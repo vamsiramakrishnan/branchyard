@@ -140,7 +140,10 @@ impl Remote {
         };
         let result = self.collect(&mut report, dry_run);
         if let Some(generation) = lock {
-            let _ = self.store.delete_if_match(SWEEP, &generation);
+            branchyard_support::best_effort(
+                "delete the object if it is unchanged",
+                self.store.delete_if_match(SWEEP, &generation),
+            );
         }
         result.map(|_| report)
     }
@@ -157,7 +160,10 @@ impl Remote {
             match record {
                 Some(r) if self.lock_live(&r) => live_writers += 1,
                 _ if !dry_run => {
-                    let _ = self.store.delete_if_match(&entry.key, &entry.generation);
+                    branchyard_support::best_effort(
+                        "delete the object if it is unchanged",
+                        self.store.delete_if_match(&entry.key, &entry.generation),
+                    );
                 }
                 _ => {}
             }

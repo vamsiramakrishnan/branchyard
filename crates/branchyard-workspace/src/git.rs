@@ -180,6 +180,7 @@ impl Git {
     }
 
     /// Runs git and returns its output whatever the exit status.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
     pub fn output(mut self) -> Result<(Output, Vec<String>), GitError> {
         let Some(input) = self.input.take() else {
             let out = self.cmd.output().map_err(GitError::Spawn)?;
@@ -204,7 +205,7 @@ impl Git {
             }
         });
         let out = child.wait_with_output().map_err(GitError::Io)?;
-        let _ = writer.join();
+        branchyard_support::join_reporting("writer", writer);
         Ok((out, self.args))
     }
 

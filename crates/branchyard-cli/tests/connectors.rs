@@ -6,18 +6,16 @@
 //! engine's tests do that against the published keys). Requires `git`,
 //! `sh` and `python3`; no network beyond loopback, no real Anvil.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
+use branchyard_testkit::fake_agent;
+use branchyard_testkit::wait;
 use serde_json::Value;
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const FAKE_ANVIL: &str = r##"#!/usr/bin/env python3
 import base64, http.server, json, os, sys
@@ -106,70 +104,32 @@ except urllib.error.HTTPError as e:
     print("call %s: %d" % (sys.argv[1], e.code))
 "#;
 
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(env!("CARGO_BIN_EXE_by"));
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        profile_dir.join("fake-acp-agent")
-    })
+/// The kit's repository, plus what this file adds.
+struct Repo {
+    kit: branchyard_testkit::Repo,
+    url: String,
 }
 
-struct Repo {
-    dir: PathBuf,
-    root: PathBuf,
-    url: String,
+impl std::ops::Deref for Repo {
+    type Target = branchyard_testkit::Repo;
+    fn deref(&self) -> &Self::Target {
+        &self.kit
+    }
 }
 
 impl Repo {
     fn new() -> Repo {
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-cli-connectors-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
-        let root = dir.join("repo");
         // A free port for the gateway.
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
+        let kit = branchyard_testkit::repo!();
         let repo = Repo {
-            root,
             url: format!("http://127.0.0.1:{port}/mcp"),
-            dir,
+            kit,
         };
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@localhost"]);
-        fs::write(repo.root.join("a.txt"), "one\n").unwrap();
-        repo.git(&["add", "."]);
-        repo.git(&["commit", "-q", "-m", "initial"]);
         let anvil = repo.dir.join("fake-anvil");
         fs::write(&anvil, FAKE_ANVIL).unwrap();
         fs::set_permissions(&anvil, fs::Permissions::from_mode(0o755)).unwrap();
@@ -195,54 +155,6 @@ impl Repo {
         )
         .unwrap();
         repo
-    }
-
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
-        command
-            .current_dir(&self.root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("NO_COLOR", "1")
-            .env(
-                "BRANCHYARD_USER_CONFIG",
-                "/nonexistent/branchyard-config.toml",
-            );
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-        ] {
-            command.env_remove(var);
-        }
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let out = self.command("git").args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}");
-        String::from_utf8(out.stdout).unwrap()
-    }
-
-    fn by(&self, args: &[&str]) -> Output {
-        self.command(env!("CARGO_BIN_EXE_by"))
-            .args(args)
-            .output()
-            .unwrap()
-    }
-
-    fn json(&self, args: &[&str]) -> Value {
-        let out = self.by(args);
-        assert!(out.status.success(), "{args:?}: {}", stderr(&out));
-        serde_json::from_slice(&out.stdout).unwrap()
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = self.by(&["gateway", "stop"]);
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -296,7 +208,7 @@ fn the_gateway_runs_supervised_a_granted_turn_calls_it_and_by_log_shows_the_call
     assert!(jwks["keys"][0].get("d").is_none());
 
     // A turn granted github:read reads and is refused a write.
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let call = repo.dir.join("call.py").display().to_string();
     let prompt = format!(
         "SH python3 {call} issues.list\nSH python3 {call} issues.create\n\
@@ -390,11 +302,9 @@ fn the_gateway_runs_supervised_a_granted_turn_calls_it_and_by_log_shows_the_call
 
     let stopped = repo.json(&["gateway", "stop", "--json"]);
     assert_eq!(stopped["stopped"], true);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while repo.json(&["gateway", "status", "--json"])["listening"] == true {
-        assert!(Instant::now() < deadline, "the gateway still listens");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait::until("the gateway to stop listening", || {
+        repo.json(&["gateway", "status", "--json"])["listening"] != true
+    });
 }
 
 #[test]
@@ -410,7 +320,7 @@ fn connectors_without_a_private_home_are_refused_before_a_branch_exists() {
         "--harness",
         "gemini-cli",
         "--command",
-        &fake_agent().display().to_string(),
+        &fake_agent!().display().to_string(),
         "--yes",
     ]);
     assert!(!out.status.success());

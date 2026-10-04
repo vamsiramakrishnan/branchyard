@@ -15,6 +15,7 @@ lists it with the reason and the upstream commit the patch applies to. So:
   vendor/ refers to vendor/warp-agpl (no path dependency, `include!` or
   `#[path]` can pull Warp code into an Apache-licensed crate).
 """
+
 import hashlib
 import json
 import os
@@ -58,10 +59,13 @@ def sources(root):
     """Rust and Cargo files outside vendor/ and build output."""
     for dirpath, dirnames, filenames in os.walk(root):
         # Hidden directories hold VCS data, tool state and other checkouts.
-        dirnames[:] = [d for d in dirnames
-                       if d not in ("target", "node_modules", "__pycache__")
-                       and not d.startswith(".")
-                       and not (Path(dirpath) == root and d == "vendor")]
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in ("target", "node_modules", "__pycache__")
+            and not d.startswith(".")
+            and not (Path(dirpath) == root and d == "vendor")
+        ]
         for name in filenames:
             if name.endswith((".rs", ".toml")):
                 yield Path(dirpath) / name
@@ -78,8 +82,9 @@ def verify_boundary(root, lock, problems):
     for path in sorted(sources(root)):
         rel = path.relative_to(root).as_posix()
         if "vendor/warp-agpl" in path.read_text(errors="replace"):
-            problems.append(f"{rel} refers to vendor/warp-agpl: Warp's AGPL code must not reach "
-                            "an Apache-licensed file")
+            problems.append(
+                f"{rel} refers to vendor/warp-agpl: Warp's AGPL code must not reach an Apache-licensed file"
+            )
 
 
 def verify(root=ROOT):
@@ -106,23 +111,29 @@ def verify(root=ROOT):
         matches = digests(path.read_bytes()) == (entry["sha256"], entry["git_blob"])
         patch = patches.get(rel)
         if patch is None and not matches:
-            problems.append(f"modified upstream file: {rel}; record the patch in "
-                            "vendor.patches.json with its reason and upstream commit, or restore it")
+            problems.append(
+                f"modified upstream file: {rel}; record the patch in "
+                "vendor.patches.json with its reason and upstream commit, or restore it"
+            )
         elif patch is not None:
             patched += 1
             if matches:
-                problems.append(f"{rel} is listed as patched but matches its pin; remove its "
-                                "vendor.patches.json entry")
+                problems.append(f"{rel} is listed as patched but matches its pin; remove its vendor.patches.json entry")
             if patch.get("upstream_commit") != entry["commit"]:
-                problems.append(f"{rel}: the patch names upstream commit "
-                                f"{patch.get('upstream_commit')}, but the file is pinned at "
-                                f"{entry['commit']}")
+                problems.append(
+                    f"{rel}: the patch names upstream commit "
+                    f"{patch.get('upstream_commit')}, but the file is pinned at "
+                    f"{entry['commit']}"
+                )
     for rel in patches:
         if rel not in seen:
             problems.append(f"vendor.patches.json lists {rel}, which vendor.lock.json does not pin")
     # Developer notes are kept outside vendor/ so every file here is pinned.
-    actual = {p.relative_to(root).as_posix() for p in (root / "vendor").rglob("*")
-              if p.is_file() and "__pycache__" not in p.parts}
+    actual = {
+        p.relative_to(root).as_posix()
+        for p in (root / "vendor").rglob("*")
+        if p.is_file() and "__pycache__" not in p.parts
+    }
     if actual != seen:
         problems.append(f"untracked or missing vendor files: {sorted(actual ^ seen)}")
     verify_boundary(root, lock, problems)
@@ -133,8 +144,10 @@ def main():
     problems, pinned, patched = verify()
     if problems:
         sys.exit("vendor/ does not match its pins and patches:\n  " + "\n  ".join(problems))
-    print(f"Verified {pinned} vendored files: {pinned - patched} match their upstream pins, "
-          f"{patched} carry recorded patches; the Warp license boundary holds.")
+    print(
+        f"Verified {pinned} vendored files: {pinned - patched} match their upstream pins, "
+        f"{patched} carry recorded patches; the Warp license boundary holds."
+    )
 
 
 if __name__ == "__main__":

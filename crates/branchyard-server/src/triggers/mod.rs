@@ -78,7 +78,7 @@ impl std::fmt::Debug for Clock {
 
 impl Clock {
     pub fn system() -> Clock {
-        Clock(Arc::new(crate::ops::now_ms))
+        Clock(Arc::new(branchyard_support::time::now_ms))
     }
 
     /// A clock that reads `time`, which the caller moves.

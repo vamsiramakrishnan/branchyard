@@ -1,5 +1,6 @@
 //! Binding, TLS, the accept loop and graceful shutdown.
 
+use branchyard_support::best_effort;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -111,7 +112,7 @@ impl Running {
         self.shutdown.send_replace(true);
     }
 
-    /// A handle that can call [`Running::shutdown`] and [`Running::force`]
+    /// A handle that can call [`Running::shutdown`] and `Running::force`
     /// from another task.
     pub fn handle(&self) -> Handle {
         Handle {
@@ -124,16 +125,20 @@ impl Running {
     /// Wait for shutdown to begin and finish. From the moment it begins,
     /// open connections drain and running operations get the grace period
     /// at the same time, so the whole takes at most the grace period (and
-    /// at least [`MIN_DRAIN`] for requests in flight), which is what a
+    /// at least `MIN_DRAIN` for requests in flight), which is what a
     /// supervisor's stop timeout, such as `docker stop`'s, must exceed.
     /// Operations still running after it are recorded as interrupted;
     /// their threads end with the process.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
     pub async fn wait(self) -> Stopped {
         let mut begun = self.shutdown.subscribe();
         let _ = begun.wait_for(|stop| *stop).await;
         drop(self.pools);
         let services = self.services;
-        let _ = tokio::task::spawn_blocking(move || drop(services)).await;
+        best_effort(
+            "close the databases",
+            tokio::task::spawn_blocking(move || drop(services)).await,
+        );
         for poller in self.pollers {
             poller.abort();
         }
@@ -158,10 +163,13 @@ impl Running {
             .await
             .unwrap_or(0);
         if let Some(sync) = self.sync {
-            let _ = tokio::task::spawn_blocking(move || sync.finish()).await;
+            best_effort(
+                "finish the sync engine",
+                tokio::task::spawn_blocking(move || sync.finish()).await,
+            );
         }
         if let Some(path) = &self.unix {
-            let _ = std::fs::remove_file(path);
+            branchyard_support::cleanup_file(path);
         }
         Stopped { interrupted }
     }
@@ -215,6 +223,7 @@ fn tls_acceptor(files: &TlsFiles) -> Result<TlsAcceptor, String> {
 /// Open every repository (recovering branches whose engine stopped), the
 /// registry and the feeds, bind, and start
 /// serving. Needs a multi-threaded Tokio runtime.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 pub async fn start(config: Config) -> Result<Running, String> {
     config.validate()?;
     // Installed once per process, idempotently: our own TLS acceptor
@@ -866,6 +875,7 @@ enum Accepted {
 }
 
 impl Listener {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
     async fn accept(&self) -> std::io::Result<Accepted> {
         match self {
             Listener::Tcp(listener) => listener.accept().await.map(|(tcp, _)| {
@@ -933,6 +943,7 @@ async fn accept_loop(
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 async fn serve_connection<I>(io: I, service: TowerToHyperService<axum::Router>, watcher: Watcher)
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,

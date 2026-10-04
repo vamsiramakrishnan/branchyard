@@ -26,6 +26,7 @@ fn short(commit: &str) -> &str {
 
 /// Ask `question` on the terminal; true only for an explicit yes. Without a
 /// terminal nothing is asked and the answer is no.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 pub fn confirm(env: &Env, question: &str) -> bool {
     if !(env.stdin_tty && env.stderr_tty) {
         return false;
@@ -254,7 +255,11 @@ pub fn try_branch(
             ),
         });
     }
-    let branch = branch.expect("clap requires a branch without --off or --status");
+    let Some(branch) = branch else {
+        return Err(Failure::Message(
+            "name a branch, or pass --off or --status".into(),
+        ));
+    };
     let previous = yard.try_status()?;
     let state = yard.try_on(branch)?;
     if as_json {
@@ -504,7 +509,7 @@ pub fn compare_table(attempts: &[Attempt], style: Style) -> String {
                 Cell::toned(status, tone),
                 Cell::plain(a.turns.to_string()),
                 Cell::plain(render::cost_text(a.cost_usd)),
-                Cell::plain(a.tokens.map(render::tokens).unwrap_or_else(|| "-".into())),
+                Cell::plain(a.tokens.map_or_else(|| "-".into(), render::tokens)),
                 Cell::plain(duration_text(a.duration_ms)),
                 Cell {
                     text: a.check.word().to_owned(),

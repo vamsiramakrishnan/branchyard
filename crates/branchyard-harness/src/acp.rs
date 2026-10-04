@@ -144,6 +144,7 @@ impl Acp {
         frame(&json!({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params}))
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-harness
     fn initialized(&mut self, result: &Value) -> Output {
         let response: InitializeResponse = match serde_json::from_value(result.clone()) {
             Ok(response) => response,
@@ -568,6 +569,7 @@ impl Driver for Acp {
         )])
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-harness
     fn respond(
         &mut self,
         key: &PermissionKey,

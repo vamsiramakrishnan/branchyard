@@ -21,8 +21,9 @@ use crate::store::xml;
 use crate::store::{
     check_key, check_prefix, join, Entry, Generation, Object, ObjectStore, UploadJournal,
 };
-use crate::util::{b64, http_date, parse_http_date, uri_encode};
+use crate::util::{b64, uri_encode};
 use branchyard::services::Clock;
+use branchyard_support::time::{http_date, parse_http_date};
 
 pub const DEFAULT_PART: usize = 8 << 20;
 
@@ -149,7 +150,7 @@ impl AzureStore {
 
     fn block_id(key: &str, index: usize) -> String {
         // Every ID of one blob must be the same length.
-        let tag = crate::util::hex(&blake3::hash(key.as_bytes()).as_bytes()[..6]);
+        let tag = hex::encode(&blake3::hash(key.as_bytes()).as_bytes()[..6]);
         b64(format!("{tag}-{index:08}").as_bytes())
     }
 }
@@ -222,7 +223,9 @@ impl ObjectStore for AzureStore {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0),
                 generation: etag(&response)?,
-                modified_ms: response.header("last-modified").and_then(parse_http_date),
+                modified_ms: response
+                    .header("last-modified")
+                    .and_then(|t| parse_http_date(t).ok()),
             })),
             404 => Ok(None),
             _ => Err(response.error(&format!("HEAD {key}"))),
@@ -275,7 +278,8 @@ impl ObjectStore for AzureStore {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0),
                     generation: xml::text(blob, "Etag").unwrap_or_default(),
-                    modified_ms: xml::text(blob, "Last-Modified").and_then(|t| parse_http_date(&t)),
+                    modified_ms: xml::text(blob, "Last-Modified")
+                        .and_then(|t| parse_http_date(&t).ok()),
                 });
             }
             match xml::text(&text, "NextMarker") {
@@ -315,7 +319,7 @@ impl ObjectStore for AzureStore {
         if self.stat(key)?.is_some() {
             return Err(Error::precondition(format!("{key} already exists")));
         }
-        let digest = crate::util::hex(&blake3::hash(data).as_bytes()[..16]);
+        let digest = hex::encode(&blake3::hash(data).as_bytes()[..16]);
         let mut staged: Staged = journal
             .load(key)
             .and_then(|s| serde_json::from_str(&s).ok())

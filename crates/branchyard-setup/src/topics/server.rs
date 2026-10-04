@@ -328,6 +328,7 @@ pub(crate) fn credential(hash: &str, name: &str, tenant: &str, scopes: &[String]
     json!({ "token_sha256": hash, "tenant": tenant, "name": name, "scopes": scopes })
 }
 
+#[allow(clippy::expect_used)] // ratchet: branchyard-setup
 pub fn plan(
     facts: &Facts,
     answers: &Answers,

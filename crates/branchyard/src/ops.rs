@@ -9,10 +9,11 @@ use branchyard_workspace::{Candidate, Check, Commit, DiffStat, IntegrationError,
 use serde_json::json;
 
 use crate::record::Recorder;
-use crate::state::{now_ms, Begun, Lease, Record, Store, Taken};
+use crate::state::{Begun, Lease, Record, Store, Taken};
 use crate::{
     git, names, recover, Activity, BranchStatus, Error, Merged, RecordedEvent, RemoveOptions, Yard,
 };
+use branchyard_support::time::now_ms;
 
 /// How long a branch's check may run during a merge.
 pub(crate) const CHECK_TIMEOUT: Duration = Duration::from_secs(30 * 60);

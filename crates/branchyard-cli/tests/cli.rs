@@ -2,139 +2,27 @@
 //! fake ACP agent from branchyard-runtime. Hermetic: no real harness, no
 //! network. Requires `git` and `sh`.
 
+#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 
+use branchyard_testkit::{fake_agent, wait};
 use serde_json::Value;
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
+/// The kit's repository, plus what this file adds.
+struct Repo(branchyard_testkit::Repo);
 
-/// Built once per test binary; cargo exposes a binary's path only to its
-/// own package's tests.
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(env!("CARGO_BIN_EXE_by"));
-        // target/<profile>/by
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        let agent = profile_dir.join("fake-acp-agent");
-        assert!(agent.is_file());
-        agent
-    })
-}
-
-struct Repo {
-    dir: PathBuf,
-    root: PathBuf,
+impl std::ops::Deref for Repo {
+    type Target = branchyard_testkit::Repo;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl Repo {
     fn new() -> Repo {
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-cli-test-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
-        let repo = Repo {
-            root: dir.join("repo"),
-            dir,
-        };
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@localhost"]);
-        fs::write(repo.root.join("a.txt"), "one\n").unwrap();
-        repo.git(&["add", "."]);
-        repo.git(&["commit", "-q", "-m", "initial"]);
-        repo
-    }
-
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
-        command
-            .current_dir(&self.root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("NO_COLOR", "1")
-            // Never a person's own ~/.config/branchyard/config.toml.
-            .env(
-                "BRANCHYARD_USER_CONFIG",
-                "/nonexistent/branchyard-config.toml",
-            )
-            .env("PAGER", "cat");
-        // Never inherit a delegating harness's identity from whoever runs
-        // the tests.
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-        ] {
-            command.env_remove(var);
-        }
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let out = self.command("git").args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}");
-        String::from_utf8(out.stdout).unwrap()
-    }
-
-    fn by(&self, args: &[&str]) -> Output {
-        self.command(env!("CARGO_BIN_EXE_by"))
-            .args(args)
-            .output()
-            .unwrap()
-    }
-
-    /// `by <args>` with the fake agent as the gemini-cli harness.
-    fn by_agent(&self, args: &[&str]) -> Output {
-        let agent = fake_agent().display().to_string();
-        let mut all: Vec<&str> = args.to_vec();
-        all.extend(["--command", &agent]);
-        if args[0] != "send" && !args.contains(&"--harness") {
-            all.extend(["--harness", "gemini-cli"]);
-        }
-        self.by(&all)
-    }
-
-    fn json(&self, args: &[&str]) -> Value {
-        let out = self.by(args);
-        assert!(out.status.success(), "{}", stderr(&out));
-        serde_json::from_slice(&out.stdout).unwrap()
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+        Repo(branchyard_testkit::repo!())
     }
 }
 
@@ -290,7 +178,7 @@ fn send_continues_and_max_minutes_interrupts() {
 #[test]
 fn by_cancel_stops_a_turn_that_another_by_runs() {
     let repo = Repo::new();
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let running = repo
         .command(env!("CARGO_BIN_EXE_by"))
         .args(["run", "HANG", "--name", "held", "--harness", "gemini-cli"])
@@ -300,18 +188,9 @@ fn by_cancel_stops_a_turn_that_another_by_runs() {
         .spawn()
         .unwrap();
     let runner = std::thread::spawn(move || running.wait_with_output().unwrap());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let log = repo.by(&["log", "held"]);
-        if stdout(&log).contains("prompt: HANG") {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the turn never started"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    wait::until("the turn to start", || {
+        stdout(&repo.by(&["log", "held"])).contains("prompt: HANG")
+    });
     // Another process may not send to it while it runs.
     let refused = repo.by_agent(&["send", "held", "WHOAMI"]);
     assert!(!refused.status.success());
@@ -399,7 +278,7 @@ fn watch_prints_the_tree_once_or_logs_changes_until_q() {
         .by_agent(&["run", "WRITE w.txt=1", "--name", "w", "--yes"])
         .status
         .success());
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let fork = repo.by(&[
         "fork",
         "w",
@@ -446,17 +325,15 @@ fn watch_prints_the_tree_once_or_logs_changes_until_q() {
     let second = lines.next().unwrap().unwrap();
     assert!(second.contains("  w-alt  ready"), "{second}");
     child.stdin.take().unwrap().write_all(b"q\n").unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            assert!(status.success());
-            break;
-        }
-        if std::time::Instant::now() > deadline {
+    let exited = wait::try_until_for(std::time::Duration::from_secs(10), || {
+        child.try_wait().unwrap()
+    });
+    match exited {
+        Ok(status) => assert!(status.success()),
+        Err(_) => {
             let _ = child.kill();
             panic!("by watch did not exit on q");
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
@@ -468,7 +345,7 @@ fn watch_prints_the_tree_once_or_logs_changes_until_q() {
 fn the_watch_cockpit_merges_the_selected_branch_on_m_then_y() {
     use std::io::Write;
     use std::process::Stdio;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     if !Path::new("/usr/bin/script").exists() {
         eprintln!("skipped: no /usr/bin/script for a pseudo-terminal");
         return;
@@ -527,17 +404,18 @@ fn the_watch_cockpit_merges_the_selected_branch_on_m_then_y() {
             .any(|screen| screen.contains(text))
     };
     let wait_for = |from: usize, text: &str| {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !shows_after(from, text) {
-            if Instant::now() >= deadline {
-                // The screen as it is now: the last frame's rows, and any
-                // error `by watch` printed on its way out.
-                let screens = screens.lock().unwrap();
-                let now = screens[screens.len().saturating_sub(30)..].join("\n");
-                panic!("{text:?} never drawn; the screen:\n{now}");
+        wait::until(&format!("{text:?} to be drawn"), || {
+            if shows_after(from, text) {
+                return Ok(());
             }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+            // The screen as it is now: the last frame's rows, and any
+            // error `by watch` printed on its way out.
+            let screens = screens.lock().unwrap();
+            Err(format!(
+                "the screen:\n{}",
+                screens[screens.len().saturating_sub(30)..].join("\n")
+            ))
+        })
     };
     // The dashboard draws after entering raw mode, so keys typed once a
     // ready row is shown are not flushed with the cooked-mode buffer.
@@ -545,40 +423,26 @@ fn the_watch_cockpit_merges_the_selected_branch_on_m_then_y() {
     // A follow-up first: `s`, a line of text, Enter; it runs in the
     // background while the dashboard carries on.
     keys.write_all(b"sWRITE x.txt=2\r").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
+    wait::until("the send to finish", || {
         let shown = repo.json(&["show", "w", "--json"]);
         if shown["turns"] == 2 && shown["status"]["state"] == "ready" {
-            break;
+            Ok(())
+        } else {
+            Err(shown)
         }
-        assert!(
-            Instant::now() < deadline,
-            "the send did not finish: {shown}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    });
     // `m` asks only once the dashboard has seen the branch ready again;
     // until its question (its `n not now` choice) is drawn, ask again.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
+    wait::until("m to ask to merge", || {
         let from = drawn();
         keys.write_all(b"m").unwrap();
-        let asked = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < asked && !shows_after(from, "not now") {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        if shows_after(from, "not now") {
-            break;
-        }
-        assert!(Instant::now() < deadline, "m never asked to merge");
-    }
+        wait::try_until_for(Duration::from_secs(2), || shows_after(from, "not now")).is_ok()
+    });
     let from = drawn();
     keys.write_all(b"y").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !fs::read_to_string(repo.root.join("x.txt")).is_ok_and(|t| t == "2\n") {
-        assert!(Instant::now() < deadline, "the merge did not happen");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait::until("the merge to happen", || {
+        fs::read_to_string(repo.root.join("x.txt")).is_ok_and(|t| t == "2\n")
+    });
     // The result reaches the screen, then quit.
     wait_for(from, "merged w into main (");
     keys.write_all(b"qq").unwrap();
@@ -630,7 +494,7 @@ fn a_waiting_run_notifies_on_its_terminal_when_the_branch_ends() {
         return;
     }
     let repo = Repo::new();
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let by = env!("CARGO_BIN_EXE_by");
     let on_terminal = |name: &str, extra: &str| {
         let line = format!(
@@ -811,7 +675,7 @@ fn a_harness_steers_its_running_children_with_by_and_python() {
 #[test]
 fn send_steer_reaches_a_turn_another_process_runs() {
     let repo = Repo::new();
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     /// Kills the turn's process if the test fails before it ends.
     struct Running(std::process::Child);
     impl Drop for Running {
@@ -829,15 +693,10 @@ fn send_steer_reaches_a_turn_another_process_runs() {
             .spawn()
             .unwrap(),
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    let waiting = || {
+    wait::until("live to start", || {
         let log = repo.by(&["log", "live", "--json"]);
         log.status.success() && stdout(&log).contains("waiting for steering")
-    };
-    while !waiting() {
-        assert!(std::time::Instant::now() < deadline, "live never started");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    });
     let limited = repo.by(&["send", "live", "--steer", "x", "--budget-usd", "1"]);
     assert!(!limited.status.success());
     assert!(stderr(&limited).contains("send --steer takes only --json"));
@@ -1040,7 +899,7 @@ fn the_same_commands_act_with_your_authority_outside_a_harness() {
     assert!(plain.status.success(), "{}", stderr(&plain));
 
     // Outside a harness, spawn names its parent and waits for the child.
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let spawned = repo.by(&[
         "spawn",
         "WRITE kid.txt=k",
@@ -1292,7 +1151,7 @@ fn a_rig_runs_its_root_which_fills_seats_with_by_and_python() {
         "SH by integrate team-worker --json".into(),
     ]
     .join("\n");
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let spec = spec.display().to_string();
     let out = repo.by(&["rig", "run", &spec, &prompt, "--command", &agent, "--json"]);
     assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
@@ -1800,7 +1659,7 @@ fn checkpoints_show_and_log_then_rewind_and_fork_at() {
     assert_eq!(forward["session"]["mode"], "native");
     assert!(stdout(&repo.by(&["log", "cp"])).contains("rewound from 1 to checkpoint 2"));
 
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let forked = repo.by(&[
         "fork",
         "cp",

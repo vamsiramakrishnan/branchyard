@@ -14,6 +14,7 @@
 //!   `profile=`, and `part_size=` in bytes (at least 5 MiB on S3; default
 //!   8 MiB).
 
+use branchyard_support::best_effort;
 use std::sync::Arc;
 
 use crate::auth::aws::AwsCredentials;
@@ -24,8 +25,9 @@ use crate::store::xml;
 use crate::store::{
     check_key, check_prefix, join, Entry, Generation, Object, ObjectStore, UploadJournal,
 };
-use crate::util::{parse_http_date, parse_rfc3339, uri_encode, xml_escape};
+use crate::util::{uri_encode, xml_escape};
 use branchyard::services::Clock;
+use branchyard_support::time::{parse_http_date, parse_rfc3339};
 
 pub const DEFAULT_PART: usize = 8 << 20;
 
@@ -174,14 +176,17 @@ impl S3Store {
     }
 
     fn abort(&self, key: &str, upload: &str) {
-        let _ = self.call(Request::new(
-            "DELETE",
-            self.object_url(key, &format!("uploadId={}", uri_encode(upload, false))),
-        ));
+        best_effort(
+            "abort the multipart upload",
+            self.call(Request::new(
+                "DELETE",
+                self.object_url(key, &format!("uploadId={}", uri_encode(upload, false))),
+            )),
+        );
     }
 
     fn multipart(&self, key: &str, data: &[u8], journal: &dyn UploadJournal) -> Result<Generation> {
-        let digest = crate::util::hex(&blake3::hash(data).as_bytes()[..16]);
+        let digest = hex::encode(&blake3::hash(data).as_bytes()[..16]);
         let mut state: Multipart = journal
             .load(key)
             .and_then(|s| serde_json::from_str(&s).ok())
@@ -339,7 +344,9 @@ impl ObjectStore for S3Store {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0),
                 generation: etag(&response)?,
-                modified_ms: response.header("last-modified").and_then(parse_http_date),
+                modified_ms: response
+                    .header("last-modified")
+                    .and_then(|t| parse_http_date(t).ok()),
             })),
             404 => Ok(None),
             _ => Err(self.fail(&response, &format!("HEAD {key}"))),
@@ -389,7 +396,8 @@ impl ObjectStore for S3Store {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0),
                     generation: xml::text(item, "ETag").unwrap_or_default(),
-                    modified_ms: xml::text(item, "LastModified").and_then(|t| parse_rfc3339(&t)),
+                    modified_ms: xml::text(item, "LastModified")
+                        .and_then(|t| parse_rfc3339(&t).ok()),
                 });
             }
             match (

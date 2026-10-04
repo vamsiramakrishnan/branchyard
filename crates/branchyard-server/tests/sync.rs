@@ -5,6 +5,7 @@
 //! sync series in `/metrics`; and a run whose lease is taken over
 //! cancelled, failed with `sync_lease_lost` and no longer pushed.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::sync::Arc;
@@ -18,7 +19,8 @@ use branchyard_sync::source::BranchSource;
 use branchyard_sync::store::file::FileStore;
 use branchyard_sync::store::ObjectStore as _;
 use branchyard_sync::SyncConfig;
-use common::{eventually, get, git, raw, run, task, wait, Fixture, Server, TOKEN};
+use branchyard_testkit::wait;
+use common::{await_operation, get, git, raw, run, task, Fixture, Server, TOKEN};
 
 fn remote(bucket: &std::path::Path, device: &str) -> Remote {
     let mut options = Options::default();
@@ -51,7 +53,7 @@ fn a_server_pulls_runs_under_the_lease_and_pushes() {
 
     // Pushed after it ran, keyed by the repository.
     let elsewhere = remote(&bucket, "laptop");
-    eventually("the task in the remote", || {
+    wait::until("the task in the remote", || {
         elsewhere
             .tasks()
             .is_ok_and(|t| t.iter().any(|t| t.task.ends_with(".s1")))
@@ -107,7 +109,7 @@ fn a_server_pulls_runs_under_the_lease_and_pushes() {
                 &new_key(),
             )
             .unwrap();
-        wait(&client, &op.id)
+        await_operation(&client, &op.id)
     };
     let refused = send("WRITE two.txt=2");
     assert_eq!(refused.state, OperationState::Failed, "{refused:?}");
@@ -134,7 +136,7 @@ fn a_server_pulls_runs_under_the_lease_and_pushes() {
     );
 
     // And the result reaches the remote.
-    eventually("the second turn pushed", || {
+    wait::until("the second turn pushed", || {
         elsewhere
             .manifest(&task_id)
             .ok()
@@ -149,8 +151,7 @@ fn a_server_pulls_runs_under_the_lease_and_pushes() {
     let swaps = text
         .lines()
         .find_map(|l| l.strip_prefix(r#"branchyard_sync_swaps_total{repo="app"} "#))
-        .map(|v| v.parse::<f64>().unwrap())
-        .unwrap_or(0.0);
+        .map_or(0.0, |v| v.parse::<f64>().unwrap());
     assert!(swaps >= 2.0, "{text}");
     assert!(
         text.contains(r#"branchyard_sync_bytes_total{direction="up",repo="app"}"#)
@@ -181,7 +182,7 @@ fn a_run_that_loses_its_lease_is_cancelled_not_accepted_and_not_pushed() {
     let done = run(&client, &task("WRITE one.txt=1", "s1"));
     assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
     let elsewhere = remote(&bucket, "laptop");
-    eventually("the task in the remote", || {
+    wait::until("the task in the remote", || {
         elsewhere
             .tasks()
             .is_ok_and(|t| t.iter().any(|t| t.task.ends_with(".s1")))
@@ -207,7 +208,7 @@ fn a_run_that_loses_its_lease_is_cancelled_not_accepted_and_not_pushed() {
             &new_key(),
         )
         .unwrap();
-    eventually("the server holds the lease", || {
+    wait::until("the server holds the lease", || {
         elsewhere
             .lease_state(&task_id, "run")
             .is_ok_and(|l| l.is_some())
@@ -232,7 +233,7 @@ fn a_run_that_loses_its_lease_is_cancelled_not_accepted_and_not_pushed() {
     let taken = taken.expect("the lease taken over");
 
     // The server stops the run, says why, and does not accept its result.
-    let lost = wait(&client, &op.id);
+    let lost = await_operation(&client, &op.id);
     assert_eq!(lost.state, OperationState::Failed, "{lost:?}");
     let error = lost.error.unwrap();
     assert_eq!(error.code, "sync_lease_lost", "{error:?}");
@@ -248,7 +249,10 @@ fn a_run_that_loses_its_lease_is_cancelled_not_accepted_and_not_pushed() {
     // What changes here afterwards is not pushed while another runner
     // holds the task (a push already under way when the lease was lost
     // has finished by now).
-    std::thread::sleep(Duration::from_millis(1500));
+    wait::settle(
+        "a push under way when the lease was lost finishes",
+        Duration::from_millis(1500),
+    );
     let before = pushed();
     let git_branch = branch.info().git_branch.clone();
     let tip = git(&f.root, &["rev-parse", &format!("refs/heads/{git_branch}")]);
@@ -272,7 +276,10 @@ fn a_run_that_loses_its_lease_is_cancelled_not_accepted_and_not_pushed() {
             late.trim(),
         ],
     );
-    std::thread::sleep(Duration::from_secs(3));
+    wait::settle(
+        "pushes that must not happen would have by now",
+        Duration::from_secs(3),
+    );
     let after = pushed();
     assert_eq!(after.seq, before.seq, "{after:?}");
     assert_eq!(after.refs, before.refs);

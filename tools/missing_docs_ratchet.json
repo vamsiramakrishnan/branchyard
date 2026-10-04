@@ -1,0 +1,15 @@
+{
+  "branchyard": 841,
+  "branchyard-bridge": 61,
+  "branchyard-client": 286,
+  "branchyard-harness": 79,
+  "branchyard-microsandbox": 23,
+  "branchyard-provision": 106,
+  "branchyard-recipe": 42,
+  "branchyard-sandbox": 65,
+  "branchyard-server": 366,
+  "branchyard-setup": 174,
+  "branchyard-substrate": 31,
+  "branchyard-sync": 347,
+  "branchyard-workspace": 50
+}

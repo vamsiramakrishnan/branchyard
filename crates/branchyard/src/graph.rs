@@ -28,6 +28,7 @@
 //! denials; one started by [`crate::Yard::resume_graph`] runs under the
 //! options passed there.
 
+use branchyard_support::best_effort;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::Duration;
@@ -40,9 +41,10 @@ use crate::delegation::{self, ChildBudget, Spawn, Spawned};
 use crate::projection::lock;
 use crate::record::Recorder;
 use crate::run::{self, Prepared};
-use crate::state::{now_ms, Fence, Lease, Owner, Record, Store, LEASE_TTL};
+use crate::state::{Fence, Lease, Owner, Record, Store, LEASE_TTL};
 use crate::storage::Lineage;
 use crate::{git, harness, Activity, BranchStatus, Error, RecordedEvent, TaskOptions, Yard};
+use branchyard_support::time::now_ms;
 
 /// Most edits one proposal may carry.
 pub const MAX_EDITS: usize = 64;
@@ -51,6 +53,8 @@ pub const MAX_EDITS: usize = 64;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
+#[derive(strum::Display, strum::EnumString, strum::EnumIter, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum After {
     /// Its last turn ended `ready` or `no_changes`, or it was merged.
     #[default]
@@ -63,15 +67,6 @@ pub enum After {
 impl After {
     fn is_settled(&self) -> bool {
         *self == After::Settled
-    }
-}
-
-impl fmt::Display for After {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            After::Settled => "settled",
-            After::Integrated => "integrated",
-        })
     }
 }
 
@@ -563,7 +558,10 @@ pub(crate) fn settled(yard: &Yard, name: &str, options: Option<&TaskOptions>) {
     let store = yard.store();
     let dependents = dependents_of(&store, name);
     if !dependents.is_empty() {
-        let _ = advance(yard, &dependents, options);
+        best_effort(
+            "advance the dependent branches",
+            advance(yard, &dependents, options),
+        );
     }
 }
 
@@ -616,7 +614,7 @@ fn start(yard: &Yard, mut record: Record, options: &TaskOptions) -> Result<Optio
             store.append(
                 &record.info.name,
                 &crate::RecordedEvent {
-                    at_ms: crate::state::now_ms(),
+                    at_ms: branchyard_support::time::now_ms(),
                     activity: crate::Activity::Plan(Box::new(crate::PlanActivity::Planning {
                         round: 1,
                     })),
@@ -757,7 +755,10 @@ pub(crate) fn bind(yard: &Yard, record: &Record) -> Result<(), String> {
             Ok(()) => {}
             Err(error) => {
                 for scratch in taken {
-                    let _ = crate::storage::unlock_scratch(yard, name, scratch);
+                    best_effort(
+                        "unlock the scratch area",
+                        crate::storage::unlock_scratch(yard, name, scratch),
+                    );
                 }
                 return Err(format!(
                     "its {} binding to scratch area {} could not be honored: {error}",
@@ -773,7 +774,10 @@ pub(crate) fn bind(yard: &Yard, record: &Record) -> Result<(), String> {
 pub(crate) fn unbind(yard: &Yard, record: &Record) {
     for binding in &record.bindings {
         if binding.access == Access::ExclusiveWrite {
-            let _ = crate::storage::unlock_scratch(yard, &record.info.name, &binding.scratch);
+            best_effort(
+                "unlock the scratch area",
+                crate::storage::unlock_scratch(yard, &record.info.name, &binding.scratch),
+            );
         }
     }
 }
@@ -783,9 +787,12 @@ pub(crate) fn cancel_unstarted(store: &Store, record: &Record, by: &str) -> Resu
     let done = settle_unstarted(store, record, BranchStatus::Interrupted)?;
     if done {
         if let Ok(mut recorder) = Recorder::open(store, &record.info.name, None) {
-            let _ = recorder.record(Activity::Warning(format!(
-                "cancelled by {by} before its prerequisites settled; it never ran"
-            )));
+            best_effort(
+                "record the activity",
+                recorder.record(Activity::Warning(format!(
+                    "cancelled by {by} before its prerequisites settled; it never ran"
+                ))),
+            );
         }
     }
     Ok(done)

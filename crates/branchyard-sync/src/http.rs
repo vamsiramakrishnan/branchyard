@@ -7,7 +7,8 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use branchyard_client::http as wire;
+use branchyard_client::http as client;
+use branchyard_wire as wire;
 
 use crate::error::{Error, Kind, Result};
 
@@ -32,45 +33,22 @@ pub struct Url {
 
 impl Url {
     pub fn parse(url: &str) -> Result<Url> {
-        let (base, query) = match url.split_once('?') {
-            Some((b, q)) => (b, q.to_owned()),
-            None => (url, String::new()),
-        };
-        let (tls, rest) = if let Some(rest) = base.strip_prefix("https://") {
-            (true, rest)
-        } else if let Some(rest) = base.strip_prefix("http://") {
-            (false, rest)
-        } else {
-            return Err(Error::config(format!("{url:?} is not an http(s) URL")));
-        };
-        let (authority, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, "/"),
-        };
-        let endpoint = wire::Endpoint::parse(&format!(
-            "{}://{authority}",
-            if tls { "https" } else { "http" }
-        ))
-        .map_err(Error::config)?;
+        let parsed = wire::HttpUrl::parse(url).map_err(|e| Error::config(e.to_string()))?;
         Ok(Url {
-            tls,
-            host: endpoint.host,
-            port: endpoint.port,
-            path: path.to_owned(),
-            query,
+            tls: parsed.tls,
+            path: match parsed.path.is_empty() {
+                true => "/".to_owned(),
+                false => parsed.path,
+            },
+            host: parsed.host,
+            port: parsed.port,
+            query: parsed.query.unwrap_or_default(),
         })
     }
 
     /// The `Host` header the client sends, which signatures cover.
     pub fn host_header(&self) -> String {
-        let host = match self.host.contains(':') {
-            true => format!("[{}]", self.host),
-            false => self.host.clone(),
-        };
-        match (self.tls, self.port) {
-            (true, 443) | (false, 80) => host,
-            _ => format!("{host}:{}", self.port),
-        }
+        wire::host_header(self.tls, &self.host, self.port)
     }
 
     /// `scheme://host[:port]`.
@@ -185,7 +163,7 @@ fn tls() -> Result<Arc<rustls::ClientConfig>> {
     CONFIG
         .get_or_init(|| {
             let ca = std::env::var_os(ENV_CA_FILE).filter(|v| !v.is_empty());
-            wire::tls_config(ca.as_deref().map(std::path::Path::new))
+            client::tls_config(ca.as_deref().map(std::path::Path::new))
         })
         .clone()
         .map_err(Error::config)
@@ -193,7 +171,7 @@ fn tls() -> Result<Arc<rustls::ClientConfig>> {
 
 /// Send `request` and read the whole response.
 pub fn send(request: &Request) -> Result<Response> {
-    let endpoint = wire::Endpoint {
+    let endpoint = client::Endpoint {
         tls: request.url.tls,
         host: request.url.host.clone(),
         port: request.url.port,
@@ -204,7 +182,7 @@ pub fn send(request: &Request) -> Result<Response> {
         true => Some(tls()?),
         false => None,
     };
-    let stream = wire::connect(&endpoint, config.as_ref(), Duration::from_secs(120))
+    let stream = client::connect(&endpoint, config.as_ref(), Duration::from_secs(120))
         .map_err(|e| Error::transient(format!("{}: {e}", request.url.origin())))?;
     let headers: Vec<(&str, String)> = request
         .headers
@@ -212,10 +190,10 @@ pub fn send(request: &Request) -> Result<Response> {
         .map(|(n, v)| (n.as_str(), v.clone()))
         .collect();
     let target = request.url.target();
-    let response = wire::send(
+    let response = client::send(
         stream,
         &endpoint,
-        &wire::Request {
+        &client::Request {
             method: &request.method,
             target: &target,
             headers: &headers,

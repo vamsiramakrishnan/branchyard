@@ -29,11 +29,11 @@
 //! warn (or refuse) near a limit, and the router can skip such a
 //! candidate. See `docs/usage.md`.
 
+use branchyard_support::time::{now_ms, parse_rfc3339, utc_minute};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use branchyard_setup::config::{UsageConfig, UsageGuard};
 use serde::{Deserialize, Serialize};
@@ -118,6 +118,7 @@ pub struct Pricing {
 }
 
 /// The built-in pricing tables.
+#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 pub fn pricing() -> Pricing {
     toml_edit::de::from_str(PRICING_TOML).expect("catalog/pricing.toml parses")
 }
@@ -265,74 +266,6 @@ pub fn codex_cost(pricing: &Pricing, event: &CodexTokens) -> Option<f64> {
 
 // Reading the files.
 
-/// Milliseconds since the epoch for an RFC 3339 time.
-pub fn rfc3339_ms(text: &str) -> Option<u64> {
-    let bytes = text.as_bytes();
-    if bytes.len() < 20 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
-        return None;
-    }
-    let num = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
-    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
-    let (h, mi, s) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    let mut rest = &text[19..];
-    let mut ms = 0i64;
-    if let Some(frac) = rest.strip_prefix('.') {
-        let digits: String = frac.chars().take_while(char::is_ascii_digit).collect();
-        let mut padded: String = digits.chars().take(3).collect();
-        while padded.len() < 3 {
-            padded.push('0');
-        }
-        ms = padded.parse().ok()?;
-        rest = &frac[digits.len()..];
-    }
-    let offset = match rest {
-        "Z" | "z" => 0,
-        _ => {
-            let sign = match rest.as_bytes().first()? {
-                b'+' => 1,
-                b'-' => -1,
-                _ => return None,
-            };
-            let oh: i64 = rest.get(1..3)?.parse().ok()?;
-            let om: i64 = rest.get(4..6)?.parse().ok()?;
-            sign * (oh * 3600 + om * 60)
-        }
-    };
-    let days = days_from_civil(y, mo, d);
-    let secs = days * 86_400 + h * 3600 + mi * 60 + s - offset;
-    u64::try_from(secs * 1000 + ms).ok()
-}
-
-/// Howard Hinnant's days from the civil date.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * m + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-/// `2026-10-01 14:30 UTC`.
-pub fn utc(ms: u64) -> String {
-    let secs = (ms / 1000) as i64;
-    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
-        rem / 3600,
-        rem % 3600 / 60
-    )
-}
-
 /// `2h 13m`, `4d 2h`, `12m`.
 pub fn span(ms: u64) -> String {
     let minutes = ms.div_ceil(60_000);
@@ -361,8 +294,8 @@ fn jsonl_files(root: &Path, since_ms: u64, out: &mut Vec<PathBuf>) {
                 .metadata()
                 .and_then(|m| m.modified())
                 .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map_or(u64::MAX, |d| d.as_millis() as u64);
+                .and_then(branchyard_support::time::system_time_ms)
+                .unwrap_or(u64::MAX);
             if modified >= since_ms {
                 out.push(path);
             }
@@ -427,7 +360,10 @@ pub fn claude_record(line: &str) -> (Option<Turn>, Option<LimitHit>) {
     if record["type"] != "assistant" {
         return (None, None);
     }
-    let Some(at_ms) = record["timestamp"].as_str().and_then(rfc3339_ms) else {
+    let Some(at_ms) = record["timestamp"]
+        .as_str()
+        .and_then(|t| parse_rfc3339(t).ok())
+    else {
         return (None, None);
     };
     let message = &record["message"];
@@ -636,7 +572,10 @@ pub fn codex_file(path: &Path) -> (Vec<CodexTokens>, Option<CodexLimits>) {
         if record["type"] != "event_msg" || payload["type"] != "token_count" {
             continue;
         }
-        let Some(at_ms) = record["timestamp"].as_str().and_then(rfc3339_ms) else {
+        let Some(at_ms) = record["timestamp"]
+            .as_str()
+            .and_then(|t| parse_rfc3339(t).ok())
+        else {
             continue;
         };
         let rate_limits = &payload["rate_limits"];
@@ -978,7 +917,7 @@ pub fn codex(account: &str, dir: &Path, pricing: &Pricing, now_ms: u64) -> Login
                     notes.push(format!(
                         "its {} window reset at {} after Codex last reported it",
                         window.label(),
-                        utc(reset)
+                        utc_minute(reset)
                     ));
                 }
                 reset => {
@@ -1020,13 +959,6 @@ pub fn codex(account: &str, dir: &Path, pricing: &Pricing, now_ms: u64) -> Login
         weekly,
         notes,
     }
-}
-
-pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// Every login to meter: the default Claude Code and Codex logins, then
@@ -1124,7 +1056,7 @@ fn percent_text(w: &Window) -> String {
 
 fn reset_text(w: &Window, now: u64) -> String {
     match w.resets_at_ms {
-        Some(at) if at > now => format!("in {} ({})", span(at - now), utc(at)),
+        Some(at) if at > now => format!("in {} ({})", span(at - now), utc_minute(at)),
         _ if w.window == "five_hour" && w.source != "rate_limits" => "no window open".into(),
         _ if w.source == "rate_limits" => "-".into(),
         _ => "rolling 7 days".into(),
@@ -1405,9 +1337,9 @@ mod tests {
 
     #[test]
     fn times_parse_and_print() {
-        assert_eq!(rfc3339_ms("1970-01-01T00:00:01.5Z"), Some(1500));
-        assert_eq!(rfc3339_ms("2026-09-21T16:13:20+02:00"), Some(NOW));
-        assert_eq!(utc(NOW), "2026-09-21 14:13 UTC");
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:01.5Z"), Ok(1500));
+        assert_eq!(parse_rfc3339("2026-09-21T16:13:20+02:00"), Ok(NOW));
+        assert_eq!(utc_minute(NOW), "2026-09-21 14:13 UTC");
         assert_eq!(span(59_000), "1m");
         assert_eq!(span(2 * HOUR_MS + 13 * 60_000), "2h 13m");
         assert_eq!(span(4 * 86_400_000 + 2 * HOUR_MS), "4d 2h");

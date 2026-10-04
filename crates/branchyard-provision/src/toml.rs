@@ -142,6 +142,7 @@ pub fn set_top_level(content: &str, key: &str, literal: &str) -> String {
 /// Insert a top-level `line` (`"key = literal"`) after the last top-level
 /// line, before the first table. Kept for its existing callers and tests;
 /// prefer [`set_top_level`] in new code, which needs no line to parse.
+#[allow(clippy::panic)] // ratchet: branchyard-provision
 pub fn insert_top_level(content: &str, line: &str) -> String {
     let (key, literal) = line
         .split_once('=')

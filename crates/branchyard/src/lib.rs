@@ -132,11 +132,14 @@ mod policy;
 mod pool;
 mod proc;
 mod projection;
+mod providers;
 mod provisioning;
 mod pull_request;
 mod record;
 mod recover;
 mod run;
+#[cfg(test)]
+mod schema_parity;
 mod seats;
 pub mod services;
 mod snapshots;
@@ -145,10 +148,14 @@ mod sqlite;
 mod state;
 mod steer;
 mod storage;
+#[doc(hidden)]
+pub mod store_codec;
 mod tarball;
 pub mod tasks;
 mod workspace;
 
+use branchyard_support::best_effort;
+use branchyard_support::LockExt as _;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -396,11 +403,7 @@ impl Yard {
     /// its granted packages; see `docs/connectors.md`. Replaces any gateway
     /// set before. Shared by every clone of this `Yard`.
     pub fn use_connectors(&self, gateway: connectors::Gateway) {
-        *self
-            .hub
-            .connectors
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(gateway));
+        *self.hub.connectors.lock_recovering("connectors") = Some(Arc::new(gateway));
     }
 
     /// Give this yard's branches the model gateway `gateway`: a branch on
@@ -408,16 +411,12 @@ impl Yard {
     /// see `docs/model-gateway.md`. Replaces any set before. Shared by
     /// every clone of this `Yard`.
     pub fn use_models(&self, gateway: models::Gateway) {
-        *self.hub.models.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(gateway));
+        *self.hub.models.lock_recovering("models") = Some(Arc::new(gateway));
     }
 
     /// The model gateway set with [`Yard::use_models`], if any.
     pub fn models(&self) -> Option<Arc<models::Gateway>> {
-        self.hub
-            .models
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.hub.models.lock_recovering("models").clone()
     }
 
     /// Calls through the model gateway at or after `since_ms` (since the
@@ -432,26 +431,21 @@ impl Yard {
     /// server's principal). Replaces any set before. See
     /// `docs/model-gateway.md#one-scope`.
     pub fn use_ceilings(&self, ceilings: std::collections::BTreeMap<String, Ceiling>) {
-        *self.hub.ceilings.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(ceilings);
+        *self.hub.ceilings.lock_recovering("ceilings") = Arc::new(ceilings);
     }
 
     /// The ceiling of `subject`, if one is set.
     pub fn ceiling(&self, subject: &str) -> Option<Ceiling> {
         self.hub
             .ceilings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("ceilings")
             .get(subject)
             .cloned()
     }
 
     /// The connector gateway set with [`Yard::use_connectors`], if any.
     pub fn connectors(&self) -> Option<Arc<connectors::Gateway>> {
-        self.hub
-            .connectors
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.hub.connectors.lock_recovering("connectors").clone()
     }
 
     /// Record the gateway's new audit lines on the branches they name, as
@@ -465,27 +459,18 @@ impl Yard {
     /// start; see [`DeliveryHook`]. Replaces any hook set before. Shared by
     /// every clone of this `Yard`.
     pub fn set_delivery_hook(&self, hook: Arc<dyn DeliveryHook>) {
-        *self
-            .hub
-            .delivery_hook
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(hook);
+        *self.hub.delivery_hook.lock_recovering("delivery_hook") = Some(hook);
     }
 
     /// Stop trying a hook set with [`Yard::set_delivery_hook`].
     pub fn clear_delivery_hook(&self) {
-        *self
-            .hub
-            .delivery_hook
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self.hub.delivery_hook.lock_recovering("delivery_hook") = None;
     }
 
     pub(crate) fn delivery_hook(&self) -> Option<Arc<dyn DeliveryHook>> {
         self.hub
             .delivery_hook
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("delivery_hook")
             .clone()
     }
 
@@ -519,7 +504,7 @@ impl Yard {
     /// shared by every process on this machine; opened once per yard and
     /// its clones. See `docs/registry.md`.
     pub fn services(&self) -> Result<Arc<services::LocalRegistry>, Error> {
-        let mut held = self.hub.services.lock().unwrap_or_else(|e| e.into_inner());
+        let mut held = self.hub.services.lock_recovering("services");
         if let Some(registry) = &*held {
             return Ok(registry.clone());
         }
@@ -533,11 +518,7 @@ impl Yard {
     /// Whether this repository has a registry file yet: what lets a
     /// reader skip opening one that would be empty.
     pub fn has_services(&self) -> bool {
-        self.hub
-            .services
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some()
+        self.hub.services.lock_recovering("services").is_some()
             || services::local_path(&self.root).is_file()
     }
 
@@ -569,7 +550,7 @@ impl Yard {
         Ok(services::resolve(
             &*self.services()?,
             query,
-            state::now_ms(),
+            branchyard_support::time::now_ms(),
         )?)
     }
 
@@ -578,7 +559,7 @@ impl Yard {
     /// it: a leaked process, a sandbox or recipe machine (through the
     /// branch's recovery), pool slots. [`Yard::recover`] does this too.
     pub fn reclaim_services(&self) -> Result<Vec<services::Reaped>, Error> {
-        services::reclaim::sweep(self, state::now_ms())
+        services::reclaim::sweep(self, branchyard_support::time::now_ms())
     }
 
     /// Repository root.
@@ -626,7 +607,10 @@ impl Yard {
     pub fn merge(&self, branch: &str, target: &str) -> Result<Merged, Error> {
         let merged = ops::merge(self, branch, target)?;
         // The outcome store learns the merge; it never undoes one.
-        let _ = fleet::observe(self, branch, None);
+        best_effort(
+            "record the fleet outcome",
+            fleet::observe(self, branch, None),
+        );
         // So may the knowledge store, as proposals a person reviews.
         knowledge::on_end(self, branch, DistillTrigger::Merged);
         Ok(merged)
@@ -2362,6 +2346,8 @@ pub enum Activity {
     /// A harness-to-harness message was sent or delivered; see
     /// [`crate::inbox`]. Recorded on both the sending and the receiving
     /// branch's event log.
+    // The doc comment is the schema description, so the private link stays.
+    #[allow(rustdoc::private_intra_doc_links)]
     Message(Message),
     /// Inbox messages reached this branch's turn, and by which path; see
     /// `docs/delegation.md#delivery`. Each message is delivered once.
@@ -2567,6 +2553,8 @@ pub struct Steer {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
+#[derive(strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum SteerState {
     /// Queued for the running turn; the engine running it writes it to the
     /// harness within about 100 ms, in whichever process it runs.

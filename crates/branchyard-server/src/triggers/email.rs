@@ -62,6 +62,7 @@ pub struct FilePart {
 
 /// Constant-time equality of two secrets: their MACs under one key,
 /// compared by `verify_slice`, so neither length nor content leaks.
+#[allow(clippy::expect_used)] // ratchet: branchyard-server
 fn same(a: &str, b: &str) -> bool {
     use hmac::{Hmac, KeyInit, Mac};
     let mac = |text: &str| {
@@ -524,7 +525,9 @@ pub fn strip_html(html: &str) -> String {
             i += end;
             continue;
         }
-        let c = html[i..].chars().next().expect("in bounds");
+        let Some(c) = html[i..].chars().next() else {
+            break;
+        };
         out.push(c);
         i += c.len_utf8();
     }
@@ -625,8 +628,7 @@ pub fn read(
             let full = fields.get("FromFull");
             from = full
                 .and_then(|f| f.get("Email"))
-                .map(|e| text_of(Some(e)))
-                .unwrap_or_else(|| get("From"));
+                .map_or_else(|| get("From"), |e| text_of(Some(e)));
             email.from_name = full
                 .and_then(|f| f.get("Name"))
                 .map(|n| text_of(Some(n)))
@@ -852,7 +854,7 @@ pub fn read(
 /// `@domain` (that domain exactly, not its subdomains), ignoring case.
 pub fn allowed(allowed: &[String], address: &str) -> bool {
     let address = address.to_ascii_lowercase();
-    let domain = address.rsplit_once('@').map(|(_, d)| d).unwrap_or("");
+    let domain = address.rsplit_once('@').map_or("", |(_, d)| d);
     allowed.iter().any(|entry| {
         let entry = entry.trim().to_ascii_lowercase();
         match entry.strip_prefix('@') {
@@ -1052,15 +1054,7 @@ mod tests {
             }
             body.push_str(name);
             body.push('=');
-            for byte in value.bytes() {
-                match byte {
-                    b' ' => body.push('+'),
-                    b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'.' => {
-                        body.push(byte as char)
-                    }
-                    other => body.push_str(&format!("%{other:02X}")),
-                }
-            }
+            body.push_str(&branchyard_client::http::encode(value).replace("%20", "+"));
         }
         body.into_bytes()
     }

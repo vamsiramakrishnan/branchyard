@@ -2,7 +2,7 @@
 //! Requires `git` and `sh`.
 
 #![allow(dead_code)]
-
+#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -132,43 +132,5 @@ impl Cluster {
 
     pub fn provider(&self) -> SubstrateProvider {
         SubstrateProvider::connect(self.config()).unwrap()
-    }
-}
-
-/// Whether `pid` is a live (not zombie) process on this host.
-pub fn alive(pid: u32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        let state = stat
-            .rsplit(')')
-            .next()
-            .unwrap_or("")
-            .split_whitespace()
-            .next();
-        !matches!(state, Some("Z") | Some("X"))
-    })
-}
-
-/// Wait until `pid` runs `name`: a forked child is named after its parent
-/// until it execs.
-pub fn wait_exec(pid: u32, name: &str) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default() != format!("{name}\n")
-    {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "pid {pid} never ran {name}"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
-pub fn wait_gone(pid: u32) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while alive(pid) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "pid {pid} is still running"
-        );
-        std::thread::sleep(Duration::from_millis(20));
     }
 }

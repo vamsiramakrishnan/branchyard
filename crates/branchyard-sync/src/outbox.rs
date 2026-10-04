@@ -15,6 +15,8 @@
 //! turns becomes one push, and the lag reported is from the oldest change
 //! not yet pushed.
 
+use branchyard_support::best_effort;
+use branchyard_support::LockExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -50,6 +52,10 @@ pub struct LogEntry {
     pub detail: String,
 }
 
+/// `due` with no deadline, or one past what a column holds: everything is
+/// due. A bound for a query, never a stored value.
+const NO_DEADLINE: i64 = i64::MAX;
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS outbox (
@@ -69,6 +75,7 @@ CREATE TABLE IF NOT EXISTS counters (
 ";
 
 impl Outbox {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
     pub fn open(path: &Path) -> Result<Outbox> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -99,7 +106,7 @@ impl Outbox {
     }
 
     fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = self.conn.lock_recovering("conn");
         Ok(f(&conn)?)
     }
 
@@ -121,7 +128,7 @@ impl Outbox {
         let name = format!(
             "{}-{}",
             crate::engine::default_device(),
-            crate::util::hex(&crate::util::random_bytes(2)?)
+            hex::encode(&crate::util::random_bytes(2)?)
         );
         self.with(|c| {
             c.execute(
@@ -199,7 +206,10 @@ impl Outbox {
             )?;
             let rows = s
                 .query_map(
-                    params![remote, due_by.map(|d| d as i64).unwrap_or(i64::MAX)],
+                    params![
+                        remote,
+                        due_by.map_or(NO_DEADLINE, |d| i64::try_from(d).map_or(NO_DEADLINE, |v| v))
+                    ],
                     |r| {
                         Ok(Pending {
                             task: r.get(0)?,
@@ -342,19 +352,24 @@ impl UploadJournal for OutboxJournal {
     }
 
     fn save(&self, key: &str, state: &str) {
-        let _ = self.0.with(|c| {
-            c.execute(
-                "INSERT INTO uploads (key, state) VALUES (?1, ?2)
+        best_effort(
+            "record the upload state",
+            self.0.with(|c| {
+                c.execute(
+                    "INSERT INTO uploads (key, state) VALUES (?1, ?2)
                  ON CONFLICT (key) DO UPDATE SET state = excluded.state",
-                params![key, state],
-            )
-        });
+                    params![key, state],
+                )
+            }),
+        );
     }
 
     fn clear(&self, key: &str) {
-        let _ = self
-            .0
-            .with(|c| c.execute("DELETE FROM uploads WHERE key = ?1", params![key]));
+        best_effort(
+            "record the upload state",
+            self.0
+                .with(|c| c.execute("DELETE FROM uploads WHERE key = ?1", params![key])),
+        );
     }
 }
 

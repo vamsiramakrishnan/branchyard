@@ -4,6 +4,7 @@
 //! and `If-Match` on puts, block lists and deletes, `x-ms-range`, staged
 //! blocks, and listing with markers.
 
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -70,6 +71,7 @@ impl MockAzure {
         format!("{}/{ACCOUNT}", self.server.url)
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-sync
     pub fn store(
         &self,
         container: &str,
@@ -89,8 +91,7 @@ impl MockAzure {
 
     pub fn objects(&self) -> BTreeMap<String, Vec<u8>> {
         self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("state")
             .blobs
             .iter()
             .map(|(k, o)| (k.clone(), o.data.clone()))
@@ -100,8 +101,7 @@ impl MockAzure {
     /// Blocks staged and not yet committed, per blob.
     pub fn staged(&self) -> usize {
         self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("state")
             .staged
             .values()
             .map(BTreeMap::len)
@@ -151,7 +151,7 @@ fn handle(state: &Mutex<State>, container: &str, page: usize, r: &MockRequest) -
     if c != container {
         return error(404, "ContainerNotFound");
     }
-    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = state.lock_recovering("state");
     if name.is_empty() {
         if r.method == "GET" && r.param("comp").as_deref() == Some("list") {
             let prefix = r.param("prefix").unwrap_or_default();

@@ -1,0 +1,15 @@
+[package]
+name = "branchyard-wire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "The one HTTP/1.1 wire codec: request and response heads, body framing, chunked transfer coding and http(s) URLs, strict about malformed input"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Head parsing. Already in Cargo.lock.
+httparse = { workspace = true }

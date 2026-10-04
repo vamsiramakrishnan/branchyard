@@ -1,5 +1,7 @@
 //! Hermetic tests against temporary repositories. Requires `git` and `sh`.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+use branchyard_testkit::wait;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -333,12 +335,11 @@ fn a_same_size_rewrite_in_the_checkout_second_is_diffed() {
     for attempt in 0.. {
         // Start just after a second begins, so the checkout and the rewrite
         // share it.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap();
-        std::thread::sleep(Duration::from_nanos(
-            1_000_000_000 - u64::from(now.subsec_nanos()),
-        ));
+        let subsec_nanos = (branchyard_support::time::now_nanos() % 1_000_000_000) as u64;
+        wait::settle(
+            "to just after a second begins",
+            Duration::from_nanos(1_000_000_000 - subsec_nanos),
+        );
         let ws = fixture.workspace(&format!("racy{attempt}"));
         let file = ws.path.join("a.txt");
         fs::write(&file, "one\nTWO\nthree\n").unwrap();
@@ -355,13 +356,9 @@ fn a_same_size_rewrite_in_the_checkout_second_is_diffed() {
         }
         // The diff runs in a later second than the checkout and the write.
         let next = Duration::from_secs(written.mtime() as u64 + 1);
-        while std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            < next
-        {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        wait::until("the clock to reach the next second", || {
+            Duration::from_millis(branchyard_support::time::now_ms()) >= next
+        });
         let diff = ws.diff().unwrap();
         assert!(diff.contains("-two\n+TWO"), "{diff:?}");
         let stat = ws.diffstat().unwrap();

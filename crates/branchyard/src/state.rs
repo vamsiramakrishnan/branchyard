@@ -23,12 +23,14 @@
 //! engine adds them): every other write keeps the list in the
 //! store, so a turn that ends after it spawned children cannot drop them.
 
+use branchyard_support::time::now_ms;
+use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -159,10 +161,7 @@ impl Owner {
         Owner {
             id: format!(
                 "{pid}-{:x}-{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0),
+                branchyard_support::time::now_nanos(),
                 N.fetch_add(1, Ordering::Relaxed)
             ),
             host: proc::host().to_owned(),
@@ -305,24 +304,32 @@ pub(crate) struct SteerRow {
 }
 
 impl SteerState {
-    /// The stored state name and reason.
+    /// The stored state name (the text serde puts in `state`) and reason.
     pub(crate) fn columns(&self) -> (&'static str, Option<&str>) {
-        match self {
-            SteerState::Pending => ("pending", None),
-            SteerState::Delivered => ("delivered", None),
-            SteerState::Accepted => ("accepted", None),
-            SteerState::Refused { reason } => ("refused", Some(reason)),
-        }
+        let reason = match self {
+            SteerState::Refused { reason } => Some(reason.as_str()),
+            _ => None,
+        };
+        (self.into(), reason)
     }
 
-    pub(crate) fn from_columns(state: &str, reason: Option<String>) -> SteerState {
+    /// The state a row stores; an error for a name no state has, rather
+    /// than reading it as a refusal.
+    pub(crate) fn from_columns(
+        state: &str,
+        reason: Option<String>,
+    ) -> Result<SteerState, crate::store_codec::CodecError> {
         match state {
-            "pending" => SteerState::Pending,
-            "delivered" => SteerState::Delivered,
-            "accepted" => SteerState::Accepted,
-            _ => SteerState::Refused {
+            "pending" => Ok(SteerState::Pending),
+            "delivered" => Ok(SteerState::Delivered),
+            "accepted" => Ok(SteerState::Accepted),
+            "refused" => Ok(SteerState::Refused {
                 reason: reason.unwrap_or_default(),
-            },
+            }),
+            other => Err(crate::store_codec::CodecError::UnknownText {
+                field: "steer state",
+                text: other.to_owned(),
+            }),
         }
     }
 }
@@ -760,8 +767,7 @@ fn signal_for(path: &Path) -> Arc<Signal> {
     static SIGNALS: OnceLock<Mutex<HashMap<PathBuf, Arc<Signal>>>> = OnceLock::new();
     let mut signals = SIGNALS
         .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .lock_recovering("task signals");
     signals.entry(path.to_path_buf()).or_default().clone()
 }
 
@@ -784,13 +790,6 @@ pub(crate) struct Store {
     extras: Arc<dyn Extras>,
     owner: Arc<Owner>,
     signal: Arc<Signal>,
-}
-
-pub(crate) fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 impl Store {
@@ -922,7 +921,7 @@ impl Store {
 
     /// Give up a reservation made by [`Store::reserve`].
     pub fn release(&self, name: &str) {
-        let _ = self.backend.release(name);
+        branchyard_support::best_effort("release a name reservation", self.backend.release(name));
     }
 
     /// Replace the record outside any turn. The `children` already stored
@@ -994,11 +993,7 @@ impl Store {
 
     /// Wake readers waiting in this process.
     pub fn notify(&self) {
-        let mut appended = self
-            .signal
-            .appended
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut appended = self.signal.appended.lock_recovering("appended");
         *appended += 1;
         self.signal.changed.notify_all();
     }
@@ -1011,30 +1006,27 @@ impl Store {
         timeout: Duration,
         mut ready: impl FnMut() -> Result<Option<T>, Error>,
     ) -> Result<Option<T>, Error> {
-        let deadline = Instant::now() + timeout;
+        // A timeout too long to add to the clock (`Duration::MAX`) is a wait
+        // with no deadline.
+        let deadline = Instant::now().checked_add(timeout);
         loop {
-            let seen = *self
-                .signal
-                .appended
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let seen = *self.signal.appended.lock_recovering("appended");
             if let Some(found) = ready()? {
                 return Ok(Some(found));
             }
             let now = Instant::now();
-            if now >= deadline {
-                return Ok(None);
-            }
-            let appended = self
-                .signal
-                .appended
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let remaining = match deadline {
+                Some(deadline) if now >= deadline => return Ok(None),
+                Some(deadline) => POLL.min(deadline - now),
+                None => POLL,
+            };
+            let appended = self.signal.appended.lock_recovering("appended");
             if *appended == seen {
-                let _ = self
-                    .signal
-                    .changed
-                    .wait_timeout(appended, POLL.min(deadline - now));
+                drop(
+                    self.signal
+                        .changed
+                        .wait_timeout_recovering(appended, remaining, "changed"),
+                );
             }
         }
     }
@@ -1105,7 +1097,13 @@ impl Drop for Lease {
     fn drop(&mut self) {
         self.heartbeat.take();
         if !self.done {
-            let _ = self.store.backend.finish(&self.fence, None, None);
+            // A lease dropped without finishing (an early return, a panic)
+            // still has to be released, and nothing here can return the
+            // error: so it is logged, and the lease expires on its own.
+            branchyard_support::best_effort(
+                "release a lease dropped without finish",
+                self.store.backend.finish(&self.fence, None, None),
+            );
         }
     }
 }
@@ -1128,15 +1126,12 @@ impl Heartbeat {
             .name(format!("by-lease-{}", fence.branch))
             .spawn(move || {
                 let (flag, wake) = &*stopping;
-                let mut stopped = flag.lock().unwrap_or_else(|e| e.into_inner());
+                let mut stopped = flag.lock_recovering("heartbeat stop flag");
                 loop {
                     let deadline = Instant::now() + HEARTBEAT;
                     while !*stopped && Instant::now() < deadline {
                         let left = deadline.saturating_duration_since(Instant::now());
-                        stopped = wake
-                            .wait_timeout(stopped, left)
-                            .unwrap_or_else(|e| e.into_inner())
-                            .0;
+                        stopped = wake.wait_timeout_recovering(stopped, left, "wake").0;
                     }
                     if *stopped {
                         return;
@@ -1165,10 +1160,73 @@ impl Heartbeat {
 impl Drop for Heartbeat {
     fn drop(&mut self) {
         let (flag, wake) = &*self.stop;
-        *flag.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        *flag.lock_recovering("heartbeat stop flag") = true;
         wake.notify_all();
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            branchyard_support::join_reporting("lease heartbeat", thread);
         }
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+    use branchyard_support::testing::{capture, Level};
+
+    fn record(name: &str) -> Record {
+        serde_json::from_value(serde_json::json!({
+            "info": {
+                "name": name, "git_branch": format!("by/{name}"), "worktree": "/w",
+                "prompt": "p", "harness": "h", "profile": "p", "session": null,
+                "parent": null, "base": "b", "candidate": null,
+                "status": {"state": "running"}, "turns": 0, "cost_usd": null,
+                "created_at": 0
+            },
+            "created_ms": 0, "check": null, "command": null, "home": null,
+            "cost_baseline": null
+        }))
+        .unwrap()
+    }
+
+    fn lease_on(store: &Store, name: &str) -> Lease {
+        assert!(store.reserve(name).unwrap());
+        match store.acquire(&record(name)).unwrap() {
+            Taken::Granted(lease) => lease,
+            Taken::Stale => panic!("a fresh branch has no stale lease"),
+        }
+    }
+
+    #[test]
+    fn a_lease_dropped_without_finish_releases_quietly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let lease = lease_on(&store, "quiet");
+        let (_, events) = capture(|| drop(lease));
+        assert!(events.is_empty(), "{events:?}");
+        // Released: the branch can be leased again.
+        assert!(matches!(
+            store.acquire(&record("quiet")).unwrap(),
+            Taken::Granted(_)
+        ));
+    }
+
+    #[test]
+    fn a_failed_release_on_drop_is_logged_not_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let lease = lease_on(&store, "fenced");
+        // The branch's record and lease go away under the holder, as when
+        // another engine took the lease over: its release is now refused.
+        store.delete("fenced").unwrap();
+        let (_, events) = capture(|| drop(lease));
+        let warnings: Vec<_> = events.iter().filter(|e| e.level == Level::WARN).collect();
+        assert_eq!(warnings.len(), 1, "{events:?}");
+        assert!(
+            warnings[0]
+                .text
+                .contains("release a lease dropped without finish"),
+            "{}",
+            warnings[0].text
+        );
     }
 }

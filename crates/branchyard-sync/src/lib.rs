@@ -27,7 +27,7 @@
 //!   retention, legal holds and a quota ([`gc`]).
 //! - **Backends** ([`store`]): one [`ObjectStore`] interface, conformance
 //!   tested on every backend; in-process stand-ins for the cloud APIs are
-//!   in [`testing`] (feature `testing`).
+//!   in `testing` (feature `testing`).
 //! - **What is synced** is a [`SyncSource`]: a git directory, a task ID and
 //!   a chunk directory. [`source::BranchSource`] adapts today's branches;
 //!   a task repository implements the same trait.

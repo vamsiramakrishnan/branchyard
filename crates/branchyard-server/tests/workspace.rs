@@ -2,6 +2,7 @@
 //! allows it (`allow_workspace_scripts`), never because a request asks,
 //! and a configuration naming a repository it does not serve is refused.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

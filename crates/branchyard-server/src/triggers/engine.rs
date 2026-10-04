@@ -280,8 +280,7 @@ impl Engine {
         let trigger = self.store.get(&run.trigger)?;
         let pause_after = trigger
             .as_ref()
-            .map(|t| t.spec.policy.pause_after_failures)
-            .unwrap_or(0);
+            .map_or(0, |t| t.spec.policy.pause_after_failures);
         match trigger {
             None => {
                 run.state = RunState::SkippedDisabled;
@@ -345,11 +344,11 @@ impl Engine {
             Err(e) => return fail(run, format!("rendering the task: {e}")),
         };
         if trigger.spec.route.is_some() {
-            let seed = u64::from_be_bytes(
-                sha2::Sha256::digest(run.key.as_bytes())[..8]
-                    .try_into()
-                    .expect("eight bytes"),
-            );
+            let digest = sha2::Sha256::digest(run.key.as_bytes());
+            let seed = digest
+                .first_chunk::<8>()
+                .copied()
+                .map_or(0, u64::from_be_bytes);
             request = match self.sink.route(trigger, request, seed) {
                 Ok(request) => request,
                 Err(e) => return fail(run, format!("routing: {e}")),
@@ -409,8 +408,7 @@ impl Engine {
             let pause_after = self
                 .store
                 .get(&run.trigger)?
-                .map(|t| t.spec.policy.pause_after_failures)
-                .unwrap_or(0);
+                .map_or(0, |t| t.spec.policy.pause_after_failures);
             let accounted = self.store.settle(&run.id, &outcome, pause_after)?;
             if let Some(why) = &accounted.paused {
                 tracing::warn!(trigger = %run.trigger, reason = %why, "trigger paused");
@@ -447,7 +445,7 @@ fn default_name(trigger: &StoredTrigger, run: &TriggerRun) -> String {
             }
         }
         None => {
-            let at = template::rfc3339(run.scheduled_ms.unwrap_or(run.at_ms));
+            let at = branchyard_support::time::rfc3339_secs(run.scheduled_ms.unwrap_or(run.at_ms));
             // 2026-10-01T09:00:00Z -> 20261001-0900
             let digits: String = at.chars().filter(char::is_ascii_digit).collect();
             format!("{name}-{}-{}", &digits[..8], &digits[8..12])
@@ -486,7 +484,7 @@ pub fn run_precheck(
         &env,
     );
     drop(worktree);
-    let _ = std::fs::remove_file(&event_file);
+    branchyard_support::cleanup_file(&event_file);
     Ok(result)
 }
 
@@ -567,6 +565,7 @@ fn state(state: OperationState) -> &'static str {
     }
 }
 
+#[allow(clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

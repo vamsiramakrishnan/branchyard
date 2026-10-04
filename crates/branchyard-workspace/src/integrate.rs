@@ -1,5 +1,6 @@
 //! Validated promotion of a candidate into a target branch.
 
+use branchyard_support::best_effort;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -243,9 +244,12 @@ impl Repository {
 
         let mut stale_checkouts = Vec::new();
         for worktree in checkouts {
-            let _ = Git::new(&worktree)
-                .args(["update-index", "-q", "--refresh"])
-                .output();
+            best_effort(
+                "refresh the git index of a checkout",
+                Git::new(&worktree)
+                    .args(["update-index", "-q", "--refresh"])
+                    .output(),
+            );
             let moved = Git::new(&worktree)
                 .no_hooks()
                 .args(["read-tree", "-m", "-u", expected.as_str(), merged.as_str()])
@@ -378,7 +382,10 @@ fn merge(
         let unmerged = Git::new(dir)
             .args(["diff", "--name-only", "-z", "--diff-filter=U"])
             .run();
-        let _ = Git::new(dir).args(["merge", "--abort"]).output();
+        best_effort(
+            "abort the merge",
+            Git::new(dir).args(["merge", "--abort"]).output(),
+        );
         let files: Vec<String> = unmerged
             .unwrap_or_default()
             .split('\0')
@@ -490,8 +497,11 @@ impl Drop for TempWorktree {
             .arg(&self.path)
             .run();
         if removed.is_err() || self.path.exists() {
-            let _ = fs::remove_dir_all(&self.path);
-            let _ = Git::new(&self.root).args(["worktree", "prune"]).run();
+            branchyard_support::cleanup_dir(&self.path);
+            best_effort(
+                "git worktree prune",
+                Git::new(&self.root).args(["worktree", "prune"]).run(),
+            );
         }
     }
 }

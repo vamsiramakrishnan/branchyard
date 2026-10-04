@@ -94,11 +94,8 @@ pub fn main(env: &Env, target: &Target, period: &str, as_json: bool) -> Outcome 
     }
     let yard = open()?;
     let gateway = yard.models();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let (day, month) = models::period_starts(now);
+    let now = branchyard_support::time::now_ms();
+    let (day, month) = branchyard_support::time::period_starts(now);
     let since = match period {
         "day" => day,
         "month" => month,

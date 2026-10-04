@@ -9,6 +9,7 @@
 //! the RFC requires; the server does not check that they are, since
 //! masking protects intermediaries, not the endpoints.
 
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
@@ -35,21 +36,8 @@ fn invalid(message: impl Into<String>) -> io::Error {
 
 /// Standard base64 with padding, as the handshake needs.
 pub(crate) fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(ALPHABET[(n >> (18 - 6 * i)) as usize & 63] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 /// The `Sec-WebSocket-Accept` value for a key.
@@ -116,6 +104,7 @@ pub fn read_head(stream: &mut impl Read) -> io::Result<Head> {
 }
 
 /// Write a complete, non-upgrade HTTP response and close the connection.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 pub fn respond(stream: &mut Stream, status: &str, body: &str) -> io::Result<()> {
     write!(
         stream,
@@ -193,6 +182,7 @@ impl WsWriter {
     }
 
     /// Close the TCP connection in both directions without a close frame.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
     pub fn abort(&self) {
         let _ = self.stream.shutdown(Shutdown::Both);
     }
@@ -209,6 +199,7 @@ pub struct WsReader {
 impl WsReader {
     /// The next binary message, or `None` once the peer closed the
     /// WebSocket or the connection.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
     pub fn recv(&mut self) -> io::Result<Option<Vec<u8>>> {
         let mut message: Option<Vec<u8>> = None;
         loop {
@@ -262,20 +253,21 @@ impl WsReader {
                     message = Some(payload);
                 }
                 OP_CONTINUATION if message.is_some() => {
-                    let whole = message.as_mut().unwrap();
+                    let mut whole = message.take().unwrap_or_default();
                     whole.extend_from_slice(&payload);
                     if fin {
-                        return Ok(message);
+                        return Ok(Some(whole));
                     }
+                    message = Some(whole);
                 }
                 OP_PING => {
-                    let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut writer = self.writer.lock_recovering("writer");
                     let _ = writer.frame(OP_PONG, &payload);
                 }
                 OP_PONG => {}
                 OP_CLOSE => {
                     self.closed = true;
-                    let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut writer = self.writer.lock_recovering("writer");
                     let _ = writer.frame(OP_CLOSE, &payload[..payload.len().min(2)]);
                     let _ = writer.stream.shutdown(Shutdown::Write);
                     return Ok(None);
@@ -341,6 +333,7 @@ pub struct Refused {
 /// `protocol`, with `headers` added. A non-101 answer is returned as
 /// [`Refused`] inside the error, with kind `PermissionDenied` for 401 and
 /// 403, `NotFound` for 404 and `Other` otherwise.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 pub fn client(
     mut stream: Stream,
     host: &str,

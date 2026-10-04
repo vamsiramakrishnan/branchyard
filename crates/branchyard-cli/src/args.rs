@@ -4038,6 +4038,7 @@ where
 }
 
 /// Run `f` on a thread with [`PARSE_STACK`], passing on its panic.
+#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 fn on_parse_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
     std::thread::Builder::new()
         .name("by-args".into())
@@ -4048,6 +4049,7 @@ fn on_parse_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> 
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
+#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 fn parse_argv(argv: Vec<OsString>) -> Result<Cli, clap::Error> {
     let mut cmd = build_command();
     let matches = cmd
@@ -4191,21 +4193,10 @@ pub fn server_call(args: &[OsString]) -> Option<ServerCall> {
     })
 }
 
-/// Split a command line into words the way a POSIX shell quotes them:
-/// single quotes, double quotes, backslash escapes, and `#` comments. There
-/// is no variable, glob or operator expansion; the result runs without a
-/// shell.
-pub fn split_words(line: &str) -> Result<Vec<String>, String> {
-    shlex::split(line).ok_or_else(|| "unterminated quote or trailing backslash".to_owned())
-}
+pub use branchyard_setup::config::split_words;
 
 /// Quote `word` for a POSIX shell, leaving plain words as they are.
-pub fn shell_quote(word: &str) -> String {
-    // Only a NUL byte cannot be quoted; no branch name holds one.
-    shlex::try_quote(&word.replace('\0', ""))
-        .map(|quoted| quoted.into_owned())
-        .unwrap_or_default()
-}
+pub use branchyard_recipe::quote as shell_quote;
 
 // Value parsers. Each error reads after "invalid value 'X' for '--flag
 // <VALUE>': ".
@@ -4357,6 +4348,7 @@ fn label(text: &str) -> Result<(String, String), String> {
         .ok_or_else(|| "needs KEY=VALUE".into())
 }
 
+#[allow(clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

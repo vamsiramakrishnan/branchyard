@@ -2,6 +2,7 @@
 //! (vendor/orca, pinned in vendor.lock.json; see patches/ports.json). When a
 //! re-pin changes one of these, read the upstream change and port it.
 
+#![allow(clippy::panic)] // tests: a panic is the failure report
 use std::fs;
 
 fn vendored(path: &str) -> String {

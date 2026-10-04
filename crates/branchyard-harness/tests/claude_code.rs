@@ -1,6 +1,7 @@
 //! Claude Code driver against a recorded Claude Code 2.1.283 session and
 //! frames shaped by the Agent SDK's published stdout protocol types.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use branchyard_harness::claude_code::{mcp_config, ClaudeCode};
 use branchyard_harness::conformance::{decode, feed, handshake, Replay, Transcript};
 use branchyard_harness::{

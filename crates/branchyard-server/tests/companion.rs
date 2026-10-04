@@ -3,6 +3,7 @@
 //! limit, scopes, revocation), and Web Push to a mock push service that
 //! checks the VAPID signature and decrypts the message as a browser would.
 
+#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -14,7 +15,8 @@ use std::time::{Duration, Instant};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use branchyard_server::companion::{self, link, push, store};
-use common::{eventually, get, post, raw, Fixture, Server, TOKEN};
+use branchyard_testkit::wait;
+use common::{get, post, raw, Fixture, Server, TOKEN};
 use ring::agreement;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::Value;
@@ -69,10 +71,10 @@ fn token_command(f: &Fixture, args: &[&str]) -> (String, String, bool) {
 
 /// The code in a pairing link's fragment.
 fn code_of(link: &str) -> String {
-    link.trim()
-        .split_once("#pair=")
-        .map(|(_, code)| code.to_owned())
-        .unwrap_or_else(|| panic!("no code in {link:?}"))
+    link.trim().split_once("#pair=").map_or_else(
+        || panic!("no code in {link:?}"),
+        |(_, code)| code.to_owned(),
+    )
 }
 
 fn redeem(server: &Server, code: &str) -> (u16, String, String) {
@@ -189,7 +191,7 @@ fn a_pairing_link_gives_a_scoped_token_once_until_revoked() {
     assert!(!err.contains('\u{1b}'), "no QR code off a terminal: {err}");
     let code = code_of(&out);
 
-    let started = branchyard_server::ops::now_ms();
+    let started = branchyard_support::time::now_ms();
     let (status, head, body) = redeem(&server, &code);
     assert_eq!(status, 200, "{body}");
     assert_eq!(header(&head, "cache-control"), Some("no-store"));
@@ -263,7 +265,7 @@ fn expired_codes_and_tokens_are_refused() {
     let config = app_config(&f);
     let server = Server::start(config.clone());
     let companion = store::open(&config).unwrap();
-    let now = branchyard_server::ops::now_ms();
+    let now = branchyard_support::time::now_ms();
     let request = |name: &str, ttl: Duration| link::LinkRequest {
         name: Some(name.into()),
         tenant: "default".into(),
@@ -296,8 +298,7 @@ fn expired_codes_and_tokens_are_refused() {
     assert_eq!(status, 200, "{body}");
     let token = json(&body)["token"].as_str().unwrap().to_owned();
     assert_eq!(raw(server.addr, &get("/v1/repos", Some(&token))).0, 200);
-    eventually("the token to expire", || {
-        std::thread::sleep(Duration::from_millis(200));
+    wait::until("the token to expire", || {
         raw(server.addr, &get("/v1/repos", Some(&token))).0 == 401
     });
 
@@ -330,7 +331,7 @@ fn pairing_attempts_are_rate_limited() {
         &config,
         companion.as_ref(),
         &request,
-        branchyard_server::ops::now_ms(),
+        branchyard_support::time::now_ms(),
     )
     .unwrap();
     // Even a good code waits once the limit is reached; it stays unused.
@@ -363,7 +364,7 @@ fn a_paired_event_stream_ends_when_its_token_is_revoked() {
         &config,
         companion.as_ref(),
         &request,
-        branchyard_server::ops::now_ms(),
+        branchyard_support::time::now_ms(),
     )
     .unwrap();
     let token = json(&redeem(&server, &code).2)["token"]
@@ -383,7 +384,7 @@ fn a_paired_event_stream_ends_when_its_token_is_revoked() {
     assert!(line.starts_with("HTTP/1.1 200"), "{line}");
     let started = Instant::now();
     companion
-        .revoke("watcher", None, branchyard_server::ops::now_ms())
+        .revoke("watcher", None, branchyard_support::time::now_ms())
         .unwrap();
     let mut rest = Vec::new();
     // The stream ends (rather than hanging until the read timeout).
@@ -536,7 +537,7 @@ fn push_notifications_reach_a_subscribed_browser() {
         branchyard_client::api::OperationState::Succeeded,
         "{op:?}"
     );
-    eventually("a push for the permission request", || mock.count() >= 1);
+    wait::until("a push for the permission request", || mock.count() >= 1);
     let (path, head, body) = mock.received.lock().unwrap()[0].clone();
     assert_eq!(path, "/push/one");
     assert_eq!(header(&head, "content-encoding"), Some("aes128gcm"));
@@ -555,7 +556,7 @@ fn push_notifications_reach_a_subscribed_browser() {
     assert_eq!(notice["url"], "#/b/app/asks");
     assert!(notice["body"].as_str().unwrap().contains("asks to use"));
     // Then the finished turn.
-    eventually("a push for the finished turn", || mock.count() >= 2);
+    wait::until("a push for the finished turn", || mock.count() >= 2);
 
     // A push service that says the subscription is gone loses it.
     let (_, public2, auth2) = browser_keys();
@@ -613,7 +614,7 @@ fn a_subscription_follows_its_tokens_reach() {
         &config,
         companion.as_ref(),
         &write_only,
-        branchyard_server::ops::now_ms(),
+        branchyard_support::time::now_ms(),
     )
     .unwrap();
     let blind = json(&redeem(&server, &code).2)["token"]
@@ -635,7 +636,7 @@ fn a_subscription_follows_its_tokens_reach() {
         &config,
         companion.as_ref(),
         &reader,
-        branchyard_server::ops::now_ms(),
+        branchyard_support::time::now_ms(),
     )
     .unwrap();
     let token = json(&redeem(&server, &code).2)["token"]
@@ -648,7 +649,7 @@ fn a_subscription_follows_its_tokens_reach() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(json(&body)["delivered"], 1);
     companion
-        .revoke("reader", None, branchyard_server::ops::now_ms())
+        .revoke("reader", None, branchyard_support::time::now_ms())
         .unwrap();
     assert!(companion.subscriptions().unwrap().is_empty());
     assert_eq!(raw(server.addr, &request_test(&token)).0, 401);

@@ -2,6 +2,7 @@
 //! file, and [`SqliteRows`], which a server's operation store uses on its
 //! own connection with [`SCHEMA`] among its tables.
 
+use branchyard_support::LockExt as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,7 @@ use std::time::Duration;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::{decode, encode, Rows, Service, ServiceState, ServiceStore};
+use crate::store_codec::{from_db, to_db};
 
 /// The registry's tables: one row per record, its body JSON, and the
 /// change counter.
@@ -36,14 +38,6 @@ fn sql(error: rusqlite::Error) -> io::Error {
     io::Error::other(format!("service registry: {error}"))
 }
 
-fn uint(value: i64) -> u64 {
-    u64::try_from(value).unwrap_or(0)
-}
-
-fn int(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
-
 /// The registry's rows on a SQLite connection inside a transaction.
 pub struct SqliteRows<'a>(pub &'a Connection);
 
@@ -56,7 +50,13 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, i64, i64, i64
 fn service(
     (body, state, lease, changed, seq): (String, String, i64, i64, i64),
 ) -> io::Result<Service> {
-    decode(&body, &state, uint(lease), uint(changed), uint(seq))
+    decode(
+        &body,
+        &state,
+        from_db("lease", lease)?,
+        from_db("changed", changed)?,
+        from_db("seq", seq)?,
+    )
 }
 
 impl SqliteRows<'_> {
@@ -80,8 +80,8 @@ impl Rows for SqliteRows<'_> {
                 [],
                 |r| r.get::<_, i64>(0),
             )
-            .map(uint)
             .map_err(sql)
+            .and_then(|seq| Ok(from_db("seq", seq)?))
     }
 
     fn head(&mut self) -> io::Result<u64> {
@@ -90,8 +90,8 @@ impl Rows for SqliteRows<'_> {
                 r.get::<_, i64>(0)
             })
             .optional()
-            .map(|v| v.map_or(0, uint))
             .map_err(sql)
+            .and_then(|seq| Ok(from_db("seq", seq.unwrap_or(0))?))
     }
 
     fn get(&mut self, id: &str) -> io::Result<Option<Service>> {
@@ -120,9 +120,9 @@ impl Rows for SqliteRows<'_> {
                     s.kind,
                     s.owner.id,
                     s.state.as_str(),
-                    int(s.lease_until_ms),
-                    int(s.changed_ms),
-                    int(s.seq),
+                    to_db("lease_until_ms", s.lease_until_ms)?,
+                    to_db("changed_ms", s.changed_ms)?,
+                    to_db("seq", s.seq)?,
                     encode(s)?
                 ],
             )
@@ -140,7 +140,7 @@ impl Rows for SqliteRows<'_> {
     fn since(&mut self, seq: u64) -> io::Result<Vec<Service>> {
         self.query(
             &format!("SELECT {COLUMNS} FROM services WHERE seq > ?1 ORDER BY seq"),
-            int(seq),
+            to_db("seq", seq)?,
         )
     }
 
@@ -151,7 +151,7 @@ impl Rows for SqliteRows<'_> {
                 params![
                     ServiceState::Left.as_str(),
                     ServiceState::Reclaimed.as_str(),
-                    int(before_ms)
+                    to_db("before_ms", before_ms)?
                 ],
             )
             .map_err(sql)
@@ -230,6 +230,7 @@ impl LocalRegistry {
     }
 
     /// An in-memory registry, for tests and embedding.
+    #[allow(clippy::expect_used)] // ratchet: branchyard
     pub fn memory() -> LocalRegistry {
         let conn = Connection::open_in_memory().expect("an in-memory database");
         conn.execute_batch(SCHEMA)
@@ -272,7 +273,7 @@ impl ServiceStore for LocalRegistry {
         &self,
         f: &mut (dyn FnMut(&mut dyn Rows) -> io::Result<()> + Send),
     ) -> io::Result<()> {
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.conn.lock_recovering("conn");
         transact(&mut conn, f)
     }
 }

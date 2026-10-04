@@ -125,10 +125,7 @@ pub fn dir() -> PathBuf {
 }
 
 fn sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn read_manifest(dir: &Path) -> Result<Option<Manifest>, String> {
@@ -206,6 +203,7 @@ pub fn load(dir: &Path) -> Result<Option<Loaded>, String> {
 
 /// A GET of `url` with `If-None-Match` from `cached` when its file still
 /// verifies: the body, and the response as the manifest records it.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn fetch(dir: &Path, url: &str, cached: Option<&Cached>) -> Result<(Vec<u8>, Cached), String> {
     let (base, query) = match url.split_once('?') {
         Some((base, query)) => (base, Some(query)),
@@ -325,10 +323,7 @@ pub fn refresh(dir: &Path, sources: &Sources<'_>) -> Result<Refreshed, String> {
         manifest.responses.insert(url, cached);
         Ok(body)
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let now = branchyard_support::time::now_ms();
     let mut connectors_count = None;
     if sources.connectors {
         let base = sources.mcp_registry.trim_end_matches('/');

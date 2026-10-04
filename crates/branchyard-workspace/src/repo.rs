@@ -1,5 +1,6 @@
 //! Repositories, branch workspaces, and candidates.
 
+use branchyard_support::best_effort;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,10 +17,7 @@ static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
 /// A process-unique suffix for scratch paths.
 pub(crate) fn unique_suffix() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
+    let nanos = (branchyard_support::time::now_nanos() % 1_000_000_000) as u32;
     format!(
         "{}-{nanos:08x}-{}",
         std::process::id(),
@@ -165,7 +163,10 @@ impl Repository {
             .arg(base.as_str())
             .run();
         if let Err(e) = added {
-            let _ = Git::new(&self.root).args(["config", "--unset", &key]).run();
+            best_effort(
+                "git config --unset",
+                Git::new(&self.root).args(["config", "--unset", &key]).run(),
+            );
             return Err(e);
         }
         Ok(Workspace {
@@ -206,12 +207,19 @@ impl Repository {
             .args(["config", &key, base.as_str()])
             .run()?;
         let undo = |at: &Path| {
-            let _ = Git::new(&self.root)
+            let removed = Git::new(&self.root)
                 .args(["worktree", "remove", "--force"])
                 .arg(at)
                 .run();
-            let _ = fs::remove_dir_all(at);
-            let _ = Git::new(&self.root).args(["config", "--unset", &key]).run();
+            // A worktree that was never made is nothing to report.
+            if !matches!(&removed, Err(e) if e.to_string().contains("is not a working tree")) {
+                best_effort("remove the new worktree", removed);
+            }
+            branchyard_support::cleanup_dir(at);
+            best_effort(
+                "git config --unset",
+                Git::new(&self.root).args(["config", "--unset", &key]).run(),
+            );
         };
         let moved = Git::new(&self.root)
             .no_hooks()
@@ -230,9 +238,12 @@ impl Repository {
             .run();
         if let Err(e) = switched {
             undo(&dir);
-            let _ = Git::new(&self.root)
-                .args(["branch", "-D", &name.branch()])
-                .run();
+            best_effort(
+                "delete the new branch",
+                Git::new(&self.root)
+                    .args(["branch", "-D", &name.branch()])
+                    .run(),
+            );
             return Err(e);
         }
         Ok(Workspace {
@@ -584,9 +595,9 @@ struct RemoveOnDrop<'a>(&'a Path);
 
 impl Drop for RemoveOnDrop<'_> {
     fn drop(&mut self) {
-        let _ = fs::remove_file(self.0);
+        branchyard_support::cleanup_file(self.0);
         let mut lock = self.0.as_os_str().to_owned();
         lock.push(".lock");
-        let _ = fs::remove_file(PathBuf::from(lock));
+        branchyard_support::cleanup_file(PathBuf::from(lock));
     }
 }

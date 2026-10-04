@@ -19,6 +19,7 @@
 //! service answers 404 or 410, or whose credential no longer verifies
 //! (revoked, expired, removed from the configuration), is dropped.
 
+use branchyard_support::best_effort;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -231,16 +232,7 @@ impl Tracker {
 
 /// `text` percent-encoded for a URL fragment segment.
 fn url_part(text: &str) -> String {
-    let mut out = String::new();
-    for b in text.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+    branchyard_client::http::encode(text)
 }
 
 // ---------------------------------------------------------------------
@@ -273,6 +265,7 @@ impl Vapid {
     }
 
     /// A fresh key, kept in memory only: for tests.
+    #[allow(clippy::expect_used)] // ratchet: branchyard-server
     pub fn ephemeral(subject: &str) -> Vapid {
         let rng = SystemRandom::new();
         let document = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
@@ -377,6 +370,7 @@ pub fn decode_b64(text: &str) -> Result<Vec<u8>, String> {
 /// §3.4): the content encryption key and nonce, from the shared ECDH
 /// secret, the subscription's authentication secret, both public keys and
 /// the message's salt.
+#[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-server
 fn derive(
     ecdh_secret: &[u8],
     auth_secret: &[u8],
@@ -587,7 +581,7 @@ pub async fn send(
         Ok(body) => body,
         Err(e) => return Sent::Failed(e),
     };
-    let authorization = match vapid.authorization(&url, crate::ops::now_ms() / 1000) {
+    let authorization = match vapid.authorization(&url, branchyard_support::time::now_ms() / 1000) {
         Ok(a) => a,
         Err(e) => return Sent::Failed(e),
     };
@@ -626,7 +620,7 @@ pub(crate) async fn owner(app: &Arc<App>, token_sha256: &str) -> Option<Principa
         .ok()?
         .ok()??;
     token
-        .usable_at(crate::ops::now_ms())
+        .usable_at(branchyard_support::time::now_ms())
         .then_some(token.principal)
 }
 
@@ -686,7 +680,10 @@ pub(crate) async fn fan_out(
 
 async fn drop_subscription(companion: &super::Companion, endpoint: &str) {
     let (store, endpoint) = (companion.store.clone(), endpoint.to_owned());
-    let _ = tokio::task::spawn_blocking(move || store.unsubscribe(&endpoint, None)).await;
+    best_effort(
+        "unsubscribe the push subscription",
+        tokio::task::spawn_blocking(move || store.unsubscribe(&endpoint, None)).await,
+    );
 }
 
 /// One notifier per served repository, following its feed.
@@ -745,7 +742,8 @@ async fn run(
             }
             let store = store.clone();
             let taken = tokio::task::spawn_blocking(move || {
-                let notices = follower.take(store.as_ref(), &entries, crate::ops::now_ms());
+                let notices =
+                    follower.take(store.as_ref(), &entries, branchyard_support::time::now_ms());
                 (follower, notices)
             })
             .await;
@@ -871,8 +869,9 @@ impl Follower {
 /// `repo` names a repository no other test of the store uses. Panics on a
 /// violation. Run on SQLite here and on PostgreSQL by `tests/postgres.rs`.
 #[doc(hidden)]
+#[allow(clippy::unwrap_used)] // ratchet: branchyard-server
 pub fn check_claims(one: &dyn OperationStore, other: &dyn OperationStore, repo: &str) {
-    let now = crate::ops::now_ms();
+    let now = branchyard_support::time::now_ms();
     let ready = |seq: u64, branch: &str| FeedEntry {
         seq,
         branch: branch.to_owned(),

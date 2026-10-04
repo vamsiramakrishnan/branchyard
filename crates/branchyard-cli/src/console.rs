@@ -4,6 +4,7 @@
 //! terminal until it is answered. Decisions are printed from the engine's
 //! record of them, whoever made them.
 
+use branchyard_support::LockExt as _;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -59,6 +60,7 @@ struct State {
 
 impl State {
     /// Output is best effort: a closed stdout must not fail the branch.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
     fn write(&mut self, text: &str) {
         if !text.is_empty() {
             let _ = self.out.write_all(text.as_bytes());
@@ -82,9 +84,7 @@ impl Console {
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state.lock_recovering("state")
     }
 
     pub fn event(&self, event: &BranchEvent) {
@@ -180,6 +180,7 @@ pub fn terminal_prompt(question: &str) -> io::Result<String> {
     Ok(answer)
 }
 
+#[allow(clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

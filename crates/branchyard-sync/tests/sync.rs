@@ -5,6 +5,7 @@
 //! holds and retention, quotas, bounds on concurrency and bandwidth, and
 //! incremental packs. Time comes from manual clocks.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -860,6 +861,43 @@ fn leases_are_exclusive_expire_and_are_registered() {
         ra.lease_state("feature", "attempt-3").unwrap().is_none(),
         "released when dropped"
     );
+}
+
+#[test]
+fn a_lease_keeper_that_cannot_release_on_drop_says_so() {
+    use branchyard_support::testing::{capture, Level};
+    let w = world();
+    let faulty = Arc::new(FaultyStore::new(w.file_store()));
+    let remote = Arc::new(w.remote(faulty.clone(), "a"));
+    let keeper = branchyard_sync::lease::LeaseKeeper::start(
+        remote.clone(),
+        "feature",
+        "attempt-9",
+        "a:9",
+        Duration::from_secs(60),
+        None,
+    )
+    .unwrap();
+    faulty.fail_deletes(true);
+    let (_, events) = capture(|| drop(keeper));
+    let warnings: Vec<_> = events.iter().filter(|e| e.level == Level::WARN).collect();
+    assert_eq!(warnings.len(), 1, "{events:?}");
+    assert!(
+        warnings[0].text.contains("release the sync lease on drop"),
+        "{}",
+        warnings[0].text
+    );
+    assert!(
+        warnings[0].text.contains("simulated failure deleting"),
+        "{}",
+        warnings[0].text
+    );
+    // The failure was real: the lease is still on the remote.
+    faulty.fail_deletes(false);
+    assert!(remote
+        .lease_state("feature", "attempt-9")
+        .unwrap()
+        .is_some());
 }
 
 #[test]

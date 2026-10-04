@@ -11,7 +11,7 @@
 //! it defaults to `alpine:3.20`.
 
 #![cfg(feature = "microsandbox")]
-
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::path::PathBuf;
 use std::time::Duration;
 

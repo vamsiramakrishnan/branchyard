@@ -1,15 +1,18 @@
 //! A small HTTP/1.1 server on loopback for the stand-ins: one thread per
 //! connection, `Content-Length` bodies, `Connection: close`.
 
+use branchyard_support::LockExt as _;
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use branchyard_wire as wire;
+
 use crate::http::{Request, Url};
-use crate::util::{query_pairs, uri_decode};
+use crate::util::query_pairs;
 
 /// A received request.
 #[derive(Clone, Debug)]
@@ -45,7 +48,7 @@ impl MockRequest {
 
     /// The decoded path.
     pub fn decoded_path(&self) -> String {
-        uri_decode(&self.path, false)
+        branchyard_client::http::decode(&self.path)
     }
 
     /// As the client's request type, for checking signatures.
@@ -143,25 +146,22 @@ struct Rule {
 
 impl Faults {
     pub fn fail(&self, method: &str, contains: &str, status: u16, skip: usize, times: usize) {
-        self.rules
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push_back(Rule {
-                method: method.to_owned(),
-                contains: contains.to_owned(),
-                status,
-                skip,
-                times,
-            });
+        self.rules.lock_recovering("rules").push_back(Rule {
+            method: method.to_owned(),
+            contains: contains.to_owned(),
+            status,
+            skip,
+            times,
+        });
     }
 
     pub fn clear(&self) {
-        self.rules.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.rules.lock_recovering("rules").clear();
     }
 
     /// The injected failure for `request`, if one applies.
     pub fn check(&self, request: &MockRequest) -> Option<MockResponse> {
-        let mut rules = self.rules.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rules = self.rules.lock_recovering("rules");
         let line = request.line();
         for rule in rules.iter_mut() {
             if rule.times == 0
@@ -196,6 +196,7 @@ pub struct MockServer {
 }
 
 impl MockServer {
+    #[allow(clippy::expect_used)] // ratchet: branchyard-sync
     pub fn start(handler: Handler) -> MockServer {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
         let port = listener.local_addr().expect("local address").port();
@@ -224,64 +225,56 @@ impl MockServer {
     }
 
     pub fn requests(&self) -> Vec<String> {
-        self.log.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.log.lock_recovering("log").clone()
     }
 }
 
 impl Drop for MockServer {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(("127.0.0.1", self.port));
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            branchyard_support::join_reporting("mock server", t);
         }
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
 fn serve(stream: TcpStream, handler: &Handler, log: &Mutex<Vec<String>>) {
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
     let mut reader = BufReader::new(match stream.try_clone() {
         Ok(s) => s,
         Err(_) => return,
     });
-    let mut head = Vec::new();
-    loop {
-        let before = head.len();
-        match reader.read_until(b'\n', &mut head) {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {}
+    // Heads and bodies are the wire codec's: a request it cannot frame
+    // (both lengths, a bad chunk, a short body) is answered 400.
+    let read = |reader: &mut BufReader<TcpStream>| -> Result<Option<_>, wire::WireError> {
+        let Some(head) = wire::read_request_head(reader, 64 * 1024)? else {
+            return Ok(None);
+        };
+        let framing = wire::request_framing(&head.headers)?;
+        let body = wire::read_body(&mut *reader, framing, 256 << 20)?;
+        Ok(Some((head, body)))
+    };
+    let (head, body) = match read(&mut reader) {
+        Ok(Some(request)) => request,
+        Ok(None) => return,
+        Err(why) => {
+            let text = why.to_string();
+            let mut stream = stream;
+            branchyard_support::best_effort(
+                "answer a malformed request with 400",
+                write!(
+                    stream,
+                    "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{text}",
+                    text.len()
+                ),
+            );
+            return;
         }
-        let line = &head[before..];
-        if line == b"\r\n" || line == b"\n" {
-            break;
-        }
-    }
-    let mut headers = [httparse::EMPTY_HEADER; 64];
-    let mut parsed = httparse::Request::new(&mut headers);
-    if !matches!(parsed.parse(&head), Ok(httparse::Status::Complete(_))) {
-        return;
-    }
-    let method = parsed.method.unwrap_or("GET").to_owned();
-    let target = parsed.path.unwrap_or("/").to_owned();
-    let headers: Vec<(String, String)> = parsed
-        .headers
-        .iter()
-        .map(|h| {
-            (
-                h.name.to_owned(),
-                String::from_utf8_lossy(h.value).trim().to_owned(),
-            )
-        })
-        .collect();
-    let length: usize = headers
-        .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, v)| v.parse().ok())
-        .unwrap_or(0);
-    let mut body = vec![0u8; length];
-    if reader.read_exact(&mut body).is_err() {
-        return;
-    }
+    };
+    let (method, target, headers) = (head.method, head.target, head.headers);
     let (path, query) = match target.split_once('?') {
         Some((p, q)) => (p.to_owned(), q.to_owned()),
         None => (target.clone(), String::new()),
@@ -293,9 +286,7 @@ fn serve(stream: TcpStream, handler: &Handler, log: &Mutex<Vec<String>>) {
         headers,
         body,
     };
-    log.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(request.line());
+    log.lock_recovering("log").push(request.line());
     let response = handler(&request);
     let mut out = format!("HTTP/1.1 {} X\r\nConnection: close\r\n", response.status);
     let mut has_length = false;

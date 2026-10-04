@@ -109,7 +109,7 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
                 "The lead's check; children keep it unless their seat sets one.",
             )
             .optional()
-            .default(facts.suggested_check.clone().map(Value::from).unwrap_or(Value::Null))
+            .default(facts.suggested_check.clone().map_or(Value::Null, Value::from))
             .choices(choices)
             .rule(Rule::CommandLine)
         },

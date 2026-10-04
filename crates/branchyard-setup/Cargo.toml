@@ -4,16 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Branchyard's setup interview: declarative questions, detected defaults and validated file plans, with no I/O"
+
+[lints]
+workspace = true
 
 [dependencies]
 branchyard-harness = { version = "0.0.1", path = "../branchyard-harness" }
 branchyard-provision = { version = "0.0.1", path = "../branchyard-provision" }
-glob = "0.3"
-hex = "0.4.3"
-schemars = "1"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-sha2 = "0.11.0"
+glob = { workspace = true }
+shlex = { workspace = true }
+hex = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 similar = "3.2.0"
-toml = "1.1.6"
+toml = { workspace = true }

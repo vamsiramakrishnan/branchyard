@@ -6,6 +6,12 @@
 //! the gateway's audit log becomes `connector_call` events. Hermetic: no
 //! gateway runs and nothing is called.
 
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_in_result,
+    clippy::unwrap_used
+)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

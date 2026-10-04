@@ -4,6 +4,7 @@
 //! server operation with `--remote` ([`crate::remote::map`]). See
 //! docs/map.md.
 
+use branchyard_support::LockExt as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -274,7 +275,7 @@ fn run_local(
         let (yard, out, name, writer) = (yard.clone(), out.clone(), name.clone(), writer.clone());
         move || -> Result<(), Failure> {
             let Some(out) = &out else { return Ok(()) };
-            let _held = writer.lock().unwrap_or_else(|e| e.into_inner());
+            let _held = writer.lock_recovering("writer");
             let report = yard.map_report(&name)?;
             write_atomic(out, &results_text(out, &report))
         }
@@ -338,8 +339,7 @@ fn resume(env: &Env, name: &str, retry_failed: bool, json: bool) -> Outcome {
         .unwrap_or_default();
     let cwd = stored.launch["cwd"]
         .as_str()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| yard.root().to_path_buf());
+        .map_or_else(|| yard.root().to_path_buf(), PathBuf::from);
     let cli = crate::args::parse_from(std::iter::once("by".to_owned()).chain(argv))
         .map_err(|e| Failure::Message(format!("map {name}'s recorded command line: {e}")))?;
     let Some(command) = cli.command else {

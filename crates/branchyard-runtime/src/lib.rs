@@ -40,7 +40,7 @@
 //!
 //! The `fake-acp-agent` binary in this crate is a test fixture speaking just
 //! enough ACP v1 for the crate's tests; it is not a harness.
-
+#![warn(missing_docs)]
 #![cfg(unix)]
 
 pub mod egress;
@@ -48,6 +48,7 @@ mod local;
 #[cfg(target_os = "linux")]
 mod netns;
 
+use branchyard_support::LockExt as _;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::fmt;
@@ -167,6 +168,7 @@ impl Environment {
         self
     }
 
+    /// The private (or, with [`Environment::inherit`], inherited) `HOME` the harness runs with.
     pub fn home(&self) -> &Path {
         &self.home
     }
@@ -205,12 +207,16 @@ impl Environment {
 pub enum RuntimeError {
     /// The launch could not be started.
     Spawn {
+        /// The command line that could not be started.
         argv: Vec<String>,
+        /// The operating-system error.
         source: io::Error,
     },
     /// Writing to the harness or the transcript failed.
     Io {
+        /// What was being written: the harness's input or the transcript.
         context: &'static str,
+        /// The operating-system error.
         source: io::Error,
     },
     /// Nothing matched before the deadline. The session is still usable.
@@ -219,7 +225,10 @@ pub enum RuntimeError {
     Rejected(Rejected),
     /// The harness's stdout closed. The driver's closing events, such as
     /// [`Event::OutcomeUnknown`], are in [`Session::events`].
-    HarnessExited { stderr: String },
+    HarnessExited {
+        /// What the harness wrote to standard error before it closed.
+        stderr: String,
+    },
     /// The driver reported [`Event::OpenFailed`].
     OpenFailed(String),
 }
@@ -256,7 +265,9 @@ impl From<Rejected> for RuntimeError {
 /// One completed turn.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurnReport {
+    /// The turn's number, counting from 1 in its session.
     pub turn: u64,
+    /// How the turn ended.
     pub outcome: TurnOutcome,
     /// The turn's message deltas, concatenated.
     pub text: String,
@@ -347,7 +358,10 @@ impl Session {
             listener = Some(bound);
             Ok(Box::new(process) as Box<dyn Process>)
         })?;
-        let listener = listener.expect("a started confined process has its listener");
+        let listener = listener.ok_or_else(|| RuntimeError::Io {
+            context: "the confined listener",
+            source: io::Error::other("the confined process did not hand back its listener"),
+        })?;
         Ok((session, listener))
     }
 
@@ -432,7 +446,7 @@ impl Session {
                 if n == 0 {
                     break;
                 }
-                let mut bytes = sink.bytes.lock().unwrap_or_else(|e| e.into_inner());
+                let mut bytes = sink.bytes.lock_recovering("bytes");
                 bytes.extend_from_slice(&chunk[..n]);
                 let excess = bytes.len().saturating_sub(STDERR_KEEP);
                 bytes.drain(..excess);
@@ -519,7 +533,7 @@ impl Session {
     }
 
     /// Deliver `text` into the turn in flight, as the driver's
-    /// [`Driver::steer`](branchyard_harness::Driver::steer) does. The
+    /// [`Driver::steer`] does. The
     /// harness confirms or refuses it with `SteerAccepted` or
     /// `SteerRejected`.
     pub fn steer(&mut self, text: &str) -> Result<(), RuntimeError> {
@@ -605,7 +619,7 @@ impl Session {
 
     /// The last few hundred bytes of the harness's stderr.
     pub fn stderr_tail(&self) -> String {
-        let bytes = self.stderr.bytes.lock().unwrap_or_else(|e| e.into_inner());
+        let bytes = self.stderr.bytes.lock_recovering("bytes");
         let start = bytes.len().saturating_sub(STDERR_TAIL);
         String::from_utf8_lossy(&bytes[start..]).trim().to_owned()
     }
@@ -629,7 +643,7 @@ impl Session {
             let remaining = deadline.remaining();
             if remaining.is_zero() {
                 forced = true;
-                let _ = self.process.kill();
+                branchyard_support::best_effort("kill process", self.process.kill());
                 break;
             }
             let slice = remaining.min(Duration::from_millis(50));
@@ -658,7 +672,7 @@ impl Session {
     pub fn kill(mut self) -> Result<Vec<Event>, RuntimeError> {
         let start = self.events.len();
         self.process.teardown();
-        let _ = self.process.kill();
+        branchyard_support::best_effort("kill process", self.process.kill());
         self.process.wait().map_err(io_error("wait"))?;
         self.teardown();
         self.drain();
@@ -784,8 +798,8 @@ impl Drop for Session {
     fn drop(&mut self) {
         if !self.finished {
             self.process.teardown();
-            let _ = self.process.kill();
-            let _ = self.process.wait();
+            branchyard_support::best_effort("kill process", self.process.kill());
+            branchyard_support::best_effort("reap process", self.process.wait());
         }
     }
 }

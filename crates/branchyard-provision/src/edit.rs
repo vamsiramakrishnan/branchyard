@@ -202,9 +202,10 @@ fn json(current: Option<&str>, edits: &[JsonEdit], comment_lines: bool) -> Resul
                 if !slot.is_array() {
                     *slot = Value::Array(Vec::new());
                 }
-                let items = slot.as_array_mut().expect("made an array");
-                if !items.contains(value) {
-                    items.push(value.clone());
+                if let Some(items) = slot.as_array_mut() {
+                    if !items.contains(value) {
+                        items.push(value.clone());
+                    }
                 }
             }
             JsonEdit::Remove(path) => remove(&mut root, path),
@@ -223,6 +224,7 @@ fn json(current: Option<&str>, edits: &[JsonEdit], comment_lines: bool) -> Resul
 
 /// The value at `path`, creating objects on the way; a non-object on the
 /// way is replaced, as Scion's `_walk_dotted_path` does.
+#[allow(clippy::expect_used)] // ratchet: branchyard-provision
 fn slot<'a>(root: &'a mut Value, path: &[String]) -> &'a mut Value {
     let mut current = root;
     for key in path {

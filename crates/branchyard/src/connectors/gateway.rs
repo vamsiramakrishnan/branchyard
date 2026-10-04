@@ -7,6 +7,7 @@
 //! `/mcp` URL as audience, the yard's public keys as a `file:` (local) or
 //! `https:` (server) JWKS URI, an audit file and a vault key file.
 
+use branchyard_support::LockExt as _;
 use std::fs;
 use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -15,7 +16,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -130,33 +131,22 @@ pub fn ensure_vault_key(path: &Path) -> Result<(), Error> {
     let mut bytes = [0u8; 32];
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes)
         .map_err(|_| Error::State("could not generate a vault key".into()))?;
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    keys::write_private(path, hex.as_bytes())
+    keys::write_private(path, hex::encode(bytes).as_bytes())
 }
 
 /// The port of an `http://host:port/...` URL (80 or 443 when it names
 /// none), and its host.
 pub fn host_port(url: &str) -> Option<(String, u16)> {
-    let (scheme, rest) = url.split_once("://")?;
-    let authority = rest.split('/').next()?;
-    let authority = authority.rsplit('@').next()?;
-    let default = match scheme {
-        "http" => 80,
-        "https" => 443,
-        _ => return None,
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = match parsed.host()? {
+        url::Host::Domain(domain) => domain.to_owned(),
+        url::Host::Ipv4(addr) => addr.to_string(),
+        url::Host::Ipv6(addr) => addr.to_string(),
     };
-    if let Some(v6) = authority.strip_prefix('[') {
-        let (host, rest) = v6.split_once(']')?;
-        let port = match rest.strip_prefix(':') {
-            Some(p) => p.parse().ok()?,
-            None => default,
-        };
-        return Some((host.to_owned(), port));
-    }
-    match authority.split_once(':') {
-        Some((host, port)) => Some((host.to_owned(), port.parse().ok()?)),
-        None => Some((authority.to_owned(), default)),
-    }
+    Some((host, parsed.port_or_known_default()?))
 }
 
 /// Whether something accepts connections at `url`'s host and port.
@@ -206,11 +196,7 @@ impl Supervisor {
 
     /// The running gateway's pid, if one is running.
     pub fn pid(&self) -> Option<u32> {
-        self.child
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(Child::id)
+        self.child.lock_recovering("child").as_ref().map(Child::id)
     }
 }
 
@@ -218,11 +204,12 @@ impl Drop for Supervisor {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            branchyard_support::join_reporting("connector gateway accept", thread);
         }
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn note(log: &Path, text: &str) {
     if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(log) {
         let _ = writeln!(file, "branchyard: {text}");
@@ -241,7 +228,7 @@ fn supervise(
     let mut started = Instant::now();
     while !stop.load(Ordering::SeqCst) {
         {
-            let mut held = slot.lock().unwrap_or_else(|e| e.into_inner());
+            let mut held = slot.lock_recovering("slot");
             match held.as_mut().map(Child::try_wait) {
                 None if Instant::now() >= next_start => {
                     match command.command(log).and_then(|mut c| {
@@ -276,7 +263,7 @@ fn supervise(
         tick();
         std::thread::sleep(Duration::from_millis(500));
     }
-    let child = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let child = slot.lock_recovering("slot").take();
     if let Some(mut child) = child {
         terminate(&mut child);
         note(log, "stopped the gateway");
@@ -287,7 +274,10 @@ fn supervise(
 /// SIGTERM, then SIGKILL after five seconds.
 fn terminate(child: &mut Child) {
     if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
-        let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+        branchyard_support::best_effort(
+            "stop the gateway process",
+            rustix::process::kill_process(pid, rustix::process::Signal::TERM),
+        );
     }
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -296,8 +286,8 @@ fn terminate(child: &mut Child) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    branchyard_support::best_effort("kill child", child.kill());
+    branchyard_support::best_effort("reap child", child.wait());
 }
 
 /// A gateway supervisor started in the background, as its state file
@@ -326,10 +316,7 @@ impl Background {
             start: crate::proc::own_start().to_owned(),
             url: url.to_owned(),
             log: log.to_path_buf(),
-            started_at_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
+            started_at_ms: branchyard_support::time::now_ms(),
         }
     }
 
@@ -346,24 +333,24 @@ impl Background {
         if crate::proc::alive(state.pid, &state.start) {
             return Some(state);
         }
-        let _ = fs::remove_file(&path);
+        branchyard_support::cleanup_file(&path);
         None
     }
 
     /// Stop it: SIGTERM to its process group (the supervisor and the
     /// gateway), SIGKILL after five seconds; then forget it.
     pub fn stop(&self, dir: &Path) -> Result<(), Error> {
-        let pgid = rustix::process::Pid::from_raw(self.pid as i32)
+        rustix::process::Pid::from_raw(self.pid as i32)
             .ok_or_else(|| Error::State(format!("pid {} is not usable", self.pid)))?;
-        let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
+        branchyard_support::terminate_group(self.pid);
         let deadline = Instant::now() + Duration::from_secs(5);
         while crate::proc::alive(self.pid, &self.start) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
         if crate::proc::alive(self.pid, &self.start) {
-            let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
+            branchyard_support::kill_group(self.pid);
         }
-        let _ = fs::remove_file(state_file(dir));
+        branchyard_support::cleanup_file(state_file(dir));
         Ok(())
     }
 }

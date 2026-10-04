@@ -164,6 +164,7 @@ pub fn review_text(plan: &Plan, color: bool) -> String {
     out
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn cancelled(error: io::Error) -> Failure {
     if error.kind() == io::ErrorKind::Interrupted {
         let _ = cliclack::outro_cancel("Cancelled; nothing was written.");
@@ -297,7 +298,9 @@ pub fn run(topic: Option<Topic>, defaults: bool) -> Outcome {
             raw.insert(q.id.clone(), value);
         }
     };
-    let plan = response.plan.expect("done has a plan");
+    let Some(plan) = response.plan else {
+        return Err(Failure::Message("the setup finished without a plan".into()));
+    };
     cliclack::note("Review", review_text(&plan, true)).map_err(Failure::Io)?;
     if !plan.valid {
         cliclack::outro_cancel("The plan failed validation; nothing was written. Run by init again to change the answers.")

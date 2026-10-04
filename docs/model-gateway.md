@@ -113,6 +113,8 @@ The rest of the path and the query follow the backend's base URL. A request's mo
 7. **The response.** Streamed to the harness as it arrives (`Transfer-Encoding: chunked`, `Connection: close`), server-sent events included, while its usage is read as it passes.
 8. **The record.** Before the response's last chunk reaches the harness, the call is metered, stored as a usage record, and recorded on the branch as a `model` event, so the next call is held to what this one cost.
 
+The gateway reads the harness's request and each backend's response with the workspace's one HTTP/1.1 codec, [`branchyard-wire`](../crates/branchyard-wire), which refuses what it cannot frame instead of guessing. A request with both `Content-Length` and `Transfer-Encoding`, a duplicate or non-decimal `Content-Length`, a transfer coding that does not end in `chunked`, a chunk size that is not hexadecimal digits (or overflows), a chunk not followed by CRLF, a body shorter than it said, or a head over 64 KiB is refused `400` and never forwarded. A backend's response broken the same way, or cut off partway through its body, fails the call (`502` before the response starts, a broken-off stream after) rather than passing a short body to the harness. A response with both lengths follows `Transfer-Encoding`, as RFC 9112 says a client must. The corpus of valid and malformed messages in `crates/branchyard-wire/src/corpus.rs` runs against the gateway's request reader, the backend response reader, the SDK client and the sync mock server.
+
 Refusals are in the provider's own error shape (`permission_error`, `rate_limit_error`, `authentication_error`), with `X-Branchyard-Gateway` naming the decision.
 
 ### Usage and cost

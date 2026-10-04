@@ -94,6 +94,7 @@ enum Plugin {
 /// `BRANCHYARD_LOG_FORMAT`, else `pretty` ([`LogFormat::resolve`]). Writes
 /// to stderr, same as the rest of this plugin's diagnostics, so a Herdr
 /// pane still shows them.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-herdr
 fn init_logging(format: Option<LogFormat>) {
     use tracing_subscriber::EnvFilter;
     let filter = std::env::var("BRANCHYARD_LOG")
@@ -114,6 +115,7 @@ fn init_logging(format: Option<LogFormat>) {
     };
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-herdr
 fn main() -> ExitCode {
     let cli = <Cli as clap::Parser>::parse();
     init_logging(cli.log_format);

@@ -47,7 +47,7 @@ fn query(raw: Option<&str>, key: &str) -> Option<String> {
     raw.unwrap_or("")
         .split('&')
         .find_map(|pair| pair.strip_prefix(&format!("{key}=")))
-        .map(crate::api::percent_decode)
+        .map(branchyard_client::http::decode_form)
 }
 
 async fn approvals(
@@ -199,4 +199,19 @@ async fn undo(
     })
     .await?)?;
     Ok(Json(report))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::query;
+
+    #[test]
+    fn query_values_decode_like_every_other_call_site() {
+        assert_eq!(
+            query(Some("a=1&k=x+y%2Bz%41"), "k").as_deref(),
+            Some("x y+zA")
+        );
+        assert_eq!(query(Some("k=%zz%4"), "k").as_deref(), Some("%zz%4"));
+        assert_eq!(query(None, "k"), None);
+    }
 }

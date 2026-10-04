@@ -52,6 +52,8 @@ pub enum PullRequestActivity {
     /// Review threads whose comments were delivered as feedback, and whose
     /// files `commit` (just pushed) changed, were answered "Addressed in
     /// <commit>" and resolved; each thread is attempted once.
+    // The doc comment is the schema description; `<commit>` is not HTML.
+    #[allow(rustdoc::invalid_html_tags)]
     ThreadsResolved {
         commit: String,
         threads: Vec<ResolvedThread>,

@@ -42,9 +42,7 @@ impl TaskRepo {
             files: view.task.files,
             git_dir: view.repository,
             own: owned.is_some(),
-            chunks: owned
-                .map(|o| o.large.store)
-                .unwrap_or_else(ChunkStore::at_home),
+            chunks: owned.map_or_else(ChunkStore::at_home, |o| o.large.store),
             attempts: view.attempts.into_iter().map(|a| a.name).collect(),
         }
     }

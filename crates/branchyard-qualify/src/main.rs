@@ -302,6 +302,7 @@ fn check(condition: bool, failure: impl FnOnce() -> String) -> Result<(), String
     }
 }
 
+#[allow(clippy::expect_used)] // ratchet: branchyard-qualify
 fn main() {
     let config = match parse_args() {
         Ok(config) => config,
@@ -653,6 +654,7 @@ fn host() -> String {
         .unwrap_or_default()
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_used)] // ratchet: branchyard-qualify
 fn report(run: &Run, elapsed: Duration) {
     let report = json!({
         "profile": run.config.profile.id,

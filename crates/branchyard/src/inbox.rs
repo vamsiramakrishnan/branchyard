@@ -59,7 +59,7 @@ pub(crate) const CLOSE_TAG: &str = "</branchyard-inbox>";
 /// running. Every [`Yard`] starts with [`SteerDelivery`]; replace it with
 /// [`crate::Yard::set_delivery_hook`], or clear it with
 /// [`crate::Yard::clear_delivery_hook`] so that every message waits for the
-/// branch's next turn to start ([`begin_submit`]).
+/// branch's next turn to start (`begin_submit`).
 pub trait DeliveryHook: Send + Sync {
     /// Try to deliver `message` to `branch`'s current turn right now, from
     /// `yard`. `true` acknowledges it: it will not be delivered again, at a
@@ -196,7 +196,10 @@ pub(crate) fn try_deliver_now(yard: &Yard, store: &Store, to: &str, message: &Me
         return;
     };
     if hook.try_deliver(yard, to, message) {
-        let _ = store.backend().mark_delivered(&[message.id]);
+        branchyard_support::best_effort(
+            "mark the message delivered",
+            store.backend().mark_delivered(&[message.id]),
+        );
     }
 }
 
@@ -338,12 +341,16 @@ pub(crate) fn wait_for_answer(
     id: u64,
     wait: Duration,
 ) -> Result<Option<Message>, Error> {
-    let until =
-        crate::state::now_ms().saturating_add(u64::try_from(wait.as_millis()).unwrap_or(u64::MAX));
+    // A wait of "forever" (`Duration::MAX`) is stored as the latest moment
+    // a column holds, not refused.
+    let until = crate::store_codec::deadline_capped(branchyard_support::time::now_ms(), wait);
     store.backend().set_awaiting(id, Some(until))?;
     let answer = store.wait(wait, || store.backend().answer_to(id));
     // A waiter that dies before this still stops counting at its deadline.
-    let _ = store.backend().set_awaiting(id, None);
+    branchyard_support::best_effort(
+        "mark the branch awaiting an answer",
+        store.backend().set_awaiting(id, None),
+    );
     answer
 }
 
@@ -352,10 +359,11 @@ pub(crate) fn wait_for_answer(
 pub(crate) fn waiting_for_answer(store: &Store, branch: &str) -> bool {
     store
         .backend()
-        .awaiting_answer(branch, crate::state::now_ms())
+        .awaiting_answer(branch, branchyard_support::time::now_ms())
         .unwrap_or(false)
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +474,38 @@ mod tests {
             .is_empty());
         let (_, again) = compose_turn_start(&store, "parent", fence.turn, "go").unwrap();
         assert_eq!(again, [id]);
+    }
+
+    /// `wait_for_answer` with `Duration::MAX`, what the agent `ask` tool
+    /// passes for a `wait_seconds` too large for a `Duration`, waits until
+    /// the answer arrives. Its deadline is stored capped at the latest
+    /// moment a column holds, where it once failed with `until_ms ... does
+    /// not fit` after the question had already been sent.
+    #[test]
+    fn an_unbounded_wait_for_an_answer_is_stored_capped_and_waits() {
+        let (_t, store, _fence, id) = running("forever");
+        let answered = std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| wait_for_answer(&store, id, Duration::MAX));
+            // The waiter is counted as waiting (its deadline is stored and
+            // is far off) until the parent answers.
+            let started = std::time::Instant::now();
+            while !waiting_for_answer(&store, "kid") {
+                if waiter.is_finished() {
+                    // It failed before it waited: report why.
+                    return waiter.join().unwrap();
+                }
+                assert!(started.elapsed() < Duration::from_secs(30), "never waited");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let mut reply = message(0, MessageKind::Answer, "yes, rename it");
+            (reply.from, reply.to, reply.in_reply_to) = ("parent".into(), "kid".into(), Some(id));
+            store.backend().send_message(&reply).unwrap();
+            waiter.join().unwrap()
+        });
+        let answer = answered.unwrap().expect("the answer ends the wait");
+        assert_eq!(answer.text, "yes, rename it");
+        // The deadline is cleared once the wait is over.
+        assert!(!waiting_for_answer(&store, "kid"));
     }
 
     fn message(id: u64, kind: MessageKind, text: &str) -> Message {

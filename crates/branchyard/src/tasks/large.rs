@@ -10,10 +10,10 @@
 //!
 //! A pointer is a short text file ([`Pointer`]). Branchyard applies it
 //! itself, never through git filters or git-lfs: when it commits a task's
-//! files ([`stage`], and the folder snapshot), a file of at least the task's
+//! files (`stage`, and the folder snapshot), a file of at least the task's
 //! threshold is stored as chunks and its index entry becomes the pointer,
 //! marked `skip-worktree` so git leaves the real file on disk alone; when it
-//! checks files out ([`restore`]: a new worktree, a rewind, an accept), each
+//! checks files out (`restore`: a new worktree, a rewind, an accept), each
 //! pointer is replaced by the file it names, verified byte for byte.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,6 +22,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use branchyard_support::rng::splitmix64;
 use branchyard_workspace::Git;
 
 use crate::Error;
@@ -55,11 +56,9 @@ const fn gear() -> [u64; 256] {
     let mut state: u64 = 0x6272_616e_6368_7964; // "branchyd"
     let mut i = 0;
     while i < 256 {
-        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        table[i] = z ^ (z >> 31);
+        let (next, word) = splitmix64(state);
+        state = next;
+        table[i] = word;
         i += 1;
     }
     table
@@ -238,7 +237,7 @@ impl ChunkStore {
             fs::rename(&temp, &path)
         })();
         if written.is_err() {
-            let _ = fs::remove_file(&temp);
+            branchyard_support::cleanup_file(&temp);
         }
         written?;
         Ok(hash)
@@ -344,7 +343,7 @@ impl ChunkStore {
             Ok(())
         })();
         if written.is_err() {
-            let _ = fs::remove_file(&temp);
+            branchyard_support::cleanup_file(&temp);
         }
         written
     }
@@ -748,9 +747,24 @@ pub(crate) fn chunks_reachable(dir: &Path, rev: &str) -> Result<BTreeSet<String>
     Ok(chunks)
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gear table decides where every large file is cut, so it may
+    /// never change: these are its values when it was built from the
+    /// hand-rolled SplitMix64 that `branchyard_support::rng` replaced.
+    #[test]
+    fn the_gear_table_never_changes() {
+        assert_eq!(GEAR[0], 0xb83b_467b_9ec4_3d26);
+        assert_eq!(GEAR[1], 0xe7f5_518d_4413_e089);
+        assert_eq!(GEAR[255], 0xcc98_7006_fe0f_9407);
+        assert_eq!(
+            GEAR.iter().fold(0u64, |sum, word| sum.wrapping_add(*word)),
+            0x134b_b607_7060_1e97
+        );
+    }
 
     /// Deterministic bytes (xorshift), so chunk boundaries are stable.
     fn noise(len: usize, seed: u64) -> Vec<u8> {

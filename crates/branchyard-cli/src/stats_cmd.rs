@@ -3,6 +3,7 @@
 //! it also shows the server's queue by priority. See
 //! `docs/observability.md#by-stats`.
 
+use branchyard_support::time::now_ms;
 use std::collections::BTreeMap;
 
 use branchyard::{Activity, BranchInfo, BranchStatus, Event, FeedEvent};
@@ -392,13 +393,6 @@ fn seconds(s: f64) -> String {
             ((s % 3600.0) / 60.0) as u64
         ),
     }
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// `by stats [--json]`.

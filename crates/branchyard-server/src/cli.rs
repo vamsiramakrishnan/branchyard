@@ -1,5 +1,6 @@
 //! The `branchyard-server` command line, also run as `by serve`.
 
+use branchyard_support::best_effort;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -917,12 +918,13 @@ impl Signals {
             }
             return;
         }
-        let _ = tokio::signal::ctrl_c().await;
+        best_effort("wait for ctrl-c", tokio::signal::ctrl_c().await);
     }
 }
 
 /// Run the server with `args` (after the program name); `program` names it
 /// in messages.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 pub fn main(args: &[String], program: &str) -> ExitCode {
     let flags = match parse_cli(args, program) {
         Ok(Cli {
@@ -1066,6 +1068,7 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
     code
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

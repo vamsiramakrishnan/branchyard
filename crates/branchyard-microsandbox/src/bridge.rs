@@ -14,6 +14,7 @@
 //! descendant still runs. Non-guarantees: memory is bounded only by the
 //! SDK's unbounded event channel while a reader is slow.
 
+use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::io::{self, PipeWriter, Read, Write};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -80,7 +81,7 @@ struct Exit {
 
 impl Exit {
     fn set(&self, status: ExitStatus) {
-        let mut slot = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = self.status.lock_recovering("status");
         if slot.is_none() {
             *slot = Some(status);
             self.changed.notify_all();
@@ -88,16 +89,16 @@ impl Exit {
     }
 
     fn get(&self) -> Option<ExitStatus> {
-        *self.status.lock().unwrap_or_else(|e| e.into_inner())
+        *self.status.lock_recovering("status")
     }
 
     fn wait(&self) -> ExitStatus {
-        let mut slot = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = self.status.lock_recovering("status");
         loop {
             if let Some(status) = *slot {
                 return status;
             }
-            slot = self.changed.wait(slot).unwrap_or_else(|e| e.into_inner());
+            slot = self.changed.wait_recovering(slot, "changed");
         }
     }
 }
@@ -214,6 +215,7 @@ impl Write for Stdin {
 }
 
 impl Drop for Stdin {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-microsandbox
     fn drop(&mut self) {
         let _ = self.control.close_stdin();
     }
@@ -262,10 +264,13 @@ impl Process for BridgedProcess {
 impl Drop for BridgedProcess {
     fn drop(&mut self) {
         if self.exit.get().is_none() {
-            let _ = self.control.kill();
+            branchyard_support::best_effort("kill control", self.control.kill());
         }
         if !self.torn_down {
-            let _ = self.control.teardown(self.pid);
+            branchyard_support::best_effort(
+                "tear down the microsandbox control process",
+                self.control.teardown(self.pid),
+            );
         }
     }
 }
@@ -280,6 +285,7 @@ pub fn survivors(output: &str) -> Vec<String> {
         .collect()
 }
 
+#[allow(clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;

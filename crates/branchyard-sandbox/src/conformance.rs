@@ -27,6 +27,12 @@
 //! conformance::run_all(provider.as_ref(), &setup);
 //! ```
 
+#![allow(
+    clippy::expect_used,
+    clippy::let_underscore_must_use,
+    clippy::panic,
+    clippy::unwrap_used
+)] // ratchet: branchyard-sandbox
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -151,7 +157,7 @@ impl<'a> Sandbox<'a> {
     }
 
     fn ensure_spec(provider: &'a dyn SandboxProvider, setup: &'a Setup, spec: SandboxSpec) -> Self {
-        let _ = provider.destroy(&spec.name);
+        branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
         let info = provider
             .ensure(&spec)
             .unwrap_or_else(|e| panic!("ensure {}: {e}", spec.name));
@@ -347,12 +353,12 @@ pub fn env_and_cwd(provider: &dyn SandboxProvider, setup: &Setup) {
 /// nothing.
 fn mount_refused(provider: &dyn SandboxProvider, mut spec: SandboxSpec) {
     spec.name.push_str("-refused");
-    let _ = provider.destroy(&spec.name);
+    branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
     match provider.ensure(&spec) {
         Err(ProviderError::Invalid(_) | ProviderError::Unsupported(_)) => {}
         Err(other) => panic!("ensure with a mount it cannot honor: {other}"),
         Ok(_) => {
-            let _ = provider.destroy(&spec.name);
+            branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
             panic!("a provider without mounts created a sandbox with a mount")
         }
     }
@@ -377,8 +383,8 @@ pub fn workspace_mount(provider: &dyn SandboxProvider, setup: &Setup) {
     let written = std::fs::read_to_string(setup.workspace.join("from-guest.txt"))
         .expect("the guest's write reaches the host");
     assert_eq!(written, "guest");
-    let _ = std::fs::remove_file(setup.workspace.join("from-host.txt"));
-    let _ = std::fs::remove_file(setup.workspace.join("from-guest.txt"));
+    branchyard_support::cleanup_file(setup.workspace.join("from-host.txt"));
+    branchyard_support::cleanup_file(setup.workspace.join("from-guest.txt"));
 }
 
 /// A read-only mount is either refused or enforced; never silently writable.
@@ -388,10 +394,10 @@ pub fn read_only_mount(provider: &dyn SandboxProvider, setup: &Setup) {
     if !setup.mounts {
         return mount_refused(provider, spec);
     }
-    let _ = provider.destroy(&spec.name);
+    branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
     match provider.ensure(&spec) {
         Err(ProviderError::Invalid(_) | ProviderError::Unsupported(_)) => {
-            let _ = provider.destroy(&spec.name);
+            branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
         }
         Err(other) => panic!("ensure with a read-only mount: {other}"),
         Ok(_) => {

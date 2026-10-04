@@ -22,6 +22,8 @@
 //!
 //! Each repository has its own outbox, `<data_dir>/sync/<repo>.db`.
 
+use branchyard_support::best_effort;
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -132,7 +134,7 @@ impl ServerSync {
 
     /// Start each repository's replicator.
     pub fn start(&self) -> Result<(), String> {
-        let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handles = self.handles.lock_recovering("handles");
         for (name, repo) in &self.repos {
             handles.push(
                 repo.replicator
@@ -146,10 +148,7 @@ impl ServerSync {
 
     /// Stop the replicators (each finishes the round it is in).
     pub fn stop(&self) {
-        self.handles
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        self.handles.lock_recovering("handles").clear();
     }
 
     /// Stop the replicators, then push what is queued once more.
@@ -219,15 +218,10 @@ impl ServerSync {
         };
         for branch in branches {
             if let Ok(task) = r.tasks.task_id(branch) {
-                let _ = r.replicator.enqueue(&task);
+                best_effort("queue the task for sync", r.replicator.enqueue(&task));
             }
         }
-        for handle in self
-            .handles
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-        {
+        for handle in self.handles.lock_recovering("handles").iter() {
             handle.wake();
         }
     }

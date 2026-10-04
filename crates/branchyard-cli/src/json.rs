@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 /// The SDK's own serde form, which is the CLI's contract for these types:
 /// a branch, its status and candidate, and a harness profile print the same
 /// JSON from `by`, `by --remote` and the server.
+#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 fn serde(value: &impl serde::Serialize) -> Value {
     serde_json::to_value(value).expect("SDK values serialize")
 }
@@ -295,6 +296,7 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
 }
 
 /// Pretty JSON with a trailing newline.
+#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 pub fn text(value: &Value) -> String {
     let mut text = serde_json::to_string_pretty(value).expect("a JSON value always serializes");
     text.push('\n');

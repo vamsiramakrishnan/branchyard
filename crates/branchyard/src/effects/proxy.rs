@@ -25,6 +25,8 @@
 //!    when the gateway described nothing; `failed` on a refusal or a tool
 //!    error; `unknown` when the answer was lost after the call was sent.
 
+use branchyard_support::best_effort;
+use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -45,8 +47,8 @@ use super::{
 use crate::connectors::{GrantEntry, GrantMode};
 use crate::models::gateway::{presented, read_request, same, Request};
 use crate::models::upstream::{self, Failure, Target};
-use crate::state::now_ms;
 use crate::Yard;
+use branchyard_support::time::now_ms;
 
 /// How long a turn's end waits for calls still in flight.
 const DRAIN: Duration = Duration::from_secs(5);
@@ -85,7 +87,7 @@ impl ProxyState {
     }
 
     fn listed<T>(&self, read: impl FnOnce(&Listed) -> T) -> T {
-        let mut tools = self.tools.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tools = self.tools.lock_recovering("tools");
         let listed = tools.get_or_insert_with(|| {
             Listed::of(
                 &mcp::Client::new(&self.upstream, &self.token)
@@ -220,22 +222,22 @@ impl EffectProxy {
         if wake.ip().is_unspecified() {
             wake.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
         }
-        let _ = TcpStream::connect_timeout(&wake, Duration::from_secs(1));
+        best_effort(
+            "connect to wake the accept loop",
+            TcpStream::connect_timeout(&wake, Duration::from_secs(1)),
+        );
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            branchyard_support::join_reporting("effect proxy accept", thread);
         }
         let (count, idle) = &*self.in_flight;
         let deadline = std::time::Instant::now() + DRAIN;
-        let mut active = count.lock().unwrap_or_else(|e| e.into_inner());
+        let mut active = count.lock_recovering("count");
         while *active > 0 {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
                 break;
             }
-            active = idle
-                .wait_timeout(active, left)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
+            active = idle.wait_timeout_recovering(active, left, "idle").0;
         }
     }
 }
@@ -271,14 +273,14 @@ fn accept(listener: TcpListener, state: Arc<ProxyState>, in_flight: Arc<(Mutex<u
         }
         let Ok(stream) = stream else { continue };
         let (state, in_flight) = (state.clone(), in_flight.clone());
-        *in_flight.0.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        *in_flight.0.lock_recovering("in-flight count") += 1;
         let n = THREADS.fetch_add(1, Ordering::Relaxed);
         let spawned = std::thread::Builder::new()
             .name(format!("by-effects-{n}"))
             .spawn(move || {
                 handle(stream, &state);
                 let (count, idle) = &*in_flight;
-                *count.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+                *count.lock_recovering("count") -= 1;
                 idle.notify_all();
             });
         if spawned.is_err() {
@@ -335,6 +337,7 @@ fn reason(status: u16) -> &'static str {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn respond(out: &mut TcpStream, status: u16, headers: &[(String, String)], body: &[u8]) {
     let mut head = format!("HTTP/1.1 {status} {}\r\n", reason(status));
     for (name, value) in headers {
@@ -541,31 +544,29 @@ fn rest_tool(request: &Request) -> Option<String> {
     }
     let path = request.target.split(['?', '#']).next().unwrap_or("");
     let tool = path.strip_prefix("/call/")?;
-    let bytes = tool.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
-                decoded.push(u8::from_str_radix(hex, 16).ok()?);
-                i += 3;
-            }
-            b'%' => return None,
-            b => {
-                decoded.push(b);
-                i += 1;
-            }
-        }
+    // Strict: a malformed escape is not a tool name, so it is not a REST call.
+    let well_formed = tool.split('%').skip(1).all(|rest| {
+        rest.as_bytes()
+            .get(..2)
+            .is_some_and(|pair| pair.iter().all(u8::is_ascii_hexdigit))
+    });
+    if !well_formed {
+        return None;
     }
-    String::from_utf8(decoded).ok()
+    percent_encoding::percent_decode_str(tool)
+        .decode_utf8()
+        .ok()
+        .map(std::borrow::Cow::into_owned)
 }
 
 fn handle(stream: TcpStream, state: &ProxyState) {
     let Ok(mut out) = stream.try_clone() else {
         return;
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(300)));
+    best_effort(
+        "restore the stream's read timeout",
+        stream.set_read_timeout(Some(Duration::from_secs(300))),
+    );
     let mut reader = BufReader::new(stream);
     let request = match read_request(&mut reader, &mut out) {
         Ok(Some(request)) => request,
@@ -1095,9 +1096,12 @@ fn stage(state: &ProxyState, request: &Request, call: &Call, out: &mut TcpStream
                 false => EffectState::Failed,
             })
             .detail(format!("the draft call: {why}"));
-            let _ = ledger
-                .effects()
-                .move_effect(&id, &[EffectState::Staged], &change, now_ms());
+            best_effort(
+                "move the effect in the ledger",
+                ledger
+                    .effects()
+                    .move_effect(&id, &[EffectState::Staged], &change, now_ms()),
+            );
             call.wire.error(
                 out,
                 502,
@@ -1165,6 +1169,12 @@ mod tests {
         assert_eq!(rest_tool(&request("GET", "/call/g__x", b"")), None);
         assert_eq!(rest_tool(&request("POST", "/calls/g__x", b"")), None);
         assert_eq!(rest_tool(&request("POST", "/call/g__%4", b"")), None);
+        assert_eq!(rest_tool(&request("POST", "/call/g__%zz", b"")), None);
+        // An escape at the very end of the name decodes.
+        assert_eq!(
+            rest_tool(&request("POST", "/call/g__x%5F", b"")).as_deref(),
+            Some("g__x_")
+        );
         let body: Value = serde_json::from_slice(&Wire::Rest.body(&rest, "K", true)).unwrap();
         assert_eq!(body, json!({"arguments": {}, "stage": true}));
     }

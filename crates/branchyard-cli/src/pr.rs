@@ -13,6 +13,7 @@
 //! [`publish`] and [`readiness`] take no terminal and print nothing, so
 //! `by watch` can bind keys to them.
 
+use branchyard_support::time::now_ms;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -764,13 +765,6 @@ pub fn show_readiness(
     }
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 // The log line.
 
 /// `by log`'s text for a pull-request activity, and its tone.
@@ -1402,7 +1396,7 @@ pub fn observe(gh: &Gh, pr: &PullRequestRef) -> Result<Observed, Failure> {
                 ci.failing.push(name.clone());
                 if check["bucket"] == "fail" {
                     let workflow = text(&check["workflow"]);
-                    let on = head_commit.as_deref().map(short).unwrap_or("its head");
+                    let on = head_commit.as_deref().map_or("its head", short);
                     let key = format!("ci:{name}:{}", head_commit.as_deref().unwrap_or("unknown"));
                     let link = text(&check["link"]);
                     let about = match workflow.is_empty() {
@@ -1711,7 +1705,7 @@ fn watch(env: &Env, target: &Target, yard: &Yard, name: &str, gh: &Gh, args: &Pr
             threads,
         } = observe(gh, &pr)?;
         if let (Some((from, to)), false) = (&pushed, args.no_resolve) {
-            resolve_addressed(yard, &branch, gh, &pr, &state, &threads, from, to)?;
+            resolve_addressed(yard, &branch, gh, &pr, &state, &threads, (from, to))?;
         }
         if record_observation(&branch, &state, observation.clone())? {
             active = true;
@@ -1852,7 +1846,6 @@ pub fn addressed_threads<'a>(
 /// watch fed back whose file the pushed commits changed, resolve it, and
 /// record what happened, so no thread is tried twice. A failure is
 /// recorded and said, and the watch carries on.
-#[allow(clippy::too_many_arguments)]
 fn resolve_addressed(
     yard: &Yard,
     branch: &Branch,
@@ -1860,8 +1853,7 @@ fn resolve_addressed(
     pr: &PullRequestRef,
     state: &PrState,
     threads: &[ReviewThread],
-    from: &str,
-    to: &str,
+    (from, to): (&str, &str),
 ) -> Outcome {
     let changed: BTreeSet<String> = Git::new(yard.root())
         .args(["diff", "--name-only", "--no-renames", from, to, "--"])

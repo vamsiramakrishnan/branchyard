@@ -656,7 +656,7 @@ fn reset(yard: &Yard, worktree: &Path, commit: &str, recovering: bool) -> Result
                 "index.lock",
             ],
         ) {
-            let _ = std::fs::remove_file(lock.trim_end_matches('\n'));
+            branchyard_support::cleanup_file(lock.trim_end_matches('\n'));
         }
     }
     // In a task's own repository, large files are pointers in the index,

@@ -3,6 +3,7 @@
 //! "remote" command here in a session of its own, as sshd would. No cloud,
 //! no sshd. Requires `sh`, `python3`, `ps` and `awk`.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};

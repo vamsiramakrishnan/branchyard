@@ -5,47 +5,24 @@
 //! by a harness), `by workspace show` and `run`, and teardown on `by rm`
 //! and `by merge --rm`. Hermetic; requires `git` and `sh`.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::process::{Output, Stdio};
 
+use branchyard_testkit::fake_agent;
+use branchyard_testkit::wait;
 use serde_json::{json, Value};
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
+/// The kit's repository, plus what this file adds.
+struct Repo(branchyard_testkit::Repo);
 
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(env!("CARGO_BIN_EXE_by"));
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(command.status().unwrap().success());
-        profile_dir.join("fake-acp-agent")
-    })
-}
-
-struct Repo {
-    dir: PathBuf,
-    root: PathBuf,
+impl std::ops::Deref for Repo {
+    type Target = branchyard_testkit::Repo;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 const WORKSPACE: &str = r#"
@@ -64,25 +41,12 @@ command = "exit 4"
 
 impl Repo {
     fn new(project: &str) -> Repo {
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-cli-workspace-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
-        let repo = Repo {
-            root: dir.join("repo"),
-            dir,
-        };
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@localhost"]);
-        fs::write(repo.root.join("a.txt"), "one\n").unwrap();
-        fs::write(repo.root.join(".gitignore"), ".env\nbranchyard.toml\n").unwrap();
-        repo.git(&["add", "."]);
-        repo.git(&["commit", "-q", "-m", "initial"]);
+        let mut kit = branchyard_testkit::repo!(&[
+            ("a.txt", "one\n"),
+            (".gitignore", ".env\nbranchyard.toml\n")
+        ]);
+        kit.remove_env("BRANCHYARD_TRUST_FILE");
+        let repo = Repo(kit);
         fs::write(repo.root.join(".env"), "TOKEN_NAME=x\n").unwrap();
         fs::write(repo.root.join("branchyard.toml"), project).unwrap();
         repo
@@ -92,44 +56,8 @@ impl Repo {
         self.dir.join("user/config.toml")
     }
 
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
-        command
-            .current_dir(&self.root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("NO_COLOR", "1")
-            .env("BRANCHYARD_USER_CONFIG", self.user_config())
-            .env_remove("BRANCHYARD_TRUST_FILE")
-            .env("PAGER", "cat");
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-            "BRANCHYARD_REMOTE",
-        ] {
-            command.env_remove(var);
-        }
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let out = self.command("git").args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}");
-        String::from_utf8(out.stdout).unwrap()
-    }
-
-    fn by(&self, args: &[&str]) -> Output {
-        self.command(env!("CARGO_BIN_EXE_by"))
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
-    }
-
     fn by_agent(&self, args: &[&str]) -> Output {
-        let agent = fake_agent().display().to_string();
+        let agent = fake_agent!().display().to_string();
         let mut all: Vec<&str> = args.to_vec();
         all.extend(["--command", &agent, "--yes"]);
         if args[0] != "send" {
@@ -138,20 +66,8 @@ impl Repo {
         self.by(&all)
     }
 
-    fn json(&self, args: &[&str]) -> Value {
-        let out = self.by(args);
-        assert!(out.status.success(), "{}", stderr(&out));
-        serde_json::from_slice(&out.stdout).unwrap()
-    }
-
     fn branches(&self) -> usize {
         self.json(&["ls", "--json"]).as_array().unwrap().len()
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -339,12 +255,9 @@ fn run_scripts_teardown_on_rm_and_merge_rm() {
     );
     let detached = repo.json(&["workspace", "run", "served", "--detach", "--json"]);
     let log = PathBuf::from(detached["log"].as_str().unwrap());
-    for _ in 0..100 {
-        if fs::read_to_string(&log).is_ok_and(|t| t.contains("serving")) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    wait::until("the detached run to print", || {
+        fs::read_to_string(&log).is_ok_and(|t| t.contains("serving"))
+    });
     assert!(fs::read_to_string(&log)
         .unwrap()
         .contains(&format!("serving on {port}")));
@@ -453,12 +366,9 @@ command = ["echo one", "exit 3", "echo never"]
     ] {
         let detached = repo.json(&["workspace", "run", "listed", name, "--detach", "--json"]);
         let log = PathBuf::from(detached["log"].as_str().unwrap());
-        for _ in 0..250 {
-            if fs::read_to_string(&log).is_ok_and(|t| t.contains(last)) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        wait::until(&format!("the {name} run to print {last:?}"), || {
+            fs::read_to_string(&log).is_ok_and(|t| t.contains(last))
+        });
         assert_eq!(fs::read_to_string(&log).unwrap(), expected, "{name}");
     }
 }
@@ -472,7 +382,7 @@ fn a_terminal_is_asked_once_and_a_yes_is_remembered() {
         return;
     }
     let repo = Repo::new(WORKSPACE);
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let line = format!(
         "{} run 'WRITE x.txt=1' --name asked --yes --harness gemini-cli --command {agent}",
         env!("CARGO_BIN_EXE_by")

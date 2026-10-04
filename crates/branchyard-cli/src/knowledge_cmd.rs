@@ -448,6 +448,7 @@ fn run(env: &Env, target: &Target, action: &KnowledgeAction, json: bool) -> Outc
 
 /// Walk the proposed entries: adopt, reject, edit or skip each, reading
 /// one answer a line from stdin.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn review(store: &Store<'_>, editor: Option<&str>, json: bool, style: render::Style) -> Outcome {
     let proposed = store.list(Some(KnowledgeStatus::Proposed))?;
     if proposed.is_empty() {

@@ -1,5 +1,6 @@
 //! The conformance kit itself, and the driver contract for every profile.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use branchyard_harness::claude_code::ClaudeCode;
 use branchyard_harness::conformance::{
     assert_contract_greeted, assert_steer_contract, check_frame, Direction, Replay, Transcript,

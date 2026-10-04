@@ -25,6 +25,7 @@
 //! Lease expiry compares times from the engines' own clocks, as with
 //! SQLite. Engines on several hosts need synchronized clocks.
 
+use branchyard_support::LockExt as _;
 use std::fmt;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -33,17 +34,22 @@ use postgres::error::SqlState;
 use postgres::{Client, NoTls, Row, Transaction};
 use serde_json::Value;
 
-use crate::graph::{After, Dependency, GraphBackend, GraphCommit};
+use crate::graph::{Dependency, GraphBackend, GraphCommit};
 use crate::state::{
-    now_ms, pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PoolBackend,
-    PortBackend, ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow,
-    SlotRow, SlotState, SteerRow, StepRow,
+    pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PoolBackend, PortBackend,
+    ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow, SlotRow,
+    SlotState, SteerRow, StepRow,
 };
 use crate::storage::{
     ArtifactRef, ArtifactRow, Identity, LegacyBinder, LegacyBranch, LockOutcome, NewArtifact,
     NewScratch, ScratchArea, ScratchLock, ScratchRow, Share, StorageBackend,
 };
+use crate::store_codec::{
+    deadline, decode, encode, from_db, from_db_opt, from_db_u16, from_db_u32, parse_text, to_db,
+    to_db_opt, to_db_usize,
+};
 use crate::{Activity, BranchStatus, Error, Message, RecordedEvent, SteerState};
+use branchyard_support::time::now_ms;
 
 /// 2: grants bound to incarnations (see `crate::storage::LegacyBinder`).
 const SCHEMA: i64 = 2;
@@ -401,18 +407,18 @@ const STEPS: &[(&str, &str)] = &[
     ),
 ];
 
-fn steer_row(r: &Row) -> SteerRow {
-    SteerRow {
-        id: uint(r.get::<_, i64>(0)),
+fn steer_row(r: &Row) -> Result<SteerRow, Error> {
+    Ok(SteerRow {
+        id: from_db("id", r.get::<_, i64>(0))?,
         branch: r.get(1),
-        turn: uint(r.get::<_, i64>(2)),
+        turn: from_db("turn", r.get::<_, i64>(2))?,
         by: r.get(3),
         text: r.get(4),
-        requested_ms: uint(r.get::<_, i64>(5)),
-        state: SteerState::from_columns(&r.get::<_, String>(6), r.get(7)),
-        message: r.get::<_, Option<i64>>(8).map(uint),
+        requested_ms: from_db("requested_ms", r.get::<_, i64>(5))?,
+        state: SteerState::from_columns(&r.get::<_, String>(6), r.get(7))?,
+        message: from_db_opt("message", r.get::<_, Option<i64>>(8))?,
         message_delivered: r.get::<_, Option<bool>>(9).unwrap_or(false),
-    }
+    })
 }
 
 /// The columns [`steer_row`] reads, from `by_steers` as `s`. Steer ids are
@@ -438,15 +444,49 @@ impl fmt::Debug for Postgres {
 }
 
 /// `url` without a password.
+///
+/// `url::Url` does the work when it can, but a password is not always
+/// something it can see: a multi-host URL (`h1:5432,h2:5432`) does not parse,
+/// and a password with a raw `/`, `#` or `?` (as deploy/compose.yaml
+/// produces from a base64 secret) either fails to parse or parses with the
+/// password folded into the host or path. Those fall back to textual masking,
+/// which over-redacts rather than leaks.
 pub(crate) fn redact(url: &str) -> String {
+    // More than one `@` means the parser may have ended the password early
+    // (`by:a@b/c@db`); only the textual pass masks up to the last one.
+    if at_signs(url) <= 1 {
+        if let Ok(mut parsed) = url::Url::parse(url) {
+            if parsed.password().is_some() {
+                if let Ok(()) = parsed.set_password(Some("***")) {
+                    return parsed.to_string();
+                }
+            } else if !parsed.username().is_empty() || at_signs(url) == 0 {
+                return url.to_owned();
+            }
+            // No password, no username, yet an `@`: `by:12/pw@db` parses as
+            // host `by`, port 12, path `/pw@db`.
+        }
+    }
+    redact_text(url)
+}
+
+/// How many `@` the text after `://` holds.
+fn at_signs(url: &str) -> usize {
+    url.split_once("://")
+        .map_or(0, |(_, rest)| rest.matches('@').count())
+}
+
+/// Mask what follows the first `:` of the userinfo, which ends at the last
+/// `@` of the text; no `://`, no `@` or no `:` in the userinfo leaves `url`.
+fn redact_text(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_owned();
     };
-    match rest.split_once('@') {
-        Some((user, host)) => match user.split_once(':') {
-            Some((name, _)) => format!("{scheme}://{name}:***@{host}"),
-            None => url.to_owned(),
-        },
+    let Some(at) = rest.rfind('@') else {
+        return url.to_owned();
+    };
+    match rest[..at].split_once(':') {
+        Some((name, _)) => format!("{scheme}://{name}:***{}", &rest[at..]),
         None => url.to_owned(),
     }
 }
@@ -460,6 +500,12 @@ enum Fail {
 impl From<Error> for Fail {
     fn from(error: Error) -> Self {
         Fail::Error(error)
+    }
+}
+
+impl From<crate::store_codec::CodecError> for Fail {
+    fn from(error: crate::store_codec::CodecError) -> Self {
+        Fail::Error(error.into())
     }
 }
 
@@ -480,22 +526,6 @@ fn state(context: &str, error: &postgres::Error) -> Error {
         Some(db) => Error::State(format!("{context}: {}", db.message())),
         None => Error::State(format!("{context}: {error}")),
     }
-}
-
-fn int(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-fn uint(value: i64) -> u64 {
-    u64::try_from(value).unwrap_or(0)
-}
-
-fn encode<T: serde::Serialize>(what: &str, value: &T) -> Result<String, Error> {
-    serde_json::to_string(value).map_err(|e| Error::State(format!("encode {what}: {e}")))
-}
-
-fn decode<T: serde::de::DeserializeOwned>(what: &str, text: &str) -> Result<T, Error> {
-    serde_json::from_str(text).map_err(|e| Error::State(format!("{what}: {e}")))
 }
 
 fn fenced(fence: &Fence, why: &str) -> Error {
@@ -527,7 +557,7 @@ pub(crate) fn close(client: Client) {
 
 impl Drop for Postgres {
     fn drop(&mut self) {
-        let conn = self.conn.get_mut().unwrap_or_else(|e| e.into_inner());
+        let conn = self.conn.get_mut_recovering("conn");
         if let Some(client) = conn.take() {
             close(client);
         }
@@ -617,10 +647,11 @@ impl Postgres {
     }
 
     fn lock(&self) -> MutexGuard<'_, Option<Client>> {
-        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+        self.conn.lock_recovering("conn")
     }
 
     /// The connection, reconnecting after it closed.
+    #[allow(clippy::expect_used)] // ratchet: branchyard
     fn client<'a>(
         &self,
         guard: &'a mut MutexGuard<'_, Option<Client>>,
@@ -703,7 +734,8 @@ impl Postgres {
             )
         }) {
             Some((incarnation, generation, Some(_)))
-                if incarnation == fence.incarnation && uint(generation) == fence.generation =>
+                if incarnation == fence.incarnation
+                    && from_db("generation", generation)? == fence.generation =>
             {
                 Ok(())
             }
@@ -746,7 +778,7 @@ impl Postgres {
             record.info.children = current.info.children;
         }
         let text = encode(name, &record)?;
-        let created = int(record.created_ms);
+        let created = to_db("created_ms", record.created_ms)?;
         let updated = tx
             .execute(
                 "UPDATE by_branches SET record = $3, created_ms = $4 WHERE repo = $1 AND name = $2",
@@ -807,12 +839,12 @@ impl Postgres {
                 &name,
                 &incarnation,
                 &seq,
-                &int(event.at_ms),
+                &to_db("at_ms", event.at_ms)?,
                 &activity,
             ],
         )
         .map_err(db("append"))?;
-        Ok(uint(seq))
+        Ok(from_db("seq", seq)?)
     }
 
     /// Take `record`'s lease for a new turn and write it, unless a lease
@@ -845,13 +877,13 @@ impl Postgres {
                 &self.repo,
                 name,
                 &incarnation,
-                &int(generation),
+                &to_db("generation", generation)?,
                 &owner.id,
                 &owner.host,
                 &i64::from(owner.pid),
                 &owner.start,
-                &int(now),
-                &int(now + ttl.as_millis() as u64),
+                &to_db("now_ms", now)?,
+                &to_db("expires_ms", deadline(now, ttl))?,
             ],
         )
         .map_err(db("acquire"))?;
@@ -878,13 +910,14 @@ impl Postgres {
     }
 
     fn graph_revision_in(&self, tx: &mut Transaction<'_>, parent: &str) -> R<u64> {
-        Ok(tx
+        let revision = tx
             .query_opt(
                 "SELECT revision FROM by_graph_revisions WHERE repo = $1 AND parent = $2",
                 &[&self.repo, &parent],
             )
             .map_err(db("graph revision"))?
-            .map_or(0, |r| uint(r.get(0))))
+            .map_or(0, |r| r.get::<_, i64>(0));
+        Ok(from_db("revision", revision)?)
     }
 
     fn edges(&self, filter: &str, value: &str) -> Result<Vec<Dependency>, Error> {
@@ -893,14 +926,15 @@ impl Postgres {
              WHERE repo = $1 AND {filter} = $2 ORDER BY dependent, prerequisite"
         );
         let rows = self.query(|client| client.query(&sql, &[&self.repo, &value]))?;
-        Ok(rows
-            .iter()
-            .map(|r| Dependency {
-                dependent: r.get(0),
-                prerequisite: r.get(1),
-                after: after_from(&r.get::<_, String>(2)),
+        rows.iter()
+            .map(|r| {
+                Ok(Dependency {
+                    dependent: r.get(0),
+                    prerequisite: r.get(1),
+                    after: parse_text("after", &r.get::<_, String>(2))?,
+                })
             })
-            .collect())
+            .collect()
     }
 
     fn lease_row(&self, tx: &mut Transaction<'_>, name: &str) -> R<Option<LeaseRow>> {
@@ -911,42 +945,29 @@ impl Postgres {
                 &[&self.repo, &name],
             )
             .map_err(db("lease"))?
-            .map(|r| lease_from(&r)))
+            .map(|r| lease_from(&r))
+            .transpose()?)
     }
 }
 
-fn after_text(after: After) -> &'static str {
-    match after {
-        After::Settled => "settled",
-        After::Integrated => "integrated",
-    }
-}
-
-fn after_from(text: &str) -> After {
-    match text {
-        "integrated" => After::Integrated,
-        _ => After::Settled,
-    }
-}
-
-fn lease_from(r: &Row) -> LeaseRow {
-    LeaseRow {
+fn lease_from(r: &Row) -> Result<LeaseRow, Error> {
+    Ok(LeaseRow {
         branch: r.get(0),
         incarnation: r.get(1),
-        generation: uint(r.get(2)),
-        turn: uint(r.get(3)),
+        generation: from_db("generation", r.get(2))?,
+        turn: from_db("turn", r.get(3))?,
         owner: r.get(4),
         host: r.get(5),
-        pid: u32::try_from(r.get::<_, i64>(6)).unwrap_or(0),
+        pid: from_db_u32("pid", r.get::<_, i64>(6))?,
         start: r.get(7),
-        expires_ms: uint(r.get(8)),
-        deadline_ms: r.get::<_, Option<i64>>(9).map(uint),
-    }
+        expires_ms: from_db("expires_ms", r.get(8))?,
+        deadline_ms: from_db_opt("deadline_ms", r.get::<_, Option<i64>>(9))?,
+    })
 }
 
 fn event_from(what: &str, at_ms: i64, activity: &str) -> Result<RecordedEvent, Error> {
     Ok(RecordedEvent {
-        at_ms: uint(at_ms),
+        at_ms: from_db("at_ms", at_ms)?,
         activity: decode(what, activity)?,
     })
 }
@@ -954,7 +975,7 @@ fn event_from(what: &str, at_ms: i64, activity: &str) -> Result<RecordedEvent, E
 impl Backend for Postgres {
     fn reserve(&self, name: &str, owner: &Owner) -> Result<bool, Error> {
         self.tx(true, |tx| {
-            let now = int(now_ms());
+            let now = to_db("now_ms", now_ms())?;
             let inserted = tx
                 .execute(
                     "INSERT INTO by_branches (repo, name, created_ms, record) \
@@ -1013,17 +1034,18 @@ impl Backend for Postgres {
                 &[&self.repo],
             )
         })?;
-        Ok(rows
-            .iter()
-            .map(|r| ReservationRow {
-                name: r.get(0),
-                owner: r.get(1),
-                host: r.get(2),
-                pid: u32::try_from(r.get::<_, i64>(3)).unwrap_or(0),
-                start: r.get(4),
-                reserved_ms: uint(r.get(5)),
+        rows.iter()
+            .map(|r| {
+                Ok(ReservationRow {
+                    name: r.get(0),
+                    owner: r.get(1),
+                    host: r.get(2),
+                    pid: from_db_u32("pid", r.get::<_, i64>(3))?,
+                    start: r.get(4),
+                    reserved_ms: from_db("reserved_ms", r.get(5))?,
+                })
             })
-            .collect())
+            .collect()
     }
 
     fn reclaim(&self, row: &ReservationRow) -> Result<bool, Error> {
@@ -1032,7 +1054,12 @@ impl Backend for Postgres {
                 .execute(
                     "DELETE FROM by_reservations \
                      WHERE repo = $1 AND name = $2 AND owner = $3 AND reserved_ms = $4",
-                    &[&self.repo, &row.name, &row.owner, &int(row.reserved_ms)],
+                    &[
+                        &self.repo,
+                        &row.name,
+                        &row.owner,
+                        &to_db("reserved_ms", row.reserved_ms)?,
+                    ],
                 )
                 .map_err(db("reclaim"))?;
             if removed == 0 {
@@ -1186,7 +1213,7 @@ impl Backend for Postgres {
                 &[
                     &self.repo,
                     &fence.branch,
-                    &int(now_ms() + ttl.as_millis() as u64),
+                    &to_db("expires_ms", deadline(now_ms(), ttl))?,
                 ],
             )
             .map_err(db("renew"))?;
@@ -1226,7 +1253,7 @@ impl Backend for Postgres {
                 &[&self.repo],
             )
         })?;
-        Ok(rows.iter().map(lease_from).collect())
+        rows.iter().map(lease_from).collect()
     }
 
     fn take_over(
@@ -1245,13 +1272,13 @@ impl Backend for Postgres {
                     &[
                         &self.repo,
                         &lease.branch,
-                        &int(lease.generation),
+                        &to_db("generation", lease.generation)?,
                         &owner.id,
                         &owner.host,
                         &i64::from(owner.pid),
                         &owner.start,
-                        &int(now),
-                        &int(now + ttl.as_millis() as u64),
+                        &to_db("now_ms", now)?,
+                        &to_db("expires_ms", deadline(now, ttl))?,
                     ],
                 )
                 .map_err(db("take over"))?;
@@ -1269,7 +1296,11 @@ impl Backend for Postgres {
             self.check(tx, fence)?;
             tx.execute(
                 "UPDATE by_leases SET deadline_ms = $3 WHERE repo = $1 AND branch = $2",
-                &[&self.repo, &fence.branch, &deadline_ms.map(int)],
+                &[
+                    &self.repo,
+                    &fence.branch,
+                    &to_db_opt("deadline_ms", deadline_ms)?,
+                ],
             )
             .map_err(db("deadline"))?;
             Ok(())
@@ -1300,7 +1331,7 @@ impl Backend for Postgres {
                 .query_opt(
                     "SELECT intent, outcome FROM by_steps \
                      WHERE incarnation = $1 AND turn = $2 AND step = $3",
-                    &[&fence.incarnation, &int(turn), &step],
+                    &[&fence.incarnation, &to_db("turn", turn)?, &step],
                 )
                 .map_err(db("step"))?
                 .map(|r| (r.get::<_, String>(0), r.get::<_, Option<String>>(1)));
@@ -1308,16 +1339,16 @@ impl Backend for Postgres {
                 Some((_, Some(outcome))) => Ok(Begun::Done(decode(step, &outcome)?)),
                 Some((intent, None)) => Ok(Begun::Pending(decode(step, &intent)?)),
                 None => {
-                    let now = int(now_ms());
+                    let now = to_db("now_ms", now_ms())?;
                     tx.execute(
                         "INSERT INTO by_steps (incarnation, turn, step, branch, generation, \
                          intent, started_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
                         &[
                             &fence.incarnation,
-                            &int(turn),
+                            &to_db("turn", turn)?,
                             &step,
                             &fence.branch,
-                            &int(fence.generation),
+                            &to_db("generation", fence.generation)?,
                             &encode(step, intent)?,
                             &now,
                         ],
@@ -1327,7 +1358,7 @@ impl Backend for Postgres {
                         tx.execute(
                             "UPDATE by_messages SET delivered_ms = $3 \
                              WHERE repo = $1 AND id = $2 AND delivered_ms IS NULL",
-                            &[&self.repo, &int(*id), &now],
+                            &[&self.repo, &to_db("id", *id)?, &now],
                         )
                         .map_err(db("message"))?;
                     }
@@ -1352,11 +1383,11 @@ impl Backend for Postgres {
                      WHERE incarnation = $1 AND turn = $2 AND step = $3",
                     &[
                         &fence.incarnation,
-                        &int(turn),
+                        &to_db("turn", turn)?,
                         &step,
                         &encode(step, outcome)?,
-                        &int(now_ms()),
-                        &int(fence.generation),
+                        &to_db("now_ms", now_ms())?,
+                        &to_db("generation", fence.generation)?,
                     ],
                 )
                 .map_err(db("step"))?;
@@ -1390,14 +1421,20 @@ impl Backend for Postgres {
                      AND delivered_steer IS NULL AND delivered_ms = (SELECT started_ms \
                      FROM by_steps WHERE incarnation = $3 AND turn = $4 AND step = $5 \
                      AND outcome IS NULL)",
-                    &[&self.repo, &int(*id), &fence.incarnation, &int(turn), &step],
+                    &[
+                        &self.repo,
+                        &to_db("id", *id)?,
+                        &fence.incarnation,
+                        &to_db("turn", turn)?,
+                        &step,
+                    ],
                 )
                 .map_err(db("message"))?;
             }
             tx.execute(
                 "DELETE FROM by_steps WHERE incarnation = $1 AND turn = $2 AND step = $3 \
                  AND outcome IS NULL",
-                &[&fence.incarnation, &int(turn), &step],
+                &[&fence.incarnation, &to_db("turn", turn)?, &step],
             )
             .map_err(db("step"))?;
             Ok(())
@@ -1405,13 +1442,14 @@ impl Backend for Postgres {
     }
 
     fn steps(&self, name: &str, turn: u64) -> Result<Vec<StepRow>, Error> {
+        let turn_db = to_db("turn", turn)?;
         let rows = self.query(|c| {
             c.query(
                 "SELECT s.step, s.intent, s.outcome FROM by_steps s \
                  JOIN by_branches b ON b.incarnation = s.incarnation \
                  WHERE b.repo = $1 AND b.name = $2 AND s.turn = $3 \
                  ORDER BY s.started_ms, s.step",
-                &[&self.repo, &name, &int(turn)],
+                &[&self.repo, &name, &turn_db],
             )
         })?;
         rows.iter()
@@ -1439,14 +1477,14 @@ impl Backend for Postgres {
                  start = $6, host = $7, generation = $8, recorded_ms = $9",
                 &[
                     &fence.incarnation,
-                    &int(fence.turn),
+                    &to_db("turn", fence.turn)?,
                     &i64::from(process.pid),
                     &fence.branch,
                     &i64::from(process.pgid),
                     &process.start,
                     &process.host,
-                    &int(fence.generation),
-                    &int(now_ms()),
+                    &to_db("generation", fence.generation)?,
+                    &to_db("now_ms", now_ms())?,
                 ],
             )
             .map_err(db("process"))?;
@@ -1455,23 +1493,25 @@ impl Backend for Postgres {
     }
 
     fn processes(&self, name: &str, turn: u64) -> Result<Vec<ProcessRow>, Error> {
+        let turn_db = to_db("turn", turn)?;
         let rows = self.query(|c| {
             c.query(
                 "SELECT p.pid, p.pgid, p.start, p.host FROM by_processes p \
                  JOIN by_branches b ON b.incarnation = p.incarnation \
                  WHERE b.repo = $1 AND b.name = $2 AND p.turn = $3 ORDER BY p.recorded_ms",
-                &[&self.repo, &name, &int(turn)],
+                &[&self.repo, &name, &turn_db],
             )
         })?;
-        Ok(rows
-            .iter()
-            .map(|r| ProcessRow {
-                pid: u32::try_from(r.get::<_, i64>(0)).unwrap_or(0),
-                pgid: u32::try_from(r.get::<_, i64>(1)).unwrap_or(0),
-                start: r.get(2),
-                host: r.get(3),
+        rows.iter()
+            .map(|r| {
+                Ok(ProcessRow {
+                    pid: from_db_u32("pid", r.get::<_, i64>(0))?,
+                    pgid: from_db_u32("pgid", r.get::<_, i64>(1))?,
+                    start: r.get(2),
+                    host: r.get(3),
+                })
             })
-            .collect())
+            .collect()
     }
 
     fn request_cancel(&self, name: &str, by: &str, subtree: bool) -> Result<bool, Error> {
@@ -1489,10 +1529,10 @@ impl Backend for Postgres {
                  VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (incarnation, turn) DO NOTHING",
                 &[
                     &incarnation,
-                    &int(lease.turn),
+                    &to_db("turn", lease.turn)?,
                     &name,
                     &by,
-                    &int(now_ms()),
+                    &to_db("now_ms", now_ms())?,
                     &subtree,
                 ],
             )
@@ -1502,11 +1542,12 @@ impl Backend for Postgres {
     }
 
     fn cancel_requested(&self, fence: &Fence) -> Result<Option<String>, Error> {
+        let turn_db = to_db("turn", fence.turn)?;
         Ok(self
             .query(|c| {
                 c.query_opt(
                     "SELECT requested_by FROM by_cancels WHERE incarnation = $1 AND turn = $2",
-                    &[&fence.incarnation, &int(fence.turn)],
+                    &[&fence.incarnation, &turn_db],
                 )
             })?
             .map(|r| r.get(0)))
@@ -1534,11 +1575,11 @@ impl Backend for Postgres {
                      state) VALUES ($1, $2, $3, $4, $5, $6, 'pending') RETURNING id",
                     &[
                         &incarnation,
-                        &int(lease.turn),
+                        &to_db("turn", lease.turn)?,
                         &name,
                         &by,
                         &text,
-                        &int(now_ms()),
+                        &to_db("now_ms", now_ms())?,
                     ],
                 )
                 .map_err(db("steer"))?;
@@ -1548,7 +1589,7 @@ impl Backend for Postgres {
                     .execute(
                         "UPDATE by_messages SET steer_id = $3 \
                          WHERE repo = $1 AND id = $2 AND delivered_ms IS NULL",
-                        &[&self.repo, &int(message), &id],
+                        &[&self.repo, &to_db("message", message)?, &id],
                     )
                     .map_err(db("message"))?;
                 if linked == 0 {
@@ -1559,24 +1600,24 @@ impl Backend for Postgres {
                     .into());
                 }
             }
-            Ok(Some(uint(id)))
+            Ok(Some(from_db("id", id)?))
         })
     }
 
     fn pending_steers(&self, fence: &Fence) -> Result<Vec<SteerRow>, Error> {
-        Ok(self
-            .query(|c| {
-                c.query(
-                    &format!(
-                        "SELECT {STEER_COLUMNS} FROM by_steers s WHERE s.incarnation = $1 \
+        let turn_db = to_db("turn", fence.turn)?;
+        self.query(|c| {
+            c.query(
+                &format!(
+                    "SELECT {STEER_COLUMNS} FROM by_steers s WHERE s.incarnation = $1 \
                          AND s.turn = $2 AND s.state = 'pending' ORDER BY s.id"
-                    ),
-                    &[&fence.incarnation, &int(fence.turn)],
-                )
-            })?
-            .iter()
-            .map(steer_row)
-            .collect())
+                ),
+                &[&fence.incarnation, &turn_db],
+            )
+        })?
+        .iter()
+        .map(steer_row)
+        .collect()
     }
 
     fn settle_steer(
@@ -1593,9 +1634,9 @@ impl Backend for Postgres {
                     "UPDATE by_steers SET state = $4, reason = $5 \
                      WHERE id = $1 AND incarnation = $2 AND turn = $3",
                     &[
-                        &int(id),
+                        &to_db("id", id)?,
                         &fence.incarnation,
-                        &int(fence.turn),
+                        &to_db("turn", fence.turn)?,
                         &name,
                         &reason,
                     ],
@@ -1610,16 +1651,17 @@ impl Backend for Postgres {
                     .query_opt(
                         "UPDATE by_messages SET delivered_ms = $2, delivered_steer = $1 \
                          WHERE steer_id = $1 AND delivered_ms IS NULL RETURNING id",
-                        &[&int(id), &int(now_ms())],
+                        &[&to_db("id", id)?, &to_db("now_ms", now_ms())?],
                     )
                     .map_err(db("message"))?
-                    .map(|r| uint(r.get::<_, i64>(0)))),
+                    .map(|r| from_db("id", r.get::<_, i64>(0)))
+                    .transpose()?),
                 SteerState::Refused { .. } => {
                     tx.execute(
                         "UPDATE by_messages SET steer_id = NULL, delivered_steer = NULL, \
                          delivered_ms = CASE WHEN delivered_steer = $1 THEN NULL \
                          ELSE delivered_ms END WHERE steer_id = $1",
-                        &[&int(id)],
+                        &[&to_db("id", id)?],
                     )
                     .map_err(db("message"))?;
                     Ok(None)
@@ -1631,19 +1673,20 @@ impl Backend for Postgres {
     fn steer(&self, name: &str, id: u64) -> Result<Option<SteerRow>, Error> {
         let repo = self.repo.clone();
         let name = name.to_owned();
-        Ok(self
-            .query(move |c| {
-                c.query_opt(
-                    &format!(
-                        "SELECT {STEER_COLUMNS} FROM by_steers s JOIN by_branches b \
+        let id_db = to_db("id", id)?;
+        self.query(move |c| {
+            c.query_opt(
+                &format!(
+                    "SELECT {STEER_COLUMNS} FROM by_steers s JOIN by_branches b \
                          ON b.incarnation = s.incarnation \
                          WHERE b.repo = $1 AND b.name = $2 AND s.id = $3"
-                    ),
-                    &[&repo, &name, &int(id)],
-                )
-            })?
-            .as_ref()
-            .map(steer_row))
+                ),
+                &[&repo, &name, &id_db],
+            )
+        })?
+        .as_ref()
+        .map(steer_row)
+        .transpose()
     }
 
     fn append(
@@ -1666,6 +1709,8 @@ impl Backend for Postgres {
         after: u64,
         limit: usize,
     ) -> Result<Vec<(u64, RecordedEvent)>, Error> {
+        let after_db = to_db("after", after)?;
+        let limit_db = to_db_usize("limit", limit)?;
         let (known, rows) = self.query(|c| {
             let known = c
                 .query_opt(
@@ -1677,7 +1722,7 @@ impl Backend for Postgres {
                 "SELECT e.seq, e.at_ms, e.activity FROM by_events e \
                  JOIN by_branches b ON b.incarnation = e.incarnation \
                  WHERE b.repo = $1 AND b.name = $2 AND e.seq > $3 ORDER BY e.seq LIMIT $4",
-                &[&self.repo, &name, &int(after), &int(limit as u64)],
+                &[&self.repo, &name, &after_db, &limit_db],
             )?;
             Ok((known, rows))
         })?;
@@ -1689,7 +1734,7 @@ impl Backend for Postgres {
                 let seq: i64 = r.get(0);
                 let what = format!("event {seq} of {name}");
                 Ok((
-                    uint(seq),
+                    from_db("seq", seq)?,
                     event_from(&what, r.get(1), &r.get::<_, String>(2))?,
                 ))
             })
@@ -1705,23 +1750,27 @@ impl Backend for Postgres {
                 &[&self.repo, &name],
             )
         })?;
-        row.map(|r| uint(r.get(0)))
-            .ok_or_else(|| Error::UnknownBranch(name.to_owned()))
+        let seq = row
+            .map(|r| r.get::<_, i64>(0))
+            .ok_or_else(|| Error::UnknownBranch(name.to_owned()))?;
+        Ok(from_db("seq", seq)?)
     }
 
     fn feed_since(&self, after: u64, limit: usize) -> Result<Vec<FeedRow>, Error> {
+        let after_db = to_db("after", after)?;
+        let limit_db = to_db_usize("limit", limit)?;
         let rows = self.query(|c| {
             c.query(
                 "SELECT id, branch, at_ms, activity FROM by_events WHERE repo = $1 AND id > $2 \
                  ORDER BY id LIMIT $3",
-                &[&self.repo, &int(after), &int(limit as u64)],
+                &[&self.repo, &after_db, &limit_db],
             )
         })?;
         rows.iter()
             .map(|r| {
                 let id: i64 = r.get(0);
                 Ok(FeedRow {
-                    id: uint(id),
+                    id: from_db("id", id)?,
                     branch: r.get(1),
                     event: event_from(
                         &format!("feed entry {id}"),
@@ -1740,7 +1789,7 @@ impl Backend for Postgres {
                 &[&self.repo],
             )
         })
-        .map(|r| uint(r.get(0)))
+        .and_then(|r| Ok(from_db("id", r.get::<_, i64>(0))?))
     }
 
     fn send_message(&self, message: &Message) -> Result<Message, Error> {
@@ -1757,13 +1806,13 @@ impl Backend for Postgres {
                         &message.to,
                         &message.kind.as_str(),
                         &message.text,
-                        &message.in_reply_to.map(int),
-                        &int(at_ms),
+                        &to_db_opt("in_reply_to", message.in_reply_to)?,
+                        &to_db("at_ms", at_ms)?,
                     ],
                 )
                 .map_err(db("message"))?;
             Ok(Message {
-                id: uint(row.get(0)),
+                id: from_db("id", row.get(0))?,
                 at_ms,
                 delivered: false,
                 ..message.clone()
@@ -1772,11 +1821,12 @@ impl Backend for Postgres {
     }
 
     fn message(&self, id: u64) -> Result<Option<Message>, Error> {
+        let id_db = to_db("id", id)?;
         let row = self.query(|c| {
             c.query_opt(
                 "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
                  delivered_ms FROM by_messages WHERE repo = $1 AND id = $2",
-                &[&self.repo, &int(id)],
+                &[&self.repo, &id_db],
             )
         })?;
         row.map(|r| message_row(&r)).transpose()
@@ -1798,12 +1848,12 @@ impl Backend for Postgres {
             return Ok(());
         }
         self.tx(true, |tx| {
-            let now = int(now_ms());
+            let now = to_db("now_ms", now_ms())?;
             for id in ids {
                 tx.execute(
                     "UPDATE by_messages SET delivered_ms = $3 \
                      WHERE repo = $1 AND id = $2 AND delivered_ms IS NULL",
-                    &[&self.repo, &int(*id), &now],
+                    &[&self.repo, &to_db("id", *id)?, &now],
                 )
                 .map_err(db("message"))?;
             }
@@ -1812,32 +1862,41 @@ impl Backend for Postgres {
     }
 
     fn answer_to(&self, question_id: u64) -> Result<Option<Message>, Error> {
+        let question_id_db = to_db("question_id", question_id)?;
         let row = self.query(|c| {
             c.query_opt(
                 "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
                  delivered_ms FROM by_messages WHERE repo = $1 AND in_reply_to = $2 \
                  ORDER BY id LIMIT 1",
-                &[&self.repo, &int(question_id)],
+                &[&self.repo, &question_id_db],
             )
         })?;
         row.map(|r| message_row(&r)).transpose()
     }
 
     fn message_steer(&self, id: u64) -> Result<Option<u64>, Error> {
+        let id_db = to_db("id", id)?;
         let row = self.query(|c| {
             c.query_opt(
                 "SELECT steer_id FROM by_messages WHERE repo = $1 AND id = $2",
-                &[&self.repo, &int(id)],
+                &[&self.repo, &id_db],
             )
         })?;
-        Ok(row.and_then(|r| r.get::<_, Option<i64>>(0)).map(uint))
+        Ok(from_db_opt(
+            "steer_id",
+            row.and_then(|r| r.get::<_, Option<i64>>(0)),
+        )?)
     }
 
     fn set_awaiting(&self, id: u64, until_ms: Option<u64>) -> Result<(), Error> {
         self.tx(true, |tx| {
             tx.execute(
                 "UPDATE by_messages SET awaiting_until_ms = $3 WHERE repo = $1 AND id = $2",
-                &[&self.repo, &int(id), &until_ms.map(int)],
+                &[
+                    &self.repo,
+                    &to_db("id", id)?,
+                    &to_db_opt("until_ms", until_ms)?,
+                ],
             )
             .map_err(db("message"))?;
             Ok(())
@@ -1845,6 +1904,7 @@ impl Backend for Postgres {
     }
 
     fn awaiting_answer(&self, from: &str, now_ms: u64) -> Result<bool, Error> {
+        let now_ms_db = to_db("now_ms", now_ms)?;
         let row = self.query(|c| {
             c.query_one(
                 "SELECT EXISTS (SELECT 1 FROM by_messages q \
@@ -1852,7 +1912,7 @@ impl Backend for Postgres {
                  AND q.awaiting_until_ms > $3 \
                  AND NOT EXISTS (SELECT 1 FROM by_messages a \
                  WHERE a.repo = $1 AND a.in_reply_to = q.id))",
-                &[&self.repo, &from, &int(now_ms)],
+                &[&self.repo, &from, &now_ms_db],
             )
         })?;
         Ok(row.get(0))
@@ -1863,13 +1923,13 @@ impl Backend for Postgres {
 fn message_row(r: &Row) -> Result<Message, Error> {
     let kind: String = r.get(3);
     Ok(Message {
-        id: uint(r.get(0)),
+        id: from_db("id", r.get(0))?,
         from: r.get(1),
         to: r.get(2),
         kind: kind.parse()?,
         text: r.get(4),
-        in_reply_to: r.get::<_, Option<i64>>(5).map(uint),
-        at_ms: uint(r.get(6)),
+        in_reply_to: from_db_opt("in_reply_to", r.get::<_, Option<i64>>(5))?,
+        at_ms: from_db("at_ms", r.get(6))?,
         delivered: r.get::<_, Option<i64>>(7).is_some(),
     })
 }
@@ -1908,7 +1968,7 @@ fn upgrade_to_identities(tx: &mut Transaction<'_>) -> R<()> {
         repos.entry(row.get(0)).or_default().push(LegacyBranch {
             name,
             incarnation: row.get(1),
-            created_ms: uint(row.get(3)),
+            created_ms: from_db("created_ms", row.get(3))?,
             parent: record.info.parent,
         });
     }
@@ -1935,7 +1995,7 @@ fn upgrade_to_identities(tx: &mut Transaction<'_>) -> R<()> {
         let seq: i64 = row.get(1);
         let publisher: String = row.get(2);
         let ancestry: Vec<String> = decode("artifact ancestry", row.get(3))?;
-        let created = uint(row.get(4));
+        let created = from_db("created_ms", row.get(4))?;
         let ancestry = encode("ancestry", &binder.bind_all(&ancestry, created))?;
         tx.execute(
             "UPDATE by_artifacts SET publisher_incarnation = $2, ancestry_incarnations = $3 \
@@ -1956,7 +2016,7 @@ fn upgrade_to_identities(tx: &mut Transaction<'_>) -> R<()> {
         let name: String = row.get(1);
         let owner: String = row.get(2);
         let ancestry: Vec<String> = decode("scratch ancestry", row.get(3))?;
-        let created = uint(row.get(4));
+        let created = from_db("created_ms", row.get(4))?;
         let ancestry = encode("ancestry", &binder.bind_all(&ancestry, created))?;
         tx.execute(
             "UPDATE by_scratch_areas SET owner_incarnation = $3, ancestry_incarnations = $4 \
@@ -1994,7 +2054,7 @@ fn upgrade_to_identities(tx: &mut Transaction<'_>) -> R<()> {
         let repo: String = row.get(0);
         let name: String = row.get(1);
         let holder: String = row.get(2);
-        let bound = binder_for(&repo).bind(&holder, Some(uint(row.get(3))));
+        let bound = binder_for(&repo).bind(&holder, Some(from_db("acquired_ms", row.get(3))?));
         tx.execute(
             "UPDATE by_scratch_locks SET holder_incarnation = $3 WHERE repo = $1 AND name = $2",
             &[&repo, &name, &bound],
@@ -2017,12 +2077,12 @@ fn artifact_row_from(row: &Row) -> Result<ArtifactRow, Error> {
         artifact: ArtifactRef {
             id: row.get(0),
             digest: row.get(1),
-            size: uint(row.get(2)),
+            size: from_db("size", row.get(2))?,
             name: row.get(3),
             media_type: row.get(4),
             publisher_branch: row.get(5),
-            turn: uint(row.get(7)),
-            created_at: uint(row.get::<_, i64>(8)) / 1000,
+            turn: from_db("turn", row.get(7))?,
+            created_at: from_db("created_at", row.get::<_, i64>(8))? / 1000,
             labels: decode("artifact labels", &labels)?,
         },
         ancestry: decode("artifact ancestry", &ancestry)?,
@@ -2044,7 +2104,7 @@ fn scratch_row_from(row: &Row) -> Result<ScratchRow, Error> {
         area: ScratchArea {
             name: row.get(0),
             owner_branch: row.get(1),
-            created_at: uint(row.get::<_, i64>(3)) / 1000,
+            created_at: from_db("created_at", row.get::<_, i64>(3))? / 1000,
         },
         ancestry: decode("scratch ancestry", &ancestry)?,
         owner_incarnation: row.get(4),
@@ -2095,7 +2155,7 @@ impl PortBackend for Postgres {
                 )
                 .map_err(db("port"))?;
             if let Some(row) = held {
-                return Ok(row.get::<_, i32>(0) as u16);
+                return Ok(from_db_u16("port", i64::from(row.get::<_, i32>(0)))?);
             }
             // Ports are unique across the database, whichever repository
             // holds them: its repositories may share a host.
@@ -2103,12 +2163,17 @@ impl PortBackend for Postgres {
                 .query("SELECT port FROM by_ports", &[])
                 .map_err(db("port"))?
                 .iter()
-                .map(|r| r.get::<_, i32>(0) as u16)
-                .collect();
+                .map(|r| from_db_u16("port", i64::from(r.get::<_, i32>(0))))
+                .collect::<Result<_, _>>()?;
             let port = pick_port(start, &taken, usable)?;
             tx.execute(
                 "INSERT INTO by_ports (port, repo, branch, reserved_ms) VALUES ($1, $2, $3, $4)",
-                &[&i32::from(port), &self.repo, &branch, &int(now_ms())],
+                &[
+                    &i32::from(port),
+                    &self.repo,
+                    &branch,
+                    &to_db("now_ms", now_ms())?,
+                ],
             )
             .map_err(|error| match error.code() {
                 // Another reservation took it first: try again from the
@@ -2127,7 +2192,9 @@ impl PortBackend for Postgres {
                 &[&self.repo, &branch],
             )
         })?;
-        Ok(row.map(|r| r.get::<_, i32>(0) as u16))
+        row.map(|r| from_db_u16("port", i64::from(r.get::<_, i32>(0))))
+            .transpose()
+            .map_err(Error::from)
     }
 }
 
@@ -2140,9 +2207,12 @@ fn sandbox_row(r: &Row) -> Result<SandboxRow, Error> {
         kind: SandboxKind::parse(r.get(2))?,
         provider: r.get(3),
         name: r.get(4),
-        turn: r.get::<_, Option<i64>>(5).map(|t| t as u32),
+        turn: r
+            .get::<_, Option<i64>>(5)
+            .map(|t| from_db_u32("turn", t))
+            .transpose()?,
         detail: r.get(6),
-        used_ms: uint(r.get(7)),
+        used_ms: from_db("used_ms", r.get(7))?,
     })
 }
 
@@ -2165,7 +2235,7 @@ impl SandboxBackend for Postgres {
                     &row.name,
                     &row.turn.map(i64::from),
                     &row.detail,
-                    &int(row.used_ms),
+                    &to_db("used_ms", row.used_ms)?,
                 ],
             )
             .map_err(db("sandbox"))?;
@@ -2229,7 +2299,7 @@ impl GraphBackend for Postgres {
                 &[&self.repo, &parent],
             )
         })?;
-        Ok(row.map_or(0, |r| uint(r.get(0))))
+        Ok(from_db("revision", row.map_or(0, |r| r.get::<_, i64>(0)))?)
     }
 
     fn dependencies(&self, parent: &str) -> Result<Vec<Dependency>, Error> {
@@ -2331,7 +2401,7 @@ impl GraphBackend for Postgres {
                             parent,
                             &d.dependent,
                             &d.prerequisite,
-                            &after_text(d.after),
+                            &<&'static str>::from(d.after),
                         ],
                     )
                     .map_err(db("commit graph"))?;
@@ -2347,7 +2417,7 @@ impl GraphBackend for Postgres {
             tx.execute(
                 "INSERT INTO by_graph_revisions (repo, parent, revision) VALUES ($1, $2, $3) \
                  ON CONFLICT (repo, parent) DO UPDATE SET revision = $3",
-                &[&self.repo, parent, &int(next)],
+                &[&self.repo, parent, &to_db("next", next)?],
             )
             .map_err(db("commit graph"))?;
             Ok(next)
@@ -2412,7 +2482,7 @@ impl StorageBackend for Postgres {
 
     fn create_artifact(&self, new: &NewArtifact) -> Result<ArtifactRow, Error> {
         self.tx(true, |tx| {
-            let now = int(now_ms());
+            let now = to_db("now_ms", now_ms())?;
             let ancestry = encode("ancestry", &new.ancestry)?;
             let ancestry_incarnations = encode("ancestry", &new.ancestry_incarnations)?;
             let labels = encode("labels", &new.labels)?;
@@ -2425,12 +2495,12 @@ impl StorageBackend for Postgres {
                     &[
                         &self.repo,
                         &new.digest,
-                        &int(new.size),
+                        &to_db("size", new.size)?,
                         &new.name,
                         &new.media_type,
                         &new.publisher_branch,
                         &ancestry,
-                        &int(new.turn),
+                        &to_db("turn", new.turn)?,
                         &now,
                         &labels,
                         &new.publisher_incarnation,
@@ -2454,7 +2524,7 @@ impl StorageBackend for Postgres {
                     media_type: new.media_type.clone(),
                     publisher_branch: new.publisher_branch.clone(),
                     turn: new.turn,
-                    created_at: uint(now) / 1000,
+                    created_at: from_db("now", now)? / 1000,
                     labels: new.labels.clone(),
                 },
                 ancestry: new.ancestry.clone(),
@@ -2542,7 +2612,7 @@ impl StorageBackend for Postgres {
                 &[&self.repo, &digest],
             )
         })?;
-        Ok(uint(row.get::<_, i64>(0)))
+        Ok(from_db("refcount", row.get::<_, i64>(0))?)
     }
 
     fn create_scratch(&self, new: &NewScratch) -> Result<bool, Error> {
@@ -2559,7 +2629,7 @@ impl StorageBackend for Postgres {
                         &new.name,
                         &new.owner,
                         &ancestry,
-                        &int(now_ms()),
+                        &to_db("now_ms", now_ms())?,
                         &new.owner_incarnation,
                         &ancestry_incarnations,
                     ],
@@ -2672,7 +2742,7 @@ impl StorageBackend for Postgres {
                     )
                 });
             let grant = |tx: &mut Transaction<'_>| -> R<LockOutcome> {
-                let now = int(now_ms());
+                let now = to_db("now_ms", now_ms())?;
                 tx.execute(
                     "INSERT INTO by_scratch_locks (repo, name, holder, acquired_ms, \
                      holder_incarnation) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (repo, name) \
@@ -2684,7 +2754,7 @@ impl StorageBackend for Postgres {
                 Ok(LockOutcome::Granted(ScratchLock {
                     name: name.to_owned(),
                     holder_branch: branch.to_owned(),
-                    acquired_at: uint(now) / 1000,
+                    acquired_at: from_db("now", now)? / 1000,
                 }))
             };
             match current {
@@ -2696,7 +2766,7 @@ impl StorageBackend for Postgres {
                 Some((holder, acquired_ms, _)) => Ok(Some(LockOutcome::Held(ScratchLock {
                     name: name.to_owned(),
                     holder_branch: holder,
-                    acquired_at: uint(acquired_ms) / 1000,
+                    acquired_at: from_db("acquired_ms", acquired_ms)? / 1000,
                 }))),
             }
         })
@@ -2722,12 +2792,15 @@ impl StorageBackend for Postgres {
                 &[&self.repo, &name],
             )
         })
-        .map(|opt| {
-            opt.map(|r| ScratchLock {
-                name: name.to_owned(),
-                holder_branch: r.get(0),
-                acquired_at: uint(r.get::<_, i64>(1)) / 1000,
+        .and_then(|opt| {
+            opt.map(|r| {
+                Ok(ScratchLock {
+                    name: name.to_owned(),
+                    holder_branch: r.get(0),
+                    acquired_at: from_db("acquired_ms", r.get::<_, i64>(1))? / 1000,
+                })
             })
+            .transpose()
         })
     }
 }
@@ -2750,10 +2823,10 @@ fn outcome_row(r: &Row) -> Result<crate::fleet::OutcomeRecord, Error> {
         outcome: crate::fleet::BranchOutcome::parse(r.get(7))?,
         score: r.get(8),
         cost_usd: r.get(9),
-        duration_ms: r.get::<_, Option<i64>>(10).map(uint),
-        turns: u32::try_from(r.get::<_, i64>(11)).unwrap_or(0),
+        duration_ms: from_db_opt("duration_ms", r.get::<_, Option<i64>>(10))?,
+        turns: from_db_u32("turns", r.get::<_, i64>(11))?,
         routed: r.get(12),
-        recorded_ms: uint(r.get(13)),
+        recorded_ms: from_db("recorded_ms", r.get(13))?,
     })
 }
 
@@ -2786,10 +2859,10 @@ impl crate::fleet::OutcomeBackend for Postgres {
                     &row.outcome.as_str(),
                     &row.score,
                     &row.cost_usd,
-                    &row.duration_ms.map(int),
+                    &to_db_opt("duration_ms", row.duration_ms)?,
                     &i64::from(row.turns),
                     &row.routed,
-                    &int(row.recorded_ms),
+                    &to_db("recorded_ms", row.recorded_ms)?,
                 ],
             )
             .map_err(db("outcome"))?;
@@ -2829,29 +2902,29 @@ impl crate::fleet::OutcomeBackend for Postgres {
 const USAGE_COLUMNS: &str = "id, at_ms, branch, turn, subject, model, api, backend, input, \
      output, cache_read, cache_write, cache_write_1h, cost_usd, latency_ms, status, streamed";
 
-fn usage_row(r: &Row) -> crate::models::UsageRecord {
+fn usage_row(r: &Row) -> Result<crate::models::UsageRecord, Error> {
     let api: String = r.get(6);
-    crate::models::UsageRecord {
+    Ok(crate::models::UsageRecord {
         id: r.get(0),
-        at_ms: uint(r.get(1)),
+        at_ms: from_db("at_ms", r.get(1))?,
         branch: r.get(2),
-        turn: u32::try_from(r.get::<_, i64>(3)).unwrap_or(0),
+        turn: from_db_u32("turn", r.get::<_, i64>(3))?,
         subject: r.get(4),
         model: r.get(5),
-        api: serde_json::from_value(Value::String(api)).unwrap_or(crate::models::Api::Generic),
+        api: parse_text("api", &api)?,
         backend: r.get(7),
         tokens: crate::models::Tokens {
-            input: uint(r.get(8)),
-            output: uint(r.get(9)),
-            cache_read: uint(r.get(10)),
-            cache_write: uint(r.get(11)),
-            cache_write_1h: uint(r.get(12)),
+            input: from_db("input", r.get(8))?,
+            output: from_db("output", r.get(9))?,
+            cache_read: from_db("cache_read", r.get(10))?,
+            cache_write: from_db("cache_write", r.get(11))?,
+            cache_write_1h: from_db("cache_write_1h", r.get(12))?,
         },
         cost_usd: r.get(13),
-        latency_ms: uint(r.get(14)),
-        status: u16::try_from(r.get::<_, i64>(15)).unwrap_or(0),
+        latency_ms: from_db("latency_ms", r.get(14))?,
+        status: from_db_u16("status", r.get::<_, i64>(15))?,
         streamed: r.get(16),
-    }
+    })
 }
 
 impl crate::models::UsageBackend for Postgres {
@@ -2867,20 +2940,20 @@ impl crate::models::UsageBackend for Postgres {
                 &[
                     &self.repo,
                     &row.id,
-                    &int(row.at_ms),
+                    &to_db("at_ms", row.at_ms)?,
                     &row.branch,
                     &i64::from(row.turn),
                     &row.subject,
                     &row.model,
                     &row.api.as_str(),
                     &row.backend,
-                    &int(row.tokens.input),
-                    &int(row.tokens.output),
-                    &int(row.tokens.cache_read),
-                    &int(row.tokens.cache_write),
-                    &int(row.tokens.cache_write_1h),
+                    &to_db("input", row.tokens.input)?,
+                    &to_db("output", row.tokens.output)?,
+                    &to_db("cache_read", row.tokens.cache_read)?,
+                    &to_db("cache_write", row.tokens.cache_write)?,
+                    &to_db("cache_write_1h", row.tokens.cache_write_1h)?,
                     &row.cost_usd,
-                    &int(row.latency_ms),
+                    &to_db("latency_ms", row.latency_ms)?,
                     &i64::from(row.status),
                     &row.streamed,
                 ],
@@ -2891,16 +2964,17 @@ impl crate::models::UsageBackend for Postgres {
     }
 
     fn usage_since(&self, since_ms: u64) -> Result<Vec<crate::models::UsageRecord>, Error> {
+        let since_ms_db = to_db("since_ms", since_ms)?;
         let rows = self.query(|client| {
             client.query(
                 &format!(
                     "SELECT {USAGE_COLUMNS} FROM by_model_usage WHERE repo = $1 AND at_ms >= $2 \
                      ORDER BY at_ms, id"
                 ),
-                &[&self.repo, &int(since_ms)],
+                &[&self.repo, &since_ms_db],
             )
         })?;
-        Ok(rows.iter().map(usage_row).collect())
+        rows.iter().map(usage_row).collect()
     }
 }
 
@@ -2924,14 +2998,19 @@ impl crate::effects::EffectBackend for Postgres {
                     &entry.id,
                     &entry.branch,
                     &entry.state.as_str(),
-                    &int(entry.created_ms),
+                    &to_db("created_ms", entry.created_ms)?,
                     &text,
                 ],
             )
             .map_err(db("effect"))?;
             tx.execute(
                 "INSERT INTO by_effect_events (repo, id, at_ms, change) VALUES ($1, $2, $3, $4)",
-                &[&self.repo, &entry.id, &int(entry.created_ms), &change],
+                &[
+                    &self.repo,
+                    &entry.id,
+                    &to_db("created_ms", entry.created_ms)?,
+                    &change,
+                ],
             )
             .map_err(db("effect"))?;
             Ok(())
@@ -2971,7 +3050,7 @@ impl crate::effects::EffectBackend for Postgres {
             .map_err(db("effect"))?;
             tx.execute(
                 "INSERT INTO by_effect_events (repo, id, at_ms, change) VALUES ($1, $2, $3, $4)",
-                &[&self.repo, &id, &int(at_ms), &event],
+                &[&self.repo, &id, &to_db("at_ms", at_ms)?, &event],
             )
             .map_err(db("effect"))?;
             Ok(Some(entry))
@@ -3013,9 +3092,9 @@ impl crate::effects::EffectBackend for Postgres {
         rows.iter()
             .map(|r| {
                 Ok(crate::effects::EffectEvent {
-                    seq: uint(r.get(0)),
+                    seq: from_db("seq", r.get(0))?,
                     id: id.to_owned(),
-                    at_ms: uint(r.get(1)),
+                    at_ms: from_db("at_ms", r.get(1))?,
                     change: decode("effect event", &r.get::<_, String>(2))?,
                 })
             })
@@ -3032,7 +3111,7 @@ impl crate::effects::EffectBackend for Postgres {
                     &self.repo,
                     &ask.id,
                     &ask.branch,
-                    &int(ask.created_ms),
+                    &to_db("created_ms", ask.created_ms)?,
                     &ask.answer.is_some(),
                     &text,
                 ],
@@ -3104,7 +3183,7 @@ const KNOWLEDGE_COLUMNS: &str = "id, scope_path, scope_kind, text, source, statu
 
 fn knowledge_row(r: &Row) -> Result<crate::KnowledgeEntry, Error> {
     Ok(crate::KnowledgeEntry {
-        id: uint(r.get(0)),
+        id: from_db("id", r.get(0))?,
         scope: crate::KnowledgeScope {
             path: r.get(1),
             kind: r
@@ -3119,9 +3198,9 @@ fn knowledge_row(r: &Row) -> Result<crate::KnowledgeEntry, Error> {
             .get::<_, String>(5)
             .parse()
             .map_err(|e| Error::State(format!("knowledge status: {e}")))?,
-        created_ms: uint(r.get(6)),
+        created_ms: from_db("created_ms", r.get(6))?,
         adopted_by: r.get(7),
-        decided_ms: r.get::<_, Option<i64>>(8).map(uint),
+        decided_ms: from_db_opt("decided_ms", r.get::<_, Option<i64>>(8))?,
         note: r.get(9),
     })
 }
@@ -3146,9 +3225,9 @@ impl crate::knowledge::KnowledgeBackend for Postgres {
                         &entry.text,
                         &source,
                         &entry.status.as_str(),
-                        &int(created),
+                        &to_db("created", created)?,
                         &entry.adopted_by,
-                        &entry.decided_ms.map(int),
+                        &to_db_opt("decided_ms", entry.decided_ms)?,
                         &entry.note,
                     ],
                 )
@@ -3156,19 +3235,20 @@ impl crate::knowledge::KnowledgeBackend for Postgres {
                 .get(0))
         })?;
         Ok(crate::KnowledgeEntry {
-            id: uint(id),
+            id: from_db("id", id)?,
             created_ms: created,
             ..entry.clone()
         })
     }
 
     fn knowledge(&self, id: u64) -> Result<Option<crate::KnowledgeEntry>, Error> {
+        let id_db = to_db("id", id)?;
         let row = self.query(|client| {
             client.query_opt(
                 &format!(
                     "SELECT {KNOWLEDGE_COLUMNS} FROM by_knowledge WHERE repo = $1 AND id = $2"
                 ),
-                &[&self.repo, &int(id)],
+                &[&self.repo, &id_db],
             )
         })?;
         row.as_ref().map(knowledge_row).transpose()
@@ -3200,14 +3280,14 @@ impl crate::knowledge::KnowledgeBackend for Postgres {
                      WHERE repo = $1 AND id = $2 AND status = $11",
                     &[
                         &self.repo,
-                        &int(entry.id),
+                        &to_db("id", entry.id)?,
                         &entry.scope.path,
                         &entry.scope.kind.map(|k| k.as_str()),
                         &entry.text,
                         &source,
                         &entry.status.as_str(),
                         &entry.adopted_by,
-                        &entry.decided_ms.map(int),
+                        &to_db_opt("decided_ms", entry.decided_ms)?,
                         &entry.note,
                         &expected.as_str(),
                     ],
@@ -3222,7 +3302,7 @@ impl crate::knowledge::KnowledgeBackend for Postgres {
             let changed = tx
                 .execute(
                     "DELETE FROM by_knowledge WHERE repo = $1 AND id = $2",
-                    &[&self.repo, &int(id)],
+                    &[&self.repo, &to_db("id", id)?],
                 )
                 .map_err(db("knowledge"))?;
             Ok(changed == 1)
@@ -3243,11 +3323,11 @@ fn slot_row(r: &Row) -> Result<SlotRow, Error> {
         path: r.get(5),
         detail: r.get(6),
         host: r.get(7),
-        pid: u32::try_from(r.get::<_, i64>(8)).unwrap_or(0),
+        pid: from_db_u32("pid", r.get::<_, i64>(8))?,
         start: r.get(9),
         branch: r.get(10),
-        created_ms: uint(r.get(11)),
-        changed_ms: uint(r.get(12)),
+        created_ms: from_db("created_ms", r.get(11))?,
+        changed_ms: from_db("changed_ms", r.get(12))?,
     })
 }
 
@@ -3272,8 +3352,8 @@ impl PoolBackend for Postgres {
                     &i64::from(row.pid),
                     &row.start,
                     &row.branch,
-                    &int(row.created_ms),
-                    &int(row.changed_ms),
+                    &to_db("created_ms", row.created_ms)?,
+                    &to_db("changed_ms", row.changed_ms)?,
                 ],
             )
             .map_err(db("pool slot"))?;
@@ -3313,7 +3393,7 @@ impl PoolBackend for Postgres {
                         &i64::from(row.pid),
                         &row.start,
                         &row.branch,
-                        &int(row.changed_ms),
+                        &to_db("changed_ms", row.changed_ms)?,
                         &expected.as_str(),
                     ],
                 )
@@ -3332,5 +3412,62 @@ impl PoolBackend for Postgres {
                 .map_err(db("pool slot"))?;
             Ok(changed == 1)
         })
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact;
+
+    #[test]
+    fn a_password_is_hidden_and_a_url_without_one_is_left_alone() {
+        assert_eq!(
+            redact("postgres://by:s3cret@db.example:5432/yard"),
+            "postgres://by:***@db.example:5432/yard"
+        );
+        assert_eq!(
+            redact("postgres://by@db.example/yard"),
+            "postgres://by@db.example/yard"
+        );
+        assert_eq!(redact("host=db user=by"), "host=db user=by");
+    }
+
+    #[test]
+    fn a_multi_host_url_is_masked() {
+        assert_eq!(
+            redact("postgresql://by:pw@h1:5432,h2:5432/db"),
+            "postgresql://by:***@h1:5432,h2:5432/db"
+        );
+    }
+
+    #[test]
+    fn a_password_with_a_raw_delimiter_is_masked() {
+        for pw in [
+            "a/b", "a#b", "a?b", "12/b", "12#b", "12?b", "a/b/c", "p@ss/w",
+        ] {
+            let url = format!("postgres://by:{pw}@db:5432/yard");
+            let shown = redact(&url);
+            assert_eq!(shown, "postgres://by:***@db:5432/yard", "{url}");
+        }
+        assert_eq!(
+            redact("postgres://by:a/b@db/yard?sslmode=require"),
+            "postgres://by:***@db/yard?sslmode=require"
+        );
+    }
+
+    #[test]
+    fn an_empty_host_url_is_masked() {
+        assert_eq!(
+            redact("postgres://by:pw@/db?host=/run/pg"),
+            "postgres://by:***@/db?host=/run/pg"
+        );
+    }
+
+    #[test]
+    fn an_at_sign_after_the_authority_is_not_a_password() {
+        assert_eq!(
+            redact("postgres://by@db/yard?application_name=x"),
+            "postgres://by@db/yard?application_name=x"
+        );
     }
 }

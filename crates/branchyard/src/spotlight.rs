@@ -27,6 +27,7 @@
 //! The index is never written: it stays at `HEAD` throughout, so `git
 //! status` shows the tried changes as unstaged, and once restored, nothing.
 
+use branchyard_support::best_effort;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -34,8 +35,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::checkpoint::fault;
-use crate::state::now_ms;
 use crate::{git, DirLock, Error, Yard};
+use branchyard_support::time::now_ms;
 use branchyard_workspace::Git;
 
 const HEAD_REF: &str = "refs/branchyard-try/head";
@@ -395,11 +396,25 @@ fn restore(yard: &Yard, mut state: TryState) -> Result<(), Error> {
         write_entry(yard, &file.path, file.before.as_ref())?;
     }
     for dir in state.created_dirs.iter().rev() {
-        // Only if empty: anything else in it is not the try's.
-        let _ = fs::remove_dir(root.join(dir));
+        // Only if empty: anything else in it is not the try's, and a
+        // directory already gone is as good as removed.
+        if let Err(e) = fs::remove_dir(root.join(dir)) {
+            if !matches!(
+                e.kind(),
+                std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::NotFound
+            ) {
+                branchyard_support::best_effort(
+                    &format!("remove the try's directory {dir}"),
+                    Err::<(), _>(e),
+                );
+            }
+        }
     }
     // The index keeps HEAD's entries; refresh their stat data.
-    let _ = git::run(root, &["update-index", "-q", "--refresh"]);
+    best_effort(
+        "refresh the git index",
+        git::run(root, &["update-index", "-q", "--refresh"]),
+    );
     clear(yard)
 }
 

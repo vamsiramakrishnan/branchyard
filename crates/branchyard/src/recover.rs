@@ -22,17 +22,19 @@
 //! the branch: gone from this host, or reserved longer ago than
 //! [`crate::state::RESERVATION_TTL`].
 
+use branchyard_support::best_effort;
 use std::collections::BTreeSet;
 
 use serde_json::Value;
 
 use crate::engine::{self, Driven, End, STEP_START, STEP_SUBMIT, STEP_TURN_END};
 use crate::record::{self, Recorder};
-use crate::state::{now_ms, Lease, LeaseRow, Record, Taken, LEASE_TTL};
+use crate::state::{Lease, LeaseRow, Record, Taken, LEASE_TTL};
 use crate::{
     placement, proc, Activity, BranchStatus, Error, Event, NativeSession, RecordedEvent, Recovery,
     Yard,
 };
+use branchyard_support::time::now_ms;
 
 /// Recover every branch that needs it. A branch that cannot be recovered
 /// does not stop the others; the first such error is returned after all
@@ -75,7 +77,10 @@ pub(crate) fn all(yard: &Yard) -> Result<Vec<Recovery>, Error> {
     // registry that cannot be read never keeps the repository from
     // opening; `by services gc` says why.
     if yard.has_services() {
-        let _ = yard.reclaim_services();
+        best_effort(
+            "reclaim the services of stopped processes",
+            yard.reclaim_services(),
+        );
     }
     // Effects whose turn stopped between writing the ledger and recording
     // the gateway's answer: unknown, for reconciliation, never retried.

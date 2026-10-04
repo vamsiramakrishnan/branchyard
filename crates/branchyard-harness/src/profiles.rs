@@ -59,6 +59,7 @@ impl Profile {
 
     /// A fresh driver launching `command` instead of the profile's own, for
     /// an executable installed under another path.
+    #[allow(clippy::expect_used)] // ratchet: branchyard-harness
     pub fn driver_with(&self, command: Vec<String>) -> Box<dyn Driver> {
         match self.protocol {
             Protocol::ClaudeStreamJson => Box::new(ClaudeCode::new(command)),

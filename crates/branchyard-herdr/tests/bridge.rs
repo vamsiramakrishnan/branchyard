@@ -2,53 +2,23 @@
 //! fake `herdr` on `PATH` that records every call and hands out pane IDs.
 //! Hermetic; requires `git`, `sh`, `mkdir`, `sleep` and `kill`.
 
+#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+use branchyard_testkit::{wait, Scratch};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
+use std::time::Duration;
 
 const PLUGIN: &str = env!("CARGO_BIN_EXE_branchyard-herdr");
 
-/// Build a binary of this workspace next to the plugin's, once.
-fn built(package: &str, bin: &str) -> PathBuf {
-    let exe = PathBuf::from(PLUGIN);
-    let profile_dir = exe.parent().unwrap().to_path_buf();
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut command = Command::new(cargo);
-    command
-        .args(["build", "--quiet", "--offline", "--manifest-path"])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-        .args(["-p", package, "--bin", bin])
-        .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-    match profile_dir.file_name().and_then(|n| n.to_str()) {
-        Some("debug") => {}
-        Some("release") => {
-            command.arg("--release");
-        }
-        Some(other) => {
-            command.args(["--profile", other]);
-        }
-        None => panic!("unexpected binary location {}", exe.display()),
-    }
-    assert!(command.status().unwrap().success(), "building {bin} failed");
-    let path = profile_dir.join(bin);
-    assert!(path.is_file());
-    path
-}
-
+/// The `by` binary, built once next to the plugin's.
 fn by_exe() -> &'static Path {
-    static BY: OnceLock<PathBuf> = OnceLock::new();
-    BY.get_or_init(|| built("branchyard-cli", "by"))
+    branchyard_testkit::built("branchyard-cli", "by", Path::new(PLUGIN))
 }
 
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| built("branchyard-runtime", "fake-acp-agent"))
+fn testkit_agent() -> &'static Path {
+    branchyard_testkit::fake_agent(Path::new(PLUGIN))
 }
 
 /// Records each call as its arguments separated by \x1f, one call a line.
@@ -188,36 +158,15 @@ fn flag<'a>(call: &'a [String], name: &str) -> Option<&'a str> {
     call.get(at + 1).map(String::as_str)
 }
 
-fn wait_for(
-    what: &str,
-    timeout: Duration,
-    mut done: impl FnMut() -> bool,
-    context: impl Fn() -> String,
-) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if done() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    panic!("timed out waiting for {what}\n{}", context());
-}
-
-struct Dir(PathBuf);
+/// A scratch directory (`.0` is its path), removed on drop.
+struct Dir(PathBuf, #[allow(dead_code)] Scratch); // the Scratch is held for its Drop
 
 impl Dir {
     fn new() -> Dir {
         by_exe();
-        fake_agent();
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-herdr-test-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        Dir(fs::canonicalize(dir).unwrap())
+        testkit_agent();
+        let scratch = Scratch::new("herdr");
+        Dir(scratch.path().to_path_buf(), scratch)
     }
 
     fn repo(&self, name: &str) -> PathBuf {
@@ -235,12 +184,6 @@ impl Dir {
             assert!(command("git", &root).args(args).status().unwrap().success());
         }
         root
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -331,15 +274,13 @@ impl Served {
         let _ = Command::new("kill")
             .args(["-TERM", &self.child.id().to_string()])
             .status();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while Instant::now() < deadline {
-            if self.child.try_wait().unwrap().is_some() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        let exited = wait::try_until_for(Duration::from_secs(20), || {
+            self.child.try_wait().unwrap().is_some()
+        });
+        if exited.is_err() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 
     fn by(&self, cwd: &Path, args: &[&str]) -> Command {
@@ -350,7 +291,7 @@ impl Served {
             .arg(&self.token_file)
             .args(args);
         if matches!(args[0], "run" | "send") {
-            by.arg("--command").arg(fake_agent());
+            by.arg("--command").arg(testkit_agent());
         }
         if args[0] == "run" {
             by.args(["--harness", "gemini-cli"]);
@@ -460,7 +401,7 @@ fn branches_get_one_pane_each_and_their_states_follow_the_feed() {
     server.run(root, &["merge", "done"]);
 
     let mut bridge_process = bridge(root, &fake, &server, &bridge_log);
-    wait_for(
+    wait::until_with_context(
         "the listed branch",
         long,
         || fake.last_report("early").as_deref() == Some("idle (ready to merge)"),
@@ -503,7 +444,7 @@ fn branches_get_one_pane_each_and_their_states_follow_the_feed() {
             .spawn()
             .unwrap(),
     );
-    wait_for(
+    wait::until_with_context(
         "a working branch",
         long,
         || fake.last_report("slow").as_deref() == Some("working"),
@@ -520,7 +461,7 @@ fn branches_get_one_pane_each_and_their_states_follow_the_feed() {
             .spawn()
             .unwrap(),
     );
-    wait_for(
+    wait::until_with_context(
         "by log --follow to print the prompt",
         long,
         || {
@@ -537,7 +478,7 @@ fn branches_get_one_pane_each_and_their_states_follow_the_feed() {
         "{}",
         String::from_utf8_lossy(&cancelled.stderr)
     );
-    wait_for(
+    wait::until_with_context(
         "the cancelled branch",
         long,
         || fake.last_report("slow").as_deref() == Some("idle (interrupted)"),
@@ -545,7 +486,7 @@ fn branches_get_one_pane_each_and_their_states_follow_the_feed() {
     );
     assert_eq!(fake.reports(&slow), ["working", "idle (interrupted)"]);
     drop(hang);
-    wait_for(
+    wait::until_with_context(
         "by log --follow to print the new status",
         long,
         || {
@@ -564,7 +505,7 @@ fn branches_get_one_pane_each_and_their_states_follow_the_feed() {
 
     // Failures carry their reason.
     server.run(root, &["run", "EXIT", "--name", "bad", "--yes"]);
-    wait_for(
+    wait::until_with_context(
         "the failed branch",
         long,
         || {
@@ -581,7 +522,7 @@ fn branches_get_one_pane_each_and_their_states_follow_the_feed() {
         "{}",
         String::from_utf8_lossy(&merged.stderr)
     );
-    wait_for(
+    wait::until_with_context(
         "the merged branch",
         long,
         || fake.last_report("early").as_deref() == Some("idle (merged into main)"),
@@ -615,7 +556,7 @@ fn branches_get_one_pane_each_and_their_states_follow_the_feed() {
         "{}",
         String::from_utf8_lossy(&popup_out.stderr)
     );
-    wait_for(
+    wait::until_with_context(
         "the sent branch",
         long,
         || fake.last_report("slow").as_deref() == Some("idle (no changes)"),
@@ -634,7 +575,7 @@ fn branches_get_one_pane_each_and_their_states_follow_the_feed() {
     server.stop();
     let mut server = Served::start(root, &data, &repo, &listen);
     server.run(root, &["run", "hello", "--name", "after", "--yes"]);
-    wait_for(
+    wait::until_with_context(
         "a branch after the restart",
         long,
         || fake.last_report("after").as_deref() == Some("idle (no changes)"),
@@ -648,8 +589,10 @@ fn branches_get_one_pane_each_and_their_states_follow_the_feed() {
             l.split_whitespace()
                 .find_map(|word| word.strip_prefix("cursor="))
         })
-        .map(|c| c.parse::<u64>().unwrap())
-        .unwrap_or_else(|| panic!("no reconnect in\n{}", log()));
+        .map_or_else(
+            || panic!("no reconnect in\n{}", log()),
+            |c| c.parse::<u64>().unwrap(),
+        );
     assert!(resumed > 0);
     assert_eq!(fake.reports(&early), reports_before);
     let after = fake.opened();
@@ -660,7 +603,7 @@ fn branches_get_one_pane_each_and_their_states_follow_the_feed() {
     let after_pane = fake.pane("after");
     fake.close(&after_pane);
     server.run(root, &["send", "after", "WRITE after.txt=1", "--yes"]);
-    wait_for(
+    wait::until_with_context(
         "a second pane for a closed one",
         long,
         || fake.opened().iter().filter(|(b, _)| b == "after").count() == 2,
@@ -682,7 +625,7 @@ fn branches_get_one_pane_each_and_their_states_follow_the_feed() {
     drop(bridge_process);
     let calls = fake.calls().len();
     bridge_process = bridge(root, &fake, &server, &bridge_log);
-    wait_for(
+    wait::until_with_context(
         "the restarted bridge to report",
         long,
         || {
@@ -709,7 +652,7 @@ fn by_log_follow_prints_local_events_as_they_are_recorded() {
         let output = command(by_exe(), &repo)
             .args(args)
             .arg("--command")
-            .arg(fake_agent())
+            .arg(testkit_agent())
             .output()
             .unwrap();
         assert!(
@@ -736,14 +679,14 @@ fn by_log_follow_prints_local_events_as_they_are_recorded() {
             .unwrap(),
     );
     let read = || fs::read_to_string(&out).unwrap_or_default();
-    wait_for(
+    wait::until_with_context(
         "the first turn",
         Duration::from_secs(30),
         || read().contains("echo: first words"),
         read,
     );
     run(&["send", "b", "second words", "--yes"]);
-    wait_for(
+    wait::until_with_context(
         "the second turn",
         Duration::from_secs(30),
         || read().contains("echo: second words"),
@@ -762,7 +705,7 @@ fn by_log_follow_prints_local_events_as_they_are_recorded() {
             .unwrap(),
     );
     let lines = || fs::read_to_string(&json_out).unwrap_or_default();
-    wait_for(
+    wait::until_with_context(
         "JSON lines",
         Duration::from_secs(30),
         || lines().contains("second words"),

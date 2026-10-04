@@ -3,13 +3,14 @@
 //! deletes and multipart completion, ranges, ListObjectsV2 with paging,
 //! and multipart uploads.
 
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use super::server::{Faults, MockRequest, MockResponse, MockServer};
 use crate::auth::sigv4::{self, Credentials};
 use crate::store::xml;
-use crate::util::{hex, xml_escape};
+use crate::util::xml_escape;
 
 pub const ACCESS_KEY: &str = "AKIDSTANDIN";
 pub const SECRET_KEY: &str = "standin/secret/key";
@@ -34,7 +35,7 @@ pub struct MockS3 {
 }
 
 fn etag_of(data: &[u8]) -> String {
-    format!("\"{}\"", hex(&blake3::hash(data).as_bytes()[..16]))
+    format!("\"{}\"", hex::encode(&blake3::hash(data).as_bytes()[..16]))
 }
 
 fn error(status: u16, code: &str) -> MockResponse {
@@ -83,6 +84,7 @@ impl MockS3 {
     }
 
     /// A store on this server with the stand-in's credentials.
+    #[allow(clippy::expect_used)] // ratchet: branchyard-sync
     pub fn store(&self, bucket: &str, prefix: &str, part_size: usize) -> crate::store::s3::S3Store {
         crate::store::s3::S3Store::new(
             bucket,
@@ -100,8 +102,7 @@ impl MockS3 {
     /// Every key and its bytes, as stored.
     pub fn objects(&self) -> BTreeMap<String, Vec<u8>> {
         self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("state")
             .objects
             .iter()
             .map(|(k, o)| (k.clone(), o.data.clone()))
@@ -110,7 +111,7 @@ impl MockS3 {
 
     /// Change a stored object's bytes in place (to test integrity checks).
     pub fn corrupt(&self, key: &str) {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.state.lock_recovering("state");
         if let Some(o) = s.objects.get_mut(key) {
             if let Some(b) = o.data.last_mut() {
                 *b ^= 0x55;
@@ -119,11 +120,7 @@ impl MockS3 {
     }
 
     pub fn uploads_open(&self) -> usize {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .uploads
-            .len()
+        self.state.lock_recovering("state").uploads.len()
     }
 }
 
@@ -145,7 +142,7 @@ fn handle(state: &Mutex<State>, bucket: &str, page: usize, r: &MockRequest) -> M
     if b != bucket {
         return error(404, "NoSuchBucket");
     }
-    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = state.lock_recovering("state");
     if key.is_empty() {
         if r.method == "GET" && r.param("list-type").as_deref() == Some("2") {
             return list(&s, page, r);
@@ -248,7 +245,7 @@ fn handle(state: &Mutex<State>, bucket: &str, page: usize, r: &MockRequest) -> M
             s.uploads.remove(&id);
             let etag = format!(
                 "\"{}-{}\"",
-                hex(&blake3::hash(&data).as_bytes()[..16]),
+                hex::encode(&blake3::hash(&data).as_bytes()[..16]),
                 listed.len()
             );
             s.objects.insert(

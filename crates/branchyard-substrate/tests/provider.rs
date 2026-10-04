@@ -2,6 +2,7 @@
 //! over real gRPC, a router and real bridge processes, all in the fake
 //! cluster. Not evidence about a Substrate cluster.
 
+#![allow(clippy::unwrap_in_result, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::io::{self, BufRead, BufReader, Read};
@@ -14,7 +15,8 @@ use branchyard_sandbox::{
     SandboxState, SnapshotGuarantee, SnapshotScope,
 };
 use branchyard_substrate::{Config, Quiesce, SubstrateProvider};
-use common::{wait_exec, wait_gone, Cluster, Scratch};
+use branchyard_testkit::wait;
+use common::{Cluster, Scratch};
 
 fn setup(name: &str, scratch: &Scratch) -> Setup {
     let workspace = scratch.path("workspace");
@@ -148,10 +150,10 @@ fn each_attempt_has_its_own_credential_and_ended_ones_stay_dead() {
         .read_line(&mut line)
         .unwrap();
     let pid: u32 = line.trim().parse().unwrap();
-    wait_exec(pid, "sleep");
+    wait::exec(pid, "sleep");
     let killed = provider.end_attempt("actor").unwrap();
     assert!(killed.iter().any(|n| n == "sleep"), "{killed:?}");
-    wait_gone(pid);
+    wait::gone(pid);
     let ended = second
         .exec(&sh(Path::new("/"), "true"))
         .map(|_| String::new());
@@ -171,7 +173,7 @@ fn each_attempt_has_its_own_credential_and_ended_ones_stay_dead() {
     }
     let bridge = cluster.fake.bridge_pid("actor").unwrap();
     provider.destroy("actor").unwrap();
-    wait_gone(bridge);
+    wait::gone(bridge);
     assert!(cluster.fake.actor_names().is_empty());
 }
 
@@ -410,7 +412,7 @@ fn stop_and_checkpoint_wait_for_running_execs_or_refuse() {
         .read_line(&mut line)
         .unwrap();
     let sleeper: u32 = line.trim().parse().unwrap();
-    wait_exec(sleeper, "sleep");
+    wait::exec(sleeper, "sleep");
     let status = provider.status("busy").unwrap();
     assert_eq!(status.execs.len(), 1);
     assert!(status.execs[0].members.contains(&"sleep".to_owned()));
@@ -429,7 +431,7 @@ fn stop_and_checkpoint_wait_for_running_execs_or_refuse() {
     );
     busy(provider.stop_with("busy", Quiesce::Wait(Duration::from_millis(300))));
     // Nothing was stopped: the exec still runs and the actor is up.
-    assert!(common::alive(sleeper));
+    assert!(wait::alive(sleeper));
     assert_eq!(
         provider.inspect("busy").unwrap().unwrap().state,
         SandboxState::Running
@@ -437,7 +439,10 @@ fn stop_and_checkpoint_wait_for_running_execs_or_refuse() {
 
     // Once the work ends, a waiting checkpoint proceeds.
     let finisher = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
+        wait::settle(
+            "the checkpoint must be waiting on the exec before it ends",
+            Duration::from_millis(300),
+        );
         // SAFETY: plain syscall on the test's own sleeper.
         unsafe { libc_kill(sleeper) };
         process.wait().unwrap()
@@ -465,7 +470,7 @@ fn stop_and_checkpoint_wait_for_running_execs_or_refuse() {
     provider
         .checkpoint_with("busy", &full, Quiesce::Force)
         .unwrap();
-    wait_gone(sleeper);
+    wait::gone(sleeper);
     assert!(!process.wait().unwrap().success());
     provider.destroy("busy").unwrap();
 }

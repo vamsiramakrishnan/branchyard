@@ -13,9 +13,13 @@ pub enum Transport {
     Exec { argv: Vec<String> },
 }
 
-/// One single-quoted shell word.
+/// One shell word, quoted for a POSIX shell (plain words stay as they are).
+/// Every layer that builds a remote script quotes through here.
 pub fn quote(word: &str) -> String {
-    format!("'{}'", word.replace('\'', "'\\''"))
+    // Only a NUL byte cannot be quoted, and no shell word can hold one.
+    shlex::try_quote(&word.replace('\0', ""))
+        .map(|quoted| quoted.into_owned())
+        .unwrap_or_default()
 }
 
 impl Transport {
@@ -126,8 +130,9 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
+        let (remote, ssh_args) = args.split_last().unwrap();
         assert_eq!(
-            args,
+            ssh_args,
             [
                 "-T",
                 "-o",
@@ -142,8 +147,12 @@ mod tests {
                 "dev",
                 "--",
                 "10.0.0.7",
-                "sh -c 'echo \"$1\"' sh 'it'\\''s'",
             ]
+        );
+        // One string the remote shell splits back into `sh -c SCRIPT sh ARG`.
+        assert_eq!(
+            shlex::split(remote).unwrap(),
+            ["sh", "-c", "echo \"$1\"", "sh", "it's"]
         );
         assert_eq!(transport.describe(), "ssh dev@10.0.0.7:2222");
     }

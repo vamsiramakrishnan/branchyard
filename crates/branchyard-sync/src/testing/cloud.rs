@@ -4,6 +4,7 @@
 //! server, Google's OAuth token endpoint checking the service account's
 //! RS256 JWT, AWS IMDSv2, and an Azure managed identity endpoint).
 
+use branchyard_support::LockExt as _;
 use std::sync::{Arc, Mutex};
 
 use ring::signature::{KeyPair, RsaKeyPair, UnparsedPublicKey, RSA_PKCS1_2048_8192_SHA256};
@@ -27,6 +28,7 @@ fn kms_error(status: u16, why: &str) -> MockResponse {
 }
 
 impl MockKms {
+    #[allow(clippy::expect_used, clippy::unwrap_used)] // ratchet: branchyard-sync
     pub fn start() -> MockKms {
         let master = crate::util::random_bytes(32).expect("random");
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -35,12 +37,7 @@ impl MockKms {
             Arc::new(move |r: &MockRequest| {
                 let body: serde_json::Value =
                     serde_json::from_slice(&r.body).unwrap_or(serde_json::Value::Null);
-                let note = |what: &str| {
-                    calls
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push(what.to_owned())
-                };
+                let note = |what: &str| calls.lock_recovering("calls").push(what.to_owned());
                 // AWS: JSON 1.1 with X-Amz-Target, SigV4 for service kms.
                 if let Some(target) = r.header("x-amz-target") {
                     let hash = sigv4::sha256_hex(&r.body);
@@ -156,7 +153,7 @@ impl MockKms {
     }
 
     pub fn calls(&self) -> Vec<String> {
-        self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.calls.lock_recovering("calls").clone()
     }
 }
 
@@ -175,6 +172,7 @@ pub const IDENTITY_HEADER: &str = "identity-secret";
 impl MockMetadata {
     /// `account_key` is the PEM private key whose JWTs the OAuth endpoint
     /// accepts.
+    #[allow(clippy::expect_used)] // ratchet: branchyard-sync
     pub fn start(account_key: &str) -> MockMetadata {
         let der = crate::auth::google::pem_der(account_key).expect("PEM");
         let public = RsaKeyPair::from_pkcs8(&der)

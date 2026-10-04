@@ -16,6 +16,7 @@
 //! with a running turn: in local mode, tokens stop mistakes, not a hostile
 //! harness.
 
+use branchyard_support::best_effort;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -57,7 +58,7 @@ impl Broker {
         if path.as_os_str().len() > SOCKET_PATH_MAX {
             path = std::env::temp_dir().join(format!("by-{file}"));
         }
-        let _ = std::fs::remove_file(&path);
+        branchyard_support::cleanup_file(&path);
         let listener = UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -71,15 +72,18 @@ impl Broker {
                     }
                     let Ok(stream) = stream else { continue };
                     let yard = yard.clone();
-                    let _ = std::thread::Builder::new()
-                        .name("by-broker-conn".into())
-                        .spawn(move || serve(&yard, stream));
+                    best_effort(
+                        "start the connection thread",
+                        std::thread::Builder::new()
+                            .name("by-broker-conn".into())
+                            .spawn(move || serve(&yard, stream)),
+                    );
                 }
             });
         let accept = match accept {
             Ok(accept) => accept,
             Err(error) => {
-                let _ = std::fs::remove_file(&path);
+                branchyard_support::cleanup_file(&path);
                 return Err(error);
             }
         };
@@ -96,18 +100,20 @@ impl Broker {
 
     /// Stop accepting connections and remove the socket. Connections
     /// already open keep being served, but their tokens have been revoked.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::Release);
         // Wake the accept loop so it sees the flag.
         let _ = UnixStream::connect(&self.path);
         if let Some(accept) = self.accept.take() {
-            let _ = accept.join();
+            branchyard_support::join_reporting("broker accept", accept);
         }
-        let _ = std::fs::remove_file(&self.path);
+        branchyard_support::cleanup_file(&self.path);
     }
 }
 
 /// Answer one connection's requests until it closes.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn serve(yard: &Yard, stream: UnixStream) {
     let Ok(mut writer) = stream.try_clone() else {
         return;
@@ -202,7 +208,9 @@ impl Remote {
                 .map_err(|e| Error::State(format!("connection to the engine: {e}")))?;
             self.connection = Some((BufReader::new(stream), writer));
         }
-        let (reader, writer) = self.connection.as_mut().expect("connected above");
+        let Some((reader, writer)) = self.connection.as_mut() else {
+            return Err(Error::State("the engine connection is not open".into()));
+        };
         let request = json!({"token": self.token, "tool": tool, "arguments": arguments});
         let lost = |e: io::Error| Error::State(format!("lost the connection to the engine: {e}"));
         writeln!(writer, "{request}").map_err(lost)?;

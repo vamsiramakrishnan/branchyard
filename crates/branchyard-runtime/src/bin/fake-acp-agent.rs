@@ -70,6 +70,7 @@
 //! environment, and, for an argument after `--mcp-config` that names a
 //! file, that file's mode and the servers it lists.
 
+#![allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-runtime
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -343,7 +344,7 @@ fn next_in_sequence(dir: &str) -> String {
     };
     let text = std::fs::read_to_string(&first)
         .unwrap_or_else(|e| format!("reply sequence {}: {e}", first.display()));
-    let _ = std::fs::remove_file(&first);
+    branchyard_support::cleanup_file(&first);
     text
 }
 
@@ -570,8 +571,8 @@ impl McpClient {
 
 impl Drop for McpClient {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        branchyard_support::best_effort("kill child", self.child.kill());
+        branchyard_support::best_effort("reap child", self.child.wait());
     }
 }
 

@@ -16,11 +16,12 @@ use crate::engine::{self, Turn};
 use crate::placement;
 use crate::record;
 use crate::recover;
-use crate::state::{now_ms, Lease, Record, Taken};
+use crate::state::{Lease, Record, Taken};
 use crate::{
     git, harness, names, Branch, BranchInfo, BranchStatus, CandidateInfo, Error, NativeSession,
     Provider, Provisioning, TaskOptions, Yard,
 };
+use branchyard_support::time::now_ms;
 
 pub(crate) fn planned_names(
     yard: &Yard,
@@ -292,7 +293,7 @@ pub(crate) fn materialize(
             record.info.status = BranchStatus::Failed {
                 reason: format!("could not create the branch: {error}"),
             };
-            let _ = lease.finish(Some(&record), None);
+            branchyard_support::best_effort("finish the lease", lease.finish(Some(&record), None));
             Err(error)
         }
     }
@@ -303,7 +304,7 @@ pub(crate) fn abandon(lease: Lease, mut record: Record, why: &Error) {
     record.info.status = BranchStatus::Failed {
         reason: format!("its turn did not start: {why}"),
     };
-    let _ = lease.finish(Some(&record), None);
+    branchyard_support::best_effort("finish the lease", lease.finish(Some(&record), None));
 }
 
 /// Start a new top-level branch's plan and goal, as `options` ask, under
@@ -780,7 +781,7 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
     // an engine that stops mid-fan leaves it nothing to clean up.
     spec.persist = false;
     if let Err(error) = provider.ensure(&spec) {
-        let _ = provider.destroy(&spec.name);
+        branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
         return fresh(
             turns,
             format!("could not create the prepared sandbox: {error}"),
@@ -809,20 +810,20 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
     match prepared {
         Ok(Ok(())) => {}
         Ok(Err(why)) => {
-            let _ = provider.destroy(&spec.name);
+            branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
             return fresh(
                 turns,
                 format!("its setup failed in the prepared sandbox: {why}"),
             );
         }
         Err(error) => {
-            let _ = provider.destroy(&spec.name);
+            branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
             return fresh(turns, format!("its setup could not run: {error}"));
         }
     }
     // Paused, every child is captured at the same point.
     if capabilities.has(branchyard_sandbox::PAUSE) {
-        let _ = provider.pause(&spec.name);
+        branchyard_support::best_effort("pause the sandbox", provider.pause(&spec.name));
     }
     let mut children = Vec::new();
     for (turn, lease) in turns.iter() {
@@ -838,11 +839,14 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
             },
             _ => SandboxSpec::new(format!("{}-unplaced", turn.record.info.name)),
         };
-        let _ = crate::placement::journal_handed(yard, &turn.record, lease.fence(), &child.name);
+        branchyard_support::best_effort(
+            "journal the handed-over sandbox",
+            crate::placement::journal_handed(yard, &turn.record, lease.fence(), &child.name),
+        );
         children.push(child);
     }
     let made = provider.branch_live(&spec.name, &children);
-    let _ = provider.destroy(&spec.name);
+    branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
     for (((turn, _), child), made) in turns.iter_mut().zip(children).zip(made) {
         turn.sandbox = match made {
             Ok(_) => SandboxPlan::Handed {
@@ -859,7 +863,9 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
     }
     // Every other branch inherits the first one's setup now, before any
     // harness runs: what it produced is copied into each worktree.
-    let (source, rest) = turns.split_first_mut().expect("at least two");
+    let Some((source, rest)) = turns.split_first_mut() else {
+        return;
+    };
     let produced = source
         .0
         .record
@@ -885,14 +891,17 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
         };
         let mut recorder =
             crate::record::Recorder::fenced(&store, lease.fence(), turn.options.observer.clone());
-        let _ = crate::workspace::prepare(
-            yard,
-            &mut turn.record,
-            lease.fence(),
-            &mut recorder,
-            &|| lease.lost(),
-            &runner,
-            Some(&inherit),
+        branchyard_support::best_effort(
+            "prepare the workspace in the fan's sandbox",
+            crate::workspace::prepare(
+                yard,
+                &mut turn.record,
+                lease.fence(),
+                &mut recorder,
+                &|| lease.lost(),
+                &runner,
+                Some(&inherit),
+            ),
         );
     }
 }
@@ -1411,6 +1420,7 @@ pub(crate) struct Reincarnation {
 }
 
 /// [`reincarnate`], as a failover (`crate::fleet`) needs it.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn reincarnate_with(
     yard: &Yard,
     name: &str,

@@ -503,6 +503,7 @@ pub fn provider(args: &crate::args::RecipeArgs) -> Result<branchyard::RecipeOpti
     })
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn smoke_test(recipe: &Recipe, checks: &mut Vec<Check>) {
     let ssh = std::env::var("BRANCHYARD_SSH")
         .ok()

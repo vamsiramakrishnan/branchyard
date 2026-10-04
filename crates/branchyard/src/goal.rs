@@ -17,6 +17,7 @@
 //! `rounds` times and within its budget; met, it stays ready with the
 //! evidence recorded. Every verdict is an [`Activity::Goal`] event.
 
+use branchyard_support::best_effort;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -25,8 +26,9 @@ use crate::compare::AttemptCheck;
 use crate::fleet::JudgeSpec;
 use crate::judge::{HarnessJudge, Judge, JudgedBy};
 use crate::record::Recorder;
-use crate::state::{now_ms, Record};
+use crate::state::Record;
 use crate::{Activity, Branch, BranchStatus, Error, Event, RecordedEvent, TaskOptions, Yard};
+use branchyard_support::time::now_ms;
 
 /// The first line of a goal's follow-up turn.
 pub const FOLLOW_UP_HEADER: &str = "[branchyard goal not met]";
@@ -564,7 +566,9 @@ pub(crate) fn pursue(yard: &Yard, branch: Branch, options: &TaskOptions) -> Resu
             deterministic: check,
             by,
         })))?;
-        let goal = record.goal.as_mut().expect("read above");
+        let Some(goal) = record.goal.as_mut() else {
+            return Ok(branch);
+        };
         if verdict.met {
             goal.met = Some(true);
             store.write_fenced(&record, lease.fence())?;
@@ -585,7 +589,10 @@ pub(crate) fn pursue(yard: &Yard, branch: Branch, options: &TaskOptions) -> Resu
                 ),
             };
             recorder.finish(lease, &record)?;
-            let _ = crate::fleet::observe(yard, &name, None);
+            best_effort(
+                "record the fleet outcome",
+                crate::fleet::observe(yard, &name, None),
+            );
             return yard.branch(&name);
         }
         goal.used += 1;

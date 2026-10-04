@@ -5,6 +5,7 @@
 //! is refused; plain HTTP is refused off loopback unless explicitly
 //! allowed. Not evidence about a Substrate cluster.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

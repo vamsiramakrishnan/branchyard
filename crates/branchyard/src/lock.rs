@@ -8,6 +8,7 @@
 //! for it, nothing else. On a network file system it is only as good as the
 //! file system's own locking.
 
+use branchyard_support::best_effort;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -37,12 +38,13 @@ impl DirLock {
     /// this process) holds it; the error names who holds it, as that
     /// holder wrote.
     ///
-    /// A lock that stays held for [`WAIT`] is refused; one released within
+    /// A lock that stays held for `WAIT` is refused; one released within
     /// it, such as a copy a starting child held for an instant, is taken.
     pub fn acquire(dir: &Path, what: &str) -> Result<DirLock, Error> {
         Self::acquire_within(dir, what, WAIT)
     }
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn acquire_within(dir: &Path, what: &str, wait: Duration) -> Result<DirLock, Error> {
         std::fs::create_dir_all(dir)
             .map_err(|e| Error::State(format!("create {}: {e}", dir.display())))?;
@@ -84,10 +86,10 @@ impl DirLock {
         }
         // Who holds it, for the next process's error; the lock itself does
         // not depend on this.
-        let _ = file.set_len(0);
-        let _ = file.seek(SeekFrom::Start(0));
+        best_effort("truncate the lock file", file.set_len(0));
+        best_effort("rewind the lock file", file.seek(SeekFrom::Start(0)));
         let _ = writeln!(file, "{what} (pid {})", std::process::id());
-        let _ = file.sync_data();
+        best_effort("sync the lock file", file.sync_data());
         Ok(DirLock { path, _file: file })
     }
 

@@ -40,8 +40,9 @@ use branchyard_sandbox::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::state::{now_ms, Fence, Record, SandboxKind, SandboxRow, Store};
+use crate::state::{Fence, Record, SandboxKind, SandboxRow, Store};
 use crate::{Activity, Provider, Yard};
+use branchyard_support::time::now_ms;
 
 /// Checkpoints that keep a provider snapshot, by default.
 pub const DEFAULT_SNAPSHOTS: u32 = 3;
@@ -372,46 +373,37 @@ pub(crate) struct Lifecycle {
     pub max_paused: u32,
 }
 
-/// The lifecycle `provider` asks for; `None` for a local harness.
-pub(crate) fn lifecycle(provider: Option<&Provider>) -> Option<Lifecycle> {
-    let (keep, snapshots, max_paused) = match provider? {
-        Provider::Local => return None,
-        Provider::Microsandbox(o) => (o.keep, o.snapshots, o.max_paused),
-        Provider::Substrate(o) => (o.keep, o.snapshots, o.max_paused),
-        // A recipe's machine has no checkpoints to keep.
-        Provider::Recipe(o) => (o.keep, Some(0), o.max_paused),
-    };
-    Some(Lifecycle {
-        keep: keep == SandboxKeep::Pause,
-        snapshots: snapshots.unwrap_or(DEFAULT_SNAPSHOTS),
-        max_paused: max_paused.unwrap_or(DEFAULT_MAX_PAUSED),
-    })
+impl Lifecycle {
+    /// What provider options with these settings ask for; `snapshots` and
+    /// `max_paused` default when unset.
+    pub(crate) fn of(
+        keep: SandboxKeep,
+        snapshots: Option<u32>,
+        max_paused: Option<u32>,
+    ) -> Lifecycle {
+        Lifecycle {
+            keep: keep == SandboxKeep::Pause,
+            snapshots: snapshots.unwrap_or(DEFAULT_SNAPSHOTS),
+            max_paused: max_paused.unwrap_or(DEFAULT_MAX_PAUSED),
+        }
+    }
 }
 
-/// `microsandbox` or `substrate`.
+/// The lifecycle `provider` asks for; `None` for a local harness.
+pub(crate) fn lifecycle(provider: Option<&Provider>) -> Option<Lifecycle> {
+    crate::providers::of(provider).lifecycle()
+}
+
+/// `local`, `microsandbox`, `substrate` or `recipe`.
 pub(crate) fn provider_name(provider: &Provider) -> &'static str {
-    match provider {
-        Provider::Local => "local",
-        Provider::Microsandbox(_) => "microsandbox",
-        Provider::Substrate(_) => "substrate",
-        Provider::Recipe(_) => "recipe",
-    }
+    provider.kind().name()
 }
 
 /// Which provider, and where, holds a row: sandboxes and snapshots are
 /// only ever used through the same one. A Substrate tag belongs to its
 /// atespace and is created from with its template.
 pub(crate) fn provider_key(provider: &Provider) -> String {
-    match provider {
-        Provider::Substrate(o) => format!(
-            "substrate:{}/{}/{}",
-            o.endpoint.trim_end_matches('/'),
-            o.atespace(),
-            o.template
-        ),
-        Provider::Recipe(o) => format!("recipe:{}", o.name),
-        other => provider_name(other).to_owned(),
-    }
+    provider.kind().key()
 }
 
 /// Whether the provider could keep a sandbox: why not, otherwise.
@@ -463,13 +455,7 @@ fn named(stem: &str, suffix: &str, max: usize) -> String {
 /// ([`Yard::use_sandbox_provider`]) or the SDK's for Microsandbox, a signed
 /// client for Substrate.
 pub(crate) fn open(yard: &Yard, provider: &Provider) -> Result<Arc<dyn SandboxProvider>, String> {
-    match provider {
-        Provider::Local => Err("a local harness has no sandbox".into()),
-        Provider::Microsandbox(options) => crate::placement::microsandbox(yard, options),
-        Provider::Recipe(options) => Ok(crate::placement::recipe_provider(yard, options)),
-        Provider::Substrate(options) => crate::placement::substrate_signed(options)
-            .map(|p| Arc::new(p) as Arc<dyn SandboxProvider>),
-    }
+    provider.kind().open(yard)
 }
 
 /// A turn's sandbox, and where it came from.
@@ -478,22 +464,34 @@ pub(crate) struct Acquired {
     pub origin: SandboxOrigin,
 }
 
+/// The sandbox a turn wants, for [`acquire`].
+pub(crate) struct Wanted<'a> {
+    pub record: &'a Record,
+    pub fence: &'a Fence,
+    /// The provider's key, as recorded on its sandboxes.
+    pub key: &'a str,
+    pub spec: &'a SandboxSpec,
+    pub environment: Option<&'a crate::environments::SandboxEnvironment>,
+}
+
 /// Get the turn's sandbox for `record` through `provider`: the branch's
 /// kept one, resumed; else one branched from its seed's snapshot; else a
 /// fresh one from `spec`. `journal` is called with the sandbox's name
 /// before anything is created or resumed. A kept or seeded sandbox that
 /// cannot be used is a fallback to a fresh one, with the reason.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn acquire(
     store: &Store,
-    record: &Record,
-    fence: &Fence,
     provider: &dyn SandboxProvider,
-    key: &str,
-    spec: &SandboxSpec,
-    environment: Option<&crate::environments::SandboxEnvironment>,
     journal: &dyn Fn(&str) -> Result<(), String>,
+    wanted: Wanted<'_>,
 ) -> Result<Acquired, String> {
+    let Wanted {
+        record,
+        fence,
+        key,
+        spec,
+        environment,
+    } = wanted;
     let mut reasons: Vec<String> = Vec::new();
     // The branch's kept sandbox.
     let kept = store
@@ -537,7 +535,10 @@ pub(crate) fn acquire(
                         })
                     }
                     Err(error) => {
-                        let _ = provider.destroy(&row.name);
+                        branchyard_support::best_effort(
+                            "destroy the sandbox",
+                            provider.destroy(&row.name),
+                        );
                         reasons.push(format!(
                             "its kept sandbox {} could not be resumed: {error}",
                             row.name
@@ -680,7 +681,7 @@ fn branch_from_seed(
             method,
         })),
         Err(error) => {
-            let _ = provider.destroy(&spec.name);
+            branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
             Err(format!(
                 "could not branch from {}'s snapshot at checkpoint {turn}: {error}",
                 seed.branch
@@ -750,7 +751,7 @@ pub(crate) fn take_environment(
             )
         })
         .map_err(|e| {
-            let _ = provider.destroy(planned);
+            branchyard_support::best_effort("destroy the sandbox", provider.destroy(planned));
             e.to_string()
         })
 }
@@ -785,7 +786,7 @@ fn branch_environment(
     match made {
         Ok(_) => Ok(snapshot.method),
         Err(error) => {
-            let _ = provider.destroy(&spec.name);
+            branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
             Err(error.to_string())
         }
     }
@@ -811,6 +812,7 @@ pub(crate) fn release_environment(
 /// End a turn's sandbox `name`: park it (pause and record it for the next
 /// turn) when the branch keeps its sandbox and the provider can pause, then
 /// evict beyond `max_paused`; otherwise destroy it. Returns what to record.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn park(
     yard: &Yard,
     record: &Record,
@@ -821,7 +823,7 @@ pub(crate) fn park(
     let Some(policy) = lifecycle(record.provider.as_ref()) else {
         return Vec::new();
     };
-    let kind = record.provider.as_ref().map(provider_name).unwrap_or("");
+    let kind = record.provider.as_ref().map_or("", provider_name);
     let key = record
         .provider
         .as_ref()
@@ -886,14 +888,20 @@ pub(crate) fn park(
             }));
         }
         Err(error) => {
-            let _ = store
-                .sandboxes()
-                .take_sandbox(&row.branch, SandboxKind::Kept, name);
-            let _ = store.backend().finish_step(
-                fence,
-                fence.turn,
-                STEP_PARK,
-                &json!({ "kept": false }),
+            branchyard_support::best_effort(
+                "take the sandbox's row",
+                store
+                    .sandboxes()
+                    .take_sandbox(&row.branch, SandboxKind::Kept, name),
+            );
+            branchyard_support::best_effort(
+                "finish the journal step",
+                store.backend().finish_step(
+                    fence,
+                    fence.turn,
+                    STEP_PARK,
+                    &json!({ "kept": false }),
+                ),
             );
             destroy(&mut said, Some(format!("could not pause it: {error}")));
             return said;
@@ -955,6 +963,7 @@ pub(crate) fn evict(yard: &Yard, key: &str, max: u32, except: &str) -> Vec<Activ
 /// provider snapshot, keeping the newest `snapshots`. Journaled as
 /// [`STEP_SNAPSHOT`] before anything is taken. Returns the snapshot, and
 /// what to record.
+#[allow(clippy::expect_used)] // ratchet: branchyard
 pub(crate) fn snapshot_turn(
     yard: &Yard,
     fence: &Fence,
@@ -966,7 +975,9 @@ pub(crate) fn snapshot_turn(
     let Some(policy) = lifecycle(record.provider.as_ref()) else {
         return (None, said);
     };
-    let provider_options = record.provider.clone().expect("a lifecycle has a provider");
+    let Some(provider_options) = record.provider.clone() else {
+        return (None, said);
+    };
     let store = yard.store();
     let key = provider_key(&provider_options);
     let kind = provider_name(&provider_options);
@@ -981,7 +992,10 @@ pub(crate) fn snapshot_turn(
         return (None, said);
     };
     kept.turn = Some(turn);
-    let _ = store.sandboxes().put_sandbox(&kept);
+    branchyard_support::best_effort(
+        "record the sandbox's row",
+        store.sandboxes().put_sandbox(&kept),
+    );
     if policy.snapshots == 0 {
         return (None, said);
     }
@@ -1031,7 +1045,10 @@ pub(crate) fn snapshot_turn(
                     (planned.clone(), Detail::of(&guarantee))
                 })
                 .map_err(|e| {
-                    let _ = provider.destroy(&planned);
+                    branchyard_support::best_effort(
+                        "destroy the sandbox",
+                        provider.destroy(&planned),
+                    );
                     e.to_string()
                 })
         }
@@ -1067,12 +1084,18 @@ pub(crate) fn snapshot_turn(
                 detail: detail.text(),
                 used_ms: now_ms(),
             };
-            let _ = store.sandboxes().put_sandbox(&row);
-            let _ = store.backend().finish_step(
-                fence,
-                fence.turn,
-                STEP_SNAPSHOT,
-                &json!({ "handle": handle }),
+            branchyard_support::best_effort(
+                "record the sandbox's row",
+                store.sandboxes().put_sandbox(&row),
+            );
+            branchyard_support::best_effort(
+                "finish the journal step",
+                store.backend().finish_step(
+                    fence,
+                    fence.turn,
+                    STEP_SNAPSHOT,
+                    &json!({ "handle": handle }),
+                ),
             );
             Some(SandboxSnapshot {
                 provider: kind.to_owned(),
@@ -1083,11 +1106,14 @@ pub(crate) fn snapshot_turn(
             })
         }
         Err(reason) => {
-            let _ = store.backend().finish_step(
-                fence,
-                fence.turn,
-                STEP_SNAPSHOT,
-                &json!({ "error": reason }),
+            branchyard_support::best_effort(
+                "finish the journal step",
+                store.backend().finish_step(
+                    fence,
+                    fence.turn,
+                    STEP_SNAPSHOT,
+                    &json!({ "error": reason }),
+                ),
             );
             said.push(event(SandboxEvent::NoSnapshot { turn, reason }));
             None
@@ -1304,7 +1330,7 @@ pub(crate) fn recover_steps(
     }
     let options = record.provider.as_ref()?;
     let provider = open(yard, options).ok()?;
-    let _ = provider.destroy(&planned);
+    branchyard_support::best_effort("destroy the sandbox", provider.destroy(&planned));
     Some(format!(
         "destroyed the unfinished snapshot sandbox {planned}"
     ))

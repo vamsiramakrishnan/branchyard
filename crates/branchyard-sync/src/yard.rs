@@ -114,8 +114,7 @@ impl SourceProvider for YardTasks {
             .map_err(|e| Error::local(format!("reading branches: {e}")))?
             .into_iter()
             .find(|b| b.name == branch)
-            .map(|b| b.git_branch)
-            .unwrap_or_else(|| branch.clone());
+            .map_or_else(|| branch.clone(), |b| b.git_branch);
         Ok(Some(Box::new(self.source_for(
             task,
             &branch,

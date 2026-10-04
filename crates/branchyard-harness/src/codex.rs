@@ -138,6 +138,7 @@ impl Codex {
         frame(&json!({"id": self.next_id, "method": method, "params": params}))
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-harness
     fn thread_request(&mut self) -> Frame {
         let open = self.open.clone().expect("the thread opens after open()");
         let mut params = json!({

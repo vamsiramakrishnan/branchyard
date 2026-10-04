@@ -26,6 +26,7 @@
 //! assert_eq!(replayed.sent, 4);
 //! ```
 
+#![allow(clippy::expect_used, clippy::panic)] // ratchet: branchyard-harness
 use std::collections::VecDeque;
 use std::path::Path;
 

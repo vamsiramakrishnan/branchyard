@@ -5,6 +5,7 @@
 //! the worktree coming back, and a host worktree that changed meanwhile
 //! refused. Requires `git` and `sh`.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

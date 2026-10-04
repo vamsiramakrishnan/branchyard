@@ -5,6 +5,7 @@
 //! `unshare -rn` works there (then the fault is ours). The advisory and
 //! refused cases are in `egress_advisory.rs`, which turns confinement off.
 
+#![allow(clippy::panic)] // tests: a panic is the failure report
 mod common;
 mod egress_common;
 

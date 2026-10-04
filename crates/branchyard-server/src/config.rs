@@ -580,6 +580,7 @@ pub struct ConnectorsConfig {
 
 impl Config {
     /// Defaults for everything but repositories, tokens and data directory.
+    #[allow(clippy::expect_used)] // ratchet: branchyard-server
     pub fn new(data_dir: PathBuf) -> Config {
         Config {
             listen: DEFAULT_LISTEN.parse().expect("valid default address"),
@@ -1401,6 +1402,7 @@ pub mod schema {
 
     /// The full JSON Schema document, pretty-printed with a trailing
     /// newline, matching `schema/server.config.json` byte for byte.
+    #[allow(clippy::expect_used)] // ratchet: branchyard-server
     pub fn server_config_json() -> String {
         let schema = schema_for!(super::FileConfig);
         let mut text =
@@ -1501,9 +1503,9 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
     let mut inline = false;
     for token in file.tokens {
         let secret = match (&token.token, &token.token_file) {
-            (Some(_), None) => {
+            (Some(secret), None) => {
                 inline = true;
-                token.token.unwrap()
+                secret.clone()
             }
             (None, Some(file)) => read_token_file(&resolve(file.clone()), &mut warnings)?,
             _ => {

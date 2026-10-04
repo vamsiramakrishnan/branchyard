@@ -220,7 +220,12 @@ fn copy_dir(source: &Path, target: &Path, method: &mut Method) -> io::Result<()>
         .collect::<io::Result<_>>()?;
     entries.sort();
     for entry in entries {
-        let name = entry.file_name().expect("a directory entry has a name");
+        let name = entry.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} has no file name", entry.display()),
+            )
+        })?;
         let to = target.join(name);
         let meta = fs::symlink_metadata(&entry)?;
         if meta.is_dir() {
@@ -236,6 +241,7 @@ fn copy_dir(source: &Path, target: &Path, method: &mut Method) -> io::Result<()>
 }
 
 /// Clone one regular file, or copy it when the filesystem cannot clone.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
 pub fn clone_file(source: &Path, target: &Path) -> io::Result<Method> {
     let method = match platform::clone(source, target) {
         Ok(()) => Method::Clone,
@@ -244,7 +250,7 @@ pub fn clone_file(source: &Path, target: &Path) -> io::Result<Method> {
         Err(_) => {
             // Nothing half-made is left by a refused clone; a byte copy
             // follows. fs::copy keeps the permission bits.
-            let _ = fs::remove_file(target);
+            branchyard_support::cleanup_file(target);
             fs::copy(source, target)?;
             Method::Copy
         }
@@ -322,6 +328,7 @@ mod platform {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

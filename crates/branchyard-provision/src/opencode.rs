@@ -69,7 +69,7 @@ impl Provisioner for OpenCode {
             plan.auth = Some(resolved.method.to_owned());
             match resolved.method {
                 "api-key" => {
-                    let key = resolved.env_key.expect("an env method has a key");
+                    let key = resolved.env()?;
                     plan.secret_env(key, key, context.secret(key).unwrap_or_default(), true);
                 }
                 "auth-file" => {

@@ -15,11 +15,12 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::now_ms;
 use crate::{
     harness, placement, run, Activity, Branch, BranchStatus, Budget, Effort, Error, Provisioning,
     RecordedEvent, TaskOptions, Yard,
 };
+use branchyard_support::rng::SplitMix64;
+use branchyard_support::time::now_ms;
 
 // ---------------------------------------------------------------------------
 // Task kinds
@@ -29,6 +30,8 @@ use crate::{
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(strum::Display, strum::EnumIter, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum TaskKind {
     Bugfix,
     Feature,
@@ -56,23 +59,7 @@ impl TaskKind {
     ];
 
     pub fn as_str(self) -> &'static str {
-        match self {
-            TaskKind::Bugfix => "bugfix",
-            TaskKind::Feature => "feature",
-            TaskKind::Refactor => "refactor",
-            TaskKind::Review => "review",
-            TaskKind::Research => "research",
-            TaskKind::Docs => "docs",
-            TaskKind::Migration => "migration",
-            TaskKind::Tests => "tests",
-            TaskKind::Other => "other",
-        }
-    }
-}
-
-impl fmt::Display for TaskKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        self.into()
     }
 }
 
@@ -193,9 +180,9 @@ pub struct Classification {
 
 /// Infer a task's kind from its prompt, with no model call: each word
 /// (lowercase letters and digits) that starts with one of a kind's
-/// [`KEYWORDS`] scores a point for that kind, and the prompt's first word,
+/// `KEYWORDS` scores a point for that kind, and the prompt's first word,
 /// usually the imperative verb, scores three. The highest score wins, ties
-/// going to the kind listed first in [`KEYWORDS`]; no match is
+/// going to the kind listed first in `KEYWORDS`; no match is
 /// [`TaskKind::Other`].
 pub fn classify(prompt: &str) -> Classification {
     let lower = prompt.to_lowercase();
@@ -290,7 +277,7 @@ pub(crate) fn effort_text(effort: Effort) -> String {
 }
 
 /// A judge harness: run read-only on a scratch branch with a rubric and
-/// the candidates' diffs, answering a JSON verdict. See [`crate::judge`].
+/// the candidates' diffs, answering a JSON verdict. See `crate::judge`.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JudgeSpec {
@@ -516,6 +503,8 @@ pub fn recorded_route(events: &[RecordedEvent]) -> Option<RouteDecision> {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(strum::Display, strum::EnumString, strum::EnumIter, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum BranchOutcome {
     Merged,
     JudgedBest,
@@ -528,26 +517,11 @@ pub enum BranchOutcome {
 
 impl BranchOutcome {
     pub fn as_str(self) -> &'static str {
-        match self {
-            BranchOutcome::Merged => "merged",
-            BranchOutcome::JudgedBest => "judged_best",
-            BranchOutcome::Ready => "ready",
-            BranchOutcome::Failed => "failed",
-            BranchOutcome::Interrupted => "interrupted",
-        }
+        self.into()
     }
 
     pub fn parse(text: &str) -> Result<BranchOutcome, Error> {
-        [
-            BranchOutcome::Merged,
-            BranchOutcome::JudgedBest,
-            BranchOutcome::Ready,
-            BranchOutcome::Failed,
-            BranchOutcome::Interrupted,
-        ]
-        .into_iter()
-        .find(|o| o.as_str() == text)
-        .ok_or_else(|| Error::State(format!("unknown outcome {text:?}")))
+        Ok(crate::store_codec::parse_text("outcome", text)?)
     }
 
     /// The outcome a branch's status says, or `None` while it has not
@@ -635,8 +609,7 @@ pub(crate) fn observe(
     let route = recorded_route(&events);
     let kind = route
         .as_ref()
-        .map(|d| d.kind)
-        .unwrap_or_else(|| classify(&record.info.prompt).kind);
+        .map_or_else(|| classify(&record.info.prompt).kind, |d| d.kind);
     let mut score = previous.as_ref().and_then(|p| p.score);
     if let Some((judge_score, picked)) = judged {
         score = Some(judge_score);
@@ -777,27 +750,23 @@ pub fn stats(rows: &[OutcomeRecord]) -> Vec<CandidateStats> {
 // ---------------------------------------------------------------------------
 // The router
 
-/// SplitMix64: small, seedable and the same everywhere, so a seeded route
-/// is reproducible.
+/// A seeded generator for the router, [`SplitMix64`]: the same everywhere,
+/// so a seeded route is reproducible.
 #[derive(Clone, Debug)]
-pub struct Rng(u64);
+pub struct Rng(SplitMix64);
 
 impl Rng {
     pub fn new(seed: u64) -> Rng {
-        Rng(seed)
+        Rng(SplitMix64::new(seed))
     }
 
     pub fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
+        self.0.next_u64()
     }
 
     /// Uniform in the open interval (0, 1).
     pub fn uniform(&mut self) -> f64 {
-        ((self.next_u64() >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        self.0.uniform()
     }
 
     fn normal(&mut self) -> f64 {
@@ -835,11 +804,7 @@ impl Rng {
 
 /// A seed from the clock and the process, for unseeded routes.
 pub fn fresh_seed() -> u64 {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    Rng::new(nanos ^ (u64::from(std::process::id()) << 32)).next_u64()
+    branchyard_support::rng::fresh_seed()
 }
 
 /// One candidate the router chose.
@@ -889,7 +854,7 @@ pub(crate) type Availability<'a> = &'a dyn Fn(&FleetCandidate) -> Result<(), Str
 /// outcomes for this kind, ties going to the earlier candidate. Each round
 /// picks without replacement; more attempts than candidates start another
 /// round.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // ratchet: branchyard
 pub(crate) fn plan(
     kind: TaskKind,
     kind_source: &str,
@@ -965,7 +930,9 @@ pub(crate) fn plan(
                     best = Some((at, draw));
                 }
             }
-            let (at, draw) = best.expect("the pool is not empty");
+            let Some((at, draw)) = best else {
+                return Err(Error::State("the candidate pool is empty".into()));
+            };
             let stats = find(&entry.candidates[pool[at]]);
             let history = match stats {
                 Some(s) if s.runs > 0 => format!(

@@ -78,7 +78,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318 OTEL_SERVICE_NAME=by-prod by s
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | The collector's base URL; spans go to `<it>/v1/traces` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | The full traces URL, used as is; wins over the above |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` (or `..._TRACES_PROTOCOL`) | `http/protobuf` (the default) or `http/json`. `grpc` is not built in: the server warns and exports nothing; point it at the collector's HTTP port, 4318 |
-| `OTEL_EXPORTER_OTLP_HEADERS` (or `..._TRACES_HEADERS`) | `key=value,key2=value2`, percent-decoded, sent with each export (an API key, a tenant header) |
+| `OTEL_EXPORTER_OTLP_HEADERS` (or `..._TRACES_HEADERS`) | `key=value,key2=value2`, percent-decoded (`+` stays a plus), sent with each export (an API key, a tenant header) |
 | `OTEL_SERVICE_NAME` | The resource's `service.name`; default `branchyard-server` |
 | `OTEL_SDK_DISABLED=true`, `OTEL_TRACES_EXPORTER=none` | No export |
 
@@ -104,6 +104,19 @@ The admission's context is stored with the operation (`StoredOperation::trace`),
 - **From clients.** Send `traceparent` on any operation's `POST`; a malformed one starts a new trace.
 
 **Why not the OpenTelemetry crates.** `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp` and `tracing-opentelemetry` are not in `Cargo.lock` or the local registry, and this was built offline, so they could not be added. [`telemetry.rs`](../crates/branchyard-server/src/telemetry.rs) implements the part the server needs instead: the span model, W3C `traceparent` parsing and generation, a batching tracer behind a pluggable `SpanExporter` trait (`MemoryExporter` for tests and embedding), and `OtlpExporter`, which encodes OTLP's `ExportTraceServiceRequest` with `prost` (already a workspace dependency, through the Substrate provider) or as OTLP's JSON mapping, and posts it with `reqwest`. Replacing it with `tracing-opentelemetry` later changes this module only. Not implemented: OTLP over gRPC, sampling (every operation is traced when an exporter is set), span events and links, and metrics or logs over OTLP (metrics are Prometheus only).
+
+## Survived failures
+
+Some failures are acceptable (a temporary directory that cannot be removed, a process that is already gone, a lease released on a path that cannot return an error) but none is acceptable unseen. The [`branchyard-support`](../crates/branchyard-support/src/lib.rs) crate is the one way the workspace says "this may fail; carry on, but say so":
+
+- A best-effort step that fails logs a `warn` through `tracing` with a context string and the error: `best-effort step failed: release a lease dropped without finish: ...`. `by` commands show it on stderr; `by serve` and `branchyard-herdr` write it with the rest of their logs. A process can also install a sink (`set_failure_sink`) to receive each one as a structured `Failure`.
+- A lock whose holder panicked (std calls it poisoned) is used anyway, as before, but the first use logs `lock `NAME` was poisoned by a panic in another thread; recovering its data (taken at FILE:LINE)`, once per poisoning.
+- A branch's turn thread that panics appends a `warning` event ("the turn's thread panicked: ...") to the branch's own event log, besides the log line, so `by events` and `by watch` show it.
+- A thread joined during shutdown that ended in a panic logs `join the NAME thread: it panicked: ...` instead of dropping the payload.
+- A system clock set before 1970 reads as the epoch, and the first read logs `the system clock is set before 1970-01-01; reading it as the epoch`. Every part of Branchyard reads the clock through `branchyard_support::time::now_ms`, so this is one message, not one silent zero per crate.
+- A failed read of the system random generator is an error where an id is made (`by run` and the other commands that start a task say `the system random generator failed`); it no longer yields an id made from zeros. A seed for jitter or routing that cannot be had from the system falls back to one mixed from the clock and process id, and logs `seeding from the clock and process id instead`.
+
+Set `BRANCHYARD_LOG=branchyard_support=off` to silence them; there is no other switch, on purpose.
 
 ## `by stats`
 

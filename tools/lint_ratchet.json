@@ -1,0 +1,35 @@
+{
+  "allows": {
+    "branchyard": 28,
+    "branchyard-bridge": 12,
+    "branchyard-cli": 32,
+    "branchyard-client": 1,
+    "branchyard-controls": 2,
+    "branchyard-harness": 6,
+    "branchyard-herdr": 5,
+    "branchyard-mcp": 2,
+    "branchyard-microsandbox": 4,
+    "branchyard-provision": 5,
+    "branchyard-qualify": 2,
+    "branchyard-recipe": 1,
+    "branchyard-runtime": 5,
+    "branchyard-sandbox": 1,
+    "branchyard-server": 29,
+    "branchyard-setup": 3,
+    "branchyard-substrate": 4,
+    "branchyard-support": 3,
+    "branchyard-sync": 14,
+    "branchyard-workspace": 3
+  },
+  "file_wide": [
+    "crates/branchyard-bridge/src/client.rs",
+    "crates/branchyard-harness/src/conformance.rs",
+    "crates/branchyard-runtime/src/bin/fake-acp-agent.rs",
+    "crates/branchyard-sandbox/src/conformance.rs",
+    "crates/branchyard-server/src/companion/store.rs",
+    "crates/branchyard-server/src/store.rs",
+    "crates/branchyard-server/src/telemetry.rs",
+    "crates/branchyard-server/src/triggers/store.rs",
+    "crates/branchyard-substrate/src/fake.rs"
+  ]
+}

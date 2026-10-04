@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Validate the vendored Herdr detection data; never treat it as authorization."""
+
 import json
 import tomllib
 from pathlib import Path
@@ -20,8 +21,9 @@ def main():
         ids = [r["id"] for r in rules]
         if len(ids) != len(set(ids)):
             raise ValueError(f"duplicate rule ID: {agent}")
-        entries.append({"id": agent, "version": manifest["version"],
-                        "rules": len(rules), "source": str(path.relative_to(ROOT))})
+        entries.append(
+            {"id": agent, "version": manifest["version"], "rules": len(rules), "source": str(path.relative_to(ROOT))}
+        )
     print(json.dumps({"kind": "terminal-observation-catalog", "agents": entries}, indent=2))
 
 

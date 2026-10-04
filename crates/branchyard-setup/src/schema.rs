@@ -49,6 +49,7 @@ pub fn protocol_json() -> String {
     pretty(&Value::Object(doc))
 }
 
+#[allow(clippy::expect_used)] // ratchet: branchyard-setup
 fn pretty(value: &Value) -> String {
     let mut text = serde_json::to_string_pretty(value).expect("a schema serializes");
     text.push('\n');

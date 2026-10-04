@@ -20,15 +20,16 @@ Checked and reported, but not required unless asked for:
   Always informational: a served repository only needs the harnesses its
   requests actually name.
 """
+
 import argparse
 import json
 import os
-from pathlib import Path
 import platform
 import shutil
 import socket
 import subprocess
 import sys
+from pathlib import Path
 from urllib.parse import urlsplit
 
 # Kept in sync by hand with crates/branchyard-harness/src/profiles.rs's

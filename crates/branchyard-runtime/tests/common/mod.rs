@@ -1,7 +1,6 @@
 #![allow(dead_code)]
-
+#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use branchyard_harness::acp::Acp;
@@ -55,17 +54,6 @@ pub fn start(name: &str) -> (Session, PathBuf) {
         &Environment::new(dir.join("home")),
     );
     (session, dir)
-}
-
-/// True while `pid` is a live, non-zombie process.
-pub fn alive(pid: u32) -> bool {
-    let out = Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-        .unwrap();
-    let stat = String::from_utf8_lossy(&out.stdout);
-    let stat = stat.trim();
-    !stat.is_empty() && !stat.starts_with('Z')
 }
 
 pub fn background_pid(text: &str) -> u32 {

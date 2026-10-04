@@ -2,14 +2,15 @@
 //! agent starts the MCP server the engine projected into its session, speaks
 //! MCP to it, and reports each tool result in its reply.
 
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;
-use std::time::{Duration, Instant};
 
 use branchyard::{
     Activity, BranchStatus, Budget, ChildBudget, Envelope, Provisioning, Seat, Seats, TaskOptions,
 };
+use branchyard_testkit::wait;
 use common::{text, Client, Fixture};
 use serde_json::{json, Value};
 
@@ -259,11 +260,7 @@ fn the_server_refuses_a_forged_token_while_the_real_one_works() {
             .unwrap()
     });
     let token_file = f.root.join(".branchyard/delegation/root.json");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !token_file.is_file() {
-        assert!(Instant::now() < deadline, "no token file");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait::until("the token file", || token_file.is_file());
     let token: Value = serde_json::from_str(&fs::read_to_string(&token_file).unwrap()).unwrap();
     let token = token["token"].as_str().unwrap();
 

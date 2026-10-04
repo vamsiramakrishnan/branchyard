@@ -35,6 +35,7 @@
 | [Comparison](comparison.md) | How do Scion, OpenRig and Herdr compare with Branchyard, feature by feature with cited sources, and what should Branchyard absorb from each? |
 | [Vendoring](vendoring.md) | Which controls have been copied, why, and how are they adapted and upgraded? |
 | [Live testing](testing-live.md) | What do I run on a machine with real harnesses, credentials and KVM, what should happen, and where do I record it? |
+| [CI gates](ci-gates.md) | Which checks keep dependencies, licenses, docs, features, unused code, Python and test coverage from decaying, what fails them, and how do I run each locally? |
 | [Validation](validation.md) | What has actually passed, what failed upstream, and what remains untested? |
 | [Third-party notices](../THIRD_PARTY.md) | Which revisions and licenses apply to the copied sources? |
 

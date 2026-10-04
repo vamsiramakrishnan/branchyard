@@ -22,6 +22,7 @@
 //! With a state directory, each machine's result is kept in a file, so a
 //! later process can exec in, pause, resume or destroy it by name.
 
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -147,7 +148,7 @@ impl RecipeProvider {
     }
 
     fn machine(&self, name: &str) -> Option<Machine> {
-        let mut machines = self.machines.lock().unwrap_or_else(|e| e.into_inner());
+        let mut machines = self.machines.lock_recovering("machines");
         if let Some(machine) = machines.get(name) {
             return Some(machine.clone());
         }
@@ -158,7 +159,7 @@ impl RecipeProvider {
     }
 
     fn record(&self, name: &str, machine: Option<Machine>) -> Result<(), ProviderError> {
-        let mut machines = self.machines.lock().unwrap_or_else(|e| e.into_inner());
+        let mut machines = self.machines.lock_recovering("machines");
         match &machine {
             Some(machine) => {
                 machines.insert(name.to_owned(), machine.clone());
@@ -188,7 +189,7 @@ impl RecipeProvider {
                 std::fs::rename(&temporary, &file)?;
             }
             None => {
-                let _ = std::fs::remove_file(&file);
+                branchyard_support::cleanup_file(&file);
             }
         }
         Ok(())
@@ -399,7 +400,14 @@ impl SandboxProvider for RecipeProvider {
         // Until the wrapper says the program starts, stderr is the
         // transport's and the wrapper's; whatever came before the marker is
         // kept for the caller.
-        let mut stderr = BufReader::new(child.stderr.take().expect("piped"));
+        let Some(piped) = child.stderr.take() else {
+            branchyard_support::best_effort("kill wrapper", child.kill());
+            branchyard_support::best_effort("reap wrapper", child.wait());
+            return Err(ProviderError::Io(std::io::Error::other(
+                "the wrapper's stderr is not piped",
+            )));
+        };
+        let mut stderr = BufReader::new(piped);
         let mut before = Vec::new();
         let mut line = Vec::new();
         let started = loop {
@@ -470,7 +478,10 @@ impl SandboxProvider for RecipeProvider {
         };
         if machine.held == Held::Running {
             // Best effort: the machine is going away regardless.
-            let _ = self.remote(name, STOP, &[&key(name)]);
+            branchyard_support::best_effort(
+                "send the command to the remote provider",
+                self.remote(name, STOP, &[&key(name)]),
+            );
         }
         if let Some(destroy) = &self.recipe.destroy {
             self.lifecycle(name, destroy, Mode::Destroy, &machine.result)?;
@@ -547,13 +558,8 @@ impl RemoteProcess {
     }
 
     fn kill_local(&mut self) {
-        if let Some(pgid) = i32::try_from(self.child.id())
-            .ok()
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
-        }
-        let _ = self.child.kill();
+        branchyard_support::kill_group(self.child.id());
+        branchyard_support::best_effort("kill child", self.child.kill());
     }
 }
 
@@ -609,7 +615,7 @@ impl Process for RemoteProcess {
         self.torn_down = true;
         let names = self.remote(TEARDOWN).unwrap_or_default();
         self.kill_local();
-        let _ = self.child.try_wait();
+        branchyard_support::best_effort("check whether the wrapper exited", self.child.try_wait());
         names
             .lines()
             .map(str::trim)
@@ -626,12 +632,18 @@ impl Drop for RemoteProcess {
         }
         match self.try_wait() {
             Ok(Some(_)) => {
-                let _ = self.remote(FORGET);
+                branchyard_support::best_effort(
+                    "send the command to the remote provider",
+                    self.remote(FORGET),
+                );
             }
             _ => {
-                let _ = self.remote(KILL);
+                branchyard_support::best_effort(
+                    "send the command to the remote provider",
+                    self.remote(KILL),
+                );
                 let _ = self.teardown();
-                let _ = self.child.wait();
+                branchyard_support::best_effort("reap child", self.child.wait());
             }
         }
     }

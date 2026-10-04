@@ -33,12 +33,14 @@ use crate::graph;
 use crate::placement::{Placement, SandboxPlan};
 use crate::projection::{ENV_BRANCH, ENV_ROOT};
 use crate::record::Recorder;
-use crate::state::{now_ms, Begun, Fence, Lease, ProcessRow, Record, Store};
+use crate::state::{Begun, Fence, Lease, ProcessRow, Record, Store};
+use crate::store_codec::deadline_capped;
 use crate::{
     git, names, Activity, Branch, BranchStatus, Budget, CandidateInfo, DecisionSource,
     DeliveredVia, Error, Event, NativeSession, PermissionDecision, PermissionRequest, Policy,
     StallAction, SteerState, TaskOptions, TurnOutcome, Yard,
 };
+use branchyard_support::time::now_ms;
 
 /// How long a harness may take to complete its handshake.
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -224,7 +226,10 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
             record.info.status = BranchStatus::Failed {
                 reason: error.to_string(),
             };
-            let _ = store.backend().finish(&fence, Some(&record), None);
+            branchyard_support::best_effort(
+                "finish the turn's journal step",
+                store.backend().finish(&fence, Some(&record), None),
+            );
             Err(error)
         }
     };
@@ -233,7 +238,10 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
     // The outcome store learns how the turn ended; best-effort, it never
     // changes what happened.
     if result.is_ok() {
-        let _ = crate::fleet::observe(turn.yard, &fence.branch, None);
+        branchyard_support::best_effort(
+            "record the fleet outcome",
+            crate::fleet::observe(turn.yard, &fence.branch, None),
+        );
         // A delegated child's plan awaiting approval goes to its parent.
         crate::plan::settled(turn.yard, &fence.branch);
         if matches!(&result, Ok(b) if b.info.status == BranchStatus::Ready) {
@@ -306,7 +314,7 @@ fn drive(
     let deadline_ms = bounds
         .budget
         .max_duration
-        .map(|limit| now_ms().saturating_add(limit.as_millis() as u64));
+        .map(|limit| deadline_capped(now_ms(), limit));
     store.backend().set_deadline(fence, deadline_ms)?;
     let driven = run(recorder, turn, record, bounds, lease, started, deadline)?;
     journal(
@@ -319,7 +327,6 @@ fn drive(
     Ok(driven)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run(
     recorder: &mut Recorder,
     turn: &Turn<'_>,
@@ -377,9 +384,8 @@ fn run(
     // token in its home, before the sandbox exists. The token file is
     // removed, and the gateway's audit log read a last time, when this
     // function returns.
-    let deadline_ms = deadline.map(|at| {
-        now_ms().saturating_add(at.saturating_duration_since(Instant::now()).as_millis() as u64)
-    });
+    let deadline_ms =
+        deadline.map(|at| deadline_capped(now_ms(), at.saturating_duration_since(Instant::now())));
     // One scope: the person's ceiling over what the branch asked for,
     // which its connectors, models, network and token all follow.
     let (scoped, narrowed) = crate::access::scoped(turn.yard, record);
@@ -706,8 +712,7 @@ fn run(
                 record.info.worktree.display(),
                 turn.fork_source
                     .as_deref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "another worktree".into()),
+                    .map_or_else(|| "another worktree".into(), |p| p.display().to_string()),
                 turn.profile.harness,
             ),
         })

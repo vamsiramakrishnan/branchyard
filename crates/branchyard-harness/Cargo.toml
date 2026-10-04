@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Harness driver contract and protocol drivers for Claude Code, Codex and ACP agents"
+
+[lints]
+workspace = true
 
 [features]
 # Derive schemars::JsonSchema on wire event types, for schema/contract.json;
@@ -16,7 +20,7 @@ agent-client-protocol-schema = { version = "1.9", default-features = false }
 branchyard-controls = { path = "../branchyard-controls" }
 # For `conformance::assert_conforms` and serializable events; already in the
 # tree through serde_json.
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-schemars = { version = "1", optional = true }
-uuid = { version = "1.26.1", features = ["v4"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+schemars = { workspace = true, optional = true }
+uuid = { workspace = true }

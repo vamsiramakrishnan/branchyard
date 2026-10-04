@@ -346,7 +346,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), E
         fs::rename(&tmp, path)
     })();
     if written.is_err() {
-        let _ = fs::remove_file(&tmp);
+        branchyard_support::cleanup_file(&tmp);
     }
     written.map_err(fail)
 }

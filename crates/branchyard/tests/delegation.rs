@@ -2,6 +2,7 @@
 //! envelopes, budgets, authority and cancellation. The MCP server and a
 //! harness calling it are tested end to end in `branchyard-mcp`.
 
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;
@@ -11,6 +12,7 @@ use branchyard::{
     Activity, BranchStatus, Budget, ChildBudget, Delegate, Envelope, Error, Policy, Provisioning,
     Seat, Seats, SecretSource, Spawn, SteerState, TaskOptions, Yard,
 };
+use branchyard_testkit::wait;
 use common::{edit_record, fake_agent, Fixture};
 
 /// Root options that may delegate. The MCP server is never started here,
@@ -36,14 +38,6 @@ fn denied(result: Result<impl std::fmt::Debug, Error>, needle: &str) {
     match result {
         Err(Error::Denied(why)) if why.contains(needle) => {}
         other => panic!("expected a denial mentioning {needle:?}, got {other:?}"),
-    }
-}
-
-fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -244,7 +238,7 @@ fn a_parent_steers_its_running_child() {
         .unwrap();
     let delegate = root.delegate(options).unwrap();
     delegate.spawn(spawn("AWAIT_STEER", "kid")).unwrap();
-    wait_until("the child to wait for steering", || {
+    wait::until("the child to wait for steering", || {
         delegate
             .inspect("kid")
             .is_ok_and(|i| i.last_message.contains("waiting for steering"))
@@ -436,7 +430,7 @@ fn tokens_are_issued_per_turn_and_forged_ones_are_refused() {
             .unwrap()
     });
     let token_file = f.root.join(".branchyard/delegation/root.json");
-    wait_until("the token file", || token_file.is_file());
+    wait::until("the token file", || token_file.is_file());
     let file: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&token_file).unwrap()).unwrap();
     use std::os::unix::fs::PermissionsExt;
@@ -496,7 +490,7 @@ fn tokens_are_issued_per_turn_and_forged_ones_are_refused() {
 }
 
 fn root_waits_for(f: &Fixture, name: &str) {
-    wait_until(name, || {
+    wait::until(name, || {
         f.yard.branch(name).unwrap().info().status != BranchStatus::Running
     });
 }

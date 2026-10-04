@@ -1168,7 +1168,7 @@ pub(crate) fn wait_subtree(yard: &Yard, name: &str) -> Result<Vec<BranchInfo>, E
                 // A panic in a child's thread has already been reported by
                 // the runtime; its record says `running` until recovered,
                 // and the others go on.
-                let _ = handle.join();
+                branchyard_support::join_reporting("child turn", handle);
             }
             continue;
         }
@@ -1224,31 +1224,52 @@ pub(crate) fn start_turn(
     } = prepared;
     let name = record.info.name.clone();
     let thread_yard = yard.clone();
-    let started = std::thread::Builder::new()
-        .name(format!("by-{name}"))
-        .spawn(move || {
-            // The outcome is the branch's status; errors are recorded there.
-            let _ = engine::execute(
-                Turn {
-                    yard: &thread_yard,
-                    record,
-                    profile,
-                    command,
-                    mode,
-                    prompt: &prompt,
-                    options: &options,
-                    fork_source: None,
-                    note,
-                    sandbox: Default::default(),
-                },
-                lease,
+    let panic_yard = yard.clone();
+    let panic_branch = name.clone();
+    let started = branchyard_support::spawn_named(
+        format!("by-{name}"),
+        // A panic in the turn is otherwise only a line on stderr; put it in
+        // the branch's own event log, where its readers look.
+        move |panic| {
+            let event = RecordedEvent {
+                at_ms: branchyard_support::time::now_ms(),
+                activity: Activity::Warning(format!(
+                    "the turn's thread panicked: {}",
+                    panic.message
+                )),
+            };
+            branchyard_support::best_effort(
+                "record a turn thread's panic",
+                panic_yard.store().append(&panic_branch, &event, None),
             );
-        });
+        },
+        move || {
+            // The outcome is the branch's status; errors are recorded there.
+            branchyard_support::best_effort(
+                "run the delegated turn",
+                engine::execute(
+                    Turn {
+                        yard: &thread_yard,
+                        record,
+                        profile,
+                        command,
+                        mode,
+                        prompt: &prompt,
+                        options: &options,
+                        fork_source: None,
+                        note,
+                        sandbox: Default::default(),
+                    },
+                    lease,
+                ),
+            );
+        },
+    );
     match started {
         Ok(handle) => {
             let previous = lock(&yard.hub.running).insert(name, handle);
             if let Some(previous) = previous {
-                let _ = previous.join();
+                branchyard_support::join_reporting("previous turn", previous);
             }
             Ok(())
         }
@@ -1258,7 +1279,10 @@ pub(crate) fn start_turn(
                 record.info.status = BranchStatus::Failed {
                     reason: format!("could not start a thread: {error}"),
                 };
-                let _ = store.write(&record);
+                branchyard_support::best_effort(
+                    "mark a branch failed after its thread would not start",
+                    store.write(&record),
+                );
             }
             Err(Error::Io(error))
         }
@@ -1369,12 +1393,15 @@ impl Local {
             Ok(value) => (done(value), false),
             Err(error) => (error.to_string(), true),
         };
-        let _ = recorder.record(Activity::Delegation {
-            tool: tool.to_owned(),
-            branch: branch.to_owned(),
-            outcome,
-            refused,
-        });
+        branchyard_support::best_effort(
+            "record the activity",
+            recorder.record(Activity::Delegation {
+                tool: tool.to_owned(),
+                branch: branch.to_owned(),
+                outcome,
+                refused,
+            }),
+        );
     }
 
     fn spawn(&self, request: &Spawn) -> Result<Spawned, Error> {
@@ -2432,7 +2459,10 @@ impl Local {
         for branch in [self.branch.as_str(), to] {
             if let Ok(mut recorder) = Recorder::open(&store, branch, self.options.observer.clone())
             {
-                let _ = recorder.record(Activity::Message(message.clone()));
+                branchyard_support::best_effort(
+                    "record the activity",
+                    recorder.record(Activity::Message(message.clone())),
+                );
             }
         }
         // The one call site a delivery hook (by default, steering `to`'s
@@ -2856,6 +2886,7 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

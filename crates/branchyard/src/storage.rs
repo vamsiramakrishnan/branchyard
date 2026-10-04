@@ -31,8 +31,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::{now_ms, Store};
+use crate::state::Store;
 use crate::{Error, Yard};
+use branchyard_support::time::now_ms;
 
 /// Directory artifact bytes are stored under, inside `.branchyard/` (or a
 /// server's data directory).
@@ -415,7 +416,7 @@ struct TempBlob(Option<PathBuf>);
 impl Drop for TempBlob {
     fn drop(&mut self) {
         if let Some(path) = self.0.take() {
-            let _ = std::fs::remove_file(path);
+            branchyard_support::cleanup_file(path);
         }
     }
 }
@@ -425,6 +426,7 @@ impl Drop for TempBlob {
 /// install exactly that file at its content address. Returns the digest
 /// and size. Opening `path` once and never again means the stored bytes are
 /// the bytes that were hashed, whatever happens to `path` meanwhile.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn store_blob(dir: &Path, path: &Path) -> Result<(String, u64), Error> {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let io = |what: &str, p: &Path, e: std::io::Error| {
@@ -468,7 +470,9 @@ fn store_blob(dir: &Path, path: &Path) -> Result<(String, u64), Error> {
     if std::fs::metadata(&dest).is_ok_and(|m| m.len() == size) {
         return Ok((digest, size));
     }
-    let parent = dest.parent().expect("blob_path has a parent");
+    let parent = dest
+        .parent()
+        .ok_or_else(|| Error::State(format!("blob path {} has no parent", dest.display())))?;
     std::fs::create_dir_all(parent).map_err(|e| io("create", parent, e))?;
     // Immutable once written: never opened for writing again.
     if let Ok(meta) = std::fs::metadata(&temp_path) {
@@ -501,8 +505,7 @@ pub(crate) fn publish(
     let (digest, size) = store_blob(store.dir(), path)?;
     let name = name.unwrap_or_else(|| {
         path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| digest.clone())
+            .map_or_else(|| digest.clone(), |n| n.to_string_lossy().into_owned())
     });
     let row = store.storage().create_artifact(&NewArtifact {
         digest,
@@ -627,7 +630,7 @@ pub(crate) fn gc_after_removal(store: &Store) -> Result<(), Error> {
         storage.delete_artifact(&row.artifact.id)?;
         if storage.digest_refcount(&row.artifact.digest)? == 0 {
             let path = blob_path(store.dir(), &row.artifact.digest);
-            let _ = std::fs::remove_file(&path);
+            branchyard_support::cleanup_file(&path);
         }
     }
     for row in scratch {
@@ -636,7 +639,7 @@ pub(crate) fn gc_after_removal(store: &Store) -> Result<(), Error> {
             continue;
         }
         storage.delete_scratch(&row.area.name)?;
-        let _ = std::fs::remove_dir_all(scratch_dir(store, &row.area.name));
+        branchyard_support::cleanup_dir(scratch_dir(store, &row.area.name));
     }
     Ok(())
 }

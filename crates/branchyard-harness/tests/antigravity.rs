@@ -1,6 +1,7 @@
 //! Antigravity driver against transcripts recorded from Antigravity CLI
 //! 1.2.11 without a model call, and against the headless-mode documentation.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use branchyard_harness::antigravity::Antigravity;
 use branchyard_harness::conformance::{decode, feed, Replay, Transcript};
 use branchyard_harness::{

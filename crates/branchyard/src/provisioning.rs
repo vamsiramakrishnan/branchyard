@@ -106,7 +106,7 @@ impl TurnFile {
 
 impl Drop for TurnFile {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+        branchyard_support::cleanup_dir(&self.dir);
     }
 }
 

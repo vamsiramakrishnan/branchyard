@@ -4,13 +4,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Selected upstream harness controls, adapted for Branchyard"
+
+[lints]
+workspace = true
 
 [dependencies]
 # The catalogs in catalog/*.toml, embedded and read at run time.
-serde = { version = "1", features = ["derive"] }
-toml = "1.1.6"
+serde = { workspace = true, features = ["derive"] }
+toml = { workspace = true }
 
 [dev-dependencies]
 # Tests read vendored TypeScript sources as JSON (src/tsdata.rs).
-serde_json = "1"
+serde_json = { workspace = true }

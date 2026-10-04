@@ -31,6 +31,7 @@
 //! object; objects written by a swap that lost are unreferenced and the
 //! collector reclaims them.
 
+use branchyard_support::LockExt as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -405,14 +406,11 @@ impl Remote {
     }
 
     pub fn sealer(&self) -> Sealer {
-        self.sealer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.sealer.lock_recovering("sealer").clone()
     }
 
     pub(crate) fn set_sealer(&self, sealer: Sealer) {
-        *self.sealer.lock().unwrap_or_else(|e| e.into_inner()) = sealer;
+        *self.sealer.lock_recovering("sealer") = sealer;
     }
 
     /// Rotate the tenant key (see [`crate::seal::rotate`]): `wrapper`
@@ -600,7 +598,7 @@ impl Remote {
     /// the two proceeds.
     pub fn begin_write(&self) -> Result<Mark> {
         let sealer = self.write_sealer()?;
-        let nonce = crate::util::hex(&crate::util::random_bytes(8)?);
+        let nonce = hex::encode(&crate::util::random_bytes(8)?);
         let key = format!(
             "locks/writers/{}-{nonce}",
             sealer.keyed("device", &self.settings.device)
@@ -617,7 +615,10 @@ impl Remote {
                 .put_if_absent(&key, &sealer.seal(&key, &serde_json::to_vec(&record)?)?)?;
             match self.read_lock("locks/sweep")? {
                 Some((sweep, _)) if self.lock_live(&sweep) => {
-                    let _ = self.store.delete_if_match(&key, &generation);
+                    branchyard_support::best_effort(
+                        "delete the object if it is unchanged",
+                        self.store.delete_if_match(&key, &generation),
+                    );
                     self.retrier.sleeper.sleep(self.retrier.backoff(attempt));
                 }
                 _ => {
@@ -669,13 +670,16 @@ impl Remote {
 
     /// Remove this writer's mark.
     pub fn end_write(&self, mark: Mark) {
-        let _ = self.store.delete_if_match(&mark.key, &mark.generation);
+        branchyard_support::best_effort(
+            "delete the object if it is unchanged",
+            self.store.delete_if_match(&mark.key, &mark.generation),
+        );
     }
 
     /// Record an object this process stored, for [`Remote::usage`].
     fn note_upload(&self, bytes: u64) {
         let now = self.clock.now();
-        let mut uploaded = self.uploaded.lock().unwrap_or_else(|e| e.into_inner());
+        let mut uploaded = self.uploaded.lock_recovering("uploaded");
         // Older than any count still used: no longer needed.
         uploaded
             .retain(|(at, _)| at + USAGE_MAX_AGE_MS + self.settings.skew.as_millis() as u64 > now);
@@ -699,8 +703,7 @@ impl Remote {
                         .saturating_sub(self.settings.skew.as_millis() as u64);
                     let ours: u64 = self
                         .uploaded
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
+                        .lock_recovering("uploaded")
                         .iter()
                         .filter(|(at, _)| *at >= since)
                         .map(|(_, bytes)| bytes)
@@ -755,22 +758,19 @@ impl Remote {
         std::thread::scope(|scope| {
             for _ in 0..threads {
                 scope.spawn(|| loop {
-                    if failed.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+                    if failed.lock_recovering("failed").is_some() {
                         return;
                     }
-                    let job = queue.lock().unwrap_or_else(|e| e.into_inner()).pop();
+                    let job = queue.lock_recovering("queue").pop();
                     let Some(job) = job else { return };
                     if let Err(e) = work(job) {
-                        failed
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .get_or_insert(e);
+                        failed.lock_recovering("failed").get_or_insert(e);
                         return;
                     }
                 });
             }
         });
-        match failed.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        match failed.into_inner_recovering("failed") {
             Some(e) => Err(e),
             None => Ok(()),
         }
@@ -967,7 +967,7 @@ impl Remote {
             ..SyncReport::default()
         };
         let mut mark: Option<Mark> = None;
-        let commit = crate::util::hex(&crate::util::random_bytes(12)?);
+        let commit = hex::encode(&crate::util::random_bytes(12)?);
         let result = (|| -> Result<()> {
             for round in 1..=self.settings.max_rounds {
                 report.rounds = round;
@@ -1136,7 +1136,7 @@ impl Remote {
                     }
                 }
                 next.ledger_watermark = watermark;
-                next.seq = remote.as_ref().map(|m| m.seq).unwrap_or(0) + 1;
+                next.seq = remote.as_ref().map_or(0, |m| m.seq) + 1;
                 next.writer = Writer {
                     device: self.settings.device.clone(),
                     commit: commit.clone(),

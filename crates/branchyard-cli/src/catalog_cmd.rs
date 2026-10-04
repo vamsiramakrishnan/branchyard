@@ -48,6 +48,7 @@ fn rows(target: &Target) -> Vec<Row> {
 }
 
 /// `by harnesses --all`.
+#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 pub fn harnesses(env: &Env, target: &Target, as_json: bool) -> Outcome {
     let rows = rows(target);
     if as_json {
@@ -110,7 +111,7 @@ pub fn harnesses(env: &Env, target: &Target, as_json: bool) -> Outcome {
                     Some(false) => Cell::toned("no", Tone::Dim),
                     None => Cell::toned("-", Tone::Dim),
                 },
-                Cell::plain(e.install.first().map(String::as_str).unwrap_or("-")),
+                Cell::plain(e.install.first().map_or("-", String::as_str)),
                 Cell::plain(e.login.as_deref().unwrap_or("-")),
                 Cell::plain(match e.auth_env.is_empty() {
                     true => "-".to_owned(),
@@ -131,6 +132,7 @@ pub fn harnesses(env: &Env, target: &Target, as_json: bool) -> Outcome {
 }
 
 /// `by connectors catalog`.
+#[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-cli
 pub fn connectors(env: &Env, as_json: bool) -> Outcome {
     let entries = catalog::connectors();
     // What `by catalog refresh` cached, verified; a cache that does not
@@ -236,6 +238,7 @@ pub fn connectors(env: &Env, as_json: bool) -> Outcome {
 }
 
 /// `by catalog refresh|status`.
+#[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-cli
 pub fn live(action: &crate::args::CatalogAction, as_json: bool) -> Outcome {
     use crate::args::CatalogAction;
     use crate::commands::Failure;

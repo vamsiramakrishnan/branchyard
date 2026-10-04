@@ -9,6 +9,8 @@
 //! gateway (a `file:` URL), and reads the gateway's audit log from
 //! `audit.jsonl` there.
 
+use branchyard_support::best_effort;
+use branchyard_support::time::now_ms;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -245,8 +247,14 @@ pub fn main(target: &Target, action: &GatewayAction, as_json: bool) -> Outcome {
                 running.stop(&dir)?;
                 // What it wrote before it stopped, and its record (a
                 // supervisor stopped by a signal leaves it live).
-                let _ = yard.ingest_connector_audit();
-                let _ = yard.reclaim_services();
+                best_effort(
+                    "ingest the connector audit log",
+                    yard.ingest_connector_audit(),
+                );
+                best_effort(
+                    "reclaim the services of stopped processes",
+                    yard.reclaim_services(),
+                );
                 say(
                     as_json,
                     json!({"stopped": true, "pid": running.pid}),
@@ -421,13 +429,6 @@ fn adopt(yard: &Yard, config: &Connectors, gw: &Gateway) -> Result<Service, Fail
     Ok(yard.services()?.register(&service, now)?)
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// The gateway at `gw.url` as a service: what it serves, for whom, and
 /// where.
 fn describe(yard: &Yard, config: &Connectors, gw: &Gateway, owner: ServiceOwner) -> Service {
@@ -477,7 +478,10 @@ fn supervise(
     let dir = connectors::local_dir(yard.root());
     Background::this_process(&gw.url, log).save(&dir)?;
     // A record a stopped supervisor left, and its gateway with it.
-    let _ = yard.reclaim_services();
+    best_effort(
+        "reclaim the services of stopped processes",
+        yard.reclaim_services(),
+    );
     let reader = yard.clone();
     // The effect ledger is reconciled on this timer too (docs/effects.md):
     // unknown outcomes looked up through the gateway it supervises.
@@ -486,15 +490,18 @@ fn supervise(
         command,
         log.to_path_buf(),
         Box::new(move || {
-            let _ = reader.ingest_connector_audit();
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+            branchyard_support::best_effort_once(
+                "ingest the connector audit log",
+                reader.ingest_connector_audit(),
+            );
+            let now = branchyard_support::time::now_ms() / 1000;
             let last = reconciled.load(std::sync::atomic::Ordering::Relaxed);
             if now.saturating_sub(last) >= RECONCILE_EVERY.as_secs() {
                 reconciled.store(now, std::sync::atomic::Ordering::Relaxed);
-                let _ = reader.reconcile_effects();
+                branchyard_support::best_effort_once(
+                    "reconcile the effect ledger",
+                    reader.reconcile_effects(),
+                );
             }
         }),
     )?;
@@ -647,7 +654,7 @@ pub fn connect(
         command.arg("--open");
     }
     let status = command.status();
-    let _ = std::fs::remove_file(&file);
+    branchyard_support::cleanup_file(&file);
     let status =
         status.map_err(|e| Failure::Message(format!("could not run {}: {e}", anvil[0])))?;
     match status.success() {

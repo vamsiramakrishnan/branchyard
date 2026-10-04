@@ -55,7 +55,7 @@ pub mod provider;
 mod transport;
 
 pub use provider::RecipeProvider;
-pub use transport::Transport;
+pub use transport::{quote, Transport};
 
 /// Output kept per stream, as Orca keeps: the last 1 MiB.
 pub const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
@@ -327,6 +327,7 @@ impl Ran {
 /// `BRANCHYARD_RECIPE_INSTANCE`, `BRANCHYARD_ROOT` and
 /// `BRANCHYARD_RECIPE_RESULT_SCHEMA_VERSION` added to this process's, and
 /// the last [`MAX_CAPTURE_BYTES`] of each stream kept.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-recipe
 pub fn run(
     recipe: &Recipe,
     command: &str,
@@ -394,7 +395,7 @@ pub fn run(
         false => String::new(),
     };
     if writer.is_finished() {
-        let _ = writer.join();
+        branchyard_support::join_reporting("writer", writer);
     }
     Ok(Ran {
         code: status.code(),
@@ -405,12 +406,7 @@ pub fn run(
 }
 
 fn kill_group(pid: u32) {
-    if let Some(pgid) = i32::try_from(pid)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    {
-        let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
-    }
+    branchyard_support::kill_group(pid);
 }
 
 fn tail_reader(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<String> {

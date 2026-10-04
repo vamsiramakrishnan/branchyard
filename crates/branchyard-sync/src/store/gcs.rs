@@ -21,8 +21,9 @@ use crate::http::{send, Request, Response, Url};
 use crate::store::{
     check_key, check_prefix, join, Entry, Generation, Object, ObjectStore, UploadJournal,
 };
-use crate::util::{parse_rfc3339, uri_encode};
+use crate::util::uri_encode;
 use branchyard::services::Clock;
+use branchyard_support::time::parse_rfc3339;
 
 pub const DEFAULT_PART: usize = 8 << 20;
 
@@ -174,8 +175,7 @@ fn persisted(response: &Response) -> usize {
         .header("range")
         .and_then(|r| r.rsplit('-').next())
         .and_then(|n| n.trim().parse::<usize>().ok())
-        .map(|n| n + 1)
-        .unwrap_or(0)
+        .map_or(0, |n| n + 1)
 }
 
 fn generation_of(value: &serde_json::Value) -> Result<Generation> {
@@ -343,7 +343,7 @@ impl ObjectStore for GcsStore {
         if data.len() <= self.part_size {
             return self.put_if_absent(key, data);
         }
-        let digest = crate::util::hex(&blake3::hash(data).as_bytes()[..16]);
+        let digest = hex::encode(&blake3::hash(data).as_bytes()[..16]);
         let saved: Option<Session> = journal
             .load(key)
             .and_then(|s| serde_json::from_str(&s).ok())
@@ -458,6 +458,6 @@ fn entry(key: &str, value: &serde_json::Value) -> Result<Entry> {
         modified_ms: value
             .get("updated")
             .and_then(|v| v.as_str())
-            .and_then(parse_rfc3339),
+            .and_then(|t| parse_rfc3339(t).ok()),
     })
 }

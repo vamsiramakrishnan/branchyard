@@ -13,21 +13,24 @@
 //! URL's path. Every response is streamed to the harness as it arrives,
 //! with `Transfer-Encoding: chunked` and `Connection: close`.
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+use branchyard_support::best_effort;
+use branchyard_support::{CondvarExt as _, LockExt as _};
+use std::io::{self, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use branchyard_wire as wire;
 use serde_json::{json, Value};
 
 use super::upstream::{self, Failure, Target};
 use super::usage::Meter;
-use super::{period_starts, Api, Backend, Gateway, ModelActivity, ModelCall, UsageRecord};
+use super::{Api, Backend, Gateway, ModelActivity, ModelCall, UsageRecord};
 use crate::connectors::keys;
-use crate::state::now_ms;
 use crate::{Activity, RecordedEvent, Yard};
+use branchyard_support::time::now_ms;
 
 /// Largest request head and body the gateway takes.
 const MAX_HEAD: usize = 64 * 1024;
@@ -99,7 +102,7 @@ impl TurnGateway {
 
     /// What this turn's calls have cost so far.
     pub fn metered(&self) -> f64 {
-        *self.state.metered.lock().unwrap_or_else(|e| e.into_inner())
+        *self.state.metered.lock_recovering("metered")
     }
 
     /// Stop taking calls, wait a little for those in flight, and return
@@ -123,22 +126,22 @@ impl TurnGateway {
                 SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
             });
         }
-        let _ = TcpStream::connect_timeout(&wake, Duration::from_secs(1));
+        best_effort(
+            "connect to wake the accept loop",
+            TcpStream::connect_timeout(&wake, Duration::from_secs(1)),
+        );
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            branchyard_support::join_reporting("model gateway accept", thread);
         }
         let (count, idle) = &*self.in_flight;
         let deadline = Instant::now() + DRAIN;
-        let mut active = count.lock().unwrap_or_else(|e| e.into_inner());
+        let mut active = count.lock_recovering("count");
         while *active > 0 {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
             }
-            active = idle
-                .wait_timeout(active, left)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
+            active = idle.wait_timeout_recovering(active, left, "idle").0;
         }
     }
 }
@@ -162,14 +165,14 @@ fn accept(
         }
         let Ok(stream) = stream else { continue };
         let (state, in_flight) = (state.clone(), in_flight.clone());
-        *in_flight.0.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        *in_flight.0.lock_recovering("in-flight count") += 1;
         let n = THREADS.fetch_add(1, Ordering::Relaxed);
         let spawned = std::thread::Builder::new()
             .name(format!("by-models-{n}"))
             .spawn(move || {
                 handle(stream, &state);
                 let (count, idle) = &*in_flight;
-                *count.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+                *count.lock_recovering("count") -= 1;
                 idle.notify_all();
             });
         if spawned.is_err() {
@@ -195,106 +198,29 @@ impl Request {
     }
 }
 
+/// Read one request from the harness, through the wire codec: a head it
+/// cannot frame (both `Content-Length` and `Transfer-Encoding`, a bad chunk
+/// size, a body cut short) is an `Err`, which the caller answers with 400.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn read_request(
     reader: &mut BufReader<TcpStream>,
     out: &mut TcpStream,
 ) -> Result<Option<Request>, String> {
-    let mut raw = Vec::new();
-    loop {
-        let before = raw.len();
-        let n = reader
-            .read_until(b'\n', &mut raw)
-            .map_err(|e| e.to_string())?;
-        if n == 0 {
-            return match raw.is_empty() {
-                true => Ok(None),
-                false => Err("the request ended in its head".into()),
-            };
-        }
-        if raw.len() > MAX_HEAD {
-            return Err("the request head is too large".into());
-        }
-        let line = &raw[before..];
-        if line == b"\r\n" || line == b"\n" {
-            break;
-        }
-    }
-    let mut headers = [httparse::EMPTY_HEADER; 96];
-    let mut parsed = httparse::Request::new(&mut headers);
-    match parsed.parse(&raw) {
-        Ok(httparse::Status::Complete(_)) => {}
-        _ => return Err("the request head is malformed".into()),
-    }
-    let method = parsed.method.unwrap_or("").to_owned();
-    let target = parsed.path.unwrap_or("").to_owned();
-    let headers: Vec<(String, String)> = parsed
-        .headers
-        .iter()
-        .map(|h| {
-            (
-                h.name.to_owned(),
-                String::from_utf8_lossy(h.value).trim().to_owned(),
-            )
-        })
-        .collect();
-    let find = |name: &str| {
-        headers
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.clone())
+    let bad = |e: wire::WireError| format!("the request is malformed: {e}");
+    let Some(head) = wire::read_request_head(reader, MAX_HEAD).map_err(bad)? else {
+        return Ok(None);
     };
-    if find("expect").is_some_and(|v| v.eq_ignore_ascii_case("100-continue")) {
+    let framing = wire::request_framing(&head.headers).map_err(bad)?;
+    let expects = wire::header(&head.headers, "expect")
+        .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
+    if expects && framing != wire::Framing::None {
         let _ = out.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
     }
-    let chunked = find("transfer-encoding").is_some_and(|v| {
-        v.to_ascii_lowercase()
-            .split(',')
-            .any(|t| t.trim() == "chunked")
-    });
-    let mut body = Vec::new();
-    if chunked {
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).map_err(|e| e.to_string())?;
-            let size =
-                usize::from_str_radix(line.trim().split(';').next().unwrap_or("").trim(), 16)
-                    .map_err(|_| "the request has a bad chunk size".to_owned())?;
-            if size == 0 {
-                loop {
-                    line.clear();
-                    if reader.read_line(&mut line).map_err(|e| e.to_string())? == 0
-                        || line.trim().is_empty()
-                    {
-                        break;
-                    }
-                }
-                break;
-            }
-            if body.len() + size > MAX_BODY {
-                return Err("the request body is too large".into());
-            }
-            let start = body.len();
-            body.resize(start + size, 0);
-            reader
-                .read_exact(&mut body[start..])
-                .map_err(|e| e.to_string())?;
-            line.clear();
-            reader.read_line(&mut line).map_err(|e| e.to_string())?;
-        }
-    } else if let Some(length) = find("content-length") {
-        let length: usize = length
-            .parse()
-            .map_err(|_| "the request has a bad Content-Length".to_owned())?;
-        if length > MAX_BODY {
-            return Err("the request body is too large".into());
-        }
-        body.resize(length, 0);
-        reader.read_exact(&mut body).map_err(|e| e.to_string())?;
-    }
+    let body = wire::read_body(&mut *reader, framing, MAX_BODY).map_err(bad)?;
     Ok(Some(Request {
-        method,
-        target,
-        headers,
+        method: head.method,
+        target: head.target,
+        headers: head.headers,
         body,
     }))
 }
@@ -399,6 +325,7 @@ fn reason_phrase(status: u16) -> &'static str {
 }
 
 /// Answer the harness without forwarding.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn refuse(
     out: &mut TcpStream,
     api: Api,
@@ -489,20 +416,31 @@ fn with_stream_usage(api: Api, path: &str, json: &mut Value) -> bool {
     }
 }
 
+/// The next request, or `None` once the harness is answered: nothing sent,
+/// or a request the wire codec refuses, which gets a 400 and no more.
+fn take_request(reader: &mut BufReader<TcpStream>, out: &mut TcpStream) -> Option<Request> {
+    match read_request(reader, out) {
+        Ok(request) => request,
+        Err(why) => {
+            refuse(out, Api::Generic, 400, "bad_request", &why, &[]);
+            None
+        }
+    }
+}
+
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn handle(stream: TcpStream, state: &TurnState) {
     let started = Instant::now();
     let Ok(mut out) = stream.try_clone() else {
         return;
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(300)));
+    best_effort(
+        "restore the stream's read timeout",
+        stream.set_read_timeout(Some(Duration::from_secs(300))),
+    );
     let mut reader = BufReader::new(stream);
-    let request = match read_request(&mut reader, &mut out) {
-        Ok(Some(request)) => request,
-        Ok(None) => return,
-        Err(why) => {
-            refuse(&mut out, Api::Generic, 400, "bad_request", &why, &[]);
-            return;
-        }
+    let Some(request) = take_request(&mut reader, &mut out) else {
+        return;
     };
     let Some((api, path, named)) = route(&request.target) else {
         refuse(
@@ -729,8 +667,8 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 let why = (!call.failed_over.is_empty()).then(|| call.failed_over.join("; "));
                 done(&mut call, "failed", status, why);
                 let _ = write_head(&mut out, &response, false);
-                let _ = write_chunk(&mut out, &kept);
-                let _ = out.write_all(b"0\r\n\r\n");
+                let _ = wire::write_chunk(&mut out, &kept);
+                let _ = out.write_all(wire::LAST_CHUNK);
                 let _ = out.flush();
             }
             None => {
@@ -766,7 +704,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 Ok(0) => break,
                 Ok(n) => {
                     meter.feed(&buf[..n]);
-                    if !client_gone && write_chunk(&mut out, &buf[..n]).is_err() {
+                    if !client_gone && wire::write_chunk(&mut out, &buf[..n]).is_err() {
                         // The harness went away: stop, which ends the
                         // backend's generation too.
                         client_gone = true;
@@ -820,13 +758,16 @@ fn handle(stream: TcpStream, state: &TurnState) {
         streamed: call.streamed,
     };
     if let Some(cost) = call.cost_usd {
-        *state.metered.lock().unwrap_or_else(|e| e.into_inner()) += cost;
+        *state.metered.lock_recovering("metered") += cost;
     }
-    let _ = state.yard.store().usage().put_usage(&row);
+    best_effort(
+        "record the model usage",
+        state.yard.store().usage().put_usage(&row),
+    );
     done(&mut call, decision, status, reason);
     alert(state);
     if !no_body && !client_gone && broken.is_none() {
-        let _ = out.write_all(b"0\r\n\r\n");
+        let _ = out.write_all(wire::LAST_CHUNK);
     }
     let _ = out.flush();
 }
@@ -862,20 +803,10 @@ fn write_head(out: &mut TcpStream, response: &upstream::Response, no_body: bool)
     out.flush()
 }
 
-fn write_chunk(out: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
-    if bytes.is_empty() {
-        return Ok(());
-    }
-    out.write_all(format!("{:x}\r\n", bytes.len()).as_bytes())?;
-    out.write_all(bytes)?;
-    out.write_all(b"\r\n")?;
-    out.flush()
-}
-
 /// Refuse a call the branch's budget or the yard's period budgets leave
 /// no room for.
 fn within_budgets(state: &TurnState) -> Result<(), String> {
-    let metered = *state.metered.lock().unwrap_or_else(|e| e.into_inner());
+    let metered = *state.metered.lock_recovering("metered");
     if let Some(max) = state.max_usd {
         let spent = state.spent_before + metered;
         if spent >= max {
@@ -922,7 +853,7 @@ fn within_budgets(state: &TurnState) -> Result<(), String> {
 
 /// The yard's spending today and this month (UTC).
 fn periods(state: &TurnState) -> Result<(super::UsageTotals, super::UsageTotals), String> {
-    let (day_start, month_start) = period_starts(now_ms());
+    let (day_start, month_start) = branchyard_support::time::period_starts(now_ms());
     let rows = state
         .yard
         .store()
@@ -957,7 +888,7 @@ fn alert(state: &TurnState) {
     let Ok((day, month)) = periods(state) else {
         return;
     };
-    let (day_start, month_start) = period_starts(now_ms());
+    let (day_start, month_start) = branchyard_support::time::period_starts(now_ms());
     let checks = [
         ("day", "usd", day.cost_usd, budget.daily_usd, day_start),
         (
@@ -1009,9 +940,13 @@ fn append(state: &TurnState, activity: ModelActivity) {
         at_ms: now_ms(),
         activity: Activity::Model(Box::new(activity)),
     };
-    let _ = state.yard.store().append(&state.branch, &event, None);
+    best_effort(
+        "append the event to the branch's log",
+        state.yard.store().append(&state.branch, &event, None),
+    );
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1083,5 +1018,65 @@ mod tests {
         let o: Value = serde_json::from_str(&error_body(Api::Openai, 429, "slow")).unwrap();
         assert_eq!(o["error"]["type"], "rate_limit_error");
         assert_eq!(o["error"]["message"], "slow");
+    }
+
+    /// A harness's connection to `take_request`: it sends `bytes` and
+    /// closes its write side; what the gateway read, and what it answered.
+    fn exchange(bytes: &[u8]) -> (Option<Request>, String) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let _ = client.write_all(bytes);
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut out = server.try_clone().unwrap();
+        let mut reader = BufReader::new(server);
+        let request = take_request(&mut reader, &mut out);
+        drop((reader, out));
+        let mut answer = String::new();
+        let _ = client.read_to_string(&mut answer);
+        (request, answer)
+    }
+
+    #[test]
+    fn every_valid_request_in_the_wire_corpus_is_read() {
+        for (name, bytes, body) in wire::corpus::requests_valid() {
+            let (request, answer) = exchange(&bytes);
+            let request = request.unwrap_or_else(|| panic!("{name}: answered {answer:?}"));
+            assert_eq!(request.body, body, "{name}");
+            assert!(answer.is_empty(), "{name}: {answer:?}");
+        }
+    }
+
+    #[test]
+    fn every_malformed_request_in_the_wire_corpus_gets_a_400() {
+        for (name, bytes) in wire::corpus::requests_malformed() {
+            let (request, answer) = exchange(&bytes);
+            assert!(request.is_none(), "{name}: was read");
+            assert!(
+                answer.starts_with("HTTP/1.1 400 "),
+                "{name}: answered {answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn content_length_with_transfer_encoding_is_refused_not_guessed() {
+        let (request, answer) = exchange(
+            b"POST /openai/v1/responses HTTP/1.1\r\nContent-Length: 4\r\n\
+              Transfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n",
+        );
+        assert!(request.is_none());
+        assert!(answer.starts_with("HTTP/1.1 400 "), "{answer:?}");
+        assert!(answer.contains("Transfer-Encoding"), "{answer:?}");
+    }
+
+    #[test]
+    fn a_connection_that_sends_nothing_is_not_answered() {
+        let (request, answer) = exchange(b"");
+        assert!(request.is_none());
+        assert!(answer.is_empty());
     }
 }

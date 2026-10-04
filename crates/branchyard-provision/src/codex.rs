@@ -99,7 +99,7 @@ impl Provisioner for Codex {
             plan.auth = Some(resolved.method.to_owned());
             let content = match resolved.method {
                 "api-key" => {
-                    let key = resolved.env_key.expect("an env method has a key");
+                    let key = resolved.env()?;
                     let value = context.secret(key).unwrap_or_default();
                     // Scion's json.dump(indent=2): its key order, not sorted.
                     let payload = json!({"auth_mode": "apikey", "OPENAI_API_KEY": value});
@@ -121,10 +121,7 @@ impl Provisioner for Codex {
                 _ => unreachable!("every method of AUTH is handled"),
             };
             plan.edit(AUTH_FILE, true, Edit::Put(content));
-            let secret = resolved
-                .env_key
-                .or(resolved.file_secret)
-                .expect("a method names its secret");
+            let secret = resolved.secret()?;
             plan.deliver(
                 secret,
                 Via::File {

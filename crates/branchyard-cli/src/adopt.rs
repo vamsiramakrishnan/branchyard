@@ -21,7 +21,6 @@
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
 use branchyard::{AdoptSpec, Adoption, Yard};
 use branchyard_workspace::Git;
@@ -29,7 +28,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::commands::{self, print, Env, Failure, Outcome, Target};
-use crate::usage::{self, rfc3339_ms};
+use crate::usage;
+use branchyard_support::time::parse_rfc3339;
 
 /// Orca's `encodeClaudeProjectPath`: one dash per character that is not
 /// an ASCII letter or digit (runs are not collapsed), a trailing slash
@@ -138,8 +138,7 @@ fn modified_ms(path: &Path) -> Option<u64> {
     fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
+        .and_then(branchyard_support::time::system_time_ms)
 }
 
 /// One Claude Code transcript.
@@ -167,7 +166,10 @@ pub fn claude_session(file: &Path) -> Option<Session> {
             summary = record["summary"].as_str().map(one_line);
             continue;
         }
-        if let Some(at) = record["timestamp"].as_str().and_then(rfc3339_ms) {
+        if let Some(at) = record["timestamp"]
+            .as_str()
+            .and_then(|t| parse_rfc3339(t).ok())
+        {
             session.started_ms = Some(session.started_ms.map_or(at, |s| s.min(at)));
             session.updated_ms = Some(session.updated_ms.map_or(at, |u| u.max(at)));
         }
@@ -232,7 +234,10 @@ pub fn codex_session(file: &Path, wanted: &dyn Fn(&str) -> bool) -> Option<Sessi
         let Ok(record) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if let Some(at) = record["timestamp"].as_str().and_then(rfc3339_ms) {
+        if let Some(at) = record["timestamp"]
+            .as_str()
+            .and_then(|t| parse_rfc3339(t).ok())
+        {
             session.started_ms = Some(session.started_ms.map_or(at, |s| s.min(at)));
             session.updated_ms = Some(session.updated_ms.map_or(at, |u| u.max(at)));
         }
@@ -513,8 +518,10 @@ fn short(commit: &str) -> &str {
 }
 
 fn age(now_ms: u64, at: Option<u64>) -> String {
-    at.map(|at| crate::render::age_text(now_ms.saturating_sub(at) / 1000))
-        .unwrap_or_else(|| "-".into())
+    at.map_or_else(
+        || "-".into(),
+        |at| crate::render::age_text(now_ms.saturating_sub(at) / 1000),
+    )
 }
 
 /// What `by adopt` was asked.
@@ -545,7 +552,7 @@ pub fn main(env: &Env, target: &Target, asked: &Asked<'_>) -> Outcome {
     let yard = commands::open()?;
     let vars = |name: &str| std::env::var(name).ok();
     let found = sessions(yard.root(), &vars);
-    let now = usage::now_ms();
+    let now = branchyard_support::time::now_ms();
     match (asked.session, asked.list) {
         (None, _) | (Some(_), true) => {
             let shown: Vec<&Session> = match asked.session {
@@ -591,18 +598,17 @@ fn list_text(env: &Env, yard: &Yard, shown: &[&Session], now: u64) -> Outcome {
         "SESSION   HARNESS      AGE  TURNS  WHERE  TASK\n",
     );
     for s in shown {
-        let cwd = s
-            .cwd
-            .as_deref()
-            .map(|c| {
+        let cwd = s.cwd.as_deref().map_or_else(
+            || "-".into(),
+            |c| {
                 let rel = canonical(Path::new(c));
                 match rel.strip_prefix(&root) {
                     Ok(p) if p.as_os_str().is_empty() => ".".to_owned(),
                     Ok(p) => p.display().to_string(),
                     Err(_) => c.to_owned(),
                 }
-            })
-            .unwrap_or_else(|| "-".into());
+            },
+        );
         out.push_str(&format!(
             "{:<9} {:<12} {:>3}  {:>5}  {cwd:<5}  {}\n",
             s.id.get(..8).unwrap_or(&s.id),

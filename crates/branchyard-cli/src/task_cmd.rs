@@ -228,7 +228,10 @@ pub fn details(view: &TaskView, style: render::Style) -> String {
         },
     );
     field("by", task.by.clone());
-    field("created", tasks::utc(task.created_ms));
+    field(
+        "created",
+        branchyard_support::time::rfc3339_secs(task.created_ms),
+    );
     field("started by", task.origin.clone());
     if !task.policy.is_empty() {
         field("policy", task.policy.clone());

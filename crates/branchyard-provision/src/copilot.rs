@@ -79,7 +79,7 @@ impl Provisioner for Copilot {
             needs_private_home(context, "Copilot's settings")?;
             match resolved.method {
                 "api-key" => {
-                    let key = resolved.env_key.expect("an env method has a key");
+                    let key = resolved.env()?;
                     let token = context.secret(key).unwrap_or_default();
                     plan.secret_env(key, "COPILOT_GITHUB_TOKEN", token, true);
                     plan.edit(CONFIG, false, trust);

@@ -22,9 +22,10 @@ pub struct Options {
 }
 
 /// Run every check against `store`.
+#[allow(clippy::unwrap_used)] // ratchet: branchyard-sync
 pub fn check(store: Arc<dyn ObjectStore>, options: Options) {
     let large = options.large;
-    let run = crate::util::hex(&crate::util::random_bytes(6).unwrap());
+    let run = hex::encode(crate::util::random_bytes(6).unwrap());
     let p = format!("conformance-{run}");
     let key = |k: &str| format!("{p}/{k}");
     let s = store.as_ref();
@@ -169,6 +170,9 @@ pub fn check(store: Arc<dyn ObjectStore>, options: Options) {
 
     // Clean up what this run made.
     for entry in s.list(&p).unwrap() {
-        let _ = s.delete_if_match(&entry.key, &entry.generation);
+        branchyard_support::best_effort(
+            "delete the object if it is unchanged",
+            s.delete_if_match(&entry.key, &entry.generation),
+        );
     }
 }

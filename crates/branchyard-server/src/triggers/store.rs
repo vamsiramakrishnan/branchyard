@@ -25,11 +25,19 @@
 //! Times are the dispatchers' clocks ([`super::Clock`]), not the
 //! database's: keep the hosts' clocks synchronized.
 
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_in_result,
+    clippy::unwrap_used
+)] // ratchet: branchyard-server
+use branchyard_support::LockExt as _;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use branchyard::store_codec::{from_db_opt, from_db_u32, to_db, to_db_opt, to_db_usize};
 use branchyard_client::triggers::{RunOutcome, RunState, TriggerRun};
 use rusqlite::OptionalExtension;
 
@@ -147,12 +155,8 @@ fn needs_settling(run: &TriggerRun) -> bool {
     run.state == RunState::Fired && run.outcome.is_none()
 }
 
-fn pause_reason(failures: u32, last: &str) -> String {
+fn pause_reason(failures: i64, last: &str) -> String {
     format!("paused after {failures} failed runs in a row; the last: {last}")
-}
-
-fn i(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 /// Columns read back into a [`StoredTrigger`].
@@ -174,8 +178,8 @@ impl Row {
         t.tenant = self.tenant;
         t.enabled = self.enabled;
         t.paused_reason = self.paused_reason;
-        t.failures = u32::try_from(self.failures).unwrap_or(0);
-        t.next_due_ms = self.next_due_ms.map(|v| v.max(0) as u64);
+        t.failures = from_db_u32("failures", self.failures)?;
+        t.next_due_ms = from_db_opt("next_due_ms", self.next_due_ms)?;
         t.secret = self.secret;
         Ok(t)
     }
@@ -324,7 +328,7 @@ impl SqliteTriggers {
         &self,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> io::Result<(T, bool)>,
     ) -> io::Result<T> {
-        let mut conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut conn = self.conn.lock_recovering("conn");
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(sql)?;
@@ -341,7 +345,7 @@ impl SqliteTriggers {
         filter: &str,
         params: &[&dyn rusqlite::ToSql],
     ) -> io::Result<Vec<StoredTrigger>> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.lock_recovering("conn");
         let mut statement = conn
             .prepare(&format!(
                 "SELECT {TRIGGER_COLUMNS} FROM triggers {filter} ORDER BY seq"
@@ -360,7 +364,7 @@ impl SqliteTriggers {
         filter: &str,
         params: &[&dyn rusqlite::ToSql],
     ) -> io::Result<Vec<TriggerRun>> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.lock_recovering("conn");
         let mut statement = conn
             .prepare(&format!("SELECT id, body FROM trigger_runs {filter}"))
             .map_err(sql)?;
@@ -380,7 +384,7 @@ fn sqlite_insert_run(
     claim: Option<(&str, u64)>,
 ) -> io::Result<bool> {
     let (attempt, claimer, until) = match claim {
-        Some((claimer, until)) => (1i64, Some(claimer), Some(i(until))),
+        Some((claimer, until)) => (1i64, Some(claimer), Some(to_db("until", until)?)),
         None => (0, None, None),
     };
     let rows = tx
@@ -441,7 +445,7 @@ fn sqlite_account(
     if pause_after == 0 || enabled == 0 || failures < i64::from(pause_after) {
         return Ok(None);
     }
-    let why = pause_reason(failures as u32, reason);
+    let why = pause_reason(failures, reason);
     tx.execute(
         "UPDATE triggers SET enabled = 0, next_due_ms = NULL, paused_reason = ?2 WHERE id = ?1",
         rusqlite::params![trigger_id, why],
@@ -475,7 +479,7 @@ impl TriggerStore for SqliteTriggers {
                         i64::from(t.enabled),
                         t.paused_reason,
                         i64::from(t.failures),
-                        t.next_due_ms.map(i),
+                        to_db_opt("next_due_ms", t.next_due_ms)?,
                         t.secret,
                         body(t)?,
                     ],
@@ -524,7 +528,7 @@ impl TriggerStore for SqliteTriggers {
                         i64::from(enabled),
                         paused_reason,
                         i64::from(failures),
-                        next_due_ms.map(i)
+                        to_db_opt("next_due_ms", next_due_ms)?
                     ],
                 )
                 .map_err(sql)?;
@@ -566,7 +570,7 @@ impl TriggerStore for SqliteTriggers {
              AND next_due_ms <= ?1 AND repo IN ({})",
             placeholders(2, repos.len())
         );
-        let now = i(now_ms);
+        let now = to_db("now_ms", now_ms)?;
         let mut params: Vec<&dyn rusqlite::ToSql> = vec![&now];
         params.extend(repos.iter().map(|r| r as &dyn rusqlite::ToSql));
         self.triggers(&filter, &params)
@@ -586,7 +590,7 @@ impl TriggerStore for SqliteTriggers {
                 .query_row(
                     "UPDATE triggers SET next_due_ms = ?3 \
                      WHERE id = ?1 AND enabled = 1 AND next_due_ms = ?2 RETURNING repo",
-                    rusqlite::params![id, i(expected), next.map(i)],
+                    rusqlite::params![id, to_db("expected", expected)?, to_db_opt("next", next)?],
                     |r| r.get(0),
                 )
                 .optional()
@@ -652,7 +656,7 @@ impl TriggerStore for SqliteTriggers {
                  ORDER BY seq LIMIT 1",
                 placeholders(2, repos.len())
             );
-            let now = i(now_ms);
+            let now = to_db("now_ms", now_ms)?;
             let mut params: Vec<&dyn rusqlite::ToSql> = vec![&now];
             params.extend(repos.iter().map(|r| r as &dyn rusqlite::ToSql));
             let found: Option<(String, i64)> = tx
@@ -666,7 +670,7 @@ impl TriggerStore for SqliteTriggers {
                 .query_row(
                     "UPDATE trigger_runs SET attempt = attempt + 1, claimer = ?3, \
                      claimed_until = ?4 WHERE id = ?1 AND attempt = ?2 RETURNING body",
-                    rusqlite::params![id, attempt, claimer, i(until_ms)],
+                    rusqlite::params![id, attempt, claimer, to_db("until_ms", until_ms)?],
                     |r| r.get(0),
                 )
                 .map_err(sql)?;
@@ -680,7 +684,7 @@ impl TriggerStore for SqliteTriggers {
                 .execute(
                     "UPDATE trigger_runs SET claimed_until = ?3 \
                      WHERE id = ?1 AND attempt = ?2 AND state = 'pending'",
-                    rusqlite::params![run_id, fence, i(until_ms)],
+                    rusqlite::params![run_id, fence, to_db("until_ms", until_ms)?],
                 )
                 .map_err(sql)?;
             Ok((rows == 1, true))
@@ -782,7 +786,7 @@ impl TriggerStore for SqliteTriggers {
     }
 
     fn runs(&self, trigger_id: &str, limit: usize) -> io::Result<Vec<TriggerRun>> {
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let limit = to_db_usize("limit", limit)?;
         self.runs_where(
             "WHERE trigger_id = ?1 ORDER BY seq DESC LIMIT ?2",
             &[&trigger_id, &limit],
@@ -800,13 +804,13 @@ impl TriggerStore for SqliteTriggers {
         self.immediate(|tx| {
             tx.execute(
                 "DELETE FROM trigger_nonces WHERE trigger_id = ?1 AND expires_ms < ?2",
-                rusqlite::params![trigger_id, i(now_ms)],
+                rusqlite::params![trigger_id, to_db("now_ms", now_ms)?],
             )
             .map_err(sql)?;
             tx.execute(
                 "INSERT INTO trigger_nonces (trigger_id, nonce, key, expires_ms) \
                  VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
-                rusqlite::params![trigger_id, nonce, key, i(expires_ms)],
+                rusqlite::params![trigger_id, nonce, key, to_db("expires_ms", expires_ms)?],
             )
             .map_err(sql)?;
             let first: String = tx
@@ -946,10 +950,10 @@ fn pg_insert_run(
     tx: &mut postgres::Transaction<'_>,
     run: &TriggerRun,
     repo: &str,
-    claim: Option<(&str, u64)>,
+    claim: Option<(&str, i64)>,
 ) -> Result<bool, postgres::Error> {
     let (attempt, claimer, until) = match claim {
-        Some((claimer, until)) => (1i64, Some(claimer.to_owned()), Some(i(until))),
+        Some((claimer, until)) => (1i64, Some(claimer.to_owned()), Some(until)),
         None => (0, None, None),
     };
     let text = serde_json::to_string(run).expect("a run serializes");
@@ -999,7 +1003,7 @@ fn pg_account(
     if pause_after == 0 || !enabled || failures < i64::from(pause_after) {
         return Ok(None);
     }
-    let why = pause_reason(failures as u32, reason);
+    let why = pause_reason(failures, reason);
     tx.execute(
         "UPDATE by_triggers SET enabled = false, next_due_ms = NULL, paused_reason = $2 \
          WHERE id = $1",
@@ -1039,7 +1043,7 @@ impl PostgresTriggers {
         &self,
         f: impl FnOnce(&mut postgres::Client) -> Result<T, postgres::Error> + Send,
     ) -> io::Result<T> {
-        let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.conn.lock_recovering("conn");
         let conn: &mut Option<postgres::Client> = &mut guard;
         let url = &self.url;
         std::thread::scope(|scope| {
@@ -1077,7 +1081,7 @@ impl PostgresTriggers {
 #[cfg(feature = "postgres")]
 impl Drop for PostgresTriggers {
     fn drop(&mut self) {
-        let conn = self.conn.get_mut().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.get_mut_recovering("conn");
         if let Some(client) = conn.take() {
             std::thread::scope(|scope| {
                 scope.spawn(move || drop(client));
@@ -1091,6 +1095,7 @@ impl TriggerStore for PostgresTriggers {
     fn create(&self, t: &StoredTrigger) -> io::Result<bool> {
         let text = body(t)?;
         let t = t.clone();
+        let next_due_ms_db = to_db_opt("next_due_ms", t.next_due_ms)?;
         self.with(move |c| {
             let rows = c.execute(
                 "INSERT INTO by_triggers (id, tenant, name, repo, schedule, enabled, \
@@ -1105,7 +1110,7 @@ impl TriggerStore for PostgresTriggers {
                     &t.enabled,
                     &t.paused_reason,
                     &i64::from(t.failures),
-                    &t.next_due_ms.map(i),
+                    &next_due_ms_db,
                     &t.secret,
                     &text,
                 ],
@@ -1147,6 +1152,7 @@ impl TriggerStore for PostgresTriggers {
         next_due_ms: Option<u64>,
     ) -> io::Result<bool> {
         let (id, reason) = (id.to_owned(), paused_reason.map(str::to_owned));
+        let next_due_ms_db = to_db_opt("next_due_ms", next_due_ms)?;
         self.with(move |c| {
             let rows = c.execute(
                 "UPDATE by_triggers SET enabled = $2, paused_reason = $3, failures = $4, \
@@ -1156,7 +1162,7 @@ impl TriggerStore for PostgresTriggers {
                     &enabled,
                     &reason,
                     &i64::from(failures),
-                    &next_due_ms.map(i),
+                    &next_due_ms_db,
                 ],
             )?;
             Ok(rows == 1)
@@ -1196,7 +1202,7 @@ impl TriggerStore for PostgresTriggers {
         self.select(
             "WHERE schedule AND enabled AND next_due_ms IS NOT NULL AND next_due_ms <= $1 \
              AND repo = ANY($2)",
-            vec![Box::new(i(now_ms)), Box::new(repos.to_vec())],
+            vec![Box::new(to_db("now_ms", now_ms)?), Box::new(repos.to_vec())],
         )
     }
 
@@ -1210,12 +1216,15 @@ impl TriggerStore for PostgresTriggers {
         until_ms: u64,
     ) -> io::Result<bool> {
         let (id, runs, claimer) = (id.to_owned(), runs.to_vec(), claimer.to_owned());
+        let expected_db = to_db("expected", expected)?;
+        let next_db = to_db_opt("next", next)?;
+        let until_ms_db = to_db("until_ms", until_ms)?;
         self.with(move |c| {
             let mut tx = c.transaction()?;
             let row = tx.query_opt(
                 "UPDATE by_triggers SET next_due_ms = $3 \
                  WHERE id = $1 AND enabled AND next_due_ms = $2 RETURNING repo",
-                &[&id, &i(expected), &next.map(i)],
+                &[&id, &expected_db, &next_db],
             )?;
             let Some(row) = row else {
                 tx.rollback()?;
@@ -1224,7 +1233,7 @@ impl TriggerStore for PostgresTriggers {
             let repo: String = row.get(0);
             for run in &runs {
                 let claim =
-                    (run.state == RunState::Pending).then_some((claimer.as_str(), until_ms));
+                    (run.state == RunState::Pending).then_some((claimer.as_str(), until_ms_db));
                 pg_insert_run(&mut tx, run, &repo, claim)?;
             }
             tx.commit()?;
@@ -1273,6 +1282,8 @@ impl TriggerStore for PostgresTriggers {
             return Ok(None);
         }
         let (repos, claimer) = (repos.to_vec(), claimer.to_owned());
+        let now_ms_db = to_db("now_ms", now_ms)?;
+        let until_ms_db = to_db("until_ms", until_ms)?;
         let row = self.with(move |c| {
             c.query_opt(
                 "UPDATE by_trigger_runs SET attempt = attempt + 1, claimer = $3, \
@@ -1281,7 +1292,7 @@ impl TriggerStore for PostgresTriggers {
                      AND (claimed_until IS NULL OR claimed_until < $1) AND repo = ANY($2) \
                      ORDER BY seq LIMIT 1 FOR UPDATE SKIP LOCKED) \
                  RETURNING id, body, attempt",
-                &[&i(now_ms), &repos, &claimer, &i(until_ms)],
+                &[&now_ms_db, &repos, &claimer, &until_ms_db],
             )
         })?;
         row.map(|r| {
@@ -1293,11 +1304,12 @@ impl TriggerStore for PostgresTriggers {
 
     fn defer_run(&self, run_id: &str, fence: i64, until_ms: u64) -> io::Result<bool> {
         let id = run_id.to_owned();
+        let until_ms_db = to_db("until_ms", until_ms)?;
         self.with(move |c| {
             let rows = c.execute(
                 "UPDATE by_trigger_runs SET claimed_until = $3 \
                  WHERE id = $1 AND attempt = $2 AND state = 'pending'",
-                &[&id, &fence, &i(until_ms)],
+                &[&id, &fence, &until_ms_db],
             )?;
             Ok(rows == 1)
         })
@@ -1400,7 +1412,7 @@ impl TriggerStore for PostgresTriggers {
 
     fn runs(&self, trigger_id: &str, limit: usize) -> io::Result<Vec<TriggerRun>> {
         let id = trigger_id.to_owned();
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let limit = to_db_usize("limit", limit)?;
         let rows = self.with(move |c| {
             c.query(
                 "SELECT id, body FROM by_trigger_runs WHERE trigger_id = $1 \
@@ -1420,16 +1432,18 @@ impl TriggerStore for PostgresTriggers {
         expires_ms: u64,
     ) -> io::Result<String> {
         let (id, nonce, key) = (trigger_id.to_owned(), nonce.to_owned(), key.to_owned());
+        let now_ms_db = to_db("now_ms", now_ms)?;
+        let expires_ms_db = to_db("expires_ms", expires_ms)?;
         self.with(move |c| {
             let mut tx = c.transaction()?;
             tx.execute(
                 "DELETE FROM by_trigger_nonces WHERE trigger_id = $1 AND expires_ms < $2",
-                &[&id, &i(now_ms)],
+                &[&id, &now_ms_db],
             )?;
             tx.execute(
                 "INSERT INTO by_trigger_nonces (trigger_id, nonce, key, expires_ms) \
                  VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-                &[&id, &nonce, &key, &i(expires_ms)],
+                &[&id, &nonce, &key, &expires_ms_db],
             )?;
             let row = tx.query_one(
                 "SELECT key FROM by_trigger_nonces WHERE trigger_id = $1 AND nonce = $2",
@@ -1777,6 +1791,7 @@ pub mod conformance {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

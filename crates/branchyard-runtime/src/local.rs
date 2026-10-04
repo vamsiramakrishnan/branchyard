@@ -28,6 +28,7 @@
 //!   and the ID was reused, an unrelated group would be signalled. The same
 //!   window exists for any tool that kills a group after reaping its leader.
 
+use branchyard_support::LockExt as _;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -72,6 +73,7 @@ impl Group {
 }
 
 impl LocalProvider {
+    /// A provider with no sandbox: harnesses run as local processes.
     pub fn new() -> LocalProvider {
         LocalProvider::default()
     }
@@ -174,7 +176,7 @@ impl LocalProvider {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Local>> {
-        self.sandboxes.lock().unwrap_or_else(|e| e.into_inner())
+        self.sandboxes.lock_recovering("sandboxes")
     }
 }
 
@@ -313,6 +315,7 @@ impl LocalProcess {
         })
     }
 
+    /// The operating-system process ID of the harness.
     pub fn pid(&self) -> u32 {
         self.child.id()
     }
@@ -375,8 +378,8 @@ impl Drop for LocalProcess {
             self.group.done.store(true, Ordering::Release);
         }
         if !self.reaped {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            branchyard_support::best_effort("kill child", self.child.kill());
+            branchyard_support::best_effort("reap child", self.child.wait());
         }
     }
 }
@@ -432,10 +435,5 @@ fn group_members(pgid: u32) -> Vec<String> {
 
 /// SIGKILL the whole process group, through killpg(2).
 fn signal_group(pgid: u32) {
-    if let Some(pgid) = i32::try_from(pgid)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    {
-        let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
-    }
+    branchyard_support::kill_group(pgid);
 }

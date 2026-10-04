@@ -273,16 +273,20 @@ impl Decoder<'_> {
         Ok(self.take(1)?[0])
     }
 
+    fn array<const N: usize>(&mut self) -> io::Result<[u8; N]> {
+        <[u8; N]>::try_from(self.take(N)?).map_err(|_| invalid("frame is truncated"))
+    }
+
     fn u32(&mut self) -> io::Result<u32> {
-        Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()))
+        Ok(u32::from_be_bytes(self.array()?))
     }
 
     fn i32(&mut self) -> io::Result<i32> {
-        Ok(i32::from_be_bytes(self.take(4)?.try_into().unwrap()))
+        Ok(i32::from_be_bytes(self.array()?))
     }
 
     fn u64(&mut self) -> io::Result<u64> {
-        Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))
+        Ok(u64::from_be_bytes(self.array()?))
     }
 
     fn bytes(&mut self) -> io::Result<Vec<u8>> {

@@ -40,6 +40,8 @@
 //!   and is removed. Recovery ([`crate::Yard::recover`]) does this, as
 //!   does every fill and drain.
 
+use branchyard_support::best_effort;
+use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -53,9 +55,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::environments as envs;
-use crate::state::{now_ms, Record, SlotRow, SlotState};
+use crate::state::{Record, SlotRow, SlotState};
 use crate::workspace::WorkspaceSpec;
 use crate::{proc, Error, Yard};
+use branchyard_support::time::now_ms;
 
 /// How long a ready slot is kept unless the pool says otherwise: a day.
 pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
@@ -96,8 +99,7 @@ pub struct PoolSpec {
 impl PoolSpec {
     pub fn max_age(&self) -> Duration {
         self.max_age_secs
-            .map(Duration::from_secs)
-            .unwrap_or(DEFAULT_MAX_AGE)
+            .map_or(DEFAULT_MAX_AGE, Duration::from_secs)
     }
 
     pub fn max_behind(&self) -> u32 {
@@ -363,8 +365,7 @@ fn signal(root: &Path) -> Arc<Signal> {
     static SIGNALS: OnceLock<Mutex<HashMap<PathBuf, Arc<Signal>>>> = OnceLock::new();
     SIGNALS
         .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .lock_recovering("pool signals")
         .entry(root.to_path_buf())
         .or_default()
         .clone()
@@ -372,7 +373,7 @@ fn signal(root: &Path) -> Arc<Signal> {
 
 fn wake(root: &Path) {
     let signal = signal(root);
-    *signal.claims.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+    *signal.claims.lock_recovering("claims") += 1;
     signal.changed.notify_all();
 }
 
@@ -423,19 +424,19 @@ fn remove_files(root: &Path, path: &Path, shared: &[String]) {
     branchyard_workspace::materialize::remove_links(path, shared);
     if path.exists() {
         let _lock = crate::git::lock();
-        let _ = Git::new(root)
-            .args(["worktree", "remove", "--force"])
-            .arg(path)
-            .run();
+        crate::git::remove_worktree(root, path);
     }
-    let _ = fs::remove_dir_all(path);
+    branchyard_support::cleanup_dir(path);
 }
 
 /// Forget worktrees git still lists whose directories are gone (a slot
 /// removed without git).
 fn prune_worktrees(root: &Path) {
     let _lock = crate::git::lock();
-    let _ = Git::new(root).args(["worktree", "prune"]).run();
+    best_effort(
+        "git worktree prune",
+        Git::new(root).args(["worktree", "prune"]).run(),
+    );
 }
 
 /// Take a ready slot to remove it: compare-and-set to `claimed` by nobody,
@@ -463,7 +464,10 @@ fn take_for_removal(yard: &Yard, row: &SlotRow, why: &str) -> bool {
 /// files, then its row.
 fn discard(yard: &Yard, row: &SlotRow) {
     remove_files(&yard.root, Path::new(&row.path), &Detail::of(row).shared);
-    let _ = yard.store().pool().delete_slot(&row.id);
+    best_effort(
+        "delete the pool slot",
+        yard.store().pool().delete_slot(&row.id),
+    );
 }
 
 /// Remove what stopped processes left: rows filling or claiming whose
@@ -494,7 +498,7 @@ pub(crate) fn reclaim(yard: &Yard) -> Vec<(String, String)> {
         match row.state {
             SlotState::Ready => {
                 if !path.is_dir() && take_for_removal(yard, row, "its worktree is gone") {
-                    let _ = store.pool().delete_slot(&row.id);
+                    best_effort("delete the pool slot", store.pool().delete_slot(&row.id));
                     pruned = true;
                     done.push((row.id.clone(), "its worktree is gone".into()));
                 }
@@ -518,10 +522,7 @@ pub(crate) fn reclaim(yard: &Yard) -> Vec<(String, String)> {
                     if target.is_dir() && on.as_deref() != Some(&format!("by/{branch}")) {
                         branchyard_workspace::materialize::remove_links(target, &detail.shared);
                         let _lock = crate::git::lock();
-                        let _ = Git::new(root)
-                            .args(["worktree", "remove", "--force"])
-                            .arg(target)
-                            .run();
+                        crate::git::remove_worktree(root, target);
                     }
                 }
                 if store.pool().delete_slot(&row.id).unwrap_or(false) {
@@ -761,7 +762,10 @@ pub(crate) fn take(yard: &Yard, record: &Record, base: &str) -> Result<Taken, St
 
 /// The claim is done: the slot is the branch's worktree now.
 pub(crate) fn settle(yard: &Yard, taken: &Taken) {
-    let _ = yard.store().pool().delete_slot(&taken.row.id);
+    best_effort(
+        "delete the pool slot",
+        yard.store().pool().delete_slot(&taken.row.id),
+    );
     wake(&yard.root);
 }
 
@@ -983,17 +987,31 @@ fn environment(yard: &Yard, spec: &WorkspaceSpec, path: &Path) -> Result<Detail,
             if yard.hub.scripts_denied() {
                 return Err(crate::workspace::DENIED.into());
             }
-            let built = envs::build_in(yard, spec, path, "pool", "pool", &key, &recipe, inputs)
-                .map_err(|e| e.to_string())?;
+            let built = envs::build_in(
+                yard,
+                spec,
+                path,
+                envs::BuildFor {
+                    by: "pool",
+                    branch: "pool",
+                    key: &key,
+                    recipe: &recipe,
+                    inputs,
+                },
+            )
+            .map_err(|e| e.to_string())?;
             drop(lock);
             // Copied files are the branch's to copy, fresh, when it starts.
             for rel in &built.copied {
                 let target = path.join(rel);
-                let _ = match fs::symlink_metadata(&target).map(|m| m.is_dir()) {
-                    Ok(true) => fs::remove_dir_all(&target),
-                    Ok(false) => fs::remove_file(&target),
-                    Err(_) => Ok(()),
-                };
+                best_effort(
+                    "remove the file the failed build left",
+                    match fs::symlink_metadata(&target).map(|m| m.is_dir()) {
+                        Ok(true) => fs::remove_dir_all(&target),
+                        Ok(false) => fs::remove_file(&target),
+                        Err(_) => Ok(()),
+                    },
+                );
             }
             match built.environment {
                 Some(info) => {
@@ -1087,7 +1105,7 @@ impl PoolKeeper {
                 .name("by-pool".into())
                 .spawn(move || {
                     let signal = signal(&yard.root);
-                    let mut seen = *signal.claims.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut seen = *signal.claims.lock_recovering("claims");
                     while !stop.load(Ordering::SeqCst) {
                         if let Some(spec) = spec().filter(|s| s.pool.is_some()) {
                             match fill(&yard, &spec) {
@@ -1099,7 +1117,7 @@ impl PoolKeeper {
                             }
                         }
                         let deadline = Instant::now() + every;
-                        let mut claims = signal.claims.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut claims = signal.claims.lock_recovering("claims");
                         while *claims == seen && !stop.load(Ordering::SeqCst) {
                             let left = deadline.saturating_duration_since(Instant::now());
                             if left.is_zero() {
@@ -1107,8 +1125,7 @@ impl PoolKeeper {
                             }
                             claims = signal
                                 .changed
-                                .wait_timeout(claims, left)
-                                .unwrap_or_else(|e| e.into_inner())
+                                .wait_timeout_recovering(claims, left, "changed")
                                 .0;
                         }
                         seen = *claims;
@@ -1130,7 +1147,7 @@ impl PoolKeeper {
     pub fn stop(mut self) {
         self.signal_stop();
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            branchyard_support::join_reporting("pool keeper", thread);
         }
     }
 
@@ -1139,7 +1156,7 @@ impl PoolKeeper {
         let signal = signal(&self.root);
         // Under the lock, so the keeper is either waiting (and woken) or
         // will see the flag before it waits.
-        drop(signal.claims.lock().unwrap_or_else(|e| e.into_inner()));
+        drop(signal.claims.lock_recovering("claims"));
         signal.changed.notify_all();
     }
 }

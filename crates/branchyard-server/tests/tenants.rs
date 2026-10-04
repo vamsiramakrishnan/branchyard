@@ -1,12 +1,14 @@
 //! Tenant identity, scopes and quotas over real HTTP: see
 //! `docs/server.md#identity-and-scopes` and `docs/server.md#quotas`.
 
+#![allow(clippy::panic)] // tests: a panic is the failure report
 mod common;
 
 use branchyard_client::api::{MergeRequest, OperationState};
 use branchyard_client::new_key;
 use branchyard_server::config::{Credential, Principal, TenantPolicy, Token};
-use common::{eventually, raw, run, started, task, wait, Fixture, Server, TOKEN};
+use branchyard_testkit::wait;
+use common::{await_operation, raw, run, started, task, Fixture, Server, TOKEN};
 
 fn json(body: &str) -> serde_json::Value {
     serde_json::from_str(body).unwrap_or_else(|e| panic!("{e}: {body:?}"))
@@ -28,7 +30,10 @@ fn single_token_configs_keep_working_unchanged() {
         .repo("app")
         .merge("one", &MergeRequest::default(), &new_key())
         .unwrap();
-    assert_eq!(wait(&client, &merged.id).state, OperationState::Succeeded);
+    assert_eq!(
+        await_operation(&client, &merged.id).state,
+        OperationState::Succeeded
+    );
 }
 
 /// Every endpoint checks the principal's scope: `read` for lookups, `run`
@@ -221,7 +226,7 @@ fn max_running_quota_is_reserved_and_released() {
     let client = server.client();
     let repo = client.repo("app");
     let op = repo.submit_task(&task("HANG", "held"), &new_key()).unwrap();
-    eventually("the prompt to be submitted", || {
+    wait::until("the prompt to be submitted", || {
         repo.events("held", 0).is_ok_and(|page| {
             page.events
                 .iter()
@@ -233,7 +238,10 @@ fn max_running_quota_is_reserved_and_released() {
         .unwrap_err();
     assert_eq!(denied.code(), Some("quota_exceeded"));
     assert_eq!(repo.cancel("held").unwrap(), ["held"]);
-    assert_eq!(wait(&client, &op.id).state, OperationState::Succeeded);
+    assert_eq!(
+        await_operation(&client, &op.id).state,
+        OperationState::Succeeded
+    );
     // Released: a new one is admitted now.
     let after = run(&client, &task("WRITE a.txt=x", "third"));
     assert_eq!(after.state, OperationState::Succeeded);
@@ -262,7 +270,7 @@ fn max_running_quota_holds_across_a_restart_with_queued_operations() {
     let client = server.client();
     let repo = client.repo("app");
     let first = repo.submit_task(&task("HANG", "h1"), &new_key()).unwrap();
-    eventually("h1 to start", || started(&client, "app", "h1"));
+    wait::until("h1 to start", || started(&client, "app", "h1"));
     let queued = repo.submit_task(&task("HANG", "h2"), &new_key()).unwrap();
     assert_eq!(queued.state, OperationState::Queued);
     let denied = repo
@@ -279,7 +287,7 @@ fn max_running_quota_holds_across_a_restart_with_queued_operations() {
         OperationState::Interrupted
     );
     // The queued one survived the restart and runs now; it still counts.
-    eventually("h2 to start", || started(&client, "app", "h2"));
+    wait::until("h2 to start", || started(&client, "app", "h2"));
     let third = repo
         .submit_task(&task("WRITE a.txt=x", "h3"), &new_key())
         .unwrap();
@@ -289,8 +297,14 @@ fn max_running_quota_holds_across_a_restart_with_queued_operations() {
     assert_eq!(denied.code(), Some("quota_exceeded"));
     assert!(denied.to_string().contains("(2 of 2)"), "{denied}");
     assert_eq!(repo.cancel("h2").unwrap(), ["h2"]);
-    assert_eq!(wait(&client, &queued.id).state, OperationState::Succeeded);
-    assert_eq!(wait(&client, &third.id).state, OperationState::Succeeded);
+    assert_eq!(
+        await_operation(&client, &queued.id).state,
+        OperationState::Succeeded
+    );
+    assert_eq!(
+        await_operation(&client, &third.id).state,
+        OperationState::Succeeded
+    );
     let after = run(&client, &task("WRITE a.txt=y", "h4"));
     assert_eq!(after.state, OperationState::Succeeded);
 }
@@ -425,8 +439,14 @@ fn idempotency_keys_are_scoped_per_tenant() {
     assert_ne!(a.id, b.id);
     assert_eq!(acme.operation_by_key(&key).unwrap().id, a.id);
     assert_eq!(globex.operation_by_key(&key).unwrap().id, b.id);
-    assert_eq!(wait(&acme, &a.id).state, OperationState::Succeeded);
-    assert_eq!(wait(&globex, &b.id).state, OperationState::Succeeded);
+    assert_eq!(
+        await_operation(&acme, &a.id).state,
+        OperationState::Succeeded
+    );
+    assert_eq!(
+        await_operation(&globex, &b.id).state,
+        OperationState::Succeeded
+    );
 }
 
 /// A graph proposal is not an operation, but its spawns are branches:

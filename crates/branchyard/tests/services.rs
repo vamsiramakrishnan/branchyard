@@ -9,6 +9,7 @@
 //! an owner killed on this host is known gone at once. Requires `git`,
 //! `sh`, `sleep`, `ps` and `python3`.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;
@@ -16,7 +17,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use branchyard::services::{
     self, conformance, Endpoint, LocalRegistry, Outcome, Query, Reclaim, Service, ServiceOwner,
@@ -24,33 +25,13 @@ use branchyard::services::{
 };
 use branchyard::{Provider, RecipeOptions, Yard};
 use branchyard_sandbox::{SandboxProvider, SandboxSpec};
+use branchyard_testkit::wait;
 use common::Fixture;
 
 const FAKE_SSH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../branchyard-recipe/tests/fixtures/fake-ssh"
 );
-
-fn alive(pid: u32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        let state = stat
-            .rsplit(')')
-            .next()
-            .unwrap_or("")
-            .split_whitespace()
-            .next();
-        !matches!(state, Some("Z") | Some("X"))
-    })
-}
-
-/// Wait for `what` to hold, up to 30 seconds.
-fn until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
 
 /// A pid that no longer runs, with a start time no process has: an owner
 /// known gone from this host.
@@ -227,7 +208,7 @@ fn a_killed_owners_leaked_process_is_reclaimed_and_nothing_else() {
     assert_eq!(found.owner.pid, owner.id());
     // Nothing is reclaimed while the owner lives, even by a reaper.
     assert!(f.yard.reclaim_services().unwrap().is_empty());
-    assert!(alive(leaked));
+    assert!(wait::alive(leaked));
     // A process with the leaked pid but another start time is one
     // Branchyard did not start: its record is reaped, the process is not
     // signalled.
@@ -247,11 +228,11 @@ fn a_killed_owners_leaked_process_is_reclaimed_and_nothing_else() {
         reaped[0].outcome,
         Outcome::Done(format!("process {leaked} had already exited"))
     );
-    assert!(alive(leaked));
+    assert!(wait::alive(leaked));
 
     owner.kill().unwrap();
     owner.wait().unwrap();
-    assert!(alive(leaked), "the owner's group outlived it");
+    assert!(wait::alive(leaked), "the owner's group outlived it");
     let reaped = f.yard.reclaim_services().unwrap();
     assert_eq!(
         reaped
@@ -263,7 +244,7 @@ fn a_killed_owners_leaked_process_is_reclaimed_and_nothing_else() {
             Outcome::Done(format!("stopped pid {leaked}"))
         )]
     );
-    until("the leaked process to stop", || !alive(leaked));
+    wait::until("the leaked process to stop", || !wait::alive(leaked));
     let row = f.yard.services().unwrap().get(&found.id).unwrap().unwrap();
     assert_eq!(row.state, ServiceState::Reclaimed);
     assert!(f
@@ -417,7 +398,7 @@ fn a_record_whose_owner_left_is_never_reclaimed() {
     let row = f.yard.services().unwrap().get(&id).unwrap().unwrap();
     assert_eq!(row.state, ServiceState::Left);
     assert!(f.yard.reclaim_services().unwrap().is_empty());
-    assert!(alive(pid));
+    assert!(wait::alive(pid));
     let mut leaked = leaked;
     leaked.kill().unwrap();
     leaked.wait().unwrap();

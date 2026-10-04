@@ -154,7 +154,7 @@ pub fn main(
             let report = remote
                 .scrub(
                     *sample,
-                    seed.unwrap_or_else(branchyard_sync::util::random_seed),
+                    seed.unwrap_or_else(branchyard_support::rng::fresh_seed),
                     &dirs,
                 )
                 .map_err(failure)?;

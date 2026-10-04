@@ -14,6 +14,7 @@
 //! reported, if any. A staged draft is discarded with the gateway's discard
 //! call; one held in Branchyard's outbox is simply dropped.
 
+use branchyard_support::best_effort;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -302,16 +303,19 @@ pub(crate) fn execute(
             .filter(|_| entry.state == EffectState::Staged);
         let deny_ask = || {
             if let Some(staged) = &entry.staged {
-                let _ = super::ask::answer(
-                    yard,
-                    &staged.ask,
-                    &super::AskAnswer {
-                        allow: false,
-                        by: by.to_owned(),
-                        surface: surface.to_owned(),
-                        at_ms: now_ms,
-                        reason: Some("discarded by undo".into()),
-                    },
+                best_effort(
+                    "answer the approval ask",
+                    super::ask::answer(
+                        yard,
+                        &staged.ask,
+                        &super::AskAnswer {
+                            allow: false,
+                            by: by.to_owned(),
+                            surface: surface.to_owned(),
+                            at_ms: now_ms,
+                            reason: Some("discarded by undo".into()),
+                        },
+                    ),
                 );
             }
         };

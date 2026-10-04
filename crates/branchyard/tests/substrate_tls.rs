@@ -3,6 +3,7 @@
 //! the provider, against the fake cluster serving TLS with certificates
 //! generated here. Hermetic; not evidence about a Substrate cluster.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

@@ -34,11 +34,13 @@
 //! queued ones stay queued for the next worker, here after a restart or on
 //! another server.
 
+use branchyard_support::time::now_ms;
+use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::HashMap;
 use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use branchyard_client::api::{
@@ -55,13 +57,6 @@ use crate::store::{
     Worker,
 };
 use crate::telemetry::SpanContext;
-
-pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
 
 /// What a finished operation reports.
 pub struct Finished {
@@ -181,6 +176,7 @@ static INVENTORY_SOURCE: std::sync::OnceLock<InventorySource> = std::sync::OnceL
 /// Detect inventories with `source` in every registry this process opens
 /// from a configuration: how `by serve` and `by worker` add the usage
 /// meters `by usage` reads. Only the first call counts.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 pub fn set_inventory_source(source: InventorySource) {
     let _ = INVENTORY_SOURCE.set(source);
 }
@@ -286,7 +282,7 @@ impl Registry {
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|p| p.into_inner())
+        self.state.lock_recovering("state")
     }
 
     /// This registry's worker identity, as its claims record it.
@@ -316,10 +312,7 @@ impl Registry {
 
     /// This worker's harness inventory, once detected.
     pub fn inventory(&self) -> Option<branchyard::inventory::Inventory> {
-        self.inventory
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        self.inventory.lock_recovering("inventory").clone()
     }
 
     /// The labels this worker claims with: its configured ones and those
@@ -353,7 +346,7 @@ impl Registry {
         loop {
             let found = (source.0)();
             if found.is_some() {
-                *self.inventory.lock().unwrap_or_else(|p| p.into_inner()) = found;
+                *self.inventory.lock_recovering("inventory") = found;
                 // Beat with it now rather than at the next beat.
                 self.changed.notify_all();
             }
@@ -369,8 +362,7 @@ impl Registry {
                 }
                 state = self
                     .changed
-                    .wait_timeout(state, left)
-                    .unwrap_or_else(|p| p.into_inner())
+                    .wait_timeout_recovering(state, left, "changed")
                     .0;
             }
         }
@@ -480,6 +472,7 @@ impl Registry {
     /// Admit a new operation durably, with `work` describing what to run,
     /// or return the one an earlier request with the same key created
     /// (`true`).
+    #[allow(clippy::expect_used)] // ratchet: branchyard-server
     pub fn submit(&self, new: NewOperation, work: Value) -> Result<(Operation, bool), ApiError> {
         if let Some(idem) = &new.idempotency {
             if let Some(existing) = self.replay(idem, &new.principal.tenant)? {
@@ -565,6 +558,7 @@ impl Registry {
 
     /// Claim and run queued operations until shutdown, renewing the
     /// claims of those running.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
     fn dispatch(self: Arc<Self>) {
         let mut renewed = Instant::now();
         let renew_every = self.options.lease / 3;
@@ -621,10 +615,7 @@ impl Registry {
             let wait = self.options.poll.min(renew_every);
             let state = self.lock();
             if !state.admitted || !free {
-                let _ = self
-                    .changed
-                    .wait_timeout(state, wait)
-                    .unwrap_or_else(|p| p.into_inner());
+                let _ = self.changed.wait_timeout_recovering(state, wait, "changed");
             }
         }
     }
@@ -712,7 +703,10 @@ impl Registry {
             let mut state = self.lock();
             if state.closed || !state.accepting {
                 drop(state);
-                let _ = self.store.release(&self.worker, &id, claim.fence);
+                branchyard_support::best_effort(
+                    "release the operation's branch lock",
+                    self.store.release(&self.worker, &id, claim.fence),
+                );
                 return;
             }
             state.running.insert(id.clone(), claim.fence);
@@ -724,7 +718,10 @@ impl Registry {
             .spawn(move || registry.work(claim, executor));
         if let Err(error) = spawned {
             tracing::error!(%id, %error, "could not start a worker thread for an operation");
-            let _ = self.store.release(&self.worker, &id, fence);
+            branchyard_support::best_effort(
+                "release the operation's branch lock",
+                self.store.release(&self.worker, &id, fence),
+            );
             self.done(&id);
         }
     }
@@ -760,7 +757,10 @@ impl Registry {
             }
             Err(e) => {
                 tracing::error!(%id, error = %e, "could not record an operation as running");
-                let _ = self.store.release(&self.worker, &id, fence);
+                branchyard_support::best_effort(
+                    "release the operation's branch lock",
+                    self.store.release(&self.worker, &id, fence),
+                );
                 self.done(&id);
                 return;
             }
@@ -896,6 +896,7 @@ impl Registry {
         self.wait(timeout, false)
     }
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
     fn wait(&self, timeout: Duration, queued_too: bool) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
@@ -913,10 +914,11 @@ impl Registry {
                 return false;
             }
             let state = self.lock();
-            let _ = self
-                .changed
-                .wait_timeout(state, (deadline - now).min(Duration::from_millis(20)))
-                .unwrap_or_else(|p| p.into_inner());
+            let _ = self.changed.wait_timeout_recovering(
+                state,
+                (deadline - now).min(Duration::from_millis(20)),
+                "changed",
+            );
         }
     }
 
@@ -942,7 +944,7 @@ impl Registry {
                 count += 1;
             }
         }
-        let _ = self.store.leave(&self.worker);
+        branchyard_support::best_effort("leave the worker pool", self.store.leave(&self.worker));
         self.lock().closed = true;
         self.changed.notify_all();
         count
@@ -1037,6 +1039,7 @@ impl Drop for Hold {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

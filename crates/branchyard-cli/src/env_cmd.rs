@@ -13,7 +13,7 @@
 //! claims a ready slot. `by serve` and `by worker` refill after each claim;
 //! locally, `by env pool fill` fills once.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use branchyard::{EnvironmentInfo, EnvironmentState, WorkspaceSpec, Yard};
 use serde_json::json;
@@ -70,8 +70,7 @@ fn slot_line(slot: &branchyard::PoolSlot) -> String {
         short(&slot.base),
         slot.environment
             .as_deref()
-            .map(short)
-            .unwrap_or_else(|| "-".into()),
+            .map_or_else(|| "-".into(), short),
         age(slot.changed_ms),
     );
     if let Some(ms) = slot.fill_ms {
@@ -98,8 +97,7 @@ fn pool(env: &Env, yard: &Yard, action: &PoolAction, json: bool) -> Outcome {
                 status
                     .base
                     .as_deref()
-                    .map(|b| &b[..b.len().min(12)])
-                    .unwrap_or("?"),
+                    .map_or("?", |b| &b[..b.len().min(12)]),
                 status.ready(),
                 status.size
             );
@@ -191,10 +189,7 @@ fn spec(yard: &Yard) -> Result<Option<(WorkspaceSpec, workspace_cmd::Resolved)>,
 }
 
 fn age(ms: u64) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let now = branchyard_support::time::now_ms();
     let seconds = now.saturating_sub(ms) / 1000;
     match seconds {
         s if s < 120 => format!("{s}s ago"),
@@ -381,13 +376,13 @@ fn prune(
 ) -> Outcome {
     let only: Vec<String> = keys
         .iter()
-        .map(|k| find(yard, k).map(|i| i.key).unwrap_or_else(|| k.clone()))
+        .map(|k| find(yard, k).map_or_else(|| k.clone(), |i| i.key))
         .collect();
     let pruned = yard.prune_environments(
         keep.unwrap_or(branchyard::ENVIRONMENT_DEFAULT_KEEP),
-        older_than
-            .map(|days| Duration::from_secs(days * 86400))
-            .unwrap_or(branchyard::ENVIRONMENT_DEFAULT_MAX_AGE),
+        older_than.map_or(branchyard::ENVIRONMENT_DEFAULT_MAX_AGE, |days| {
+            Duration::from_secs(days * 86400)
+        }),
         &only,
     );
     if json {

@@ -19,7 +19,8 @@ use crate::args::{HarnessChange, HarnessesAction};
 use crate::commands::{print, Env, Failure, Outcome, Target};
 use crate::json;
 use crate::render::{table, Cell, Column, Style, Tone};
-use crate::ssh_remote::{quote, SshUrl};
+use crate::ssh_remote::SshUrl;
+use branchyard_recipe::quote;
 
 /// The machine a command acts on.
 enum Machine {
@@ -238,20 +239,20 @@ fn attach_quota(found: &mut Inventory) {
     if !wanted("claude-code") && !wanted("codex") {
         return;
     }
-    let logins = crate::usage::meter(&config, &vars, crate::usage::now_ms());
+    let logins = crate::usage::meter(&config, &vars, branchyard_support::time::now_ms());
     for login in logins.iter().filter(|l| l.account == "default" && l.found) {
         let Some(state) = found.harnesses.iter_mut().find(|h| h.id == login.harness) else {
             continue;
         };
         let windows = [&login.five_hour, &login.weekly];
-        let fuller = windows
-            .iter()
-            .max_by(|a, b| {
-                a.used_percent
-                    .unwrap_or(0.0)
-                    .total_cmp(&b.used_percent.unwrap_or(0.0))
-            })
-            .expect("two windows");
+        // The fuller window; the weekly one when they are level.
+        let used = |w: &crate::usage::Window| w.used_percent.unwrap_or(0.0);
+        let [five, weekly] = windows;
+        let fuller = if used(five) > used(weekly) {
+            five
+        } else {
+            weekly
+        };
         state.quota = Some(Quota {
             five_hour_percent: login.five_hour.used_percent,
             weekly_percent: login.weekly.used_percent,
@@ -264,7 +265,7 @@ fn attach_quota(found: &mut Inventory) {
 // Commands.
 
 /// `by harnesses [ACTION]`.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // ratchet: branchyard-cli
 pub fn main(
     env: &Env,
     target: &Target,
@@ -295,6 +296,7 @@ pub fn main(
     }
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-cli
 fn list(env: &Env, target: &Target, as_json: bool, refresh: bool, on: Option<&str>) -> Outcome {
     if let Target::Remote(remote) = target {
         let report = remote.client.inventory()?;
@@ -342,7 +344,7 @@ fn quota_text(quota: Option<&Quota>) -> String {
     let Some(q) = quota else {
         return "-".into();
     };
-    let percent = |p: Option<f64>| p.map(|p| format!("{p:.0}%")).unwrap_or_else(|| "-".into());
+    let percent = |p: Option<f64>| p.map_or_else(|| "-".into(), |p| format!("{p:.0}%"));
     let mut text = format!(
         "5h {} · wk {}",
         percent(q.five_hour_percent),
@@ -459,6 +461,7 @@ fn inventory_text(found: &Inventory, style: Style) -> String {
     text
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-cli
 fn change_harness(
     env: &Env,
     target: &Target,
@@ -524,7 +527,7 @@ fn change_harness(
         .map_err(Failure::Message)?;
     let policy = policy(env)?;
     let event = |outcome: &str, detail: Option<String>, after: Option<String>| HarnessEvent {
-        at_ms: inventory::now_ms(),
+        at_ms: branchyard_support::time::now_ms(),
         on: machine.name(),
         harness: id.to_owned(),
         action,
@@ -729,7 +732,7 @@ fn login(
             )));
         };
         if !state.on_path {
-            let rest = command.split_once(' ').map(|(_, r)| r).unwrap_or("");
+            let rest = command.split_once(' ').map_or("", |(_, r)| r);
             command = format!("{} {rest}", quote(&state.path))
                 .trim_end()
                 .to_owned();
@@ -738,7 +741,7 @@ fn login(
     let command = command;
     let reported = |how: String| -> Outcome {
         record(HarnessEvent {
-            at_ms: inventory::now_ms(),
+            at_ms: branchyard_support::time::now_ms(),
             on: machine.name(),
             harness: id.to_owned(),
             action: InstallAction::Login,
@@ -811,7 +814,7 @@ fn login(
     let after = detect(env, &machine, &options, true)?;
     let state = after.get(id).map(|s| s.login.clone());
     record(HarnessEvent {
-        at_ms: inventory::now_ms(),
+        at_ms: branchyard_support::time::now_ms(),
         on: machine.name(),
         harness: id.to_owned(),
         action: InstallAction::Login,
@@ -905,7 +908,7 @@ fn store_key(env: &Env, as_json: bool, machine: &Machine, id: &str) -> Outcome {
     crate::setup_io::write_file(&path, key, 0o600)?;
     let named = name_secret(var, &path)?;
     record(HarnessEvent {
-        at_ms: inventory::now_ms(),
+        at_ms: branchyard_support::time::now_ms(),
         on: "local".into(),
         harness: id.to_owned(),
         action: InstallAction::Login,
@@ -1014,6 +1017,7 @@ fn name_secret(var: &str, path: &Path) -> Result<bool, Failure> {
     Ok(true)
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-cli
 fn show_log(env: &Env, as_json: bool) -> Outcome {
     let events = log().read()?;
     if as_json {
@@ -1073,7 +1077,7 @@ fn show_log(env: &Env, as_json: bool) -> Outcome {
                 (None, None) => "-".into(),
             };
             vec![
-                Cell::plain(crate::usage::utc(e.at_ms)),
+                Cell::plain(branchyard_support::time::utc_minute(e.at_ms)),
                 Cell::plain(&e.on),
                 Cell::plain(&e.harness),
                 Cell::plain(e.action.to_string()),

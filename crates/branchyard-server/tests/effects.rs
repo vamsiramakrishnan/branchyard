@@ -5,6 +5,7 @@
 //! performed through the API, and `/metrics` counts effects and waiting
 //! approvals. A shell script stands in for Anvil's packaging.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 #[path = "../../branchyard/tests/mock_gateway/mod.rs"]
 mod mock_gateway;
@@ -18,7 +19,8 @@ use branchyard::Provisioning;
 use branchyard_client::api::{OperationState, TaskRequest};
 use branchyard_client::effects_api::{ApprovalAnswerRequest, UndoRequest};
 use branchyard_server::config::{ConnectorsConfig, MetricsConfig};
-use common::{eventually, get, raw, task, wait, Fixture, Server};
+use branchyard_testkit::wait;
+use common::{await_operation, get, raw, task, Fixture, Server};
 use mock_gateway::MockGateway;
 
 const FAKE_ANVIL: &str = r##"#!/bin/sh
@@ -126,7 +128,7 @@ fn a_locked_policy_holds_an_ask_is_answered_through_the_api_and_undo_runs_there(
         .unwrap();
     // The ask waits; the turn with it.
     let mut waiting = Vec::new();
-    eventually("an ask", || {
+    wait::until("an ask", || {
         waiting = repo.approvals(false).unwrap();
         !waiting.is_empty()
     });
@@ -167,7 +169,7 @@ fn a_locked_policy_holds_an_ask_is_answered_through_the_api_and_undo_runs_there(
         (answer.by.as_str(), answer.surface.as_str()),
         ("tester", "companion")
     );
-    let done = wait(&client, &op.id);
+    let done = await_operation(&client, &op.id);
     assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
 
     // The ledger: the issue made, approved by the caller; the deletion

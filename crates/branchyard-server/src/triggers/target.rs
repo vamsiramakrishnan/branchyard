@@ -43,6 +43,7 @@ fn is_checkout(root: &Path) -> bool {
     root.join(".git").exists()
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

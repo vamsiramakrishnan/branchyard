@@ -6,6 +6,7 @@
 //! how workload identity reaches a pod or VM. Tokens are cached until a
 //! minute before they run out.
 
+use branchyard_support::LockExt as _;
 use std::sync::Mutex;
 
 use ring::signature::{RsaKeyPair, RSA_PKCS1_SHA256};
@@ -151,7 +152,7 @@ impl GoogleAuth {
         if let Source::None = self.source {
             return Ok(None);
         }
-        let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cached = self.cached.lock_recovering("cached");
         if let Some(t) = cached.as_ref() {
             if t.expires_ms.is_none_or(|e| e > now_ms + 60_000) {
                 return Ok(Some(format!("Bearer {}", t.value)));

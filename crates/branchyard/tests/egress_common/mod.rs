@@ -2,7 +2,7 @@
 //! runs, and the egress events of a branch.
 
 #![allow(dead_code)]
-
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};

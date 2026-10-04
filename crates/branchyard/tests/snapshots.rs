@@ -10,6 +10,7 @@
 //! the sandbox; and a fan whose setup runs once. Hermetic; nothing here is
 //! evidence about Microsandbox itself.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

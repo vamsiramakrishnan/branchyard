@@ -5,13 +5,14 @@
 //! metadata service). The same token flow serves Key Vault with another
 //! resource.
 
+use branchyard_support::LockExt as _;
 use std::sync::Mutex;
 
 use ring::hmac;
 
 use crate::error::{Error, Result};
 use crate::http::{send, Request, Url};
-use crate::util::{b64, unb64, uri_decode, uri_encode};
+use crate::util::{b64, unb64, uri_encode};
 
 /// The Storage service version every request names.
 pub const VERSION: &str = "2021-08-06";
@@ -35,8 +36,8 @@ pub fn string_to_sign(request: &Request, account: &str) -> String {
     let mut params: Vec<(String, Vec<String>)> = Vec::new();
     for pair in request.url.query.split('&').filter(|p| !p.is_empty()) {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        let k = uri_decode(k, false).to_ascii_lowercase();
-        let v = uri_decode(v, false);
+        let k = branchyard_client::http::decode(k).to_ascii_lowercase();
+        let v = branchyard_client::http::decode(v);
         match params.iter_mut().find(|(name, _)| *name == k) {
             Some((_, values)) => values.push(v),
             None => params.push((k, vec![v])),
@@ -142,7 +143,7 @@ impl ManagedIdentity {
     }
 
     pub fn token(&self, now_ms: u64) -> Result<String> {
-        let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cached = self.cached.lock_recovering("cached");
         if let Some((token, expires)) = cached.as_ref() {
             if *expires > now_ms + 60_000 {
                 return Ok(token.clone());
@@ -150,11 +151,10 @@ impl ManagedIdentity {
         }
         let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
         let resource = uri_encode(&self.resource, false);
-        let configured = self
-            .endpoint
-            .clone()
-            .map(|(e, h)| (Some(e), Some(h)))
-            .unwrap_or_else(|| (var("IDENTITY_ENDPOINT"), var("IDENTITY_HEADER")));
+        let configured = self.endpoint.clone().map_or_else(
+            || (var("IDENTITY_ENDPOINT"), var("IDENTITY_HEADER")),
+            |(e, h)| (Some(e), Some(h)),
+        );
         let request = match configured {
             (Some(endpoint), Some(header)) => Request::new(
                 "GET",
@@ -190,8 +190,7 @@ impl ManagedIdentity {
         let expires = value
             .get("expires_on")
             .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()))
-            .map(|s| s * 1000)
-            .unwrap_or(now_ms + 300_000);
+            .map_or(now_ms + 300_000, |s| s * 1000);
         *cached = Some((token.clone(), expires));
         Ok(token)
     }

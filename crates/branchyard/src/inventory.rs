@@ -22,6 +22,9 @@
 //! ([`HarnessLog`]). The router consults the inventory through
 //! [`HarnessGate`].
 
+use branchyard_support::best_effort;
+use branchyard_support::time::now_ms;
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -31,6 +34,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use branchyard_controls::catalog;
+use branchyard_recipe::quote;
 use serde::{Deserialize, Serialize};
 
 /// Labels derived from an inventory: `harness:<id>` for each harness that
@@ -389,8 +393,7 @@ fn version_args(id: &str) -> &'static [&'static str] {
     VERSION_ARGS
         .iter()
         .find(|(h, _)| *h == id)
-        .map(|(_, a)| *a)
-        .unwrap_or(&["--version"])
+        .map_or(&["--version"], |(_, a)| *a)
 }
 
 /// The key variables a harness reads instead of a login: the catalog's
@@ -474,11 +477,6 @@ impl DetectOptions {
             })
             .collect()
     }
-}
-
-/// One single-quoted shell word.
-fn quote(word: &str) -> String {
-    format!("'{}'", word.replace('\'', "'\\''"))
 }
 
 /// A directory as a shell word: `$HOME/x` keeps `$HOME` for the machine to
@@ -806,14 +804,6 @@ pub fn parse_version(line: &str) -> Option<String> {
     None
 }
 
-/// Milliseconds since the Unix epoch.
-pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// Run the detection script on this machine with `/bin/sh -s`.
 pub fn detect_local(options: &DetectOptions) -> Result<Inventory, String> {
     detect_with(options, true, |_| {
@@ -826,6 +816,7 @@ pub fn detect_local(options: &DetectOptions) -> Result<Inventory, String> {
 /// Run the detection script with the command `make` returns for it: the
 /// script goes on its stdin when `stdin` (`sh -s`, `ssh host sh -s`);
 /// otherwise `make` puts it in the arguments (`sh -c SCRIPT`).
+#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard
 pub fn detect_with(
     options: &DetectOptions,
     stdin: bool,
@@ -949,7 +940,7 @@ impl InventoryCache {
 
     /// Forget it.
     pub fn clear(&self) {
-        let _ = std::fs::remove_file(&self.path);
+        branchyard_support::cleanup_file(&self.path);
     }
 
     /// The cached inventory when fresh, else a new detection here, kept.
@@ -962,7 +953,7 @@ impl InventoryCache {
         }
         let inventory = detect_local(options)?;
         if options.only.is_none() {
-            let _ = self.put(options, &inventory);
+            best_effort("store the inventory", self.put(options, &inventory));
         }
         Ok(inventory)
     }
@@ -1435,10 +1426,7 @@ impl LocalGate {
 
     /// The inventory as it stands, after any installs.
     pub fn inventory(&self) -> Inventory {
-        self.inventory
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        self.inventory.lock_recovering("inventory").clone()
     }
 
     pub fn into_arc(self) -> Arc<dyn HarnessGate> {
@@ -1448,7 +1436,7 @@ impl LocalGate {
 
 impl HarnessGate for LocalGate {
     fn check(&self, harness: &str) -> Result<(), String> {
-        let mut inventory = self.inventory.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inventory = self.inventory.lock_recovering("inventory");
         if catalog::harness(harness).is_none() || !inventory.checked(harness) {
             // Not something detection knows: the PATH check decides.
             return Ok(());
@@ -1488,21 +1476,24 @@ impl HarnessGate for LocalGate {
             &mut |_| detect_local(&options),
         );
         if let Some(log) = &self.log {
-            let _ = log.append(&HarnessEvent {
-                at_ms: now_ms(),
-                on: "local".into(),
-                harness: harness.to_owned(),
-                action: InstallAction::Install,
-                by: "router".into(),
-                command: Some(plan.command.clone()),
-                outcome: match result.verified {
-                    true => "verified".into(),
-                    false => "failed".into(),
-                },
-                version_before: None,
-                version_after: result.after.as_ref().and_then(|a| a.version.clone()),
-                detail: result.problem.clone(),
-            });
+            best_effort(
+                "log the harness install",
+                log.append(&HarnessEvent {
+                    at_ms: now_ms(),
+                    on: "local".into(),
+                    harness: harness.to_owned(),
+                    action: InstallAction::Install,
+                    by: "router".into(),
+                    command: Some(plan.command.clone()),
+                    outcome: match result.verified {
+                        true => "verified".into(),
+                        false => "failed".into(),
+                    },
+                    version_before: None,
+                    version_after: result.after.as_ref().and_then(|a| a.version.clone()),
+                    detail: result.problem.clone(),
+                }),
+            );
         }
         if let Some(cache) = &self.cache {
             cache.clear();
@@ -1664,10 +1655,10 @@ mod tests {
             ..DetectOptions::default()
         });
         assert!(text.contains("[ -n \"${OPENAI_API_KEY:-}\" ] && echo 'env codex OPENAI_API_KEY'"));
-        assert!(text.contains("'login' 'status'"));
+        assert!(text.contains(" login status"));
         assert!(!text.contains("echo \"$OPENAI_API_KEY"));
         assert!(!text.contains("checked claude-code"));
-        assert!(text.contains("\"$HOME\"/'.local/bin'"));
+        assert!(text.contains("\"$HOME\"/.local/bin"));
     }
 
     #[test]

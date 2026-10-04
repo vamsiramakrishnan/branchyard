@@ -1,12 +1,13 @@
 //! One function per command, each a thin call into the SDK locally or into
 //! `branchyard-client` remotely ([`crate::remote`]).
 
+use branchyard_support::best_effort;
 use std::fmt;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use branchyard::{
     Activity, Branch, BranchInfo, BranchStatus, Budget, Delegate, Envelope, Event, Policy,
@@ -113,6 +114,12 @@ impl From<io::Error> for Failure {
 
 pub type Outcome = Result<(), Failure>;
 
+/// An argument clap requires for the action it is parsed under. A missing
+/// one is reported, never a panic.
+fn given<T>(value: Option<T>, name: &str) -> Result<T, Failure> {
+    value.ok_or_else(|| Failure::Message(format!("missing the {name} argument")))
+}
+
 pub fn print(text: &str) -> Outcome {
     let mut stdout = io::stdout().lock();
     stdout.write_all(text.as_bytes())?;
@@ -153,13 +160,6 @@ pub(crate) fn configure(yard: Yard) -> Result<Yard, branchyard::Error> {
     crate::knowledge_cmd::configure(&yard)
         .map_err(|e| branchyard::Error::Unsupported(format!("[knowledge]: {e}")))?;
     Ok(yard)
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// Console and policy for commands that run a harness.
@@ -787,7 +787,11 @@ pub fn ls(env: &Env, target: &Target, as_json: bool) -> Outcome {
     }
     print(&format!(
         "{}{maps}",
-        render::branch_table(&infos, now(), env.style())
+        render::branch_table(
+            &infos,
+            branchyard_support::time::now_ms() / 1000,
+            env.style()
+        )
     ))
 }
 
@@ -926,7 +930,12 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         extra.push(("listening", crate::ports::lines(&listening).join("; ")));
     }
     extra.extend(crate::plan_cmd::show_lines(&info.name, &events));
-    let mut text = render::details(&info, now(), env.style(), extra);
+    let mut text = render::details(
+        &info,
+        branchyard_support::time::now_ms() / 1000,
+        env.style(),
+        extra,
+    );
     text.push_str(&crate::attempts::checkpoint_lines(
         &checkpoints,
         env.style(),
@@ -1063,7 +1072,10 @@ pub fn log(env: &Env, target: &Target, branch: &str, as_json: bool, follow: bool
         Target::Local => {
             let yard = open()?;
             // The gateway's newest calls, if it has written any.
-            let _ = yard.ingest_connector_audit();
+            best_effort(
+                "ingest the connector audit log",
+                yard.ingest_connector_audit(),
+            );
             yard.branch(branch)?.events()?
         }
         Target::Remote(remote) => remote.repo.events(branch, 0)?.events,
@@ -1100,7 +1112,10 @@ fn log_follow(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcom
             (Some(branch), _) => {
                 // The gateway's newest calls, as connector_call events.
                 if let Some(yard) = &yard {
-                    let _ = yard.ingest_connector_audit();
+                    branchyard_support::best_effort_once(
+                        "ingest the connector audit log",
+                        yard.ingest_connector_audit(),
+                    );
                 }
                 let page = branch.wait_for_events(cursor, 500, FOLLOW_POLL)?;
                 (page.events, page.next_cursor)
@@ -1259,6 +1274,7 @@ pub(crate) fn harness_delegate(json: bool) -> Result<Option<Delegate>, Failure> 
     Ok(None)
 }
 
+#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 pub(crate) fn to_json<T: Serialize>(value: &T) -> String {
     serde_json::to_string_pretty(value).expect("results serialize")
 }
@@ -1636,7 +1652,11 @@ pub fn children(env: &Env, target: &Target, branch: Option<String>, json: bool) 
     };
     emit(json, result, |c| match c.descendants.is_empty() {
         true => format!("{} has no children\n", c.branch),
-        false => render::branch_table(&c.descendants, now(), env.style()),
+        false => render::branch_table(
+            &c.descendants,
+            branchyard_support::time::now_ms() / 1000,
+            env.style(),
+        ),
     })
 }
 
@@ -1814,7 +1834,7 @@ pub fn artifact(target: &Target, args: &ArtifactArgs) -> Outcome {
     };
     match args.action.as_str() {
         "publish" => {
-            let path = absolute(args.arg.as_deref().expect("checked in args"));
+            let path = absolute(given(args.arg.as_deref(), "arg")?);
             let labels = args.labels.iter().cloned().collect();
             let result = act.publish_artifact(&path, args.name.clone(), labels);
             emit(json, result, |a| {
@@ -1841,21 +1861,21 @@ pub fn artifact(target: &Target, args: &ArtifactArgs) -> Outcome {
             })
         }
         "get" => {
-            let id = args.arg.clone().expect("checked in args");
-            let out = absolute(args.out.as_deref().expect("checked in args"));
+            let id = given(args.arg.clone(), "arg")?;
+            let out = absolute(given(args.out.as_deref(), "out")?);
             let result = act.read_artifact(&id, &out);
             emit(json, result, |a| {
                 format!("wrote {} bytes of {} to {}\n", a.size, a.id, out.display())
             })
         }
         "share" => {
-            let id = args.arg.clone().expect("checked in args");
-            let to = args.to.clone().expect("checked in args");
+            let id = given(args.arg.clone(), "arg")?;
+            let to = given(args.to.clone(), "to")?;
             let result = act.share_artifact(&id, &to).map(|()| Ack { ok: true });
             emit(json, result, |_| format!("shared {id} with {to}\n"))
         }
         "export" => {
-            let out = absolute(args.out.as_deref().expect("checked in args"));
+            let out = absolute(given(args.out.as_deref(), "out")?);
             let result = act.export_artifacts(&args.ids, &out);
             emit(json, result, |entries: &Vec<branchyard::BundleEntry>| {
                 format!(
@@ -1867,7 +1887,7 @@ pub fn artifact(target: &Target, args: &ArtifactArgs) -> Outcome {
             })
         }
         "import" => {
-            let path = absolute(args.arg.as_deref().expect("checked in args"));
+            let path = absolute(given(args.arg.as_deref(), "arg")?);
             let result = act.import_artifacts(&path);
             emit(json, result, |imported: &Vec<branchyard::ArtifactRef>| {
                 let mut out = format!(
@@ -1926,7 +1946,7 @@ fn remote_artifact(server: &remote::Remote, args: &ArtifactArgs) -> Outcome {
     };
     match args.action.as_str() {
         "publish" => {
-            let path = absolute(args.arg.as_deref().expect("checked in args"));
+            let path = absolute(given(args.arg.as_deref(), "arg")?);
             let bytes = match std::fs::read(&path) {
                 Ok(bytes) => bytes,
                 Err(error) => {
@@ -1971,8 +1991,8 @@ fn remote_artifact(server: &remote::Remote, args: &ArtifactArgs) -> Outcome {
             })
         }
         "get" => {
-            let id = args.arg.clone().expect("checked in args");
-            let out = absolute(args.out.as_deref().expect("checked in args"));
+            let id = given(args.arg.clone(), "arg")?;
+            let out = absolute(given(args.out.as_deref(), "out")?);
             let result = server
                 .repo
                 .read_artifact(&branch, &id)
@@ -1995,8 +2015,8 @@ fn remote_artifact(server: &remote::Remote, args: &ArtifactArgs) -> Outcome {
             })
         }
         "share" => {
-            let id = args.arg.clone().expect("checked in args");
-            let to = args.to.clone().expect("checked in args");
+            let id = given(args.arg.clone(), "arg")?;
+            let to = given(args.to.clone(), "to")?;
             let result = server
                 .repo
                 .share_artifact(&branch, &id, &to, &branchyard_client::new_key())
@@ -2036,7 +2056,7 @@ pub fn scratch(target: &Target, args: &ScratchArgs) -> Outcome {
     };
     match args.action.as_str() {
         "create" => {
-            let result = act.create_scratch(args.name.as_deref().expect("checked in args"));
+            let result = act.create_scratch(given(args.name.as_deref(), "name")?);
             emit(json, result, |a| {
                 format!("created scratch area {}\n", a.name)
             })
@@ -2053,20 +2073,20 @@ pub fn scratch(target: &Target, args: &ScratchArgs) -> Outcome {
             })
         }
         "lock" => {
-            let result = act.lock_scratch(args.name.as_deref().expect("checked in args"));
+            let result = act.lock_scratch(given(args.name.as_deref(), "name")?);
             emit(json, result, |l| {
                 format!("{} holds {}\n", l.holder_branch, l.name)
             })
         }
         "unlock" => {
             let result = act
-                .unlock_scratch(args.name.as_deref().expect("checked in args"))
+                .unlock_scratch(given(args.name.as_deref(), "name")?)
                 .map(|()| Ack { ok: true });
             emit(json, result, |_| "unlocked\n".to_owned())
         }
         "share" => {
-            let name = args.name.clone().expect("checked in args");
-            let to = args.to.clone().expect("checked in args");
+            let name = given(args.name.clone(), "name")?;
+            let to = given(args.to.clone(), "to")?;
             let result = act.share_scratch(&name, &to).map(|()| Ack { ok: true });
             emit(json, result, |_| format!("shared {name} with {to}\n"))
         }
@@ -2088,7 +2108,7 @@ fn remote_scratch(server: &remote::Remote, args: &ScratchArgs) -> Outcome {
     };
     match args.action.as_str() {
         "create" => {
-            let name = args.name.as_deref().expect("checked in args");
+            let name = given(args.name.as_deref(), "name")?;
             let result = server
                 .repo
                 .create_scratch(&branch, name, &branchyard_client::new_key())
@@ -2112,7 +2132,7 @@ fn remote_scratch(server: &remote::Remote, args: &ScratchArgs) -> Outcome {
             })
         }
         "lock" => {
-            let name = args.name.as_deref().expect("checked in args");
+            let name = given(args.name.as_deref(), "name")?;
             let result = server
                 .repo
                 .lock_scratch(&branch, name, &branchyard_client::new_key())
@@ -2122,7 +2142,7 @@ fn remote_scratch(server: &remote::Remote, args: &ScratchArgs) -> Outcome {
             })
         }
         "unlock" => {
-            let name = args.name.as_deref().expect("checked in args");
+            let name = given(args.name.as_deref(), "name")?;
             let result = server
                 .repo
                 .unlock_scratch(&branch, name, &branchyard_client::new_key())
@@ -2131,8 +2151,8 @@ fn remote_scratch(server: &remote::Remote, args: &ScratchArgs) -> Outcome {
             emit(json, result, |_| "unlocked\n".to_owned())
         }
         "share" => {
-            let name = args.name.clone().expect("checked in args");
-            let to = args.to.clone().expect("checked in args");
+            let name = given(args.name.clone(), "name")?;
+            let to = given(args.to.clone(), "to")?;
             let result = server
                 .repo
                 .share_scratch(&branch, &name, &to, &branchyard_client::new_key())

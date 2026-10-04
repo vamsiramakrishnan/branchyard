@@ -1,0 +1,4 @@
+# Panicking shortcuts are fine in tests, where a panic is the failure report.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

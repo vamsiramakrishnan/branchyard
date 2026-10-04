@@ -735,26 +735,13 @@ impl ApprovalSettings {
     }
 }
 
-pub(crate) const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
 /// A ULID for `now_ms`: 48 bits of time and 80 random bits, in Crockford's
 /// base32, so ids sort by when they were made.
 pub fn ulid(now_ms: u64) -> Result<String, Error> {
-    use ring::rand::{SecureRandom, SystemRandom};
     let mut random = [0u8; 10];
-    SystemRandom::new()
-        .fill(&mut random)
+    branchyard_support::rng::fill_random(&mut random)
         .map_err(|_| Error::State("could not generate a random id".into()))?;
-    let mut value: u128 = u128::from(now_ms & 0xFFFF_FFFF_FFFF) << 80;
-    for (i, byte) in random.iter().enumerate() {
-        value |= u128::from(*byte) << (8 * (9 - i));
-    }
-    let mut out = [0u8; 26];
-    for (i, slot) in out.iter_mut().enumerate() {
-        let shift = 5 * (25 - i);
-        *slot = CROCKFORD[((value >> shift) & 0x1F) as usize];
-    }
-    Ok(String::from_utf8_lossy(&out).into_owned())
+    Ok(branchyard_support::ulid_from_parts(now_ms, random))
 }
 
 /// blake3 of the canonical request: the connector, the operation and the
@@ -791,11 +778,12 @@ pub(crate) fn find_effect(backend: &dyn EffectBackend, id: &str) -> Result<Effec
         .into_iter()
         .filter(|e| e.id.ends_with(&wanted))
         .collect();
-    match matches.len() {
-        1 => Ok(matches.into_iter().next().expect("one")),
-        0 => Err(Error::Denied(format!("no effect {id} in the ledger"))),
-        n => Err(Error::Denied(format!(
-            "{id} names {n} effects; give more of its id"
+    let count = matches.len();
+    match matches.into_iter().next() {
+        Some(only) if count == 1 => Ok(only),
+        None => Err(Error::Denied(format!("no effect {id} in the ledger"))),
+        Some(_) => Err(Error::Denied(format!(
+            "{id} names {count} effects; give more of its id"
         ))),
     }
 }
@@ -811,11 +799,12 @@ pub(crate) fn find_ask(backend: &dyn EffectBackend, id: &str) -> Result<Approval
         .into_iter()
         .filter(|a| a.id.ends_with(&wanted))
         .collect();
-    match matches.len() {
-        1 => Ok(matches.into_iter().next().expect("one")),
-        0 => Err(Error::Denied(format!("no approval {id}"))),
-        n => Err(Error::Denied(format!(
-            "{id} names {n} approvals; give more of its id"
+    let count = matches.len();
+    match matches.into_iter().next() {
+        Some(only) if count == 1 => Ok(only),
+        None => Err(Error::Denied(format!("no approval {id}"))),
+        Some(_) => Err(Error::Denied(format!(
+            "{id} names {count} approvals; give more of its id"
         ))),
     }
 }
@@ -830,7 +819,11 @@ mod tests {
         let b = ulid(2_000).unwrap();
         assert_eq!(a.len(), 26);
         assert!(a < b, "{a} {b}");
-        assert!(a.bytes().all(|c| CROCKFORD.contains(&c)), "{a}");
+        assert!(
+            a.bytes()
+                .all(|c| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&c)),
+            "{a}"
+        );
         assert_ne!(ulid(1_000).unwrap(), a);
         assert_eq!(&ulid(0).unwrap()[..10], "0000000000");
     }

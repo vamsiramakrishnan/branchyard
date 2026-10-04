@@ -13,6 +13,7 @@
 //! `notify-send` or, on macOS, `osascript`. `--no-notify` or
 //! `[notify] enabled = false` turns it all off.
 
+use branchyard_support::LockExt as _;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -332,8 +333,7 @@ impl Notifier {
     pub fn observe(&self, branch: &str, activity: &Activity) {
         let notice = self
             .tracker
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("tracker")
             .observe(branch, activity);
         if let Some(notice) = notice {
             self.show(&notice);
@@ -342,16 +342,13 @@ impl Notifier {
 
     /// Show `notice` now.
     pub fn show(&self, notice: &Notice) {
-        show(
-            &self.settings,
-            notice,
-            &mut self.out.lock().unwrap_or_else(|e| e.into_inner()),
-        );
+        show(&self.settings, notice, &mut self.out.lock_recovering("out"));
     }
 }
 
 /// Show `notice` on `out` and, when configured, on the desktop. Best
 /// effort: a notification never fails the command.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 pub fn show(settings: &Settings, notice: &Notice, out: &mut Option<Box<dyn Write + Send>>) {
     if !settings.enabled {
         return;
@@ -378,6 +375,7 @@ pub fn show(settings: &Settings, notice: &Notice, out: &mut Option<Box<dyn Write
     }
 }
 
+#[allow(clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -154,6 +154,7 @@ pub fn template(branch: &str, diff: &str) -> String {
 
 /// The comments in `edited`, the review file for `diff` after editing, in
 /// the order written; or where the diff itself was changed.
+#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 pub fn parse(diff: &str, edited: &str) -> Result<Vec<DiffComment>, ParseError> {
     let original: Vec<&str> = diff.lines().collect();
     let mut walker = Walker {
@@ -360,7 +361,7 @@ pub fn main(env: &Env, target: &Target, args: &ReviewArgs) -> Outcome {
     })?;
     if comments.is_empty() {
         if args.file.is_none() {
-            let _ = std::fs::remove_file(&path);
+            branchyard_support::cleanup_file(&path);
         }
         eprintln!("by: no comments, so nothing was sent to {branch}");
         return Ok(());
@@ -386,7 +387,7 @@ pub fn main(env: &Env, target: &Target, args: &ReviewArgs) -> Outcome {
         commands::send(env, target, branch, &text, args.task, false, false)?;
     }
     if args.file.is_none() {
-        let _ = std::fs::remove_file(&path);
+        branchyard_support::cleanup_file(&path);
     }
     Ok(())
 }
@@ -417,13 +418,7 @@ fn detach(target: &Target, branch: &str, text: &str, task: &TaskArgs, draft: &Pa
         command.arg("--command").arg(line.join(" "));
     }
     command.args(["--", branch, text]);
-    let log = draft.with_extension(format!(
-        "{}.log",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or_default()
-    ));
+    let log = draft.with_extension(format!("{}.log", branchyard_support::time::now_ms()));
     let file = std::fs::File::create(&log)?;
     command
         .stdin(std::process::Stdio::null())

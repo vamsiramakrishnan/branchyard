@@ -644,9 +644,13 @@ dependencies = [
  "branchyard-runtime",
  "branchyard-sandbox",
  "branchyard-substrate",
+ "branchyard-support",
+ "branchyard-testkit",
+ "branchyard-wire",
  "branchyard-workspace",
  "glob",
- "httparse",
+ "hex",
+ "percent-encoding",
  "postgres",
  "rcgen",
  "ring",
@@ -656,9 +660,12 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "strum 0.28.0",
+ "tar",
  "tempfile",
  "tokio",
  "toml_edit",
+ "url",
  "webpki-roots",
 ]
 
@@ -666,13 +673,16 @@ dependencies = [
 name = "branchyard-bridge"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "branchyard-sandbox",
+ "branchyard-support",
+ "branchyard-testkit",
  "clap",
+ "hex",
  "libc",
  "rcgen",
  "ring",
  "rustls",
- "rustls-pki-types",
  "webpki-roots",
 ]
 
@@ -680,6 +690,7 @@ dependencies = [
 name = "branchyard-cli"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "branchyard",
  "branchyard-bridge",
  "branchyard-client",
@@ -691,13 +702,17 @@ dependencies = [
  "branchyard-server",
  "branchyard-setup",
  "branchyard-substrate",
+ "branchyard-support",
  "branchyard-sync",
+ "branchyard-testkit",
+ "branchyard-wire",
  "branchyard-workspace",
  "clap",
  "clap_complete",
  "clap_mangen",
  "cliclack",
  "dirs",
+ "hex",
  "ratatui",
  "schemars 1.2.2",
  "serde",
@@ -707,6 +722,7 @@ dependencies = [
  "tempfile",
  "toml_edit",
  "unicode-width",
+ "url",
 ]
 
 [[package]]
@@ -716,9 +732,9 @@ dependencies = [
  "backon",
  "blake3",
  "branchyard",
- "httparse",
+ "branchyard-wire",
+ "percent-encoding",
  "rustls",
- "rustls-pki-types",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -753,6 +769,8 @@ version = "0.0.1"
 dependencies = [
  "branchyard",
  "branchyard-client",
+ "branchyard-support",
+ "branchyard-testkit",
  "clap",
  "serde",
  "serde_json",
@@ -767,6 +785,8 @@ name = "branchyard-mcp"
 version = "0.0.1"
 dependencies = [
  "branchyard",
+ "branchyard-support",
+ "branchyard-testkit",
  "clap",
  "rmcp",
  "serde_json",
@@ -778,6 +798,7 @@ name = "branchyard-microsandbox"
 version = "0.0.1"
 dependencies = [
  "branchyard-sandbox",
+ "branchyard-support",
  "microsandbox",
  "tokio",
 ]
@@ -788,9 +809,11 @@ version = "0.0.1"
 dependencies = [
  "branchyard-controls",
  "branchyard-harness",
+ "branchyard-support",
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "tempfile",
  "toml_edit",
 ]
 
@@ -809,9 +832,10 @@ name = "branchyard-recipe"
 version = "0.0.1"
 dependencies = [
  "branchyard-sandbox",
- "rustix",
+ "branchyard-support",
  "serde",
  "serde_json",
+ "shlex",
  "tempfile",
 ]
 
@@ -821,6 +845,8 @@ version = "0.0.1"
 dependencies = [
  "branchyard-harness",
  "branchyard-sandbox",
+ "branchyard-support",
+ "branchyard-testkit",
  "rustix",
  "serde_json",
 ]
@@ -828,6 +854,9 @@ dependencies = [
 [[package]]
 name = "branchyard-sandbox"
 version = "0.0.1"
+dependencies = [
+ "branchyard-support",
+]
 
 [[package]]
 name = "branchyard-server"
@@ -840,7 +869,9 @@ dependencies = [
  "branchyard",
  "branchyard-client",
  "branchyard-setup",
+ "branchyard-support",
  "branchyard-sync",
+ "branchyard-testkit",
  "clap",
  "futures-util",
  "hex",
@@ -853,9 +884,7 @@ dependencies = [
  "reqwest",
  "ring",
  "rusqlite",
- "rustix",
  "rustls",
- "rustls-pki-types",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -881,6 +910,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "shlex",
  "similar",
  "toml",
 ]
@@ -892,16 +922,32 @@ dependencies = [
  "branchyard-bridge",
  "branchyard-sandbox",
  "branchyard-substrate",
+ "branchyard-support",
+ "branchyard-testkit",
  "branchyard-workspace",
  "prost",
  "prost-types",
  "protoc-bin-vendored",
  "rcgen",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "branchyard-support"
+version = "0.0.1"
+dependencies = [
+ "branchyard-support",
+ "branchyard-testkit",
+ "getrandom 0.4.3",
+ "jiff",
+ "rustix",
+ "tracing",
+ "ulid",
 ]
 
 [[package]]
@@ -912,8 +958,10 @@ dependencies = [
  "blake3",
  "branchyard",
  "branchyard-client",
+ "branchyard-support",
  "branchyard-sync",
- "httparse",
+ "branchyard-wire",
+ "hex",
  "ring",
  "rusqlite",
  "rustls",
@@ -923,9 +971,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "branchyard-testkit"
+version = "0.0.1"
+dependencies = [
+ "branchyard-support",
+ "branchyard-wire",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "branchyard-wire"
+version = "0.0.1"
+dependencies = [
+ "httparse",
+]
+
+[[package]]
 name = "branchyard-workspace"
 version = "0.0.1"
 dependencies = [
+ "branchyard-support",
+ "branchyard-testkit",
  "rustix",
 ]
 
@@ -6443,6 +6510,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
+name = "ulid"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "947dde63b6d514cc5e044edad4e0ca7261afd1099d16c83d942cb2b2f348689c"
+dependencies = [
+ "web-time",
+]
+
+[[package]]
 name = "unicase"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7182,9 +7258,9 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",

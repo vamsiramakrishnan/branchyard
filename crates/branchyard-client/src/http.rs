@@ -1,11 +1,12 @@
-//! A minimal blocking HTTP/1.1 client: one connection per request, bodies
-//! by `Content-Length` or chunked encoding, optional TLS through rustls,
+//! A minimal blocking HTTP/1.1 client: one connection per request, heads,
+//! framing, chunked decoding and URLs from `branchyard-wire` (the
+//! workspace's one codec), optional TLS through rustls,
 //! over TCP or, for `unix:/path` (a server's `--listen-unix` socket, such as
 //! the one `by --remote ssh://` forwards), a Unix domain socket.
 //! Just enough for the Branchyard API; not a general HTTP client.
 
 use std::fmt;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use branchyard_wire as wire;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
@@ -51,58 +53,18 @@ impl Endpoint {
                 unix: Some(path.to_path_buf()),
             });
         }
-        let (tls, rest) = if let Some(rest) = url.strip_prefix("https://") {
-            (true, rest)
-        } else if let Some(rest) = url.strip_prefix("http://") {
-            (false, rest)
-        } else {
-            return Err(format!("{url:?} is not an http:// or https:// URL"));
-        };
-        let (authority, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, ""),
-        };
-        if authority.is_empty() || authority.contains('@') {
-            return Err(format!("{url:?} has no usable host"));
-        }
-        if path.contains(['?', '#']) {
-            return Err(format!("{url:?} must not have a query or fragment"));
-        }
-        let default_port = if tls { 443 } else { 80 };
-        let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
-            let (host, after) = v6
-                .split_once(']')
-                .ok_or_else(|| format!("{url:?} has an unterminated IPv6 address"))?;
-            let port = match after.strip_prefix(':') {
-                Some(port) => parse_port(url, port)?,
-                None if after.is_empty() => default_port,
-                None => return Err(format!("{url:?} has a malformed host")),
-            };
-            (host.to_owned(), port)
-        } else {
-            match authority.rsplit_once(':') {
-                Some((host, port)) => (host.to_owned(), parse_port(url, port)?),
-                None => (authority.to_owned(), default_port),
-            }
-        };
+        let base = branchyard::models::BaseUrl::parse(url)?;
         Ok(Endpoint {
-            tls,
-            host,
-            port,
-            prefix: path.trim_end_matches('/').to_owned(),
+            tls: base.tls,
+            host: base.host,
+            port: base.port,
+            prefix: base.prefix,
             unix: None,
         })
     }
 
     fn host_header(&self) -> String {
-        let host = match self.host.contains(':') {
-            true => format!("[{}]", self.host),
-            false => self.host.clone(),
-        };
-        match (self.tls, self.port) {
-            (true, 443) | (false, 80) => host,
-            _ => format!("{host}:{}", self.port),
-        }
+        wire::host_header(self.tls, &self.host, self.port)
     }
 }
 
@@ -114,11 +76,6 @@ impl fmt::Display for Endpoint {
         let scheme = if self.tls { "https" } else { "http" };
         write!(f, "{scheme}://{}{}", self.host_header(), self.prefix)
     }
-}
-
-fn parse_port(url: &str, port: &str) -> Result<u16, String> {
-    port.parse()
-        .map_err(|_| format!("{url:?} has an invalid port {port:?}"))
 }
 
 /// TLS settings: the Mozilla roots from `webpki-roots`, plus the
@@ -287,27 +244,21 @@ pub fn send(
     endpoint: &Endpoint,
     request: &Request<'_>,
 ) -> io::Result<Response> {
-    let mut head = format!(
-        "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: branchyard-client/{}\r\n",
+    let host = endpoint.host_header();
+    let agent = concat!("branchyard-client/", env!("CARGO_PKG_VERSION"));
+    let head = wire::request_head(
         request.method,
         request.target,
-        endpoint.host_header(),
-        env!("CARGO_PKG_VERSION")
-    );
-    for (name, value) in request.headers {
-        if value.contains(['\r', '\n']) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("header {name} contains a line break"),
-            ));
-        }
-        head.push_str(&format!("{name}: {value}\r\n"));
-    }
-    if let Some(body) = request.body {
-        head.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    }
-    head.push_str("\r\n");
-    let mut bytes = head.into_bytes();
+        [
+            ("Host", host.as_str()),
+            ("Connection", "close"),
+            ("User-Agent", agent),
+        ]
+        .into_iter()
+        .chain(request.headers.iter().map(|(n, v)| (*n, v.as_str()))),
+        request.body.map(|body| body.len() as u64),
+    )?;
+    let mut bytes = head;
     if let Some(body) = request.body {
         bytes.extend_from_slice(body);
     }
@@ -317,164 +268,56 @@ pub fn send(
 }
 
 fn read_response(mut reader: BufReader<Stream>, head_only: bool) -> io::Result<Response> {
-    let mut raw = Vec::new();
-    loop {
-        let before = raw.len();
-        let n = reader.read_until(b'\n', &mut raw)?;
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "the server closed the connection before responding",
-            ));
-        }
-        if raw.len() > MAX_HEAD {
-            return Err(invalid("response head too large"));
-        }
-        let line = &raw[before..];
-        if line == b"\r\n" || line == b"\n" {
-            break;
-        }
-    }
-    let mut headers = [httparse::EMPTY_HEADER; 64];
-    let mut parsed = httparse::Response::new(&mut headers);
-    match parsed.parse(&raw) {
-        Ok(httparse::Status::Complete(_)) => {}
-        Ok(httparse::Status::Partial) => return Err(invalid("incomplete response head")),
-        Err(e) => return Err(invalid(&format!("malformed response head: {e}"))),
-    }
-    let status = parsed.code.ok_or_else(|| invalid("no status code"))?;
-    let headers: Vec<(String, String)> = parsed
-        .headers
-        .iter()
-        .map(|h| {
-            (
-                h.name.to_owned(),
-                String::from_utf8_lossy(h.value).trim().to_owned(),
-            )
-        })
-        .collect();
-    let find = |name: &str| {
-        headers
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
-    };
-    let chunked = find("transfer-encoding").is_some_and(|v| {
-        v.to_ascii_lowercase()
-            .split(',')
-            .any(|t| t.trim() == "chunked")
-    });
-    let body = if head_only || status == 204 || status == 304 {
-        Body::Empty
-    } else if chunked {
-        Body::Chunked(Chunked {
-            reader,
-            remaining: 0,
-            done: false,
-        })
-    } else if let Some(length) = find("content-length") {
-        let length: u64 = length
-            .parse()
-            .map_err(|_| invalid("invalid Content-Length"))?;
-        Body::Length(reader.take(length))
-    } else {
-        Body::Eof(reader)
-    };
+    let head = wire::read_response_head(&mut reader, MAX_HEAD)?;
+    let framing = wire::response_framing(head.status, &head.headers, head_only)?;
     Ok(Response {
-        status,
-        headers,
-        body,
+        status: head.status,
+        headers: head.headers,
+        body: Body::new(reader, framing),
     })
 }
 
-fn invalid(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message.to_owned())
-}
+/// A response body, its framing undone by the wire codec.
+pub type Body = wire::Body<BufReader<Stream>>;
 
-pub enum Body {
-    Empty,
-    Length(io::Take<BufReader<Stream>>),
-    Chunked(Chunked),
-    Eof(BufReader<Stream>),
-}
-
-impl Read for Body {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Body::Empty => Ok(0),
-            Body::Length(r) => r.read(buf),
-            Body::Chunked(r) => r.read(buf),
-            Body::Eof(r) => r.read(buf),
-        }
-    }
-}
-
-/// Decodes `Transfer-Encoding: chunked`, ignoring extensions and trailers.
-pub struct Chunked {
-    reader: BufReader<Stream>,
-    remaining: u64,
-    done: bool,
-}
-
-impl Read for Chunked {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.done || buf.is_empty() {
-            return Ok(0);
-        }
-        if self.remaining == 0 {
-            let mut line = String::new();
-            if self.reader.read_line(&mut line)? == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "chunked body ended early",
-                ));
-            }
-            let size = line.trim().split(';').next().unwrap_or("").trim();
-            self.remaining =
-                u64::from_str_radix(size, 16).map_err(|_| invalid("invalid chunk size"))?;
-            if self.remaining == 0 {
-                // Trailers, then the final blank line.
-                loop {
-                    line.clear();
-                    if self.reader.read_line(&mut line)? == 0 || line.trim().is_empty() {
-                        break;
-                    }
-                }
-                self.done = true;
-                return Ok(0);
-            }
-        }
-        let want = buf.len().min(self.remaining as usize);
-        let n = self.reader.read(&mut buf[..want])?;
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "chunk ended early",
-            ));
-        }
-        self.remaining -= n as u64;
-        if self.remaining == 0 {
-            let mut crlf = String::new();
-            self.reader.read_line(&mut crlf)?;
-        }
-        Ok(n)
-    }
-}
+/// Everything but `A-Z a-z 0-9 - . _ ~`.
+const COMPONENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 
 /// Percent-encode one path segment or query value.
 pub fn encode(text: &str) -> String {
-    let mut out = String::new();
-    for byte in text.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
+    percent_encoding::utf8_percent_encode(text, COMPONENT).to_string()
 }
 
+/// Undo [`encode`]: `%XX` escapes become bytes (a trailing `%41` too), a
+/// malformed escape (`%zz`, a lone `%4`) stays as written, and bytes that
+/// are not UTF-8 become U+FFFD. `+` is not a space; see [`decode_form`].
+pub fn decode(text: &str) -> String {
+    percent_encoding::percent_decode_str(text)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+/// [`decode`] for an `application/x-www-form-urlencoded` query value, where
+/// a literal `+` is a space (an encoded one, `%2B`, stays a plus).
+pub fn decode_form(text: &str) -> String {
+    decode(&text.replace('+', " "))
+}
+
+/// [`decode_form`] on bytes, which need not be UTF-8 (a webhook's form body
+/// carries a JSON payload as bytes).
+pub fn decode_form_bytes(value: &[u8]) -> Vec<u8> {
+    let spaced: Vec<u8> = value
+        .iter()
+        .map(|b| if *b == b'+' { b' ' } else { *b })
+        .collect();
+    percent_encoding::percent_decode(&spaced).collect()
+}
+
+#[allow(clippy::let_underscore_must_use, clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,5 +358,112 @@ mod tests {
     fn encoding_keeps_unreserved_bytes() {
         assert_eq!(encode("fix-it_1.2~"), "fix-it_1.2~");
         assert_eq!(encode("a b/c"), "a%20b%2Fc");
+    }
+
+    /// The decoding cases every percent-decoding call site shares: the
+    /// server's query values, OTLP headers and storage routes all go
+    /// through `decode`/`decode_form`.
+    #[test]
+    fn decoding_handles_the_edges() {
+        // A trailing escape decodes (the hand-rolled decoders it replaced
+        // left `%41` at the end of input as written).
+        assert_eq!(decode("%41"), "A");
+        assert_eq!(decode("a%41"), "aA");
+        // Malformed escapes stay as written.
+        assert_eq!(decode("%zz"), "%zz");
+        assert_eq!(decode("%4"), "%4");
+        assert_eq!(decode("100%"), "100%");
+        assert_eq!(decode("%%41"), "%A");
+        // Multi-byte UTF-8, whole and cut.
+        assert_eq!(decode("%C3%A9"), "\u{e9}");
+        assert_eq!(decode("%E2%82%AC"), "\u{20ac}");
+        assert_eq!(decode("%C3"), "\u{fffd}");
+        // `+` is a space only in a form value.
+        assert_eq!(decode("a+b"), "a+b");
+        assert_eq!(decode_form("a+b%2Bc%20d"), "a b+c d");
+        assert_eq!(decode_form("%41"), "A");
+        assert_eq!(decode_form_bytes(b"a+b%2Bc%FF%41"), b"a b+c\xffA");
+    }
+
+    #[test]
+    fn encoding_round_trips() {
+        for text in [
+            "",
+            "plain",
+            "a b/c?d=e&f",
+            "100%",
+            "%41",
+            "caf\u{e9} \u{20ac} \u{1f600}",
+            "+ plus",
+            "~-._",
+        ] {
+            assert_eq!(decode(&encode(text)), text, "{text:?}");
+            assert_eq!(decode_form(&encode(text)), text, "{text:?}");
+        }
+    }
+    /// A server that sends `bytes` and closes, read through `read_response`.
+    fn answer(bytes: &[u8], head_only: bool) -> io::Result<(u16, Vec<u8>)> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut server = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (client, _) = listener.accept().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let _ = server.write_all(bytes);
+        drop(server);
+        let mut response = read_response(BufReader::new(Stream::Plain(client)), head_only)?;
+        let mut body = Vec::new();
+        response.body.read_to_end(&mut body)?;
+        Ok((response.status, body))
+    }
+
+    #[test]
+    fn every_valid_response_in_the_wire_corpus_is_read() {
+        for (name, bytes, body) in wire::corpus::responses_valid() {
+            let got = answer(&bytes, false).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(got.1, body, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_malformed_response_in_the_wire_corpus_fails_cleanly() {
+        for (name, bytes) in wire::corpus::responses_malformed() {
+            let got = answer(&bytes, false);
+            assert!(got.is_err(), "{name}: read as {got:?}");
+        }
+    }
+
+    #[test]
+    fn a_framing_failure_carries_its_typed_cause() {
+        let error = answer(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n",
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(matches!(
+            wire::wire_error(&error),
+            Some(wire::WireError::BadChunkSize(_))
+        ));
+        let error = answer(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nabc", false).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn a_request_head_refuses_what_could_split_it() {
+        let headers = [("X-Evil", "a\r\nInjected: 1".to_owned())];
+        let request = Request {
+            method: "GET",
+            target: "/",
+            headers: &headers,
+            body: None,
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let tcp = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let endpoint = Endpoint::parse("http://127.0.0.1:1").unwrap();
+        let Err(error) = send(Stream::Plain(tcp), &endpoint, &request) else {
+            panic!("a header with a line break was sent");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 }

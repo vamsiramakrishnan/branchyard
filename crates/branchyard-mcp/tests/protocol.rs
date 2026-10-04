@@ -1,5 +1,6 @@
 //! `branchyard-mcp` over stdio, speaking JSON-RPC as an MCP client would.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::process::{Command, Stdio};

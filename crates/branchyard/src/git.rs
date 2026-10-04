@@ -3,6 +3,7 @@
 //! everything that changes branches or worktrees goes through
 //! `branchyard_workspace`'s repository API.
 
+use branchyard_support::LockExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -17,12 +18,31 @@ use crate::Error;
 static WRITES: Mutex<()> = Mutex::new(());
 
 pub(crate) fn lock() -> MutexGuard<'static, ()> {
-    WRITES.lock().unwrap_or_else(|e| e.into_inner())
+    WRITES.lock_recovering("WRITES")
 }
 
 /// Run git in `dir` and return stdout, or the exit's stderr as an error.
 pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<String, Error> {
     Git::new(dir).args(args).run().map_err(error)
+}
+
+/// `git worktree remove --force path`, for a caller that holds [`lock`] and
+/// removes the directory itself afterwards. A path git does not know as a
+/// worktree (a half-made one) is nothing to report; any other failure is.
+pub(crate) fn remove_worktree(root: &Path, path: &Path) {
+    let removed = run(
+        root,
+        &["worktree", "remove", "--force", &path.display().to_string()],
+    );
+    match removed {
+        Err(e) if e.to_string().contains("is not a working tree") => {}
+        other => {
+            branchyard_support::best_effort(
+                &format!("remove the worktree {}", path.display()),
+                other,
+            );
+        }
+    }
 }
 
 /// Whether git exits successfully.

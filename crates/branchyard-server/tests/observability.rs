@@ -1,6 +1,7 @@
 //! Priority, metrics and traces over real HTTP with the fake ACP agent:
 //! see `docs/server.md#scheduling` and `docs/observability.md`.
 
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use branchyard_server::config::{MetricsConfig, Principal, TenantPolicy, Token};
 use branchyard_server::metrics::Metrics;
 use branchyard_server::observe::Observability;
 use branchyard_server::telemetry::{Attr, MemoryExporter, SpanContext, Tracer};
-use common::{get, post, raw, run, task, wait, Fixture, Server, TOKEN};
+use common::{await_operation, get, post, raw, run, task, Fixture, Server, TOKEN};
 
 fn json(body: &str) -> serde_json::Value {
     serde_json::from_str(body).unwrap_or_else(|e| panic!("{e}: {body:?}"))
@@ -86,14 +87,17 @@ fn priority_is_checked_capped_reported_and_inherited() {
         .unwrap();
     assert_eq!(inherited.priority, 6, "a child inherits its parent's");
     assert_eq!(
-        wait(&client, &inherited.id).state,
+        await_operation(&client, &inherited.id).state,
         OperationState::Succeeded
     );
     let own = repo
         .spawn("parent", &child("own", Some(-2)), &new_key())
         .unwrap();
     assert_eq!(own.priority, -2, "unless it names its own");
-    assert_eq!(wait(&client, &own.id).state, OperationState::Succeeded);
+    assert_eq!(
+        await_operation(&client, &own.id).state,
+        OperationState::Succeeded
+    );
     server.stop();
 }
 
@@ -264,7 +268,10 @@ fn an_operation_is_traced_from_admission_to_its_turns() {
     );
     assert_eq!(status, 202, "{answer}");
     let id = json(&answer)["id"].as_str().unwrap().to_owned();
-    assert_eq!(wait(&client, &id).state, OperationState::Succeeded);
+    assert_eq!(
+        await_operation(&client, &id).state,
+        OperationState::Succeeded
+    );
     tracer.flush(Duration::from_secs(10));
     let spans = memory.spans();
     let named = |name: &str| {
@@ -320,7 +327,10 @@ fn an_operation_is_traced_from_admission_to_its_turns() {
     );
     assert_eq!(status, 202, "{answer}");
     let id = json(&answer)["id"].as_str().unwrap().to_owned();
-    assert_eq!(wait(&client, &id).state, OperationState::Succeeded);
+    assert_eq!(
+        await_operation(&client, &id).state,
+        OperationState::Succeeded
+    );
     tracer.flush(Duration::from_secs(10));
     let fresh = memory
         .spans()

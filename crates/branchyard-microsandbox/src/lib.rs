@@ -1,7 +1,7 @@
 //! A [`SandboxProvider`](branchyard_sandbox::SandboxProvider) on the
 //! Microsandbox microVM runtime, through its public Rust SDK.
 //!
-//! [`MicrosandboxProvider`] (cargo feature `microsandbox`, off by default)
+//! `MicrosandboxProvider` (cargo feature `microsandbox`, off by default)
 //! boots one microVM per sandbox from an OCI image with CPU and memory
 //! limits, binds host directories into it (the branch worktree at a fixed
 //! guest path), runs execs with piped stdio through the in-guest agent, and

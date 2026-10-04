@@ -797,6 +797,8 @@ pub struct NetworkConfig {
     /// HOST[:PORT] rules a new branch's harness may reach, such as
     /// `"github.com"` or `"*.npmjs.org:443"`; `[]` allows nothing. Unset:
     /// every host (open). A connector grant adds the gateway.
+    // The doc comment is the schema description; `[:PORT]` is not a link.
+    #[allow(rustdoc::broken_intra_doc_links)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow: Option<Vec<String>>,
     /// `best_effort` (the default): where the policy cannot be enforced,
@@ -1308,9 +1310,13 @@ impl WorkspaceConfig {
                         false => format!("no run script named {name}; there are {}", names()),
                     })?
             }
-            None => match self.run.iter().find(|(_, r)| r.default) {
+            None => match self
+                .run
+                .iter()
+                .find(|(_, r)| r.default)
+                .or_else(|| self.run.iter().next().filter(|_| self.run.len() == 1))
+            {
                 Some(found) => found,
-                None if self.run.len() == 1 => self.run.iter().next().expect("one"),
                 None if self.run.is_empty() => {
                     return Err("[workspace] has no run scripts".to_owned())
                 }
@@ -2331,62 +2337,11 @@ fn flatten_into(prefix: &str, map: &Map<String, Value>, flat: &mut BTreeMap<Stri
     }
 }
 
-/// Split a command line like a shell does for `--check`: whitespace,
-/// single and double quotes, backslash escapes.
+/// Split a command line like a shell does for `--check` and `--command`:
+/// single and double quotes, backslash escapes and `#` comments. There is no
+/// variable, glob or operator expansion; the result runs without a shell.
 pub fn split_words(line: &str) -> Result<Vec<String>, String> {
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut in_word = false;
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\'' => {
-                in_word = true;
-                loop {
-                    match chars.next() {
-                        Some('\'') => break,
-                        Some(c) => word.push(c),
-                        None => return Err("unterminated single quote".into()),
-                    }
-                }
-            }
-            '"' => {
-                in_word = true;
-                loop {
-                    match chars.next() {
-                        Some('"') => break,
-                        Some('\\') => match chars.next() {
-                            Some(c) => word.push(c),
-                            None => return Err("unterminated double quote".into()),
-                        },
-                        Some(c) => word.push(c),
-                        None => return Err("unterminated double quote".into()),
-                    }
-                }
-            }
-            '\\' => {
-                in_word = true;
-                match chars.next() {
-                    Some(c) => word.push(c),
-                    None => return Err("trailing backslash".into()),
-                }
-            }
-            c if c.is_whitespace() => {
-                if in_word {
-                    words.push(std::mem::take(&mut word));
-                    in_word = false;
-                }
-            }
-            c => {
-                in_word = true;
-                word.push(c);
-            }
-        }
-    }
-    if in_word {
-        words.push(word);
-    }
-    Ok(words)
+    shlex::split(line).ok_or_else(|| "unterminated quote or trailing backslash".to_owned())
 }
 
 /// A TOML string literal.

@@ -4,12 +4,14 @@
 //! [`Yard`] handles on one repository, as other durability tests use to
 //! stand in for two engines).
 
+#![allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 mod common;
 
 use std::collections::BTreeMap;
 use std::fs;
 
 use branchyard::Error;
+use branchyard_testkit::wait;
 use common::{edit_record, text, Fixture};
 
 /// Give `name`'s branch `parent` (as a delegated child would have) and
@@ -409,7 +411,10 @@ fn published_bytes_are_the_bytes_that_were_hashed() {
             // The first open sees "first" and then end of file; any second
             // open, once the first has read to the end, sees "second".
             fs::write(&fifo, b"first").unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            wait::settle(
+                "the first open must read to the end before the second",
+                std::time::Duration::from_millis(300),
+            );
             let _ = fs::write(&fifo, b"second");
         })
     };

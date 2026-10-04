@@ -4,6 +4,7 @@
 //! `crates/branchyard-recipe/tests/fixtures/fake-ssh`. No cloud, no sshd.
 //! Requires `git`, `sh`, `python3`, `ps`.
 
+#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

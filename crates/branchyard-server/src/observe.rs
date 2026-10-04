@@ -5,7 +5,7 @@
 //! records the admission, claim and operation spans. What happened inside
 //! the operation (turns, tool calls, connector calls, cost) is the
 //! engine's and the harness's, recorded as the branch's events; once the
-//! operation finishes, [`record_run`] reads the events it recorded (from
+//! operation finishes, `record_run` reads the events it recorded (from
 //! its feed position at admission to its end) and turns them into
 //! counters, a turn-duration histogram, and spans with the events' own
 //! timestamps, children of the operation's span. Each operation is run by
@@ -138,9 +138,7 @@ pub fn record_events(
                     end_turn(open, branch, &harness, at, "unknown");
                 }
                 metrics.inc(metrics::TURNS_STARTED, &[("harness", &harness)]);
-                let context = parent
-                    .map(SpanContext::child)
-                    .unwrap_or_else(SpanContext::root);
+                let context = parent.map_or_else(SpanContext::root, SpanContext::child);
                 turns.insert(
                     branch,
                     Turn {
@@ -226,7 +224,7 @@ pub fn record_events(
                     &[("connector", &call.connector), ("decision", &call.decision)],
                 );
                 if let Some(parent) = traced {
-                    let within = turns.get(branch).map(|t| t.context).unwrap_or(*parent);
+                    let within = turns.get(branch).map_or(*parent, |t| t.context);
                     let start = at.saturating_sub(call.latency_ms.unwrap_or(0));
                     let mut span = SpanData::new(
                         format!("connector {}", call.operation),

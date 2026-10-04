@@ -1,6 +1,7 @@
 //! `mem://name`: objects in this process's memory, shared by every handle
 //! of one name. For tests and examples; nothing survives the process.
 
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -34,8 +35,7 @@ impl MemoryStore {
         static ALL: OnceLock<Mutex<BTreeMap<String, Arc<Mutex<State>>>>> = OnceLock::new();
         let state = ALL
             .get_or_init(Default::default)
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("named memory stores")
             .entry(name.to_owned())
             .or_default()
             .clone();
@@ -53,7 +53,7 @@ impl MemoryStore {
     }
 
     fn with<T>(&self, f: impl FnOnce(&mut State) -> T) -> T {
-        f(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()))
+        f(&mut self.state.lock_recovering("state"))
     }
 
     fn write(&self, key: &str, data: &[u8], expect: Option<&str>) -> Result<Generation> {

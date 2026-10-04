@@ -33,7 +33,9 @@
 //!
 //! It uses the official Rust MCP SDK (`rmcp`), server role and stdio
 //! transport only, on a current-thread Tokio runtime.
+#![warn(missing_docs)]
 
+use branchyard_support::LockExt as _;
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -546,8 +548,9 @@ impl Server {
         }
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-mcp
     fn call(&self, tool: &str, arguments: Value) -> Result<Value, branchyard::Error> {
-        let mut delegate = self.delegate.lock().unwrap_or_else(|e| e.into_inner());
+        let mut delegate = self.delegate.lock_recovering("delegate");
         if delegate.is_none() {
             let found = Delegate::connect(&self.root, &self.token)?;
             if found.branch() != self.branch {

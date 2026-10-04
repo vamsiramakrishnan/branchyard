@@ -839,7 +839,9 @@ impl EventStream {
         if self.reader.is_none() {
             self.connect()?;
         }
-        let reader = self.reader.as_mut().expect("connected above");
+        let Some(reader) = self.reader.as_mut() else {
+            return Err(Error::Protocol("the stream is not connected".into()));
+        };
         match reader.next_event() {
             Ok(Some(event)) if event.event == "open" => {
                 let id = event
@@ -920,7 +922,10 @@ impl Iterator for EventStream {
                     }
                 }
             }
-            let reader = self.reader.as_mut().expect("connected above");
+            let Some(reader) = self.reader.as_mut() else {
+                self.done = true;
+                return Some(Err(Error::Protocol("the stream is not connected".into())));
+            };
             match reader.next_event() {
                 Ok(Some(event)) => match event.event.as_str() {
                     "open" => {

@@ -4,6 +4,7 @@
 //! what stopped owners left. See docs/registry.md.
 
 use branchyard::services::{Service, ServiceState};
+use branchyard_support::time::now_ms;
 use serde_json::json;
 
 use crate::args::ServicesAction;
@@ -112,13 +113,6 @@ pub fn main(
     }
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// How long is left of a lease, or how long ago it ran out.
 fn lease(service: &Service, now: u64) -> String {
     match service.lease_until_ms.checked_sub(now) {
@@ -210,8 +204,7 @@ fn render(env: &Env, services: &[Service], now: u64) -> String {
                 Cell::plain(
                     s.endpoints
                         .first()
-                        .map(|e| e.describe())
-                        .unwrap_or_else(|| "-".into()),
+                        .map_or_else(|| "-".into(), |e| e.describe()),
                 ),
                 Cell::plain(
                     s.capabilities

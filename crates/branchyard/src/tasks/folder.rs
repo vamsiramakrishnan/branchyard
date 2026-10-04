@@ -34,8 +34,8 @@ use branchyard_workspace::Git;
 
 use super::large::{self, At, ChunkStore, Large, Pointer, DEFAULT_THRESHOLD};
 use super::{Task, TaskFiles, TaskView, LEAVE_OUT, TASK_DIR};
-use crate::state::now_ms;
 use crate::{Activity, BranchStatus, Error, RecordedEvent, Yard};
+use branchyard_support::time::now_ms;
 
 /// Where the folder is known to be.
 pub(crate) const FOLDER_REF: &str = "refs/branchyard/folder";
@@ -277,7 +277,7 @@ pub fn create(new: &NewTask) -> Result<(Task, Yard), Error> {
         None => None,
     };
     let home = new.home.clone().unwrap_or_else(super::home);
-    let id = super::new_id();
+    let id = super::new_id()?;
     let dir = tasks_dir(&home).join(&id);
     let git_dir = dir.join("git");
     let work = dir.join("work");
@@ -388,7 +388,7 @@ pub fn create(new: &NewTask) -> Result<(Task, Yard), Error> {
         Ok((task, yard))
     })();
     if made.is_err() {
-        let _ = fs::remove_dir_all(&dir);
+        branchyard_support::cleanup_dir(&dir);
     }
     made
 }
@@ -679,7 +679,7 @@ fn finish(
         };
         lease.finish(Some(&record), Some(&event))?;
     }
-    let _ = fs::remove_file(journal_path(owned));
+    branchyard_support::cleanup_file(journal_path(owned));
     Ok(())
 }
 
@@ -913,7 +913,7 @@ fn apply(root: &Path, owned: &Owned, plan: &[Change]) -> Result<(Vec<String>, Ve
                     fs::rename(&temp, &disk).map_err(Error::from)
                 });
             if wrote.is_err() {
-                let _ = fs::remove_file(&temp);
+                branchyard_support::cleanup_file(&temp);
             }
             wrote?;
         }

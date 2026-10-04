@@ -81,7 +81,9 @@ pub fn main(env: &Env, init: &InitArgs) -> Outcome {
         }
         return crate::wizard::run(init.topic, init.defaults);
     };
-    let topic = init.topic.expect("clap requires a topic with a step");
+    let Some(topic) = init.topic else {
+        return Err(Failure::Message("a step needs a topic".into()));
+    };
     let raw = match &init.answers {
         Some(source) => match read_answers(source) {
             Ok(raw) => raw,

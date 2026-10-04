@@ -3,6 +3,10 @@
 //! mode, and of a Branchyard server through `branchyard-client` in remote
 //! mode (`--remote URL`).
 
+// Doc comments on the clap types are the `--help` text, written for a shell
+// reader (`[fleet]`, `HOST:PORT`, `<commit>`), not as rustdoc links or HTML.
+#![allow(rustdoc::broken_intra_doc_links, rustdoc::invalid_html_tags)]
+
 mod adf;
 mod adopt;
 mod args;
@@ -56,6 +60,7 @@ use std::process::ExitCode;
 use args::{Command, Globals};
 use commands::{Env, Failure, Target};
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().collect();
     args::unset_blank_env();
@@ -85,6 +90,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Warnings from best-effort steps (a cleanup that failed, a lock whose
+    // holder panicked) go to stderr. Not under the live `watch` screen,
+    // which owns the terminal.
+    if !matches!(command, Command::Watch { once: false, .. }) {
+        branchyard_server::logging::init_for_commands();
+    }
     let mut env_now = Env::detect();
     env_now.notify = notify::Settings::resolve(globals.no_notify, &globals.notify, &env);
     match run(&env_now, &globals, command) {
@@ -101,6 +112,7 @@ fn main() -> ExitCode {
 
 /// `by serve`, `by worker` and their help: the server's own command line.
 /// `prefix` is `by`'s part, parsed only for its global options.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn serve(prefix: &[OsString], call: args::ServerCall) -> ExitCode {
     let globals = match args::parse_from(prefix) {
         Ok(cli) => cli.globals,

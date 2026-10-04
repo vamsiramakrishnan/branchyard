@@ -9,11 +9,14 @@
 //! - A paired token is revoked by stamping `revoked_at_ms`; every request
 //!   reads the row, so a revocation holds at once everywhere.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)] // ratchet: branchyard-server
+use branchyard_support::LockExt as _;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use branchyard::store_codec::{from_db, from_db_opt, to_db};
 use rusqlite::OptionalExtension;
 
 use crate::config::Principal;
@@ -93,14 +96,6 @@ pub trait CompanionStore: Send + Sync {
 
 fn sql(error: rusqlite::Error) -> io::Error {
     io::Error::other(format!("companion store: {error}"))
-}
-
-fn i(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-fn u(value: i64) -> u64 {
-    value.max(0) as u64
 }
 
 fn principal_json(p: &Principal) -> io::Result<String> {
@@ -202,9 +197,9 @@ fn token_from(row: TokenRow) -> io::Result<PairedToken> {
         token_sha256,
         principal: principal_of(&principal)?,
         device,
-        created_at_ms: u(created),
-        expires_at_ms: u(expires),
-        revoked_at_ms: revoked.map(u),
+        created_at_ms: from_db("created", created)?,
+        expires_at_ms: from_db("expires", expires)?,
+        revoked_at_ms: from_db_opt("revoked", revoked)?,
     })
 }
 
@@ -215,9 +210,9 @@ fn pairing_from(row: PairingRow) -> io::Result<Pairing> {
     Ok(Pairing {
         code_sha256,
         principal: principal_of(&principal)?,
-        token_ttl_ms: u(ttl),
-        created_at_ms: u(created),
-        expires_at_ms: u(expires),
+        token_ttl_ms: from_db("ttl", ttl)?,
+        created_at_ms: from_db("created", created)?,
+        expires_at_ms: from_db("expires", expires)?,
     })
 }
 
@@ -262,7 +257,7 @@ impl SqliteCompanion {
         &self,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> io::Result<T>,
     ) -> io::Result<T> {
-        let mut conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut conn = self.conn.lock_recovering("conn");
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(sql)?;
@@ -298,10 +293,10 @@ impl CompanionStore for SqliteCompanion {
         self.immediate(|tx| {
             tx.execute(
                 "DELETE FROM companion_pairings WHERE expires_at_ms <= ?1",
-                [i(now_ms)],
+                [to_db("now_ms", now_ms)?],
             )
             .map_err(sql)?;
-            if sqlite_name_taken(tx, &p.principal.name, i(now_ms))? {
+            if sqlite_name_taken(tx, &p.principal.name, to_db("now_ms", now_ms)?)? {
                 return Ok(false);
             }
             tx.execute(
@@ -312,9 +307,9 @@ impl CompanionStore for SqliteCompanion {
                     p.principal.name,
                     p.principal.tenant,
                     body,
-                    i(p.token_ttl_ms),
-                    i(p.created_at_ms),
-                    i(p.expires_at_ms)
+                    to_db("token_ttl_ms", p.token_ttl_ms)?,
+                    to_db("created_at_ms", p.created_at_ms)?,
+                    to_db("expires_at_ms", p.expires_at_ms)?
                 ],
             )
             .map_err(sql)?;
@@ -370,8 +365,8 @@ impl CompanionStore for SqliteCompanion {
                     token.principal.tenant,
                     principal_json(&token.principal)?,
                     token.device,
-                    i(token.created_at_ms),
-                    i(token.expires_at_ms)
+                    to_db("created_at_ms", token.created_at_ms)?,
+                    to_db("expires_at_ms", token.expires_at_ms)?
                 ],
             )
             .map_err(sql)?;
@@ -380,7 +375,7 @@ impl CompanionStore for SqliteCompanion {
     }
 
     fn token(&self, token_sha256: &str) -> io::Result<Option<PairedToken>> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.lock_recovering("conn");
         let row: Option<TokenRow> = conn
             .query_row(
                 &format!("SELECT {TOKEN_COLUMNS} FROM companion_tokens WHERE token_sha256 = ?1"),
@@ -393,7 +388,7 @@ impl CompanionStore for SqliteCompanion {
     }
 
     fn tokens(&self) -> io::Result<(Vec<PairedToken>, Vec<Pairing>)> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.lock_recovering("conn");
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT {TOKEN_COLUMNS} FROM companion_tokens ORDER BY seq"
@@ -446,7 +441,7 @@ impl CompanionStore for SqliteCompanion {
             for hash in &hashes {
                 tx.execute(
                     "UPDATE companion_tokens SET revoked_at_ms = ?2 WHERE token_sha256 = ?1",
-                    rusqlite::params![hash, i(now_ms)],
+                    rusqlite::params![hash, to_db("now_ms", now_ms)?],
                 )
                 .map_err(sql)?;
                 tx.execute("DELETE FROM companion_push WHERE token_sha256 = ?1", [hash])
@@ -479,7 +474,7 @@ impl CompanionStore for SqliteCompanion {
                     s.p256dh,
                     s.auth,
                     kinds,
-                    i(s.created_at_ms)
+                    to_db("created_at_ms", s.created_at_ms)?
                 ],
             )
             .map_err(sql)?;
@@ -510,7 +505,7 @@ impl CompanionStore for SqliteCompanion {
     }
 
     fn subscriptions(&self) -> io::Result<Vec<Subscription>> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.lock_recovering("conn");
         let mut stmt = conn
             .prepare(
                 "SELECT endpoint, token_sha256, p256dh, auth, kinds, created_at_ms \
@@ -525,7 +520,7 @@ impl CompanionStore for SqliteCompanion {
                     p256dh: r.get(2)?,
                     auth: r.get(3)?,
                     kinds: kinds_of(&r.get::<_, String>(4)?),
-                    created_at_ms: u(r.get(5)?),
+                    created_at_ms: from_db("created_at_ms", r.get(5)?)?,
                 })
             })
             .map_err(sql)?;
@@ -659,7 +654,7 @@ impl PostgresCompanion {
         &self,
         f: impl FnOnce(&mut postgres::Client) -> Result<T, postgres::Error> + Send,
     ) -> io::Result<T> {
-        let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.conn.lock_recovering("conn");
         let conn: &mut Option<postgres::Client> = &mut guard;
         let url = &self.url;
         std::thread::scope(|scope| {
@@ -683,7 +678,7 @@ impl PostgresCompanion {
 #[cfg(feature = "postgres")]
 impl Drop for PostgresCompanion {
     fn drop(&mut self) {
-        let conn = self.conn.get_mut().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.get_mut_recovering("conn");
         if let Some(client) = conn.take() {
             std::thread::scope(|scope| {
                 scope.spawn(move || drop(client));
@@ -702,6 +697,10 @@ impl CompanionStore for PostgresCompanion {
     fn create_pairing(&self, p: &Pairing, now_ms: u64) -> io::Result<bool> {
         let body = principal_json(&p.principal)?;
         let p = p.clone();
+        let now_ms_db = to_db("now_ms", now_ms)?;
+        let token_ttl_ms_db = to_db("token_ttl_ms", p.token_ttl_ms)?;
+        let created_at_ms_db = to_db("created_at_ms", p.created_at_ms)?;
+        let expires_at_ms_db = to_db("expires_at_ms", p.expires_at_ms)?;
         self.with(move |c| {
             let mut tx = c.transaction()?;
             // Pairings of one name take turns, so two cannot both pass the
@@ -712,9 +711,9 @@ impl CompanionStore for PostgresCompanion {
             )?;
             tx.execute(
                 "DELETE FROM by_companion_pairings WHERE expires_at_ms <= $1",
-                &[&i(now_ms)],
+                &[&now_ms_db],
             )?;
-            if pg_name_taken(&mut tx, &p.principal.name, i(now_ms))? {
+            if pg_name_taken(&mut tx, &p.principal.name, now_ms_db)? {
                 return Ok(false);
             }
             tx.execute(
@@ -725,9 +724,9 @@ impl CompanionStore for PostgresCompanion {
                     &p.principal.name,
                     &p.principal.tenant,
                     &body,
-                    &i(p.token_ttl_ms),
-                    &i(p.created_at_ms),
-                    &i(p.expires_at_ms),
+                    &token_ttl_ms_db,
+                    &created_at_ms_db,
+                    &expires_at_ms_db,
                 ],
             )?;
             tx.commit()?;
@@ -747,6 +746,7 @@ impl CompanionStore for PostgresCompanion {
             token_sha256.to_owned(),
             device.map(str::to_owned),
         );
+        let now_ms_db = to_db("now_ms", now_ms)?;
         let row = self.with(move |c| {
             let mut tx = c.transaction()?;
             let row = tx.query_opt(
@@ -759,10 +759,12 @@ impl CompanionStore for PostgresCompanion {
                 return Ok(None);
             };
             let pairing: PairingRow = (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4));
-            if u(pairing.4) <= now_ms {
+            // Expired, or a stored negative the decode below reports.
+            if pairing.2 < 0 || pairing.4 <= now_ms_db {
                 tx.commit()?;
                 return Ok(Some((pairing, false)));
             }
+            let expires_at_ms_db = now_ms_db.saturating_add(pairing.2);
             let principal: Principal = serde_json::from_str(&pairing.1)
                 .unwrap_or_else(|_| Principal::default_for("unreadable"));
             tx.execute(
@@ -774,17 +776,20 @@ impl CompanionStore for PostgresCompanion {
                     &principal.tenant,
                     &pairing.1,
                     &label,
-                    &i(now_ms),
-                    &i(now_ms.saturating_add(u(pairing.2))),
+                    &now_ms_db,
+                    &expires_at_ms_db,
                 ],
             )?;
             tx.commit()?;
             Ok(Some((pairing, true)))
         })?;
-        let Some((pairing, true)) = row else {
+        let Some((pairing, redeemed)) = row else {
             return Ok(None);
         };
         let pairing = pairing_from(pairing)?;
+        if !redeemed {
+            return Ok(None);
+        }
         Ok(Some(PairedToken {
             token_sha256: token_sha256.to_owned(),
             principal: pairing.principal,
@@ -832,13 +837,14 @@ impl CompanionStore for PostgresCompanion {
 
     fn revoke(&self, name: &str, tenant: Option<&str>, now_ms: u64) -> io::Result<usize> {
         let (name, tenant) = (name.to_owned(), tenant.map(str::to_owned));
-        self.with(move |c| {
+        let now_ms_db = to_db("now_ms", now_ms)?;
+        let (tokens, codes) = self.with(move |c| {
             let mut tx = c.transaction()?;
             let rows = tx.query(
                 "UPDATE by_companion_tokens SET revoked_at_ms = $3 WHERE name = $1 \
                  AND revoked_at_ms IS NULL AND ($2::text IS NULL OR tenant = $2) \
                  RETURNING token_sha256",
-                &[&name, &tenant, &i(now_ms)],
+                &[&name, &tenant, &now_ms_db],
             )?;
             let hashes: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
             tx.execute(
@@ -851,13 +857,15 @@ impl CompanionStore for PostgresCompanion {
                 &[&name, &tenant],
             )?;
             tx.commit()?;
-            Ok(hashes.len() + codes as usize)
-        })
+            Ok((hashes.len(), codes))
+        })?;
+        Ok(tokens + branchyard::store_codec::to_usize("revoked pairings", codes)?)
     }
 
     fn subscribe(&self, s: &Subscription) -> io::Result<()> {
         let kinds = serde_json::to_string(&s.kinds).map_err(io::Error::other)?;
         let s = s.clone();
+        let created_at_ms_db = to_db("created_at_ms", s.created_at_ms)?;
         self.with(move |c| {
             c.execute(
                 "INSERT INTO by_companion_push (endpoint, token_sha256, p256dh, auth, kinds, \
@@ -871,7 +879,7 @@ impl CompanionStore for PostgresCompanion {
                     &s.p256dh,
                     &s.auth,
                     &kinds,
-                    &i(s.created_at_ms),
+                    &created_at_ms_db,
                 ],
             )?;
             Ok(())
@@ -904,17 +912,18 @@ impl CompanionStore for PostgresCompanion {
                 &[],
             )
         })?;
-        Ok(rows
-            .iter()
-            .map(|r| Subscription {
-                endpoint: r.get(0),
-                token_sha256: r.get(1),
-                p256dh: r.get(2),
-                auth: r.get(3),
-                kinds: kinds_of(&r.get::<_, String>(4)),
-                created_at_ms: u(r.get(5)),
+        rows.iter()
+            .map(|r| {
+                Ok(Subscription {
+                    endpoint: r.get(0),
+                    token_sha256: r.get(1),
+                    p256dh: r.get(2),
+                    auth: r.get(3),
+                    kinds: kinds_of(&r.get::<_, String>(4)),
+                    created_at_ms: from_db("created_at_ms", r.get(5))?,
+                })
             })
-            .collect())
+            .collect()
     }
 }
 
@@ -1055,6 +1064,7 @@ pub mod conformance {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,17 +1,21 @@
 //! Webhook notifications against a local HTTP receiver: no real network,
 //! no real harness.
 
+#![allow(
+    clippy::expect_used,
+    clippy::let_underscore_must_use,
+    clippy::unwrap_used
+)] // tests: a panic is the failure report
 mod common;
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use branchyard_server::config::WebhookConfig;
-use common::{eventually, run, task, Fixture, Server};
+use branchyard_testkit::{wait, MockHttp, Response};
+use common::{run, task, Fixture, Server};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
@@ -41,112 +45,47 @@ impl Delivery {
 }
 
 /// A local HTTP receiver: answers `500` for its first `fail_next`
-/// deliveries, then `200`, recording every one it accepts.
+/// deliveries, then `200`, recording every one it accepts. A connection
+/// that errs fails the test.
 struct Receiver {
-    addr: SocketAddr,
-    deliveries: Arc<Mutex<Vec<Delivery>>>,
+    mock: MockHttp,
     fail_next: Arc<AtomicU32>,
-    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Receiver {
     fn start() -> Receiver {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let addr = listener.local_addr().unwrap();
-        let deliveries = Arc::new(Mutex::new(Vec::new()));
         let fail_next = Arc::new(AtomicU32::new(0));
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (d, f, s) = (deliveries.clone(), fail_next.clone(), stop.clone());
-        std::thread::spawn(move || loop {
-            if s.load(Ordering::Relaxed) {
-                return;
-            }
-            match listener.accept() {
-                Ok((stream, _)) => handle(stream, &d, &f),
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(_) => return,
-            }
+        let failing = fail_next.clone();
+        let mock = MockHttp::start(move |_| {
+            let fail = failing
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    (n > 0).then(|| n - 1)
+                })
+                .is_ok();
+            Response::new(if fail { 500 } else { 200 }, "")
         });
-        Receiver {
-            addr,
-            deliveries,
-            fail_next,
-            stop,
-        }
+        Receiver { mock, fail_next }
     }
 
     fn url(&self) -> String {
-        format!("http://{}/hook", self.addr)
+        format!("{}/hook", self.mock.url())
     }
 
     fn deliveries(&self) -> Vec<Delivery> {
-        self.deliveries.lock().unwrap().clone()
+        self.mock
+            .requests()
+            .into_iter()
+            .map(|r| Delivery {
+                headers: r.headers.into_iter().collect(),
+                body: r.body,
+            })
+            .collect()
     }
 
     /// Answer the next `n` deliveries with `500`.
     fn fail_next(&self, n: u32) {
         self.fail_next.store(n, Ordering::Relaxed);
     }
-}
-
-impl Drop for Receiver {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-    }
-}
-
-fn handle(
-    stream: std::net::TcpStream,
-    deliveries: &Arc<Mutex<Vec<Delivery>>>,
-    fail_next: &Arc<AtomicU32>,
-) {
-    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut stream = stream;
-    let mut line = String::new();
-    if reader.read_line(&mut line).unwrap_or(0) == 0 {
-        return;
-    }
-    let mut headers = HashMap::new();
-    let mut content_length = 0usize;
-    loop {
-        line.clear();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-            return;
-        }
-        let text = line.trim_end();
-        if text.is_empty() {
-            break;
-        }
-        if let Some((k, v)) = text.split_once(':') {
-            let key = k.trim().to_ascii_lowercase();
-            let value = v.trim().to_owned();
-            if key == "content-length" {
-                content_length = value.parse().unwrap_or(0);
-            }
-            headers.insert(key, value);
-        }
-    }
-    let mut body = vec![0u8; content_length];
-    if reader.read_exact(&mut body).is_err() {
-        return;
-    }
-    let fail = fail_next
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-            (n > 0).then(|| n - 1)
-        })
-        .is_ok();
-    let status = if fail {
-        "HTTP/1.1 500 Internal Server Error\r\n"
-    } else {
-        "HTTP/1.1 200 OK\r\n"
-    };
-    let _ = stream
-        .write_all(format!("{status}Content-Length: 0\r\nConnection: close\r\n\r\n").as_bytes());
-    deliveries.lock().unwrap().push(Delivery { headers, body });
 }
 
 fn hmac_hex(secret: &str, body: &[u8]) -> String {
@@ -176,7 +115,7 @@ fn deliveries_are_signed_and_carry_the_original_activity() {
     let client = server.client();
     run(&client, &task("WRITE a.txt=1", "one"));
 
-    eventually("a status delivery", || {
+    wait::until("a status delivery", || {
         receiver
             .deliveries()
             .iter()
@@ -212,7 +151,10 @@ fn an_event_filter_narrows_what_is_delivered() {
     assert_eq!(op.state, branchyard_client::api::OperationState::Succeeded);
 
     // Give a filtered-out delivery a moment it could have arrived in.
-    std::thread::sleep(Duration::from_millis(300));
+    wait::settle(
+        "a filtered-out delivery would have arrived by now",
+        Duration::from_millis(300),
+    );
     assert!(
         receiver.deliveries().is_empty(),
         "{:?}",
@@ -234,7 +176,7 @@ fn a_failing_receiver_is_retried_and_still_delivers() {
     let client = server.client();
     run(&client, &task("WRITE a.txt=1", "one"));
 
-    eventually("a delivery to arrive despite two failures", || {
+    wait::until("a delivery to arrive despite two failures", || {
         receiver
             .deliveries()
             .iter()
@@ -266,7 +208,7 @@ fn a_receiver_that_never_succeeds_is_dead_lettered_and_the_cursor_still_advances
     // ever "succeeds", but the second branch's status must still have been
     // attempted (the cursor moved past the first branch's dead-lettered
     // entries) within a reasonable time.
-    eventually("both branches to have been attempted", || {
+    wait::until("both branches to have been attempted", || {
         let seen: std::collections::HashSet<String> = receiver
             .deliveries()
             .iter()
@@ -289,7 +231,7 @@ fn a_restart_resumes_from_its_saved_cursor_instead_of_replaying() {
     let server = Server::start(config.clone());
     let client = server.client();
     run(&client, &task("WRITE a.txt=1", "one"));
-    eventually("the first branch delivered", || {
+    wait::until("the first branch delivered", || {
         receiver
             .deliveries()
             .iter()
@@ -317,7 +259,7 @@ fn a_restart_resumes_from_its_saved_cursor_instead_of_replaying() {
     // A third branch after the restart, so there is definitely new
     // activity to wake the webhook task promptly.
     run(&client, &task("WRITE c.txt=1", "three"));
-    eventually("the second and third branches delivered", || {
+    wait::until("the second and third branches delivered", || {
         let seen: std::collections::HashSet<String> = receiver
             .deliveries()
             .iter()
@@ -359,7 +301,7 @@ fn a_stall_notification_reaches_a_webhook() {
         .repo("app")
         .submit_task(&request, &branchyard_client::new_key())
         .unwrap();
-    eventually("a stall delivery", || {
+    wait::until("a stall delivery", || {
         receiver.deliveries().iter().any(|d| {
             d.json()["kinds"]
                 .as_array()
@@ -369,161 +311,40 @@ fn a_stall_notification_reaches_a_webhook() {
         })
     });
     let _ = client.repo("app").cancel("stalls");
-    let _ = common::wait(&client, &op.id);
+    let _ = common::await_operation(&client, &op.id);
     server.stop();
 }
 
-/// Read one HTTP request's headers and body off `stream`, however the
-/// caller means to answer it (or not). Shared by the adversarial receivers
-/// below.
-fn read_request(stream: &std::net::TcpStream) -> Option<Vec<u8>> {
-    let mut reader = BufReader::new(stream.try_clone().ok()?);
-    let mut line = String::new();
-    if reader.read_line(&mut line).unwrap_or(0) == 0 {
-        return None;
-    }
-    let mut content_length = 0usize;
-    loop {
-        line.clear();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-            return None;
-        }
-        let text = line.trim_end();
-        if text.is_empty() {
-            break;
-        }
-        if let Some((k, v)) = text.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("content-length") {
-                content_length = v.trim().parse().unwrap_or(0);
-            }
-        }
-    }
-    let mut body = vec![0u8; content_length];
-    reader.read_exact(&mut body).ok()?;
-    Some(body)
-}
-
-/// A receiver that reads a delivery in full and then never answers,
-/// holding the connection open: the "receiver that hangs" a webhook target
-/// can be. Every accepted connection is kept alive on its own thread so
-/// the accept loop is never blocked by one slow peer.
-struct HangingReceiver {
-    addr: SocketAddr,
-    accepted: Arc<AtomicU32>,
-    stop: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl HangingReceiver {
-    fn start() -> HangingReceiver {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let addr = listener.local_addr().unwrap();
-        let accepted = Arc::new(AtomicU32::new(0));
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (a, s) = (accepted.clone(), stop.clone());
-        std::thread::spawn(move || loop {
-            if s.load(Ordering::Relaxed) {
-                return;
-            }
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    let a = a.clone();
-                    std::thread::spawn(move || {
-                        if read_request(&stream).is_some() {
-                            a.fetch_add(1, Ordering::Relaxed);
-                        }
-                        // Never write a response; hold the connection open
-                        // well past the client's request timeout and this
-                        // test's own duration, then let it drop.
-                        std::thread::sleep(Duration::from_secs(120));
-                    });
-                }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(_) => return,
-            }
-        });
-        HangingReceiver {
-            addr,
-            accepted,
-            stop,
-        }
-    }
-
-    fn url(&self) -> String {
-        format!("http://{}/hook", self.addr)
-    }
-
-    fn accepted(&self) -> u32 {
-        self.accepted.load(Ordering::Relaxed)
-    }
-}
-
-impl Drop for HangingReceiver {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-    }
-}
-
-/// A receiver that reads a delivery in full and then closes the
-/// connection without writing any response at all: the "receiver that
-/// closes mid-response" case (from the client's side, a connection that
-/// disappears before the reply arrives looks the same whether it was
+/// A receiver that reads a delivery in full and then misbehaves: never
+/// answers, holding the connection open (the "receiver that hangs"), or
+/// closes the connection without writing any response at all (the
+/// "receiver that closes mid-response": from the client's side, a connection
+/// that disappears before the reply arrives looks the same whether it was
 /// closed gracefully or reset).
-struct ResettingReceiver {
-    addr: SocketAddr,
-    accepted: Arc<AtomicU32>,
-    stop: Arc<std::sync::atomic::AtomicBool>,
+struct Adversary {
+    mock: MockHttp,
 }
 
-impl ResettingReceiver {
-    fn start() -> ResettingReceiver {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let addr = listener.local_addr().unwrap();
-        let accepted = Arc::new(AtomicU32::new(0));
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (a, s) = (accepted.clone(), stop.clone());
-        std::thread::spawn(move || loop {
-            if s.load(Ordering::Relaxed) {
-                return;
-            }
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    if read_request(&stream).is_some() {
-                        a.fetch_add(1, Ordering::Relaxed);
-                    }
-                    // Close without writing a byte of response: the
-                    // client's connection ends before any status line
-                    // arrives, however the OS reports that shutdown.
-                    drop(stream);
-                }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(_) => return,
-            }
-        });
-        ResettingReceiver {
-            addr,
-            accepted,
-            stop,
+impl Adversary {
+    fn hanging() -> Adversary {
+        Adversary {
+            mock: MockHttp::start(|_| Response::hang()),
+        }
+    }
+
+    fn closing() -> Adversary {
+        Adversary {
+            mock: MockHttp::start(|_| Response::close()),
         }
     }
 
     fn url(&self) -> String {
-        format!("http://{}/hook", self.addr)
+        format!("{}/hook", self.mock.url())
     }
 
-    fn accepted(&self) -> u32 {
-        self.accepted.load(Ordering::Relaxed)
-    }
-}
-
-impl Drop for ResettingReceiver {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+    /// Deliveries read in full.
+    fn accepted(&self) -> usize {
+        self.mock.requests().len()
     }
 }
 
@@ -534,7 +355,7 @@ impl Drop for ResettingReceiver {
 #[test]
 fn a_hanging_receiver_never_delays_the_operation_or_the_feed() {
     let f = Fixture::new();
-    let receiver = HangingReceiver::start();
+    let receiver = Adversary::hanging();
     let mut config = f.config();
     config.webhooks = vec![webhook(&receiver.url(), SECRET, &[])];
     let server = Server::start(config);
@@ -549,7 +370,7 @@ fn a_hanging_receiver_never_delays_the_operation_or_the_feed() {
         start.elapsed()
     );
 
-    eventually("the hanging receiver to have accepted the delivery", || {
+    wait::until("the hanging receiver to have accepted the delivery", || {
         receiver.accepted() > 0
     });
 
@@ -574,7 +395,7 @@ fn a_receiver_that_resets_the_connection_never_delays_the_operation() {
     std::env::set_var("BY_TEST_WEBHOOK_RETRY_MS", "5");
     std::env::set_var("BY_TEST_WEBHOOK_MAX_ATTEMPTS", "3");
     let f = Fixture::new();
-    let receiver = ResettingReceiver::start();
+    let receiver = Adversary::closing();
     let mut config = f.config();
     config.webhooks = vec![webhook(&receiver.url(), SECRET, &[])];
     let server = Server::start(config);
@@ -589,7 +410,7 @@ fn a_receiver_that_resets_the_connection_never_delays_the_operation() {
         start.elapsed()
     );
 
-    eventually(
+    wait::until(
         "the resetting receiver to have been hit at least once",
         || receiver.accepted() > 0,
     );
@@ -622,7 +443,7 @@ fn deliveries_carry_the_operations_traceparent_and_are_counted() {
     let server = Server::start(config);
     let client = server.client();
     let op = run(&client, &task("WRITE a.txt=1", "one"));
-    eventually("a status delivery", || {
+    wait::until("a status delivery", || {
         receiver
             .deliveries()
             .iter()

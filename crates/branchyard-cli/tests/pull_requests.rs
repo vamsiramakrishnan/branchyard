@@ -4,47 +4,15 @@
 //! records its arguments and answers with canned JSON. Hermetic: nothing
 //! reaches GitHub, and no credential is read. Requires `git` and `sh`.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 
+use branchyard_testkit::fake_agent;
+use branchyard_testkit::wait;
 use serde_json::{json, Value};
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Built once per test binary, as in `tests/cli.rs`.
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(env!("CARGO_BIN_EXE_by"));
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        profile_dir.join("fake-acp-agent")
-    })
-}
 
 /// A fake `gh`: appends its arguments to `calls.log` (one line per call),
 /// saves a body read from stdin, and answers from files in its directory.
@@ -90,30 +58,42 @@ case "$1 $2" in
 esac
 "#;
 
+/// The kit's repository, plus what this file adds.
 struct Repo {
-    dir: PathBuf,
-    root: PathBuf,
+    kit: branchyard_testkit::Repo,
     /// The fake gh's directory: its script, answers and call log.
     gh: PathBuf,
     remote: PathBuf,
 }
 
+impl std::ops::Deref for Repo {
+    type Target = branchyard_testkit::Repo;
+    fn deref(&self) -> &Self::Target {
+        &self.kit
+    }
+}
+
 impl Repo {
     fn new() -> Repo {
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-pr-test-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        fs::create_dir_all(dir.join("gh")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
+        let mut kit = branchyard_testkit::repo!();
+        let gh = kit.dir.join("gh");
+        fs::create_dir_all(&gh).unwrap();
+        kit.set_env(
+            "PATH",
+            &format!(
+                "{}:{}",
+                gh.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        kit.set_env("FAKE_GH_DIR", &gh.display().to_string());
+        for var in ["VISUAL", "EDITOR", "GH_TOKEN", "GITHUB_TOKEN"] {
+            kit.remove_env(var);
+        }
         let repo = Repo {
-            root: dir.join("repo"),
-            gh: dir.join("gh"),
-            remote: dir.join("remote.git"),
-            dir,
+            gh,
+            remote: kit.dir.join("remote.git"),
+            kit,
         };
         let script = repo.gh.join("gh");
         fs::write(&script, FAKE_GH).unwrap();
@@ -123,12 +103,6 @@ impl Repo {
             r#"[{"number": 7, "url": "https://github.com/acme/widgets/pull/7", "isDraft": false, "baseRefName": "main"}]"#,
         )
         .unwrap();
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@localhost"]);
-        fs::write(repo.root.join("a.txt"), "one\n").unwrap();
-        repo.git(&["add", "."]);
-        repo.git(&["commit", "-q", "-m", "initial"]);
         let out = repo
             .command("git")
             .args(["init", "-q", "--bare"])
@@ -138,49 +112,6 @@ impl Repo {
         assert!(out.status.success());
         repo.git(&["remote", "add", "origin", repo.remote.to_str().unwrap()]);
         repo
-    }
-
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
-        let path = format!(
-            "{}:{}",
-            self.gh.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        command
-            .current_dir(&self.root)
-            .env("PATH", path)
-            .env("FAKE_GH_DIR", &self.gh)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("NO_COLOR", "1")
-            .env(
-                "BRANCHYARD_USER_CONFIG",
-                "/nonexistent/branchyard-config.toml",
-            )
-            .env("PAGER", "cat")
-            .env_remove("VISUAL")
-            .env_remove("EDITOR");
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-            "BRANCHYARD_REMOTE",
-            "BRANCHYARD_TOKEN_FILE",
-            "BRANCHYARD_REPO",
-            "GH_TOKEN",
-            "GITHUB_TOKEN",
-        ] {
-            command.env_remove(var);
-        }
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let out = self.command("git").args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", stderr(&out));
-        String::from_utf8(out.stdout).unwrap()
     }
 
     /// `git` in the bare remote.
@@ -193,16 +124,9 @@ impl Repo {
             .unwrap()
     }
 
-    fn by(&self, args: &[&str]) -> Output {
-        self.command(env!("CARGO_BIN_EXE_by"))
-            .args(args)
-            .output()
-            .unwrap()
-    }
-
     /// `by <args>` with the fake agent as the gemini-cli harness.
     fn by_agent(&self, args: &[&str]) -> Output {
-        let agent = fake_agent().display().to_string();
+        let agent = fake_agent!().display().to_string();
         let mut all: Vec<&str> = args.to_vec();
         all.extend(["--command", &agent]);
         if !matches!(args[0], "send" | "pr") && !args.contains(&"--harness") {
@@ -275,12 +199,6 @@ impl Repo {
                 fs::remove_file(path).unwrap();
             }
         }
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -1088,7 +1006,7 @@ fn watch_steers_feedback_into_a_running_turn() {
     repo.ok(repo.by_agent(&["run", "WRITE a.txt=two", "--name", "feat"]));
     repo.ok(repo.by(&["pr", "feat"]));
     // A turn someone else started, still running when feedback arrives.
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let mut running = Killed(
         repo.command(env!("CARGO_BIN_EXE_by"))
             .args(["send", "feat", "AWAIT_STEER", "--command", &agent, "--yes"])
@@ -1097,18 +1015,14 @@ fn watch_steers_feedback_into_a_running_turn() {
             .spawn()
             .unwrap(),
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
+    wait::until("the turn to start", || {
         let log = stdout(&repo.by(&["log", "feat"]));
         if log.contains("waiting for steering") {
-            break;
+            Ok(())
+        } else {
+            Err(log)
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the turn never started:\n{log}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    });
     let mut open = view("OPEN", &"5".repeat(40));
     open["comments"] = json!([
         {"id": "IC_1", "author": {"login": "carol"}, "body": "Rename the flag, please."}

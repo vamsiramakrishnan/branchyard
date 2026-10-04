@@ -33,8 +33,14 @@
 pub(crate) mod gateway;
 pub mod pricing;
 pub(crate) mod upstream;
+
+/// A backend's or server's base URL, parsed: scheme, host, port and path
+/// prefix. The one parser for them; `branchyard_client::http::Endpoint`
+/// builds on it.
+pub use upstream::Target as BaseUrl;
 mod usage;
 
+use branchyard_support::LockExt as _;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, TcpListener};
@@ -57,6 +63,8 @@ pub use usage::Tokens;
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(strum::Display, strum::EnumString, strum::EnumIter, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum Api {
     /// Anthropic's Messages API (`/v1/messages`), with `x-api-key`.
     Anthropic,
@@ -69,11 +77,7 @@ pub enum Api {
 
 impl Api {
     pub fn as_str(&self) -> &'static str {
-        match self {
-            Api::Anthropic => "anthropic",
-            Api::Openai => "openai",
-            Api::Generic => "generic",
-        }
+        self.into()
     }
 
     /// The provider's public API, for a backend that names no URL.
@@ -83,12 +87,6 @@ impl Api {
             Api::Openai => Some("https://api.openai.com"),
             Api::Generic => None,
         }
-    }
-}
-
-impl fmt::Display for Api {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -314,7 +312,7 @@ struct Shared {
     /// Request times (ms) in the last minute, by route.
     windows: HashMap<usize, VecDeque<u64>>,
     /// The weighted choice's generator.
-    rng: u64,
+    rng: branchyard_support::rng::SplitMix64,
     /// Budget alerts already recorded, by period and its start.
     alerted: Vec<(String, u64)>,
 }
@@ -414,11 +412,9 @@ impl Gateway {
                 .map_err(|_| format!("models.listen: {text:?} is not an IP address"))?,
             None => IpAddr::V4(Ipv4Addr::LOCALHOST),
         };
-        let seed = config.seed.unwrap_or_else(|| {
-            let mut bytes = [0u8; 8];
-            let _ = ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes);
-            u64::from_le_bytes(bytes)
-        });
+        let seed = config
+            .seed
+            .unwrap_or_else(branchyard_support::rng::fresh_seed);
         Ok(Gateway {
             backends,
             routes,
@@ -430,7 +426,7 @@ impl Gateway {
             branch_scope: None,
             state: Mutex::new(Shared {
                 windows: HashMap::new(),
-                rng: seed,
+                rng: branchyard_support::rng::SplitMix64::new(seed),
                 alerted: Vec::new(),
             }),
         })
@@ -474,8 +470,8 @@ impl Gateway {
         };
         let total: u64 = route.backends.iter().map(|(_, w)| u64::from(*w)).sum();
         let pick = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            next_random(&mut state.rng) % total.max(1)
+            let mut state = self.state.lock_recovering("state");
+            state.rng.next_u64() % total.max(1)
         };
         let mut first = 0;
         let mut acc = 0u64;
@@ -511,7 +507,7 @@ impl Gateway {
         let Some(limit) = self.routes.get(index).and_then(|r| r.requests_per_minute) else {
             return Ok(());
         };
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock_recovering("state");
         let window = state.windows.entry(index).or_default();
         while window
             .front()
@@ -532,7 +528,7 @@ impl Gateway {
     /// Whether an alert for `period` starting at `start` is still to be
     /// recorded in this process; marks it recorded.
     fn first_alert(&self, period: &str, start: u64) -> bool {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock_recovering("state");
         let key = (period.to_owned(), start);
         match state.alerted.contains(&key) {
             true => false,
@@ -562,15 +558,6 @@ impl Gateway {
         }
         pricing::cost(api, model, tokens)
     }
-}
-
-/// SplitMix64.
-fn next_random(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
 }
 
 /// A backend name: `[A-Za-z0-9_-]`, 1 to 64 characters.
@@ -847,7 +834,6 @@ fn direct_reason(gateway: &Gateway, record: &Record, api: Option<Api>) -> Option
 /// gateway. `token` is the connector token when the turn has one (it
 /// carries the model scope too); otherwise the gateway's own is minted. A
 /// failure is the turn's, by name.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare(
     yard: &Yard,
     record: &Record,
@@ -866,7 +852,7 @@ pub(crate) fn prepare(
     let spec = record
         .provision
         .as_ref()
-        .expect("models imply provisioning");
+        .ok_or("models imply provisioning, but this branch has none")?;
     if let Some(key) = spec
         .secrets
         .iter()
@@ -919,7 +905,7 @@ pub(crate) fn prepare(
     let token = match token {
         Some(token) => token.to_owned(),
         None => {
-            let now = crate::state::now_ms() / 1000;
+            let now = branchyard_support::time::now_ms() / 1000;
             let mut exp = now + crate::connectors::MAX_TTL.as_secs();
             if let Some(deadline) = deadline_ms {
                 exp = exp.min((deadline / 1000).max(now + 1));
@@ -928,16 +914,16 @@ pub(crate) fn prepare(
                 subject: gateway.signer.subject.clone(),
                 tenant: gateway.signer.tenant.clone(),
             });
-            let claims = crate::connectors::turn_claims(
-                &gateway.signer.issuer,
-                &url,
+            let claims = crate::connectors::turn_claims(crate::connectors::TurnToken {
+                issuer: &gateway.signer.issuer,
+                audience: &url,
                 actor,
-                gateway.by_branch(&record.info.name),
-                record.info.turns + 1,
-                (now, exp),
-                Vec::new(),
+                by_branch: gateway.by_branch(&record.info.name),
+                turn: record.info.turns + 1,
+                window: (now, exp),
+                grants: Vec::new(),
                 scopes,
-            )?;
+            })?;
             keys.sign(&claims)
                 .map_err(|e| format!("could not sign the model gateway token: {e}"))?
         }
@@ -1013,23 +999,6 @@ pub(crate) fn prepare(
 /// that takes neither provider's base URL variable.
 pub const ENV_GATEWAY: &str = "BRANCHYARD_MODEL_GATEWAY";
 
-/// Milliseconds at the start of the UTC day and month holding `now_ms`.
-pub fn period_starts(now_ms: u64) -> (u64, u64) {
-    let day_ms = 86_400_000;
-    let day = now_ms - now_ms % day_ms;
-    // Civil date from days since the epoch (Howard Hinnant's algorithm).
-    let days = (now_ms / day_ms) as i64;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let month_start = (days - (d - 1)) as u64 * day_ms;
-    (day, month_start)
-}
-
 /// The yard's spending since `since_ms`, summed.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct UsageTotals {
@@ -1081,11 +1050,11 @@ mod tests {
     fn periods_start_at_utc_midnight_and_the_first_of_the_month() {
         // 2026-10-01T12:34:56Z.
         let now = 1_790_858_096_000;
-        let (day, month) = period_starts(now);
+        let (day, month) = branchyard_support::time::period_starts(now);
         assert_eq!(day, 1_790_812_800_000);
         assert_eq!(month, 1_790_812_800_000);
         // 2024-02-29T23:59:59Z, a leap day.
-        let (day, month) = period_starts(1_709_251_199_000);
+        let (day, month) = branchyard_support::time::period_starts(1_709_251_199_000);
         assert_eq!(day, 1_709_164_800_000);
         assert_eq!(month, 1_706_745_600_000);
     }

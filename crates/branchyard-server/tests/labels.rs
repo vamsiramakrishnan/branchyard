@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use branchyard_client::api::OperationState;
 use branchyard_client::new_key;
-use common::{eventually, run, task, wait, Fixture, Server};
+use branchyard_testkit::wait;
+use common::{await_operation, run, task, Fixture, Server};
 
 #[test]
 fn labeled_work_waits_for_a_worker_that_carries_its_labels_and_says_why() {
@@ -29,7 +30,7 @@ fn labeled_work_waits_for_a_worker_that_carries_its_labels_and_says_why() {
     // Work that requires nothing still runs while it waits.
     let plain = run(&client, &task("WRITE plain.txt=1", "plain"));
     assert_eq!(plain.state, OperationState::Succeeded);
-    eventually("the operation to say why it waits", || {
+    wait::until("the operation to say why it waits", || {
         client.operation(&op.id).unwrap().waiting.is_some()
     });
     let waiting = client.operation(&op.id).unwrap();
@@ -62,7 +63,7 @@ fn labeled_work_waits_for_a_worker_that_carries_its_labels_and_says_why() {
     config.labels = vec!["linux".into(), "gpu".into()];
     let server = Server::start(config);
     let client = server.client();
-    let done = wait(&client, &op.id);
+    let done = await_operation(&client, &op.id);
     assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
     assert_eq!(done.waiting, None);
 }

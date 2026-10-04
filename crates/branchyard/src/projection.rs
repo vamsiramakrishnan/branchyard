@@ -25,6 +25,7 @@
 //! such variables from the environment of the shell commands it runs by
 //! default (`shell_environment_policy`), and `by` must see them there.
 
+use branchyard_support::LockExt as _;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -150,8 +151,9 @@ impl fmt::Debug for Hub {
     }
 }
 
+#[track_caller]
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|e| e.into_inner())
+    mutex.lock_recovering("shared state")
 }
 
 impl Hub {
@@ -183,7 +185,10 @@ impl Hub {
                 }
             }
         }
-        Ok(broker.as_ref().expect("started above").path().to_path_buf())
+        broker
+            .as_ref()
+            .map(|started| started.path().to_path_buf())
+            .ok_or_else(|| Error::State("the delegation broker is not running".into()))
     }
 
     /// Revoke `name`'s context if it still holds `token`; stop the broker
@@ -318,7 +323,7 @@ impl Drop for Projection {
             .and_then(|text| serde_json::from_str::<TokenFile>(&text).ok())
             .is_some_and(|file| file.token == self.token);
         if ours {
-            let _ = fs::remove_file(&path);
+            branchyard_support::cleanup_file(&path);
         }
         self.yard.hub.unregister(&self.name, &self.token);
     }
@@ -326,6 +331,7 @@ impl Drop for Projection {
 
 /// Offer delegation to `record`'s turn if it may create children: issue a
 /// token, register the turn, and describe what the harness gets.
+#[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard
 pub(crate) fn project(
     yard: &Yard,
     record: &Record,
@@ -431,7 +437,9 @@ fn install(path: &Path, content: &str) -> Result<(), Error> {
         return Ok(());
     }
     let failed = |e: std::io::Error| Error::State(format!("install {}: {e}", path.display()));
-    let dir = path.parent().expect("installed files have a directory");
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::State(format!("install {}: it has no directory", path.display())))?;
     fs::create_dir_all(dir).map_err(failed)?;
     let temp = dir.join(format!(
         ".{}.{}.tmp",
@@ -441,7 +449,7 @@ fn install(path: &Path, content: &str) -> Result<(), Error> {
     fs::write(&temp, content)
         .and_then(|()| fs::rename(&temp, path))
         .map_err(|e| {
-            let _ = fs::remove_file(&temp);
+            branchyard_support::cleanup_file(&temp);
             failed(e)
         })
 }
@@ -451,7 +459,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    let _ = fs::remove_file(path);
+    branchyard_support::cleanup_file(path);
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -468,7 +476,7 @@ pub(crate) fn new_token() -> Result<String, Error> {
     fs::File::open("/dev/urandom")
         .and_then(|mut random| random.read_exact(&mut bytes))
         .map_err(|e| Error::State(format!("could not read /dev/urandom for a token: {e}")))?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hex::encode(bytes))
 }
 
 /// Compare without stopping at the first difference.

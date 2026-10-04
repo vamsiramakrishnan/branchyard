@@ -20,6 +20,7 @@
 //! turn in the managed instructions block, most specific first, within a
 //! token budget; the `provisioned` event lists their ids.
 
+use branchyard_support::best_effort;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
@@ -29,8 +30,9 @@ use serde::{Deserialize, Serialize};
 use crate::fleet::{classify, recorded_route, FleetActivity, TaskKind};
 use crate::judge::{Judge, JudgedBy};
 use crate::record::Recorder;
-use crate::state::{now_ms, Record};
+use crate::state::Record;
 use crate::{Activity, Error, RecordedEvent, Yard};
+use branchyard_support::time::now_ms;
 
 /// Where an entry applies: the whole repository, files matching a path
 /// glob, a kind of task, or both of the last two. Serialized as
@@ -648,9 +650,7 @@ pub(crate) fn brief(
 
 /// The kind a branch's task has: its route's, else the classifier's.
 pub(crate) fn kind_of(record: &Record, events: &[RecordedEvent]) -> TaskKind {
-    recorded_route(events)
-        .map(|d| d.kind)
-        .unwrap_or_else(|| classify(&record.info.prompt).kind)
+    recorded_route(events).map_or_else(|| classify(&record.info.prompt).kind, |d| d.kind)
 }
 
 /// The files a branch's task is known to touch: those its candidate
@@ -931,7 +931,7 @@ struct AnswerEntry {
 }
 
 /// Parse a distiller's answer: one JSON object (optionally in one fenced
-/// block) with exactly `entries`, at most [`DISTILLED_MAX`] of them, each
+/// block) with exactly `entries`, at most `DISTILLED_MAX` of them, each
 /// with exactly `text`, `path` (a glob or null), `kind` (a task kind or
 /// null) and `why`.
 pub fn parse_distilled(text: &str) -> Result<Vec<(String, KnowledgeScope, String)>, String> {
@@ -1194,7 +1194,10 @@ pub(crate) fn on_end(yard: &Yard, name: &str, trigger: DistillTrigger) {
     if is_scratch(&events) {
         return;
     }
-    let _ = distill(yard, name, settings.distiller.as_ref(), trigger.as_str());
+    best_effort(
+        "distill the branch's knowledge",
+        distill(yard, name, settings.distiller.as_ref(), trigger.as_str()),
+    );
 }
 
 #[cfg(test)]

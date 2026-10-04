@@ -6,7 +6,8 @@
 use ring::{digest, hmac};
 
 use crate::http::Request;
-use crate::util::{amz_date, hex, query_pairs, uri_encode};
+use crate::util::{query_pairs, uri_encode};
+use branchyard_support::time::amz_date;
 
 /// SHA-256 of nothing, the payload hash of an empty body.
 pub const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -28,7 +29,7 @@ impl std::fmt::Debug for Credentials {
 }
 
 pub fn sha256_hex(data: &[u8]) -> String {
-    hex(digest::digest(&digest::SHA256, data).as_ref())
+    hex::encode(digest::digest(&digest::SHA256, data))
 }
 
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
@@ -59,10 +60,10 @@ fn query_pairs_raw(query: &str) -> Vec<(String, String)> {
         .filter(|p| !p.is_empty())
         .map(|p| match p.split_once('=') {
             Some((k, v)) => (
-                crate::util::uri_decode(k, false),
-                crate::util::uri_decode(v, false),
+                branchyard_client::http::decode(k),
+                branchyard_client::http::decode(v),
             ),
-            None => (crate::util::uri_decode(p, false), String::new()),
+            None => (branchyard_client::http::decode(p), String::new()),
         })
         .collect()
 }
@@ -125,7 +126,7 @@ pub fn signature(secret: &str, date: &str, region: &str, service: &str, to_sign:
     let k_region = hmac_sha256(&k_date, region.as_bytes());
     let k_service = hmac_sha256(&k_region, service.as_bytes());
     let k_signing = hmac_sha256(&k_service, b"aws4_request");
-    hex(&hmac_sha256(&k_signing, to_sign.as_bytes()))
+    hex::encode(hmac_sha256(&k_signing, to_sign.as_bytes()))
 }
 
 /// Sign `request` in place: `x-amz-date`, `x-amz-security-token` when the
@@ -174,7 +175,7 @@ pub fn sign(
 }
 
 /// Check a received request's `Authorization` against `secret`, as a
-/// server would: the stand-ins in [`crate::testing`] use it.
+/// server would: the stand-ins in `crate::testing` use it.
 pub fn verify(request: &Request, secret: &str, payload_hash: &str) -> Result<(), String> {
     let auth = request
         .find("authorization")

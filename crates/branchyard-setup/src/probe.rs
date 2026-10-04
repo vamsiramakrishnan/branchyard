@@ -353,16 +353,14 @@ impl Facts {
         }
         self.installed()
             .next()
-            .map(|h| h.harness.clone())
-            .unwrap_or_else(|| "claude-code".into())
+            .map_or_else(|| "claude-code".into(), |h| h.harness.clone())
     }
 
     pub fn repo_name(&self) -> String {
         let base = self
             .git
             .as_ref()
-            .map(|g| g.root.as_str())
-            .unwrap_or(self.root.as_str())
+            .map_or(self.root.as_str(), |g| g.root.as_str())
             .trim_end_matches('/')
             .rsplit('/')
             .next()

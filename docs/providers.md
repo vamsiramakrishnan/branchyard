@@ -156,6 +156,26 @@ It does not mount: a spec with a mount, an image or limits is refused, because t
 
 `TaskOptions::provider` selects it with `Provider::Substrate(SubstrateOptions)`; the CLI flags are `--provider substrate --substrate-endpoint URL --substrate-router URL --substrate-template NAME --substrate-key FILE [--substrate-atespace NAME] [--substrate-workdir PATH] [--substrate-home PATH] [--substrate-ca FILE] [--substrate-client-cert FILE --substrate-client-key FILE] [--substrate-router-ca FILE] [--substrate-insecure] [--pass-env NAME,...]` on `by run`, `by fan` and `by fork`. [Agent Substrate](substrate.md) documents the bridge protocol, the credentials, the transfer, the template and what remains unqualified; [live testing](testing-live.md#6-agent-substrate-cluster) says how to run it on a kind cluster.
 
+## Adding a provider
+
+A branch stores a [`Provider`](../crates/branchyard/src/lib.rs): the closed, serialized enum `local`, `microsandbox`, `substrate` or `recipe`. What each variant means to the engine (its name and key, its sandbox lifecycle, whether its options can run, where the harness sees the worktree and `HOME`, how a stopped engine's sandbox is recovered and a reaped one destroyed, how its sandbox provider is opened, whether it can confine egress) is one crate-private trait, `ProviderKind` in [`providers/mod.rs`](../crates/branchyard/src/providers/mod.rs), implemented once per variant:
+
+| Variant | File |
+|---|---|
+| `Provider::Local` | [`providers/local.rs`](../crates/branchyard/src/providers/local.rs) |
+| `Provider::Microsandbox` | [`providers/microsandbox.rs`](../crates/branchyard/src/providers/microsandbox.rs) |
+| `Provider::Substrate` | [`providers/substrate.rs`](../crates/branchyard/src/providers/substrate.rs) |
+| `Provider::Recipe` | [`providers/recipe.rs`](../crates/branchyard/src/providers/recipe.rs) |
+
+The engine never matches on the enum. Placement, snapshots, egress and the reaper call `provider.kind().method()`, or `providers::of(provider)` for a branch's optional provider (`None` is local); `Provider::kind` is the one place a variant is mapped to its implementation. A new provider is therefore one new file implementing `ProviderKind`, plus the enum variant that carries its options and its arm in `Provider::kind`. The trait's required methods are what a provider must answer; the compiler lists any it has not.
+
+The enum's serde shape is unchanged by the trait, so the wire format and `schema/` follow the enum alone. A new variant changes them; regenerate the schemas as [CONTRIBUTING](../CONTRIBUTING.md#adding-a-provider) says.
+
+Two tests keep it this way:
+
+- `providers::tests` in `crates/branchyard/src/providers/tests.rs` is a table over every variant that exercises `check`, `recover`, `lifecycle`, `key`, `guest_paths`, `open` and `destroy` through the trait, including each error path. Its exhaustive `index` match fails to compile for a new variant, and the table fails until the variant has a sample (it counts the variants in the enum's own source and in `Provider::kind`, so there is no count to bump).
+- `crates/branchyard/tests/provider_seam.rs` fails when any crate's `src/` names a variant outside `providers/`. The engine crate's count is zero. The CLI and the server still match on the enum to announce and admit a provider; their counts are a ratchet in that file that can only fall (they need a public accessor before they can move).
+
 ## Provisioning a harness's home
 
 Every provider runs the same [provisioning](provisioning.md) before the harness starts: the harness's provisioner plans its native files, variables and session items from the task's secrets, MCP servers, instructions, model, reasoning effort and telemetry, and the engine applies the files to the branch's private home on the host. Where the home is, and so whether files may be written at all, depends on the provider:

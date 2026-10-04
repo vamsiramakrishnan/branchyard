@@ -38,15 +38,15 @@ impl QrCode {
                 )
             })?;
         let codewords = interleave(version, &data_codewords(version, data));
-        let mut best: Option<(u32, QrCode)> = None;
-        for mask in 0..8 {
-            let code = QrCode::with_mask(version, &codewords, mask);
-            let score = code.penalty();
-            if best.as_ref().is_none_or(|(s, _)| score < *s) {
-                best = Some((score, code));
-            }
-        }
-        Ok(best.expect("eight masks were tried").1)
+        // The lowest penalty; the first of equals, as the masks are tried.
+        (0..8)
+            .map(|mask| {
+                let code = QrCode::with_mask(version, &codewords, mask);
+                (code.penalty(), code)
+            })
+            .min_by_key(|(score, _)| *score)
+            .map(|(_, code)| code)
+            .ok_or_else(|| "no QR mask was tried".to_owned())
     }
 
     /// `data` in `version` with `mask`, for comparing with another encoder.
@@ -399,9 +399,11 @@ fn data_codewords(version: usize, data: &[u8]) -> Vec<u8> {
         .chunks(8)
         .map(|byte| byte.iter().fold(0u8, |acc, &b| (acc << 1) | u8::from(b)))
         .collect();
-    let mut pad = [0xEC, 0x11].into_iter().cycle();
+    let pad = [0xEC, 0x11];
+    let mut next = 0;
     while out.len() < data_codeword_count(version) {
-        out.push(pad.next().expect("cycles"));
+        out.push(pad[next % 2]);
+        next += 1;
     }
     out
 }

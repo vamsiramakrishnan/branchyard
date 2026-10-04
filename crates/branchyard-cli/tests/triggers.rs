@@ -3,51 +3,28 @@
 //! `--remote`. Hermetic: the fake ACP agent is the harness; the webhook is
 //! signed here. Requires `git`, `sh` and `kill`.
 
+#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use branchyard_testkit::fake_agent;
+use branchyard_testkit::wait;
 use serde_json::Value;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const BY: &str = env!("CARGO_BIN_EXE_by");
 
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(BY);
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        if profile_dir.file_name().and_then(|n| n.to_str()) == Some("release") {
-            command.arg("--release");
-        }
-        // Built already (as by this test's build) when cargo is not at hand.
-        let agent = profile_dir.join("fake-acp-agent");
-        if !agent.is_file() {
-            assert!(command.status().unwrap().success());
-        }
-        assert!(agent.is_file());
-        agent
-    })
-}
-
 struct Dir(PathBuf);
 
 impl Dir {
     fn new() -> Dir {
-        fake_agent();
+        fake_agent!();
         let dir = std::env::temp_dir().join(format!(
             "branchyard-trigger-test-{}-{}",
             std::process::id(),
@@ -131,7 +108,7 @@ impl Served {
         serve.args(["serve", "--listen", "127.0.0.1:0", "--quiet"]);
         serve
             .arg("--harness-command")
-            .arg(format!("gemini-cli={}", fake_agent().display()));
+            .arg(format!("gemini-cli={}", fake_agent!().display()));
         let log = fs::File::create(root.join("../server.log")).unwrap();
         let mut child = serve.stdout(Stdio::piped()).stderr(log).spawn().unwrap();
         let mut line = String::new();
@@ -184,12 +161,11 @@ impl Drop for Served {
         let _ = Command::new("kill")
             .args(["-TERM", &self.child.id().to_string()])
             .status();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while Instant::now() < deadline {
-            if self.child.try_wait().ok().flatten().is_some() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        let exited = wait::try_until_for(Duration::from_secs(20), || {
+            self.child.try_wait().ok().flatten().is_some()
+        });
+        if exited.is_ok() {
+            return;
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -320,15 +296,14 @@ fn local_triggers_are_kept_where_by_serve_fires_them_and_remote_sees_them() {
         body,
     );
     assert_eq!(status, 202);
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let runs = loop {
+    let runs = wait::until("the run to settle", || {
         let runs = json(&fake(&["trigger", "runs", "hooks", "--json"]));
         if runs["runs"][0]["outcome"].is_object() {
-            break runs;
+            Ok(runs)
+        } else {
+            Err(runs)
         }
-        assert!(Instant::now() < deadline, "the run never settled: {runs}");
-        std::thread::sleep(Duration::from_millis(100));
-    };
+    });
     assert_eq!(runs["runs"][0]["state"], "fired", "{runs}");
     assert_eq!(runs["runs"][0]["branches"][0], "hook-served");
     assert_eq!(runs["runs"][0]["outcome"]["ok"], true, "{runs}");

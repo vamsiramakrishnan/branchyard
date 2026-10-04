@@ -51,7 +51,7 @@ fn the_page_pairs_follows_the_stream_and_sends() {
         &config,
         companion.as_ref(),
         &request,
-        branchyard_server::ops::now_ms(),
+        branchyard_support::time::now_ms(),
     )
     .unwrap();
 

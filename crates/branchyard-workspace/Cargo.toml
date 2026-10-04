@@ -4,7 +4,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Git branches, candidates, and validated integration for Branchyard"
 
+[lints]
+workspace = true
+
+[dependencies]
+branchyard-support = { path = "../branchyard-support" }
+
 [target."cfg(unix)".dependencies]
-rustix = { version = "1.1", default-features = false, features = ["std", "process", "fs"] }
+rustix = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+branchyard-testkit = { path = "../branchyard-testkit" }

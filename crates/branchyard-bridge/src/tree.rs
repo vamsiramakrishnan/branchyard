@@ -220,6 +220,7 @@ pub fn receive(root: &Path, next: &mut dyn FnMut() -> io::Result<Frame>) -> io::
     Ok(())
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;

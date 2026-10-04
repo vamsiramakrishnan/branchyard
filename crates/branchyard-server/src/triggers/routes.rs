@@ -520,6 +520,7 @@ async fn fire_with_token(
     deliver(app, id, Some(token), headers, body).await
 }
 
+#[allow(clippy::expect_used)] // ratchet: branchyard-server
 async fn deliver(
     app: Shared,
     id: String,

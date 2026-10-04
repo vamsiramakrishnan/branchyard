@@ -11,14 +11,16 @@
 //! the next turn under the caller's own policy; rejection ends the branch,
 //! or with `replan`, runs another read-only planning turn with the reason.
 
+use branchyard_support::best_effort;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{self, Turn};
 use crate::record::Recorder;
-use crate::state::{now_ms, Record};
+use crate::state::Record;
 use crate::{
     Activity, Branch, BranchStatus, Error, Event, Policy, RecordedEvent, TaskOptions, Yard,
 };
+use branchyard_support::time::now_ms;
 
 /// The first line of a planning turn's prompt.
 pub const PLAN_HEADER: &str = "[branchyard plan mode]";
@@ -310,7 +312,9 @@ pub(crate) fn conclude(
         Ok(tasks) => (tasks, None),
         Err(why) => (None, Some(why)),
     };
-    let state = record.plan.as_mut().expect("planning checked above");
+    let Some(state) = record.plan.as_mut() else {
+        return Ok(());
+    };
     let plan = Plan {
         markdown,
         tasks,
@@ -373,10 +377,13 @@ pub(crate) fn settled(yard: &Yard, name: &str) {
     };
     if let Ok(message) = delegate.escalate(&text) {
         if let Ok(mut recorder) = Recorder::open(&store, name, None) {
-            let _ = recorder.record(Activity::Plan(Box::new(PlanActivity::Escalated {
-                to: parent.clone(),
-                message: message.id,
-            })));
+            best_effort(
+                "record the activity",
+                recorder.record(Activity::Plan(Box::new(PlanActivity::Escalated {
+                    to: parent.clone(),
+                    message: message.id,
+                }))),
+            );
         }
     }
 }
@@ -605,7 +612,10 @@ pub(crate) fn reject(
     let mut recorder = Recorder::fenced(&store, lease.fence(), options.observer.clone());
     recorder.record(Activity::Plan(Box::new(activity)))?;
     recorder.finish(lease, &record)?;
-    let _ = crate::fleet::observe(yard, name, None);
+    best_effort(
+        "record the fleet outcome",
+        crate::fleet::observe(yard, name, None),
+    );
     yard.branch(name)
 }
 

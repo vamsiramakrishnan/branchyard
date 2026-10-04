@@ -9,11 +9,12 @@
 //! entries, and reports at most once per debounce interval, only the
 //! branches whose report changed.
 
+use branchyard_support::best_effort;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use branchyard::BranchInfo;
 use branchyard_client::api::FeedEntry;
@@ -64,7 +65,10 @@ impl PaneMap {
     fn save(&self, config: &Config) {
         let path = PaneMap::path(config);
         let write = || -> std::io::Result<()> {
-            std::fs::create_dir_all(path.parent().expect("a file in a directory"))?;
+            let dir = path
+                .parent()
+                .ok_or_else(|| std::io::Error::other("the pane map path has no directory"))?;
+            std::fs::create_dir_all(dir)?;
             let temp = path.with_extension("json.tmp");
             std::fs::write(&temp, serde_json::to_vec_pretty(self)?)?;
             std::fs::rename(temp, &path)
@@ -155,6 +159,7 @@ pub fn run(config: &Config) -> Result<(), String> {
 }
 
 /// Read the feed forever, reconnecting after the last delivered cursor.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-herdr
 fn follow(repo: Repo, tx: mpsc::Sender<Feed>) {
     let mut cursor: Option<u64> = None;
     let mut snapshot = true;
@@ -270,10 +275,7 @@ impl<'a> Bridge<'a> {
     /// Strictly increasing across restarts, as Herdr's `--seq` needs:
     /// milliseconds since the epoch, or one more than the last.
     fn next_seq(&mut self) -> u64 {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now = branchyard_support::time::now_ms();
         self.seq = now.max(self.seq + 1);
         self.seq
     }
@@ -370,16 +372,21 @@ impl<'a> Bridge<'a> {
             )
             .map_err(|e| e.to_string())?;
         let label = format!("by: {branch}");
-        let _ = self.herdr.call(&[
-            "pane".into(),
-            "rename".into(),
-            opened.pane_id.clone(),
-            label.clone(),
-        ]);
+        best_effort(
+            "name the herdr pane and tab",
+            self.herdr.call(&[
+                "pane".into(),
+                "rename".into(),
+                opened.pane_id.clone(),
+                label.clone(),
+            ]),
+        );
         if let Some(tab) = &opened.tab_id {
-            let _ = self
-                .herdr
-                .call(&["tab".into(), "rename".into(), tab.clone(), label]);
+            best_effort(
+                "name the herdr pane and tab",
+                self.herdr
+                    .call(&["tab".into(), "rename".into(), tab.clone(), label]),
+            );
         }
         Ok(opened)
     }

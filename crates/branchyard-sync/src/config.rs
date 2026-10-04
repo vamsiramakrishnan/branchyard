@@ -59,30 +59,7 @@ pub struct SyncConfig {
 
 /// `30s`, `5m`, `2h`, `7d`, `500ms`, or a number of seconds.
 pub fn parse_duration(text: &str) -> Result<Duration> {
-    let t = text.trim();
-    let split = t
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .unwrap_or(t.len());
-    let (number, unit) = t.split_at(split);
-    let n: f64 = number
-        .parse()
-        .map_err(|_| Error::config(format!("{text:?} is not a duration such as 30s, 5m or 7d")))?;
-    let ms = match unit.trim() {
-        "ms" => n,
-        "" | "s" => n * 1000.0,
-        "m" => n * 60_000.0,
-        "h" => n * 3_600_000.0,
-        "d" => n * 86_400_000.0,
-        _ => {
-            return Err(Error::config(format!(
-                "{text:?} is not a duration such as 30s, 5m or 7d"
-            )))
-        }
-    };
-    if !(ms.is_finite() && ms >= 0.0) {
-        return Err(Error::config(format!("{text:?} is not a duration")));
-    }
-    Ok(Duration::from_millis(ms as u64))
+    branchyard_support::time::parse_duration(text).map_err(|e| Error::config(e.to_string()))
 }
 
 /// `500`, `64KB`, `10MB`, `1GiB`, with an optional `/s`.

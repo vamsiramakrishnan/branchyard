@@ -2,7 +2,9 @@
 //! connection, over TCP or TLS (rustls with the Mozilla roots), and a
 //! response whose body is read as it arrives.
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufReader, Read, Write};
+
+use branchyard_wire as wire;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -21,66 +23,34 @@ const QUIET: Duration = Duration::from_secs(600);
 /// A backend's base URL, parsed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
+    /// `https` (true) or `http` (false).
     pub tls: bool,
+    /// The host, without the brackets of an IPv6 literal.
     pub host: String,
+    /// The port, the scheme's default when none is written.
     pub port: u16,
     /// Its path, without a trailing slash, prefixed to every request's.
     pub prefix: String,
 }
 
 impl Target {
+    /// Parse a backend's base URL: `http` or `https`, a host, an optional port
+    /// and path, and no query, fragment or userinfo.
     pub fn parse(url: &str) -> Result<Target, String> {
-        let (tls, rest) = match url.split_once("://") {
-            Some(("https", rest)) => (true, rest),
-            Some(("http", rest)) => (false, rest),
-            _ => return Err(format!("{url:?} is not an http:// or https:// URL")),
-        };
-        let (authority, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, ""),
-        };
-        if authority.is_empty() || authority.contains('@') || path.contains(['?', '#']) {
-            return Err(format!("{url:?} must be a base URL: a host and a path"));
-        }
-        let default = if tls { 443 } else { 80 };
-        let (host, port) = match authority.strip_prefix('[') {
-            Some(v6) => {
-                let (host, after) = v6
-                    .split_once(']')
-                    .ok_or_else(|| format!("{url:?} has an unterminated IPv6 address"))?;
-                let port = match after.strip_prefix(':') {
-                    Some(p) => p.parse().map_err(|_| format!("{url:?} has a bad port"))?,
-                    None if after.is_empty() => default,
-                    None => return Err(format!("{url:?} has a malformed host")),
-                };
-                (host.to_owned(), port)
-            }
-            None => match authority.rsplit_once(':') {
-                Some((host, p)) => (
-                    host.to_owned(),
-                    p.parse().map_err(|_| format!("{url:?} has a bad port"))?,
-                ),
-                None => (authority.to_owned(), default),
-            },
-        };
+        let url = wire::HttpUrl::parse(url)
+            .and_then(wire::HttpUrl::without_query)
+            .map_err(|e| e.to_string())?;
         Ok(Target {
-            tls,
-            host,
-            port,
-            prefix: path.trim_end_matches('/').to_owned(),
+            tls: url.tls,
+            host: url.host.clone(),
+            port: url.port,
+            prefix: url.prefix().to_owned(),
         })
     }
 
     /// The `Host` header.
     pub fn authority(&self) -> String {
-        let host = match self.host.contains(':') {
-            true => format!("[{}]", self.host),
-            false => self.host.clone(),
-        };
-        match (self.tls, self.port) {
-            (true, 443) | (false, 80) => host,
-            _ => format!("{host}:{}", self.port),
-        }
+        wire::host_header(self.tls, &self.host, self.port)
     }
 }
 
@@ -214,171 +184,48 @@ pub fn send(
     body: &[u8],
 ) -> Result<Response, Failure> {
     let mut stream = connect(target)?;
-    let mut head = format!(
-        "{method} {}{path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
-        target.prefix,
-        target.authority()
-    );
-    for (name, value) in headers {
-        if name.contains(['\r', '\n', ':']) || value.contains(['\r', '\n']) {
-            return Err(Failure::Exchange(format!("header {name} is malformed")));
-        }
-        head.push_str(&format!("{name}: {value}\r\n"));
-    }
-    if !body.is_empty() || !matches!(method, "GET" | "HEAD" | "DELETE" | "OPTIONS") {
-        head.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    }
-    head.push_str("\r\n");
     let exchange = |e: io::Error| Failure::Exchange(e.to_string());
-    stream.write_all(head.as_bytes()).map_err(exchange)?;
+    let authority = target.authority();
+    let line = format!("{}{path}", target.prefix);
+    let content_length = (!body.is_empty()
+        || !matches!(method, "GET" | "HEAD" | "DELETE" | "OPTIONS"))
+    .then_some(body.len() as u64);
+    let head = wire::request_head(
+        method,
+        &line,
+        [("Host", authority.as_str()), ("Connection", "close")]
+            .into_iter()
+            .chain(headers.iter().map(|(n, v)| (n.as_str(), v.as_str()))),
+        content_length,
+    )
+    .map_err(|e| Failure::Exchange(e.to_string()))?;
+    stream.write_all(&head).map_err(exchange)?;
     stream.write_all(body).map_err(exchange)?;
     stream.flush().map_err(exchange)?;
     read_response(BufReader::new(stream), method == "HEAD")
 }
 
 fn read_response(mut reader: BufReader<Stream>, head_only: bool) -> Result<Response, Failure> {
-    let bad = |why: &str| Failure::Exchange(why.to_owned());
-    let mut raw = Vec::new();
-    loop {
-        let before = raw.len();
-        let n = reader
-            .read_until(b'\n', &mut raw)
-            .map_err(|e| Failure::Exchange(e.to_string()))?;
-        if n == 0 {
-            return Err(bad("the backend closed the connection before responding"));
+    let bad = |e: wire::WireError| match e {
+        wire::WireError::ConnectionClosed => {
+            Failure::Exchange("the backend closed the connection before responding".into())
         }
-        if raw.len() > MAX_HEAD {
-            return Err(bad("the backend's response head is too large"));
-        }
-        let line = &raw[before..];
-        if line == b"\r\n" || line == b"\n" {
-            // An interim response (100 Continue) comes before the real one.
-            if raw.starts_with(b"HTTP/1.1 1") || raw.starts_with(b"HTTP/1.0 1") {
-                raw.clear();
-                continue;
-            }
-            break;
-        }
-    }
-    let mut headers = [httparse::EMPTY_HEADER; 96];
-    let mut parsed = httparse::Response::new(&mut headers);
-    match parsed.parse(&raw) {
-        Ok(httparse::Status::Complete(_)) => {}
-        _ => return Err(bad("the backend's response head is malformed")),
-    }
-    let status = parsed.code.ok_or_else(|| bad("no status code"))?;
-    let reason = parsed.reason.unwrap_or("").to_owned();
-    let headers: Vec<(String, String)> = parsed
-        .headers
-        .iter()
-        .map(|h| {
-            (
-                h.name.to_owned(),
-                String::from_utf8_lossy(h.value).trim().to_owned(),
-            )
-        })
-        .collect();
-    let find = |name: &str| {
-        headers
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
+        e => Failure::Exchange(format!("the backend's response is malformed: {e}")),
     };
-    let chunked = find("transfer-encoding").is_some_and(|v| {
-        v.to_ascii_lowercase()
-            .split(',')
-            .any(|t| t.trim() == "chunked")
-    });
-    let body = if head_only || status == 204 || status == 304 {
-        Body::Empty
-    } else if chunked {
-        Body::Chunked {
-            reader,
-            remaining: 0,
-            done: false,
-        }
-    } else if let Some(length) = find("content-length") {
-        let length: u64 = length.parse().map_err(|_| bad("invalid Content-Length"))?;
-        Body::Length(reader.take(length))
-    } else {
-        Body::Eof(reader)
-    };
+    let head = wire::read_response_head(&mut reader, MAX_HEAD).map_err(bad)?;
+    let framing = wire::response_framing(head.status, &head.headers, head_only).map_err(bad)?;
     Ok(Response {
-        status,
-        reason,
-        headers,
-        body,
+        status: head.status,
+        reason: head.reason,
+        headers: head.headers,
+        body: Body::new(reader, framing),
     })
 }
 
 /// A response body, its transfer encoding undone.
-pub enum Body {
-    Empty,
-    Length(io::Take<BufReader<Stream>>),
-    Chunked {
-        reader: BufReader<Stream>,
-        remaining: u64,
-        done: bool,
-    },
-    Eof(BufReader<Stream>),
-}
+pub type Body = wire::Body<BufReader<Stream>>;
 
-impl Read for Body {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Body::Empty => Ok(0),
-            Body::Length(r) => r.read(buf),
-            Body::Eof(r) => r.read(buf),
-            Body::Chunked {
-                reader,
-                remaining,
-                done,
-            } => {
-                if *done || buf.is_empty() {
-                    return Ok(0);
-                }
-                if *remaining == 0 {
-                    let mut line = String::new();
-                    if reader.read_line(&mut line)? == 0 {
-                        return Err(io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            "chunked body ended early",
-                        ));
-                    }
-                    let size = line.trim().split(';').next().unwrap_or("").trim();
-                    *remaining = u64::from_str_radix(size, 16).map_err(|_| {
-                        io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size")
-                    })?;
-                    if *remaining == 0 {
-                        loop {
-                            line.clear();
-                            if reader.read_line(&mut line)? == 0 || line.trim().is_empty() {
-                                break;
-                            }
-                        }
-                        *done = true;
-                        return Ok(0);
-                    }
-                }
-                let want = buf.len().min(*remaining as usize);
-                let n = reader.read(&mut buf[..want])?;
-                if n == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "chunk ended early",
-                    ));
-                }
-                *remaining -= n as u64;
-                if *remaining == 0 {
-                    let mut crlf = String::new();
-                    reader.read_line(&mut crlf)?;
-                }
-                Ok(n)
-            }
-        }
-    }
-}
-
+#[allow(clippy::let_underscore_must_use, clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +255,56 @@ mod tests {
         ] {
             assert!(Target::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    /// A backend that sends `bytes` and closes, read through `read_response`.
+    fn answer(bytes: &[u8], head_only: bool) -> Result<(u16, Vec<u8>), String> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut backend = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (client, _) = listener.accept().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let _ = backend.write_all(bytes);
+        drop(backend);
+        let mut response = read_response(BufReader::new(Stream::Plain(client)), head_only)
+            .map_err(|e| e.to_string())?;
+        let mut body = Vec::new();
+        response
+            .body
+            .read_to_end(&mut body)
+            .map_err(|e| e.to_string())?;
+        Ok((response.status, body))
+    }
+
+    #[test]
+    fn every_valid_response_in_the_wire_corpus_is_read() {
+        for (name, bytes, body) in wire::corpus::responses_valid() {
+            let got = answer(&bytes, false).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(got.1, body, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_malformed_response_in_the_wire_corpus_fails_cleanly() {
+        for (name, bytes) in wire::corpus::responses_malformed() {
+            let got = answer(&bytes, false);
+            assert!(got.is_err(), "{name}: read as {got:?}");
+        }
+    }
+
+    #[test]
+    fn a_response_cut_off_mid_chunk_is_an_error_not_a_short_body() {
+        let got = answer(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n5\r\nhe",
+            false,
+        );
+        assert!(got.is_err(), "{got:?}");
+    }
+
+    #[test]
+    fn a_head_request_has_no_body_whatever_the_head_says() {
+        let got = answer(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n", true);
+        assert_eq!(got, Ok((200, Vec::new())));
     }
 }

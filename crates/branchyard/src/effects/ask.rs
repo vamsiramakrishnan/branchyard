@@ -3,13 +3,14 @@
 //! the turn's budget. Every surface answers through
 //! [`crate::Yard::answer_approval`], which writes the answer once.
 
+use branchyard_support::best_effort;
 use std::time::Duration;
 
 use serde_json::Value;
 
 use super::{ulid, ApprovalAsk, AskAbout, AskAnswer, EffectActivity, Resolved};
-use crate::state::now_ms;
 use crate::{Activity, Error, RecordedEvent, TaskOptions, Yard};
+use branchyard_support::time::now_ms;
 
 /// What to ask.
 pub(crate) struct AskSpec {
@@ -30,7 +31,10 @@ pub(crate) fn note(yard: &Yard, branch: &str, activity: EffectActivity) {
         at_ms: now_ms(),
         activity: Activity::Effect(Box::new(activity)),
     };
-    let _ = yard.store().append(branch, &event, None);
+    best_effort(
+        "append the event to the branch's log",
+        yard.store().append(branch, &event, None),
+    );
 }
 
 /// Store the ask, record it on the branch, and escalate it to a delegating
@@ -83,7 +87,10 @@ fn escalate(yard: &Yard, ask: &ApprovalAsk) {
         ask.id
     );
     if let Ok(delegate) = crate::delegation::trusted(yard, &ask.branch, TaskOptions::default()) {
-        let _ = delegate.escalate(&text);
+        best_effort(
+            "escalate the question to the parent",
+            delegate.escalate(&text),
+        );
     }
 }
 
@@ -114,6 +121,7 @@ pub(crate) fn answer(yard: &Yard, id: &str, answer: &AskAnswer) -> Result<Approv
 
 /// Wait for `ask`'s answer until its deadline, or until `stop` says the
 /// turn is ending; then it is answered `expired` (denied).
+#[allow(clippy::expect_used)] // ratchet: branchyard
 pub(crate) fn wait(
     yard: &Yard,
     ask: &ApprovalAsk,

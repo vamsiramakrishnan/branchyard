@@ -4,14 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Environment recipes (repository scripts that create a VM) and a sandbox provider over them"
 
+[lints]
+workspace = true
+
 [dependencies]
+branchyard-support = { path = "../branchyard-support" }
 branchyard-sandbox = { path = "../branchyard-sandbox" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-# A recipe script's process group, stopped on a timeout. Already in Cargo.lock.
-rustix = { version = "1.1", default-features = false, features = ["std", "process"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+# Shell words quoted for a remote `sh -c`. Already in Cargo.lock.
+shlex = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3.27.0"
+tempfile = { workspace = true }

@@ -59,7 +59,7 @@ impl FileStore {
     }
 
     fn temp(&self) -> PathBuf {
-        let name = crate::util::hex(&crate::util::random_bytes(12).unwrap_or_default());
+        let name = hex::encode(crate::util::random_bytes(12).unwrap_or_default());
         self.root.join(".tmp").join(name)
     }
 
@@ -73,6 +73,7 @@ impl FileStore {
 
     /// Rename `temp` over `key` if `check` passes on the current
     /// generation, under the lock.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
     fn commit(
         &self,
         key: &str,
@@ -83,7 +84,7 @@ impl FileStore {
         let _lock = self.lock()?;
         let current = generation_of(&path)?;
         if let Err(e) = check(current) {
-            let _ = fs::remove_file(temp);
+            branchyard_support::cleanup_file(temp);
             return Err(e);
         }
         if let Some(parent) = path.parent() {
@@ -124,8 +125,7 @@ fn generation(meta: &fs::Metadata) -> Generation {
     let modified = meta
         .modified()
         .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
+        .and_then(branchyard_support::time::system_time_nanos)
         .unwrap_or(0);
     format!("{modified:x}-{:x}", meta.len())
 }
@@ -133,8 +133,7 @@ fn generation(meta: &fs::Metadata) -> Generation {
 fn modified_ms(meta: &fs::Metadata) -> Option<u64> {
     meta.modified()
         .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
+        .and_then(branchyard_support::time::system_time_ms)
 }
 
 fn missing(key: &str) -> Error {
@@ -295,9 +294,9 @@ impl ObjectStore for FileStore {
         journal: &dyn UploadJournal,
     ) -> Result<Generation> {
         self.path(key)?;
-        let id = crate::util::hex(&blake3::hash(key.as_bytes()).as_bytes()[..12]);
+        let id = hex::encode(&blake3::hash(key.as_bytes()).as_bytes()[..12]);
         let partial = self.root.join(".tmp").join(format!("{id}.partial"));
-        let digest = crate::util::hex(&blake3::hash(data).as_bytes()[..16]);
+        let digest = hex::encode(&blake3::hash(data).as_bytes()[..16]);
         let mut done: u64 = journal
             .load(key)
             .and_then(|state| {

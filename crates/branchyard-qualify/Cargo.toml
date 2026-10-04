@@ -4,10 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Runs harness driver qualification scenarios against real harness binaries"
+
+[lints]
+workspace = true
 
 [dependencies]
 branchyard-harness = { path = "../branchyard-harness" }
 branchyard-runtime = { path = "../branchyard-runtime" }
-clap = { version = "4.6", features = ["derive"] }
-serde_json = "1"
+clap = { workspace = true }
+serde_json = { workspace = true }

@@ -777,6 +777,7 @@ pub trait Driver {
 }
 
 /// Serialize one frame as a single line.
+#[allow(clippy::expect_used)] // ratchet: branchyard-harness
 pub(crate) fn frame(value: &Value) -> Frame {
     let mut bytes = serde_json::to_vec(value).expect("a JSON value always serializes");
     bytes.push(b'\n');
