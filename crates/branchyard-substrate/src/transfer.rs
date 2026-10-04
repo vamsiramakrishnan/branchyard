@@ -1042,3 +1042,528 @@ pub fn pull_tree(endpoint: &dyn Guest, from: &Path, to: &Path) -> Result<(), Err
     let _ = fs::remove_dir_all(&old);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    //! [`push`] and [`pull`] against a sandbox that is a directory of this
+    //! host: [`HostProvider`] runs each exec as a local process, so the
+    //! real [`Exec`] guest carries real git bundles and tar streams between
+    //! two repositories on disk. The same steps through a Substrate actor's
+    //! bridge are in `tests/transfer.rs`. Requires `git`, `sh` and `tar`.
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{Child, Command, Stdio};
+
+    use branchyard_sandbox::{Capabilities, ExitStatus, SandboxInfo, SandboxSpec, SandboxState};
+
+    use super::*;
+
+    /// Runs every exec as a process on this host.
+    struct HostProvider {
+        broken: bool,
+    }
+
+    struct HostProcess {
+        child: Child,
+    }
+
+    impl Process for HostProcess {
+        fn id(&self) -> String {
+            self.child.id().to_string()
+        }
+        fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
+            self.child
+                .stdin
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Write + Send>)
+        }
+        fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+            self.child
+                .stdout
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Read + Send>)
+        }
+        fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
+            self.child
+                .stderr
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Read + Send>)
+        }
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            Ok(self.child.try_wait()?.map(status))
+        }
+        fn wait(&mut self) -> io::Result<ExitStatus> {
+            Ok(status(self.child.wait()?))
+        }
+        fn kill(&mut self) -> io::Result<()> {
+            self.child.kill()
+        }
+        fn teardown(&mut self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    fn status(s: std::process::ExitStatus) -> ExitStatus {
+        ExitStatus {
+            code: s.code(),
+            signal: s.signal(),
+        }
+    }
+
+    impl SandboxProvider for HostProvider {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+        fn ensure(&self, spec: &SandboxSpec) -> Result<SandboxInfo, ProviderError> {
+            self.inspect(&spec.name).map(|i| i.expect("always there"))
+        }
+        fn inspect(&self, name: &str) -> Result<Option<SandboxInfo>, ProviderError> {
+            Ok(Some(SandboxInfo {
+                name: name.into(),
+                state: SandboxState::Running,
+            }))
+        }
+        fn exec(&self, _: &str, spec: &ExecSpec) -> Result<Box<dyn Process>, ProviderError> {
+            if self.broken {
+                return Err(ProviderError::Runtime("the sandbox is gone".into()));
+            }
+            let mut command = Command::new(&spec.argv[0]);
+            command
+                .args(&spec.argv[1..])
+                .current_dir(&spec.cwd)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .envs(&spec.env)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            Ok(Box::new(HostProcess {
+                child: command.spawn()?,
+            }))
+        }
+        fn stop(&self, _: &str) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn destroy(&self, _: &str) -> Result<(), ProviderError> {
+            Ok(())
+        }
+    }
+
+    const PROVIDER: HostProvider = HostProvider { broken: false };
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    /// A host repository with committed files of each kind and an ignored
+    /// directory, and a remote URL that must never reach the sandbox.
+    fn repository(dir: &Path) -> PathBuf {
+        let root = dir.join("repo");
+        fs::create_dir_all(root.join("src")).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.name", "Test"]);
+        git(&root, &["config", "user.email", "test@localhost"]);
+        git(
+            &root,
+            &[
+                "config",
+                "remote.origin.url",
+                "https://secret@example.com/r.git",
+            ],
+        );
+        fs::write(root.join("a.txt"), "one\n").unwrap();
+        fs::write(root.join("src/b.txt"), "two\n").unwrap();
+        fs::write(root.join("tool.sh"), "#!/bin/sh\n").unwrap();
+        fs::set_permissions(root.join("tool.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "initial"]);
+        root
+    }
+
+    struct Setup {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        guest: PathBuf,
+    }
+
+    fn setup() -> Setup {
+        let dir = tempfile::tempdir().unwrap();
+        let root = repository(dir.path());
+        let guest = dir.path().join("sandbox/work");
+        Setup {
+            _dir: dir,
+            root,
+            guest,
+        }
+    }
+
+    fn sandbox_git(s: &Setup, args: &[&str]) -> String {
+        git(&s.guest, args)
+    }
+
+    #[test]
+    fn a_push_recreates_the_worktree_in_the_sandbox_and_a_pull_brings_the_result_back() {
+        let s = setup();
+        let exec = Exec::new(&PROVIDER, "box");
+        // Uncommitted state on the host that must reach the sandbox.
+        fs::write(s.root.join("a.txt"), "one, edited on the host\n").unwrap();
+        fs::write(s.root.join("untracked.txt"), "untracked\n").unwrap();
+        fs::create_dir_all(s.root.join("ignored")).unwrap();
+        fs::write(s.root.join("ignored/cache"), "never sent\n").unwrap();
+        let head = git(&s.root, &["rev-parse", "HEAD"]);
+
+        let pushed = push(&exec, &s.root, &s.guest).unwrap();
+        assert_eq!(pushed.base, head);
+        assert_eq!(pushed.guest, s.guest);
+        // The files are as on the host, HEAD is the host's commit, the index
+        // is at HEAD (so the edits are working-tree changes), and the
+        // ignored file and the host's configuration stay behind.
+        assert_eq!(sandbox_git(&s, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            fs::read_to_string(s.guest.join("a.txt")).unwrap(),
+            "one, edited on the host\n"
+        );
+        assert_eq!(
+            fs::read_to_string(s.guest.join("untracked.txt")).unwrap(),
+            "untracked\n"
+        );
+        assert!(!s.guest.join("ignored").exists());
+        assert_eq!(
+            fs::metadata(s.guest.join("tool.sh"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert!(!sandbox_git(&s, &["config", "--local", "--list"]).contains("secret"));
+        let status = sandbox_git(&s, &["status", "--porcelain"]);
+        assert!(
+            status.contains("M a.txt") && status.contains("?? untracked.txt"),
+            "{status}"
+        );
+
+        // The harness edits, adds, deletes, links and commits one change.
+        fs::write(s.guest.join("src/b.txt"), "two, committed in the sandbox\n").unwrap();
+        sandbox_git(&s, &["commit", "-q", "-am", "harness commit"]);
+        fs::write(s.guest.join("new.txt"), "new\n").unwrap();
+        fs::remove_file(s.guest.join("untracked.txt")).unwrap();
+        symlink("a.txt", s.guest.join("link")).unwrap();
+        let sandbox_head = sandbox_git(&s, &["rev-parse", "HEAD"]);
+
+        let pulled = pull(&exec, &pushed, &s.root).unwrap();
+        assert!(pulled.changed);
+        assert_eq!(pulled.commits, [sandbox_head.clone()]);
+        // The host branch moved to the sandbox's commit, with its message.
+        assert_eq!(git(&s.root, &["rev-parse", "HEAD"]), sandbox_head);
+        assert_eq!(
+            git(&s.root, &["log", "-1", "--format=%s"]),
+            "harness commit"
+        );
+        assert_eq!(
+            fs::read_to_string(s.root.join("src/b.txt")).unwrap(),
+            "two, committed in the sandbox\n"
+        );
+        assert_eq!(fs::read_to_string(s.root.join("new.txt")).unwrap(), "new\n");
+        assert!(!s.root.join("untracked.txt").exists());
+        assert_eq!(
+            fs::read_link(s.root.join("link")).unwrap(),
+            Path::new("a.txt")
+        );
+        assert!(
+            s.root.join("ignored/cache").exists(),
+            "ignored files are never touched"
+        );
+        // What was not committed is a working-tree change on top.
+        let status = git(&s.root, &["status", "--porcelain"]);
+        assert!(
+            status.contains("new.txt") && !status.contains("src/b.txt"),
+            "{status}"
+        );
+    }
+
+    #[test]
+    fn a_pull_with_no_changes_touches_nothing_on_the_host() {
+        let s = setup();
+        let exec = Exec::new(&PROVIDER, "box");
+        let refs = git(&s.root, &["for-each-ref"]);
+        let pushed = push(&exec, &s.root, &s.guest).unwrap();
+        let pulled = pull(&exec, &pushed, &s.root).unwrap();
+        assert!(!pulled.changed);
+        assert!(pulled.commits.is_empty());
+        assert_eq!(git(&s.root, &["for-each-ref"]), refs);
+        assert_eq!(git(&s.root, &["status", "--porcelain"]), "");
+    }
+
+    #[test]
+    fn uncommitted_changes_alone_are_applied_without_moving_the_branch() {
+        let s = setup();
+        let exec = Exec::new(&PROVIDER, "box");
+        let head = git(&s.root, &["rev-parse", "HEAD"]);
+        let pushed = push(&exec, &s.root, &s.guest).unwrap();
+        fs::write(s.guest.join("a.txt"), "edited in the sandbox\n").unwrap();
+        let pulled = pull(&exec, &pushed, &s.root).unwrap();
+        assert!(pulled.changed && pulled.commits.is_empty());
+        assert_eq!(git(&s.root, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            fs::read_to_string(s.root.join("a.txt")).unwrap(),
+            "edited in the sandbox\n"
+        );
+    }
+
+    #[test]
+    fn a_pull_refuses_when_the_host_branch_moved_meanwhile() {
+        let s = setup();
+        let exec = Exec::new(&PROVIDER, "box");
+        let pushed = push(&exec, &s.root, &s.guest).unwrap();
+        git(&s.root, &["commit", "-q", "--allow-empty", "-m", "moved"]);
+        let err = pull(&exec, &pushed, &s.root).unwrap_err();
+        assert!(
+            matches!(&err, Error::WorktreeChanged(why) if why.contains("HEAD moved")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_pull_refuses_when_a_host_file_changed_meanwhile() {
+        let s = setup();
+        let exec = Exec::new(&PROVIDER, "box");
+        let pushed = push(&exec, &s.root, &s.guest).unwrap();
+        fs::write(s.guest.join("a.txt"), "sandbox edit\n").unwrap();
+        fs::write(s.root.join("a.txt"), "host edit, after the push\n").unwrap();
+        let err = pull(&exec, &pushed, &s.root).unwrap_err();
+        assert!(matches!(err, Error::WorktreeChanged(_)), "{err}");
+        assert_eq!(
+            fs::read_to_string(s.root.join("a.txt")).unwrap(),
+            "host edit, after the push\n",
+            "the host's own change is not overwritten"
+        );
+    }
+
+    #[test]
+    fn history_rewritten_below_the_base_is_refused() {
+        let s = setup();
+        let exec = Exec::new(&PROVIDER, "box");
+        let refs = git(&s.root, &["for-each-ref"]);
+        let pushed = push(&exec, &s.root, &s.guest).unwrap();
+        sandbox_git(&s, &["checkout", "-q", "--orphan", "rewritten"]);
+        sandbox_git(&s, &["commit", "-q", "-m", "a new root"]);
+        let err = pull(&exec, &pushed, &s.root).unwrap_err();
+        assert!(matches!(err, Error::Rewritten(_)), "{err}");
+        assert_eq!(git(&s.root, &["for-each-ref"]), refs);
+    }
+
+    #[test]
+    fn a_push_needs_an_absolute_path_and_an_empty_repository() {
+        let s = setup();
+        let exec = Exec::new(&PROVIDER, "box");
+        let err = push(&exec, &s.root, Path::new("relative/dir")).unwrap_err();
+        assert!(
+            matches!(&err, Error::Guest(why) if why.contains("not an absolute path")),
+            "{err}"
+        );
+        let _first = push(&exec, &s.root, &s.guest).unwrap();
+        let err = push(&exec, &s.root, &s.guest).unwrap_err();
+        assert!(
+            matches!(&err, Error::Guest(why) if why.contains("already holds a repository")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_broken_sandbox_is_a_guest_error() {
+        let s = setup();
+        let broken = HostProvider { broken: true };
+        let err = push(&Exec::new(&broken, "box"), &s.root, &s.guest).unwrap_err();
+        assert!(
+            matches!(&err, Error::Guest(why) if why.contains("the sandbox is gone")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_staged_push_can_be_reopened_by_another_process() {
+        let s = setup();
+        let exec = Exec::new(&PROVIDER, "box");
+        let stage = s.root.parent().unwrap().join("stage");
+        let pushed = push_staged(&exec, &s.root, &s.guest, Some(&stage)).unwrap();
+        let (base, snapshot) = (pushed.base.clone(), pushed.snapshot.clone());
+        // The first process dies without dropping its stage.
+        std::mem::forget(pushed);
+        let reopened = reopen_staged(&s.root, &s.guest, &stage).unwrap();
+        assert_eq!(
+            (reopened.base.as_str(), reopened.snapshot.as_str()),
+            (base.as_str(), snapshot.as_str())
+        );
+        fs::write(s.guest.join("late.txt"), "late\n").unwrap();
+        let pulled = pull(&exec, &reopened, &s.root).unwrap();
+        assert!(pulled.changed);
+        assert!(s.root.join("late.txt").exists());
+        drop(reopened);
+        assert!(
+            !stage.exists(),
+            "dropping the push deletes its staging repository"
+        );
+    }
+
+    #[test]
+    fn reopening_a_stage_that_holds_no_push_fails() {
+        let s = setup();
+        let empty = s.root.parent().unwrap().join("empty-stage");
+        fs::create_dir_all(&empty).unwrap();
+        let err = reopen_staged(&s.root, &s.guest, &empty).unwrap_err();
+        assert!(
+            matches!(&err, Error::Host(why) if why.contains("holds no base")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn clearing_removes_what_git_sees_and_the_home_but_keeps_ignored_files() {
+        let s = setup();
+        let exec = Exec::new(&PROVIDER, "box");
+        fs::create_dir_all(s.root.join("ignored")).unwrap();
+        let _pushed = push(&exec, &s.root, &s.guest).unwrap();
+        fs::create_dir_all(s.guest.join("ignored")).unwrap();
+        fs::write(s.guest.join("ignored/installed"), "dependency\n").unwrap();
+        fs::write(s.guest.join("scratch.txt"), "untracked\n").unwrap();
+        let home = s.guest.parent().unwrap().join("home");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(home.join("token"), "t").unwrap();
+
+        clear_for_push(&exec, &s.guest, &home).unwrap();
+        assert!(!s.guest.join(".git").exists());
+        assert!(!s.guest.join("a.txt").exists());
+        assert!(!s.guest.join("scratch.txt").exists());
+        assert!(s.guest.join("ignored/installed").exists());
+        assert!(!home.exists());
+    }
+
+    #[test]
+    fn clearing_a_previous_push_leaves_a_repository_that_is_not_one() {
+        let s = setup();
+        let exec = Exec::new(&PROVIDER, "box");
+        // Somebody else's repository: no .git/branchyard.
+        fs::create_dir_all(&s.guest).unwrap();
+        git(&s.guest, &["init", "-q"]);
+        fs::write(s.guest.join("theirs.txt"), "mine\n").unwrap();
+        clear_previous_push(&exec, &s.guest).unwrap();
+        assert!(s.guest.join("theirs.txt").exists());
+        assert!(s.guest.join(".git").exists());
+        // A push of ours is cleared.
+        let ours = s.guest.parent().unwrap().join("ours");
+        let _pushed = push(&exec, &s.root, &ours).unwrap();
+        clear_previous_push(&exec, &ours).unwrap();
+        assert!(!ours.join(".git").exists());
+        assert!(!ours.join("a.txt").exists());
+    }
+
+    #[test]
+    fn a_clear_in_an_unreachable_sandbox_is_a_guest_error() {
+        let s = setup();
+        let err = clear_for_push(
+            &Exec::new(&HostProvider { broken: true }, "box"),
+            &s.guest,
+            Path::new("/tmp/h"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Guest(why) if why.contains("could not clear")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn files_and_trees_cross_as_streams() {
+        let s = setup();
+        let exec = Exec::new(&PROVIDER, "box");
+        let dir = s.root.parent().unwrap();
+        // A file, with its mode, into a directory that does not exist yet.
+        let target = dir.join("sandbox/deep/file.bin");
+        Guest::put_file(&exec, &target, 0o600, &mut &b"payload"[..]).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"payload");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let mut back = Vec::new();
+        Guest::get_file(&exec, &target, &mut back).unwrap();
+        assert_eq!(back, b"payload");
+        let err = Guest::get_file(&exec, &dir.join("absent"), &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("get_file"), "{err}");
+
+        // A tree out and back in.
+        let home = dir.join("home");
+        fs::create_dir_all(home.join("sub")).unwrap();
+        fs::write(home.join("sub/x"), "x").unwrap();
+        let theirs = dir.join("sandbox/home");
+        push_tree(&exec, &home, &theirs).unwrap();
+        assert_eq!(fs::read_to_string(theirs.join("sub/x")).unwrap(), "x");
+        fs::write(theirs.join("sub/y"), "y").unwrap();
+        pull_tree(&exec, &theirs, &home).unwrap();
+        assert_eq!(fs::read_to_string(home.join("sub/y")).unwrap(), "y");
+        let leftovers: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".incoming") || n.contains(".old"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn a_tree_that_is_absent_on_either_side_is_skipped() {
+        let s = setup();
+        let exec = Exec::new(&PROVIDER, "box");
+        let dir = s.root.parent().unwrap();
+        // Nothing on the host to send.
+        push_tree(&exec, &dir.join("no-such-host-dir"), &dir.join("sandbox/x")).unwrap();
+        assert!(!dir.join("sandbox/x").exists());
+        // Nothing in the sandbox to bring back: the host's tree stays.
+        let home = dir.join("home");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(home.join("keep"), "k").unwrap();
+        pull_tree(&exec, &dir.join("no-such-sandbox-dir"), &home).unwrap();
+        assert_eq!(fs::read_to_string(home.join("keep")).unwrap(), "k");
+    }
+
+    #[test]
+    fn a_pull_tree_target_needs_a_file_name_and_may_not_already_be_received() {
+        let s = setup();
+        let exec = Exec::new(&PROVIDER, "box");
+        let err = pull_tree(&exec, Path::new("/tmp"), Path::new("/")).unwrap_err();
+        assert!(matches!(err, Error::Host(_)), "{err}");
+        let existing = s.root.parent().unwrap().join("existing");
+        fs::create_dir_all(&existing).unwrap();
+        let err = Guest::get_tree(&exec, Path::new("/tmp"), &existing).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn errors_say_which_side_failed() {
+        assert_eq!(Error::Host("x".into()).to_string(), "on the host: x");
+        assert_eq!(Error::Guest("y".into()).to_string(), "in the sandbox: y");
+        assert!(Error::WorktreeChanged("z".into())
+            .to_string()
+            .contains("changed on the host"));
+        assert!(Error::Rewritten("w".into())
+            .to_string()
+            .contains("rewrote history"));
+        let io: Error = io::Error::other("disk").into();
+        assert_eq!(io.to_string(), "disk");
+        let provider: Error = ProviderError::Runtime("down".into()).into();
+        assert!(matches!(provider, Error::Guest(_)));
+    }
+}
