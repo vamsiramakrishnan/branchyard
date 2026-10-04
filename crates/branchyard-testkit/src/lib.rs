@@ -25,7 +25,9 @@ mod repo;
 mod scratch;
 pub mod wait;
 
-pub use agent::{built, fake_agent, fake_agent_here};
+pub use agent::{
+    built, built_uninstrumented, fake_agent, fake_agent_here, fake_agent_here_uninstrumented,
+};
 pub use mock::{MockHttp, Request, Response};
 pub use repo::Repo;
 pub use scratch::Scratch;

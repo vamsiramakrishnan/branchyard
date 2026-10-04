@@ -33,15 +33,40 @@ pub fn fake_agent_here() -> &'static Path {
     fake_agent(&std::env::current_exe().expect("the path of the test executable"))
 }
 
+/// [`fake_agent_here`], built without coverage instrumentation; see
+/// [`built_uninstrumented`] for when a test needs it.
+pub fn fake_agent_here_uninstrumented() -> &'static Path {
+    built_uninstrumented(
+        "branchyard-runtime",
+        "fake-acp-agent",
+        &std::env::current_exe().expect("the path of the test executable"),
+    )
+}
+
 /// Build `bin` of `package` into the target directory and profile of
 /// `artifact` (a path inside `target/<profile>/`, or its `deps/`), once,
 /// and return its path. A failed build fails the test with cargo's status.
+/// Under `cargo llvm-cov` the binary is instrumented like the tests, so
+/// what it runs counts toward its crate's coverage.
 pub fn built(package: &str, bin: &str, artifact: &Path) -> &'static Path {
+    build(package, bin, artifact, false)
+}
+
+/// [`built`], but never instrumented for coverage: for a helper the engine
+/// runs in a sandbox with a cleaned environment, where an instrumented
+/// binary (no `LLVM_PROFILE_FILE`) writes a `default_*.profraw` into its
+/// working directory, which the engine then reports as a change the branch
+/// made. Outside a coverage run it is the same binary as [`built`]'s.
+pub fn built_uninstrumented(package: &str, bin: &str, artifact: &Path) -> &'static Path {
+    build(package, bin, artifact, true)
+}
+
+fn build(package: &str, bin: &str, artifact: &Path, plain: bool) -> &'static Path {
     static BUILT: Mutex<BTreeMap<(PathBuf, String), &'static Path>> = Mutex::new(BTreeMap::new());
     let profile_dir = profile_dir(artifact);
     // Held across the build: concurrent tests wait for the one build.
     let mut built = BUILT.lock_recovering("testkit built binaries");
-    let key = (profile_dir.clone(), format!("{package}/{bin}"));
+    let key = (profile_dir.clone(), format!("{package}/{bin}/{plain}"));
     if let Some(path) = built.get(&key) {
         return path;
     }
@@ -54,17 +79,12 @@ pub fn built(package: &str, bin: &str, artifact: &Path) -> &'static Path {
         .args(["build", "--quiet", "--offline", "--manifest-path"])
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
         .args(["-p", package, "--bin", bin]);
-    // Under `cargo llvm-cov` the helper must not be built instrumented: run in
-    // a sandbox with a cleaned environment (no LLVM_PROFILE_FILE), an
-    // instrumented binary writes a default_*.profraw into its working
-    // directory, which the engine then reports as a change the branch made.
-    // The helpers are not what coverage measures, so they are built plain,
-    // in a target directory of their own (cargo's fingerprint does not see
-    // the RUSTC_WRAPPER that instruments, so it would reuse the instrumented
-    // binary in the shared one).
+    // A plain build under `cargo llvm-cov` goes to a target directory of its
+    // own: cargo's fingerprint does not see the RUSTC_WRAPPER that
+    // instruments, so it would reuse the instrumented binary in the shared one.
     let coverage = std::env::var_os("CARGO_LLVM_COV").is_some()
         || std::env::var_os("LLVM_PROFILE_FILE").is_some();
-    let (target_dir, built_dir) = if coverage {
+    let (target_dir, built_dir) = if plain && coverage {
         command.env_remove("RUSTC_WRAPPER");
         for flags in ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS"] {
             command.env_remove(flags);

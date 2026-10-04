@@ -10,11 +10,13 @@ use std::sync::Once;
 
 use branchyard::{Activity, Event, RecordedEvent, TaskBuilder, TaskOptions, Yard};
 
-pub use branchyard_testkit::fake_agent_here as fake_agent;
+// The engine runs these in sandboxes with a cleaned environment, so they
+// are built without coverage instrumentation (see `built_uninstrumented`).
+pub use branchyard_testkit::fake_agent_here_uninstrumented as fake_agent;
 
 /// The `branchyard-bridge` binary, built once per target directory.
 pub fn bridge_binary() -> &'static Path {
-    branchyard_testkit::built(
+    branchyard_testkit::built_uninstrumented(
         "branchyard-bridge",
         "branchyard-bridge",
         &std::env::current_exe().unwrap(),
