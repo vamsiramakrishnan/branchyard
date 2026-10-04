@@ -110,6 +110,8 @@ python3 tests/test_verify_vendor.py
 python3 tools/verify_derivatives.py
 python3 tools/check_catalog.py
 python3 tools/check_docs.py
+python3 tools/check_wire.py
+python3 tests/test_check_wire.py
 python3 tools/test_scion.py --qualified
 python3 tools/check_scion_compatibility.py
 cargo fmt --all -- --check
