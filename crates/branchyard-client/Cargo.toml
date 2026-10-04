@@ -16,7 +16,6 @@ blake3 = { workspace = true }
 branchyard = { path = "../branchyard" }
 httparse = { workspace = true }
 rustls = { workspace = true }
-rustls-pki-types = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 webpki-roots = { workspace = true }

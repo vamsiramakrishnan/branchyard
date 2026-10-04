@@ -6,6 +6,11 @@ license.workspace = true
 publish.workspace = true
 description = "Agent Substrate as an unqualified Branchyard sandbox provider"
 
+# The generated ateapi code (tonic::include_proto! in src/lib.rs) uses these
+# three, which cargo-machete cannot see through the include.
+[package.metadata.cargo-machete]
+ignored = ["prost", "prost-types", "tonic-prost"]
+
 [features]
 # An in-process fake cluster for hermetic tests: `branchyard_substrate::fake`.
 fake = ["dep:tokio-stream", "tokio/net"]
@@ -27,5 +32,6 @@ tonic-prost-build = "0.14"
 
 [dev-dependencies]
 rcgen = { workspace = true }
+tempfile = { workspace = true }
 branchyard-substrate = { path = ".", features = ["fake"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }

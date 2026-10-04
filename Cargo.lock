@@ -672,7 +672,6 @@ dependencies = [
  "rcgen",
  "ring",
  "rustls",
- "rustls-pki-types",
  "webpki-roots",
 ]
 
@@ -718,7 +717,6 @@ dependencies = [
  "branchyard",
  "httparse",
  "rustls",
- "rustls-pki-types",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -791,6 +789,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "tempfile",
  "toml_edit",
 ]
 
@@ -855,7 +854,6 @@ dependencies = [
  "rusqlite",
  "rustix",
  "rustls",
- "rustls-pki-types",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -897,6 +895,7 @@ dependencies = [
  "prost-types",
  "protoc-bin-vendored",
  "rcgen",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",

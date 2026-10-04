@@ -20,3 +20,4 @@ toml_edit = { workspace = true, features = ["display"] }
 
 [dev-dependencies]
 branchyard-controls = { path = "../branchyard-controls" }
+tempfile = { workspace = true }

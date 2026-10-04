@@ -34,7 +34,6 @@ postgres = { workspace = true, optional = true }
 # in the workspace through the Substrate provider.
 prost = { workspace = true }
 rustls = { workspace = true }
-rustls-pki-types = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
