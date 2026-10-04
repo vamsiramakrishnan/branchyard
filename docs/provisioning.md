@@ -81,7 +81,7 @@ A variable in the harness's environment reaches every command its tools run (its
 | Any | a secret in an MCP server's `secret_env` | that server's variable, in its configuration (a 0600 file or the session request on stdin) | No: only that server's process | Claude Code 2.1.283 started a server from a `--mcp-config` file with its variables |
 | Claude Code, ACP agents | a secret in a remote MCP server's `headers` | that header, in the same way | No | Claude Code 2.1.283 sent the headers from a `--mcp-config` file to a local HTTP MCP server |
 
-"Assumed" means the harness was not available to check and the conservative answer is recorded. Isolated mode strips only `ANTHROPIC*`, `CLAUDE*`, `OPENAI*` and `CODEX*` from the host's environment, so a host `GEMINI_API_KEY` or `GH_TOKEN` still reaches an isolated harness unless it is given with `--secret` (then its source variable is removed and only the plan's delivery remains).
+"Assumed" means the harness was not available to check and the conservative answer is recorded. Isolated mode strips only <!-- fact:runtime.strip_prefixes -->`ANTHROPIC*`, `CLAUDE*`, `OPENAI*` and `CODEX*`<!-- /fact --> from the host's environment, so a host `GEMINI_API_KEY` or `GH_TOKEN` still reaches an isolated harness unless it is given with `--secret` (then its source variable is removed and only the plan's delivery remains).
 
 ### Not ported, per harness
 

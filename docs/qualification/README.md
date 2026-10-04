@@ -48,4 +48,4 @@ cargo run -p branchyard-qualify -- --profile claude-code-stream-json \
     --workdir /tmp/qual --max-cost-usd 3 --report report.json
 ```
 
-`--command` overrides the executable path. The runner strips `ANTHROPIC*`, `CLAUDE*`, `OPENAI*` and `CODEX*` variables unless kept with `--keep-env NAME`; for example, `--keep-env OPENAI_API_KEY` for `codex-app-server`. The run stops scheduling scenarios once the harness's own cost estimates pass `--max-cost-usd`.
+`--command` overrides the executable path. The runner strips <!-- fact:runtime.strip_prefixes -->`ANTHROPIC*`, `CLAUDE*`, `OPENAI*` and `CODEX*`<!-- /fact --> variables unless kept with `--keep-env NAME`; for example, `--keep-env OPENAI_API_KEY` for `codex-app-server`. The run stops scheduling scenarios once the harness's own cost estimates pass `--max-cost-usd`.

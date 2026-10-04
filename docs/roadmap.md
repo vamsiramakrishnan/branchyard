@@ -1,6 +1,6 @@
 # Roadmap
 
-Written 30 September 2026 from four studies: an audit of Branchyard itself; Manus, Genspark, Devin, Codex cloud, Claude Code, Cursor, Jules, Factory, OpenHands, Amp and Kiro; emdash, Superset and Orca; and the MCP authorization specification with the gateways and credential brokers around it.
+Written 30 September 2026 and updated through 3 October 2026 (each wave's status paragraph carries its own date), from four studies: an audit of Branchyard itself; Manus, Genspark, Devin, Codex cloud, Claude Code, Cursor, Jules, Factory, OpenHands, Amp and Kiro; emdash, Superset and Orca; and the MCP authorization specification with the gateways and credential brokers around it.
 
 ## Where the value is
 

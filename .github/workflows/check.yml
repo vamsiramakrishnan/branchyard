@@ -33,6 +33,9 @@ jobs:
       - name: HTTP framing is parsed only in branchyard-wire
         run: python tools/check_wire.py
       - run: python tests/test_check_wire.py
+      - name: Verify the facts in the docs are generated from the code
+        run: python tools/docs_facts.py --check
+      - run: python tests/test_docs_facts.py
       - run: python tools/test_scion.py --qualified
       - name: Verify the recorded upstream Claude compatibility
         run: python tools/check_scion_compatibility.py
@@ -40,6 +43,13 @@ jobs:
       # Resolve crates from Cargo.lock once; every later cargo step runs offline.
       - run: cargo fetch --locked
       - run: cargo test --workspace --locked --offline
+      - name: Verify catalog/*.toml is generated and fresh
+        # BRANCHYARD_BLESS would rewrite the files instead of comparing them.
+        run: test -z "${BRANCHYARD_BLESS+x}" && cargo test -p branchyard-controls --locked --offline catalog
+      - name: Verify docs/compatibility.md is generated and fresh
+        run: test -z "${BRANCHYARD_BLESS+x}" && cargo test -p branchyard-harness --locked --offline --test compatibility
+      - name: Count undocumented public items against the ratchet
+        run: python tools/check_missing_docs.py
       - run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
       - name: Verify schema/contract.json is generated and fresh
         run: cargo test -p branchyard-client --locked --offline --features schema

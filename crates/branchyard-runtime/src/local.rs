@@ -73,6 +73,7 @@ impl Group {
 }
 
 impl LocalProvider {
+    /// A provider with no sandbox: harnesses run as local processes.
     pub fn new() -> LocalProvider {
         LocalProvider::default()
     }
@@ -314,6 +315,7 @@ impl LocalProcess {
         })
     }
 
+    /// The operating-system process ID of the harness.
     pub fn pid(&self) -> u32 {
         self.child.id()
     }

@@ -33,6 +33,7 @@
 //!
 //! It uses the official Rust MCP SDK (`rmcp`), server role and stdio
 //! transport only, on a current-thread Tokio runtime.
+#![warn(missing_docs)]
 
 use branchyard_support::LockExt as _;
 use std::borrow::Cow;
