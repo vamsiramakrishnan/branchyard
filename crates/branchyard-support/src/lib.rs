@@ -5,7 +5,7 @@
 //! acceptable *unseen*. This crate is the one sanctioned way to say "this may
 //! fail, carry on, but say so":
 //!
-//! - [`best_effort`] and [`best_effort!`] run a fallible step whose failure
+//! - [`best_effort()`] and [`best_effort!`] run a fallible step whose failure
 //!   the caller survives. The failure is logged at `warn` through `tracing`
 //!   with a context string naming the step, and handed to the installed
 //!   [`set_failure_sink`], so a server can put it in an event log.

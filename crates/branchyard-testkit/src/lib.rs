@@ -7,7 +7,7 @@
 //! - [`wait`]: waiting for a condition, with one default timeout, a
 //!   `BY_TEST_TIMEOUT_SCALE` multiplier for slow machines and a failure that
 //!   shows the last value observed. Polling lives here and nowhere else.
-//! - [`fake_agent`]: the `fake-acp-agent` binary, built once per target
+//! - [`fake_agent()`] (and [`fake_agent!`]): the `fake-acp-agent` binary, built once per target
 //!   directory.
 //! - [`Repo`]: a throwaway git repository driven through the built `by`
 //!   binary, with the command's output shown when it fails.
