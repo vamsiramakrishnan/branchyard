@@ -267,7 +267,15 @@ impl LeaseKeeper {
                 .name("by-sync-lease".into())
                 .spawn(move || loop {
                     let guard = stop.stopped.lock_recovering("stopped");
-                    let (guard, _) = stop.wake.wait_timeout_recovering(guard, ttl / 3, "wake");
+                    // Wait only while not stopped: a stop that came before
+                    // the wait began would otherwise be missed for a third
+                    // of the lease.
+                    let (guard, _) = stop.wake.wait_timeout_while_recovering(
+                        guard,
+                        ttl / 3,
+                        |stopped| !*stopped,
+                        "wake",
+                    );
                     if *guard {
                         return;
                     }
@@ -343,10 +351,15 @@ impl Drop for LeaseKeeper {
         *self.stop.stopped.lock_recovering("stopped") = true;
         self.stop.wake.notify_all();
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            branchyard_support::join_reporting("lease renewal", thread);
         }
         if let Some(lease) = self.lease.lock_recovering("lease").take() {
-            let _ = self.remote.release_lease(lease);
+            // Nothing here can return the error, and the lease expires on
+            // its own: log the failed release so a stuck lease is explained.
+            branchyard_support::best_effort(
+                "release the sync lease on drop",
+                self.remote.release_lease(lease),
+            );
         }
         drop(self.registration.take());
     }

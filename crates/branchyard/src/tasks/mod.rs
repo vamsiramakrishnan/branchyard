@@ -197,7 +197,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
         fs::rename(&temp, path)
     })();
     if written.is_err() {
-        let _ = fs::remove_file(&temp);
+        branchyard_support::cleanup_file(&temp);
     }
     Ok(written?)
 }
@@ -268,7 +268,7 @@ pub fn task_of(root: &Path, name: &str) -> Result<Option<Task>, Error> {
 /// Forget that `name` is an attempt, as its branch is removed. Its marker
 /// in the task stays, so the task still lists it, as removed.
 pub(crate) fn forget(root: &Path, name: &str) {
-    let _ = fs::remove_file(index_dir(root).join(encode(name)));
+    branchyard_support::cleanup_file(index_dir(root).join(encode(name)));
 }
 
 fn marker(root: &Path, id: &str, name: &str) -> Result<Option<AttemptMarker>, Error> {

@@ -486,7 +486,7 @@ pub fn run_precheck(
         &env,
     );
     drop(worktree);
-    let _ = std::fs::remove_file(&event_file);
+    branchyard_support::cleanup_file(&event_file);
     Ok(result)
 }
 

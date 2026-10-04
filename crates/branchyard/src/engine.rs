@@ -224,7 +224,10 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
             record.info.status = BranchStatus::Failed {
                 reason: error.to_string(),
             };
-            let _ = store.backend().finish(&fence, Some(&record), None);
+            branchyard_support::best_effort(
+                "store.backend.finish",
+                store.backend().finish(&fence, Some(&record), None),
+            );
             Err(error)
         }
     };

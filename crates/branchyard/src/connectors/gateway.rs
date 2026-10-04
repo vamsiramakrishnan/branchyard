@@ -215,7 +215,7 @@ impl Drop for Supervisor {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            branchyard_support::join_reporting("connector gateway accept", thread);
         }
     }
 }
@@ -293,8 +293,8 @@ fn terminate(child: &mut Child) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    branchyard_support::best_effort("kill child", child.kill());
+    branchyard_support::best_effort("reap child", child.wait());
 }
 
 /// A gateway supervisor started in the background, as its state file
@@ -343,24 +343,24 @@ impl Background {
         if crate::proc::alive(state.pid, &state.start) {
             return Some(state);
         }
-        let _ = fs::remove_file(&path);
+        branchyard_support::cleanup_file(&path);
         None
     }
 
     /// Stop it: SIGTERM to its process group (the supervisor and the
     /// gateway), SIGKILL after five seconds; then forget it.
     pub fn stop(&self, dir: &Path) -> Result<(), Error> {
-        let pgid = rustix::process::Pid::from_raw(self.pid as i32)
+        rustix::process::Pid::from_raw(self.pid as i32)
             .ok_or_else(|| Error::State(format!("pid {} is not usable", self.pid)))?;
-        let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
+        branchyard_support::terminate_group(self.pid);
         let deadline = Instant::now() + Duration::from_secs(5);
         while crate::proc::alive(self.pid, &self.start) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
         if crate::proc::alive(self.pid, &self.start) {
-            let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
+            branchyard_support::kill_group(self.pid);
         }
-        let _ = fs::remove_file(state_file(dir));
+        branchyard_support::cleanup_file(state_file(dir));
         Ok(())
     }
 }

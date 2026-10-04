@@ -71,7 +71,7 @@ pub fn edit_text(text: &str, editor: Option<&str>, stem: &str) -> Result<String,
     eprintln!("by: editing in {}", plan.argv[0]);
     let launched = crate::open::launch(&plan);
     let edited = std::fs::read_to_string(&path);
-    let _ = std::fs::remove_file(&path);
+    branchyard_support::cleanup_file(&path);
     launched?;
     Ok(edited?)
 }

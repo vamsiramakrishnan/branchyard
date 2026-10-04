@@ -57,3 +57,19 @@ where
         }
     })
 }
+
+/// Wait for a thread whose result the caller does not need. A panic that
+/// ended it is reported with `context` (what the thread did) instead of being
+/// dropped with the `Err`; the value of a thread that finished is returned.
+pub fn join_reporting<T>(context: &str, handle: JoinHandle<T>) -> Option<T> {
+    match handle.join() {
+        Ok(value) => Some(value),
+        Err(payload) => {
+            crate::best_effort::report(
+                &format!("join the {context} thread"),
+                &format!("it panicked: {}", message_of(payload.as_ref())),
+            );
+            None
+        }
+    }
+}

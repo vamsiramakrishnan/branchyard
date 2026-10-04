@@ -196,8 +196,8 @@ fn first_line(
             }
             Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(20)),
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                branchyard_support::best_effort("kill child", child.kill());
+                branchyard_support::best_effort("reap child", child.wait());
                 return None;
             }
         }
@@ -380,7 +380,7 @@ impl Staging {
 
 impl Drop for Staging {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+        branchyard_support::cleanup_dir(&self.dir);
     }
 }
 
@@ -474,7 +474,7 @@ pub fn write_file(path: &Path, body: &str, mode: u32) -> std::io::Result<()> {
         .and_then(|_| fs::set_permissions(&temp, fs::Permissions::from_mode(mode)))
         .and_then(|_| fs::rename(&temp, path));
     if result.is_err() {
-        let _ = fs::remove_file(&temp);
+        branchyard_support::cleanup_file(&temp);
     }
     result
 }

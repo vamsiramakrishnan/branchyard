@@ -204,7 +204,7 @@ impl Shared {
                 .create(parent)?;
         }
         let partial = self.state_file.with_extension("partial");
-        let _ = fs::remove_file(&partial);
+        branchyard_support::cleanup_file(&partial);
         let text = attempts.encode();
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -1020,7 +1020,7 @@ fn exec(
     drop(stdin);
     group.teardown();
     group.kill_leader();
-    let _ = waiter.join();
+    branchyard_support::join_reporting("waiter", waiter);
     writer.lock_recovering("writer").abort();
     Ok(())
 }

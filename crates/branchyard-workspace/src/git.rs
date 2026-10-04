@@ -204,7 +204,7 @@ impl Git {
             }
         });
         let out = child.wait_with_output().map_err(GitError::Io)?;
-        let _ = writer.join();
+        branchyard_support::join_reporting("writer", writer);
         Ok((out, self.args))
     }
 

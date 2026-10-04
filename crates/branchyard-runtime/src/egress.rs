@@ -155,7 +155,7 @@ impl Drop for Proxy {
         for listener in listening.iter_mut() {
             wake(listener);
             if let Some(thread) = listener.thread.take() {
-                let _ = thread.join();
+                branchyard_support::join_reporting("egress proxy accept", thread);
             }
         }
     }
@@ -334,7 +334,7 @@ fn relay(
     let _ = client_write.shutdown(Shutdown::Both);
     let _ = upstream_read.shutdown(Shutdown::Both);
     if let Ok(up) = up {
-        let _ = up.join();
+        branchyard_support::join_reporting("egress upstream relay", up);
     }
 }
 

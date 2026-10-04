@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
-use tracing::{Event, Level, Metadata, Subscriber};
+use tracing::{Event, Metadata, Subscriber};
+
+pub use tracing::Level;
 
 use crate::LockExt as _;
 

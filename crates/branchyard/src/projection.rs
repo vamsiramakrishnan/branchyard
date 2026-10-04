@@ -320,7 +320,7 @@ impl Drop for Projection {
             .and_then(|text| serde_json::from_str::<TokenFile>(&text).ok())
             .is_some_and(|file| file.token == self.token);
         if ours {
-            let _ = fs::remove_file(&path);
+            branchyard_support::cleanup_file(&path);
         }
         self.yard.hub.unregister(&self.name, &self.token);
     }
@@ -443,7 +443,7 @@ fn install(path: &Path, content: &str) -> Result<(), Error> {
     fs::write(&temp, content)
         .and_then(|()| fs::rename(&temp, path))
         .map_err(|e| {
-            let _ = fs::remove_file(&temp);
+            branchyard_support::cleanup_file(&temp);
             failed(e)
         })
 }
@@ -453,7 +453,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    let _ = fs::remove_file(path);
+    branchyard_support::cleanup_file(path);
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)

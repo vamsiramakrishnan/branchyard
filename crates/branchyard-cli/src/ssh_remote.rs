@@ -585,7 +585,7 @@ pub fn main(stop: bool, url: &str, json: bool) -> Outcome {
     let server = field(&remote, "state").unwrap_or("unknown").to_owned();
     let closed = ssh.exit_master()?;
     for path in [local.socket(), local.token(), local.control()] {
-        let _ = fs::remove_file(path);
+        branchyard_support::cleanup_file(path);
     }
     if server != "stopped" {
         return Err(Failure::Message(format!(

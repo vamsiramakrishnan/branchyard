@@ -360,7 +360,7 @@ pub fn main(env: &Env, target: &Target, args: &ReviewArgs) -> Outcome {
     })?;
     if comments.is_empty() {
         if args.file.is_none() {
-            let _ = std::fs::remove_file(&path);
+            branchyard_support::cleanup_file(&path);
         }
         eprintln!("by: no comments, so nothing was sent to {branch}");
         return Ok(());
@@ -386,7 +386,7 @@ pub fn main(env: &Env, target: &Target, args: &ReviewArgs) -> Outcome {
         commands::send(env, target, branch, &text, args.task, false, false)?;
     }
     if args.file.is_none() {
-        let _ = std::fs::remove_file(&path);
+        branchyard_support::cleanup_file(&path);
     }
     Ok(())
 }

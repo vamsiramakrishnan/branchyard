@@ -210,7 +210,7 @@ impl Repository {
                 .args(["worktree", "remove", "--force"])
                 .arg(at)
                 .run();
-            let _ = fs::remove_dir_all(at);
+            branchyard_support::cleanup_dir(at);
             let _ = Git::new(&self.root).args(["config", "--unset", &key]).run();
         };
         let moved = Git::new(&self.root)
@@ -584,9 +584,9 @@ struct RemoveOnDrop<'a>(&'a Path);
 
 impl Drop for RemoveOnDrop<'_> {
     fn drop(&mut self) {
-        let _ = fs::remove_file(self.0);
+        branchyard_support::cleanup_file(self.0);
         let mut lock = self.0.as_os_str().to_owned();
         lock.push(".lock");
-        let _ = fs::remove_file(PathBuf::from(lock));
+        branchyard_support::cleanup_file(PathBuf::from(lock));
     }
 }

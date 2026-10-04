@@ -59,7 +59,7 @@ impl Git {
             let output = child
                 .wait_with_output()
                 .map_err(|e| Error::local(format!("git: {e}")))?;
-            let _ = writer.join();
+            branchyard_support::join_reporting("writer", writer);
             return Ok(output);
         }
         child

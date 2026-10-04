@@ -280,8 +280,8 @@ impl Guest for Exec<'_> {
         let mut process = match self.sh(PUT_TREE, &[to]) {
             Ok(process) => process,
             Err(error) => {
-                let _ = tar.kill();
-                let _ = tar.wait();
+                branchyard_support::best_effort("kill tar", tar.kill());
+                branchyard_support::best_effort("reap tar", tar.wait());
                 return Err(error);
             }
         };
@@ -338,7 +338,7 @@ impl Guest for Exec<'_> {
         let finished = finish(process, &format!("get_tree {from}"));
         let done = finished.and(unpacked);
         if done.is_err() {
-            let _ = fs::remove_dir_all(to);
+            branchyard_support::cleanup_dir(to);
         }
         done
     }
@@ -396,7 +396,7 @@ impl Stage {
             Some(dir) => dir.to_path_buf(),
             None => std::env::temp_dir().join(unique("branchyard-transfer")),
         };
-        let _ = fs::remove_dir_all(&dir);
+        branchyard_support::cleanup_dir(&dir);
         fs::create_dir_all(&dir)?;
         let stage = Stage { dir, objects };
         host(&stage.dir, &["init", "-q", "--bare", "repo.git"], &[])?;
@@ -442,7 +442,7 @@ impl Stage {
 
 impl Drop for Stage {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+        branchyard_support::cleanup_dir(&self.dir);
     }
 }
 
@@ -1023,11 +1023,11 @@ pub fn pull_tree(endpoint: &dyn Guest, from: &Path, to: &Path) -> Result<(), Err
     match endpoint.get_tree(from, &incoming) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let _ = fs::remove_dir_all(&incoming);
+            branchyard_support::cleanup_dir(&incoming);
             return Ok(());
         }
         Err(error) => {
-            let _ = fs::remove_dir_all(&incoming);
+            branchyard_support::cleanup_dir(&incoming);
             return Err(error.into());
         }
     }
@@ -1039,6 +1039,6 @@ pub fn pull_tree(endpoint: &dyn Guest, from: &Path, to: &Path) -> Result<(), Err
         let _ = fs::rename(&old, to);
         return Err(error.into());
     }
-    let _ = fs::remove_dir_all(&old);
+    branchyard_support::cleanup_dir(&old);
     Ok(())
 }

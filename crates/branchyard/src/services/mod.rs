@@ -1201,7 +1201,7 @@ impl Registration {
         *self.renewal.stop.lock_recovering("stop") = true;
         self.renewal.wake.notify_all();
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            branchyard_support::join_reporting("service heartbeat", thread);
         }
     }
 

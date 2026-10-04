@@ -757,7 +757,7 @@ impl Run<'_> {
         };
         if row.status == MapStatus::Ok && self.spec.remove_done {
             for name in &row.branches {
-                let _ = self.yard.remove(name);
+                branchyard_support::best_effort("self.yard.remove", self.yard.remove(name));
             }
         }
         if let Some(progress) = &self.options.progress {
@@ -800,7 +800,10 @@ impl Run<'_> {
                         outcome.status = MapStatus::Ok;
                         outcome.text = Some(reply.trim().to_owned());
                         if self.spec.remove_done {
-                            let _ = self.yard.remove(&branch.info().name);
+                            branchyard_support::best_effort(
+                                "self.yard.remove",
+                                self.yard.remove(&branch.info().name),
+                            );
                         }
                     }
                     Err(error) => outcome.error = Some(error),

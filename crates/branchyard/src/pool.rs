@@ -428,7 +428,7 @@ fn remove_files(root: &Path, path: &Path, shared: &[String]) {
             .arg(path)
             .run();
     }
-    let _ = fs::remove_dir_all(path);
+    branchyard_support::cleanup_dir(path);
 }
 
 /// Forget worktrees git still lists whose directories are gone (a slot
@@ -1129,7 +1129,7 @@ impl PoolKeeper {
     pub fn stop(mut self) {
         self.signal_stop();
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            branchyard_support::join_reporting("pool keeper", thread);
         }
     }
 

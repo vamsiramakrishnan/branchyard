@@ -244,7 +244,7 @@ pub fn clone_file(source: &Path, target: &Path) -> io::Result<Method> {
         Err(_) => {
             // Nothing half-made is left by a refused clone; a byte copy
             // follows. fs::copy keeps the permission bits.
-            let _ = fs::remove_file(target);
+            branchyard_support::cleanup_file(target);
             fs::copy(source, target)?;
             Method::Copy
         }

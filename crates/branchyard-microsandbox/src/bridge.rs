@@ -263,7 +263,7 @@ impl Process for BridgedProcess {
 impl Drop for BridgedProcess {
     fn drop(&mut self) {
         if self.exit.get().is_none() {
-            let _ = self.control.kill();
+            branchyard_support::best_effort("kill control", self.control.kill());
         }
         if !self.torn_down {
             let _ = self.control.teardown(self.pid);

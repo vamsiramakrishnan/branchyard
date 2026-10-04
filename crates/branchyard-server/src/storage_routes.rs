@@ -263,7 +263,7 @@ impl TempFile {
 
 impl Drop for TempFile {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        branchyard_support::cleanup_file(&self.0);
     }
 }
 

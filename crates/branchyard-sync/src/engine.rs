@@ -615,7 +615,10 @@ impl Remote {
                 .put_if_absent(&key, &sealer.seal(&key, &serde_json::to_vec(&record)?)?)?;
             match self.read_lock("locks/sweep")? {
                 Some((sweep, _)) if self.lock_live(&sweep) => {
-                    let _ = self.store.delete_if_match(&key, &generation);
+                    branchyard_support::best_effort(
+                        "self.store.delete_if_match",
+                        self.store.delete_if_match(&key, &generation),
+                    );
                     self.retrier.sleeper.sleep(self.retrier.backoff(attempt));
                 }
                 _ => {
@@ -667,7 +670,10 @@ impl Remote {
 
     /// Remove this writer's mark.
     pub fn end_write(&self, mark: Mark) {
-        let _ = self.store.delete_if_match(&mark.key, &mark.generation);
+        branchyard_support::best_effort(
+            "self.store.delete_if_match",
+            self.store.delete_if_match(&mark.key, &mark.generation),
+        );
     }
 
     /// Record an object this process stored, for [`Remote::usage`].

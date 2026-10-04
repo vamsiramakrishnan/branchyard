@@ -343,7 +343,7 @@ fn next_in_sequence(dir: &str) -> String {
     };
     let text = std::fs::read_to_string(&first)
         .unwrap_or_else(|e| format!("reply sequence {}: {e}", first.display()));
-    let _ = std::fs::remove_file(&first);
+    branchyard_support::cleanup_file(&first);
     text
 }
 
@@ -570,8 +570,8 @@ impl McpClient {
 
 impl Drop for McpClient {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        branchyard_support::best_effort("kill child", self.child.kill());
+        branchyard_support::best_effort("reap child", self.child.wait());
     }
 }
 

@@ -950,7 +950,7 @@ impl InventoryCache {
 
     /// Forget it.
     pub fn clear(&self) {
-        let _ = std::fs::remove_file(&self.path);
+        branchyard_support::cleanup_file(&self.path);
     }
 
     /// The cached inventory when fresh, else a new detection here, kept.

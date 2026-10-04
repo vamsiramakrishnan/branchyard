@@ -83,7 +83,7 @@ impl FileStore {
         let _lock = self.lock()?;
         let current = generation_of(&path)?;
         if let Err(e) = check(current) {
-            let _ = fs::remove_file(temp);
+            branchyard_support::cleanup_file(temp);
             return Err(e);
         }
         if let Some(parent) = path.parent() {

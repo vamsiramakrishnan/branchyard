@@ -238,7 +238,7 @@ impl ChunkStore {
             fs::rename(&temp, &path)
         })();
         if written.is_err() {
-            let _ = fs::remove_file(&temp);
+            branchyard_support::cleanup_file(&temp);
         }
         written?;
         Ok(hash)
@@ -344,7 +344,7 @@ impl ChunkStore {
             Ok(())
         })();
         if written.is_err() {
-            let _ = fs::remove_file(&temp);
+            branchyard_support::cleanup_file(&temp);
         }
         written
     }

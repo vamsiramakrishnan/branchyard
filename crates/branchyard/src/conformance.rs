@@ -76,11 +76,11 @@ pub(crate) fn sqlite(name: &str) -> Opened {
     struct Temp(std::path::PathBuf);
     impl Drop for Temp {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            branchyard_support::cleanup_dir(&self.0);
         }
     }
     let dir = std::env::temp_dir().join(format!("branchyard-conformance-{}", unique(name)));
-    let _ = std::fs::remove_dir_all(&dir);
+    branchyard_support::cleanup_dir(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let shared = Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap());
     let open = {
@@ -2195,7 +2195,7 @@ mod sqlite {
             None,
             &|| Arc::new(Sqlite::open(&dir).unwrap()),
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        branchyard_support::cleanup_dir(&dir);
     }
 }
 

@@ -1168,7 +1168,7 @@ pub(crate) fn wait_subtree(yard: &Yard, name: &str) -> Result<Vec<BranchInfo>, E
                 // A panic in a child's thread has already been reported by
                 // the runtime; its record says `running` until recovered,
                 // and the others go on.
-                let _ = handle.join();
+                branchyard_support::join_reporting("child turn", handle);
             }
             continue;
         }
@@ -1224,9 +1224,26 @@ pub(crate) fn start_turn(
     } = prepared;
     let name = record.info.name.clone();
     let thread_yard = yard.clone();
-    let started = std::thread::Builder::new()
-        .name(format!("by-{name}"))
-        .spawn(move || {
+    let panic_yard = yard.clone();
+    let panic_branch = name.clone();
+    let started = branchyard_support::spawn_named(
+        format!("by-{name}"),
+        // A panic in the turn is otherwise only a line on stderr; put it in
+        // the branch's own event log, where its readers look.
+        move |panic| {
+            let event = RecordedEvent {
+                at_ms: crate::state::now_ms(),
+                activity: Activity::Warning(format!(
+                    "the turn's thread panicked: {}",
+                    panic.message
+                )),
+            };
+            branchyard_support::best_effort(
+                "record a turn thread's panic",
+                panic_yard.store().append(&panic_branch, &event, None),
+            );
+        },
+        move || {
             // The outcome is the branch's status; errors are recorded there.
             let _ = engine::execute(
                 Turn {
@@ -1243,12 +1260,13 @@ pub(crate) fn start_turn(
                 },
                 lease,
             );
-        });
+        },
+    );
     match started {
         Ok(handle) => {
             let previous = lock(&yard.hub.running).insert(name, handle);
             if let Some(previous) = previous {
-                let _ = previous.join();
+                branchyard_support::join_reporting("previous turn", previous);
             }
             Ok(())
         }
@@ -1258,7 +1276,10 @@ pub(crate) fn start_turn(
                 record.info.status = BranchStatus::Failed {
                     reason: format!("could not start a thread: {error}"),
                 };
-                let _ = store.write(&record);
+                branchyard_support::best_effort(
+                    "mark a branch failed after its thread would not start",
+                    store.write(&record),
+                );
             }
             Err(Error::Io(error))
         }

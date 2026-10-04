@@ -189,7 +189,7 @@ impl RecipeProvider {
                 std::fs::rename(&temporary, &file)?;
             }
             None => {
-                let _ = std::fs::remove_file(&file);
+                branchyard_support::cleanup_file(&file);
             }
         }
         Ok(())
@@ -548,13 +548,8 @@ impl RemoteProcess {
     }
 
     fn kill_local(&mut self) {
-        if let Some(pgid) = i32::try_from(self.child.id())
-            .ok()
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
-        }
-        let _ = self.child.kill();
+        branchyard_support::kill_group(self.child.id());
+        branchyard_support::best_effort("kill child", self.child.kill());
     }
 }
 
@@ -632,7 +627,7 @@ impl Drop for RemoteProcess {
             _ => {
                 let _ = self.remote(KILL);
                 let _ = self.teardown();
-                let _ = self.child.wait();
+                branchyard_support::best_effort("reap child", self.child.wait());
             }
         }
     }

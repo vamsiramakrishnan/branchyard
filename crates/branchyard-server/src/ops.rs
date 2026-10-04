@@ -706,7 +706,10 @@ impl Registry {
             let mut state = self.lock();
             if state.closed || !state.accepting {
                 drop(state);
-                let _ = self.store.release(&self.worker, &id, claim.fence);
+                branchyard_support::best_effort(
+                    "self.store.release",
+                    self.store.release(&self.worker, &id, claim.fence),
+                );
                 return;
             }
             state.running.insert(id.clone(), claim.fence);
@@ -718,7 +721,10 @@ impl Registry {
             .spawn(move || registry.work(claim, executor));
         if let Err(error) = spawned {
             tracing::error!(%id, %error, "could not start a worker thread for an operation");
-            let _ = self.store.release(&self.worker, &id, fence);
+            branchyard_support::best_effort(
+                "self.store.release",
+                self.store.release(&self.worker, &id, fence),
+            );
             self.done(&id);
         }
     }
@@ -754,7 +760,10 @@ impl Registry {
             }
             Err(e) => {
                 tracing::error!(%id, error = %e, "could not record an operation as running");
-                let _ = self.store.release(&self.worker, &id, fence);
+                branchyard_support::best_effort(
+                    "self.store.release",
+                    self.store.release(&self.worker, &id, fence),
+                );
                 self.done(&id);
                 return;
             }

@@ -14,7 +14,8 @@
 //! - [`LockExt`], [`RwLockExt`] and [`CondvarExt`] take a lock whose holder
 //!   panicked, log the poisoning with the lock's name, and go on.
 //! - [`spawn_named`] runs a thread that reports a panic through a sink the
-//!   caller supplies instead of leaving it on stderr.
+//!   caller supplies instead of leaving it on stderr, and [`join_reporting`]
+//!   waits for one without dropping a panic that ended it.
 //!
 //! Nothing here panics, so all of it is safe on a `Drop` path. See
 //! CONTRIBUTING.md ("Failures that may be ignored").
@@ -32,7 +33,7 @@ pub use best_effort::{
 };
 pub use locks::{CondvarExt, LockExt, RwLockExt};
 pub use process::{kill_group, kill_process, terminate_group};
-pub use threads::{spawn_named, PanicReport};
+pub use threads::{join_reporting, spawn_named, PanicReport};
 
 /// Run a fallible step that may fail without failing the caller, logging the
 /// failure under `$context` and yielding `Some(value)` on success.

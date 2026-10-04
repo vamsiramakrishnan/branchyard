@@ -768,7 +768,7 @@ fn stage(capture: &Capture<'_>, staging: &Path) -> Result<EnvironmentInfo, Strin
                 let _ = fs::rename(into.join(rel), worktree.join(rel));
             }
         }
-        let _ = fs::remove_dir_all(staging);
+        branchyard_support::cleanup_dir(staging);
     };
     let mut produced = Vec::new();
     if let Some(worktree) = capture.worktree {
@@ -840,9 +840,9 @@ fn stage(capture: &Capture<'_>, staging: &Path) -> Result<EnvironmentInfo, Strin
         return Err(format!("could not keep the environment: {e}"));
     }
     if replaced {
-        let _ = fs::remove_dir_all(&old);
+        branchyard_support::cleanup_dir(&old);
     }
-    let _ = fs::remove_file(failed_path(capture.root, capture.key));
+    branchyard_support::cleanup_file(failed_path(capture.root, capture.key));
     Ok(info)
 }
 
@@ -860,7 +860,7 @@ pub(crate) fn recover_step(yard: &Yard, step: Option<&crate::state::StepRow>) ->
         let staging = Path::new(staging);
         // Only ever a directory of ours.
         if staging.starts_with(dir(&yard.root)) {
-            let _ = fs::remove_dir_all(staging);
+            branchyard_support::cleanup_dir(staging);
         }
     }
     let mut said = format!("removed the half-built environment {}", short(&key));
@@ -960,7 +960,7 @@ pub(crate) fn prune(yard: &Yard, keep: usize, max_age: Duration, only: &[String]
     for info in all.iter().filter(|i| i.state == EnvironmentState::Failed) {
         let asked = only.contains(&info.key);
         if asked || (only.is_empty() && old(info.built_ms)) {
-            let _ = fs::remove_file(failed_path(root, &info.key));
+            branchyard_support::cleanup_file(failed_path(root, &info.key));
             pruned
                 .removed
                 .push((format!("{}.failed", info.key), "a recorded failure".into()));
@@ -991,7 +991,7 @@ pub(crate) fn prune(yard: &Yard, keep: usize, max_age: Duration, only: &[String]
                             &entry.path().display().to_string(),
                         ],
                     );
-                    let _ = fs::remove_dir_all(entry.path());
+                    branchyard_support::cleanup_dir(entry.path());
                 }
                 continue;
             }
@@ -1001,7 +1001,7 @@ pub(crate) fn prune(yard: &Yard, keep: usize, max_age: Duration, only: &[String]
             let Some(rest) = rest else { continue };
             let key = rest.split('-').next().unwrap_or_default();
             if let Ok(Some(_lock)) = KeyLock::try_take(root, key) {
-                let _ = fs::remove_dir_all(entry.path());
+                branchyard_support::cleanup_dir(entry.path());
             }
         }
     }
@@ -1073,7 +1073,7 @@ pub(crate) fn rebuild(yard: &Yard, spec: &WorkspaceSpec) -> Result<EnvironmentBu
             root,
             &["worktree", "remove", "--force", &work.display().to_string()],
         );
-        let _ = fs::remove_dir_all(&work);
+        branchyard_support::cleanup_dir(&work);
     };
     let inputs = inputs(&work, spec);
     let (key, recipe) = key(spec, HOST, &inputs);

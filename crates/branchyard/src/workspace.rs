@@ -1295,7 +1295,7 @@ fn copy_one(root: &Path, worktree: &Path, rel: &str) -> Result<(), String> {
     if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink() || m.is_dir()) {
         return Err("the worktree already has a link or directory there".into());
     }
-    let _ = fs::remove_file(&target);
+    branchyard_support::cleanup_file(&target);
     branchyard_workspace::materialize::clone_file(&source, &target)
         .map(|_| ())
         .map_err(|e| format!("could not be copied: {e}"))
@@ -1398,12 +1398,12 @@ pub(crate) fn run_commands(
             }
             if Instant::now() >= deadline {
                 proc::kill_group(pid, &start);
-                let _ = child.wait();
+                branchyard_support::best_effort("reap child", child.wait());
                 break Err(format!("timed out after {}s", timeout.as_secs()));
             }
             if let Some(why) = cancel() {
                 proc::kill_group(pid, &start);
-                let _ = child.wait();
+                branchyard_support::best_effort("reap child", child.wait());
                 break Err(format!("stopped: {why}"));
             }
             std::thread::sleep(TICK);
@@ -1497,11 +1497,11 @@ pub(crate) fn run_in_sandbox(
                 Err(e) => break Err(format!("could not wait for it: {e}")),
             }
             if Instant::now() >= deadline {
-                let _ = process.kill();
+                branchyard_support::best_effort("kill process", process.kill());
                 break Err(format!("timed out after {}s", timeout.as_secs()));
             }
             if let Some(why) = cancel() {
-                let _ = process.kill();
+                branchyard_support::best_effort("kill process", process.kill());
                 break Err(format!("stopped: {why}"));
             }
             std::thread::sleep(TICK);
@@ -1510,7 +1510,7 @@ pub(crate) fn run_in_sandbox(
         // output open; it goes with the command.
         process.teardown();
         for reader in readers {
-            let _ = reader.join();
+            branchyard_support::join_reporting("reader", reader);
         }
         match status {
             Ok(status) if status.success() => report.exit_code = status.code,

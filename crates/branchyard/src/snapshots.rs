@@ -537,7 +537,10 @@ pub(crate) fn acquire(
                         })
                     }
                     Err(error) => {
-                        let _ = provider.destroy(&row.name);
+                        branchyard_support::best_effort(
+                            "provider.destroy",
+                            provider.destroy(&row.name),
+                        );
                         reasons.push(format!(
                             "its kept sandbox {} could not be resumed: {error}",
                             row.name
@@ -680,7 +683,7 @@ fn branch_from_seed(
             method,
         })),
         Err(error) => {
-            let _ = provider.destroy(&spec.name);
+            branchyard_support::best_effort("provider.destroy", provider.destroy(&spec.name));
             Err(format!(
                 "could not branch from {}'s snapshot at checkpoint {turn}: {error}",
                 seed.branch
@@ -750,7 +753,7 @@ pub(crate) fn take_environment(
             )
         })
         .map_err(|e| {
-            let _ = provider.destroy(planned);
+            branchyard_support::best_effort("provider.destroy", provider.destroy(planned));
             e.to_string()
         })
 }
@@ -785,7 +788,7 @@ fn branch_environment(
     match made {
         Ok(_) => Ok(snapshot.method),
         Err(error) => {
-            let _ = provider.destroy(&spec.name);
+            branchyard_support::best_effort("provider.destroy", provider.destroy(&spec.name));
             Err(error.to_string())
         }
     }
@@ -889,11 +892,14 @@ pub(crate) fn park(
             let _ = store
                 .sandboxes()
                 .take_sandbox(&row.branch, SandboxKind::Kept, name);
-            let _ = store.backend().finish_step(
-                fence,
-                fence.turn,
-                STEP_PARK,
-                &json!({ "kept": false }),
+            branchyard_support::best_effort(
+                "store.backend.finish_step",
+                store.backend().finish_step(
+                    fence,
+                    fence.turn,
+                    STEP_PARK,
+                    &json!({ "kept": false }),
+                ),
             );
             destroy(&mut said, Some(format!("could not pause it: {error}")));
             return said;
@@ -1031,7 +1037,7 @@ pub(crate) fn snapshot_turn(
                     (planned.clone(), Detail::of(&guarantee))
                 })
                 .map_err(|e| {
-                    let _ = provider.destroy(&planned);
+                    branchyard_support::best_effort("provider.destroy", provider.destroy(&planned));
                     e.to_string()
                 })
         }
@@ -1068,11 +1074,14 @@ pub(crate) fn snapshot_turn(
                 used_ms: now_ms(),
             };
             let _ = store.sandboxes().put_sandbox(&row);
-            let _ = store.backend().finish_step(
-                fence,
-                fence.turn,
-                STEP_SNAPSHOT,
-                &json!({ "handle": handle }),
+            branchyard_support::best_effort(
+                "store.backend.finish_step",
+                store.backend().finish_step(
+                    fence,
+                    fence.turn,
+                    STEP_SNAPSHOT,
+                    &json!({ "handle": handle }),
+                ),
             );
             Some(SandboxSnapshot {
                 provider: kind.to_owned(),
@@ -1083,11 +1092,14 @@ pub(crate) fn snapshot_turn(
             })
         }
         Err(reason) => {
-            let _ = store.backend().finish_step(
-                fence,
-                fence.turn,
-                STEP_SNAPSHOT,
-                &json!({ "error": reason }),
+            branchyard_support::best_effort(
+                "store.backend.finish_step",
+                store.backend().finish_step(
+                    fence,
+                    fence.turn,
+                    STEP_SNAPSHOT,
+                    &json!({ "error": reason }),
+                ),
             );
             said.push(event(SandboxEvent::NoSnapshot { turn, reason }));
             None
@@ -1304,7 +1316,7 @@ pub(crate) fn recover_steps(
     }
     let options = record.provider.as_ref()?;
     let provider = open(yard, options).ok()?;
-    let _ = provider.destroy(&planned);
+    branchyard_support::best_effort("provider.destroy", provider.destroy(&planned));
     Some(format!(
         "destroyed the unfinished snapshot sandbox {planned}"
     ))

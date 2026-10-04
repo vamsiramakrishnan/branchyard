@@ -647,7 +647,7 @@ pub fn connect(
         command.arg("--open");
     }
     let status = command.status();
-    let _ = std::fs::remove_file(&file);
+    branchyard_support::cleanup_file(&file);
     let status =
         status.map_err(|e| Failure::Message(format!("could not run {}: {e}", anvil[0])))?;
     match status.success() {

@@ -68,7 +68,8 @@ pub fn best_effort<T, E: Display>(context: &str, result: Result<T, E>) -> Option
 
 /// Remove a directory tree. One already gone is success; any other failure
 /// is reported with the path.
-pub fn cleanup_dir(path: &Path) {
+pub fn cleanup_dir(path: impl AsRef<Path>) {
+    let path = path.as_ref();
     if let Err(e) = std::fs::remove_dir_all(path) {
         if e.kind() != std::io::ErrorKind::NotFound {
             report(&format!("remove directory {}", path.display()), &e);
@@ -78,7 +79,8 @@ pub fn cleanup_dir(path: &Path) {
 
 /// Remove a file. One already gone is success; any other failure is
 /// reported with the path.
-pub fn cleanup_file(path: &Path) {
+pub fn cleanup_file(path: impl AsRef<Path>) {
+    let path = path.as_ref();
     if let Err(e) = std::fs::remove_file(path) {
         if e.kind() != std::io::ErrorKind::NotFound {
             report(&format!("remove file {}", path.display()), &e);

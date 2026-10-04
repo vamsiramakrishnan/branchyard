@@ -161,7 +161,7 @@ impl Running {
             let _ = tokio::task::spawn_blocking(move || sync.finish()).await;
         }
         if let Some(path) = &self.unix {
-            let _ = std::fs::remove_file(path);
+            branchyard_support::cleanup_file(path);
         }
         Stopped { interrupted }
     }

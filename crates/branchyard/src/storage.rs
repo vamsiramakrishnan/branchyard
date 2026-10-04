@@ -415,7 +415,7 @@ struct TempBlob(Option<PathBuf>);
 impl Drop for TempBlob {
     fn drop(&mut self) {
         if let Some(path) = self.0.take() {
-            let _ = std::fs::remove_file(path);
+            branchyard_support::cleanup_file(path);
         }
     }
 }
@@ -627,7 +627,7 @@ pub(crate) fn gc_after_removal(store: &Store) -> Result<(), Error> {
         storage.delete_artifact(&row.artifact.id)?;
         if storage.digest_refcount(&row.artifact.digest)? == 0 {
             let path = blob_path(store.dir(), &row.artifact.digest);
-            let _ = std::fs::remove_file(&path);
+            branchyard_support::cleanup_file(&path);
         }
     }
     for row in scratch {
@@ -636,7 +636,7 @@ pub(crate) fn gc_after_removal(store: &Store) -> Result<(), Error> {
             continue;
         }
         storage.delete_scratch(&row.area.name)?;
-        let _ = std::fs::remove_dir_all(scratch_dir(store, &row.area.name));
+        branchyard_support::cleanup_dir(scratch_dir(store, &row.area.name));
     }
     Ok(())
 }

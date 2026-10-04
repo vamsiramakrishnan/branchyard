@@ -793,6 +793,7 @@ version = "0.0.1"
 dependencies = [
  "branchyard-controls",
  "branchyard-harness",
+ "branchyard-support",
  "schemars 1.2.2",
  "serde",
  "serde_json",

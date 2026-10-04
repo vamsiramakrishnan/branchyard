@@ -388,7 +388,7 @@ pub fn create(new: &NewTask) -> Result<(Task, Yard), Error> {
         Ok((task, yard))
     })();
     if made.is_err() {
-        let _ = fs::remove_dir_all(&dir);
+        branchyard_support::cleanup_dir(&dir);
     }
     made
 }
@@ -679,7 +679,7 @@ fn finish(
         };
         lease.finish(Some(&record), Some(&event))?;
     }
-    let _ = fs::remove_file(journal_path(owned));
+    branchyard_support::cleanup_file(journal_path(owned));
     Ok(())
 }
 
@@ -913,7 +913,7 @@ fn apply(root: &Path, owned: &Owned, plan: &[Change]) -> Result<(Vec<String>, Ve
                     fs::rename(&temp, &disk).map_err(Error::from)
                 });
             if wrote.is_err() {
-                let _ = fs::remove_file(&temp);
+                branchyard_support::cleanup_file(&temp);
             }
             wrote?;
         }

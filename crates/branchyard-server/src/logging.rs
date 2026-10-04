@@ -59,6 +59,26 @@ pub fn init(quiet: bool, format: Option<LogFormat>) {
     };
 }
 
+/// The subscriber for a short-lived command (`by ls`, `by merge`, ...):
+/// warnings and errors only unless `BRANCHYARD_LOG` or `RUST_LOG` says
+/// otherwise, on stderr, without timestamps or targets. Best-effort failures
+/// anywhere in the workspace (`branchyard-support`) log at `warn`, so this
+/// is what makes a swallowed cleanup error visible to the person running the
+/// command. Idempotent, like [`init`].
+pub fn init_for_commands() {
+    let filter = std::env::var("BRANCHYARD_LOG")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .ok()
+        .and_then(|directives| EnvFilter::try_new(directives).ok())
+        .unwrap_or_else(|| EnvFilter::new("warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .without_time()
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 #[cfg(test)]
 mod tests {
     use super::LogFormat;

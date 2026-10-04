@@ -922,7 +922,7 @@ impl Store {
 
     /// Give up a reservation made by [`Store::reserve`].
     pub fn release(&self, name: &str) {
-        let _ = self.backend.release(name);
+        branchyard_support::best_effort("release a name reservation", self.backend.release(name));
     }
 
     /// Replace the record outside any turn. The `children` already stored
@@ -1019,10 +1019,11 @@ impl Store {
             }
             let appended = self.signal.appended.lock_recovering("appended");
             if *appended == seen {
-                let _ = self
-                    .signal
-                    .changed
-                    .wait_timeout(appended, POLL.min(deadline - now));
+                drop(self.signal.changed.wait_timeout_recovering(
+                    appended,
+                    POLL.min(deadline - now),
+                    "changed",
+                ));
             }
         }
     }
@@ -1093,7 +1094,13 @@ impl Drop for Lease {
     fn drop(&mut self) {
         self.heartbeat.take();
         if !self.done {
-            let _ = self.store.backend.finish(&self.fence, None, None);
+            // A lease dropped without finishing (an early return, a panic)
+            // still has to be released, and nothing here can return the
+            // error: so it is logged, and the lease expires on its own.
+            branchyard_support::best_effort(
+                "release a lease dropped without finish",
+                self.store.backend.finish(&self.fence, None, None),
+            );
         }
     }
 }
@@ -1153,7 +1160,70 @@ impl Drop for Heartbeat {
         *flag.lock_recovering("heartbeat stop flag") = true;
         wake.notify_all();
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            branchyard_support::join_reporting("lease heartbeat", thread);
         }
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+    use branchyard_support::testing::{capture, Level};
+
+    fn record(name: &str) -> Record {
+        serde_json::from_value(serde_json::json!({
+            "info": {
+                "name": name, "git_branch": format!("by/{name}"), "worktree": "/w",
+                "prompt": "p", "harness": "h", "profile": "p", "session": null,
+                "parent": null, "base": "b", "candidate": null,
+                "status": {"state": "running"}, "turns": 0, "cost_usd": null,
+                "created_at": 0
+            },
+            "created_ms": 0, "check": null, "command": null, "home": null,
+            "cost_baseline": null
+        }))
+        .unwrap()
+    }
+
+    fn lease_on(store: &Store, name: &str) -> Lease {
+        assert!(store.reserve(name).unwrap());
+        match store.acquire(&record(name)).unwrap() {
+            Taken::Granted(lease) => lease,
+            Taken::Stale => panic!("a fresh branch has no stale lease"),
+        }
+    }
+
+    #[test]
+    fn a_lease_dropped_without_finish_releases_quietly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let lease = lease_on(&store, "quiet");
+        let (_, events) = capture(|| drop(lease));
+        assert!(events.is_empty(), "{events:?}");
+        // Released: the branch can be leased again.
+        assert!(matches!(
+            store.acquire(&record("quiet")).unwrap(),
+            Taken::Granted(_)
+        ));
+    }
+
+    #[test]
+    fn a_failed_release_on_drop_is_logged_not_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let lease = lease_on(&store, "fenced");
+        // The branch's record and lease go away under the holder, as when
+        // another engine took the lease over: its release is now refused.
+        store.delete("fenced").unwrap();
+        let (_, events) = capture(|| drop(lease));
+        let warnings: Vec<_> = events.iter().filter(|e| e.level == Level::WARN).collect();
+        assert_eq!(warnings.len(), 1, "{events:?}");
+        assert!(
+            warnings[0]
+                .text
+                .contains("release a lease dropped without finish"),
+            "{}",
+            warnings[0].text
+        );
     }
 }

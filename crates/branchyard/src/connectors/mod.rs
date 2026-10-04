@@ -392,7 +392,7 @@ pub(crate) struct TokenFile(PathBuf);
 
 impl Drop for TokenFile {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        branchyard_support::cleanup_file(&self.0);
     }
 }
 
@@ -476,7 +476,7 @@ pub(crate) fn prepare(
         gateway
             .packager
             .index(&grants, &bundles, &staged.join("INDEX.md"))?;
-        let _ = fs::remove_file(&grants);
+        branchyard_support::cleanup_file(&grants);
         if !staged.join("INDEX.md").is_file() {
             return Err("the connector index was not written".into());
         }
@@ -488,7 +488,7 @@ pub(crate) fn prepare(
         fs::rename(&staged, &target).map_err(|e| format!("place {}: {e}", target.display()))
     })();
     if placed.is_err() {
-        let _ = fs::remove_dir_all(&staged);
+        branchyard_support::cleanup_dir(&staged);
     }
     placed.map_err(|e| format!("could not place connector packages: {e}"))?;
     // The token: this turn's, for at most an hour and not past the
@@ -589,12 +589,12 @@ fn cached_package(
     ));
     fs::create_dir_all(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
     if let Err(e) = packager.package(bundle, &tmp) {
-        let _ = fs::remove_dir_all(&tmp);
+        branchyard_support::cleanup_dir(&tmp);
         return Err(format!("packaging {}: {e}", bundle.id));
     }
     // Another turn may have packaged it meanwhile; either copy will do.
     if fs::rename(&tmp, &dir).is_err() {
-        let _ = fs::remove_dir_all(&tmp);
+        branchyard_support::cleanup_dir(&tmp);
         if !dir.is_dir() {
             return Err(format!("could not cache the package of {}", bundle.id));
         }
@@ -640,7 +640,7 @@ impl Drop for AuditTail {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            branchyard_support::join_reporting("connector supervisor", thread);
         }
         let _ = ingest(&self.yard);
     }

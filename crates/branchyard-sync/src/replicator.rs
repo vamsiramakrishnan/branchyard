@@ -392,7 +392,7 @@ impl Drop for ReplicatorHandle {
         self.signal.0.lock_recovering("replicator signal").stop = true;
         self.signal.1.notify_all();
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            branchyard_support::join_reporting("replicator", t);
         }
     }
 }

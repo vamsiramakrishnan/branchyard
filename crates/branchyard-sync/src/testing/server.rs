@@ -231,7 +231,7 @@ impl Drop for MockServer {
         self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(("127.0.0.1", self.port));
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            branchyard_support::join_reporting("mock server", t);
         }
     }
 }

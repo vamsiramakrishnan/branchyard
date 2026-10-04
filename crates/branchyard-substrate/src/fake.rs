@@ -68,8 +68,8 @@ impl Bridge {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        branchyard_support::best_effort("kill child", self.child.kill());
+        branchyard_support::best_effort("reap child", self.child.wait());
     }
 }
 
@@ -184,8 +184,8 @@ impl Inner {
         match address {
             Some(address) => Ok(Bridge { child, address }),
             None => {
-                let _ = child.kill();
-                let _ = child.wait();
+                branchyard_support::best_effort("kill child", child.kill());
+                branchyard_support::best_effort("reap child", child.wait());
                 Err(Status::internal(format!(
                     "the bridge did not start: {line:?}"
                 )))
@@ -237,7 +237,7 @@ impl Inner {
         if let Some(bridge) = old.bridge {
             bridge.stop();
         }
-        let _ = fs::remove_dir_all(old.root);
+        branchyard_support::cleanup_dir(old.root);
     }
 
     fn transition(
@@ -380,13 +380,13 @@ impl Control for Service {
             .scratch
             .join("actors")
             .join(format!("{name}-{}", metadata.uid));
-        let _ = fs::remove_dir_all(&root);
+        branchyard_support::cleanup_dir(&root);
         fs::create_dir_all(&root).map_err(|e| Status::internal(e.to_string()))?;
         if let Some(seed) = seed {
             copy_dir(&seed, &root).map_err(|e| Status::internal(e.to_string()))?;
         }
         for path in self.0.fresh.lock_recovering("fresh").iter() {
-            let _ = fs::remove_dir_all(path);
+            branchyard_support::cleanup_dir(path);
         }
         set_state(&mut actor, pb::ActorState::Suspended);
         state.actors.insert(
@@ -518,7 +518,7 @@ impl Control for Service {
         }
         metadata.uid = format!("tag-{}", metadata.name);
         let copy = self.0.scratch.join("tags").join(&metadata.name);
-        let _ = fs::remove_dir_all(&copy);
+        branchyard_support::cleanup_dir(&copy);
         copy_dir(&from, &copy).map_err(|e| Status::internal(e.to_string()))?;
         tag.status = Some(pb::TagStatus {
             snapshot: Some(pb::ExternalSnapshot {
@@ -551,7 +551,7 @@ impl Control for Service {
         }
         let (tag, copy) = state.tags.remove(&name).expect("checked above");
         drop(state);
-        let _ = fs::remove_dir_all(copy);
+        branchyard_support::cleanup_dir(copy);
         Ok(Response::new(tag))
     }
 
@@ -600,7 +600,7 @@ impl Control for Service {
             if let Some(bridge) = bridge {
                 bridge.stop();
             }
-            let _ = fs::remove_dir_all(root);
+            branchyard_support::cleanup_dir(root);
         })
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -668,7 +668,7 @@ fn route(inner: &Inner, client: TcpStream) -> io::Result<()> {
     });
     let _ = io::copy(&mut upstream, &mut client);
     let _ = client.shutdown(Shutdown::Write);
-    let _ = up.join();
+    branchyard_support::join_reporting("fake upstream relay", up);
     Ok(())
 }
 

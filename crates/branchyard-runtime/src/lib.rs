@@ -630,7 +630,7 @@ impl Session {
             let remaining = deadline.remaining();
             if remaining.is_zero() {
                 forced = true;
-                let _ = self.process.kill();
+                branchyard_support::best_effort("kill process", self.process.kill());
                 break;
             }
             let slice = remaining.min(Duration::from_millis(50));
@@ -659,7 +659,7 @@ impl Session {
     pub fn kill(mut self) -> Result<Vec<Event>, RuntimeError> {
         let start = self.events.len();
         self.process.teardown();
-        let _ = self.process.kill();
+        branchyard_support::best_effort("kill process", self.process.kill());
         self.process.wait().map_err(io_error("wait"))?;
         self.teardown();
         self.drain();
@@ -785,8 +785,8 @@ impl Drop for Session {
     fn drop(&mut self) {
         if !self.finished {
             self.process.teardown();
-            let _ = self.process.kill();
-            let _ = self.process.wait();
+            branchyard_support::best_effort("kill process", self.process.kill());
+            branchyard_support::best_effort("reap process", self.process.wait());
         }
     }
 }

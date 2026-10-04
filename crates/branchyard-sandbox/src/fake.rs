@@ -248,9 +248,9 @@ impl FakeProvider {
     /// Remove `name` without recording a call, as if it vanished.
     pub fn vanish(&self, name: &str) {
         if let Some(sandbox) = self.lock().sandboxes.remove(name) {
-            let _ = fs::remove_dir_all(sandbox.rootfs);
+            branchyard_support::cleanup_dir(sandbox.rootfs);
         }
-        let _ = self.inner.destroy(name);
+        branchyard_support::best_effort("self.inner.destroy", self.inner.destroy(name));
     }
 
     fn refuse(&self, operation: Operation) -> Result<(), ProviderError> {
@@ -424,7 +424,7 @@ impl SandboxProvider for FakeProvider {
         }
         let removed = self.lock().sandboxes.remove(name);
         if let Some(sandbox) = removed {
-            let _ = fs::remove_dir_all(sandbox.rootfs);
+            branchyard_support::cleanup_dir(sandbox.rootfs);
         }
         self.inner.destroy(name)
     }
@@ -578,7 +578,7 @@ impl SandboxProvider for FakeProvider {
             reference: checkpoint.reference.clone(),
         });
         if let Some(dir) = state.checkpoints.remove(&checkpoint.reference) {
-            let _ = fs::remove_dir_all(dir);
+            branchyard_support::cleanup_dir(dir);
         }
         Ok(())
     }

@@ -126,7 +126,7 @@ impl TurnGateway {
         }
         let _ = TcpStream::connect_timeout(&wake, Duration::from_secs(1));
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            branchyard_support::join_reporting("model gateway accept", thread);
         }
         let (count, idle) = &*self.in_flight;
         let deadline = Instant::now() + DRAIN;

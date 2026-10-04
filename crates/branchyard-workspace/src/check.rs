@@ -110,19 +110,14 @@ pub(crate) fn run(check: &Check, dir: &Path) -> io::Result<(CheckOutcome, String
 /// the leader itself, and reaps it.
 fn kill(child: &mut Child) {
     kill_group(child.id());
-    let _ = child.kill();
-    let _ = child.wait();
+    branchyard_support::best_effort("kill child", child.kill());
+    branchyard_support::best_effort("reap child", child.wait());
 }
 
 #[cfg(unix)]
 fn kill_group(pgid: u32) {
-    // std has no killpg; rustix calls killpg(2) directly.
-    if let Some(pgid) = i32::try_from(pgid)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    {
-        let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
-    }
+    // std has no killpg; the support crate calls killpg(2) directly.
+    branchyard_support::kill_group(pgid);
 }
 
 #[cfg(not(unix))]

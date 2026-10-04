@@ -223,7 +223,7 @@ impl EffectProxy {
         }
         let _ = TcpStream::connect_timeout(&wake, Duration::from_secs(1));
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            branchyard_support::join_reporting("effect proxy accept", thread);
         }
         let (count, idle) = &*self.in_flight;
         let deadline = std::time::Instant::now() + DRAIN;

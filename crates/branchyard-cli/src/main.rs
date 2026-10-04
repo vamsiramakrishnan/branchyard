@@ -85,6 +85,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Warnings from best-effort steps (a cleanup that failed, a lock whose
+    // holder panicked) go to stderr. Not under the live `watch` screen,
+    // which owns the terminal.
+    if !matches!(command, Command::Watch { once: false, .. }) {
+        branchyard_server::logging::init_for_commands();
+    }
     let mut env_now = Env::detect();
     env_now.notify = notify::Settings::resolve(globals.no_notify, &globals.notify, &env);
     match run(&env_now, &globals, command) {
