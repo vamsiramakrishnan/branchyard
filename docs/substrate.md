@@ -21,7 +21,7 @@ Substrate describes itself as "not an SDK for building agents." Branchyard is th
 
 - [`branchyard-substrate`](../crates/branchyard-substrate/src/lib.rs) generates the `Control` client at build time with `tonic-prost-build` and a pinned `protoc` from `protoc-bin-vendored` (host `protoc` installations are ignored). `Actors` maps the actor lifecycle asynchronously; `SubstrateProvider` implements the synchronous `SandboxProvider` on top of it and of the bridge; `transfer` moves code; `template` builds the actor template; `fake` (cargo feature `fake`) is the test cluster. No Substrate Go code is translated. See [vendoring](vendoring.md#agent-substrate-generate-from-the-contract-do-not-translate-the-runtime).
 - [`branchyard-bridge`](../crates/branchyard-bridge/src/lib.rs) is the in-actor exec endpoint: a static-friendly binary on `std`, `libc`, `ring` and `rustls` (with `ring`, for TLS), and the host-side client that turns its connection into a `Process`.
-- The engine's `Provider::Substrate(SubstrateOptions)` and the CLI's `--provider substrate` use both ([placement](../crates/branchyard/src/placement.rs)).
+- The engine's `Provider::Substrate(SubstrateOptions)` and the CLI's `--provider substrate` use both ([provider](../crates/branchyard/src/providers/substrate.rs), [placement](../crates/branchyard/src/placement.rs)).
 
 ## Operation mapping
 

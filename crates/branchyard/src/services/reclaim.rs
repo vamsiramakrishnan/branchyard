@@ -11,7 +11,7 @@ use std::path::Path;
 
 use super::{reap, reclaim_process, Outcome, Reaped, Reclaim, Service};
 use crate::state::SandboxKind;
-use crate::{placement, Error, Provider, Yard};
+use crate::{Error, Provider, Yard};
 
 /// Expire and reclaim what the yard's registry holds.
 pub(crate) fn sweep(yard: &Yard, now_ms: u64) -> Result<Vec<Reaped>, Error> {
@@ -80,32 +80,5 @@ fn sandbox_outcome(yard: &Yard, branch: &str, provider: &Provider, sandbox: &str
 }
 
 fn destroy(yard: &Yard, provider: &Provider, sandbox: &str) -> Result<String, String> {
-    match provider {
-        Provider::Recipe(options) => {
-            let recipes = placement::recipe_provider(yard, options);
-            if recipes.result(sandbox).is_none() {
-                return Ok(format!("machine {sandbox} was already gone"));
-            }
-            branchyard_sandbox::SandboxProvider::destroy(recipes.as_ref(), sandbox)
-                .map_err(|e| format!("could not destroy machine {sandbox}: {e}"))?;
-            Ok(format!(
-                "destroyed machine {sandbox} (recipe {})",
-                options.name
-            ))
-        }
-        Provider::Microsandbox(options) => {
-            let said = placement::destroy_orphan(placement::microsandbox(yard, options), sandbox);
-            match said.starts_with("could not") {
-                true => Err(said),
-                false => Ok(said),
-            }
-        }
-        Provider::Substrate(options) => {
-            let provider = placement::substrate_provider(options, false)?;
-            branchyard_sandbox::SandboxProvider::destroy(&provider, sandbox)
-                .map_err(|e| format!("could not delete actor {sandbox}: {e}"))?;
-            Ok(format!("deleted actor {sandbox}"))
-        }
-        Provider::Local => Ok("nothing to destroy".into()),
-    }
+    provider.kind().destroy(yard, sandbox)
 }

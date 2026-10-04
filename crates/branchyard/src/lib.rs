@@ -132,6 +132,7 @@ mod policy;
 mod pool;
 mod proc;
 mod projection;
+mod providers;
 mod provisioning;
 mod pull_request;
 mod record;

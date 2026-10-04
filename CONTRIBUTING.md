@@ -113,6 +113,21 @@ How to:
 To add a malformed case (a vector that must be refused, or a valid one that must be read), put it in `crates/branchyard-wire/src/corpus.rs`. The wire crate's tests, the gateway's request reader, the backend and SDK response readers and the sync mock server all run the whole corpus, so one vector tests every consumer.
 
 `tools/wire_ratchet.json` lists what is still hand-written outside the crate, per file (header drop lists and serialisers, and two head readers: the WebSocket handshake in `branchyard-bridge` and the egress proxy in `branchyard-runtime`). A count may only fall. If you remove a site, lower its number (the check fails until you do); never raise one or add a file. Migrate a site to the wire crate instead.
+## Adding a provider
+
+A branch's provider is the closed enum `Provider` (`crates/branchyard/src/lib.rs`), and everything the engine needs to know about a variant is a method of the crate-private trait `ProviderKind`, implemented once per variant in `crates/branchyard/src/providers/`. Do not match on `Provider` anywhere else: call `provider.kind().<method>()`, or `providers::of(provider)` for an `Option<&Provider>` where `None` means local.
+
+- To change what a provider does (a check, its recovery, its paths, its lifecycle, its destroy), edit its file in `providers/`.
+- To add a provider, add `providers/<name>.rs` implementing `ProviderKind` on its options struct, the variant in `Provider` and its arm in `Provider::kind`. Then add a sample to `providers/tests.rs` (its `index` match will not compile until the variant is listed, and `the_table_covers_every_variant` fails until `samples` has an instance of it; the variant count is read from the enum itself, so nothing needs bumping) and regenerate the schemas:
+
+  ```sh
+  cargo run -p branchyard-client --features schema --example generate_contract --offline > schema/contract.json
+  cargo run -p branchyard-setup --example generate_schemas --offline
+  cargo run -p branchyard-server --features schema --example generate_server_config_schema --offline > schema/server.config.json
+  ```
+- To add a new thing the engine asks of every provider, add a method to `ProviderKind`; the compiler then lists each implementation that must answer it.
+
+`crates/branchyard/tests/provider_seam.rs` fails when a variant is named outside `providers/`. The few surfaces that still match (the CLI and server) are a ratchet in that file: lower a count when you remove a site, never raise one. See [Adding a provider](docs/providers.md#adding-a-provider).
 
 ## Validation
 

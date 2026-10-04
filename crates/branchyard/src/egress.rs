@@ -233,13 +233,14 @@ pub(crate) fn check(
     if network.is_open() || network.enforce != Enforce::Required {
         return Ok(());
     }
-    let why = match provider {
-        None | Some(Provider::Local) => LocalProvider::confinement()
+    let kind = crate::providers::of(provider);
+    let why = match kind.confines_egress() {
+        true => LocalProvider::confinement()
             .err()
             .map(|why| format!("this host cannot confine a local harness: {why}")),
-        Some(other) => Some(format!(
+        false => Some(format!(
             "the {} provider cannot confine its sandboxes",
-            crate::snapshots::provider_name(other)
+            kind.name()
         )),
     };
     match why {
@@ -279,11 +280,9 @@ pub(crate) fn prepare(
         enforcement,
         reason,
     };
-    let provider = match &record.provider {
-        None | Some(Provider::Local) => None,
-        Some(other) => Some(crate::snapshots::provider_name(other)),
-    };
-    if let Some(provider) = provider {
+    let kind = crate::providers::of(record.provider.as_ref());
+    if !kind.confines_egress() {
+        let provider = kind.name();
         let why = format!(
             "the {provider} provider cannot confine its sandboxes or route them to the egress \
              proxy, so the policy is not applied"
@@ -446,10 +445,9 @@ mod tests {
             network: Some(Network::none()),
             ..crate::Provisioning::default()
         };
-        let microsandbox = Provider::Microsandbox(crate::SandboxOptions {
-            image: "img".into(),
-            ..crate::SandboxOptions::default()
-        });
+        let microsandbox: Provider =
+            serde_json::from_value(serde_json::json!({ "kind": "microsandbox", "image": "img" }))
+                .unwrap();
         match check(Some(&required), Some(&microsandbox)) {
             Err(crate::Error::Unsupported(why)) => {
                 assert!(

@@ -373,46 +373,37 @@ pub(crate) struct Lifecycle {
     pub max_paused: u32,
 }
 
-/// The lifecycle `provider` asks for; `None` for a local harness.
-pub(crate) fn lifecycle(provider: Option<&Provider>) -> Option<Lifecycle> {
-    let (keep, snapshots, max_paused) = match provider? {
-        Provider::Local => return None,
-        Provider::Microsandbox(o) => (o.keep, o.snapshots, o.max_paused),
-        Provider::Substrate(o) => (o.keep, o.snapshots, o.max_paused),
-        // A recipe's machine has no checkpoints to keep.
-        Provider::Recipe(o) => (o.keep, Some(0), o.max_paused),
-    };
-    Some(Lifecycle {
-        keep: keep == SandboxKeep::Pause,
-        snapshots: snapshots.unwrap_or(DEFAULT_SNAPSHOTS),
-        max_paused: max_paused.unwrap_or(DEFAULT_MAX_PAUSED),
-    })
+impl Lifecycle {
+    /// What provider options with these settings ask for; `snapshots` and
+    /// `max_paused` default when unset.
+    pub(crate) fn of(
+        keep: SandboxKeep,
+        snapshots: Option<u32>,
+        max_paused: Option<u32>,
+    ) -> Lifecycle {
+        Lifecycle {
+            keep: keep == SandboxKeep::Pause,
+            snapshots: snapshots.unwrap_or(DEFAULT_SNAPSHOTS),
+            max_paused: max_paused.unwrap_or(DEFAULT_MAX_PAUSED),
+        }
+    }
 }
 
-/// `microsandbox` or `substrate`.
+/// The lifecycle `provider` asks for; `None` for a local harness.
+pub(crate) fn lifecycle(provider: Option<&Provider>) -> Option<Lifecycle> {
+    crate::providers::of(provider).lifecycle()
+}
+
+/// `local`, `microsandbox`, `substrate` or `recipe`.
 pub(crate) fn provider_name(provider: &Provider) -> &'static str {
-    match provider {
-        Provider::Local => "local",
-        Provider::Microsandbox(_) => "microsandbox",
-        Provider::Substrate(_) => "substrate",
-        Provider::Recipe(_) => "recipe",
-    }
+    provider.kind().name()
 }
 
 /// Which provider, and where, holds a row: sandboxes and snapshots are
 /// only ever used through the same one. A Substrate tag belongs to its
 /// atespace and is created from with its template.
 pub(crate) fn provider_key(provider: &Provider) -> String {
-    match provider {
-        Provider::Substrate(o) => format!(
-            "substrate:{}/{}/{}",
-            o.endpoint.trim_end_matches('/'),
-            o.atespace(),
-            o.template
-        ),
-        Provider::Recipe(o) => format!("recipe:{}", o.name),
-        other => provider_name(other).to_owned(),
-    }
+    provider.kind().key()
 }
 
 /// Whether the provider could keep a sandbox: why not, otherwise.
@@ -464,13 +455,7 @@ fn named(stem: &str, suffix: &str, max: usize) -> String {
 /// ([`Yard::use_sandbox_provider`]) or the SDK's for Microsandbox, a signed
 /// client for Substrate.
 pub(crate) fn open(yard: &Yard, provider: &Provider) -> Result<Arc<dyn SandboxProvider>, String> {
-    match provider {
-        Provider::Local => Err("a local harness has no sandbox".into()),
-        Provider::Microsandbox(options) => crate::placement::microsandbox(yard, options),
-        Provider::Recipe(options) => Ok(crate::placement::recipe_provider(yard, options)),
-        Provider::Substrate(options) => crate::placement::substrate_signed(options)
-            .map(|p| Arc::new(p) as Arc<dyn SandboxProvider>),
-    }
+    provider.kind().open(yard)
 }
 
 /// A turn's sandbox, and where it came from.
