@@ -31,6 +31,9 @@ branchyard-substrate = { path = "../branchyard-substrate" }
 branchyard-workspace = { path = "../branchyard-workspace" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Enum text for stored columns (Display/EnumString derives), see
+# src/store_codec.rs. Already in Cargo.lock at this version.
+strum = { version = "0.28", features = ["derive"] }
 rusqlite = { version = "0.39", default-features = false, features = ["bundled"] }
 postgres = { version = "0.19", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["rt"] }

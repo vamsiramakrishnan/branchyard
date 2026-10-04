@@ -41,6 +41,8 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use branchyard::store_codec::{deadline, from_db_opt, millis_saturating, to_db, to_db_opt};
+
 use crate::config::{Principal, DEFAULT_TENANT};
 
 /// An idempotency key as the server scopes it: per authenticated caller and
@@ -669,14 +671,17 @@ pub fn worker_services(
             service.registered_ms = seen;
             service.renewed_ms = seen;
             service.changed_ms = seen;
-            service.lease_until_ms = seen + within.as_millis() as u64;
+            service.lease_until_ms = deadline(seen, within);
             service
         })
         .collect()
 }
 
+/// A duration in milliseconds for scheduling arithmetic, where one past
+/// `i64::MAX` just means "effectively forever". Stored values go through
+/// `branchyard::store_codec` instead.
 fn ms(duration: Duration) -> i64 {
-    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+    millis_saturating(duration)
 }
 
 fn parse_op(id: &str, body: &str, place: &str) -> io::Result<StoredOperation> {
@@ -1334,7 +1339,7 @@ impl OperationStore for SqliteStore {
                     serde_json::to_string(&op.requires)?,
                     op.priority,
                     operation.tenant(),
-                    op.created_at_ms as i64
+                    to_db("created_at_ms", op.created_at_ms)?
                 ],
             )
             .map_err(sql)?;
@@ -1403,7 +1408,7 @@ impl OperationStore for SqliteStore {
                     worker.host,
                     worker.pid,
                     worker.start,
-                    clock + ms(lease)
+                    clock.saturating_add(ms(lease))
                 ],
             )
             .map_err(sql)?;
@@ -1518,7 +1523,7 @@ impl OperationStore for SqliteStore {
             )
             .map_err(sql)?;
         let rows = statement
-            .query_map([now - ms(within)], |r| {
+            .query_map([now.saturating_sub(ms(within))], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -1557,7 +1562,7 @@ impl OperationStore for SqliteStore {
             .execute(
                 "UPDATE operation_queue SET lease_until = ?4 \
                  WHERE id = ?1 AND attempt = ?2 AND worker = ?3",
-                rusqlite::params![id, fence, worker.id, sqlite_now() + ms(lease)],
+                rusqlite::params![id, fence, worker.id, sqlite_now().saturating_add(ms(lease))],
             )
             .map_err(sql)?;
         Ok(changed == 1)
@@ -1579,7 +1584,7 @@ impl OperationStore for SqliteStore {
                         operation.operation.id,
                         fence,
                         worker.id,
-                        sqlite_now() + ms(lease)
+                        sqlite_now().saturating_add(ms(lease))
                     ],
                 )
                 .map_err(sql)?;
@@ -1665,7 +1670,7 @@ impl OperationStore for SqliteStore {
             tx.execute(
                 "INSERT INTO branch_locks (repo, branch, holder, token, expires_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![repo, branch, holder, token, now + ms(ttl)],
+                rusqlite::params![repo, branch, holder, token, now.saturating_add(ms(ttl))],
             )
             .map_err(sql)?;
             Ok((None, true))
@@ -1703,31 +1708,34 @@ impl OperationStore for SqliteStore {
             )
             .optional()
             .map_err(sql)?;
-        Ok(found.map(|c| c as u64))
+        Ok(from_db_opt("cursor", found)?)
     }
 
     fn save_webhook_cursor(&self, id: &str, cursor: u64) -> io::Result<()> {
+        let cursor = to_db("cursor", cursor)?;
         self.conn()
             .execute(
                 "INSERT INTO webhook_cursors (id, cursor) VALUES (?1, ?2) \
                  ON CONFLICT (id) DO UPDATE SET cursor = excluded.cursor",
-                rusqlite::params![id, cursor as i64],
+                rusqlite::params![id, cursor],
             )
             .map_err(sql)?;
         Ok(())
     }
 
     fn claim_webhook_cursor(&self, id: &str, expected: Option<u64>, next: u64) -> io::Result<bool> {
+        let next = to_db("next", next)?;
+        let expected = to_db_opt("expected", expected)?;
         let conn = self.conn();
         let changed = match expected {
             None => conn.execute(
                 "INSERT INTO webhook_cursors (id, cursor) VALUES (?1, ?2) \
                  ON CONFLICT (id) DO NOTHING",
-                rusqlite::params![id, next as i64],
+                rusqlite::params![id, next],
             ),
             Some(from) => conn.execute(
                 "UPDATE webhook_cursors SET cursor = ?3 WHERE id = ?1 AND cursor = ?2",
-                rusqlite::params![id, from as i64, next as i64],
+                rusqlite::params![id, from, next],
             ),
         }
         .map_err(sql)?;
@@ -2162,7 +2170,7 @@ impl OperationStore for PostgresStore {
         let locks = lock_order(&operation.locks);
         let tenant = operation.tenant().to_owned();
         let requires = op.requires.clone();
-        let (priority, enqueued_ms) = (op.priority, op.created_at_ms as i64);
+        let (priority, enqueued_ms) = (op.priority, to_db("created_at_ms", op.created_at_ms)?);
         let admitted = self.with(move |c| {
             let mut tx = c.transaction()?;
             if !quota.is_empty() {
@@ -2604,15 +2612,13 @@ impl OperationStore for PostgresStore {
                 &[&id],
             )
         })?;
-        Ok(rows.first().map(|row| {
-            let cursor: i64 = row.get(0);
-            cursor as u64
-        }))
+        let cursor = rows.first().map(|row| row.get::<_, i64>(0));
+        Ok(from_db_opt("cursor", cursor)?)
     }
 
     fn save_webhook_cursor(&self, id: &str, cursor: u64) -> io::Result<()> {
         let id = id.to_owned();
-        let cursor = cursor as i64;
+        let cursor = to_db("cursor", cursor)?;
         self.with(move |c| {
             c.execute(
                 "INSERT INTO by_webhook_cursors (id, cursor) VALUES ($1, $2) \
@@ -2624,7 +2630,8 @@ impl OperationStore for PostgresStore {
     }
 
     fn claim_webhook_cursor(&self, id: &str, expected: Option<u64>, next: u64) -> io::Result<bool> {
-        let (id, next) = (id.to_owned(), next as i64);
+        let (id, next) = (id.to_owned(), to_db("next", next)?);
+        let expected = to_db_opt("expected", expected)?;
         let changed = self.with(move |c| match expected {
             None => c.execute(
                 "INSERT INTO by_webhook_cursors (id, cursor) VALUES ($1, $2) \
@@ -2633,7 +2640,7 @@ impl OperationStore for PostgresStore {
             ),
             Some(from) => c.execute(
                 "UPDATE by_webhook_cursors SET cursor = $3 WHERE id = $1 AND cursor = $2",
-                &[&id, &(from as i64), &next],
+                &[&id, &from, &next],
             ),
         })?;
         Ok(changed == 1)

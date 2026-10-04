@@ -29,6 +29,8 @@ use crate::{
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(strum::Display, strum::EnumIter, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum TaskKind {
     Bugfix,
     Feature,
@@ -56,23 +58,7 @@ impl TaskKind {
     ];
 
     pub fn as_str(self) -> &'static str {
-        match self {
-            TaskKind::Bugfix => "bugfix",
-            TaskKind::Feature => "feature",
-            TaskKind::Refactor => "refactor",
-            TaskKind::Review => "review",
-            TaskKind::Research => "research",
-            TaskKind::Docs => "docs",
-            TaskKind::Migration => "migration",
-            TaskKind::Tests => "tests",
-            TaskKind::Other => "other",
-        }
-    }
-}
-
-impl fmt::Display for TaskKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        self.into()
     }
 }
 
@@ -516,6 +502,8 @@ pub fn recorded_route(events: &[RecordedEvent]) -> Option<RouteDecision> {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(strum::Display, strum::EnumString, strum::EnumIter, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum BranchOutcome {
     Merged,
     JudgedBest,
@@ -528,26 +516,11 @@ pub enum BranchOutcome {
 
 impl BranchOutcome {
     pub fn as_str(self) -> &'static str {
-        match self {
-            BranchOutcome::Merged => "merged",
-            BranchOutcome::JudgedBest => "judged_best",
-            BranchOutcome::Ready => "ready",
-            BranchOutcome::Failed => "failed",
-            BranchOutcome::Interrupted => "interrupted",
-        }
+        self.into()
     }
 
     pub fn parse(text: &str) -> Result<BranchOutcome, Error> {
-        [
-            BranchOutcome::Merged,
-            BranchOutcome::JudgedBest,
-            BranchOutcome::Ready,
-            BranchOutcome::Failed,
-            BranchOutcome::Interrupted,
-        ]
-        .into_iter()
-        .find(|o| o.as_str() == text)
-        .ok_or_else(|| Error::State(format!("unknown outcome {text:?}")))
+        Ok(crate::store_codec::parse_text("outcome", text)?)
     }
 
     /// The outcome a branch's status says, or `None` while it has not

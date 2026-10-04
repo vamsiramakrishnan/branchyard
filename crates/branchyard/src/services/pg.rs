@@ -10,6 +10,7 @@ use std::io;
 use postgres::Transaction;
 
 use super::{decode, encode, Rows, Service, ServiceState};
+use crate::store_codec::{from_db, to_db};
 
 /// The registry's objects and the statements that make them.
 pub const SCHEMA: &[(&str, &str)] = &[
@@ -46,20 +47,18 @@ fn sql(error: postgres::Error) -> io::Error {
     }
 }
 
-fn uint(value: i64) -> u64 {
-    u64::try_from(value).unwrap_or(0)
-}
-
-fn int(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
-
 const COLUMNS: &str = "body, state, lease_until, changed, seq";
 
 fn service(row: &postgres::Row) -> io::Result<Service> {
     let (body, state, lease, changed, seq): (String, String, i64, i64, i64) =
         (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4));
-    decode(&body, &state, uint(lease), uint(changed), uint(seq))
+    decode(
+        &body,
+        &state,
+        from_db("lease", lease)?,
+        from_db("changed", changed)?,
+        from_db("seq", seq)?,
+    )
 }
 
 /// The registry's rows inside one PostgreSQL transaction.
@@ -75,7 +74,7 @@ impl Rows for PgRows<'_, '_> {
                 &[],
             )
             .map_err(sql)?;
-        Ok(uint(row.get(0)))
+        Ok(from_db("seq", row.get(0))?)
     }
 
     fn head(&mut self) -> io::Result<u64> {
@@ -83,7 +82,10 @@ impl Rows for PgRows<'_, '_> {
             .0
             .query("SELECT seq FROM by_service_seq WHERE id = 1", &[])
             .map_err(sql)?;
-        Ok(rows.first().map_or(0, |r| uint(r.get(0))))
+        Ok(from_db(
+            "seq",
+            rows.first().map_or(0, |r| r.get::<_, i64>(0)),
+        )?)
     }
 
     fn get(&mut self, id: &str) -> io::Result<Option<Service>> {
@@ -111,9 +113,9 @@ impl Rows for PgRows<'_, '_> {
                     &s.kind,
                     &s.owner.id,
                     &s.state.as_str(),
-                    &int(s.lease_until_ms),
-                    &int(s.changed_ms),
-                    &int(s.seq),
+                    &to_db("lease_until_ms", s.lease_until_ms)?,
+                    &to_db("changed_ms", s.changed_ms)?,
+                    &to_db("seq", s.seq)?,
                     &body,
                 ],
             )
@@ -137,7 +139,7 @@ impl Rows for PgRows<'_, '_> {
             .0
             .query(
                 &format!("SELECT {COLUMNS} FROM by_services WHERE seq > $1 ORDER BY seq"),
-                &[&int(seq)],
+                &[&to_db("seq", seq)?],
             )
             .map_err(sql)?;
         rows.iter().map(service).collect()
@@ -151,7 +153,7 @@ impl Rows for PgRows<'_, '_> {
                 &[
                     &ServiceState::Left.as_str(),
                     &ServiceState::Reclaimed.as_str(),
-                    &int(before_ms),
+                    &to_db("before_ms", before_ms)?,
                 ],
             )
             .map_err(sql)?;

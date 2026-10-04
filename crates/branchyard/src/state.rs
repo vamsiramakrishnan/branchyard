@@ -305,24 +305,32 @@ pub(crate) struct SteerRow {
 }
 
 impl SteerState {
-    /// The stored state name and reason.
+    /// The stored state name (the text serde puts in `state`) and reason.
     pub(crate) fn columns(&self) -> (&'static str, Option<&str>) {
-        match self {
-            SteerState::Pending => ("pending", None),
-            SteerState::Delivered => ("delivered", None),
-            SteerState::Accepted => ("accepted", None),
-            SteerState::Refused { reason } => ("refused", Some(reason)),
-        }
+        let reason = match self {
+            SteerState::Refused { reason } => Some(reason.as_str()),
+            _ => None,
+        };
+        (self.into(), reason)
     }
 
-    pub(crate) fn from_columns(state: &str, reason: Option<String>) -> SteerState {
+    /// The state a row stores; an error for a name no state has, rather
+    /// than reading it as a refusal.
+    pub(crate) fn from_columns(
+        state: &str,
+        reason: Option<String>,
+    ) -> Result<SteerState, crate::store_codec::CodecError> {
         match state {
-            "pending" => SteerState::Pending,
-            "delivered" => SteerState::Delivered,
-            "accepted" => SteerState::Accepted,
-            _ => SteerState::Refused {
+            "pending" => Ok(SteerState::Pending),
+            "delivered" => Ok(SteerState::Delivered),
+            "accepted" => Ok(SteerState::Accepted),
+            "refused" => Ok(SteerState::Refused {
                 reason: reason.unwrap_or_default(),
-            },
+            }),
+            other => Err(crate::store_codec::CodecError::UnknownText {
+                field: "steer state",
+                text: other.to_owned(),
+            }),
         }
     }
 }

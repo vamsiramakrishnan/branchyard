@@ -172,7 +172,9 @@ fn event_value(e: &TriggerEvent, field: &str) -> String {
 
 /// RFC 3339 in UTC, to the second.
 pub fn rfc3339(ms: u64) -> String {
-    jiff::Timestamp::from_millisecond(i64::try_from(ms).unwrap_or(i64::MAX))
+    i64::try_from(ms)
+        .ok()
+        .and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
         .map(|t| t.strftime("%Y-%m-%dT%H:%M:%SZ").to_string())
         .unwrap_or_default()
 }

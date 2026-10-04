@@ -656,6 +656,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "strum 0.28.0",
  "tempfile",
  "tokio",
  "toml_edit",
