@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Named best-effort steps, poison-tolerant locks and panic-reporting threads, shared by every Branchyard crate"
+description = "Named best-effort steps, poison-tolerant locks, panic-reporting threads, the one clock, ids and seedable randomness, shared by every Branchyard crate"
 
 [features]
 # `testing::capture`, a tracing subscriber that collects events, for the tests
@@ -12,7 +12,10 @@ description = "Named best-effort steps, poison-tolerant locks and panic-reportin
 testing = []
 
 [dependencies]
+getrandom = "0.4"
+jiff = { version = "0.2.37", default-features = false, features = ["std"] }
 tracing = "0.1.44"
+ulid = { version = "3.0.0", default-features = false }
 
 [target."cfg(unix)".dependencies]
 rustix = { version = "1.1", default-features = false, features = ["std", "process"] }

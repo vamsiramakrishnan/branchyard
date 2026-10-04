@@ -1,4 +1,4 @@
-//! Failure handling every Branchyard crate shares.
+//! Failure handling, time and randomness every Branchyard crate shares.
 //!
 //! Some failures are acceptable (a temp directory that cannot be removed, a
 //! process that already exited, a lock whose holder panicked) but none is
@@ -17,13 +17,20 @@
 //!   caller supplies instead of leaving it on stderr, and [`join_reporting`]
 //!   waits for one without dropping a panic that ended it.
 //!
+//! - [`time`] is the one clock and the one set of date formats (on `jiff`),
+//!   [`rng`] the one seedable generator and the system entropy (on
+//!   `getrandom`), and [`new_ulid`] mints ids from both.
+//!
 //! Nothing here panics, so all of it is safe on a `Drop` path. See
 //! CONTRIBUTING.md ("Failures that may be ignored").
 
 mod best_effort;
+mod id;
 mod locks;
 mod process;
+pub mod rng;
 mod threads;
+pub mod time;
 
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -31,6 +38,7 @@ pub mod testing;
 pub use best_effort::{
     best_effort, cleanup_dir, cleanup_file, set_failure_sink, Failure, FailureSink,
 };
+pub use id::{new_ulid, ulid_from_parts};
 pub use locks::{CondvarExt, LockExt, RwLockExt};
 pub use process::{kill_group, kill_process, terminate_group};
 pub use threads::{join_reporting, spawn_named, PanicReport};
