@@ -634,29 +634,12 @@ pub fn parse_headers(text: &str) -> Result<Vec<(String, String)>, String> {
         let (key, value) = pair
             .split_once('=')
             .ok_or_else(|| format!("OTLP header {pair:?} is not key=value"))?;
-        headers.push((percent_decode(key.trim()), percent_decode(value.trim())));
+        headers.push((
+            branchyard_client::http::decode(key.trim()),
+            branchyard_client::http::decode(value.trim()),
+        ));
     }
     Ok(headers)
-}
-
-/// `%XX` escapes; everything else, `+` included, as it is.
-fn percent_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let pair = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
-            if let Some(byte) = pair.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// OTLP's trace messages (opentelemetry-proto, `trace/v1` and its
@@ -885,6 +868,22 @@ pub mod otlp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shared percent-decoding cases (see
+    /// `branchyard_client::http`), through OTLP header parsing: a trailing
+    /// escape decodes, malformed ones and `+` stay as written.
+    #[test]
+    fn otlp_headers_percent_decode_like_every_other_call_site() {
+        let headers = parse_headers("a%41=b%41, k=%zz%4+%C3%A9%E2%82%AC, t=x%41").unwrap();
+        assert_eq!(
+            headers,
+            [
+                ("aA".to_owned(), "bA".to_owned()),
+                ("k".to_owned(), "%zz%4+\u{e9}\u{20ac}".to_owned()),
+                ("t".to_owned(), "xA".to_owned()),
+            ]
+        );
+    }
 
     #[test]
     fn traceparent_round_trips_and_malformed_headers_are_refused() {

@@ -343,7 +343,7 @@ impl ObjectStore for GcsStore {
         if data.len() <= self.part_size {
             return self.put_if_absent(key, data);
         }
-        let digest = crate::util::hex(&blake3::hash(data).as_bytes()[..16]);
+        let digest = hex::encode(&blake3::hash(data).as_bytes()[..16]);
         let saved: Option<Session> = journal
             .load(key)
             .and_then(|s| serde_json::from_str(&s).ok())

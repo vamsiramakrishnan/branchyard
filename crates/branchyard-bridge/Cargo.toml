@@ -8,7 +8,9 @@ description = "The in-sandbox exec bridge for sandboxes without an exec API, and
 
 [dependencies]
 branchyard-sandbox = { path = "../branchyard-sandbox" }
+base64 = "0.22"
 clap = { version = "4.6", features = ["derive"] }
+hex = "0.4"
 libc = "0.2"
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

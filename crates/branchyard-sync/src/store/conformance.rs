@@ -24,7 +24,7 @@ pub struct Options {
 /// Run every check against `store`.
 pub fn check(store: Arc<dyn ObjectStore>, options: Options) {
     let large = options.large;
-    let run = crate::util::hex(&crate::util::random_bytes(6).unwrap());
+    let run = hex::encode(crate::util::random_bytes(6).unwrap());
     let p = format!("conformance-{run}");
     let key = |k: &str| format!("{p}/{k}");
     let s = store.as_ref();

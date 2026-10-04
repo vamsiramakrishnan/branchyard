@@ -11,7 +11,7 @@ use ring::hmac;
 
 use crate::error::{Error, Result};
 use crate::http::{send, Request, Url};
-use crate::util::{b64, unb64, uri_decode, uri_encode};
+use crate::util::{b64, unb64, uri_encode};
 
 /// The Storage service version every request names.
 pub const VERSION: &str = "2021-08-06";
@@ -35,8 +35,8 @@ pub fn string_to_sign(request: &Request, account: &str) -> String {
     let mut params: Vec<(String, Vec<String>)> = Vec::new();
     for pair in request.url.query.split('&').filter(|p| !p.is_empty()) {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        let k = uri_decode(k, false).to_ascii_lowercase();
-        let v = uri_decode(v, false);
+        let k = branchyard_client::http::decode(k).to_ascii_lowercase();
+        let v = branchyard_client::http::decode(v);
         match params.iter_mut().find(|(name, _)| *name == k) {
             Some((_, values)) => values.push(v),
             None => params.push((k, vec![v])),

@@ -149,7 +149,7 @@ impl AzureStore {
 
     fn block_id(key: &str, index: usize) -> String {
         // Every ID of one blob must be the same length.
-        let tag = crate::util::hex(&blake3::hash(key.as_bytes()).as_bytes()[..6]);
+        let tag = hex::encode(&blake3::hash(key.as_bytes()).as_bytes()[..6]);
         b64(format!("{tag}-{index:08}").as_bytes())
     }
 }
@@ -315,7 +315,7 @@ impl ObjectStore for AzureStore {
         if self.stat(key)?.is_some() {
             return Err(Error::precondition(format!("{key} already exists")));
         }
-        let digest = crate::util::hex(&blake3::hash(data).as_bytes()[..16]);
+        let digest = hex::encode(&blake3::hash(data).as_bytes()[..16]);
         let mut staged: Staged = journal
             .load(key)
             .and_then(|s| serde_json::from_str(&s).ok())

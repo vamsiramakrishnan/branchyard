@@ -69,32 +69,11 @@ fn verify(secret: &str, parts: &[&[u8]], hex_signature: &str) -> bool {
     mac.verify_slice(&given).is_ok()
 }
 
-/// `application/x-www-form-urlencoded` value bytes, decoded.
+/// `application/x-www-form-urlencoded` value bytes, decoded; a value ends
+/// at the next `&`.
 pub fn form_decode(value: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(value.len());
-    let mut i = 0;
-    while i < value.len() {
-        match value[i] {
-            b'&' => break,
-            b'+' => out.push(b' '),
-            b'%' => {
-                let hex = value
-                    .get(i + 1..i + 3)
-                    .and_then(|h| std::str::from_utf8(h).ok());
-                match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                    Some(byte) => {
-                        out.push(byte);
-                        i += 3;
-                        continue;
-                    }
-                    None => out.push(b'%'),
-                }
-            }
-            byte => out.push(byte),
-        }
-        i += 1;
-    }
-    out
+    let value = value.split(|b| *b == b'&').next().unwrap_or_default();
+    branchyard_client::http::decode_form_bytes(value)
 }
 
 fn body_hash(body: &[u8]) -> String {
@@ -461,6 +440,13 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    #[test]
+    fn form_values_decode_like_every_other_call_site() {
+        assert_eq!(form_decode(b"a+b%2Bc%41"), b"a b+cA");
+        assert_eq!(form_decode(b"%zz%4"), b"%zz%4");
+        assert_eq!(form_decode(b"%C3%A9&next=1"), "\u{e9}".as_bytes());
+    }
+
     fn headers(pairs: &[(&str, String)]) -> impl Fn(&str) -> Option<String> {
         let map: BTreeMap<String, String> = pairs
             .iter()
@@ -544,13 +530,11 @@ mod tests {
     fn github_form_encoded_payloads_are_read() {
         let json = serde_json::to_string(&issue_labeled()).unwrap();
         let mut body = b"payload=".to_vec();
-        for byte in json.bytes() {
-            match byte {
-                b' ' => body.push(b'+'),
-                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' => body.push(byte),
-                other => body.extend(format!("%{other:02X}").bytes()),
-            }
-        }
+        body.extend(
+            branchyard_client::http::encode(&json)
+                .replace("%20", "+")
+                .bytes(),
+        );
         let h = headers(&[
             (
                 "x-hub-signature-256",

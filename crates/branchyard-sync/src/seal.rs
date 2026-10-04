@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Kind, Result};
 use crate::kms::{aead_open, aead_seal, Wrapper};
 use crate::store::ObjectStore;
-use crate::util::{b64, hex, random_bytes, unb64};
+use crate::util::{b64, random_bytes, unb64};
 
 pub const KEYRING: &str = "keyring.json";
 const MAGIC: &[u8; 4] = b"BYS1";
@@ -234,7 +234,7 @@ impl Sealer {
             Mode::Sealed { names, .. } => {
                 let mut input = b"task\0".to_vec();
                 input.extend_from_slice(task.as_bytes());
-                hex(&blake3::keyed_hash(names, &input).as_bytes()[..20])
+                hex::encode(&blake3::keyed_hash(names, &input).as_bytes()[..20])
             }
         }
     }
@@ -247,7 +247,7 @@ impl Sealer {
                 let mut input = label.as_bytes().to_vec();
                 input.push(0);
                 input.extend_from_slice(text.as_bytes());
-                hex(&blake3::keyed_hash(names, &input).as_bytes()[..20])
+                hex::encode(&blake3::keyed_hash(names, &input).as_bytes()[..20])
             }
         }
     }

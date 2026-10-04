@@ -231,16 +231,7 @@ impl Tracker {
 
 /// `text` percent-encoded for a URL fragment segment.
 fn url_part(text: &str) -> String {
-    let mut out = String::new();
-    for b in text.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+    branchyard_client::http::encode(text)
 }
 
 // ---------------------------------------------------------------------

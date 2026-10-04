@@ -66,9 +66,8 @@ impl GitStore {
                     .map(PathBuf::from)
                     .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
                     .unwrap_or_else(std::env::temp_dir);
-                base.join("branchyard/sync-git").join(crate::util::hex(
-                    &blake3::hash(url.as_bytes()).as_bytes()[..12],
-                ))
+                base.join("branchyard/sync-git")
+                    .join(hex::encode(&blake3::hash(url.as_bytes()).as_bytes()[..12]))
             }
         };
         if !cache.join("HEAD").exists() {
@@ -90,10 +89,7 @@ impl GitStore {
         )?;
         // A nonce in the message makes every write a new commit, so a
         // write of the same bytes is still a change git's lease checks.
-        let message = format!(
-            "{key}\n\n{}",
-            crate::util::hex(&crate::util::random_bytes(8)?)
-        );
+        let message = format!("{key}\n\n{}", hex::encode(&crate::util::random_bytes(8)?));
         let commit = run(
             &self.cache,
             &["commit-tree", tree.trim(), "-m", &message],

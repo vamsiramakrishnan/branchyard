@@ -125,10 +125,7 @@ pub fn dir() -> PathBuf {
 }
 
 fn sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn read_manifest(dir: &Path) -> Result<Option<Manifest>, String> {

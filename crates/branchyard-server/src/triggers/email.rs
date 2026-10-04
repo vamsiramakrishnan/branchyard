@@ -1052,15 +1052,7 @@ mod tests {
             }
             body.push_str(name);
             body.push('=');
-            for byte in value.bytes() {
-                match byte {
-                    b' ' => body.push('+'),
-                    b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'.' => {
-                        body.push(byte as char)
-                    }
-                    other => body.push_str(&format!("%{other:02X}")),
-                }
-            }
+            body.push_str(&branchyard_client::http::encode(value).replace("%20", "+"));
         }
         body.into_bytes()
     }

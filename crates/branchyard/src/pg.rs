@@ -439,15 +439,12 @@ impl fmt::Debug for Postgres {
 
 /// `url` without a password.
 pub(crate) fn redact(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_owned();
-    };
-    match rest.split_once('@') {
-        Some((user, host)) => match user.split_once(':') {
-            Some((name, _)) => format!("{scheme}://{name}:***@{host}"),
-            None => url.to_owned(),
+    match url::Url::parse(url) {
+        Ok(mut parsed) if parsed.password().is_some() => match parsed.set_password(Some("***")) {
+            Ok(()) => parsed.to_string(),
+            Err(()) => url.to_owned(),
         },
-        None => url.to_owned(),
+        _ => url.to_owned(),
     }
 }
 
@@ -3332,5 +3329,23 @@ impl PoolBackend for Postgres {
                 .map_err(db("pool slot"))?;
             Ok(changed == 1)
         })
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact;
+
+    #[test]
+    fn a_password_is_hidden_and_a_url_without_one_is_left_alone() {
+        assert_eq!(
+            redact("postgres://by:s3cret@db.example:5432/yard"),
+            "postgres://by:***@db.example:5432/yard"
+        );
+        assert_eq!(
+            redact("postgres://by@db.example/yard"),
+            "postgres://by@db.example/yard"
+        );
+        assert_eq!(redact("host=db user=by"), "host=db user=by");
     }
 }

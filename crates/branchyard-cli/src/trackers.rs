@@ -163,17 +163,21 @@ pub fn parse(text: &str) -> Result<Option<IssueRef>, String> {
             };
         }
     }
-    let Some(rest) = text
-        .strip_prefix("https://")
-        .or_else(|| text.strip_prefix("http://"))
-    else {
+    if !(text.starts_with("https://") || text.starts_with("http://")) {
         return Ok(None);
+    }
+    let Ok(url) = url::Url::parse(text) else {
+        return bad("not a URL");
     };
-    let scheme = &text[..text.len() - rest.len()];
-    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
-    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
-    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-    let site = format!("{scheme}{host}");
+    let host = url.host_str().unwrap_or_default();
+    let parts: Vec<&str> = url
+        .path_segments()
+        .map(|segments| segments.filter(|p| !p.is_empty()).collect())
+        .unwrap_or_default();
+    let site = match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    };
     if host == "linear.app" || host.ends_with(".linear.app") {
         // https://linear.app/<workspace>/issue/ENG-123/<slug>
         return match parts.iter().position(|p| *p == "issue") {
@@ -318,20 +322,8 @@ fn refused(tracker: Tracker, status: u16, reference: &str) -> String {
 
 /// Base64 for HTTP Basic authentication.
 fn base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let n = (chunk[0] as u32) << 16
-            | (*chunk.get(1).unwrap_or(&0) as u32) << 8
-            | *chunk.get(2).unwrap_or(&0) as u32;
-        for i in 0..4 {
-            match i <= chunk.len() {
-                true => out.push(TABLE[(n >> (18 - 6 * i) & 63) as usize] as char),
-                false => out.push('='),
-            }
-        }
-    }
-    out
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 fn number_in(key: &str) -> u64 {
@@ -418,14 +410,7 @@ fn text(value: &Value) -> String {
 
 /// Percent-encode a GitLab project path for `/projects/:id`.
 fn encode_path(path: &str) -> String {
-    path.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
+    branchyard_client::http::encode(path)
 }
 
 /// The object a gateway tool returned for the issue: the API's own answer,

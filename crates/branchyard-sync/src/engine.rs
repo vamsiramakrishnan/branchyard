@@ -600,7 +600,7 @@ impl Remote {
     /// the two proceeds.
     pub fn begin_write(&self) -> Result<Mark> {
         let sealer = self.write_sealer()?;
-        let nonce = crate::util::hex(&crate::util::random_bytes(8)?);
+        let nonce = hex::encode(&crate::util::random_bytes(8)?);
         let key = format!(
             "locks/writers/{}-{nonce}",
             sealer.keyed("device", &self.settings.device)
@@ -967,7 +967,7 @@ impl Remote {
             ..SyncReport::default()
         };
         let mut mark: Option<Mark> = None;
-        let commit = crate::util::hex(&crate::util::random_bytes(12)?);
+        let commit = hex::encode(&crate::util::random_bytes(12)?);
         let result = (|| -> Result<()> {
             for round in 1..=self.settings.max_rounds {
                 report.rounds = round;

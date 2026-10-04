@@ -40,6 +40,11 @@ glob = "0.3"
 # and their base64url encoding. Both already in Cargo.lock.
 ring = "0.17"
 base64 = "0.22"
+# The deterministic bundle writer and reader (src/tarball.rs). Already in Cargo.lock.
+tar = { version = "0.4", default-features = false }
+percent-encoding = "2"
+hex = "0.4"
+url = "2"
 # The model gateway (docs/model-gateway.md): its HTTP/1.1 parsing, TLS to
 # backends with the Mozilla roots, and catalog/pricing.toml. All already
 # in Cargo.lock.
