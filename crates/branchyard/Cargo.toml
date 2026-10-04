@@ -49,6 +49,7 @@ webpki-roots = "1"
 toml_edit = { version = "0.25", default-features = false, features = ["parse", "serde"] }
 
 [dev-dependencies]
+branchyard-testkit = { path = "../branchyard-testkit" }
 branchyard-substrate = { path = "../branchyard-substrate", features = ["fake"] }
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
 tempfile = "3.27.0"

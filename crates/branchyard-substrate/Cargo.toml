@@ -26,6 +26,7 @@ protoc-bin-vendored = "3"
 tonic-prost-build = "0.14"
 
 [dev-dependencies]
+branchyard-testkit = { path = "../branchyard-testkit" }
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
 branchyard-substrate = { path = ".", features = ["fake"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
