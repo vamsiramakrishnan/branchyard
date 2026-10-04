@@ -16,7 +16,9 @@ use crate::LockExt as _;
 /// One event a test subscriber saw.
 #[derive(Clone, Debug)]
 pub struct Captured {
+    /// The event's level.
     pub level: Level,
+    /// The event's target (its module path unless set).
     pub target: String,
     /// The event's fields, as `name=value` pairs joined by spaces, with the
     /// message first.

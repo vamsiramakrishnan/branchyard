@@ -17,6 +17,7 @@
 //!
 //! It is a dev-dependency only; nothing in a release build links it. See
 //! "Writing tests" in CONTRIBUTING.md.
+#![warn(missing_docs)]
 
 mod agent;
 mod mock;

@@ -6,7 +6,9 @@ use std::thread::JoinHandle;
 /// A thread that panicked: its name and the panic's message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PanicReport {
+    /// The panicking thread's name.
     pub thread: String,
+    /// The panic's message, or a note when it was not a string.
     pub message: String,
 }
 

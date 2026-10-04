@@ -33,6 +33,7 @@ pub const fn splitmix64(state: u64) -> (u64, u64) {
 pub struct SplitMix64(u64);
 
 impl SplitMix64 {
+    /// A generator that replays the same sequence for the same `seed`.
     pub fn new(seed: u64) -> SplitMix64 {
         SplitMix64(seed)
     }
@@ -43,6 +44,7 @@ impl SplitMix64 {
         SplitMix64(fresh_seed())
     }
 
+    /// The next 64 random bits.
     pub fn next_u64(&mut self) -> u64 {
         let (state, word) = splitmix64(self.0);
         self.0 = state;

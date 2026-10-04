@@ -33,20 +33,25 @@ const MAX_BODY: usize = 64 * 1024 * 1024;
 /// One request the server received.
 #[derive(Clone, Debug)]
 pub struct Request {
+    /// The request method, as sent.
     pub method: String,
+    /// The request target: the path and any query.
     pub path: String,
     /// Header names are lower-cased.
     pub headers: BTreeMap<String, String>,
+    /// The request body, its framing undone.
     pub body: Vec<u8>,
 }
 
 impl Request {
+    /// The value of header `name`, matched without regard to case.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .get(&name.to_ascii_lowercase())
             .map(String::as_str)
     }
 
+    /// The body as text, invalid UTF-8 replaced.
     pub fn body_text(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
     }
@@ -67,8 +72,11 @@ impl Request {
 /// What the handler answers.
 #[derive(Clone, Debug)]
 pub struct Response {
+    /// The status code to answer with.
     pub status: u16,
+    /// Headers to send, in order, besides `Content-Length` and `Connection`.
     pub headers: Vec<(String, String)>,
+    /// The body to send.
     pub body: Vec<u8>,
     reply: Reply,
 }
@@ -84,6 +92,7 @@ enum Reply {
 }
 
 impl Response {
+    /// Answer `status` with `body` and no other headers.
     pub fn new(status: u16, body: impl Into<Vec<u8>>) -> Response {
         Response {
             status,
@@ -116,6 +125,7 @@ impl Response {
         Response::new(status, value.to_string()).header("Content-Type", "application/json")
     }
 
+    /// Add a response header.
     pub fn header(mut self, name: &str, value: &str) -> Response {
         self.headers.push((name.to_owned(), value.to_owned()));
         self
@@ -200,10 +210,12 @@ impl MockHttp {
         }
     }
 
+    /// The address the server listens on.
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
 
+    /// The port the server listens on.
     pub fn port(&self) -> u16 {
         self.addr.port()
     }

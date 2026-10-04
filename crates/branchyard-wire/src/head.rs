@@ -22,19 +22,26 @@ pub fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str
 /// A parsed request head.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestHead {
+    /// The request method, as sent.
     pub method: String,
+    /// The request target, as sent.
     pub target: String,
     /// The minor version: 0 for HTTP/1.0, 1 for HTTP/1.1.
     pub minor: u8,
+    /// The header fields, in order, values trimmed.
     pub headers: Headers,
 }
 
 /// A parsed response head.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseHead {
+    /// The status code.
     pub status: u16,
+    /// The reason phrase, possibly empty.
     pub reason: String,
+    /// The minor version: 0 for HTTP/1.0, 1 for HTTP/1.1.
     pub minor: u8,
+    /// The header fields, in order, values trimmed.
     pub headers: Headers,
 }
 

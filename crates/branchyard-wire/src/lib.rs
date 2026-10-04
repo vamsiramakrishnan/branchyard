@@ -20,6 +20,7 @@
 //! Nothing here defaults on malformed input: the answer is a typed
 //! [`WireError`]. Do not parse HTTP framing anywhere else; see
 //! `CONTRIBUTING.md` and `tools/check_wire.py`.
+#![warn(missing_docs)]
 
 mod body;
 mod build;

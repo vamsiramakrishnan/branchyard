@@ -21,10 +21,12 @@ impl Scratch {
         Scratch { dir, path }
     }
 
+    /// The directory, canonicalized.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// A path inside the directory.
     pub fn join(&self, name: impl AsRef<Path>) -> PathBuf {
         self.path.join(name)
     }

@@ -23,14 +23,19 @@ const QUIET: Duration = Duration::from_secs(600);
 /// A backend's base URL, parsed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
+    /// `https` (true) or `http` (false).
     pub tls: bool,
+    /// The host, without the brackets of an IPv6 literal.
     pub host: String,
+    /// The port, the scheme's default when none is written.
     pub port: u16,
     /// Its path, without a trailing slash, prefixed to every request's.
     pub prefix: String,
 }
 
 impl Target {
+    /// Parse a backend's base URL: `http` or `https`, a host, an optional port
+    /// and path, and no query, fragment or userinfo.
     pub fn parse(url: &str) -> Result<Target, String> {
         let url = wire::HttpUrl::parse(url)
             .and_then(wire::HttpUrl::without_query)

@@ -23,6 +23,7 @@
 //!
 //! Nothing here panics, so all of it is safe on a `Drop` path. See
 //! CONTRIBUTING.md ("Failures that may be ignored").
+#![warn(missing_docs)]
 
 mod best_effort;
 mod id;

@@ -12,7 +12,10 @@ pub enum WireError {
     /// The peer closed in the middle of a head.
     TruncatedHead,
     /// The head is longer than the limit the caller set.
-    HeadTooLarge { limit: usize },
+    HeadTooLarge {
+        /// The limit, in bytes.
+        limit: usize,
+    },
     /// More header fields than the codec holds.
     TooManyHeaders,
     /// The head does not parse; the text says where.
@@ -37,7 +40,12 @@ pub enum WireError {
     /// extensions), is empty, overflows `u64`, or is too long.
     BadChunkSize(String),
     /// A chunk larger than the cap.
-    ChunkTooLarge { size: u64, limit: u64 },
+    ChunkTooLarge {
+        /// The chunk's declared size.
+        size: u64,
+        /// The cap.
+        limit: u64,
+    },
     /// Chunk data not followed by CRLF.
     BadChunkTerminator,
     /// A trailer line that is not `name: value`, or trailers over the cap.
@@ -45,7 +53,10 @@ pub enum WireError {
     /// The body ended before its framing said it would.
     TruncatedBody(&'static str),
     /// A body longer than the caller's limit.
-    BodyTooLarge { limit: u64 },
+    BodyTooLarge {
+        /// The limit, in bytes.
+        limit: u64,
+    },
     /// A header name or value that cannot be written to the wire.
     BadHeader(String),
     /// A request method or target that cannot be written.
@@ -54,7 +65,9 @@ pub enum WireError {
     BadUrl(String),
     /// A transport error under the codec.
     Io {
+        /// What kind of I/O error it was.
         kind: io::ErrorKind,
+        /// The I/O error's message.
         message: String,
     },
 }

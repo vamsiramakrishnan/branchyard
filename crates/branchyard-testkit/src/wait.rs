@@ -55,6 +55,7 @@ pub fn scaled(timeout: Duration) -> Duration {
 /// What a check observed: either the condition holds (with what it found)
 /// or it does not (with a description of what was seen instead).
 pub trait Observation {
+    /// What `until` returns once the condition holds.
     type Output;
     /// `Ok` when the condition holds, else the last thing observed.
     fn settle(self) -> Result<Self::Output, String>;

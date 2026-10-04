@@ -18,6 +18,7 @@ pub struct Failure {
 /// writes them to an event log. It runs on whatever thread hit the failure,
 /// possibly inside a `Drop`, so it must be quick and must not block.
 pub trait FailureSink: Send + Sync {
+    /// Take note of one survived failure.
     fn record(&self, failure: &Failure);
 }
 

@@ -89,8 +89,10 @@ impl<T> LockExt<T> for Mutex<T> {
 
 /// [`LockExt`] for `RwLock`.
 pub trait RwLockExt<T> {
+    /// Read-lock, recovering (and logging once) if a writer panicked.
     #[track_caller]
     fn read_recovering(&self, name: &str) -> RwLockReadGuard<'_, T>;
+    /// Write-lock, recovering (and logging once) if a writer panicked.
     #[track_caller]
     fn write_recovering(&self, name: &str) -> RwLockWriteGuard<'_, T>;
 }
@@ -116,9 +118,11 @@ impl<T> RwLockExt<T> for RwLock<T> {
 /// A guard cannot reach its mutex to clear the poison flag, so a wait that
 /// meets poison logs each time until the next `lock_recovering` clears it.
 pub trait CondvarExt {
+    /// `Condvar::wait`, recovering the guard if the lock was poisoned.
     #[track_caller]
     fn wait_recovering<'a, T>(&self, guard: MutexGuard<'a, T>, name: &str) -> MutexGuard<'a, T>;
 
+    /// `Condvar::wait_timeout`, recovering the guard if the lock was poisoned.
     #[track_caller]
     fn wait_timeout_recovering<'a, T>(
         &self,
@@ -127,6 +131,8 @@ pub trait CondvarExt {
         name: &str,
     ) -> (MutexGuard<'a, T>, WaitTimeoutResult);
 
+    /// `Condvar::wait_timeout_while`, recovering the guard if the lock was
+    /// poisoned.
     #[track_caller]
     fn wait_timeout_while_recovering<'a, T, F: FnMut(&mut T) -> bool>(
         &self,

@@ -84,6 +84,7 @@ pub struct ChunkedReader<R> {
 }
 
 impl<R: BufRead> ChunkedReader<R> {
+    /// Decode the chunked body that `reader` is positioned at.
     pub fn new(reader: R) -> Self {
         ChunkedReader {
             reader,
@@ -244,6 +245,7 @@ pub struct LengthReader<R> {
 }
 
 impl<R: Read> LengthReader<R> {
+    /// Read exactly `length` bytes from `reader`, then end.
     pub fn new(reader: R, length: u64) -> Self {
         LengthReader {
             reader,
@@ -271,14 +273,18 @@ impl<R: Read> Read for LengthReader<R> {
 
 /// A message body with its framing undone.
 pub enum Body<R> {
+    /// No body.
     Empty,
+    /// A body of a declared `Content-Length`.
     Length(LengthReader<R>),
+    /// A `Transfer-Encoding: chunked` body.
     Chunked(ChunkedReader<R>),
     /// Until the connection closes.
     Eof(R),
 }
 
 impl<R: BufRead> Body<R> {
+    /// The body `framing` describes, read from `reader`.
     pub fn new(reader: R, framing: Framing) -> Self {
         match framing {
             Framing::None => Body::Empty,

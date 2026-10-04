@@ -9,9 +9,11 @@ use crate::error::WireError;
 /// numeric port, and no whitespace, control bytes or non-ASCII anywhere.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpUrl {
+    /// `https` (true) or `http` (false).
     pub tls: bool,
     /// The host, without the brackets of an IPv6 literal.
     pub host: String,
+    /// The port, the scheme's default when none is written.
     pub port: u16,
     /// The path as written: empty, or starting with `/`.
     pub path: String,
@@ -20,6 +22,7 @@ pub struct HttpUrl {
 }
 
 impl HttpUrl {
+    /// Parse `url`, refusing anything outside the strict form above.
     pub fn parse(url: &str) -> Result<HttpUrl, WireError> {
         let bad = |why: &str| WireError::BadUrl(format!("{url:?} {why}"));
         if url.bytes().any(|b| b <= b' ' || b >= 0x7f) {
