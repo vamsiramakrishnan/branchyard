@@ -110,6 +110,8 @@ python3 tests/test_verify_vendor.py
 python3 tools/verify_derivatives.py
 python3 tools/check_catalog.py
 python3 tools/check_docs.py
+python3 tools/check_test_hygiene.py
+python3 tests/test_check_test_hygiene.py
 python3 tools/test_scion.py --qualified
 python3 tools/check_scion_compatibility.py
 cargo fmt --all -- --check
@@ -117,5 +119,7 @@ cargo test --workspace --locked --offline
 cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 cargo run --locked --offline -p branchyard-controls --example plan_resume
 ```
+
+`tools/check_test_hygiene.py` keeps the tests on `branchyard-testkit` (no local `wait_until` or `fake_agent`, no raw `thread::sleep`, and counted ratchets that can only fall for `wait::settle`, hand-rolled temporary directories and hand-rolled TCP servers); see "Writing tests" in [CONTRIBUTING.md](../CONTRIBUTING.md). `BY_TEST_TIMEOUT_SCALE=3 cargo test --workspace --locked --offline` runs every wait with three times its timeout, for a slow machine.
 
 `python3 tools/test_scion.py` without `--qualified` runs the same suites at this revision. CI runs the suites and the compatibility check as separate required steps.

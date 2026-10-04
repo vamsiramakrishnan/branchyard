@@ -23,6 +23,8 @@ jobs:
       - run: python tools/verify_derivatives.py
       - run: python tools/check_catalog.py
       - run: python tools/check_docs.py
+      - run: python tools/check_test_hygiene.py
+      - run: python tests/test_check_test_hygiene.py
       - run: python tools/test_scion.py --qualified
       - name: Verify the recorded upstream Claude compatibility
         run: python tools/check_scion_compatibility.py

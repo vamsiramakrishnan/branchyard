@@ -431,7 +431,7 @@ impl Shared {
         self.changed.notify_all();
     }
 
-    fn wait_until<T>(
+    fn await_state<T>(
         &self,
         timeout: Option<Duration>,
         mut ready: impl FnMut(&mut State) -> Option<T>,
@@ -614,7 +614,7 @@ impl Process for BridgeProcess {
     fn wait(&mut self) -> io::Result<ExitStatus> {
         Ok(self
             .shared
-            .wait_until(None, |s| match (s.status, s.gone) {
+            .await_state(None, |s| match (s.status, s.gone) {
                 (Some(status), _) => Some(status),
                 (None, true) => Some(ExitStatus::default()),
                 (None, false) => None,
@@ -639,7 +639,7 @@ impl Process for BridgeProcess {
             return Vec::new();
         }
         self.shared
-            .wait_until(Some(TEARDOWN_WAIT), |s| match (&mut s.survivors, s.gone) {
+            .await_state(Some(TEARDOWN_WAIT), |s| match (&mut s.survivors, s.gone) {
                 (Some(names), _) => Some(std::mem::take(names)),
                 (None, true) => Some(Vec::new()),
                 (None, false) => None,

@@ -365,7 +365,7 @@ fn a_branch_granted_github_read_lists_issues_and_is_refused_a_write_through_anvi
             "gemini-cli",
             "--command",
         ])
-        .arg(&agent)
+        .arg(agent)
         .arg("--yes")
         .output()
         .unwrap();
@@ -506,7 +506,7 @@ fn the_effect_ledger_records_anvils_reports_and_undoes_through_its_gateway() {
             "gemini-cli",
             "--command",
         ])
-        .arg(&agent)
+        .arg(agent)
         .arg("--yes")
         .output()
         .unwrap();
