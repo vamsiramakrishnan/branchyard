@@ -16,10 +16,7 @@ static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
 /// A process-unique suffix for scratch paths.
 pub(crate) fn unique_suffix() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
+    let nanos = (branchyard_support::time::now_nanos() % 1_000_000_000) as u32;
     format!(
         "{}-{nanos:08x}-{}",
         std::process::id(),

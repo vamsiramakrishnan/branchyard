@@ -210,7 +210,7 @@ pub(crate) async fn verify_paired(
         .await
         .ok()?
         .ok()??;
-    if !token.usable_at(crate::ops::now_ms()) {
+    if !token.usable_at(branchyard_support::time::now_ms()) {
         return None;
     }
     Some((
@@ -239,7 +239,7 @@ pub(crate) fn bound(app: &Shared, verified: &Verified, response: Response) -> Re
     let hash = verified.token_sha256.clone();
     let ended = async move {
         loop {
-            let now = crate::ops::now_ms();
+            let now = branchyard_support::time::now_ms();
             if now >= expires_at_ms {
                 return;
             }
@@ -251,7 +251,7 @@ pub(crate) fn bound(app: &Shared, verified: &Verified, response: Response) -> Re
                 .ok()
                 .and_then(Result::ok)
                 .flatten()
-                .is_some_and(|t| t.usable_at(crate::ops::now_ms()));
+                .is_some_and(|t| t.usable_at(branchyard_support::time::now_ms()));
             if !still {
                 return;
             }
@@ -417,7 +417,7 @@ async fn pair(
             &code_hash,
             &token_hash,
             device.as_deref(),
-            crate::ops::now_ms(),
+            branchyard_support::time::now_ms(),
         )
     })
     .await?
@@ -535,7 +535,7 @@ async fn subscribe(
         p256dh: request.keys.p256dh,
         auth: request.keys.auth,
         kinds: request.kinds,
-        created_at_ms: crate::ops::now_ms(),
+        created_at_ms: branchyard_support::time::now_ms(),
     };
     let store = companion.store.clone();
     blocking(move || store.subscribe(&subscription))

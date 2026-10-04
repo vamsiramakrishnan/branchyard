@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use branchyard_bridge::{Claims, ClientTls, Endpoint, Signer};
 use branchyard_sandbox::{ExecSpec, Process, ProviderError};
@@ -20,10 +20,7 @@ use branchyard_sandbox::{ExecSpec, Process, ProviderError};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+    branchyard_support::time::now_ms() / 1000
 }
 
 /// A bridge process with its own identity and state, stopped on drop by

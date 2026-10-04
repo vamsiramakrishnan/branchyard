@@ -388,7 +388,10 @@ fn record_loss(
 /// A unique holder name for this process.
 pub fn holder_for_this_process(device: &str) -> String {
     let (host, pid, _) = branchyard::process_identity();
-    let nonce = crate::util::hex(&crate::util::random_bytes(4).unwrap_or_default());
+    let nonce = crate::util::hex(
+        &crate::util::random_bytes(4)
+            .unwrap_or_else(|_| branchyard_support::time::now_nanos().to_le_bytes()[..4].to_vec()),
+    );
     format!(
         "{device}:{}:{pid}:{nonce}",
         crate::engine::sanitize_device(&host)

@@ -544,7 +544,7 @@ impl Yard {
         Ok(services::resolve(
             &*self.services()?,
             query,
-            state::now_ms(),
+            branchyard_support::time::now_ms(),
         )?)
     }
 
@@ -553,7 +553,7 @@ impl Yard {
     /// it: a leaked process, a sandbox or recipe machine (through the
     /// branch's recovery), pool slots. [`Yard::recover`] does this too.
     pub fn reclaim_services(&self) -> Result<Vec<services::Reaped>, Error> {
-        services::reclaim::sweep(self, state::now_ms())
+        services::reclaim::sweep(self, branchyard_support::time::now_ms())
     }
 
     /// Repository root.

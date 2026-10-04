@@ -54,7 +54,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use branchyard_bridge::{BridgeStatus, Claims, ClientTls, Endpoint, Signer};
 use branchyard_sandbox::{
@@ -345,12 +345,6 @@ fn runtime(error: Error) -> ProviderError {
     ProviderError::Runtime(error.to_string())
 }
 
-fn unix_now() -> Duration {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-}
-
 impl SubstrateProvider {
     /// Prepare a provider. Nothing is contacted until the first call.
     pub fn connect(config: Config) -> Result<SubstrateProvider, ProviderError> {
@@ -412,7 +406,7 @@ impl SubstrateProvider {
     /// A strictly increasing sequence number from the clock, so a later
     /// provider's attempts supersede an earlier one's.
     fn next_seq(&self) -> u64 {
-        let now = unix_now().as_micros() as u64;
+        let now = (branchyard_support::time::now_nanos() / 1000) as u64;
         let mut last = self.last_seq.load(Ordering::Acquire);
         loop {
             let next = now.max(last + 1);
@@ -443,7 +437,9 @@ impl SubstrateProvider {
             uid: handle.uid.clone(),
             attempt: label.to_owned(),
             seq: self.next_seq(),
-            expires: (unix_now() + self.config.attempt_ttl).as_secs(),
+            expires: (Duration::from_millis(branchyard_support::time::now_ms())
+                + self.config.attempt_ttl)
+                .as_secs(),
         };
         let credential = signer
             .sign(&claims)
@@ -776,7 +772,7 @@ impl SandboxProvider for SubstrateProvider {
             self.block(async move |actors| actors.stop(&paused).await)?;
         }
         // Tag names are DNS labels of at most 63 characters.
-        let suffix = format!("-{}", unix_now().as_millis());
+        let suffix = format!("-{}", branchyard_support::time::now_ms());
         let stem: String = name.chars().take(63 - suffix.len()).collect();
         let tag = format!("{}{suffix}", stem.trim_end_matches('-'));
         let tag = self.block(async move |actors| actors.checkpoint(&handle, &tag).await)?;

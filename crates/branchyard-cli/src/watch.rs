@@ -15,13 +15,14 @@
 mod actions;
 mod tui;
 
+use branchyard_support::time::now_ms;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use branchyard::{Activity, BranchInfo, Event, RecordedEvent, Yard};
 use branchyard_client::api::FeedEntry;
@@ -324,7 +325,7 @@ pub fn changes(
     doing: &HashMap<String, Doing>,
     now_ms: u64,
 ) -> Vec<String> {
-    let stamp = render::timestamp(now_ms);
+    let stamp = branchyard_support::time::rfc3339(now_ms);
     let mut out = Vec::new();
     for info in infos {
         let (status, _) = render::status_text(&info.status);
@@ -530,13 +531,6 @@ impl Source {
     }
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// Bytes from `reader`, on a thread, until it ends.
 fn keys(mut reader: impl Read + Send + 'static) -> Receiver<u8> {
     let (tx, rx) = mpsc::channel();
@@ -727,7 +721,7 @@ impl Extras {
                 .flatten()
                 .map(|c| c.usage)
                 .unwrap_or_default();
-            let logins = crate::usage::meter(&config, &vars, crate::usage::now_ms());
+            let logins = crate::usage::meter(&config, &vars, branchyard_support::time::now_ms());
             self.usage = crate::usage::header(&logins);
             self.usage_at = Some(std::time::Instant::now());
         }

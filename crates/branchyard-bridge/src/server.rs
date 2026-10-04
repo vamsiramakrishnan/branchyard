@@ -63,7 +63,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::credential::{Attempts, Claims, Identity, Refusal, Verifier};
 use crate::protocol::{ExecReport, Frame, CHUNK, SUBPROTOCOL};
@@ -257,7 +257,10 @@ impl Shared {
     fn admit(&self, token: Option<&str>) -> Result<Claims, (u16, String)> {
         let unauthorized = |refusal: Refusal| (401, refusal.to_string());
         let token = token.ok_or(unauthorized(Refusal::Missing))?;
-        let claims = self.verifier.verify(token, now()).map_err(unauthorized)?;
+        let claims = self
+            .verifier
+            .verify(token, branchyard_support::time::now_ms() / 1000)
+            .map_err(unauthorized)?;
         let identity = self
             .identity()
             .map_err(|e| (503, format!("the bridge cannot read its identity: {e}")))?;
@@ -520,12 +523,6 @@ impl Drop for AsUser {
             }
         }
     }
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 /// A bound bridge, not yet serving.

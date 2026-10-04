@@ -4,6 +4,7 @@
 //! what stopped owners left. See docs/registry.md.
 
 use branchyard::services::{Service, ServiceState};
+use branchyard_support::time::now_ms;
 use serde_json::json;
 
 use crate::args::ServicesAction;
@@ -110,13 +111,6 @@ pub fn main(
             print(&render(env, &services, now))
         }
     }
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// How long is left of a lease, or how long ago it ran out.

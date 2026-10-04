@@ -344,10 +344,7 @@ struct Staging {
 
 impl Staging {
     fn new(files: &[PlannedFile]) -> std::io::Result<Staging> {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default();
+        let nanos = branchyard_support::time::now_nanos();
         let dir = std::env::temp_dir().join(format!("by-init-{}-{nanos}", std::process::id()));
         {
             use std::os::unix::fs::DirBuilderExt;

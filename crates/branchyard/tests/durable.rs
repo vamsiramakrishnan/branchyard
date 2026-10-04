@@ -603,10 +603,7 @@ fn a_name_reserved_by_an_engine_that_stopped_is_reclaimed_by_recovery() {
             r.get(0)
         })
         .unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = branchyard_support::time::now_ms() as i64;
     let reserve = |name: &str, host: &str, pid: u32, start: &str, at_ms: i64| {
         db.execute(
             "INSERT INTO branches (name, created_ms, record) VALUES (?1, ?2, NULL)",

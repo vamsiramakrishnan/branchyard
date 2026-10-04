@@ -43,9 +43,10 @@ use branchyard_workspace::materialize::{self, Method, Mode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::state::{now_ms, Fence, Store};
+use crate::state::{Fence, Store};
 use crate::workspace::WorkspaceSpec;
 use crate::{Error, Yard};
+use branchyard_support::time::now_ms;
 
 /// The files that key an environment when `[workspace] inputs` names none,
 /// each if present at the top of the worktree.

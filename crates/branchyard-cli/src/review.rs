@@ -417,13 +417,7 @@ fn detach(target: &Target, branch: &str, text: &str, task: &TaskArgs, draft: &Pa
         command.arg("--command").arg(line.join(" "));
     }
     command.args(["--", branch, text]);
-    let log = draft.with_extension(format!(
-        "{}.log",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or_default()
-    ));
+    let log = draft.with_extension(format!("{}.log", branchyard_support::time::now_ms()));
     let file = std::fs::File::create(&log)?;
     command
         .stdin(std::process::Stdio::null())

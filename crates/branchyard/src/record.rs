@@ -4,8 +4,9 @@
 
 use std::time::Duration;
 
-use crate::state::{now_ms, Fence, Lease, Record, Store};
+use crate::state::{Fence, Lease, Record, Store};
 use crate::{Activity, BranchEvent, Error, FeedEvent, FeedPage, Observer, Page, RecordedEvent};
+use branchyard_support::time::now_ms;
 
 /// Most events one page returns.
 pub(crate) const PAGE_MAX: usize = 10_000;

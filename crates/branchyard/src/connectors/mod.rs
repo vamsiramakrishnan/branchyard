@@ -24,7 +24,7 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 pub use branchyard_provision::connectors::{
     check_connector, describe, fold_connector, intersect, narrow, Confirm, GrantEntry, GrantMode,
@@ -168,7 +168,7 @@ impl Gateway {
     }
 
     fn connect_claims(&self, subject: Option<&str>, ttl: Duration) -> Result<Claims, Error> {
-        let now = now_secs();
+        let now = branchyard_support::time::now_ms() / 1000;
         let ttl = ttl.min(self.max_ttl).min(CONNECT_TTL);
         Ok(Claims {
             iss: self.issuer.clone(),
@@ -196,7 +196,7 @@ impl Gateway {
         grants: Vec<GrantEntry>,
         ttl: Duration,
     ) -> Result<String, Error> {
-        let now = now_secs();
+        let now = branchyard_support::time::now_ms() / 1000;
         let claims = Claims {
             iss: self.issuer.clone(),
             aud: self.url.clone(),
@@ -238,7 +238,7 @@ pub(crate) fn branch_token(
         subject: gateway.subject.clone(),
         tenant: gateway.tenant.clone(),
     });
-    let now = now_secs();
+    let now = branchyard_support::time::now_ms() / 1000;
     let ttl = gateway
         .max_ttl
         .min(Duration::from_secs(300))
@@ -396,13 +396,6 @@ impl Drop for TokenFile {
     }
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// Prepare the turn's connectors: `None` when the branch has no grant.
 /// A failure is the turn's, by name: no gateway, no private home, a
 /// connector the gateway does not serve, a sandbox the gateway is not
@@ -493,7 +486,7 @@ pub(crate) fn prepare(
     placed.map_err(|e| format!("could not place connector packages: {e}"))?;
     // The token: this turn's, for at most an hour and not past the
     // turn's deadline.
-    let now = now_secs();
+    let now = branchyard_support::time::now_ms() / 1000;
     let mut exp = now + gateway.max_ttl.min(MAX_TTL).as_secs().max(1);
     if let Some(deadline) = deadline_ms {
         exp = exp.min((deadline / 1000).max(now + 1));
@@ -766,14 +759,9 @@ fn parse_line(line: &str, scope: Option<&str>) -> Option<(String, u64, Connector
     let time = text(&["time", "ts", "timestamp"]);
     let at_ms = time
         .as_deref()
-        .and_then(rfc3339_ms)
+        .and_then(|t| branchyard_support::time::parse_rfc3339(t).ok())
         .or_else(|| number(&["at_ms"]).map(|n| n.max(0) as u64))
-        .unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0)
-        });
+        .unwrap_or_else(branchyard_support::time::now_ms);
     let call = ConnectorCall {
         connector: text(&["connector", "bundle"]).unwrap_or_default(),
         operation: text(&["operation", "operation_id", "tool"]).unwrap_or_default(),
@@ -799,56 +787,6 @@ fn parse_line(line: &str, scope: Option<&str>) -> Option<(String, u64, Connector
         time,
     };
     Some((branch, at_ms, call))
-}
-
-/// `2026-09-30T12:34:56.789Z` (or with a `+hh:mm` offset) as milliseconds
-/// since the Unix epoch.
-fn rfc3339_ms(text: &str) -> Option<u64> {
-    let bytes = text.as_bytes();
-    if bytes.len() < 20 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
-        return None;
-    }
-    let num = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
-    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
-    let (h, mi, s) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    let mut rest = &text[19..];
-    let mut ms = 0i64;
-    if let Some(frac) = rest.strip_prefix('.') {
-        let digits: String = frac.chars().take_while(char::is_ascii_digit).collect();
-        let mut padded = digits.clone();
-        padded.truncate(3);
-        while padded.len() < 3 {
-            padded.push('0');
-        }
-        ms = padded.parse().ok()?;
-        rest = &frac[digits.len()..];
-    }
-    let offset = match rest {
-        "Z" | "z" => 0,
-        _ => {
-            let sign = match rest.as_bytes().first()? {
-                b'+' => 1,
-                b'-' => -1,
-                _ => return None,
-            };
-            let oh: i64 = rest.get(1..3)?.parse().ok()?;
-            let om: i64 = rest.get(4..6)?.parse().ok()?;
-            sign * (oh * 3600 + om * 60)
-        }
-    };
-    // Days from the civil date (Howard Hinnant's algorithm).
-    let (y, m) = if mo <= 2 {
-        (y - 1, mo + 9)
-    } else {
-        (y, mo - 3)
-    };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * m + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    let secs = days * 86_400 + h * 3600 + mi * 60 + s - offset;
-    u64::try_from(secs * 1000 + ms).ok()
 }
 
 #[cfg(test)]
@@ -882,12 +820,13 @@ mod tests {
 
     #[test]
     fn times_parse_as_rfc3339() {
-        assert_eq!(rfc3339_ms("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(rfc3339_ms("1970-01-01T01:00:00+01:00"), Some(0));
+        use branchyard_support::time::parse_rfc3339;
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Ok(0));
+        assert_eq!(parse_rfc3339("1970-01-01T01:00:00+01:00"), Ok(0));
         assert_eq!(
-            rfc3339_ms("2000-03-01T00:00:00.123456Z"),
-            Some(951_868_800_123)
+            parse_rfc3339("2000-03-01T00:00:00.123456Z"),
+            Ok(951_868_800_123)
         );
-        assert_eq!(rfc3339_ms("yesterday"), None);
+        assert!(parse_rfc3339("yesterday").is_err());
     }
 }

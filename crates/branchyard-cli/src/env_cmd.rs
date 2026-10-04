@@ -13,7 +13,7 @@
 //! claims a ready slot. `by serve` and `by worker` refill after each claim;
 //! locally, `by env pool fill` fills once.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use branchyard::{EnvironmentInfo, EnvironmentState, WorkspaceSpec, Yard};
 use serde_json::json;
@@ -191,10 +191,7 @@ fn spec(yard: &Yard) -> Result<Option<(WorkspaceSpec, workspace_cmd::Resolved)>,
 }
 
 fn age(ms: u64) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let now = branchyard_support::time::now_ms();
     let seconds = now.saturating_sub(ms) / 1000;
     match seconds {
         s if s < 120 => format!("{s}s ago"),

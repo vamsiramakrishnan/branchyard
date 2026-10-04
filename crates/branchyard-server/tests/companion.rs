@@ -189,7 +189,7 @@ fn a_pairing_link_gives_a_scoped_token_once_until_revoked() {
     assert!(!err.contains('\u{1b}'), "no QR code off a terminal: {err}");
     let code = code_of(&out);
 
-    let started = branchyard_server::ops::now_ms();
+    let started = branchyard_support::time::now_ms();
     let (status, head, body) = redeem(&server, &code);
     assert_eq!(status, 200, "{body}");
     assert_eq!(header(&head, "cache-control"), Some("no-store"));
@@ -263,7 +263,7 @@ fn expired_codes_and_tokens_are_refused() {
     let config = app_config(&f);
     let server = Server::start(config.clone());
     let companion = store::open(&config).unwrap();
-    let now = branchyard_server::ops::now_ms();
+    let now = branchyard_support::time::now_ms();
     let request = |name: &str, ttl: Duration| link::LinkRequest {
         name: Some(name.into()),
         tenant: "default".into(),
@@ -330,7 +330,7 @@ fn pairing_attempts_are_rate_limited() {
         &config,
         companion.as_ref(),
         &request,
-        branchyard_server::ops::now_ms(),
+        branchyard_support::time::now_ms(),
     )
     .unwrap();
     // Even a good code waits once the limit is reached; it stays unused.
@@ -363,7 +363,7 @@ fn a_paired_event_stream_ends_when_its_token_is_revoked() {
         &config,
         companion.as_ref(),
         &request,
-        branchyard_server::ops::now_ms(),
+        branchyard_support::time::now_ms(),
     )
     .unwrap();
     let token = json(&redeem(&server, &code).2)["token"]
@@ -383,7 +383,7 @@ fn a_paired_event_stream_ends_when_its_token_is_revoked() {
     assert!(line.starts_with("HTTP/1.1 200"), "{line}");
     let started = Instant::now();
     companion
-        .revoke("watcher", None, branchyard_server::ops::now_ms())
+        .revoke("watcher", None, branchyard_support::time::now_ms())
         .unwrap();
     let mut rest = Vec::new();
     // The stream ends (rather than hanging until the read timeout).
@@ -613,7 +613,7 @@ fn a_subscription_follows_its_tokens_reach() {
         &config,
         companion.as_ref(),
         &write_only,
-        branchyard_server::ops::now_ms(),
+        branchyard_support::time::now_ms(),
     )
     .unwrap();
     let blind = json(&redeem(&server, &code).2)["token"]
@@ -635,7 +635,7 @@ fn a_subscription_follows_its_tokens_reach() {
         &config,
         companion.as_ref(),
         &reader,
-        branchyard_server::ops::now_ms(),
+        branchyard_support::time::now_ms(),
     )
     .unwrap();
     let token = json(&redeem(&server, &code).2)["token"]
@@ -648,7 +648,7 @@ fn a_subscription_follows_its_tokens_reach() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(json(&body)["delivered"], 1);
     companion
-        .revoke("reader", None, branchyard_server::ops::now_ms())
+        .revoke("reader", None, branchyard_support::time::now_ms())
         .unwrap();
     assert!(companion.subscriptions().unwrap().is_empty());
     assert_eq!(raw(server.addr, &request_test(&token)).0, 401);

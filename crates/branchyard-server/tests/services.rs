@@ -158,7 +158,7 @@ fn a_server_describes_itself_and_its_services_and_takes_registrations() {
     let here = branchyard::services::resolve(
         &local,
         &Query::kind(KIND_SERVER).require("repo", "app"),
-        branchyard_server::ops::now_ms(),
+        branchyard_support::time::now_ms(),
     )
     .unwrap()
     .expect("the server, in the repository's registry");

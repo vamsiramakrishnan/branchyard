@@ -25,10 +25,10 @@ use serde_json::{json, Value};
 
 use super::upstream::{self, Failure, Target};
 use super::usage::Meter;
-use super::{period_starts, Api, Backend, Gateway, ModelActivity, ModelCall, UsageRecord};
+use super::{Api, Backend, Gateway, ModelActivity, ModelCall, UsageRecord};
 use crate::connectors::keys;
-use crate::state::now_ms;
 use crate::{Activity, RecordedEvent, Yard};
+use branchyard_support::time::now_ms;
 
 /// Largest request head and body the gateway takes.
 const MAX_HEAD: usize = 64 * 1024;
@@ -920,7 +920,7 @@ fn within_budgets(state: &TurnState) -> Result<(), String> {
 
 /// The yard's spending today and this month (UTC).
 fn periods(state: &TurnState) -> Result<(super::UsageTotals, super::UsageTotals), String> {
-    let (day_start, month_start) = period_starts(now_ms());
+    let (day_start, month_start) = branchyard_support::time::period_starts(now_ms());
     let rows = state
         .yard
         .store()
@@ -955,7 +955,7 @@ fn alert(state: &TurnState) {
     let Ok((day, month)) = periods(state) else {
         return;
     };
-    let (day_start, month_start) = period_starts(now_ms());
+    let (day_start, month_start) = branchyard_support::time::period_starts(now_ms());
     let checks = [
         ("day", "usd", day.cost_usd, budget.daily_usd, day_start),
         (

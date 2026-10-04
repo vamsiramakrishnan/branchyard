@@ -40,8 +40,9 @@ use branchyard_sandbox::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::state::{now_ms, Fence, Record, SandboxKind, SandboxRow, Store};
+use crate::state::{Fence, Record, SandboxKind, SandboxRow, Store};
 use crate::{Activity, Provider, Yard};
+use branchyard_support::time::now_ms;
 
 /// Checkpoints that keep a provider snapshot, by default.
 pub const DEFAULT_SNAPSHOTS: u32 = 3;

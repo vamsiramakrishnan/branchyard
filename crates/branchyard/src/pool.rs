@@ -54,9 +54,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::environments as envs;
-use crate::state::{now_ms, Record, SlotRow, SlotState};
+use crate::state::{Record, SlotRow, SlotState};
 use crate::workspace::WorkspaceSpec;
 use crate::{proc, Error, Yard};
+use branchyard_support::time::now_ms;
 
 /// How long a ready slot is kept unless the pool says otherwise: a day.
 pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(24 * 3600);

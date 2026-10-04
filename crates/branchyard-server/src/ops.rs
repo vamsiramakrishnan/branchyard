@@ -34,12 +34,13 @@
 //! queued ones stay queued for the next worker, here after a restart or on
 //! another server.
 
+use branchyard_support::time::now_ms;
 use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::HashMap;
 use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use branchyard_client::api::{
@@ -56,13 +57,6 @@ use crate::store::{
     Worker,
 };
 use crate::telemetry::SpanContext;
-
-pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
 
 /// What a finished operation reports.
 pub struct Finished {

@@ -46,8 +46,8 @@ use super::{
 use crate::connectors::{GrantEntry, GrantMode};
 use crate::models::gateway::{presented, read_request, same, Request};
 use crate::models::upstream::{self, Failure, Target};
-use crate::state::now_ms;
 use crate::Yard;
+use branchyard_support::time::now_ms;
 
 /// How long a turn's end waits for calls still in flight.
 const DRAIN: Duration = Duration::from_secs(5);

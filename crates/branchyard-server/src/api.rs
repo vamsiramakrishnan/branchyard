@@ -904,7 +904,12 @@ pub(crate) async fn render_metrics(app: Shared) -> Response {
         let mut snapshot = registry.observability().metrics.snapshot();
         let queue = registry.queue()?;
         let workers = registry.live_workers()?;
-        crate::metrics::queue_gauges(&mut snapshot, &queue, &workers, crate::ops::now_ms() as i64);
+        crate::metrics::queue_gauges(
+            &mut snapshot,
+            &queue,
+            &workers,
+            branchyard_support::time::now_ms() as i64,
+        );
         for repo in app.repos.values() {
             // The effect ledger and the approvals waiting (docs/effects.md).
             let entries = repo.yard.effects(None).map_err(std::io::Error::other)?;

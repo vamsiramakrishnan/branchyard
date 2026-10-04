@@ -22,6 +22,7 @@
 //! ([`HarnessLog`]). The router consults the inventory through
 //! [`HarnessGate`].
 
+use branchyard_support::time::now_ms;
 use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -805,14 +806,6 @@ pub fn parse_version(line: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// Milliseconds since the Unix epoch.
-pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// Run the detection script on this machine with `/bin/sh -s`.

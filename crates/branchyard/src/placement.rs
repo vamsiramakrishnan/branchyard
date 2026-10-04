@@ -55,10 +55,11 @@ use branchyard_substrate::SubstrateProvider;
 use serde_json::{json, Value};
 
 use crate::snapshots::{self, SandboxEvent, SandboxOrigin};
-use crate::state::{now_ms, Begun, Fence, Record, SandboxKind};
+use crate::state::{Begun, Fence, Record, SandboxKind};
 use crate::{
     git, harness, Activity, Error, Provider, RecipeOptions, SandboxOptions, SubstrateOptions, Yard,
 };
+use branchyard_support::time::now_ms;
 
 /// Where the worktree appears in a sandbox.
 pub const WORKSPACE: &str = "/workspace";

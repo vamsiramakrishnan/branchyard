@@ -16,11 +16,12 @@ use crate::engine::{self, Turn};
 use crate::placement;
 use crate::record;
 use crate::recover;
-use crate::state::{now_ms, Lease, Record, Taken};
+use crate::state::{Lease, Record, Taken};
 use crate::{
     git, harness, names, Branch, BranchInfo, BranchStatus, CandidateInfo, Error, NativeSession,
     Provider, Provisioning, TaskOptions, Yard,
 };
+use branchyard_support::time::now_ms;
 
 pub(crate) fn planned_names(
     yard: &Yard,

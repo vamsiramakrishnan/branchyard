@@ -15,8 +15,8 @@ use super::{
     find_ask, find_effect, ApprovalAsk, ApprovalRecord, ApprovalSettings, AskAbout, AskAnswer,
     EffectActivity, EffectEntry, EffectEvent, EffectMove, EffectState,
 };
-use crate::state::now_ms;
 use crate::{Error, Yard};
+use branchyard_support::time::now_ms;
 
 impl Yard {
     /// Resolve approvals with `settings`: an administrator's locked policy

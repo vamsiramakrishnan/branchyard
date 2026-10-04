@@ -135,7 +135,8 @@ fn from_json(value: &serde_json::Value) -> Result<Credentials> {
         access_key: text("AccessKeyId").ok_or_else(|| Error::refused("no AccessKeyId"))?,
         secret_key: text("SecretAccessKey").ok_or_else(|| Error::refused("no SecretAccessKey"))?,
         session_token: text("Token"),
-        expires_ms: text("Expiration").and_then(|t| crate::util::parse_rfc3339(&t)),
+        expires_ms: text("Expiration")
+            .and_then(|t| branchyard_support::time::parse_rfc3339(&t).ok()),
     })
 }
 

@@ -341,8 +341,8 @@ pub(crate) fn wait_for_answer(
     id: u64,
     wait: Duration,
 ) -> Result<Option<Message>, Error> {
-    let until =
-        crate::state::now_ms().saturating_add(u64::try_from(wait.as_millis()).unwrap_or(u64::MAX));
+    let until = branchyard_support::time::now_ms()
+        .saturating_add(u64::try_from(wait.as_millis()).unwrap_or(u64::MAX));
     store.backend().set_awaiting(id, Some(until))?;
     let answer = store.wait(wait, || store.backend().answer_to(id));
     // A waiter that dies before this still stops counting at its deadline.
@@ -358,7 +358,7 @@ pub(crate) fn wait_for_answer(
 pub(crate) fn waiting_for_answer(store: &Store, branch: &str) -> bool {
     store
         .backend()
-        .awaiting_answer(branch, crate::state::now_ms())
+        .awaiting_answer(branch, branchyard_support::time::now_ms())
         .unwrap_or(false)
 }
 

@@ -71,7 +71,7 @@ pub(crate) fn fleet(app: &Shared) -> std::io::Result<Vec<Service>> {
     all.extend(crate::store::worker_services(
         &registry.live_workers()?,
         within,
-        crate::ops::now_ms(),
+        branchyard_support::time::now_ms(),
     ));
     all.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.id.cmp(&b.id)));
     Ok(all)
@@ -80,7 +80,7 @@ pub(crate) fn fleet(app: &Shared) -> std::io::Result<Vec<Service>> {
 async fn well_known(State(app): State<Shared>) -> Result<Json<WellKnown>, ApiError> {
     let shared = app.clone();
     let services = blocking(move || fleet(&shared)).await?.map_err(io)?;
-    let now = crate::ops::now_ms();
+    let now = branchyard_support::time::now_ms();
     Ok(Json(WellKnown {
         service: "branchyard".into(),
         version: env!("CARGO_PKG_VERSION").into(),
@@ -156,7 +156,7 @@ async fn register(
     service.weight = request.weight.unwrap_or(1);
     // Never anything to reclaim: the server stops only what it started.
     service.reclaim = None;
-    let now = crate::ops::now_ms();
+    let now = branchyard_support::time::now_ms();
     service.lease_until_ms = now + ttl.as_millis() as u64;
     let stored = blocking(move || app.registry.services().register(&service, now))
         .await?
@@ -173,7 +173,7 @@ async fn deregister(
     let owner = owner_id(&caller);
     let (left, found) = blocking(move || {
         let store = app.registry.services();
-        let left = store.deregister(&id, &owner, crate::ops::now_ms())?;
+        let left = store.deregister(&id, &owner, branchyard_support::time::now_ms())?;
         Ok::<_, std::io::Error>((left, store.get(&id)?))
     })
     .await?
@@ -209,7 +209,11 @@ async fn gc(
 /// reclaim, such as one registered over the API, is only marked.
 pub(crate) fn reap(app: &Shared) -> std::io::Result<Vec<services::Reaped>> {
     let reaper = |_: &Service, reclaim: &services::Reclaim| services::reclaim_process(reclaim);
-    services::reap(app.registry.services(), crate::ops::now_ms(), &reaper)
+    services::reap(
+        app.registry.services(),
+        branchyard_support::time::now_ms(),
+        &reaper,
+    )
 }
 
 /// A query parameter with its `%XX` escapes decoded.

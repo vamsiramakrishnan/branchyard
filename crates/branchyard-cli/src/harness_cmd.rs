@@ -238,7 +238,7 @@ fn attach_quota(found: &mut Inventory) {
     if !wanted("claude-code") && !wanted("codex") {
         return;
     }
-    let logins = crate::usage::meter(&config, &vars, crate::usage::now_ms());
+    let logins = crate::usage::meter(&config, &vars, branchyard_support::time::now_ms());
     for login in logins.iter().filter(|l| l.account == "default" && l.found) {
         let Some(state) = found.harnesses.iter_mut().find(|h| h.id == login.harness) else {
             continue;
@@ -524,7 +524,7 @@ fn change_harness(
         .map_err(Failure::Message)?;
     let policy = policy(env)?;
     let event = |outcome: &str, detail: Option<String>, after: Option<String>| HarnessEvent {
-        at_ms: inventory::now_ms(),
+        at_ms: branchyard_support::time::now_ms(),
         on: machine.name(),
         harness: id.to_owned(),
         action,
@@ -738,7 +738,7 @@ fn login(
     let command = command;
     let reported = |how: String| -> Outcome {
         record(HarnessEvent {
-            at_ms: inventory::now_ms(),
+            at_ms: branchyard_support::time::now_ms(),
             on: machine.name(),
             harness: id.to_owned(),
             action: InstallAction::Login,
@@ -811,7 +811,7 @@ fn login(
     let after = detect(env, &machine, &options, true)?;
     let state = after.get(id).map(|s| s.login.clone());
     record(HarnessEvent {
-        at_ms: inventory::now_ms(),
+        at_ms: branchyard_support::time::now_ms(),
         on: machine.name(),
         harness: id.to_owned(),
         action: InstallAction::Login,
@@ -905,7 +905,7 @@ fn store_key(env: &Env, as_json: bool, machine: &Machine, id: &str) -> Outcome {
     crate::setup_io::write_file(&path, key, 0o600)?;
     let named = name_secret(var, &path)?;
     record(HarnessEvent {
-        at_ms: inventory::now_ms(),
+        at_ms: branchyard_support::time::now_ms(),
         on: "local".into(),
         harness: id.to_owned(),
         action: InstallAction::Login,
@@ -1073,7 +1073,7 @@ fn show_log(env: &Env, as_json: bool) -> Outcome {
                 (None, None) => "-".into(),
             };
             vec![
-                Cell::plain(crate::usage::utc(e.at_ms)),
+                Cell::plain(branchyard_support::time::utc_minute(e.at_ms)),
                 Cell::plain(&e.on),
                 Cell::plain(&e.harness),
                 Cell::plain(e.action.to_string()),

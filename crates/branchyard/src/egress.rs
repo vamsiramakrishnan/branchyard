@@ -36,8 +36,9 @@ use branchyard_runtime::egress::{Decision, Proxy, Verdict};
 use branchyard_runtime::LocalProvider;
 use serde::{Deserialize, Serialize};
 
-use crate::state::{now_ms, Record};
+use crate::state::Record;
 use crate::{Activity, Provider, RecordedEvent, Yard};
+use branchyard_support::time::now_ms;
 
 /// The port the proxy's listener takes inside a confined harness's own
 /// network namespace.

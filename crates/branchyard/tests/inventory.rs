@@ -189,7 +189,7 @@ fn the_cache_keeps_an_inventory_for_its_ttl() {
     assert_eq!(cache.get(&opts), None);
     let taken = Inventory {
         host: "box".into(),
-        detected_at_ms: inventory::now_ms(),
+        detected_at_ms: branchyard_support::time::now_ms(),
         checked: vec!["codex".into()],
         ..Inventory::default()
     };
@@ -203,7 +203,7 @@ fn the_cache_keeps_an_inventory_for_its_ttl() {
     assert_eq!(cache.get(&other), None);
     // Too old.
     let stale = Inventory {
-        detected_at_ms: inventory::now_ms() - 120_000,
+        detected_at_ms: branchyard_support::time::now_ms() - 120_000,
         ..taken
     };
     cache.put(&opts, &stale).unwrap();

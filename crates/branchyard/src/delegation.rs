@@ -1232,7 +1232,7 @@ pub(crate) fn start_turn(
         // the branch's own event log, where its readers look.
         move |panic| {
             let event = RecordedEvent {
-                at_ms: crate::state::now_ms(),
+                at_ms: branchyard_support::time::now_ms(),
                 activity: Activity::Warning(format!(
                     "the turn's thread panicked: {}",
                     panic.message

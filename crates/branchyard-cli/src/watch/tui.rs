@@ -1630,7 +1630,7 @@ fn draw_detail(model: &Model, info: Option<&BranchInfo>, frame: &mut Frame, area
     }
     let shown = room.saturating_sub(fixed).max(1).min(recent.len());
     for (at_ms, text, tone) in &recent[recent.len() - shown..] {
-        let stamp = render::timestamp(*at_ms);
+        let stamp = branchyard_support::time::rfc3339(*at_ms);
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{} ", stamp.get(11..19).unwrap_or(&stamp)),

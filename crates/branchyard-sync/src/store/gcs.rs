@@ -21,8 +21,9 @@ use crate::http::{send, Request, Response, Url};
 use crate::store::{
     check_key, check_prefix, join, Entry, Generation, Object, ObjectStore, UploadJournal,
 };
-use crate::util::{parse_rfc3339, uri_encode};
+use crate::util::uri_encode;
 use branchyard::services::Clock;
+use branchyard_support::time::parse_rfc3339;
 
 pub const DEFAULT_PART: usize = 8 << 20;
 
@@ -458,6 +459,6 @@ fn entry(key: &str, value: &serde_json::Value) -> Result<Entry> {
         modified_ms: value
             .get("updated")
             .and_then(|v| v.as_str())
-            .and_then(parse_rfc3339),
+            .and_then(|t| parse_rfc3339(t).ok()),
     })
 }

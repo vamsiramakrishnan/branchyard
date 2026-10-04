@@ -31,7 +31,7 @@ use branchyard_support::LockExt as _;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use branchyard_sandbox::{
     Capabilities, Checkpoint, ExecSpec, Operation, Process, ProviderError, SandboxInfo,
@@ -311,13 +311,6 @@ impl GuestControl for Control {
     }
 }
 
-fn now_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
-
 impl SandboxProvider for MicrosandboxProvider {
     fn capabilities(&self) -> Capabilities {
         plan::capabilities_with(self.live_branch)
@@ -440,7 +433,7 @@ impl SandboxProvider for MicrosandboxProvider {
         let Some(guarantee) = offered.iter().find(|g| g.satisfies(required)).copied() else {
             return Err(unsupported(Operation::Checkpoint, required, offered));
         };
-        let label = format!("{name}-checkpoint-{}", now_ms());
+        let label = format!("{name}-checkpoint-{}", branchyard_support::time::now_ms());
         plan::name(&label)?;
         let builder = Snapshot::builder(label.as_str()).from_sandbox(name);
         let builder = match guarantee.scope {

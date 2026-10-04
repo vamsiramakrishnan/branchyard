@@ -587,7 +587,7 @@ pub async fn send(
         Ok(body) => body,
         Err(e) => return Sent::Failed(e),
     };
-    let authorization = match vapid.authorization(&url, crate::ops::now_ms() / 1000) {
+    let authorization = match vapid.authorization(&url, branchyard_support::time::now_ms() / 1000) {
         Ok(a) => a,
         Err(e) => return Sent::Failed(e),
     };
@@ -626,7 +626,7 @@ pub(crate) async fn owner(app: &Arc<App>, token_sha256: &str) -> Option<Principa
         .ok()?
         .ok()??;
     token
-        .usable_at(crate::ops::now_ms())
+        .usable_at(branchyard_support::time::now_ms())
         .then_some(token.principal)
 }
 
@@ -745,7 +745,8 @@ async fn run(
             }
             let store = store.clone();
             let taken = tokio::task::spawn_blocking(move || {
-                let notices = follower.take(store.as_ref(), &entries, crate::ops::now_ms());
+                let notices =
+                    follower.take(store.as_ref(), &entries, branchyard_support::time::now_ms());
                 (follower, notices)
             })
             .await;
@@ -872,7 +873,7 @@ impl Follower {
 /// violation. Run on SQLite here and on PostgreSQL by `tests/postgres.rs`.
 #[doc(hidden)]
 pub fn check_claims(one: &dyn OperationStore, other: &dyn OperationStore, repo: &str) {
-    let now = crate::ops::now_ms();
+    let now = branchyard_support::time::now_ms();
     let ready = |seq: u64, branch: &str| FeedEntry {
         seq,
         branch: branch.to_owned(),

@@ -23,11 +23,12 @@
 //! (`http/protobuf`, the default, or `http/json`; `grpc` is not built in),
 //! `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME` and `OTEL_SDK_DISABLED`.
 
+use branchyard_support::time::now_ms;
 use branchyard_support::LockExt as _;
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 /// A span's identity: its trace and its own ID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -261,13 +262,6 @@ impl Default for Tracer {
     fn default() -> Tracer {
         Tracer::disabled()
     }
-}
-
-pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 impl Tracer {

@@ -40,9 +40,10 @@ use crate::delegation::{self, ChildBudget, Spawn, Spawned};
 use crate::projection::lock;
 use crate::record::Recorder;
 use crate::run::{self, Prepared};
-use crate::state::{now_ms, Fence, Lease, Owner, Record, Store, LEASE_TTL};
+use crate::state::{Fence, Lease, Owner, Record, Store, LEASE_TTL};
 use crate::storage::Lineage;
 use crate::{git, harness, Activity, BranchStatus, Error, RecordedEvent, TaskOptions, Yard};
+use branchyard_support::time::now_ms;
 
 /// Most edits one proposal may carry.
 pub const MAX_EDITS: usize = 64;
@@ -616,7 +617,7 @@ fn start(yard: &Yard, mut record: Record, options: &TaskOptions) -> Result<Optio
             store.append(
                 &record.info.name,
                 &crate::RecordedEvent {
-                    at_ms: crate::state::now_ms(),
+                    at_ms: branchyard_support::time::now_ms(),
                     activity: crate::Activity::Plan(Box::new(crate::PlanActivity::Planning {
                         round: 1,
                     })),

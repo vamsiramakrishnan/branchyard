@@ -23,13 +23,14 @@
 //! engine adds them): every other write keeps the list in the
 //! store, so a turn that ends after it spawned children cannot drop them.
 
+use branchyard_support::time::now_ms;
 use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -160,10 +161,7 @@ impl Owner {
         Owner {
             id: format!(
                 "{pid}-{:x}-{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0),
+                branchyard_support::time::now_nanos(),
                 N.fetch_add(1, Ordering::Relaxed)
             ),
             host: proc::host().to_owned(),
@@ -784,13 +782,6 @@ pub(crate) struct Store {
     extras: Arc<dyn Extras>,
     owner: Arc<Owner>,
     signal: Arc<Signal>,
-}
-
-pub(crate) fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 impl Store {

@@ -27,7 +27,7 @@ use crate::error::{Error, Result};
 use crate::outbox::{LogEntry, Outbox, Pending};
 use crate::source::SyncSource;
 use crate::stats::Snapshot;
-use crate::util::SplitMix;
+use branchyard_support::rng::SplitMix64;
 
 /// The local tasks a replicator can sync.
 pub trait SourceProvider: Send + Sync {
@@ -78,7 +78,7 @@ pub struct Replicator {
     provider: Arc<dyn SourceProvider>,
     clock: Clock,
     flushed: Mutex<Snapshot>,
-    rng: Mutex<SplitMix>,
+    rng: Mutex<SplitMix64>,
     rounds: Mutex<u64>,
     /// Tasks not to push, and why: a runner lost its lease on them.
     fenced: Mutex<std::collections::BTreeMap<String, String>>,
@@ -102,7 +102,7 @@ impl Replicator {
             provider,
             clock,
             flushed: Mutex::new(Snapshot::default()),
-            rng: Mutex::new(SplitMix::new(crate::util::random_seed())),
+            rng: Mutex::new(SplitMix64::new(branchyard_support::rng::fresh_seed())),
             rounds: Mutex::new(0),
             fenced: Mutex::new(std::collections::BTreeMap::new()),
         }

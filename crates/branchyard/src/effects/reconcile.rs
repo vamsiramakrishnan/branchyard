@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use super::ask::note;
 use super::mcp::{CallError, Client};
 use super::{EffectActivity, EffectEntry, EffectMove, EffectState};
-use crate::state::now_ms;
 use crate::{Error, Yard};
+use branchyard_support::time::now_ms;
 
 /// What one reconciliation did.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

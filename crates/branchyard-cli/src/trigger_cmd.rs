@@ -308,7 +308,7 @@ fn spec(args: &AddArgs, repo: &str) -> Result<TriggerSpec, Failure> {
 }
 
 fn time(ms: u64) -> String {
-    triggers::template::rfc3339(ms)
+    branchyard_support::time::rfc3339_secs(ms)
 }
 
 fn describe_when(when: &When) -> String {
@@ -754,7 +754,7 @@ impl Local {
     }
 
     fn main(&self, action: &TriggerAction, json: bool) -> Outcome {
-        let now = branchyard_server::ops::now_ms();
+        let now = branchyard_support::time::now_ms();
         match action {
             TriggerAction::Add(args) => self.add(args, json, now),
             TriggerAction::List => {

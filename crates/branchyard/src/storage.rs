@@ -31,8 +31,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::{now_ms, Store};
+use crate::state::Store;
 use crate::{Error, Yard};
+use branchyard_support::time::now_ms;
 
 /// Directory artifact bytes are stored under, inside `.branchyard/` (or a
 /// server's data directory).

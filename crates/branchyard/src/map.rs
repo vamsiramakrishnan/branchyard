@@ -32,8 +32,8 @@ use serde_json::Value;
 
 use crate::json_schema::JsonSchema;
 use crate::map_input::{self, MapItem, TemplateContext};
-use crate::state::now_ms;
 use crate::{Branch, BranchStatus, Error, Fleet, RouteOptions, TaskKind, TaskOptions, Yard};
+use branchyard_support::time::now_ms;
 
 /// Branches running at once when none is said.
 pub const DEFAULT_CONCURRENCY: u32 = 4;
@@ -414,8 +414,8 @@ pub(crate) fn list(yard: &Yard) -> Result<Vec<MapSummary>, Error> {
             .or_else(|_| fs::metadata(spec_path(&dir)))
             .and_then(|m| m.modified())
             .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(spec.created_ms, |d| d.as_millis() as u64);
+            .and_then(branchyard_support::time::system_time_ms)
+            .unwrap_or(spec.created_ms);
         out.push(MapSummary {
             name: spec.name,
             prompt: spec.prompt,
