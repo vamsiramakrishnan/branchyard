@@ -23,6 +23,7 @@ schema = ["dep:schemars"]
 [dependencies]
 branchyard = { path = "../branchyard" }
 branchyard-client = { path = "../branchyard-client" }
+branchyard-wire = { path = "../branchyard-wire" }
 branchyard-server = { path = "../branchyard-server" }
 branchyard-workspace = { path = "../branchyard-workspace" }
 branchyard-mcp = { path = "../branchyard-mcp" }

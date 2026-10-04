@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use branchyard_client::http;
 use branchyard_setup::config::{TrackerConfig, Trackers};
+use branchyard_wire as wire;
 use serde_json::{json, Value};
 
 /// The trackers `--issue` takes besides GitHub.
@@ -263,14 +264,15 @@ fn request(
     headers: &[(&str, String)],
     body: Option<&[u8]>,
 ) -> Result<Answer, String> {
-    let (origin, target) = match url.find("://").map(|i| i + 3) {
-        Some(start) => match url[start..].find('/') {
-            Some(slash) => (&url[..start + slash], &url[start + slash..]),
-            None => (url, "/"),
-        },
-        None => return Err(format!("{url:?} is not an http(s) URL")),
+    let parsed = wire::HttpUrl::parse(url).map_err(|e| e.to_string())?;
+    let (origin, target) = (parsed.origin(), parsed.target());
+    let endpoint = http::Endpoint {
+        tls: parsed.tls,
+        host: parsed.host,
+        port: parsed.port,
+        prefix: String::new(),
+        unix: None,
     };
-    let endpoint = http::Endpoint::parse(origin)?;
     let tls = match endpoint.tls {
         true => Some(http::tls_config(None)?),
         false => None,
@@ -282,7 +284,7 @@ fn request(
         &endpoint,
         &http::Request {
             method,
-            target,
+            target: &target,
             headers,
             body,
         },
@@ -766,5 +768,248 @@ mod tests {
         );
         assert_eq!(base64(b"ab"), "YWI=");
         assert_eq!(encode_path("acme/sub widgets"), "acme%2Fsub%20widgets");
+    }
+
+    /// What a mock tracker saw of one request.
+    struct Seen {
+        method: String,
+        target: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    /// A loopback tracker that answers the next connections with `replies`
+    /// in order (one request each, read through the wire codec), and the
+    /// requests it saw.
+    fn tracker(replies: Vec<Vec<u8>>) -> (String, std::sync::mpsc::Receiver<Seen>) {
+        use std::io::{BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (sender, seen) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for reply in replies {
+                let Ok((stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut out = stream.try_clone().unwrap();
+                let mut reader = BufReader::new(stream);
+                let head = wire::read_request_head(&mut reader, 64 * 1024)
+                    .unwrap()
+                    .unwrap();
+                let framing = wire::request_framing(&head.headers).unwrap();
+                let body = wire::read_body(&mut reader, framing, 1 << 20).unwrap();
+                let _ = sender.send(Seen {
+                    method: head.method,
+                    target: head.target,
+                    headers: head.headers,
+                    body,
+                });
+                let _ = out.write_all(&reply);
+            }
+        });
+        (url, seen)
+    }
+
+    /// A response with `body` sent chunked, in two pieces.
+    fn chunked(status: &str, headers: &str, body: &str) -> Vec<u8> {
+        let (a, b) = body.split_at(body.len() / 2);
+        format!(
+            "HTTP/1.1 {status}\r\n{headers}Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
+             {:x}\r\n{a}\r\n{:x};part=2\r\n{b}\r\n0\r\n\r\n",
+            a.len(),
+            b.len()
+        )
+        .into_bytes()
+    }
+
+    fn plain(status: &str, headers: &str, body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    fn linear(key: &str) -> IssueRef {
+        parse(&format!("linear:{key}")).unwrap().unwrap()
+    }
+
+    fn with_env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect();
+        move |name| vars.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn a_linear_issue_comes_back_through_a_chunked_answer() {
+        let answer = json!({"data": {"issue": {
+            "identifier": "ENG-5", "title": "Fix the parser", "description": "It breaks.",
+            "url": "https://linear.app/acme/issue/ENG-5", "labels": {"nodes": [{"name": "bug"}]}
+        }}})
+        .to_string();
+        let (url, seen) = tracker(vec![chunked(
+            "200 OK",
+            "Content-Type: application/json\r\n",
+            &answer,
+        )]);
+        let env = with_env(&[("LINEAR_API_KEY", "lin_key"), ("LINEAR_API_URL", &url)]);
+        let config = Trackers::default();
+        let sources = Sources {
+            env: &env,
+            config: &config,
+            gateway: None,
+        };
+        let issue = fetch(&linear("ENG-5"), &sources).unwrap();
+        assert_eq!(
+            (
+                issue.key.as_str(),
+                issue.title.as_str(),
+                issue.labels.as_slice()
+            ),
+            ("ENG-5", "Fix the parser", &["bug".to_owned()][..])
+        );
+        let seen = seen.recv().unwrap();
+        assert_eq!((seen.method.as_str(), seen.target.as_str()), ("POST", "/"));
+        assert_eq!(
+            wire::header(&seen.headers, "authorization"),
+            Some("lin_key")
+        );
+        let query: Value = serde_json::from_slice(&seen.body).unwrap();
+        assert_eq!(query["variables"]["id"], "ENG-5");
+    }
+
+    #[test]
+    fn an_http_error_body_is_shown_and_a_bare_status_is_explained() {
+        let (url, _) = tracker(vec![
+            plain(
+                "400 Bad Request",
+                "Content-Type: application/json\r\n",
+                r#"{"errors":[{"message":"Variable id is invalid"}]}"#,
+            ),
+            plain(
+                "200 OK",
+                "",
+                r#"{"errors":[{"message":"Entity not found: Issue"}]}"#,
+            ),
+            plain("403 Forbidden", "", "nope"),
+            plain("502 Bad Gateway", "", "<html>bad gateway</html>"),
+        ]);
+        let env = with_env(&[("LINEAR_API_KEY", "k"), ("LINEAR_API_URL", &url)]);
+        let config = Trackers::default();
+        let sources = Sources {
+            env: &env,
+            config: &config,
+            gateway: None,
+        };
+        let r = linear("ENG-9");
+        assert_eq!(
+            fetch(&r, &sources).unwrap_err(),
+            "Linear refused the query for ENG-9: Variable id is invalid"
+        );
+        assert_eq!(
+            fetch(&r, &sources).unwrap_err(),
+            "Linear has no issue ENG-9"
+        );
+        let denied = fetch(&r, &sources).unwrap_err();
+        assert!(
+            denied.contains("refused the credentials") && denied.contains("(403)"),
+            "{denied}"
+        );
+        assert_eq!(
+            fetch(&r, &sources).unwrap_err(),
+            "Linear answered 502 for ENG-9"
+        );
+    }
+
+    #[test]
+    fn a_tracker_answer_that_is_not_framed_is_an_error_not_a_guess() {
+        let (url, _) = tracker(vec![
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Length: 9\r\n\r\n{\"a\":1}".to_vec(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n{}\r\n0\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\n{\"data\":".to_vec(),
+        ]);
+        let env = with_env(&[("LINEAR_API_KEY", "k"), ("LINEAR_API_URL", &url)]);
+        let config = Trackers::default();
+        let sources = Sources {
+            env: &env,
+            config: &config,
+            gateway: None,
+        };
+        for _ in 0..3 {
+            let error = fetch(&linear("ENG-1"), &sources).unwrap_err();
+            assert!(error.contains(&url[7..]), "{error}");
+        }
+    }
+
+    #[test]
+    fn with_no_token_the_issue_comes_through_the_connector_gateway() {
+        let result = json!({"structuredContent": {"issue": {
+            "identifier": "ENG-7", "title": "Via the gateway", "description": "",
+            "url": "https://linear.app/acme/issue/ENG-7", "labels": {"nodes": []}
+        }}});
+        let rpc = |id: u64, result: &Value| {
+            json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string()
+        };
+        let (url, seen) = tracker(vec![
+            plain(
+                "200 OK",
+                "Content-Type: application/json\r\nMcp-Session-Id: sess-1\r\n",
+                &rpc(1, &json!({"protocolVersion": "2025-06-18"})),
+            ),
+            plain("202 Accepted", "", ""),
+            chunked(
+                "200 OK",
+                "Content-Type: application/json\r\n",
+                &rpc(2, &result),
+            ),
+        ]);
+        let env = with_env(&[]);
+        let mut config = Trackers::default();
+        config.linear = Some(branchyard_setup::config::TrackerConfig {
+            url: None,
+            gateway_tool: Some("linear__get_issue".into()),
+        });
+        let call = |tool: &str, arguments: Value| gateway_call(&url, "gw-token", tool, arguments);
+        let sources = Sources {
+            env: &env,
+            config: &config,
+            gateway: Some(&call),
+        };
+        let issue = fetch(&linear("ENG-7"), &sources).unwrap();
+        assert_eq!(
+            (issue.key.as_str(), issue.title.as_str()),
+            ("ENG-7", "Via the gateway")
+        );
+        let calls: Vec<Seen> = seen.try_iter().collect();
+        assert_eq!(calls.len(), 3);
+        for seen in &calls {
+            assert_eq!(
+                wire::header(&seen.headers, "authorization"),
+                Some("Bearer gw-token")
+            );
+        }
+        assert_eq!(wire::header(&calls[0].headers, "mcp-session-id"), None);
+        assert_eq!(
+            wire::header(&calls[2].headers, "mcp-session-id"),
+            Some("sess-1")
+        );
+        let tools_call: Value = serde_json::from_slice(&calls[2].body).unwrap();
+        assert_eq!(tools_call["params"]["name"], "linear__get_issue");
+    }
+
+    #[test]
+    fn a_refusing_connector_gateway_says_what_to_check() {
+        let (url, _) = tracker(vec![plain(
+            "401 Unauthorized",
+            "",
+            r#"{"error":"bad token"}"#,
+        )]);
+        let error = gateway_call(&url, "t", "linear__get_issue", json!({})).unwrap_err();
+        assert!(
+            error.contains("answered 401 to initialize") && error.contains("by gateway status"),
+            "{error}"
+        );
     }
 }

@@ -13,13 +13,14 @@
 //! URL's path. Every response is streamed to the harness as it arrives,
 //! with `Transfer-Encoding: chunked` and `Connection: close`.
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use branchyard_wire as wire;
 use serde_json::{json, Value};
 
 use super::upstream::{self, Failure, Target};
@@ -195,106 +196,28 @@ impl Request {
     }
 }
 
+/// Read one request from the harness, through the wire codec: a head it
+/// cannot frame (both `Content-Length` and `Transfer-Encoding`, a bad chunk
+/// size, a body cut short) is an `Err`, which the caller answers with 400.
 pub(crate) fn read_request(
     reader: &mut BufReader<TcpStream>,
     out: &mut TcpStream,
 ) -> Result<Option<Request>, String> {
-    let mut raw = Vec::new();
-    loop {
-        let before = raw.len();
-        let n = reader
-            .read_until(b'\n', &mut raw)
-            .map_err(|e| e.to_string())?;
-        if n == 0 {
-            return match raw.is_empty() {
-                true => Ok(None),
-                false => Err("the request ended in its head".into()),
-            };
-        }
-        if raw.len() > MAX_HEAD {
-            return Err("the request head is too large".into());
-        }
-        let line = &raw[before..];
-        if line == b"\r\n" || line == b"\n" {
-            break;
-        }
-    }
-    let mut headers = [httparse::EMPTY_HEADER; 96];
-    let mut parsed = httparse::Request::new(&mut headers);
-    match parsed.parse(&raw) {
-        Ok(httparse::Status::Complete(_)) => {}
-        _ => return Err("the request head is malformed".into()),
-    }
-    let method = parsed.method.unwrap_or("").to_owned();
-    let target = parsed.path.unwrap_or("").to_owned();
-    let headers: Vec<(String, String)> = parsed
-        .headers
-        .iter()
-        .map(|h| {
-            (
-                h.name.to_owned(),
-                String::from_utf8_lossy(h.value).trim().to_owned(),
-            )
-        })
-        .collect();
-    let find = |name: &str| {
-        headers
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.clone())
+    let bad = |e: wire::WireError| format!("the request is malformed: {e}");
+    let Some(head) = wire::read_request_head(reader, MAX_HEAD).map_err(bad)? else {
+        return Ok(None);
     };
-    if find("expect").is_some_and(|v| v.eq_ignore_ascii_case("100-continue")) {
+    let framing = wire::request_framing(&head.headers).map_err(bad)?;
+    let expects = wire::header(&head.headers, "expect")
+        .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
+    if expects && framing != wire::Framing::None {
         let _ = out.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
     }
-    let chunked = find("transfer-encoding").is_some_and(|v| {
-        v.to_ascii_lowercase()
-            .split(',')
-            .any(|t| t.trim() == "chunked")
-    });
-    let mut body = Vec::new();
-    if chunked {
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).map_err(|e| e.to_string())?;
-            let size =
-                usize::from_str_radix(line.trim().split(';').next().unwrap_or("").trim(), 16)
-                    .map_err(|_| "the request has a bad chunk size".to_owned())?;
-            if size == 0 {
-                loop {
-                    line.clear();
-                    if reader.read_line(&mut line).map_err(|e| e.to_string())? == 0
-                        || line.trim().is_empty()
-                    {
-                        break;
-                    }
-                }
-                break;
-            }
-            if body.len() + size > MAX_BODY {
-                return Err("the request body is too large".into());
-            }
-            let start = body.len();
-            body.resize(start + size, 0);
-            reader
-                .read_exact(&mut body[start..])
-                .map_err(|e| e.to_string())?;
-            line.clear();
-            reader.read_line(&mut line).map_err(|e| e.to_string())?;
-        }
-    } else if let Some(length) = find("content-length") {
-        let length: usize = length
-            .parse()
-            .map_err(|_| "the request has a bad Content-Length".to_owned())?;
-        if length > MAX_BODY {
-            return Err("the request body is too large".into());
-        }
-        body.resize(length, 0);
-        reader.read_exact(&mut body).map_err(|e| e.to_string())?;
-    }
+    let body = wire::read_body(&mut *reader, framing, MAX_BODY).map_err(bad)?;
     Ok(Some(Request {
-        method,
-        target,
-        headers,
+        method: head.method,
+        target: head.target,
+        headers: head.headers,
         body,
     }))
 }
@@ -489,6 +412,18 @@ fn with_stream_usage(api: Api, path: &str, json: &mut Value) -> bool {
     }
 }
 
+/// The next request, or `None` once the harness is answered: nothing sent,
+/// or a request the wire codec refuses, which gets a 400 and no more.
+fn take_request(reader: &mut BufReader<TcpStream>, out: &mut TcpStream) -> Option<Request> {
+    match read_request(reader, out) {
+        Ok(request) => request,
+        Err(why) => {
+            refuse(out, Api::Generic, 400, "bad_request", &why, &[]);
+            None
+        }
+    }
+}
+
 fn handle(stream: TcpStream, state: &TurnState) {
     let started = Instant::now();
     let Ok(mut out) = stream.try_clone() else {
@@ -496,13 +431,8 @@ fn handle(stream: TcpStream, state: &TurnState) {
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(300)));
     let mut reader = BufReader::new(stream);
-    let request = match read_request(&mut reader, &mut out) {
-        Ok(Some(request)) => request,
-        Ok(None) => return,
-        Err(why) => {
-            refuse(&mut out, Api::Generic, 400, "bad_request", &why, &[]);
-            return;
-        }
+    let Some(request) = take_request(&mut reader, &mut out) else {
+        return;
     };
     let Some((api, path, named)) = route(&request.target) else {
         refuse(
@@ -729,8 +659,8 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 let why = (!call.failed_over.is_empty()).then(|| call.failed_over.join("; "));
                 done(&mut call, "failed", status, why);
                 let _ = write_head(&mut out, &response, false);
-                let _ = write_chunk(&mut out, &kept);
-                let _ = out.write_all(b"0\r\n\r\n");
+                let _ = wire::write_chunk(&mut out, &kept);
+                let _ = out.write_all(wire::LAST_CHUNK);
                 let _ = out.flush();
             }
             None => {
@@ -766,7 +696,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 Ok(0) => break,
                 Ok(n) => {
                     meter.feed(&buf[..n]);
-                    if !client_gone && write_chunk(&mut out, &buf[..n]).is_err() {
+                    if !client_gone && wire::write_chunk(&mut out, &buf[..n]).is_err() {
                         // The harness went away: stop, which ends the
                         // backend's generation too.
                         client_gone = true;
@@ -826,7 +756,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
     done(&mut call, decision, status, reason);
     alert(state);
     if !no_body && !client_gone && broken.is_none() {
-        let _ = out.write_all(b"0\r\n\r\n");
+        let _ = out.write_all(wire::LAST_CHUNK);
     }
     let _ = out.flush();
 }
@@ -859,16 +789,6 @@ fn write_head(out: &mut TcpStream, response: &upstream::Response, no_body: bool)
     }
     head.push_str("Connection: close\r\n\r\n");
     out.write_all(head.as_bytes())?;
-    out.flush()
-}
-
-fn write_chunk(out: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
-    if bytes.is_empty() {
-        return Ok(());
-    }
-    out.write_all(format!("{:x}\r\n", bytes.len()).as_bytes())?;
-    out.write_all(bytes)?;
-    out.write_all(b"\r\n")?;
     out.flush()
 }
 
@@ -1083,5 +1003,65 @@ mod tests {
         let o: Value = serde_json::from_str(&error_body(Api::Openai, 429, "slow")).unwrap();
         assert_eq!(o["error"]["type"], "rate_limit_error");
         assert_eq!(o["error"]["message"], "slow");
+    }
+
+    /// A harness's connection to `take_request`: it sends `bytes` and
+    /// closes its write side; what the gateway read, and what it answered.
+    fn exchange(bytes: &[u8]) -> (Option<Request>, String) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let _ = client.write_all(bytes);
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut out = server.try_clone().unwrap();
+        let mut reader = BufReader::new(server);
+        let request = take_request(&mut reader, &mut out);
+        drop((reader, out));
+        let mut answer = String::new();
+        let _ = client.read_to_string(&mut answer);
+        (request, answer)
+    }
+
+    #[test]
+    fn every_valid_request_in_the_wire_corpus_is_read() {
+        for (name, bytes, body) in wire::corpus::requests_valid() {
+            let (request, answer) = exchange(&bytes);
+            let request = request.unwrap_or_else(|| panic!("{name}: answered {answer:?}"));
+            assert_eq!(request.body, body, "{name}");
+            assert!(answer.is_empty(), "{name}: {answer:?}");
+        }
+    }
+
+    #[test]
+    fn every_malformed_request_in_the_wire_corpus_gets_a_400() {
+        for (name, bytes) in wire::corpus::requests_malformed() {
+            let (request, answer) = exchange(&bytes);
+            assert!(request.is_none(), "{name}: was read");
+            assert!(
+                answer.starts_with("HTTP/1.1 400 "),
+                "{name}: answered {answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn content_length_with_transfer_encoding_is_refused_not_guessed() {
+        let (request, answer) = exchange(
+            b"POST /openai/v1/responses HTTP/1.1\r\nContent-Length: 4\r\n\
+              Transfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n",
+        );
+        assert!(request.is_none());
+        assert!(answer.starts_with("HTTP/1.1 400 "), "{answer:?}");
+        assert!(answer.contains("Transfer-Encoding"), "{answer:?}");
+    }
+
+    #[test]
+    fn a_connection_that_sends_nothing_is_not_answered() {
+        let (request, answer) = exchange(b"");
+        assert!(request.is_none());
+        assert!(answer.is_empty());
     }
 }

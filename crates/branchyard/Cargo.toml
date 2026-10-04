@@ -40,10 +40,10 @@ glob = "0.3"
 # and their base64url encoding. Both already in Cargo.lock.
 ring = "0.17"
 base64 = "0.22"
-# The model gateway (docs/model-gateway.md): its HTTP/1.1 parsing, TLS to
+# The model gateway (docs/model-gateway.md): its HTTP/1.1 wire codec, TLS to
 # backends with the Mozilla roots, and catalog/pricing.toml. All already
 # in Cargo.lock.
-httparse = "1"
+branchyard-wire = { path = "../branchyard-wire" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
 toml_edit = { version = "0.25", default-features = false, features = ["parse", "serde"] }

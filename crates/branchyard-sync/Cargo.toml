@@ -11,7 +11,7 @@ description = "Replicates Branchyard task repositories to durable object storage
 # KMS APIs and the cloud metadata servers, with the real conditional
 # semantics, for hermetic tests here and in the CLI and server. See
 # docs/sync.md.
-testing = ["dep:httparse"]
+testing = []
 
 [dependencies]
 base64 = "0.22"
@@ -20,6 +20,8 @@ branchyard = { path = "../branchyard" }
 # The blocking HTTP/1.1 client (rustls, Mozilla roots) every backend speaks
 # through.
 branchyard-client = { path = "../branchyard-client" }
+# The one HTTP/1.1 codec: the URL type, and the mock server's requests.
+branchyard-wire = { path = "../branchyard-wire" }
 # AES-256-GCM, ChaCha20-Poly1305, HMAC-SHA256, SHA-256, PBKDF2, HKDF and
 # RSA PKCS#1 SHA-256 (service-account JWTs). Already in Cargo.lock.
 ring = "0.17"
@@ -27,7 +29,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rusqlite = { version = "0.39", default-features = false, features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-httparse = { version = "1", optional = true }
 
 [dev-dependencies]
 branchyard-sync = { path = ".", features = ["testing"] }
