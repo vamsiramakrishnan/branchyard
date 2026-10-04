@@ -177,7 +177,9 @@ jobs:
       - run: cargo llvm-cov --workspace --locked --offline --lcov --output-path lcov.info
       - run: cargo llvm-cov -p branchyard -p branchyard-provision -p branchyard-substrate --lib --locked --offline --lcov --output-path unit.lcov
       - run: python tools/check_coverage.py lcov.info --unit unit.lcov
+      # Even when the floor check fails: the floors are written from this artifact.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
         with:
           name: lcov
           path: |

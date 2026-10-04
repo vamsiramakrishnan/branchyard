@@ -48,6 +48,8 @@ cargo llvm-cov -p branchyard -p branchyard-provision -p branchyard-substrate \
 python3 tools/check_coverage.py lcov.info --unit unit.lcov
 ```
 
-After adding tests, raise the floors with `python3 tools/check_coverage.py lcov.info --unit unit.lcov --update`: floors only go up, covered files leave `uncovered`, and nothing is ever added to it. Commit the result with the tests. If a floor must go down (a module was deleted, or tests were moved), edit the JSON by hand and say why in the commit message; the diff is the review.
+**Floors come from CI, never from a local run.** A local run (as root, with namespaces and `/dev/kvm`) exercises tests the hosted runner skips, so floors measured there fail in CI (runtime and sandbox did, in PR #12). Seed and update floors only from the `lcov` artifact of the `coverage` job, which uploads it even when the floor check fails: download it from the run, unpack `lcov.info` and `unit.lcov`, and run `python3 tools/check_coverage.py lcov.info --unit unit.lcov --update --from-ci`. Without `--from-ci` (or `GITHUB_ACTIONS`), `--update` and `--seed` refuse; `--local` overrides the guard for a throwaway file and warns.
+
+After adding tests, raise the floors with that command: floors only go up, covered files leave `uncovered`, and nothing is ever added to it. Commit the result with the tests. If a floor must go down (a module was deleted, or tests were moved), edit the JSON by hand and say why in the commit message; the diff is the review.
 
 The instrumented build is a second compile of the workspace; expect the job to take as long as `controls`.

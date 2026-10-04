@@ -19,6 +19,13 @@ go up, files that gained coverage leave `uncovered`, and a file that has
 none is never added, so write its test instead. `--seed` writes a first
 floor file and is the only way to fill `uncovered`.
 
+Floors come from the CI coverage job, never from a local run: a developer's
+machine runs tests the hosted runner skips (root-only and namespace tests),
+so a floor measured there fails in CI. Download the `lcov` artifact of a
+green run and pass `--from-ci` with `--update` or `--seed` (the job itself,
+under GITHUB_ACTIONS, needs no flag). `--local` overrides the guard for a
+throwaway floor file, with a warning.
+
 Only crates/<name>/src/ files count: tests, examples, build scripts and
 vendored code do not.
 """
@@ -26,6 +33,7 @@ vendored code do not.
 import argparse
 import json
 import math
+import os
 import re
 import sys
 from pathlib import Path
@@ -141,6 +149,21 @@ def load(path, root):
     return parse_lcov(Path(path).read_text(), root)
 
 
+def refuse_local_measurement(args):
+    """Floors are written only from the CI job's reports, or with --local."""
+    if args.from_ci or os.environ.get("GITHUB_ACTIONS") == "true":
+        return True
+    if args.local:
+        print("warning: floors written from a local run may fail in CI", file=sys.stderr)
+        return True
+    print(
+        "error: floors are seeded and updated from the CI coverage artifact, not a local run.\n"
+        "Download the `lcov` artifact of the CI coverage job and pass --from-ci (or --local to override).",
+        file=sys.stderr,
+    )
+    return False
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("lcov", help="lcov report of the whole workspace's tests")
@@ -148,10 +171,14 @@ def main(argv):
     parser.add_argument("--root", default=str(ROOT), help="repository root, to relativize report paths")
     parser.add_argument("--floor", default=str(FLOOR))
     parser.add_argument("--update", action="store_true", help="raise the floors to the measured values")
+    parser.add_argument("--from-ci", action="store_true", help="the reports are the CI coverage job's artifact")
+    parser.add_argument("--local", action="store_true", help="let --update/--seed use reports from this machine")
     parser.add_argument("--seed", action="store_true", help="write a first floor file (see --watch, --unit-watch)")
     parser.add_argument("--watch", nargs="*", default=[], help="with --seed: files that get their own floor")
     parser.add_argument("--unit-watch", nargs="*", default=[], help="with --seed: files that get a unit-test floor")
     args = parser.parse_args(argv[1:])
+    if (args.update or args.seed) and not refuse_local_measurement(args):
+        return 1
     files = load(args.lcov, args.root)
     unit = load(args.unit, args.root) if args.unit else None
     floor_path = Path(args.floor)

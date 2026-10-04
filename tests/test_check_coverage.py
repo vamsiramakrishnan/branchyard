@@ -4,10 +4,12 @@ floors with their tolerance, the unit-test floors, the uncovered ratchet, and
 --seed/--update."""
 
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import check_coverage
@@ -155,6 +157,25 @@ class Cli(unittest.TestCase):
         self.assertEqual(code, 0)
         code, _ = self.run_cli(floor(crates={"a": 60.0}), text)
         self.assertEqual(code, 1)
+
+    def test_update_and_seed_refuse_a_local_run(self):
+        text = lcov(**{A: [1, 1, 0, 0]})
+        for flag in ("--update", "--seed"):
+            with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": ""}):
+                code, written = self.run_cli(floor(crates={"a": 10.0}), text, flag)
+            self.assertEqual(code, 1, flag)
+            self.assertEqual(written["crates"], {"a": 10.0}, "the floor file is untouched")
+
+    def test_update_is_allowed_from_the_ci_artifact_or_in_ci(self):
+        text = lcov(**{A: [1, 1, 0, 0]})
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": ""}):
+            code, written = self.run_cli(floor(crates={"a": 10.0}), text, "--update", "--from-ci")
+            self.assertEqual((code, written["crates"]["a"]), (0, 50.0))
+            code, _ = self.run_cli(floor(crates={"a": 10.0}), text, "--update", "--local")
+            self.assertEqual(code, 0)
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            code, _ = self.run_cli(floor(crates={"a": 10.0}), text, "--update")
+            self.assertEqual(code, 0)
 
     def test_the_committed_floor_file_is_well_formed(self):
         data = json.loads(check_coverage.FLOOR.read_text())
