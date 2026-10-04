@@ -12,7 +12,9 @@ all-features = true
 # without one.
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2025-0141", reason = "bincode 2.0.1 only via microsandbox-filesystem (optional microsandbox feature); upstream has no fix" },
+]
 
 [licenses]
 # The licenses present in Cargo.lock today. A new license is a decision:

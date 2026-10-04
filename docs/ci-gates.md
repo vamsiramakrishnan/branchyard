@@ -22,6 +22,10 @@ To add a dependency used in one crate, put it in that crate with its version. Wh
 
 `deny.toml` is the policy. The licenses allowed are the ones `Cargo.lock` carries today; a new one is a decision, made in the change that brings the dependency in, with the reason in the commit message. Duplicate versions of a crate are a warning (most come from upstream), not a failure. An advisory that does not apply goes in `[advisories] ignore` with the reason, never without one. The job also catches a new advisory against an unchanged lockfile, so a red `deny` on a change that touched no dependency means a crate was reported: update it, or ignore the advisory with the reason.
 
+Current exceptions, each in `deny.toml` with its reason: `RUSTSEC-2025-0141` (bincode 2.0.1 is unmaintained; it reaches the graph only through `microsandbox-filesystem`, behind the optional `microsandbox` feature, and upstream has no fix). Remove the entry when `microsandbox` moves off bincode.
+
+A yanked release is fixed in the lockfile, not ignored: `cargo update -p <crate> --precise <newer version>`, commit `Cargo.lock`, and re-run `cargo deny --locked check`. If the advisory database fetch fails locally (a proxy that blocks libgit2), run the check against a copy of `deny.toml` with `git-fetch-with-cli = true` under `[advisories]`: `cargo deny --locked check --config /path/to/copy.toml`. Do not commit that setting; CI does not need it.
+
 The CI tools are release binaries pinned by SHA-256 in `tools/install_ci_tool.py` rather than `cargo install`, so installing them is fast and a replaced asset fails the job. To bump one, change its version, URL and digest together.
 
 ## Coverage
