@@ -1104,15 +1104,18 @@ fn the_audit_log_settles_a_lost_answer_and_records_calls_around_the_proxy() {
     assert_eq!(mock.calls_to("flaky__charge").len(), 1);
     // The gateway's audit line for that call carries its key: it happened.
     // A second line is a call that did not go through the proxy, and says
-    // its effect.
+    // its effect. The line's time becomes that entry's creation time, and
+    // the ledger is ordered by it, so the times are far in the future: a
+    // date in the past (the test's own day) sorts it before the call made
+    // when the test runs, and the test fails from the next day on.
     let audit = f.root.join(".branchyard/gateway/audit.jsonl");
     let lines = format!(
         "{}\n{}\n",
-        serde_json::json!({"time": "2026-10-03T10:00:00Z", "by_branch": "audited", "by_turn": "1",
+        serde_json::json!({"time": "2099-01-01T00:00:00Z", "by_branch": "audited", "by_turn": "1",
             "sub": "local:me", "connector": "flaky", "operation": "flaky.charges.create",
             "decision": "allowed", "upstream_status": 200, "error_code": null,
             "effect_class": "compensable", "ledger_id": lost.id, "staged_for": null}),
-        serde_json::json!({"time": "2026-10-03T10:00:01Z", "by_branch": "audited", "by_turn": "1",
+        serde_json::json!({"time": "2099-01-01T00:00:01Z", "by_branch": "audited", "by_turn": "1",
             "sub": "local:me", "connector": "slack", "operation": "slack.chat.post",
             "decision": "allowed", "upstream_status": 200, "error_code": null,
             "effect_class": "reversible", "ledger_id": null, "staged_for": null}),
@@ -1120,7 +1123,7 @@ fn the_audit_log_settles_a_lost_answer_and_records_calls_around_the_proxy() {
     // A draft's line settles nothing and records nothing.
     let lines = format!(
         "{lines}{}\n",
-        serde_json::json!({"time": "2026-10-03T10:00:02Z", "by_branch": "audited", "by_turn": "1",
+        serde_json::json!({"time": "2099-01-01T00:00:02Z", "by_branch": "audited", "by_turn": "1",
             "sub": "local:me", "connector": "gmail", "operation": "gmail.drafts.create",
             "decision": "allowed", "upstream_status": 200, "error_code": null,
             "effect_class": "irreversible", "ledger_id": null, "staged_for": "gmail.send"})

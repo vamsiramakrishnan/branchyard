@@ -35,13 +35,38 @@ fn built(package: &str, bin: &str) -> PathBuf {
     // target/<profile>/deps/<test binary>
     let profile_dir = exe.parent().and_then(Path::parent).unwrap().to_path_buf();
     let target_dir = profile_dir.parent().unwrap();
+    let profile = profile_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_owned);
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut command = Command::new(cargo);
     command
         .args(["build", "--quiet", "--offline", "--manifest-path"])
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-        .args(["-p", package, "--bin", bin])
-        .env("CARGO_TARGET_DIR", target_dir);
+        .args(["-p", package, "--bin", bin]);
+    // Under `cargo llvm-cov` the helper must not be built instrumented: run in
+    // a sandbox with a cleaned environment (no LLVM_PROFILE_FILE), an
+    // instrumented binary writes a default_*.profraw into its working
+    // directory, which the engine then reports as a change the branch made.
+    // The helpers are not what coverage measures, so they are built plain,
+    // in a target directory of their own (cargo's fingerprint does not see
+    // the RUSTC_WRAPPER that instruments, so it would reuse the instrumented
+    // binary in the shared one).
+    let coverage = std::env::var_os("CARGO_LLVM_COV").is_some()
+        || std::env::var_os("LLVM_PROFILE_FILE").is_some();
+    let (target_dir, profile_dir) = if coverage {
+        command.env_remove("RUSTC_WRAPPER");
+        for flags in ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS"] {
+            command.env_remove(flags);
+        }
+        let own = target_dir.join("uninstrumented");
+        let profile_dir = own.join(profile.as_deref().unwrap_or("debug"));
+        (own, profile_dir)
+    } else {
+        (target_dir.to_path_buf(), profile_dir)
+    };
+    command.env("CARGO_TARGET_DIR", &target_dir);
     match profile_dir.file_name().and_then(|n| n.to_str()) {
         Some("debug") => {}
         Some("release") => {
