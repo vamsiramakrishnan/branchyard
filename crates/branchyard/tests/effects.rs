@@ -1096,7 +1096,7 @@ fn the_audit_log_settles_a_lost_answer_and_records_calls_around_the_proxy() {
     // its effect. The lines are dated far ahead so that they sort after the
     // real call whenever the test runs (they were once dated "next week",
     // and the test failed from the day that date passed).
-    let audit =f.root.join(".branchyard/gateway/audit.jsonl");
+    let audit = f.root.join(".branchyard/gateway/audit.jsonl");
     let lines = format!(
         "{}\n{}\n",
         serde_json::json!({"time": "2099-10-03T10:00:00Z", "by_branch": "audited", "by_turn": "1",

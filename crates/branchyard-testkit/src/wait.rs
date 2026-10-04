@@ -172,11 +172,15 @@ pub fn until_value<T: Debug>(
     })
 }
 
-/// Let `duration` pass (multiplied by `BY_TEST_TIMEOUT_SCALE`) because the
-/// test needs time itself to go by, not an event: a pipe to fill, a lease
+/// Let `duration` pass because the test needs time itself to go by, not an event: a pipe to fill, a lease
 /// or token to expire, a quiet period in which nothing may happen. `why`
 /// says which, so that the next reader can judge whether an event could be
 /// awaited instead.
+///
+/// The duration is *not* multiplied by `BY_TEST_TIMEOUT_SCALE`: it is
+/// time against the clock of the code under test (a stall window, an ask's
+/// timeout, a lease), which a slow machine does not stretch. Scaling it
+/// would break the test, not harden it.
 ///
 /// It is never the way to wait *for* something: that is [`until`], which
 /// returns the moment the thing happens and cannot be too short on a slow
@@ -184,7 +188,7 @@ pub fn until_value<T: Debug>(
 /// and fails if the count grows.
 pub fn settle(why: &str, duration: Duration) {
     let _ = why;
-    std::thread::sleep(scaled(duration));
+    std::thread::sleep(duration);
 }
 
 /// The one place a test sleeps: a fixed interval plus a jitter taken from

@@ -33,7 +33,7 @@ Shared test infrastructure lives in one crate, `crates/branchyard-testkit`, a de
 | A scratch directory | `Scratch::new("name")`, removed on drop. Not `std::env::temp_dir()` plus a counter. |
 | A mock HTTP server | `MockHttp::start(\|request\| Response::json(200, &body))`, then `.url()`, `.requests()` and `.await_requests(n)`. Every connection runs on a thread whose result is joined when the server is finished or dropped, so an I/O error, a truncated request or a handler panic fails the test that owns the server. `Response::hang()` and `Response::close()` are the receiver that never answers and the one that closes without a response; `MockHttp::start_v6` returns `None` where there is no IPv6 loopback. |
 
-`BY_TEST_TIMEOUT_SCALE=3` multiplies every timeout (waits, settles and the mock's read timeout) by three; use it to check a test against a slow machine. A test you write must pass with it.
+`BY_TEST_TIMEOUT_SCALE=3` multiplies every wait's timeout (`wait::until` and friends, and the mock server's read timeout) by three; use it to check a test against a slow machine. It does not stretch `wait::settle`: that is time against the code under test's own clocks. A test you write must pass with it.
 
 The hygiene check also keeps three counted ratchets in `tools/test_hygiene_ratchet.json`: calls to `wait::settle`, hand-rolled `std::env::temp_dir()` directories and hand-rolled `TcpListener::bind` servers, per file. A count above the file fails; a count below it fails until the file is lowered (`python3 tools/check_test_hygiene.py --lower`). They can only fall: when you touch one of the listed files, move it onto the kit and lower its count.
 

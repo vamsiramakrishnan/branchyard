@@ -191,7 +191,8 @@ fn close_names_and_kills_descendants_that_outlive_the_harness() {
     let closed = session.close(WAIT).unwrap();
     assert!(!closed.forced);
     assert_eq!(closed.survivors, ["sleep"]);
-    assert!(!wait::alive(pid), "the survivor is still running");
+    // The kill is a signal: it lands a moment after `close` returns.
+    wait::gone(pid);
 }
 
 #[test]
