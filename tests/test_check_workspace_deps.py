@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """tools/check_workspace_deps.py on small fixture workspaces, plus the real one."""
+
 import sys
 import tempfile
 import unittest

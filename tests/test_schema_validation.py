@@ -9,11 +9,12 @@ examples is wrong, so this doubles as `schema/contract.json`'s sanity
 check, besides `crates/branchyard-client/tests/contract.rs`'s freshness
 check.
 """
+
 import json
-from pathlib import Path
 import re
 import tomllib
 import unittest
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = json.loads((ROOT / "schema/contract.json").read_text())
@@ -285,8 +286,12 @@ class GraphTypesValidate(unittest.TestCase):
         )
         with self.assertRaises(ValidationError):
             validate_as(
-                {"branch": "r", "revision": 0, "children": [], "dependencies": [
-                    {"dependent": "a", "prerequisite": "b", "after": "later"}]},
+                {
+                    "branch": "r",
+                    "revision": 0,
+                    "children": [],
+                    "dependencies": [{"dependent": "a", "prerequisite": "b", "after": "later"}],
+                },
                 "Graph",
             )
 

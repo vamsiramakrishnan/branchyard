@@ -6,6 +6,7 @@ provisioner; at the current pin, d9b9e6a, all 13 pass and the baseline records
 no incompatibility. A change in either direction fails this check until the
 baseline and docs/validation.md are updated together.
 """
+
 import io
 import json
 import runpy
@@ -29,13 +30,19 @@ def observe():
         for test, traceback in failures:
             # Compare the test and exception, not unstable temporary paths or timing.
             last = traceback.strip().splitlines()
-            exception = next((line for line in last
-                              if line.startswith(("AssertionError:", "AttributeError:",
-                                                  "FileNotFoundError:", "TypeError:"))),
-                             last[-1] if last else "unknown")
+            exception = next(
+                (
+                    line
+                    for line in last
+                    if line.startswith(("AssertionError:", "AttributeError:", "FileNotFoundError:", "TypeError:"))
+                ),
+                last[-1] if last else "unknown",
+            )
             observations.append({"test": test.id(), "kind": kind, "exception": exception})
-    return {"tests_run": result.testsRun,
-            "incompatibilities": sorted(observations, key=lambda x: x["test"])}, output.getvalue()
+    return {
+        "tests_run": result.testsRun,
+        "incompatibilities": sorted(observations, key=lambda x: x["test"]),
+    }, output.getvalue()
 
 
 def main():
@@ -46,12 +53,16 @@ def main():
         print(json.dumps(actual, indent=2), file=sys.stderr)
         raise SystemExit("Upstream compatibility changed; inspect it and update the recorded qualification.")
     if actual["incompatibilities"]:
-        print(f"KNOWN INCOMPATIBILITY: {actual['tests_run']} Claude tests reproduced "
-              f"{len(actual['incompatibilities'])} expected failure/error observations. "
-              "See docs/validation.md.")
+        print(
+            f"KNOWN INCOMPATIBILITY: {actual['tests_run']} Claude tests reproduced "
+            f"{len(actual['incompatibilities'])} expected failure/error observations. "
+            "See docs/validation.md."
+        )
     else:
-        print(f"COMPATIBLE: all {actual['tests_run']} Claude tests pass against the pinned "
-              "provisioner, as recorded; see docs/validation.md.")
+        print(
+            f"COMPATIBLE: all {actual['tests_run']} Claude tests pass against the pinned "
+            "provisioner, as recorded; see docs/validation.md."
+        )
 
 
 if __name__ == "__main__":

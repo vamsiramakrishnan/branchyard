@@ -7,6 +7,7 @@ cannot. Members may still add their own `features` and `optional`.
 
 Run: python3 tools/check_workspace_deps.py [root]
 """
+
 import sys
 import tomllib
 from pathlib import Path
@@ -45,9 +46,15 @@ def check(root):
     for name, users in sorted(pinned.items()):
         members = sorted({m for m, _ in users})
         if name in hoisted:
-            errors.append(f"{name}: declared in [workspace.dependencies] but {', '.join(members)} still spell a version; use workspace = true")
+            errors.append(
+                f"{name}: declared in [workspace.dependencies] but {', '.join(members)} "
+                "still spell a version; use workspace = true"
+            )
         elif len(members) > 1:
-            errors.append(f"{name}: versioned separately in {', '.join(members)}; move it to [workspace.dependencies] and use workspace = true")
+            errors.append(
+                f"{name}: versioned separately in {', '.join(members)}; "
+                "move it to [workspace.dependencies] and use workspace = true"
+            )
     return errors
 
 

@@ -3,10 +3,10 @@ extracted outside the checkout, installed with the shipped installer, and
 run with the shipped launcher / imported as the shipped module. See
 `docs/distribution.md`.
 """
+
 import importlib.util
 import json
 import os
-from pathlib import Path
 import re
 import stat
 import subprocess
@@ -14,10 +14,12 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 spec = importlib.util.spec_from_file_location("package", ROOT / "tools/package.py")
+assert spec is not None and spec.loader is not None
 package = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(package)
 
@@ -34,7 +36,7 @@ class ArchiveTests(unittest.TestCase):
         first = package.build(self.root / "one")
         second = package.build(self.root / "two")
         self.assertEqual(len(first), 4)
-        for a, b in zip(first, second):
+        for a, b in zip(first, second, strict=True):
             self.assertEqual(a.name, b.name)
             self.assertEqual(a.read_bytes(), b.read_bytes(), f"{a.name} is not reproducible")
             with zipfile.ZipFile(a) as archive:
@@ -52,7 +54,10 @@ class ArchiveTests(unittest.TestCase):
     def test_plugin_archive_bundles_the_same_skill_bytes_as_the_standalone_one(self):
         plugin, skill, setup_skill, _sdk = package.build(self.root / "dist")
         with zipfile.ZipFile(plugin) as plugin_zip:
-            for archive, source, name in [(skill, package.SKILL, "delegate"), (setup_skill, package.SETUP_SKILL, "setup")]:
+            for archive, source, name in [
+                (skill, package.SKILL, "delegate"),
+                (setup_skill, package.SETUP_SKILL, "setup"),
+            ]:
                 with zipfile.ZipFile(archive) as skill_zip:
                     inputs = package.inputs(source)
                     self.assertIn("SKILL.md", inputs)
@@ -170,11 +175,7 @@ class SdkArchiveRuntimeTests(unittest.TestCase):
 
     def _stub_by(self, reply: dict) -> Path:
         stub = self.root / "by"
-        stub.write_text(
-            "#!/usr/bin/env python3\n"
-            "import json, sys\n"
-            f"print(json.dumps({reply!r}))\n"
-        )
+        stub.write_text(f"#!/usr/bin/env python3\nimport json, sys\nprint(json.dumps({reply!r}))\n")
         stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
         return stub
 
@@ -230,7 +231,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         for trigger in ("pull_request", "workflow_dispatch", "schedule", "branches"):
             self.assertNotIn(trigger, head)
         try:
-            import yaml  # noqa: PLC0415
+            import yaml
         except ImportError:
             return
         parsed = yaml.safe_load(self.text)
@@ -245,8 +246,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertRegex(use, r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$")
 
     def test_it_builds_four_targets_with_checksums_and_attestations(self):
-        for target in ("x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl",
-                       "aarch64-apple-darwin", "x86_64-apple-darwin"):
+        for target in (
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-musl",
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+        ):
             self.assertIn(f"target: {target}", self.text)
         self.assertIn("-p branchyard-cli -p branchyard-server", self.text)
         self.assertIn("statically linked", self.text)
@@ -275,6 +280,7 @@ def _fake_release(directory, version, target, by_text="#!/bin/sh\necho 'by 9.9.9
     archive = release / f"{name}.tar.gz"
     subprocess.run(["tar", "-C", str(stage.parent), "-czf", str(archive), name], check=True)
     import hashlib
+
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     (release / "SHA256SUMS").write_text(f"{digest}  {archive.name}\n")
     return release
@@ -294,7 +300,9 @@ class InstallScriptTests(unittest.TestCase):
     def run_install(self, *args):
         return subprocess.run(
             ["sh", str(ROOT / "install.sh"), "--target", self.target, *args],
-            capture_output=True, text=True, env={"PATH": os.environ["PATH"], "HOME": str(self.root)},
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ["PATH"], "HOME": str(self.root)},
         )
 
     def test_it_is_posix_sh(self):
@@ -305,8 +313,9 @@ class InstallScriptTests(unittest.TestCase):
         self.assertNotIn("[[", text)
 
     def test_installs_after_verifying_the_checksum(self):
-        out = self.run_install("--version", "v1.2.3", "--prefix", str(self.prefix),
-                               "--base-url", f"file://{self.release}")
+        out = self.run_install(
+            "--version", "v1.2.3", "--prefix", str(self.prefix), "--base-url", f"file://{self.release}"
+        )
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("installed by 9.9.9 into", out.stdout)
         for binary in ("by", "branchyard-server"):
@@ -314,15 +323,15 @@ class InstallScriptTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)
         self.assertTrue((self.prefix / "share/branchyard/licenses/orca-LICENSE").is_file())
         # A plain directory works too, and installing again replaces.
-        out = self.run_install("--version", "1.2.3", "--prefix", str(self.prefix),
-                               "--base-url", str(self.release))
+        out = self.run_install("--version", "1.2.3", "--prefix", str(self.prefix), "--base-url", str(self.release))
         self.assertEqual(out.returncode, 0, out.stderr)
 
     def test_a_tampered_archive_installs_nothing(self):
         sums = self.release / "SHA256SUMS"
         sums.write_text("0" * 64 + sums.read_text()[64:])
-        out = self.run_install("--version", "1.2.3", "--prefix", str(self.prefix),
-                               "--base-url", f"file://{self.release}")
+        out = self.run_install(
+            "--version", "1.2.3", "--prefix", str(self.prefix), "--base-url", f"file://{self.release}"
+        )
         self.assertNotEqual(out.returncode, 0)
         self.assertIn("checksum mismatch", out.stderr)
         self.assertFalse((self.prefix / "bin" / "by").exists())
@@ -332,8 +341,9 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn("--version", out.stderr)
         out = self.run_install("--version", "1.2.3", "--base-url", "http://example.invalid/r")
         self.assertIn("refusing plain http", out.stderr)
-        out = self.run_install("--version", "1.2.3", "--prefix", str(self.prefix),
-                               "--base-url", f"file://{self.root}/nowhere")
+        out = self.run_install(
+            "--version", "1.2.3", "--prefix", str(self.prefix), "--base-url", f"file://{self.root}/nowhere"
+        )
         self.assertNotEqual(out.returncode, 0)
         self.assertFalse(self.prefix.exists())
         out = self.run_install("--version", "1.2.3", "--dry-run")
@@ -348,8 +358,7 @@ class HomebrewFormulaTests(unittest.TestCase):
         spec.loader.exec_module(self.module)
 
     def test_the_template_fills_from_sha256sums(self):
-        sums = "".join(f"{str(i) * 64}  branchyard-1.2.3-{t}.tar.gz\n"
-                       for i, t in enumerate(self.module.TARGETS))
+        sums = "".join(f"{str(i) * 64}  branchyard-1.2.3-{t}.tar.gz\n" for i, t in enumerate(self.module.TARGETS))
         formula = self.module.render("1.2.3", sums)
         self.assertNotRegex(formula, r"@[A-Z0-9_]+@")
         self.assertIn('version "1.2.3"', formula)
@@ -368,7 +377,8 @@ class HarnessImageTests(unittest.TestCase):
     def test_the_build_stage_is_deploy_dockerfiles(self):
         def stage(text):
             start = text.index("FROM rust:")
-            return text[start:text.index("\nFROM ", start + 1)]
+            return text[start : text.index("\nFROM ", start + 1)]
+
         self.assertEqual(stage(self.text), stage((ROOT / "deploy/Dockerfile").read_text()))
 
     def test_runtime_images_are_pinned_by_digest_and_run_as_a_user(self):

@@ -17,6 +17,7 @@ sources, license and modification, or when a vendored source changed since
 the translation was reviewed. Orca's worktree helpers (MIT) are translated
 from TypeScript and recorded the same way, in patches/orca-worktree.json.
 """
+
 import difflib
 import fnmatch
 import json
@@ -29,11 +30,14 @@ DERIVED = "crates/branchyard-controls/src/resume.rs"
 
 
 def verify_herdr():
-    expected = "".join(difflib.unified_diff(
-        (ROOT / UPSTREAM).read_text().splitlines(True),
-        (ROOT / DERIVED).read_text().splitlines(True),
-        fromfile=UPSTREAM, tofile=DERIVED,
-    ))
+    expected = "".join(
+        difflib.unified_diff(
+            (ROOT / UPSTREAM).read_text().splitlines(True),
+            (ROOT / DERIVED).read_text().splitlines(True),
+            fromfile=UPSTREAM,
+            tofile=DERIVED,
+        )
+    )
     actual = (ROOT / "patches/herdr-resume.patch").read_text()
     if actual != expected:
         raise SystemExit("Herdr adaptation changed: regenerate and review patches/herdr-resume.patch")
@@ -41,8 +45,7 @@ def verify_herdr():
 
 
 def _header(path):
-    header = "".join(line for line in path.read_text().splitlines(True)[:20]
-                     if line.startswith("//"))
+    header = "".join(line for line in path.read_text().splitlines(True)[:20] if line.startswith("//"))
     return re.sub(r"\s*\n//\s*", " ", header)
 
 
@@ -54,8 +57,7 @@ def verify_scion():
     for derived in manifest["derivatives"]:
         path = ROOT / derived["path"]
         header = _header(path)
-        for needed in ("GoogleCloudPlatform/scion", commit, "Apache License, Version 2.0",
-                       "Modified for Branchyard"):
+        for needed in ("GoogleCloudPlatform/scion", commit, "Apache License, Version 2.0", "Modified for Branchyard"):
             if needed not in header:
                 problems.append(f"{derived['path']}: its header does not name {needed!r}")
         for source, recorded in derived["from"].items():
@@ -69,8 +71,10 @@ def verify_scion():
             # translation follows, and verify_vendor.py checks an
             # unpatched file against its pin.
             elif entry["git_blob"] != recorded:
-                problems.append(f"{source} changed upstream since {derived['path']} was "
-                                "translated: review the change, port it, and record the new blob")
+                problems.append(
+                    f"{source} changed upstream since {derived['path']} was "
+                    "translated: review the change, port it, and record the new blob"
+                )
     # A `rewritten` file was once translated line for line from these
     # sources, like a `derivatives` entry, but has since been rebuilt on a
     # real library instead of following them: its header must still credit
@@ -79,8 +83,7 @@ def verify_scion():
     for rewritten in manifest.get("rewritten", []):
         path = ROOT / rewritten["path"]
         header = _header(path)
-        for needed in ("GoogleCloudPlatform/scion", commit, "Apache License, Version 2.0",
-                       "Rewritten for Branchyard"):
+        for needed in ("GoogleCloudPlatform/scion", commit, "Apache License, Version 2.0", "Rewritten for Branchyard"):
             if needed not in header:
                 problems.append(f"{rewritten['path']}: its header does not name {needed!r}")
         for source in rewritten.get("originally_from", []):
@@ -90,8 +93,10 @@ def verify_scion():
         raise SystemExit("Scion derivatives out of date:\n  " + "\n  ".join(problems))
     count = sum(len(d["from"]) for d in manifest["derivatives"])
     rewritten = len(manifest.get("rewritten", []))
-    print(f"Verified {len(manifest['derivatives'])} Scion derivatives against {count} "
-          f"vendored sources at {commit[:7]}, and {rewritten} rewritten file(s)' attribution.")
+    print(
+        f"Verified {len(manifest['derivatives'])} Scion derivatives against {count} "
+        f"vendored sources at {commit[:7]}, and {rewritten} rewritten file(s)' attribution."
+    )
 
 
 def verify_orca():
@@ -105,8 +110,14 @@ def verify_orca():
     for derived in manifest["derivatives"]:
         path = ROOT / derived["path"]
         header = _header(path)
-        for needed in ("stablyai/orca", commit, "MIT License", "Copyright (c) 2026 Lovecast Inc.",
-                       "vendor/orca/LICENSE", "Modified for Branchyard"):
+        for needed in (
+            "stablyai/orca",
+            commit,
+            "MIT License",
+            "Copyright (c) 2026 Lovecast Inc.",
+            "vendor/orca/LICENSE",
+            "Modified for Branchyard",
+        ):
             if needed not in header:
                 problems.append(f"{derived['path']}: its header does not name {needed!r}")
         for source, recorded in derived["from"].items():
@@ -116,13 +127,14 @@ def verify_orca():
             if entry is None or entry["commit"] != commit:
                 problems.append(f"{source} is not vendored at {commit}")
             elif entry["git_blob"] != recorded:
-                problems.append(f"{source} changed upstream since {derived['path']} was "
-                                "translated: review the change, port it, and record the new blob")
+                problems.append(
+                    f"{source} changed upstream since {derived['path']} was "
+                    "translated: review the change, port it, and record the new blob"
+                )
     if problems:
         raise SystemExit("Orca derivatives out of date:\n  " + "\n  ".join(problems))
     count = sum(len(d["from"]) for d in manifest["derivatives"])
-    print(f"Verified {len(manifest['derivatives'])} Orca derivatives against {count} "
-          f"vendored sources at {commit[:7]}.")
+    print(f"Verified {len(manifest['derivatives'])} Orca derivatives against {count} vendored sources at {commit[:7]}.")
 
 
 def _comment_header(path, lines=30):
@@ -132,7 +144,7 @@ def _comment_header(path, lines=30):
         stripped = line.lstrip()
         for marker in ("//", "#"):
             if stripped.startswith(marker):
-                text.append(stripped[len(marker):].strip())
+                text.append(stripped[len(marker) :].strip())
                 break
     return " ".join(text)
 
@@ -154,8 +166,7 @@ def verify_ports(root=ROOT):
             problems.append(f"{derived['path']}: its header does not say 'Modified for Branchyard'")
         for name, sources in derived["from"].items():
             upstream = upstreams[name]
-            for needed in (upstream["repository"], upstream["commit"], upstream["license"],
-                           upstream["copyright"]):
+            for needed in (upstream["repository"], upstream["commit"], upstream["license"], upstream["copyright"]):
                 if needed not in header:
                     problems.append(f"{derived['path']}: its header does not name {needed!r}")
             for source, recorded in sources.items():
@@ -166,12 +177,13 @@ def verify_ports(root=ROOT):
                 if entry is None or entry["commit"] != upstream["commit"]:
                     problems.append(f"{source} is not vendored at {upstream['commit']}")
                 elif entry["git_blob"] != recorded:
-                    problems.append(f"{source} changed upstream since {derived['path']} was "
-                                    "derived: review the change, port it, and record the new blob")
+                    problems.append(
+                        f"{source} changed upstream since {derived['path']} was "
+                        "derived: review the change, port it, and record the new blob"
+                    )
     if problems:
         raise SystemExit("emdash and Orca ports out of date:\n  " + "\n  ".join(problems))
-    print(f"Verified {len(manifest['derivatives'])} emdash and Orca derivatives against "
-          f"{count} vendored sources.")
+    print(f"Verified {len(manifest['derivatives'])} emdash and Orca derivatives against {count} vendored sources.")
 
 
 def main():

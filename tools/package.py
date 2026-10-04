@@ -8,12 +8,13 @@ a fixed timestamp and mode, and compression is deflate at a fixed level, so
 two builds from the same source tree are byte-identical (`tests/test_distribution.py`
 checks this).
 """
+
 import argparse
 import hashlib
 import json
-from pathlib import Path
 import tomllib
 import zipfile
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "branchyard"
@@ -68,8 +69,7 @@ def build(destination: Path) -> list[Path]:
         manifest = json.loads((PLUGIN / host / "plugin.json").read_text())
         if manifest["name"] != "branchyard" or manifest["version"] != version:
             raise ValueError(
-                f"{host}/plugin.json's name and version must be 'branchyard' and {version!r}, "
-                f"the workspace version"
+                f"{host}/plugin.json's name and version must be 'branchyard' and {version!r}, the workspace version"
             )
     destination.mkdir(parents=True, exist_ok=True)
     license_bytes = (ROOT / "LICENSE").read_bytes()

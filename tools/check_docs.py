@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Check local Markdown file targets in first-party documentation. No network checks."""
+
 import re
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
