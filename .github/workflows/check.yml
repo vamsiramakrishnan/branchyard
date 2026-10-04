@@ -23,6 +23,9 @@ jobs:
       - run: python tools/verify_derivatives.py
       - run: python tools/check_catalog.py
       - run: python tools/check_docs.py
+      - name: HTTP framing is parsed only in branchyard-wire
+        run: python tools/check_wire.py
+      - run: python tests/test_check_wire.py
       - run: python tools/test_scion.py --qualified
       - name: Verify the recorded upstream Claude compatibility
         run: python tools/check_scion_compatibility.py
