@@ -137,6 +137,8 @@ mod pull_request;
 mod record;
 mod recover;
 mod run;
+#[cfg(test)]
+mod schema_parity;
 mod seats;
 pub mod services;
 mod snapshots;
@@ -145,6 +147,8 @@ mod sqlite;
 mod state;
 mod steer;
 mod storage;
+#[doc(hidden)]
+pub mod store_codec;
 mod tarball;
 pub mod tasks;
 mod workspace;
@@ -2542,6 +2546,8 @@ pub struct Steer {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
+#[derive(strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum SteerState {
     /// Queued for the running turn; the engine running it writes it to the
     /// harness within about 100 ms, in whichever process it runs.

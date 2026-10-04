@@ -63,6 +63,8 @@ pub use usage::Tokens;
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(strum::Display, strum::EnumString, strum::EnumIter, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum Api {
     /// Anthropic's Messages API (`/v1/messages`), with `x-api-key`.
     Anthropic,
@@ -75,11 +77,7 @@ pub enum Api {
 
 impl Api {
     pub fn as_str(&self) -> &'static str {
-        match self {
-            Api::Anthropic => "anthropic",
-            Api::Openai => "openai",
-            Api::Generic => "generic",
-        }
+        self.into()
     }
 
     /// The provider's public API, for a backend that names no URL.
@@ -89,12 +87,6 @@ impl Api {
             Api::Openai => Some("https://api.openai.com"),
             Api::Generic => None,
         }
-    }
-}
-
-impl fmt::Display for Api {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 

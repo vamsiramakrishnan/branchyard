@@ -52,6 +52,8 @@ pub const MAX_EDITS: usize = 64;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
+#[derive(strum::Display, strum::EnumString, strum::EnumIter, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum After {
     /// Its last turn ended `ready` or `no_changes`, or it was merged.
     #[default]
@@ -64,15 +66,6 @@ pub enum After {
 impl After {
     fn is_settled(&self) -> bool {
         *self == After::Settled
-    }
-}
-
-impl fmt::Display for After {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            After::Settled => "settled",
-            After::Integrated => "integrated",
-        })
     }
 }
 

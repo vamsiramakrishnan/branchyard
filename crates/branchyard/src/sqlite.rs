@@ -23,7 +23,7 @@ use std::time::Duration;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::Value;
 
-use crate::graph::{After, Dependency, GraphBackend, GraphCommit};
+use crate::graph::{Dependency, GraphBackend, GraphCommit};
 use crate::state::{
     pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PoolBackend, PortBackend,
     ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow, SlotRow,
@@ -32,6 +32,10 @@ use crate::state::{
 use crate::storage::{
     ArtifactRef, ArtifactRow, Identity, LegacyBinder, LegacyBranch, LockOutcome, NewArtifact,
     NewScratch, ScratchArea, ScratchLock, ScratchRow, Share, StorageBackend,
+};
+use crate::store_codec::{
+    deadline, decode, encode, from_db, from_db_opt, from_db_u16, from_db_u32, parse_text, to_db,
+    to_db_opt, to_db_usize,
 };
 use crate::{Activity, BranchStatus, Error, Message, RecordedEvent, SteerState};
 use branchyard_support::time::now_ms;
@@ -323,22 +327,6 @@ fn db(context: &str, error: rusqlite::Error) -> Error {
     Error::State(format!("{context}: {error}"))
 }
 
-fn int(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-fn uint(value: i64) -> u64 {
-    u64::try_from(value).unwrap_or(0)
-}
-
-fn encode<T: serde::Serialize>(what: &str, value: &T) -> Result<String, Error> {
-    serde_json::to_string(value).map_err(|e| Error::State(format!("encode {what}: {e}")))
-}
-
-fn decode<T: serde::de::DeserializeOwned>(what: &str, text: &str) -> Result<T, Error> {
-    serde_json::from_str(text).map_err(|e| Error::State(format!("{what}: {e}")))
-}
-
 fn fenced(fence: &Fence, why: &str) -> Error {
     Error::Fenced(format!(
         "{}'s lease generation {} {why}; another engine owns the branch now",
@@ -358,7 +346,8 @@ fn check(tx: &Transaction<'_>, fence: &Fence) -> Result<(), Error> {
         .map_err(|e| db("lease", e))?;
     match row {
         Some((incarnation, generation, Some(_)))
-            if incarnation == fence.incarnation && uint(generation) == fence.generation =>
+            if incarnation == fence.incarnation
+                && from_db("generation", generation)? == fence.generation =>
         {
             Ok(())
         }
@@ -405,13 +394,13 @@ fn put(tx: &Transaction<'_>, record: &Record) -> Result<(), Error> {
     let updated = tx
         .execute(
             "UPDATE branches SET record = ?2, created_ms = ?3 WHERE name = ?1",
-            params![name, text, int(record.created_ms)],
+            params![name, text, to_db("created_ms", record.created_ms)?],
         )
         .map_err(|e| db("write", e))?;
     if updated == 0 {
         tx.execute(
             "INSERT INTO branches (name, created_ms, record) VALUES (?1, ?2, ?3)",
-            params![name, int(record.created_ms), text],
+            params![name, to_db("created_ms", record.created_ms)?, text],
         )
         .map_err(|e| db("write", e))?;
     }
@@ -474,7 +463,7 @@ fn upgrade_to_identities(tx: &Transaction<'_>) -> Result<(), Error> {
             branches.push(LegacyBranch {
                 name,
                 incarnation,
-                created_ms: uint(created_ms),
+                created_ms: from_db("created_ms", created_ms)?,
                 parent: record.info.parent,
             });
         }
@@ -503,8 +492,11 @@ fn upgrade_to_identities(tx: &Transaction<'_>) -> Result<(), Error> {
              WHERE seq = ?1",
             params![
                 seq,
-                binder.bind(&publisher, Some(uint(created_ms))),
-                encode("ancestry", &binder.bind_all(&ancestry, uint(created_ms)))?,
+                binder.bind(&publisher, Some(from_db("created_ms", created_ms)?)),
+                encode(
+                    "ancestry",
+                    &binder.bind_all(&ancestry, from_db("created_ms", created_ms)?)
+                )?,
             ],
         )
         .map_err(e)?;
@@ -525,8 +517,11 @@ fn upgrade_to_identities(tx: &Transaction<'_>) -> Result<(), Error> {
              WHERE name = ?1",
             params![
                 name,
-                binder.bind(&owner, Some(uint(created_ms))),
-                encode("ancestry", &binder.bind_all(&ancestry, uint(created_ms)))?,
+                binder.bind(&owner, Some(from_db("created_ms", created_ms)?)),
+                encode(
+                    "ancestry",
+                    &binder.bind_all(&ancestry, from_db("created_ms", created_ms)?)
+                )?,
             ],
         )
         .map_err(e)?;
@@ -561,7 +556,10 @@ fn upgrade_to_identities(tx: &Transaction<'_>) -> Result<(), Error> {
     for (name, holder, acquired_ms) in rows {
         tx.execute(
             "UPDATE scratch_locks SET holder_incarnation = ?2 WHERE name = ?1",
-            params![name, binder.bind(&holder, Some(uint(acquired_ms)))],
+            params![
+                name,
+                binder.bind(&holder, Some(from_db("acquired_ms", acquired_ms)?))
+            ],
         )
         .map_err(e)?;
     }
@@ -601,13 +599,13 @@ fn grant(
         params![
             name,
             incarnation,
-            int(generation),
+            to_db("generation", generation)?,
             owner.id,
             owner.host,
             owner.pid,
             owner.start,
-            int(now),
-            int(now + ttl.as_millis() as u64),
+            to_db("now_ms", now)?,
+            to_db("expires_ms", deadline(now, ttl))?,
         ],
     )
     .map_err(|e| db("acquire", e))?;
@@ -629,20 +627,6 @@ fn held(tx: &Transaction<'_>, name: &str) -> Result<bool, Error> {
         .is_some_and(|row| row.owner.is_some() && Some(row.incarnation) == incarnation))
 }
 
-fn after_text(after: After) -> &'static str {
-    match after {
-        After::Settled => "settled",
-        After::Integrated => "integrated",
-    }
-}
-
-fn after_from(text: &str) -> After {
-    match text {
-        "integrated" => After::Integrated,
-        _ => After::Settled,
-    }
-}
-
 /// Append `event` to `name`'s log; returns its sequence number.
 fn insert_event(tx: &Transaction<'_>, name: &str, event: &RecordedEvent) -> Result<u64, Error> {
     let activity = encode("event", &event.activity)?;
@@ -658,22 +642,28 @@ fn insert_event(tx: &Transaction<'_>, name: &str, event: &RecordedEvent) -> Resu
     tx.execute(
         "INSERT INTO events (branch, incarnation, seq, at_ms, activity) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![name, incarnation, seq, int(event.at_ms), activity],
+        params![
+            name,
+            incarnation,
+            seq,
+            to_db("at_ms", event.at_ms)?,
+            activity
+        ],
     )
     .map_err(|e| db("append", e))?;
-    Ok(uint(seq))
+    Ok(from_db("seq", seq)?)
 }
 
 fn steer_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SteerRow> {
     Ok(SteerRow {
-        id: uint(r.get(0)?),
+        id: from_db("id", r.get(0)?)?,
         branch: r.get(1)?,
-        turn: uint(r.get(2)?),
+        turn: from_db("turn", r.get(2)?)?,
         by: r.get(3)?,
         text: r.get(4)?,
-        requested_ms: uint(r.get(5)?),
-        state: SteerState::from_columns(&r.get::<_, String>(6)?, r.get(7)?),
-        message: r.get::<_, Option<i64>>(8)?.map(uint),
+        requested_ms: from_db("requested_ms", r.get(5)?)?,
+        state: SteerState::from_columns(&r.get::<_, String>(6)?, r.get(7)?)?,
+        message: from_db_opt("message", r.get::<_, Option<i64>>(8)?)?,
         message_delivered: r.get::<_, Option<bool>>(9)?.unwrap_or(false),
     })
 }
@@ -698,20 +688,20 @@ fn lease_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<LeaseRow> {
     Ok(LeaseRow {
         branch: r.get(0)?,
         incarnation: r.get(1)?,
-        generation: uint(r.get(2)?),
-        turn: uint(r.get(3)?),
+        generation: from_db("generation", r.get(2)?)?,
+        turn: from_db("turn", r.get(3)?)?,
         owner: r.get(4)?,
         host: r.get(5)?,
-        pid: u32::try_from(r.get::<_, i64>(6)?).unwrap_or(0),
+        pid: from_db_u32("pid", r.get::<_, i64>(6)?)?,
         start: r.get(7)?,
-        expires_ms: uint(r.get(8)?),
-        deadline_ms: r.get::<_, Option<i64>>(9)?.map(uint),
+        expires_ms: from_db("expires_ms", r.get(8)?)?,
+        deadline_ms: from_db_opt("deadline_ms", r.get::<_, Option<i64>>(9)?)?,
     })
 }
 
 fn event_from(what: &str, at_ms: i64, activity: &str) -> Result<RecordedEvent, Error> {
     Ok(RecordedEvent {
-        at_ms: uint(at_ms),
+        at_ms: from_db("at_ms", at_ms)?,
         activity: decode(what, activity)?,
     })
 }
@@ -853,7 +843,7 @@ impl Sqlite {
                     (!text.is_empty()).then(|| String::from_utf8_lossy(&text).into_owned());
                 tx.execute(
                     "INSERT OR IGNORE INTO branches (name, created_ms, record) VALUES (?1, ?2, ?3)",
-                    params![name, int(created_ms), record],
+                    params![name, to_db("created_ms", created_ms)?, record],
                 )
                 .map_err(|e| db("import", e))?;
                 names.push(name);
@@ -890,7 +880,7 @@ impl Sqlite {
                         name,
                         incarnation,
                         seq,
-                        int(at_ms),
+                        to_db("at_ms", at_ms)?,
                         encode("event", &event.activity)?
                     ],
                 )
@@ -951,7 +941,7 @@ fn files(dir: &Path, suffix: &str) -> Result<Vec<(String, PathBuf)>, Error> {
 impl Backend for Sqlite {
     fn reserve(&self, name: &str, owner: &Owner) -> Result<bool, Error> {
         self.tx(true, |tx| {
-            let now = int(now_ms());
+            let now = to_db("now_ms", now_ms())?;
             let inserted = tx
                 .execute(
                     "INSERT OR IGNORE INTO branches (name, created_ms, record) VALUES (?1, ?2, NULL)",
@@ -1001,9 +991,9 @@ impl Backend for Sqlite {
                         name: r.get(0)?,
                         owner: r.get(1)?,
                         host: r.get(2)?,
-                        pid: u32::try_from(r.get::<_, i64>(3)?).unwrap_or(0),
+                        pid: from_db_u32("pid", r.get::<_, i64>(3)?)?,
                         start: r.get(4)?,
-                        reserved_ms: uint(r.get(5)?),
+                        reserved_ms: from_db("reserved_ms", r.get(5)?)?,
                     })
                 })
                 .map_err(|e| db("reservations", e))?;
@@ -1017,7 +1007,7 @@ impl Backend for Sqlite {
             let removed = tx
                 .execute(
                     "DELETE FROM reservations WHERE name = ?1 AND owner = ?2 AND reserved_ms = ?3",
-                    params![row.name, row.owner, int(row.reserved_ms)],
+                    params![row.name, row.owner, to_db("reserved_ms", row.reserved_ms)?],
                 )
                 .map_err(|e| db("reclaim", e))?;
             if removed == 0 {
@@ -1151,7 +1141,7 @@ impl Backend for Sqlite {
             check(tx, fence)?;
             tx.execute(
                 "UPDATE leases SET expires_ms = ?2 WHERE branch = ?1",
-                params![fence.branch, int(now_ms() + ttl.as_millis() as u64)],
+                params![fence.branch, to_db("expires_ms", deadline(now_ms(), ttl))?],
             )
             .map_err(|e| db("renew", e))?;
             Ok(())
@@ -1211,13 +1201,13 @@ impl Backend for Sqlite {
                      WHERE branch = ?1 AND generation = ?2 AND owner IS NOT NULL",
                     params![
                         lease.branch,
-                        int(lease.generation),
+                        to_db("generation", lease.generation)?,
                         owner.id,
                         owner.host,
                         owner.pid,
                         owner.start,
-                        int(now),
-                        int(now + ttl.as_millis() as u64),
+                        to_db("now_ms", now)?,
+                        to_db("expires_ms", deadline(now, ttl))?,
                     ],
                 )
                 .map_err(|e| db("take over", e))?;
@@ -1235,7 +1225,7 @@ impl Backend for Sqlite {
             check(tx, fence)?;
             tx.execute(
                 "UPDATE leases SET deadline_ms = ?2 WHERE branch = ?1",
-                params![fence.branch, deadline_ms.map(int)],
+                params![fence.branch, to_db_opt("deadline_ms", deadline_ms)?],
             )
             .map_err(|e| db("deadline", e))?;
             Ok(())
@@ -1266,7 +1256,7 @@ impl Backend for Sqlite {
                 .query_row(
                     "SELECT intent, outcome FROM steps \
                      WHERE incarnation = ?1 AND turn = ?2 AND step = ?3",
-                    params![fence.incarnation, int(turn), step],
+                    params![fence.incarnation, to_db("turn", turn)?, step],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()
@@ -1275,16 +1265,16 @@ impl Backend for Sqlite {
                 Some((_, Some(outcome))) => Ok(Begun::Done(decode(step, &outcome)?)),
                 Some((intent, None)) => Ok(Begun::Pending(decode(step, &intent)?)),
                 None => {
-                    let now = int(now_ms());
+                    let now = to_db("now_ms", now_ms())?;
                     tx.execute(
                         "INSERT INTO steps (incarnation, turn, step, branch, generation, intent, \
                          started_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                         params![
                             fence.incarnation,
-                            int(turn),
+                            to_db("turn", turn)?,
                             step,
                             fence.branch,
-                            int(fence.generation),
+                            to_db("generation", fence.generation)?,
                             encode(step, intent)?,
                             now,
                         ],
@@ -1294,7 +1284,7 @@ impl Backend for Sqlite {
                         tx.execute(
                             "UPDATE messages SET delivered_ms = ?2 \
                              WHERE id = ?1 AND delivered_ms IS NULL",
-                            params![int(*id), now],
+                            params![to_db("id", *id)?, now],
                         )
                         .map_err(|e| db("message", e))?;
                     }
@@ -1319,11 +1309,11 @@ impl Backend for Sqlite {
                      WHERE incarnation = ?1 AND turn = ?2 AND step = ?3",
                     params![
                         fence.incarnation,
-                        int(turn),
+                        to_db("turn", turn)?,
                         step,
                         encode(step, outcome)?,
-                        int(now_ms()),
-                        int(fence.generation),
+                        to_db("now_ms", now_ms())?,
+                        to_db("generation", fence.generation)?,
                     ],
                 )
                 .map_err(|e| db("step", e))?;
@@ -1356,14 +1346,19 @@ impl Backend for Sqlite {
                      AND delivered_steer IS NULL AND delivered_ms = (SELECT started_ms \
                      FROM steps WHERE incarnation = ?2 AND turn = ?3 AND step = ?4 \
                      AND outcome IS NULL)",
-                    params![int(*id), fence.incarnation, int(turn), step],
+                    params![
+                        to_db("id", *id)?,
+                        fence.incarnation,
+                        to_db("turn", turn)?,
+                        step
+                    ],
                 )
                 .map_err(|e| db("message", e))?;
             }
             tx.execute(
                 "DELETE FROM steps WHERE incarnation = ?1 AND turn = ?2 AND step = ?3 \
                  AND outcome IS NULL",
-                params![fence.incarnation, int(turn), step],
+                params![fence.incarnation, to_db("turn", turn)?, step],
             )
             .map_err(|e| db("step", e))?;
             Ok(())
@@ -1382,7 +1377,7 @@ impl Backend for Sqlite {
                 )
                 .map_err(|e| db("steps", e))?;
             let rows = statement
-                .query_map(params![incarnation, int(turn)], |r| {
+                .query_map(params![incarnation, to_db("turn", turn)?], |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
@@ -1411,14 +1406,14 @@ impl Backend for Sqlite {
                  host, generation, recorded_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     fence.incarnation,
-                    int(fence.turn),
+                    to_db("turn", fence.turn)?,
                     process.pid,
                     fence.branch,
                     process.pgid,
                     process.start,
                     process.host,
-                    int(fence.generation),
-                    int(now_ms()),
+                    to_db("generation", fence.generation)?,
+                    to_db("now_ms", now_ms())?,
                 ],
             )
             .map_err(|e| db("process", e))?;
@@ -1438,10 +1433,10 @@ impl Backend for Sqlite {
                 )
                 .map_err(|e| db("processes", e))?;
             let rows = statement
-                .query_map(params![incarnation, int(turn)], |r| {
+                .query_map(params![incarnation, to_db("turn", turn)?], |r| {
                     Ok(ProcessRow {
-                        pid: u32::try_from(r.get::<_, i64>(0)?).unwrap_or(0),
-                        pgid: u32::try_from(r.get::<_, i64>(1)?).unwrap_or(0),
+                        pid: from_db_u32("pid", r.get::<_, i64>(0)?)?,
+                        pgid: from_db_u32("pgid", r.get::<_, i64>(1)?)?,
                         start: r.get(2)?,
                         host: r.get(3)?,
                     })
@@ -1467,10 +1462,10 @@ impl Backend for Sqlite {
                  subtree) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     incarnation,
-                    int(lease.turn),
+                    to_db("turn", lease.turn)?,
                     name,
                     by,
-                    int(now_ms()),
+                    to_db("now_ms", now_ms())?,
                     subtree
                 ],
             )
@@ -1483,7 +1478,7 @@ impl Backend for Sqlite {
         self.query(|conn| {
             conn.query_row(
                 "SELECT requested_by FROM cancels WHERE incarnation = ?1 AND turn = ?2",
-                params![fence.incarnation, int(fence.turn)],
+                params![fence.incarnation, to_db("turn", fence.turn)?],
                 |r| r.get(0),
             )
             .optional()
@@ -1510,7 +1505,14 @@ impl Backend for Sqlite {
             tx.execute(
                 "INSERT INTO steers (incarnation, turn, branch, requested_by, text, at_ms, state) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending')",
-                params![incarnation, int(lease.turn), name, by, text, int(now_ms())],
+                params![
+                    incarnation,
+                    to_db("turn", lease.turn)?,
+                    name,
+                    by,
+                    text,
+                    to_db("now_ms", now_ms())?
+                ],
             )
             .map_err(|e| db("steer", e))?;
             let id = tx.last_insert_rowid();
@@ -1519,7 +1521,7 @@ impl Backend for Sqlite {
                     .execute(
                         "UPDATE messages SET steer_id = ?2 \
                          WHERE id = ?1 AND delivered_ms IS NULL",
-                        params![int(message), id],
+                        params![to_db("message", message)?, id],
                     )
                     .map_err(|e| db("message", e))?;
                 if linked == 0 {
@@ -1529,7 +1531,7 @@ impl Backend for Sqlite {
                     )));
                 }
             }
-            Ok(Some(uint(id)))
+            Ok(Some(from_db("id", id)?))
         })
     }
 
@@ -1542,7 +1544,10 @@ impl Backend for Sqlite {
                 ))
                 .map_err(|e| db("steers", e))?;
             let rows = statement
-                .query_map(params![fence.incarnation, int(fence.turn)], steer_row)
+                .query_map(
+                    params![fence.incarnation, to_db("turn", fence.turn)?],
+                    steer_row,
+                )
                 .map_err(|e| db("steers", e))?;
             rows.collect::<Result<_, _>>().map_err(|e| db("steers", e))
         })
@@ -1561,7 +1566,13 @@ impl Backend for Sqlite {
                 .execute(
                     "UPDATE steers SET state = ?4, reason = ?5 \
                      WHERE id = ?1 AND incarnation = ?2 AND turn = ?3",
-                    params![int(id), fence.incarnation, int(fence.turn), name, reason],
+                    params![
+                        to_db("id", id)?,
+                        fence.incarnation,
+                        to_db("turn", fence.turn)?,
+                        name,
+                        reason
+                    ],
                 )
                 .map_err(|e| db("steer", e))?;
             if settled == 0 {
@@ -1573,18 +1584,20 @@ impl Backend for Sqlite {
                     .query_row(
                         "UPDATE messages SET delivered_ms = ?2, delivered_steer = ?1 \
                          WHERE steer_id = ?1 AND delivered_ms IS NULL RETURNING id",
-                        params![int(id), int(now_ms())],
+                        params![to_db("id", id)?, to_db("now_ms", now_ms())?],
                         |r| r.get::<_, i64>(0),
                     )
                     .optional()
-                    .map(|m| m.map(uint))
-                    .map_err(|e| db("message", e)),
+                    .map_err(|e| db("message", e))?
+                    .map(|m| from_db("message", m))
+                    .transpose()
+                    .map_err(Error::from),
                 SteerState::Refused { .. } => {
                     tx.execute(
                         "UPDATE messages SET steer_id = NULL, delivered_steer = NULL, \
                          delivered_ms = CASE WHEN delivered_steer = ?1 THEN NULL \
                          ELSE delivered_ms END WHERE steer_id = ?1",
-                        params![int(id)],
+                        params![to_db("id", id)?],
                     )
                     .map_err(|e| db("message", e))?;
                     Ok(None)
@@ -1600,7 +1613,7 @@ impl Backend for Sqlite {
             };
             conn.query_row(
                 &format!("SELECT {STEER_COLUMNS} FROM steers WHERE id = ?1 AND incarnation = ?2"),
-                params![int(id), incarnation],
+                params![to_db("id", id)?, incarnation],
                 steer_row,
             )
             .optional()
@@ -1638,19 +1651,26 @@ impl Backend for Sqlite {
                 )
                 .map_err(|e| db("events", e))?;
             let rows = statement
-                .query_map(params![incarnation, int(after), int(limit as u64)], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, String>(2)?,
-                    ))
-                })
+                .query_map(
+                    params![
+                        incarnation,
+                        to_db("after", after)?,
+                        to_db_usize("limit", limit)?
+                    ],
+                    |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    },
+                )
                 .map_err(|e| db("events", e))?;
             let mut events = Vec::new();
             for row in rows {
                 let (seq, at_ms, activity) = row.map_err(|e| db("events", e))?;
                 let what = format!("event {seq} of {name}");
-                events.push((uint(seq), event_from(&what, at_ms, &activity)?));
+                events.push((from_db("seq", seq)?, event_from(&what, at_ms, &activity)?));
             }
             Ok(events)
         })
@@ -1665,8 +1685,8 @@ impl Backend for Sqlite {
                 params![incarnation],
                 |r| r.get::<_, i64>(0),
             )
-            .map(uint)
             .map_err(|e| db("events", e))
+            .and_then(|seq| Ok(from_db("seq", seq)?))
         })
     }
 
@@ -1679,20 +1699,23 @@ impl Backend for Sqlite {
                 )
                 .map_err(|e| db("feed", e))?;
             let rows = statement
-                .query_map(params![int(after), int(limit as u64)], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, i64>(2)?,
-                        r.get::<_, String>(3)?,
-                    ))
-                })
+                .query_map(
+                    params![to_db("after", after)?, to_db_usize("limit", limit)?],
+                    |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, i64>(2)?,
+                            r.get::<_, String>(3)?,
+                        ))
+                    },
+                )
                 .map_err(|e| db("feed", e))?;
             let mut feed = Vec::new();
             for row in rows {
                 let (id, branch, at_ms, activity) = row.map_err(|e| db("feed", e))?;
                 feed.push(FeedRow {
-                    id: uint(id),
+                    id: from_db("id", id)?,
                     event: event_from(&format!("feed entry {id}"), at_ms, &activity)?,
                     branch,
                 });
@@ -1706,8 +1729,8 @@ impl Backend for Sqlite {
             conn.query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |r| {
                 r.get::<_, i64>(0)
             })
-            .map(uint)
             .map_err(|e| db("feed", e))
+            .and_then(|id| Ok(from_db("id", id)?))
         })
     }
 
@@ -1723,13 +1746,13 @@ impl Backend for Sqlite {
                     message.to,
                     message.kind.as_str(),
                     message.text,
-                    message.in_reply_to.map(int),
-                    int(at_ms),
+                    to_db_opt("in_reply_to", message.in_reply_to)?,
+                    to_db("at_ms", at_ms)?,
                 ],
             )
             .map_err(|e| db("message", e))?;
             Ok(Message {
-                id: uint(tx.last_insert_rowid()),
+                id: from_db("id", tx.last_insert_rowid())?,
                 at_ms,
                 delivered: false,
                 ..message.clone()
@@ -1742,7 +1765,7 @@ impl Backend for Sqlite {
             conn.query_row(
                 "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
                  delivered_ms FROM messages WHERE id = ?1",
-                params![int(id)],
+                params![to_db("id", id)?],
                 message_from,
             )
             .optional()
@@ -1770,12 +1793,12 @@ impl Backend for Sqlite {
             return Ok(());
         }
         self.tx(true, |tx| {
-            let now = int(now_ms());
+            let now = to_db("now_ms", now_ms())?;
             for id in ids {
                 tx.execute(
                     "UPDATE messages SET delivered_ms = ?2 \
                      WHERE id = ?1 AND delivered_ms IS NULL",
-                    params![int(*id), now],
+                    params![to_db("id", *id)?, now],
                 )
                 .map_err(|e| db("message", e))?;
             }
@@ -1788,7 +1811,7 @@ impl Backend for Sqlite {
             conn.query_row(
                 "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
                  delivered_ms FROM messages WHERE in_reply_to = ?1 ORDER BY id LIMIT 1",
-                params![int(question_id)],
+                params![to_db("question_id", question_id)?],
                 message_from,
             )
             .optional()
@@ -1800,12 +1823,15 @@ impl Backend for Sqlite {
         self.query(|conn| {
             conn.query_row(
                 "SELECT steer_id FROM messages WHERE id = ?1",
-                params![int(id)],
+                params![to_db("id", id)?],
                 |r| r.get::<_, Option<i64>>(0),
             )
             .optional()
-            .map(|s| s.flatten().map(uint))
-            .map_err(|e| db("message", e))
+            .map_err(|e| db("message", e))?
+            .flatten()
+            .map(|steer| from_db("steer_id", steer))
+            .transpose()
+            .map_err(Error::from)
         })
     }
 
@@ -1813,7 +1839,7 @@ impl Backend for Sqlite {
         self.tx(true, |tx| {
             tx.execute(
                 "UPDATE messages SET awaiting_until_ms = ?2 WHERE id = ?1",
-                params![int(id), until_ms.map(int)],
+                params![to_db("id", id)?, to_db_opt("until_ms", until_ms)?],
             )
             .map_err(|e| db("message", e))?;
             Ok(())
@@ -1827,7 +1853,7 @@ impl Backend for Sqlite {
                  WHERE q.from_branch = ?1 AND q.kind = 'question' \
                  AND q.awaiting_until_ms > ?2 \
                  AND NOT EXISTS (SELECT 1 FROM messages a WHERE a.in_reply_to = q.id))",
-                params![from, int(now_ms)],
+                params![from, to_db("now_ms", now_ms)?],
                 |r| r.get::<_, bool>(0),
             )
             .map_err(|e| db("message", e))
@@ -1848,7 +1874,7 @@ fn edges(conn: &Connection, filter: &str, value: &str) -> Result<Vec<Dependency>
             Ok(Dependency {
                 dependent: r.get(0)?,
                 prerequisite: r.get(1)?,
-                after: after_from(&r.get::<_, String>(2)?),
+                after: parse_text("after", &r.get::<_, String>(2)?)?,
             })
         })
         .map_err(|e| db("dependencies", e))?;
@@ -1865,7 +1891,7 @@ fn graph_revision(conn: &Connection, parent: &str) -> Result<u64, Error> {
         )
         .optional()
         .map_err(|e| db("graph revision", e))?;
-    Ok(revision.map_or(0, uint))
+    Ok(from_db("revision", revision.unwrap_or(0))?)
 }
 
 impl PortBackend for Sqlite {
@@ -1886,19 +1912,19 @@ impl PortBackend for Sqlite {
                 .optional()
                 .map_err(e)?;
             if let Some(port) = held {
-                return Ok(port as u16);
+                return Ok(from_db_u16("port", port)?);
             }
             let taken = {
                 let mut statement = tx.prepare("SELECT port FROM ports").map_err(e)?;
                 let rows = statement.query_map([], |r| r.get::<_, i64>(0)).map_err(e)?;
-                rows.map(|r| r.map(|p| p as u16))
+                rows.map(|r| from_db_u16("port", r?).map_err(rusqlite::Error::from))
                     .collect::<Result<std::collections::BTreeSet<u16>, _>>()
                     .map_err(e)?
             };
             let port = pick_port(start, &taken, usable)?;
             tx.execute(
                 "INSERT INTO ports (port, branch, reserved_ms) VALUES (?1, ?2, ?3)",
-                params![port, branch, int(now_ms())],
+                params![port, branch, to_db("now_ms", now_ms())?],
             )
             .map_err(e)?;
             Ok(port)
@@ -1913,8 +1939,10 @@ impl PortBackend for Sqlite {
                 |r| r.get::<_, i64>(0),
             )
             .optional()
-            .map(|p| p.map(|p| p as u16))
-            .map_err(|error| db("port", error))
+            .map_err(|error| db("port", error))?
+            .map(|p| from_db_u16("port", p))
+            .transpose()
+            .map_err(Error::from)
         })
     }
 }
@@ -1930,9 +1958,12 @@ fn sandbox_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(SandboxRow, String)> 
             kind: SandboxKind::Kept,
             provider: r.get(3)?,
             name: r.get(4)?,
-            turn: r.get::<_, Option<i64>>(5)?.map(|t| t as u32),
+            turn: r
+                .get::<_, Option<i64>>(5)?
+                .map(|t| from_db_u32("turn", t))
+                .transpose()?,
             detail: r.get(6)?,
-            used_ms: uint(r.get(7)?),
+            used_ms: from_db("used_ms", r.get(7)?)?,
         },
         kind,
     ))
@@ -1970,7 +2001,7 @@ impl SandboxBackend for Sqlite {
                     row.name,
                     row.turn.map(i64::from),
                     row.detail,
-                    int(row.used_ms)
+                    to_db("used_ms", row.used_ms)?
                 ],
             )
             .map_err(|e| db("sandbox", e))?;
@@ -2123,7 +2154,12 @@ impl GraphBackend for Sqlite {
                     .execute(
                         "INSERT OR IGNORE INTO graph_edges (parent, dependent, prerequisite, \
                          after) VALUES (?1, ?2, ?3, ?4)",
-                        params![parent, d.dependent, d.prerequisite, after_text(d.after)],
+                        params![
+                            parent,
+                            d.dependent,
+                            d.prerequisite,
+                            <&'static str>::from(d.after)
+                        ],
                     )
                     .map_err(|e| db("commit graph", e))?;
                 if inserted == 0 {
@@ -2137,7 +2173,7 @@ impl GraphBackend for Sqlite {
             tx.execute(
                 "INSERT INTO graph_revisions (parent, revision) VALUES (?1, ?2) \
                  ON CONFLICT (parent) DO UPDATE SET revision = ?2",
-                params![parent, int(next)],
+                params![parent, to_db("next", next)?],
             )
             .map_err(|e| db("commit graph", e))?;
             Ok(next)
@@ -2180,13 +2216,13 @@ fn message_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         rusqlite::Error::InvalidColumnType(3, "kind".into(), rusqlite::types::Type::Text)
     })?;
     Ok(Message {
-        id: uint(r.get::<_, i64>(0)?),
+        id: from_db("id", r.get::<_, i64>(0)?)?,
         from: r.get(1)?,
         to: r.get(2)?,
         kind,
         text: r.get(4)?,
-        in_reply_to: r.get::<_, Option<i64>>(5)?.map(uint),
-        at_ms: uint(r.get(6)?),
+        in_reply_to: from_db_opt("in_reply_to", r.get::<_, Option<i64>>(5)?)?,
+        at_ms: from_db("at_ms", r.get(6)?)?,
         delivered: r.get::<_, Option<i64>>(7)?.is_some(),
     })
 }
@@ -2212,12 +2248,12 @@ fn artifact_row_from(cols: ArtifactCols) -> Result<ArtifactRow, Error> {
         artifact: ArtifactRef {
             id: cols.id,
             digest: cols.digest,
-            size: uint(cols.size),
+            size: from_db("size", cols.size)?,
             name: cols.name,
             media_type: cols.media_type,
             publisher_branch: cols.publisher,
-            turn: uint(cols.turn),
-            created_at: uint(cols.created_ms) / 1000,
+            turn: from_db("turn", cols.turn)?,
+            created_at: from_db("created_ms", cols.created_ms)? / 1000,
             labels: decode("artifact labels", &cols.labels)?,
         },
         ancestry: decode("artifact ancestry", &cols.ancestry)?,
@@ -2268,7 +2304,7 @@ fn scratch_row_from(cols: ScratchCols) -> Result<ScratchRow, Error> {
         area: ScratchArea {
             name,
             owner_branch: owner,
-            created_at: uint(created_ms) / 1000,
+            created_at: from_db("created_ms", created_ms)? / 1000,
         },
         ancestry: decode("scratch ancestry", &ancestry)?,
         owner_incarnation,
@@ -2352,7 +2388,7 @@ impl StorageBackend for Sqlite {
 
     fn create_artifact(&self, new: &NewArtifact) -> Result<ArtifactRow, Error> {
         self.tx(true, |tx| {
-            let now = int(now_ms());
+            let now = to_db("now_ms", now_ms())?;
             let ancestry = encode("ancestry", &new.ancestry)?;
             let ancestry_incarnations = encode("ancestry", &new.ancestry_incarnations)?;
             let labels = encode("labels", &new.labels)?;
@@ -2363,12 +2399,12 @@ impl StorageBackend for Sqlite {
                  VALUES ('', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     new.digest,
-                    int(new.size),
+                    to_db("size", new.size)?,
                     new.name,
                     new.media_type,
                     new.publisher_branch,
                     ancestry,
-                    int(new.turn),
+                    to_db("turn", new.turn)?,
                     now,
                     labels,
                     new.publisher_incarnation,
@@ -2386,12 +2422,12 @@ impl StorageBackend for Sqlite {
             artifact_row_from(ArtifactCols {
                 id,
                 digest: new.digest.clone(),
-                size: int(new.size),
+                size: to_db("size", new.size)?,
                 name: new.name.clone(),
                 media_type: new.media_type.clone(),
                 publisher: new.publisher_branch.clone(),
                 ancestry,
-                turn: int(new.turn),
+                turn: to_db("turn", new.turn)?,
                 created_ms: now,
                 labels,
                 publisher_incarnation: Some(new.publisher_incarnation),
@@ -2475,8 +2511,8 @@ impl StorageBackend for Sqlite {
                 params![digest],
                 |r| r.get::<_, i64>(0),
             )
-            .map(uint)
             .map_err(|e| db("artifact", e))
+            .and_then(|count| Ok(from_db("refcount", count)?))
         })
     }
 
@@ -2490,7 +2526,7 @@ impl StorageBackend for Sqlite {
                         new.name,
                         new.owner,
                         encode("ancestry", &new.ancestry)?,
-                        int(now_ms()),
+                        to_db("now_ms", now_ms())?,
                         new.owner_incarnation,
                         encode("ancestry", &new.ancestry_incarnations)?,
                     ],
@@ -2600,7 +2636,7 @@ impl StorageBackend for Sqlite {
                 .optional()
                 .map_err(|e| db("scratch lock", e))?;
             let grant = |tx: &Transaction<'_>| -> Result<LockOutcome, Error> {
-                let now = int(now_ms());
+                let now = to_db("now_ms", now_ms())?;
                 tx.execute(
                     "INSERT INTO scratch_locks (name, holder, acquired_ms, holder_incarnation) \
                      VALUES (?1, ?2, ?3, ?4) ON CONFLICT(name) DO UPDATE SET \
@@ -2612,7 +2648,7 @@ impl StorageBackend for Sqlite {
                 Ok(LockOutcome::Granted(ScratchLock {
                     name: name.to_owned(),
                     holder_branch: branch.to_owned(),
-                    acquired_at: uint(now) / 1000,
+                    acquired_at: from_db("now", now)? / 1000,
                 }))
             };
             match current {
@@ -2624,7 +2660,7 @@ impl StorageBackend for Sqlite {
                 Some((holder, acquired_ms, _)) => Ok(Some(LockOutcome::Held(ScratchLock {
                     name: name.to_owned(),
                     holder_branch: holder,
-                    acquired_at: uint(acquired_ms) / 1000,
+                    acquired_at: from_db("acquired_ms", acquired_ms)? / 1000,
                 }))),
             }
         })
@@ -2651,12 +2687,15 @@ impl StorageBackend for Sqlite {
             )
             .optional()
             .map_err(|e| db("scratch lock", e))
-            .map(|opt| {
-                opt.map(|(holder, acquired_ms)| ScratchLock {
-                    name: name.to_owned(),
-                    holder_branch: holder,
-                    acquired_at: uint(acquired_ms) / 1000,
+            .and_then(|opt| {
+                opt.map(|(holder, acquired_ms)| {
+                    Ok(ScratchLock {
+                        name: name.to_owned(),
+                        holder_branch: holder,
+                        acquired_at: from_db("acquired_ms", acquired_ms)? / 1000,
+                    })
                 })
+                .transpose()
             })
         })
     }
@@ -2716,10 +2755,10 @@ fn outcome_record(c: OutcomeColumns) -> Result<crate::fleet::OutcomeRecord, Erro
         outcome: crate::fleet::BranchOutcome::parse(&c.7)?,
         score: c.8,
         cost_usd: c.9,
-        duration_ms: c.10.map(uint),
-        turns: u32::try_from(c.11).unwrap_or(0),
+        duration_ms: from_db_opt("duration_ms", c.10)?,
+        turns: from_db_u32("turns", c.11)?,
         routed: c.12,
-        recorded_ms: uint(c.13),
+        recorded_ms: from_db("recorded_ms", c.13)?,
     })
 }
 
@@ -2744,10 +2783,10 @@ impl crate::fleet::OutcomeBackend for Sqlite {
                     row.outcome.as_str(),
                     row.score,
                     row.cost_usd,
-                    row.duration_ms.map(int),
+                    to_db_opt("duration_ms", row.duration_ms)?,
                     i64::from(row.turns),
                     row.routed,
-                    int(row.recorded_ms)
+                    to_db("recorded_ms", row.recorded_ms)?
                 ],
             )
             .map_err(|e| db("outcome", e))?;
@@ -2795,23 +2834,23 @@ fn usage_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<crate::models::UsageReco
     let api: String = r.get(6)?;
     Ok(crate::models::UsageRecord {
         id: r.get(0)?,
-        at_ms: uint(r.get(1)?),
+        at_ms: from_db("at_ms", r.get(1)?)?,
         branch: r.get(2)?,
-        turn: u32::try_from(r.get::<_, i64>(3)?).unwrap_or(0),
+        turn: from_db_u32("turn", r.get::<_, i64>(3)?)?,
         subject: r.get(4)?,
         model: r.get(5)?,
-        api: serde_json::from_value(Value::String(api)).unwrap_or(crate::models::Api::Generic),
+        api: parse_text("api", &api)?,
         backend: r.get(7)?,
         tokens: crate::models::Tokens {
-            input: uint(r.get(8)?),
-            output: uint(r.get(9)?),
-            cache_read: uint(r.get(10)?),
-            cache_write: uint(r.get(11)?),
-            cache_write_1h: uint(r.get(12)?),
+            input: from_db("input", r.get(8)?)?,
+            output: from_db("output", r.get(9)?)?,
+            cache_read: from_db("cache_read", r.get(10)?)?,
+            cache_write: from_db("cache_write", r.get(11)?)?,
+            cache_write_1h: from_db("cache_write_1h", r.get(12)?)?,
         },
         cost_usd: r.get(13)?,
-        latency_ms: uint(r.get(14)?),
-        status: u16::try_from(r.get::<_, i64>(15)?).unwrap_or(0),
+        latency_ms: from_db("latency_ms", r.get(14)?)?,
+        status: from_db_u16("status", r.get::<_, i64>(15)?)?,
         streamed: r.get(16)?,
     })
 }
@@ -2827,20 +2866,20 @@ impl crate::models::UsageBackend for Sqlite {
                 ),
                 params![
                     row.id,
-                    int(row.at_ms),
+                    to_db("at_ms", row.at_ms)?,
                     row.branch,
                     i64::from(row.turn),
                     row.subject,
                     row.model,
                     row.api.as_str(),
                     row.backend,
-                    int(row.tokens.input),
-                    int(row.tokens.output),
-                    int(row.tokens.cache_read),
-                    int(row.tokens.cache_write),
-                    int(row.tokens.cache_write_1h),
+                    to_db("input", row.tokens.input)?,
+                    to_db("output", row.tokens.output)?,
+                    to_db("cache_read", row.tokens.cache_read)?,
+                    to_db("cache_write", row.tokens.cache_write)?,
+                    to_db("cache_write_1h", row.tokens.cache_write_1h)?,
                     row.cost_usd,
-                    int(row.latency_ms),
+                    to_db("latency_ms", row.latency_ms)?,
                     i64::from(row.status),
                     row.streamed
                 ],
@@ -2859,7 +2898,7 @@ impl crate::models::UsageBackend for Sqlite {
                 ))
                 .map_err(e)?;
             let rows = statement
-                .query_map(params![int(since_ms)], usage_row)
+                .query_map(params![to_db("since_ms", since_ms)?], usage_row)
                 .map_err(e)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(e)
         })
@@ -2879,7 +2918,7 @@ impl crate::effects::EffectBackend for Sqlite {
                     entry.id,
                     entry.branch,
                     entry.state.as_str(),
-                    int(entry.created_ms),
+                    to_db("created_ms", entry.created_ms)?,
                     encode("effect", entry)?
                 ],
             )
@@ -2889,7 +2928,11 @@ impl crate::effects::EffectBackend for Sqlite {
             };
             tx.execute(
                 "INSERT INTO effect_events (id, at_ms, change) VALUES (?1, ?2, ?3)",
-                params![entry.id, int(entry.created_ms), encode("effect", &change)?],
+                params![
+                    entry.id,
+                    to_db("created_ms", entry.created_ms)?,
+                    encode("effect", &change)?
+                ],
             )
             .map_err(e)?;
             Ok(())
@@ -2931,7 +2974,7 @@ impl crate::effects::EffectBackend for Sqlite {
                 "INSERT INTO effect_events (id, at_ms, change) VALUES (?1, ?2, ?3)",
                 params![
                     id,
-                    int(at_ms),
+                    to_db("at_ms", at_ms)?,
                     encode("effect", &EffectChange::Moved(Box::new(change.clone())))?
                 ],
             )
@@ -2990,9 +3033,9 @@ impl crate::effects::EffectBackend for Sqlite {
             rows.into_iter()
                 .map(|(seq, at, change)| {
                     Ok(crate::effects::EffectEvent {
-                        seq: uint(seq),
+                        seq: from_db("seq", seq)?,
                         id: id.to_owned(),
-                        at_ms: uint(at),
+                        at_ms: from_db("at", at)?,
                         change: decode("effect event", &change)?,
                     })
                 })
@@ -3008,7 +3051,7 @@ impl crate::effects::EffectBackend for Sqlite {
                 params![
                     ask.id,
                     ask.branch,
-                    int(ask.created_ms),
+                    to_db("created_ms", ask.created_ms)?,
                     ask.answer.is_some(),
                     encode("approval", ask)?
                 ],
@@ -3115,7 +3158,7 @@ fn knowledge_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeColumns> {
 
 fn knowledge_entry(c: KnowledgeColumns) -> Result<crate::KnowledgeEntry, Error> {
     Ok(crate::KnowledgeEntry {
-        id: uint(c.0),
+        id: from_db("id", c.0)?,
         scope: crate::KnowledgeScope {
             path: c.1,
             kind: c
@@ -3130,9 +3173,9 @@ fn knowledge_entry(c: KnowledgeColumns) -> Result<crate::KnowledgeEntry, Error> 
             .5
             .parse()
             .map_err(|e| Error::State(format!("knowledge status: {e}")))?,
-        created_ms: uint(c.6),
+        created_ms: from_db("created_ms", c.6)?,
         adopted_by: c.7,
-        decided_ms: c.8.map(uint),
+        decided_ms: from_db_opt("decided_ms", c.8)?,
         note: c.9,
     })
 }
@@ -3154,9 +3197,9 @@ impl crate::knowledge::KnowledgeBackend for Sqlite {
                     entry.text,
                     source,
                     entry.status.as_str(),
-                    int(created),
+                    to_db("created", created)?,
                     entry.adopted_by,
-                    entry.decided_ms.map(int),
+                    to_db_opt("decided_ms", entry.decided_ms)?,
                     entry.note
                 ],
             )
@@ -3164,7 +3207,7 @@ impl crate::knowledge::KnowledgeBackend for Sqlite {
             Ok(tx.last_insert_rowid())
         })?;
         Ok(crate::KnowledgeEntry {
-            id: uint(id),
+            id: from_db("id", id)?,
             created_ms: created,
             ..entry.clone()
         })
@@ -3174,7 +3217,7 @@ impl crate::knowledge::KnowledgeBackend for Sqlite {
         let found = self.query(|conn| {
             conn.query_row(
                 &format!("SELECT {KNOWLEDGE_COLUMNS} FROM knowledge WHERE id = ?1"),
-                params![int(id)],
+                params![to_db("id", id)?],
                 knowledge_row,
             )
             .optional()
@@ -3210,14 +3253,14 @@ impl crate::knowledge::KnowledgeBackend for Sqlite {
                      source = ?5, status = ?6, adopted_by = ?7, decided_ms = ?8, note = ?9 \
                      WHERE id = ?1 AND status = ?10",
                     params![
-                        int(entry.id),
+                        to_db("id", entry.id)?,
                         entry.scope.path,
                         entry.scope.kind.map(|k| k.as_str()),
                         entry.text,
                         source,
                         entry.status.as_str(),
                         entry.adopted_by,
-                        entry.decided_ms.map(int),
+                        to_db_opt("decided_ms", entry.decided_ms)?,
                         entry.note,
                         expected.as_str()
                     ],
@@ -3230,7 +3273,10 @@ impl crate::knowledge::KnowledgeBackend for Sqlite {
     fn remove_knowledge(&self, id: u64) -> Result<bool, Error> {
         self.tx(true, |tx| {
             let changed = tx
-                .execute("DELETE FROM knowledge WHERE id = ?1", params![int(id)])
+                .execute(
+                    "DELETE FROM knowledge WHERE id = ?1",
+                    params![to_db("id", id)?],
+                )
                 .map_err(|e| db("knowledge", e))?;
             Ok(changed == 1)
         })
@@ -3284,11 +3330,11 @@ fn slot_row(c: SlotColumns) -> Result<SlotRow, Error> {
         path: c.5,
         detail: c.6,
         host: c.7,
-        pid: u32::try_from(c.8).unwrap_or(0),
+        pid: from_db_u32("pid", c.8)?,
         start: c.9,
         branch: c.10,
-        created_ms: uint(c.11),
-        changed_ms: uint(c.12),
+        created_ms: from_db("created_ms", c.11)?,
+        changed_ms: from_db("changed_ms", c.12)?,
     })
 }
 
@@ -3312,8 +3358,8 @@ impl PoolBackend for Sqlite {
                     i64::from(row.pid),
                     row.start,
                     row.branch,
-                    int(row.created_ms),
-                    int(row.changed_ms)
+                    to_db("created_ms", row.created_ms)?,
+                    to_db("changed_ms", row.changed_ms)?
                 ],
             )
             .map_err(|e| db("pool slot", e))?;
@@ -3355,7 +3401,7 @@ impl PoolBackend for Sqlite {
                         i64::from(row.pid),
                         row.start,
                         row.branch,
-                        int(row.changed_ms),
+                        to_db("changed_ms", row.changed_ms)?,
                         expected.as_str()
                     ],
                 )

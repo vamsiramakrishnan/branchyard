@@ -42,6 +42,11 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use branchyard::store_codec::{
+    deadline, from_db_i32, from_db_opt, from_db_u32, from_db_usize, millis_saturating, to_db,
+    to_db_opt,
+};
+
 use crate::config::{Principal, DEFAULT_TENANT};
 
 /// An idempotency key as the server scopes it: per authenticated caller and
@@ -671,14 +676,17 @@ pub fn worker_services(
             service.registered_ms = seen;
             service.renewed_ms = seen;
             service.changed_ms = seen;
-            service.lease_until_ms = seen + within.as_millis() as u64;
+            service.lease_until_ms = deadline(seen, within);
             service
         })
         .collect()
 }
 
+/// A duration in milliseconds for scheduling arithmetic, where one past
+/// `i64::MAX` just means "effectively forever". Stored values go through
+/// `branchyard::store_codec` instead.
 fn ms(duration: Duration) -> i64 {
-    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+    millis_saturating(duration)
 }
 
 fn parse_op(id: &str, body: &str, place: &str) -> io::Result<StoredOperation> {
@@ -1109,7 +1117,7 @@ fn sqlite_reap(conn: &Conn, worker: &Worker, now: i64) -> io::Result<()> {
         .collect::<Result<_, _>>()
         .map_err(sql)?;
     for (id, attempt, pid, start) in rows {
-        if branchyard::process_gone(&worker.host, pid as u32, &start) {
+        if branchyard::process_gone(&worker.host, from_db_u32("pid", pid)?, &start) {
             conn.execute(
                 "UPDATE operation_queue SET worker = NULL, lease_until = NULL \
                  WHERE id = ?1 AND attempt = ?2",
@@ -1336,7 +1344,7 @@ impl OperationStore for SqliteStore {
                     serde_json::to_string(&op.requires)?,
                     op.priority,
                     operation.tenant(),
-                    op.created_at_ms as i64
+                    to_db("created_at_ms", op.created_at_ms)?
                 ],
             )
             .map_err(sql)?;
@@ -1405,7 +1413,7 @@ impl OperationStore for SqliteStore {
                     worker.host,
                     worker.pid,
                     worker.start,
-                    clock + ms(lease)
+                    clock.saturating_add(ms(lease))
                 ],
             )
             .map_err(sql)?;
@@ -1480,7 +1488,11 @@ impl OperationStore for SqliteStore {
             )
             .optional()
             .map_err(sql)?;
-        Ok(found.map(|p| p.unwrap_or(0) as i32))
+        // No priority recorded is the default, `0`; a stored one outside
+        // `i32` is an error rather than a wrapped value.
+        Ok(found
+            .map(|p| p.map_or(Ok(0), |p| from_db_i32("priority", p)))
+            .transpose()?)
     }
 
     fn beat(
@@ -1520,7 +1532,7 @@ impl OperationStore for SqliteStore {
             )
             .map_err(sql)?;
         let rows = statement
-            .query_map([now - ms(within)], |r| {
+            .query_map([now.saturating_sub(ms(within))], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -1559,7 +1571,7 @@ impl OperationStore for SqliteStore {
             .execute(
                 "UPDATE operation_queue SET lease_until = ?4 \
                  WHERE id = ?1 AND attempt = ?2 AND worker = ?3",
-                rusqlite::params![id, fence, worker.id, sqlite_now() + ms(lease)],
+                rusqlite::params![id, fence, worker.id, sqlite_now().saturating_add(ms(lease))],
             )
             .map_err(sql)?;
         Ok(changed == 1)
@@ -1581,7 +1593,7 @@ impl OperationStore for SqliteStore {
                         operation.operation.id,
                         fence,
                         worker.id,
-                        sqlite_now() + ms(lease)
+                        sqlite_now().saturating_add(ms(lease))
                     ],
                 )
                 .map_err(sql)?;
@@ -1634,7 +1646,7 @@ impl OperationStore for SqliteStore {
                 |r| r.get(0),
             )
             .map_err(sql)?;
-        Ok(count as usize)
+        Ok(from_db_usize("pending", count)?)
     }
 
     fn hold(
@@ -1667,7 +1679,7 @@ impl OperationStore for SqliteStore {
             tx.execute(
                 "INSERT INTO branch_locks (repo, branch, holder, token, expires_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![repo, branch, holder, token, now + ms(ttl)],
+                rusqlite::params![repo, branch, holder, token, now.saturating_add(ms(ttl))],
             )
             .map_err(sql)?;
             Ok((None, true))
@@ -1705,31 +1717,34 @@ impl OperationStore for SqliteStore {
             )
             .optional()
             .map_err(sql)?;
-        Ok(found.map(|c| c as u64))
+        Ok(from_db_opt("cursor", found)?)
     }
 
     fn save_webhook_cursor(&self, id: &str, cursor: u64) -> io::Result<()> {
+        let cursor = to_db("cursor", cursor)?;
         self.conn()
             .execute(
                 "INSERT INTO webhook_cursors (id, cursor) VALUES (?1, ?2) \
                  ON CONFLICT (id) DO UPDATE SET cursor = excluded.cursor",
-                rusqlite::params![id, cursor as i64],
+                rusqlite::params![id, cursor],
             )
             .map_err(sql)?;
         Ok(())
     }
 
     fn claim_webhook_cursor(&self, id: &str, expected: Option<u64>, next: u64) -> io::Result<bool> {
+        let next = to_db("next", next)?;
+        let expected = to_db_opt("expected", expected)?;
         let conn = self.conn();
         let changed = match expected {
             None => conn.execute(
                 "INSERT INTO webhook_cursors (id, cursor) VALUES (?1, ?2) \
                  ON CONFLICT (id) DO NOTHING",
-                rusqlite::params![id, next as i64],
+                rusqlite::params![id, next],
             ),
             Some(from) => conn.execute(
                 "UPDATE webhook_cursors SET cursor = ?3 WHERE id = ?1 AND cursor = ?2",
-                rusqlite::params![id, from as i64, next as i64],
+                rusqlite::params![id, from, next],
             ),
         }
         .map_err(sql)?;
@@ -2164,7 +2179,7 @@ impl OperationStore for PostgresStore {
         let locks = lock_order(&operation.locks);
         let tenant = operation.tenant().to_owned();
         let requires = op.requires.clone();
-        let (priority, enqueued_ms) = (op.priority, op.created_at_ms as i64);
+        let (priority, enqueued_ms) = (op.priority, to_db("created_at_ms", op.created_at_ms)?);
         let admitted = self.with(move |c| {
             let mut tx = c.transaction()?;
             if !quota.is_empty() {
@@ -2295,25 +2310,33 @@ impl OperationStore for PostgresStore {
         let aging = scheduling.aging_ms();
         let window = ms(scheduling.window);
         let (tenants, weights) = scheduling.weight_arrays();
-        let claimed = self.with(move |c| {
-            // Claims whose process is gone from this host need not wait for
-            // their lease.
-            let local = c.query(
+        // Claims whose process is gone from this host need not wait for
+        // their lease. The PID is checked here, outside the connection's
+        // closure, so a stored one that is no PID is an error naming it.
+        let local: Vec<(String, i64, i64, String)> = self.with(|c| {
+            Ok(c.query(
                 "SELECT id, attempt, pid, start FROM by_operation_queue \
                  WHERE host = $1 AND worker IS NOT NULL AND worker <> $2 \
                    AND lease_until > clock_timestamp()",
                 &[&worker.host, &worker.id],
-            )?;
-            for row in &local {
-                let (id, attempt, pid, start): (String, i64, i64, String) =
-                    (row.get(0), row.get(1), row.get(2), row.get(3));
-                if branchyard::process_gone(&worker.host, pid as u32, &start) {
-                    c.execute(
-                        "UPDATE by_operation_queue SET worker = NULL, lease_until = NULL \
-                         WHERE id = $1 AND attempt = $2",
-                        &[&id, &attempt],
-                    )?;
-                }
+            )?
+            .iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+            .collect())
+        })?;
+        let mut gone = Vec::new();
+        for (id, attempt, pid, start) in local {
+            if branchyard::process_gone(&worker.host, from_db_u32("pid", pid)?, &start) {
+                gone.push((id, attempt));
+            }
+        }
+        let claimed = self.with(move |c| {
+            for (id, attempt) in &gone {
+                c.execute(
+                    "UPDATE by_operation_queue SET worker = NULL, lease_until = NULL \
+                     WHERE id = $1 AND attempt = $2",
+                    &[id, attempt],
+                )?;
             }
             let pid = i64::from(worker.pid);
             let rows = c.query(
@@ -2537,7 +2560,7 @@ impl OperationStore for PostgresStore {
             )
             .map(|row| row.get(0))
         })?;
-        Ok(count as usize)
+        Ok(from_db_usize("pending", count)?)
     }
 
     fn hold(
@@ -2606,15 +2629,13 @@ impl OperationStore for PostgresStore {
                 &[&id],
             )
         })?;
-        Ok(rows.first().map(|row| {
-            let cursor: i64 = row.get(0);
-            cursor as u64
-        }))
+        let cursor = rows.first().map(|row| row.get::<_, i64>(0));
+        Ok(from_db_opt("cursor", cursor)?)
     }
 
     fn save_webhook_cursor(&self, id: &str, cursor: u64) -> io::Result<()> {
         let id = id.to_owned();
-        let cursor = cursor as i64;
+        let cursor = to_db("cursor", cursor)?;
         self.with(move |c| {
             c.execute(
                 "INSERT INTO by_webhook_cursors (id, cursor) VALUES ($1, $2) \
@@ -2626,7 +2647,8 @@ impl OperationStore for PostgresStore {
     }
 
     fn claim_webhook_cursor(&self, id: &str, expected: Option<u64>, next: u64) -> io::Result<bool> {
-        let (id, next) = (id.to_owned(), next as i64);
+        let (id, next) = (id.to_owned(), to_db("next", next)?);
+        let expected = to_db_opt("expected", expected)?;
         let changed = self.with(move |c| match expected {
             None => c.execute(
                 "INSERT INTO by_webhook_cursors (id, cursor) VALUES ($1, $2) \
@@ -2635,7 +2657,7 @@ impl OperationStore for PostgresStore {
             ),
             Some(from) => c.execute(
                 "UPDATE by_webhook_cursors SET cursor = $3 WHERE id = $1 AND cursor = $2",
-                &[&id, &(from as i64), &next],
+                &[&id, &from, &next],
             ),
         })?;
         Ok(changed == 1)
@@ -2867,6 +2889,26 @@ pub fn test_inventory(id: &str) -> branchyard::inventory::Inventory {
     }
 }
 
+/// Draws for the scheduling property check, on the one seedable generator
+/// (`branchyard_support::rng`), so a failure names a seed that reproduces it.
+trait Draw {
+    /// An index into a collection of `len` items.
+    fn index(&mut self, len: usize) -> usize;
+    /// A scheduling priority from -10 to 10.
+    fn priority(&mut self) -> i32;
+}
+
+impl Draw for branchyard_support::rng::SplitMix64 {
+    fn index(&mut self, len: usize) -> usize {
+        let len = u64::try_from(len).expect("a length fits u64");
+        usize::try_from(self.below(len)).expect("below a usize fits it")
+    }
+
+    fn priority(&mut self) -> i32 {
+        i32::try_from(self.below(21)).expect("below 21 fits i32") - 10
+    }
+}
+
 /// What the scheduling conformance admits: an operation of `repo` for
 /// `tenant`, at `priority`, admitted `age_ms` before the fixed clock.
 fn scheduled(
@@ -3094,7 +3136,7 @@ pub fn check_scheduling(store: &dyn OperationStore, repo: &str) {
             repo,
             &id,
             &tenant,
-            rng.below(21) as i32 - 10,
+            rng.priority(),
             NOW - rng.below(10_000),
             &[],
         ));
@@ -3156,8 +3198,8 @@ pub fn check_scheduling(store: &dyn OperationStore, repo: &str) {
                 0 | 1 if model.ops.len() < 40 => {
                     let n = model.ops.len();
                     let id = format!("{repo}-{tag}-{n}");
-                    let tenant = tenants[rng.below(3) as usize].clone();
-                    let priority = rng.below(21) as i32 - 10;
+                    let tenant = tenants[rng.index(tenants.len())].clone();
+                    let priority = rng.priority();
                     let created = NOW - rng.below(60_000);
                     let gpu = rng.below(4) == 0;
                     admit(scheduled(
@@ -3172,7 +3214,7 @@ pub fn check_scheduling(store: &dyn OperationStore, repo: &str) {
                 }
                 // Finish something running.
                 2 if !claims.is_empty() => {
-                    let k = rng.below(claims.len() as u64) as usize;
+                    let k = rng.index(claims.len());
                     let (i, c, gpu) = claims.remove(k);
                     let w = if gpu { &gpu_worker } else { &plain_worker };
                     finish(w, &c);

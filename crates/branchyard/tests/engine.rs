@@ -68,6 +68,33 @@ fn a_run_that_writes_files_is_ready_with_its_diffstat() {
     assert!(!f.root.join(".gitignore").exists());
 }
 
+/// A `max_duration` too large to add to a clock or store as a millisecond
+/// count means "no deadline in practice": the turn runs, rather than
+/// failing at start with `deadline_ms ... does not fit`.
+#[test]
+fn a_turn_with_a_huge_max_duration_runs() {
+    for max_duration in [Duration::MAX, Duration::from_secs(u64::MAX / 1_000)] {
+        let f = Fixture::new();
+        let branch = f
+            .task("WRITE hello.txt=hi")
+            .options(TaskOptions {
+                budget: Budget {
+                    max_duration: Some(max_duration),
+                    ..Budget::default()
+                },
+                ..f.options()
+            })
+            .name("forever")
+            .run()
+            .unwrap();
+        assert_eq!(
+            branch.info().status,
+            BranchStatus::Ready,
+            "{max_duration:?}"
+        );
+    }
+}
+
 #[test]
 fn a_turn_without_changes_has_no_candidate() {
     let f = Fixture::new();

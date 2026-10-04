@@ -51,6 +51,10 @@ pub struct LogEntry {
     pub detail: String,
 }
 
+/// `due` with no deadline, or one past what a column holds: everything is
+/// due. A bound for a query, never a stored value.
+const NO_DEADLINE: i64 = i64::MAX;
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS outbox (
@@ -200,7 +204,10 @@ impl Outbox {
             )?;
             let rows = s
                 .query_map(
-                    params![remote, due_by.map(|d| d as i64).unwrap_or(i64::MAX)],
+                    params![
+                        remote,
+                        due_by.map_or(NO_DEADLINE, |d| i64::try_from(d).map_or(NO_DEADLINE, |v| v))
+                    ],
                     |r| {
                         Ok(Pending {
                             task: r.get(0)?,
