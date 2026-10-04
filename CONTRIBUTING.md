@@ -39,6 +39,8 @@ Do not write a percent, hex, base64, shell-quoting, URL or tar codec by hand. Fi
 | Parse a base URL into host, port and path | `branchyard::models::BaseUrl::parse`, or `url::Url` |
 | Read or write a tar | the `tar` crate, as in `crates/branchyard/src/tarball.rs` |
 
+A crate that parses a secret-bearing URL must not return the original text when `url::Url::parse` fails: `url` rejects multi-host and empty-host URLs and cannot see a password holding a raw `/`, `#` or `?`. `branchyard::pg::redact` falls back to textual masking for those; keep its `redact_tests` cases (CI's postgres job runs them) when you touch it.
+
 Add the dependency to the crate that needs it, prefer a package already in `Cargo.lock`, and commit the `Cargo.lock` change (CI builds with `--offline --locked`; `cargo fetch --locked` must pass).
 
 `python3 tools/check_handrolled.py` (CI runs it, and `tests/test_check_handrolled.py`) fails on a re-implementation: `fn percent_decode`, `fn hex(bytes: &[u8])`, a base64 alphabet literal, a `'\''` quote idiom, `b"ustar"`, and the other signatures in [`tools/handrolled_banlist.toml`](tools/handrolled_banlist.toml). If a crate truly does not fit, add an `[[allow]]` row there with the file, the number of matches and the reason. The count is a ratchet: it may only fall, and the check fails when a file has fewer matches than its row says, so lower the count (or delete the row) when you remove one. To ban a new signature, add a `[[ban]]` row with its regex and what to use instead, and a case to `tests/test_check_handrolled.py`.
