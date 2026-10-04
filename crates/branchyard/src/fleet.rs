@@ -193,9 +193,9 @@ pub struct Classification {
 
 /// Infer a task's kind from its prompt, with no model call: each word
 /// (lowercase letters and digits) that starts with one of a kind's
-/// [`KEYWORDS`] scores a point for that kind, and the prompt's first word,
+/// `KEYWORDS` scores a point for that kind, and the prompt's first word,
 /// usually the imperative verb, scores three. The highest score wins, ties
-/// going to the kind listed first in [`KEYWORDS`]; no match is
+/// going to the kind listed first in `KEYWORDS`; no match is
 /// [`TaskKind::Other`].
 pub fn classify(prompt: &str) -> Classification {
     let lower = prompt.to_lowercase();
@@ -290,7 +290,7 @@ pub(crate) fn effort_text(effort: Effort) -> String {
 }
 
 /// A judge harness: run read-only on a scratch branch with a rubric and
-/// the candidates' diffs, answering a JSON verdict. See [`crate::judge`].
+/// the candidates' diffs, answering a JSON verdict. See `crate::judge`.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JudgeSpec {

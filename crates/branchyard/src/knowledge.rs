@@ -931,7 +931,7 @@ struct AnswerEntry {
 }
 
 /// Parse a distiller's answer: one JSON object (optionally in one fenced
-/// block) with exactly `entries`, at most [`DISTILLED_MAX`] of them, each
+/// block) with exactly `entries`, at most `DISTILLED_MAX` of them, each
 /// with exactly `text`, `path` (a glob or null), `kind` (a task kind or
 /// null) and `why`.
 pub fn parse_distilled(text: &str) -> Result<Vec<(String, KnowledgeScope, String)>, String> {

@@ -3,6 +3,10 @@
 //! mode, and of a Branchyard server through `branchyard-client` in remote
 //! mode (`--remote URL`).
 
+// Doc comments on the clap types are the `--help` text, written for a shell
+// reader (`[fleet]`, `HOST:PORT`, `<commit>`), not as rustdoc links or HTML.
+#![allow(rustdoc::broken_intra_doc_links, rustdoc::invalid_html_tags)]
+
 mod adf;
 mod adopt;
 mod args;

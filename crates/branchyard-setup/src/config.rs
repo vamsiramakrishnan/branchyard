@@ -797,6 +797,8 @@ pub struct NetworkConfig {
     /// HOST[:PORT] rules a new branch's harness may reach, such as
     /// `"github.com"` or `"*.npmjs.org:443"`; `[]` allows nothing. Unset:
     /// every host (open). A connector grant adds the gateway.
+    // The doc comment is the schema description; `[:PORT]` is not a link.
+    #[allow(rustdoc::broken_intra_doc_links)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow: Option<Vec<String>>,
     /// `best_effort` (the default): where the policy cannot be enforced,

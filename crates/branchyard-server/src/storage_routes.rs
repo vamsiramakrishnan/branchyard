@@ -20,7 +20,7 @@
 //! (`publish_artifact`, `artifacts`, `read_artifact`, `share_artifact`,
 //! and the scratch ones) — never `branchyard::storage`'s own internals —
 //! round-tripping a publish's and a download's bytes through a
-//! [`TempFile`], since those methods are path-based. That keeps this
+//! `TempFile`, since those methods are path-based. That keeps this
 //! module clean of grant, hashing and GC details that belong to
 //! `branchyard::storage` alone and may change there independently.
 

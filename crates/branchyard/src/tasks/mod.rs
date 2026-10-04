@@ -20,7 +20,7 @@
 //! record continues it.
 //!
 //! A task may also have a repository of its own, under
-//! `$BRANCHYARD_HOME/tasks/<id>/` (see [`folder`]): for a folder you granted
+//! `$BRANCHYARD_HOME/tasks/<id>/` (see `folder`): for a folder you granted
 //! (`git/` is the git directory, the folder its work tree, and nothing is
 //! written into the folder until an attempt is accepted), or for a task with
 //! no files. Large files there are chunked ([`large`]).

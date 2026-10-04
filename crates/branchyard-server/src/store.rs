@@ -23,7 +23,7 @@
 //!
 //! [`SqliteStore`] is what a server with a data directory uses, and
 //! [`MemoryStore`] is the same on an in-memory database. With the
-//! `postgres` feature, [`PostgresStore`] keeps them in PostgreSQL, where
+//! `postgres` feature, `PostgresStore` keeps them in PostgreSQL, where
 //! several servers may share them: claims use `FOR UPDATE SKIP LOCKED`.
 //! The queue is plain tables; PGMQ could replace the queue table later
 //! without changing the transaction's shape. [`FileStore`], the JSON-lines

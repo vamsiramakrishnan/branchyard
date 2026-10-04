@@ -4,7 +4,7 @@
 //! ([`crate::cli`]) and any scripted output.
 //!
 //! The level comes from `BRANCHYARD_LOG` or `RUST_LOG` (the same
-//! [`EnvFilter`](tracing_subscriber::EnvFilter) syntax, e.g.
+//! [`EnvFilter`] syntax, e.g.
 //! `branchyard_server=debug,warn`), checked in that order; `--quiet`
 //! selects `warn` as the default when neither is set, matching its old
 //! meaning of "warn and above". The format is `--log-format`'s, else

@@ -111,7 +111,7 @@ impl Running {
         self.shutdown.send_replace(true);
     }
 
-    /// A handle that can call [`Running::shutdown`] and [`Running::force`]
+    /// A handle that can call [`Running::shutdown`] and `Running::force`
     /// from another task.
     pub fn handle(&self) -> Handle {
         Handle {
@@ -124,7 +124,7 @@ impl Running {
     /// Wait for shutdown to begin and finish. From the moment it begins,
     /// open connections drain and running operations get the grace period
     /// at the same time, so the whole takes at most the grace period (and
-    /// at least [`MIN_DRAIN`] for requests in flight), which is what a
+    /// at least `MIN_DRAIN` for requests in flight), which is what a
     /// supervisor's stop timeout, such as `docker stop`'s, must exceed.
     /// Operations still running after it are recorded as interrupted;
     /// their threads end with the process.

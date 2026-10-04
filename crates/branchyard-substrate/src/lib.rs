@@ -11,7 +11,7 @@
 //! code crosses by git bundle and directory tree ([`transfer`]).
 //!
 //! This profile is **unqualified**. It has been exercised only against the
-//! in-process fake in [`fake`] (feature `fake`), not against a Substrate
+//! in-process fake in `fake` (feature `fake`), not against a Substrate
 //! cluster; see `docs/substrate.md`.
 
 mod actors;
@@ -27,7 +27,8 @@ pub use capabilities::{capabilities, runs_bridge, state, TemplateError};
 pub use provider::{Config, Quiesce, SubstrateProvider};
 
 /// Types and client generated from the vendored `ateapi.proto`.
-#[allow(clippy::all, missing_docs)]
+// The proto comments hold `<placeholders>` that rustdoc reads as HTML tags.
+#[allow(clippy::all, missing_docs, rustdoc::invalid_html_tags)]
 pub mod pb {
     tonic::include_proto!("ateapi");
 }
