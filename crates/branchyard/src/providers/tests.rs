@@ -11,11 +11,55 @@ use crate::placement;
 use crate::state::{SandboxKind, SandboxRow};
 use crate::{RecipeOptions, SandboxOptions, SubstrateOptions};
 
-/// How many variants [`Provider`] has. [`index`] is an exhaustive match, so
-/// adding a variant fails to compile until it has an arm here; the table
-/// then fails until [`samples`] covers it.
-const VARIANTS: usize = 4;
+/// The names of [`Provider`]'s variants, read from the enum's own source so
+/// no count has to be bumped by hand. A variant is a line indented one level
+/// inside `pub enum Provider { .. }` that starts with an uppercase letter
+/// (doc comments and attributes do not).
+fn variants_in_enum() -> Vec<String> {
+    let source = include_str!("../lib.rs");
+    let body = source
+        .split("pub enum Provider {\n")
+        .nth(1)
+        .expect("`pub enum Provider` in lib.rs")
+        .split("\n}\n")
+        .next()
+        .unwrap();
+    body.lines()
+        .filter_map(|line| line.strip_prefix("    "))
+        .filter(|line| line.starts_with(|c: char| c.is_ascii_uppercase()))
+        .map(|line| {
+            line.split(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
 
+/// The variants `Provider::kind` has an arm for, read from its source.
+fn variants_in_kind() -> Vec<String> {
+    let source = include_str!("mod.rs");
+    let body = source
+        .split("fn kind(&self) -> &dyn ProviderKind {\n")
+        .nth(1)
+        .expect("`Provider::kind` in providers/mod.rs")
+        .split("\n    }\n")
+        .next()
+        .unwrap();
+    body.lines()
+        .filter_map(|line| line.trim_start().strip_prefix("Provider::"))
+        .map(|rest| {
+            rest.split(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
+
+/// [`index`] is an exhaustive match, so adding a variant fails to compile
+/// until it has an arm here; [`the_table_covers_every_variant`] then fails
+/// until [`samples`] has an instance of it.
 fn index(provider: &Provider) -> usize {
     match provider {
         Provider::Local => 0,
@@ -112,7 +156,23 @@ fn record(provider: &Provider) -> Record {
 }
 
 #[test]
+fn the_counter_reads_the_enum_and_kind() {
+    // If these were empty the coverage test below would compare nothing.
+    assert!(variants_in_enum().starts_with(&["Local".to_string()]));
+    assert!(variants_in_enum().contains(&"Recipe".to_string()));
+    assert_eq!(variants_in_kind(), variants_in_enum());
+}
+
+#[test]
 fn the_table_covers_every_variant() {
+    // The count comes from the enum, not from a constant: a new variant
+    // raises it, and `Provider::kind` must have an arm for each.
+    let variants = variants_in_enum();
+    assert_eq!(
+        variants_in_kind(),
+        variants,
+        "`Provider::kind` must map every variant of the enum, in its order"
+    );
     let fixture = fixture();
     let mut seen: Vec<usize> = samples(&fixture)
         .iter()
@@ -120,7 +180,14 @@ fn the_table_covers_every_variant() {
         .collect();
     seen.sort_unstable();
     seen.dedup();
-    assert_eq!(seen, (0..VARIANTS).collect::<Vec<_>>());
+    assert_eq!(
+        seen,
+        (0..variants.len()).collect::<Vec<_>>(),
+        "`Provider` has {} variants ({variants:?}); `samples` must hold a usable and a refused \
+         instance of each, and `index` must number them 0..{}",
+        variants.len(),
+        variants.len()
+    );
 }
 
 #[test]

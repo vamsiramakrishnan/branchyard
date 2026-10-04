@@ -173,7 +173,7 @@ The enum's serde shape is unchanged by the trait, so the wire format and `schema
 
 Two tests keep it this way:
 
-- `providers::tests` in `crates/branchyard/src/providers/tests.rs` is a table over every variant that exercises `check`, `recover`, `lifecycle`, `key`, `guest_paths`, `open` and `destroy` through the trait, including each error path. Its exhaustive `index` match fails to compile for a new variant, and the table fails until the variant has a sample.
+- `providers::tests` in `crates/branchyard/src/providers/tests.rs` is a table over every variant that exercises `check`, `recover`, `lifecycle`, `key`, `guest_paths`, `open` and `destroy` through the trait, including each error path. Its exhaustive `index` match fails to compile for a new variant, and the table fails until the variant has a sample (it counts the variants in the enum's own source and in `Provider::kind`, so there is no count to bump).
 - `crates/branchyard/tests/provider_seam.rs` fails when any crate's `src/` names a variant outside `providers/`. The engine crate's count is zero. The CLI and the server still match on the enum to announce and admit a provider; their counts are a ratchet in that file that can only fall (they need a public accessor before they can move).
 
 ## Provisioning a harness's home

@@ -24,7 +24,7 @@ The Warp collection is AGPL source reference material and excluded from the Carg
 A branch's provider is the closed enum `Provider` (`crates/branchyard/src/lib.rs`), and everything the engine needs to know about a variant is a method of the crate-private trait `ProviderKind`, implemented once per variant in `crates/branchyard/src/providers/`. Do not match on `Provider` anywhere else: call `provider.kind().<method>()`, or `providers::of(provider)` for an `Option<&Provider>` where `None` means local.
 
 - To change what a provider does (a check, its recovery, its paths, its lifecycle, its destroy), edit its file in `providers/`.
-- To add a provider, add `providers/<name>.rs` implementing `ProviderKind` on its options struct, the variant in `Provider` and its arm in `Provider::kind`. Then add a sample to `providers/tests.rs` (its `index` match will not compile until the variant is listed) and regenerate the schemas:
+- To add a provider, add `providers/<name>.rs` implementing `ProviderKind` on its options struct, the variant in `Provider` and its arm in `Provider::kind`. Then add a sample to `providers/tests.rs` (its `index` match will not compile until the variant is listed, and `the_table_covers_every_variant` fails until `samples` has an instance of it; the variant count is read from the enum itself, so nothing needs bumping) and regenerate the schemas:
 
   ```sh
   cargo run -p branchyard-client --features schema --example generate_contract --offline > schema/contract.json
