@@ -41,6 +41,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FLOOR = ROOT / "tools" / "coverage_floor.json"
 SRC = re.compile(r"^crates/([^/]+)/src/.+\.rs$")
+# An absolute report path from another machine (llvm-cov writes
+# /home/runner/work/<repo>/<repo>/crates/<name>/src/...): from the first crates/<name>/src/ on.
+FOREIGN = re.compile(r"/(crates/[^/]+/src/.+\.rs)$")
+NOT_OURS = ("/.cargo/", "/vendor/", "/target/", "/rustc/")
+
+
+def relative(path, root):
+    """`path` relative to the repository: by `root` when it is under it, else from its first crates/<name>/src/."""
+    if path.startswith(root):
+        return path[len(root) :]
+    found = FOREIGN.search(path)
+    if found and not any(part in path for part in NOT_OURS):
+        return found.group(1)
+    return path
 
 
 def parse_lcov(text, root):
@@ -51,7 +65,7 @@ def parse_lcov(text, root):
     for line in text.splitlines():
         if line.startswith("SF:"):
             path = line[3:]
-            path = path[len(root) :] if path.startswith(root) else path
+            path = relative(path, root)
             current = files.setdefault(path, {}) if SRC.match(path) else None
         elif current is not None and line.startswith("DA:"):
             number, count = line[3:].split(",")[:2]
@@ -149,8 +163,8 @@ def load(path, root):
     return parse_lcov(Path(path).read_text(), root)
 
 
-def refuse_local_measurement(args):
-    """Floors are written only from the CI job's reports, or with --local."""
+def may_write_floors(args):
+    """True when the reports may set floors: they are the CI job's (--from-ci, or under GITHUB_ACTIONS), or --local."""
     if args.from_ci or os.environ.get("GITHUB_ACTIONS") == "true":
         return True
     if args.local:
@@ -177,9 +191,15 @@ def main(argv):
     parser.add_argument("--watch", nargs="*", default=[], help="with --seed: files that get their own floor")
     parser.add_argument("--unit-watch", nargs="*", default=[], help="with --seed: files that get a unit-test floor")
     args = parser.parse_args(argv[1:])
-    if (args.update or args.seed) and not refuse_local_measurement(args):
+    if (args.update or args.seed) and not may_write_floors(args):
         return 1
     files = load(args.lcov, args.root)
+    if (args.update or args.seed) and not files:
+        print(
+            f"error: no crates/<name>/src/ file in {args.lcov}; refusing to write floors from an empty report",
+            file=sys.stderr,
+        )
+        return 1
     unit = load(args.unit, args.root) if args.unit else None
     floor_path = Path(args.floor)
     if args.seed:

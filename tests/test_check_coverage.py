@@ -50,6 +50,15 @@ class Parse(unittest.TestCase):
         )
         self.assertEqual(check_coverage.parse_lcov(text, ROOT), {A: [2, 1]})
 
+    def test_a_ci_report_with_absolute_paths_of_another_machine_is_read(self):
+        ci = "/home/runner/work/branchyard/branchyard"
+        text = (
+            f"SF:{ci}/{A}\nDA:1,1\nDA:2,0\nend_of_record\n"
+            f"SF:/home/runner/.cargo/registry/src/x/foo-1.0/crates/z/src/lib.rs\nDA:1,1\nend_of_record\n"
+            f"SF:{ci}/vendor/x/crates/y/src/lib.rs\nDA:1,1\nend_of_record\n"
+        )
+        self.assertEqual(check_coverage.parse_lcov(text, ROOT), {A: [2, 1]})
+
     def test_a_line_seen_in_several_instantiations_is_hit_if_any_hit(self):
         text = f"SF:{ROOT}/{A}\nDA:1,0\nDA:1,3\nDA:2,0\nend_of_record\n"
         self.assertEqual(check_coverage.parse_lcov(text, ROOT), {A: [2, 1]})
@@ -157,6 +166,20 @@ class Cli(unittest.TestCase):
         self.assertEqual(code, 0)
         code, _ = self.run_cli(floor(crates={"a": 60.0}), text)
         self.assertEqual(code, 1)
+
+    def test_update_from_a_ci_rooted_report_keeps_the_floors_and_an_empty_one_is_refused(self):
+        ci = "/home/runner/work/branchyard/branchyard"
+        text = f"SF:{ci}/{A}\nDA:1,1\nDA:2,1\nend_of_record\n"
+        code, written = self.run_cli(
+            floor(crates={"a": 10.0}, files={A: 20.0}, uncovered=[B]), text, "--update", "--from-ci"
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual((written["crates"]["a"], written["files"][A]), (100.0, 100.0))
+        empty = f"SF:{ci}/elsewhere/lib.rs\nDA:1,1\nend_of_record\n"
+        for flag in ("--update", "--seed"):
+            code, written = self.run_cli(floor(crates={"a": 10.0}, uncovered=[B]), empty, flag, "--from-ci")
+            self.assertEqual(code, 1, flag)
+            self.assertEqual((written["crates"], written["uncovered"]), ({"a": 10.0}, [B]), "untouched")
 
     def test_update_and_seed_refuse_a_local_run(self):
         text = lcov(**{A: [1, 1, 0, 0]})
