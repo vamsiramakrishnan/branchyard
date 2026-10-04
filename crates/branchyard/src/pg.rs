@@ -651,6 +651,7 @@ impl Postgres {
     }
 
     /// The connection, reconnecting after it closed.
+    #[allow(clippy::expect_used)] // ratchet: branchyard
     fn client<'a>(
         &self,
         guard: &'a mut MutexGuard<'_, Option<Client>>,

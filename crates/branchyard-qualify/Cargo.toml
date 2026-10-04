@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Runs harness driver qualification scenarios against real harness binaries"
+
+[lints]
+workspace = true
 
 [dependencies]
 branchyard-harness = { path = "../branchyard-harness" }

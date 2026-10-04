@@ -70,6 +70,7 @@ impl Provisioner for Gemini {
         Some("gemini-cli")
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-provision
     fn plan(&self, context: &Context) -> Result<Plan, Refused> {
         if context.effort.is_some() {
             return Err(unsupported(

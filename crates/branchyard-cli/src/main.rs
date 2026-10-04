@@ -60,6 +60,7 @@ use std::process::ExitCode;
 use args::{Command, Globals};
 use commands::{Env, Failure, Target};
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().collect();
     args::unset_blank_env();
@@ -111,6 +112,7 @@ fn main() -> ExitCode {
 
 /// `by serve`, `by worker` and their help: the server's own command line.
 /// `prefix` is `by`'s part, parsed only for its global options.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn serve(prefix: &[OsString], call: args::ServerCall) -> ExitCode {
     let globals = match args::parse_from(prefix) {
         Ok(cli) => cli.globals,

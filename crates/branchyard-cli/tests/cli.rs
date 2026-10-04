@@ -2,6 +2,7 @@
 //! fake ACP agent from branchyard-runtime. Hermetic: no real harness, no
 //! network. Requires `git` and `sh`.
 
+#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};

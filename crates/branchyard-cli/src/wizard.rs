@@ -164,6 +164,7 @@ pub fn review_text(plan: &Plan, color: bool) -> String {
     out
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn cancelled(error: io::Error) -> Failure {
     if error.kind() == io::ErrorKind::Interrupted {
         let _ = cliclack::outro_cancel("Cancelled; nothing was written.");
@@ -249,6 +250,7 @@ fn ask(q: &Question) -> io::Result<Value> {
 }
 
 /// The wizard: detect, ask batch by batch, review, confirm, write.
+#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 pub fn run(topic: Option<Topic>, defaults: bool) -> Outcome {
     cliclack::intro(paint(true, "1;7", " by init ")).map_err(Failure::Io)?;
     let topic = match topic {

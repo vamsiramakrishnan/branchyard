@@ -5,6 +5,7 @@
 //! performed through the API, and `/metrics` counts effects and waiting
 //! approvals. A shell script stands in for Anvil's packaging.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 #[path = "../../branchyard/tests/mock_gateway/mod.rs"]
 mod mock_gateway;

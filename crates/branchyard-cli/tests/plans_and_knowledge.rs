@@ -5,6 +5,7 @@
 //! end to end, including `review` reading answers from stdin. Hermetic: no
 //! model is called. Requires `git` and `sh`.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::Write;
 use std::process::{Output, Stdio};

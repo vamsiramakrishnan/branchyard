@@ -30,6 +30,11 @@
 //! Nothing here is evidence about a real cluster: the real router's
 //! addressing, activation and authentication are not modelled.
 
+#![allow(
+    clippy::expect_used,
+    clippy::let_underscore_must_use,
+    clippy::unwrap_used
+)] // ratchet: branchyard-substrate
 use branchyard_support::LockExt as _;
 use std::collections::HashMap;
 use std::fs;

@@ -26,6 +26,14 @@
 //!
 //! and it says why when it skips.
 
+#![allow(
+    clippy::expect_used,
+    clippy::let_underscore_must_use,
+    clippy::map_unwrap_or,
+    clippy::panic,
+    clippy::unwrap_in_result,
+    clippy::unwrap_used
+)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;

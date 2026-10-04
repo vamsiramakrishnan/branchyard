@@ -834,7 +834,7 @@ fn direct_reason(gateway: &Gateway, record: &Record, api: Option<Api>) -> Option
 /// gateway. `token` is the connector token when the turn has one (it
 /// carries the model scope too); otherwise the gateway's own is minted. A
 /// failure is the turn's, by name.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::expect_used)] // ratchet: branchyard
 pub(crate) fn prepare(
     yard: &Yard,
     record: &Record,
@@ -915,16 +915,16 @@ pub(crate) fn prepare(
                 subject: gateway.signer.subject.clone(),
                 tenant: gateway.signer.tenant.clone(),
             });
-            let claims = crate::connectors::turn_claims(
-                &gateway.signer.issuer,
-                &url,
+            let claims = crate::connectors::turn_claims(crate::connectors::TurnToken {
+                issuer: &gateway.signer.issuer,
+                audience: &url,
                 actor,
-                gateway.by_branch(&record.info.name),
-                record.info.turns + 1,
-                (now, exp),
-                Vec::new(),
+                by_branch: gateway.by_branch(&record.info.name),
+                turn: record.info.turns + 1,
+                window: (now, exp),
+                grants: Vec::new(),
                 scopes,
-            )?;
+            })?;
             keys.sign(&claims)
                 .map_err(|e| format!("could not sign the model gateway token: {e}"))?
         }

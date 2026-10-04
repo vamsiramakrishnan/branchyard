@@ -648,6 +648,7 @@ fn last_turn(names: &[String]) -> u32 {
 /// checkpoint it came after (or the one a fork started from), with this
 /// turn's conversation added. Returns the commit; `None` for a branch that
 /// is no task's attempt.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 pub(crate) fn record_checkpoint(
     yard: &Yard,
     record: &Record,

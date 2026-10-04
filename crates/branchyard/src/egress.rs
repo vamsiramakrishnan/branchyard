@@ -357,6 +357,7 @@ pub(crate) fn prepare(
 }
 
 /// A proxy deciding by `network` and recording each decision on `branch`.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn proxy(yard: &Yard, branch: &str, network: Network) -> Proxy {
     let yard = yard.clone();
     let branch = branch.to_owned();

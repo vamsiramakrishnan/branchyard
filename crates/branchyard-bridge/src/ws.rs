@@ -104,6 +104,7 @@ pub fn read_head(stream: &mut impl Read) -> io::Result<Head> {
 }
 
 /// Write a complete, non-upgrade HTTP response and close the connection.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 pub fn respond(stream: &mut Stream, status: &str, body: &str) -> io::Result<()> {
     write!(
         stream,
@@ -181,6 +182,7 @@ impl WsWriter {
     }
 
     /// Close the TCP connection in both directions without a close frame.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
     pub fn abort(&self) {
         let _ = self.stream.shutdown(Shutdown::Both);
     }
@@ -197,6 +199,7 @@ pub struct WsReader {
 impl WsReader {
     /// The next binary message, or `None` once the peer closed the
     /// WebSocket or the connection.
+    #[allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // ratchet: branchyard-bridge
     pub fn recv(&mut self) -> io::Result<Option<Vec<u8>>> {
         let mut message: Option<Vec<u8>> = None;
         loop {
@@ -329,6 +332,7 @@ pub struct Refused {
 /// `protocol`, with `headers` added. A non-101 answer is returned as
 /// [`Refused`] inside the error, with kind `PermissionDenied` for 401 and
 /// 403, `NotFound` for 404 and `Other` otherwise.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 pub fn client(
     mut stream: Stream,
     host: &str,

@@ -958,6 +958,7 @@ impl Remote {
         result
     }
 
+    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-sync
     fn sync_inner(&self, source: &dyn SyncSource, state: &mut TaskState) -> Result<SyncReport> {
         let task = source.task_id().to_owned();
         check_task_id(&task)?;

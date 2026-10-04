@@ -1323,6 +1323,7 @@ pub struct Observed {
 
 /// Ask `gh` about `pr`: its state, checks, reviews, comments and review
 /// threads, and the feedback among them.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 pub fn observe(gh: &Gh, pr: &PullRequestRef) -> Result<Observed, Failure> {
     let number = pr.number.to_string();
     let view: Value = gh.json(
@@ -1705,7 +1706,7 @@ fn watch(env: &Env, target: &Target, yard: &Yard, name: &str, gh: &Gh, args: &Pr
             threads,
         } = observe(gh, &pr)?;
         if let (Some((from, to)), false) = (&pushed, args.no_resolve) {
-            resolve_addressed(yard, &branch, gh, &pr, &state, &threads, from, to)?;
+            resolve_addressed(yard, &branch, gh, &pr, &state, &threads, (from, to))?;
         }
         if record_observation(&branch, &state, observation.clone())? {
             active = true;
@@ -1846,7 +1847,6 @@ pub fn addressed_threads<'a>(
 /// watch fed back whose file the pushed commits changed, resolve it, and
 /// record what happened, so no thread is tried twice. A failure is
 /// recorded and said, and the watch carries on.
-#[allow(clippy::too_many_arguments)]
 fn resolve_addressed(
     yard: &Yard,
     branch: &Branch,
@@ -1854,8 +1854,7 @@ fn resolve_addressed(
     pr: &PullRequestRef,
     state: &PrState,
     threads: &[ReviewThread],
-    from: &str,
-    to: &str,
+    (from, to): (&str, &str),
 ) -> Outcome {
     let changed: BTreeSet<String> = Git::new(yard.root())
         .args(["diff", "--name-only", "--no-renames", from, to, "--"])

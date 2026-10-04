@@ -84,6 +84,7 @@ impl MockS3 {
     }
 
     /// A store on this server with the stand-in's credentials.
+    #[allow(clippy::expect_used)] // ratchet: branchyard-sync
     pub fn store(&self, bucket: &str, prefix: &str, part_size: usize) -> crate::store::s3::S3Store {
         crate::store::s3::S3Store::new(
             bucket,

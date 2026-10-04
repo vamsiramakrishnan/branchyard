@@ -9,6 +9,7 @@
 //! from the reports in `docs/qualification/`. A test in
 //! `tests/compatibility.rs` fails when the committed file is stale.
 
+#![allow(clippy::map_unwrap_or, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;

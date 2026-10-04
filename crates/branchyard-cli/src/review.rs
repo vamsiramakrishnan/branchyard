@@ -154,6 +154,7 @@ pub fn template(branch: &str, diff: &str) -> String {
 
 /// The comments in `edited`, the review file for `diff` after editing, in
 /// the order written; or where the diff itself was changed.
+#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 pub fn parse(diff: &str, edited: &str) -> Result<Vec<DiffComment>, ParseError> {
     let original: Vec<&str> = diff.lines().collect();
     let mut walker = Walker {

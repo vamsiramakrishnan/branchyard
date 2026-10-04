@@ -48,6 +48,7 @@ fn refused(code: &'static str, message: impl Into<String>) -> Refused {
 }
 
 /// HMAC-SHA256 of `parts`, concatenated, with `secret`, as lowercase hex.
+#[allow(clippy::expect_used)] // ratchet: branchyard-server
 pub fn sign(secret: &str, parts: &[&[u8]]) -> String {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("any key length");
     for part in parts {
@@ -58,6 +59,7 @@ pub fn sign(secret: &str, parts: &[&[u8]]) -> String {
 
 /// Whether `hex_signature` is the HMAC of `parts` under `secret`,
 /// compared in constant time.
+#[allow(clippy::expect_used)] // ratchet: branchyard-server
 fn verify(secret: &str, parts: &[&[u8]], hex_signature: &str) -> bool {
     let Ok(given) = hex::decode(hex_signature.trim()) else {
         return false;

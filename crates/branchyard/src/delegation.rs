@@ -1207,6 +1207,7 @@ pub(crate) fn wait_subtree(yard: &Yard, name: &str) -> Result<Vec<BranchInfo>, E
 
 /// Run a turn on a thread of this process, joined by a wait for its
 /// subtree.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn start_turn(
     yard: &Yard,
     prepared: Prepared,
@@ -1374,6 +1375,7 @@ impl Local {
     }
 
     /// Record a delegation operation on this branch's event log.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn note<T>(
         &self,
         tool: &str,
@@ -2414,6 +2416,7 @@ impl Local {
         result
     }
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn try_send_message(
         &self,
         kind: MessageKind,
@@ -2877,6 +2880,7 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

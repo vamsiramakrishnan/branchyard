@@ -67,6 +67,7 @@ fn tag(value: &impl serde::Serialize, key: &str) -> String {
 /// admission and its end) say happened on `branches`, whose harness
 /// `harness_of` names. Spans are children of `parent`, the operation's
 /// span, when the operation is traced.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
 pub fn record_events(
     observability: &Observability,
     branches: &BTreeSet<String>,

@@ -5,6 +5,12 @@
 //! Requires `sh` and `sleep`; the tests of process 1 and of another user
 //! run only as root, and the first also needs `unshare`.
 
+#![allow(
+    clippy::expect_used,
+    clippy::let_underscore_must_use,
+    clippy::panic,
+    clippy::unwrap_used
+)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};

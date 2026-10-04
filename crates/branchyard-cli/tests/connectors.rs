@@ -6,6 +6,7 @@
 //! engine's tests do that against the published keys). Requires `git`,
 //! `sh` and `python3`; no network beyond loopback, no real Anvil.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;

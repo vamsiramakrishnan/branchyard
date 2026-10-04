@@ -5,6 +5,7 @@
 //! cannot be honored are refused before anything is created. Hermetic; no
 //! real harness runs.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

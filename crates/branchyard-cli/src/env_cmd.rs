@@ -57,6 +57,7 @@ fn pool_spec(yard: &Yard) -> Result<(WorkspaceSpec, workspace_cmd::Resolved), Fa
     }
 }
 
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn slot_line(slot: &branchyard::PoolSlot) -> String {
     let state = match slot.state {
         branchyard::PoolSlotState::Filling => "filling",
@@ -84,6 +85,7 @@ fn slot_line(slot: &branchyard::PoolSlot) -> String {
     line
 }
 
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn pool(env: &Env, yard: &Yard, action: &PoolAction, json: bool) -> Outcome {
     match action {
         PoolAction::Status => {
@@ -369,6 +371,7 @@ fn rebuild(env: &Env, yard: &Yard, json: bool) -> Outcome {
     }
 }
 
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn prune(
     yard: &Yard,
     keys: &[String],

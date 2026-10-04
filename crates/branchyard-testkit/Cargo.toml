@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Shared test infrastructure: event-driven waits, the fake agent, a repository fixture, scratch directories and a checked mock HTTP server. A dev-dependency only."
+
+[lints]
+workspace = true
 
 [dependencies]
 branchyard-wire = { path = "../branchyard-wire" }

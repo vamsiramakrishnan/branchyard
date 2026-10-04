@@ -149,6 +149,7 @@ enum Stop {
 /// become the branch's status; errors are state errors, after which the
 /// record says `Failed` if it could still be written. A lost lease is
 /// [`Error::Fenced`], and nothing more is written.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
     let store = turn.yard.store();
     let fence = lease.fence().clone();
@@ -324,7 +325,7 @@ fn drive(
     Ok(driven)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 fn run(
     recorder: &mut Recorder,
     turn: &Turn<'_>,

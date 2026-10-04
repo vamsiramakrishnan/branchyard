@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Runs a harness driver against a harness process, locally or through a sandbox provider"
+
+[lints]
+workspace = true
 
 [dependencies]
 branchyard-support = { path = "../branchyard-support" }

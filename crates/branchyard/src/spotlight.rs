@@ -382,6 +382,7 @@ fn off_locked(yard: &Yard, force: bool) -> Result<Option<TryState>, Error> {
 }
 
 /// Put every path back as it was before the try, then forget it.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn restore(yard: &Yard, mut state: TryState) -> Result<(), Error> {
     let root = &yard.root;
     if state.phase != RESTORING {

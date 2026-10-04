@@ -225,6 +225,7 @@ fn read_response(mut reader: BufReader<Stream>, head_only: bool) -> Result<Respo
 /// A response body, its transfer encoding undone.
 pub type Body = wire::Body<BufReader<Stream>>;
 
+#[allow(clippy::let_underscore_must_use, clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

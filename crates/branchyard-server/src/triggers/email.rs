@@ -62,6 +62,7 @@ pub struct FilePart {
 
 /// Constant-time equality of two secrets: their MACs under one key,
 /// compared by `verify_slice`, so neither length nor content leaks.
+#[allow(clippy::expect_used)] // ratchet: branchyard-server
 fn same(a: &str, b: &str) -> bool {
     use hmac::{Hmac, KeyInit, Mac};
     let mac = |text: &str| {
@@ -475,6 +476,7 @@ fn verdict(text: &str) -> Option<String> {
 /// and `head` hold, and comments), block ends as line breaks, character
 /// references decoded, blank lines dropped. The result is plain text,
 /// never markup.
+#[allow(clippy::expect_used)] // ratchet: branchyard-server
 pub fn strip_html(html: &str) -> String {
     let lower = html.to_ascii_lowercase();
     let mut out = String::with_capacity(html.len() / 2);
@@ -605,6 +607,7 @@ fn base64_len(text: &str) -> u64 {
 }
 
 /// Read a delivery's fields (and file parts) into an event.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
 pub fn read(
     source: EventSource,
     fields: &Map<String, Value>,
@@ -850,6 +853,7 @@ pub fn read(
 
 /// Whether `address` is one `allowed` names: an exact address, or a
 /// `@domain` (that domain exactly, not its subdomains), ignoring case.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
 pub fn allowed(allowed: &[String], address: &str) -> bool {
     let address = address.to_ascii_lowercase();
     let domain = address.rsplit_once('@').map(|(_, d)| d).unwrap_or("");

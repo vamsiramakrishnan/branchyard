@@ -10,6 +10,7 @@
 //! No sshd is involved: none is installed here (docs/remote-ssh.md says
 //! what a real one would add). Requires `git`, `sh`, `python3`.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 use branchyard_testkit::fake_agent;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

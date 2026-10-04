@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Harness home provisioning: a sans-IO planner per harness and a small executor, derived from Scion's provisioners"
+
+[lints]
+workspace = true
 
 [features]
 # Derive schemars::JsonSchema on the provisioning wire types, for

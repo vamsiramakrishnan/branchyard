@@ -167,6 +167,7 @@ impl Yard {
     /// `surface`: promote its draft with the gateway's promote call, or make
     /// the call held in the outbox. The entry is `begun` before the call,
     /// as any effect is, and the call carries the entry's id as its key.
+    #[allow(clippy::let_underscore_must_use, clippy::map_unwrap_or)] // ratchet: branchyard
     pub fn promote_effect(&self, id: &str, by: &str, surface: &str) -> Result<EffectEntry, Error> {
         let entry = self.effect(id)?;
         if entry.state != EffectState::Staged {

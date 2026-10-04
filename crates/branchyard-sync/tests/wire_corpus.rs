@@ -2,6 +2,7 @@
 //! the corpus every consumer runs applies to them too: a request the
 //! codec refuses is answered 400 and never reaches a handler.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;

@@ -2,6 +2,7 @@
 //! with their context, poisoning is reported once with the lock's name, and a
 //! thread's panic reaches the sink it was given.
 
+#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 

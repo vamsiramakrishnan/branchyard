@@ -768,6 +768,7 @@ pub fn request_digest(connector: &str, operation: &str, arguments: &Value) -> St
 }
 
 /// Find one entry by its id or the end of it (what people type).
+#[allow(clippy::expect_used)] // ratchet: branchyard
 pub(crate) fn find_effect(backend: &dyn EffectBackend, id: &str) -> Result<EffectEntry, Error> {
     if let Some(entry) = backend.effect(id)? {
         return Ok(entry);
@@ -788,6 +789,7 @@ pub(crate) fn find_effect(backend: &dyn EffectBackend, id: &str) -> Result<Effec
 }
 
 /// Find one ask by its id or the end of it.
+#[allow(clippy::expect_used)] // ratchet: branchyard
 pub(crate) fn find_ask(backend: &dyn EffectBackend, id: &str) -> Result<ApprovalAsk, Error> {
     if let Some(ask) = backend.ask(id)? {
         return Ok(ask);

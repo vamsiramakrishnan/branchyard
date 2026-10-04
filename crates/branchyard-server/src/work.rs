@@ -401,6 +401,7 @@ const LEASE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// is cancelled, naming the loss, and cancelled again each poll while the
 /// run lasts, so a turn starting after the loss stops too. Returns the
 /// run's result and, when a lease was lost, why.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 fn run_under_leases<T>(
     app: &App,
     repo: &RepoState,
@@ -465,6 +466,7 @@ const OBSERVED_ENTRIES: usize = 100_000;
 /// Count and trace what an operation did: its branches' cost, and the
 /// turns, tool calls and connector calls its events record between its
 /// admission and its end (see [`crate::observe`]).
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
 fn observe_run(
     app: &App,
     repo: &RepoState,

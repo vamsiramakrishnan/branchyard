@@ -44,6 +44,7 @@ impl Herdr {
     }
 
     /// Run `herdr <args>` and return its JSON response.
+    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-herdr
     pub fn call(&self, args: &[String]) -> Result<Value, HerdrError> {
         let output = Command::new(&self.bin)
             .args(args)

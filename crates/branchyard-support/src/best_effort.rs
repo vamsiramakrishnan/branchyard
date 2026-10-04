@@ -36,6 +36,7 @@ pub fn set_failure_sink(sink: Arc<dyn FailureSink>) {
     *SINK.lock_recovering("failure sink") = Some(sink);
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-support
 pub(crate) fn report(context: &str, error: &dyn Display) {
     let error = error.to_string();
     tracing::warn!(

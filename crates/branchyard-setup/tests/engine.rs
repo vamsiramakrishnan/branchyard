@@ -5,6 +5,7 @@
 //! Regenerate the golden files with `BRANCHYARD_BLESS=1 cargo test -p
 //! branchyard-setup --test engine`.
 
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::collections::BTreeMap;
 use std::path::Path;
 

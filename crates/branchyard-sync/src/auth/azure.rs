@@ -142,6 +142,7 @@ impl ManagedIdentity {
         self
     }
 
+    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-sync
     pub fn token(&self, now_ms: u64) -> Result<String> {
         let mut cached = self.cached.lock_recovering("cached");
         if let Some((token, expires)) = cached.as_ref() {

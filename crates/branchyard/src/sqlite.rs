@@ -3420,6 +3420,7 @@ impl PoolBackend for Sqlite {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

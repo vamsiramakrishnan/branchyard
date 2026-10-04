@@ -582,6 +582,7 @@ pub fn by_key(key: char) -> Option<&'static Action> {
 }
 
 /// The action with this ID.
+#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 pub fn by_id(id: ActionId) -> &'static Action {
     ACTIONS
         .iter()

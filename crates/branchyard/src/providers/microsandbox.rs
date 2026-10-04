@@ -83,6 +83,7 @@ impl ProviderKind for SandboxOptions {
 /// The spec of a Microsandbox branch's sandbox, and its harness's
 /// variables: the worktree at [`WORKSPACE`], the private home at [`HOME`],
 /// the git directory read-only, and every scratch area it may reach.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn spec(
     yard: &Yard,
     record: &Record,
@@ -174,6 +175,7 @@ pub(crate) fn destroy_orphan(
     }
 }
 
+#[allow(clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;

@@ -5,6 +5,7 @@
 //! judge --pick`, `by fleet stats|route`, and the refusals. Hermetic: no
 //! model is called. Requires `git` and `sh`.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::process::Output;
 

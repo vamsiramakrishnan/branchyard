@@ -7,6 +7,7 @@
 //! Crashes are real: a child process (this test binary, running the
 //! ignored `engine_child` test) starts a turn and is sent SIGKILL.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

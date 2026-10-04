@@ -207,6 +207,7 @@ fn first_line(
 const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// `git version 2.45.2` as `2.45.2`, `Docker version 27.1.1, build x` as `27.1.1`.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn short_version(line: &str) -> String {
     line.split_whitespace()
         .find(|word| word.starts_with(|c: char| c.is_ascii_digit()))

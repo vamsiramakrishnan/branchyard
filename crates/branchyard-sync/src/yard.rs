@@ -95,6 +95,7 @@ impl SourceProvider for YardTasks {
         Ok(out)
     }
 
+    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-sync
     fn source(&self, task: &str) -> Result<Option<Box<dyn SyncSource>>> {
         let branch = match split_task_id(task) {
             Some((key, branch)) => {

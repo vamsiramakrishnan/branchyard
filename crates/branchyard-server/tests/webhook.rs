@@ -1,6 +1,11 @@
 //! Webhook notifications against a local HTTP receiver: no real network,
 //! no real harness.
 
+#![allow(
+    clippy::expect_used,
+    clippy::let_underscore_must_use,
+    clippy::unwrap_used
+)] // tests: a panic is the failure report
 mod common;
 
 use std::collections::HashMap;

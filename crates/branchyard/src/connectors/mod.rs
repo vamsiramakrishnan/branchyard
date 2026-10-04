@@ -244,16 +244,16 @@ pub(crate) fn branch_token(
         .min(Duration::from_secs(300))
         .as_secs()
         .max(1);
-    let claims = turn_claims(
-        &gateway.issuer,
-        &gateway.url,
+    let claims = turn_claims(TurnToken {
+        issuer: &gateway.issuer,
+        audience: &gateway.url,
         actor,
-        gateway.by_branch(&record.info.name),
+        by_branch: gateway.by_branch(&record.info.name),
         turn,
-        (now, now + ttl),
-        grant,
-        &crate::access::TokenScopes::default(),
-    )?;
+        window: (now, now + ttl),
+        grants: grant,
+        scopes: &crate::access::TokenScopes::default(),
+    })?;
     let token = gateway
         .keys()
         .and_then(|keys| keys.sign(&claims))
@@ -495,16 +495,16 @@ pub(crate) fn prepare(
         subject: gateway.subject.clone(),
         tenant: gateway.tenant.clone(),
     });
-    let claims = turn_claims(
-        &gateway.issuer,
-        &gateway.url,
+    let claims = turn_claims(TurnToken {
+        issuer: &gateway.issuer,
+        audience: &gateway.url,
         actor,
-        gateway.by_branch(&record.info.name),
-        record.info.turns + 1,
-        (now, exp),
-        grant,
+        by_branch: gateway.by_branch(&record.info.name),
+        turn: record.info.turns + 1,
+        window: (now, exp),
+        grants: grant,
         scopes,
-    )?;
+    })?;
     let token = gateway
         .keys()
         .and_then(|keys| keys.sign(&claims))
@@ -533,19 +533,32 @@ pub(crate) fn prepare(
     }))
 }
 
+/// What a turn's gateway token says; [`turn_claims`] makes the claims of it.
+pub(crate) struct TurnToken<'a> {
+    pub issuer: &'a str,
+    pub audience: &'a str,
+    pub actor: Actor,
+    pub by_branch: String,
+    pub turn: u32,
+    /// Issued at and expires, in seconds.
+    pub window: (u64, u64),
+    pub grants: Vec<GrantEntry>,
+    pub scopes: &'a crate::access::TokenScopes,
+}
+
 /// A turn's claims: the contract's, and the turn's other scopes
 /// ([`crate::access::TokenScopes`]) as optional claims Anvil ignores.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn turn_claims(
-    issuer: &str,
-    audience: &str,
-    actor: Actor,
-    by_branch: String,
-    turn: u32,
-    (iat, exp): (u64, u64),
-    grants: Vec<GrantEntry>,
-    scopes: &crate::access::TokenScopes,
-) -> Result<Claims, String> {
+pub(crate) fn turn_claims(token: TurnToken<'_>) -> Result<Claims, String> {
+    let TurnToken {
+        issuer,
+        audience,
+        actor,
+        by_branch,
+        turn,
+        window: (iat, exp),
+        grants,
+        scopes,
+    } = token;
     Ok(Claims {
         iss: issuer.to_owned(),
         aud: audience.to_owned(),
@@ -607,6 +620,7 @@ impl AuditTail {
     /// How often the log is read.
     const EVERY: Duration = Duration::from_millis(250);
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     pub fn start(yard: &Yard) -> AuditTail {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let thread = {
@@ -630,6 +644,7 @@ impl AuditTail {
 }
 
 impl Drop for AuditTail {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {

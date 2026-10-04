@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS counters (
 ";
 
 impl Outbox {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
     pub fn open(path: &Path) -> Result<Outbox> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -349,6 +350,7 @@ impl UploadJournal for OutboxJournal {
             .flatten()
     }
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
     fn save(&self, key: &str, state: &str) {
         let _ = self.0.with(|c| {
             c.execute(
@@ -359,6 +361,7 @@ impl UploadJournal for OutboxJournal {
         });
     }
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
     fn clear(&self, key: &str) {
         let _ = self
             .0

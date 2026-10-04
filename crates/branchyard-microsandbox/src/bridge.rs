@@ -215,6 +215,7 @@ impl Write for Stdin {
 }
 
 impl Drop for Stdin {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-microsandbox
     fn drop(&mut self) {
         let _ = self.control.close_stdin();
     }
@@ -261,6 +262,7 @@ impl Process for BridgedProcess {
 }
 
 impl Drop for BridgedProcess {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-microsandbox
     fn drop(&mut self) {
         if self.exit.get().is_none() {
             branchyard_support::best_effort("kill control", self.control.kill());
@@ -281,6 +283,7 @@ pub fn survivors(output: &str) -> Vec<String> {
         .collect()
 }
 
+#[allow(clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;

@@ -2,7 +2,7 @@
 //! through a provider.
 
 #![cfg(unix)]
-
+#![allow(clippy::unwrap_in_result, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::collections::BTreeMap;

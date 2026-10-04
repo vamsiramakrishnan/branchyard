@@ -43,6 +43,7 @@ impl DirLock {
         Self::acquire_within(dir, what, WAIT)
     }
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn acquire_within(dir: &Path, what: &str, wait: Duration) -> Result<DirLock, Error> {
         std::fs::create_dir_all(dir)
             .map_err(|e| Error::State(format!("create {}: {e}", dir.display())))?;

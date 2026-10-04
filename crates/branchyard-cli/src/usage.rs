@@ -118,6 +118,7 @@ pub struct Pricing {
 }
 
 /// The built-in pricing tables.
+#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 pub fn pricing() -> Pricing {
     toml_edit::de::from_str(PRICING_TOML).expect("catalog/pricing.toml parses")
 }

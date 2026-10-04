@@ -25,6 +25,7 @@ pub(crate) struct AskSpec {
 
 /// Record `activity` on `branch`, best effort: the ledger and the asks are
 /// the record of truth, the event is how `by log` and `by watch` see it.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn note(yard: &Yard, branch: &str, activity: EffectActivity) {
     let event = RecordedEvent {
         at_ms: now_ms(),
@@ -67,6 +68,7 @@ pub(crate) fn open(yard: &Yard, spec: AskSpec) -> Result<ApprovalAsk, Error> {
 /// A delegated child's ask goes to its parent's inbox too, which may
 /// answer it (`by approvals allow ID` in its shell, or the
 /// `answer_approval` tool).
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn escalate(yard: &Yard, ask: &ApprovalAsk) {
     let Ok(record) = yard.store().read(&ask.branch) else {
         return;
@@ -114,6 +116,7 @@ pub(crate) fn answer(yard: &Yard, id: &str, answer: &AskAnswer) -> Result<Approv
 
 /// Wait for `ask`'s answer until its deadline, or until `stop` says the
 /// turn is ending; then it is answered `expired` (denied).
+#[allow(clippy::expect_used)] // ratchet: branchyard
 pub(crate) fn wait(
     yard: &Yard,
     ask: &ApprovalAsk,

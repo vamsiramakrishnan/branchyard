@@ -185,6 +185,7 @@ pub fn parse_object(text: &str, comment_lines: bool) -> Result<Map<String, Value
     }
 }
 
+#[allow(clippy::expect_used)] // ratchet: branchyard-provision
 fn json(current: Option<&str>, edits: &[JsonEdit], comment_lines: bool) -> Result<String, String> {
     let before = parse_object(current.unwrap_or(""), comment_lines)?;
     let mut root = Value::Object(before.clone());
@@ -223,6 +224,7 @@ fn json(current: Option<&str>, edits: &[JsonEdit], comment_lines: bool) -> Resul
 
 /// The value at `path`, creating objects on the way; a non-object on the
 /// way is replaced, as Scion's `_walk_dotted_path` does.
+#[allow(clippy::expect_used)] // ratchet: branchyard-provision
 fn slot<'a>(root: &'a mut Value, path: &[String]) -> &'a mut Value {
     let mut current = root;
     for key in path {

@@ -3,6 +3,7 @@
 //! goal's judge is either a canned verdict file the fake agent answers or a
 //! judge of the test's own that answers a scripted sequence.
 
+#![allow(clippy::expect_used, clippy::unwrap_in_result, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::sync::{Arc, Mutex};

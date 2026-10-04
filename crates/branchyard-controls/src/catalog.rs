@@ -130,6 +130,7 @@ const HARNESSES_TOML: &str = include_str!("../../../catalog/harnesses.toml");
 const CONNECTORS_TOML: &str = include_str!("../../../catalog/connectors.toml");
 
 /// Every harness CLI in `catalog/harnesses.toml`, in registry order.
+#[allow(clippy::expect_used)] // ratchet: branchyard-controls
 pub fn harnesses() -> &'static [HarnessEntry] {
     static PARSED: OnceLock<Vec<HarnessEntry>> = OnceLock::new();
     PARSED.get_or_init(|| {
@@ -145,6 +146,7 @@ pub fn harness(id: &str) -> Option<&'static HarnessEntry> {
 }
 
 /// Every connector in `catalog/connectors.toml`, by ID.
+#[allow(clippy::expect_used)] // ratchet: branchyard-controls
 pub fn connectors() -> &'static [ConnectorEntry] {
     static PARSED: OnceLock<Vec<ConnectorEntry>> = OnceLock::new();
     PARSED.get_or_init(|| {

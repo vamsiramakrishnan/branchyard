@@ -3,6 +3,7 @@
 //! tampered, missing or extra member each refusing the whole import, and
 //! read authorization on export. See `docs/storage.md` "Portable bundles".
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::collections::BTreeMap;

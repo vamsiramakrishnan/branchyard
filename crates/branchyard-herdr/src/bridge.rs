@@ -61,6 +61,7 @@ impl PaneMap {
             .unwrap_or_default()
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-herdr
     fn save(&self, config: &Config) {
         let path = PaneMap::path(config);
         let write = || -> std::io::Result<()> {
@@ -155,6 +156,7 @@ pub fn run(config: &Config) -> Result<(), String> {
 }
 
 /// Read the feed forever, reconnecting after the last delivered cursor.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-herdr
 fn follow(repo: Repo, tx: mpsc::Sender<Feed>) {
     let mut cursor: Option<u64> = None;
     let mut snapshot = true;
@@ -354,6 +356,7 @@ impl<'a> Bridge<'a> {
     }
 
     /// A new tab running `by log --follow <branch>`, named after the branch.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-herdr
     fn open(&self, branch: &str) -> Result<Opened, String> {
         let mut env = vec![("BRANCHYARD_HERDR_BRANCH".to_owned(), branch.to_owned())];
         env.extend(self.config.remote_env());

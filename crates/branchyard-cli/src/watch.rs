@@ -482,6 +482,7 @@ impl Source {
             .map_err(|e| e.to_string())
     }
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
     fn branches(&self) -> Result<Vec<BranchInfo>, Failure> {
         Ok(match self {
             Source::Local { yard, .. } => {
@@ -808,6 +809,7 @@ impl Runner {
     }
 
     /// Run `invocation`, reporting on `done` from another thread.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
     fn run(&self, invocation: tui::Invocation, done: &Sender<tui::Msg>) {
         let finished = |ok: bool, output: String| tui::Msg::Done {
             action: invocation.action,
@@ -944,6 +946,7 @@ impl tui::Effects for Cockpit {
         })
     }
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
     fn perform(&mut self, cmd: tui::Cmd, done: &Sender<tui::Msg>) {
         match cmd {
             tui::Cmd::Quit => {}

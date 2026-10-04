@@ -727,6 +727,7 @@ pub trait ServiceStore: Send + Sync {
     /// a replacement of one its owner holds, or of one no live owner
     /// holds. Refused (`AlreadyExists`) while another owner's lease on the
     /// ID lasts.
+    #[allow(clippy::expect_used)] // ratchet: branchyard
     fn register(&self, service: &Service, now_ms: u64) -> io::Result<Service> {
         service
             .check()
@@ -1211,6 +1212,7 @@ impl Registration {
 }
 
 impl Drop for Registration {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn drop(&mut self) {
         if self.thread.is_none() {
             return;
@@ -1249,6 +1251,7 @@ fn renew_once(
     Ok(())
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn renew_loop(
     store: &dyn ServiceStore,
     service: &Mutex<Service>,

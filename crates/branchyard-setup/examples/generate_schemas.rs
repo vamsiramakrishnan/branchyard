@@ -7,6 +7,7 @@
 //!
 //! `tests/schema.rs` fails when either checked-in file differs from what
 //! this writes.
+#![allow(clippy::expect_used)] // tests: a panic is the failure report
 use std::path::Path;
 
 fn main() {

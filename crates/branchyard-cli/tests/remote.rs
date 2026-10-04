@@ -3,6 +3,7 @@
 //! Hermetic: the fake ACP agent stands in for every harness. Requires
 //! `git`, `sh` and `kill`.
 
+#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};

@@ -325,6 +325,7 @@ impl SandboxProvider for RecipeProvider {
         }))
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-recipe
     fn exec(&self, name: &str, spec: &ExecSpec) -> Result<Box<dyn Process>, ProviderError> {
         let machine = self
             .machine(name)
@@ -465,6 +466,7 @@ impl SandboxProvider for RecipeProvider {
         Ok(())
     }
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-recipe
     fn destroy(&self, name: &str) -> Result<(), ProviderError> {
         let Some(machine) = self.machine(name) else {
             return Ok(());
@@ -601,6 +603,7 @@ impl Process for RemoteProcess {
         Ok(())
     }
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-recipe
     fn teardown(&mut self) -> Vec<String> {
         self.torn_down = true;
         let names = self.remote(TEARDOWN).unwrap_or_default();
@@ -616,6 +619,7 @@ impl Process for RemoteProcess {
 }
 
 impl Drop for RemoteProcess {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-recipe
     fn drop(&mut self) {
         if self.torn_down {
             return;

@@ -9,6 +9,7 @@ use crate::plan::{ArtifactKind, Plan, PlannedFile};
 use crate::probe::{unapproved_tools, Facts, Probe};
 use crate::Topic;
 
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-setup
 pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
     let lead = facts.preferred_harness();
     let other = match lead.as_str() {

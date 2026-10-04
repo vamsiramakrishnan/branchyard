@@ -1,0 +1,22 @@
+{
+  "branchyard": 83,
+  "branchyard-bridge": 15,
+  "branchyard-cli": 52,
+  "branchyard-client": 3,
+  "branchyard-controls": 2,
+  "branchyard-harness": 6,
+  "branchyard-herdr": 8,
+  "branchyard-mcp": 2,
+  "branchyard-microsandbox": 5,
+  "branchyard-provision": 13,
+  "branchyard-qualify": 2,
+  "branchyard-recipe": 5,
+  "branchyard-runtime": 3,
+  "branchyard-sandbox": 2,
+  "branchyard-server": 47,
+  "branchyard-setup": 11,
+  "branchyard-substrate": 3,
+  "branchyard-support": 3,
+  "branchyard-sync": 22,
+  "branchyard-workspace": 9
+}

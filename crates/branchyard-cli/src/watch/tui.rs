@@ -1930,6 +1930,7 @@ pub trait Effects {
 /// mode off, the main screen back) until it exits, and the dashboard is
 /// redrawn from scratch; a graphical one starts on another thread. The
 /// result comes back as [`Msg::Done`].
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn open_editor(
     terminal: &mut ratatui::DefaultTerminal,
     plan: Result<crate::open::Plan, String>,
@@ -1981,6 +1982,7 @@ const TICK: Duration = Duration::from_millis(100);
 
 /// Run the dashboard until the viewer quits. A refresh error ends the
 /// dashboard (after the terminal is restored) and is returned.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 pub fn run<F: Effects>(
     label: String,
     remote: bool,
@@ -1995,6 +1997,7 @@ pub fn run<F: Effects>(
     let mut terminal = ratatui::try_init()?;
     struct Restore;
     impl Drop for Restore {
+        #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
         fn drop(&mut self) {
             let _ = execute!(std::io::stdout(), DisableBracketedPaste);
             ratatui::restore();

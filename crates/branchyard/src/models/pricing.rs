@@ -79,6 +79,7 @@ pub struct Pricing {
 }
 
 /// The built-in tables, parsed once.
+#[allow(clippy::expect_used)] // ratchet: branchyard
 pub fn pricing() -> &'static Pricing {
     static PRICING: OnceLock<Pricing> = OnceLock::new();
     PRICING

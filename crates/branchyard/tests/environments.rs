@@ -6,6 +6,7 @@
 //! `rebuild` and `prune`, and a half-built environment removed by
 //! recovery after its engine was killed.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

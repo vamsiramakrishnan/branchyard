@@ -33,6 +33,7 @@
 //! rows: whoever shares the checkout (a server and its workers on one
 //! host) shares them, and the key's lock is an advisory `flock`.
 
+#![allow(clippy::let_underscore_must_use, clippy::map_unwrap_or)] // ratchet: branchyard
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
@@ -542,19 +543,27 @@ pub(crate) fn failure_reason(key: &str, failure: &EnvironmentInfo) -> String {
     )
 }
 
+/// A build that failed: what [`record_failure`] writes down.
+pub(crate) struct Failed<'a> {
+    pub key: &'a str,
+    pub recipe: &'a str,
+    pub place: &'a str,
+    pub inputs: Vec<EnvironmentInput>,
+    pub branch: &'a str,
+    pub reason: &'a str,
+}
+
 /// Record that `key`'s build by `branch` failed because `reason`. A good
 /// environment of the key, if any, is left alone.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn record_failure(
-    root: &Path,
-    spec: &WorkspaceSpec,
-    key: &str,
-    recipe: &str,
-    place: &str,
-    inputs: Vec<EnvironmentInput>,
-    branch: &str,
-    reason: &str,
-) {
+pub(crate) fn record_failure(root: &Path, spec: &WorkspaceSpec, failed: Failed<'_>) {
+    let Failed {
+        key,
+        recipe,
+        place,
+        inputs,
+        branch,
+        reason,
+    } = failed;
     let now = now_ms();
     let info = EnvironmentInfo {
         key: key.to_owned(),
@@ -1089,11 +1098,13 @@ pub(crate) fn rebuild(yard: &Yard, spec: &WorkspaceSpec) -> Result<EnvironmentBu
         yard,
         spec,
         &work,
-        "by env rebuild",
-        "env-rebuild",
-        &key,
-        &recipe,
-        inputs,
+        BuildFor {
+            by: "by env rebuild",
+            branch: "env-rebuild",
+            key: &key,
+            recipe: &recipe,
+            inputs,
+        },
     );
     drop(lock);
     cleanup();
@@ -1116,21 +1127,34 @@ pub(crate) struct Built {
     pub copied: Vec<String>,
 }
 
+/// Whose environment [`build_in`] builds, and for whom.
+pub(crate) struct BuildFor<'a> {
+    /// Names the builder.
+    pub by: &'a str,
+    /// Setup sees it as `BRANCHYARD_BRANCH`.
+    pub branch: &'a str,
+    pub key: &'a str,
+    pub recipe: &'a str,
+    pub inputs: Vec<EnvironmentInput>,
+}
+
 /// Build `key`'s host environment in `work`, a detached worktree of the
 /// repository, holding the key's lock: copy files, run setup, and capture
 /// what it produced (moved out of `work`), or record the key's failure.
 /// `by` names the builder; setup sees `branch` as `BRANCHYARD_BRANCH`.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_in(
     yard: &Yard,
     spec: &WorkspaceSpec,
     work: &Path,
-    by: &str,
-    branch: &str,
-    key: &str,
-    recipe: &str,
-    inputs: Vec<EnvironmentInput>,
+    build: BuildFor<'_>,
 ) -> Result<Built, Error> {
+    let BuildFor {
+        by,
+        branch,
+        key,
+        recipe,
+        inputs,
+    } = build;
     let root = &yard.root;
     let copied = crate::workspace::copy(root, work, &spec.copy, None);
     let mut report = crate::workspace::WorkspaceReport::new(crate::WorkspacePhase::Setup, None);
@@ -1192,7 +1216,18 @@ pub(crate) fn build_in(
             }
         }
     } else {
-        record_failure(root, spec, key, recipe, HOST, inputs, by, &report.failure());
+        record_failure(
+            root,
+            spec,
+            Failed {
+                key,
+                recipe,
+                place: HOST,
+                inputs,
+                branch: by,
+                reason: &report.failure(),
+            },
+        );
         None
     };
     Ok(Built {
@@ -1289,12 +1324,14 @@ pub(crate) fn after_sandbox_setup(
         record_failure(
             root,
             spec,
-            &key,
-            &recipe,
-            &place,
-            inputs,
-            &record.info.name,
-            &report.failure(),
+            Failed {
+                key: &key,
+                recipe: &recipe,
+                place: &place,
+                inputs,
+                branch: &record.info.name,
+                reason: &report.failure(),
+            },
         );
         return None;
     }

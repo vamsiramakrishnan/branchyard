@@ -24,6 +24,7 @@
 //! `BY_SUBSTRATE_BRIDGE_TLS_CERT` and `BY_SUBSTRATE_BRIDGE_TLS_KEY` (paths
 //! in the image, for a router that passes TLS through).
 
+#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;

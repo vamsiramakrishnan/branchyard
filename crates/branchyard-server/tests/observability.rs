@@ -1,6 +1,7 @@
 //! Priority, metrics and traces over real HTTP with the fake ACP agent:
 //! see `docs/server.md#scheduling` and `docs/observability.md`.
 
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::sync::Arc;

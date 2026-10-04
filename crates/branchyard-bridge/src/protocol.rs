@@ -273,14 +273,17 @@ impl Decoder<'_> {
         Ok(self.take(1)?[0])
     }
 
+    #[allow(clippy::unwrap_in_result, clippy::unwrap_used)] // ratchet: branchyard-bridge
     fn u32(&mut self) -> io::Result<u32> {
         Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()))
     }
 
+    #[allow(clippy::unwrap_in_result, clippy::unwrap_used)] // ratchet: branchyard-bridge
     fn i32(&mut self) -> io::Result<i32> {
         Ok(i32::from_be_bytes(self.take(4)?.try_into().unwrap()))
     }
 
+    #[allow(clippy::unwrap_in_result, clippy::unwrap_used)] // ratchet: branchyard-bridge
     fn u64(&mut self) -> io::Result<u64> {
         Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))
     }

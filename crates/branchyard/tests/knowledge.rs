@@ -4,6 +4,7 @@
 //! from the corrections it was sent, never adopting them; a harness
 //! distiller answers a canned file. No model is called.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::sync::Arc;

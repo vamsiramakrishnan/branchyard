@@ -1,6 +1,7 @@
 //! The engine end to end against the fake ACP agent and temporary git
 //! repositories.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::collections::BTreeSet;

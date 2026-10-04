@@ -2,6 +2,7 @@
 //! unapproved tools), and the delegation endpoints a person uses, over real
 //! HTTP on 127.0.0.1 with the fake ACP agent as `gemini-cli`.
 
+#![allow(clippy::panic)] // tests: a panic is the failure report
 mod common;
 
 use branchyard::{

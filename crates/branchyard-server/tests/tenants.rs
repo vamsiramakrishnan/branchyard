@@ -1,6 +1,7 @@
 //! Tenant identity, scopes and quotas over real HTTP: see
 //! `docs/server.md#identity-and-scopes` and `docs/server.md#quotas`.
 
+#![allow(clippy::panic)] // tests: a panic is the failure report
 mod common;
 
 use branchyard_client::api::{MergeRequest, OperationState};

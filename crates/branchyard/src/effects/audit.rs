@@ -33,6 +33,7 @@ fn text<'a>(line: &'a Value, keys: &[&str]) -> Option<&'a str> {
 }
 
 /// Feed one audit line of `branch`'s, read at `at_ms`, to the ledger.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 pub(crate) fn observe(yard: &Yard, branch: &str, at_ms: u64, line: &Value) {
     let ledger = yard.store();
     let decision = text(line, &["decision"]).unwrap_or("");

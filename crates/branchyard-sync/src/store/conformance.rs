@@ -22,6 +22,7 @@ pub struct Options {
 }
 
 /// Run every check against `store`.
+#[allow(clippy::unwrap_used)] // ratchet: branchyard-sync
 pub fn check(store: Arc<dyn ObjectStore>, options: Options) {
     let large = options.large;
     let run = hex::encode(crate::util::random_bytes(6).unwrap());

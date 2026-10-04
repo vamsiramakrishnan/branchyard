@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Branchyard's delegation tools as a stdio MCP server, for harnesses running on a branch"
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "branchyard-mcp"

@@ -3,7 +3,12 @@
 //! loopback. Requires `git` and `sh`.
 
 #![allow(dead_code)]
-
+#![allow(
+    clippy::expect_used,
+    clippy::let_underscore_must_use,
+    clippy::unwrap_in_result,
+    clippy::unwrap_used
+)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};

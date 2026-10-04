@@ -35,6 +35,7 @@ impl TaskRepo {
         Ok(Self::from_view(yard, view))
     }
 
+    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard
     fn from_view(yard: &Yard, view: TaskView) -> TaskRepo {
         let owned = super::folder::owned(yard.root());
         TaskRepo {

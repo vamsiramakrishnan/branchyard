@@ -73,6 +73,7 @@ impl FileStore {
 
     /// Rename `temp` over `key` if `check` passes on the current
     /// generation, under the lock.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
     fn commit(
         &self,
         key: &str,

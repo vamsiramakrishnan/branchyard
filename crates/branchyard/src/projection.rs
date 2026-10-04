@@ -171,6 +171,7 @@ impl Hub {
 
     /// Record `name`'s running turn, starting the broker if needed, and
     /// return the broker's socket.
+    #[allow(clippy::expect_used)] // ratchet: branchyard
     fn register(&self, yard: &Yard, name: &str, context: Context) -> Result<PathBuf, Error> {
         let mut broker = lock(&self.broker);
         lock(&self.contexts).insert(name.to_owned(), context);
@@ -328,6 +329,7 @@ impl Drop for Projection {
 
 /// Offer delegation to `record`'s turn if it may create children: issue a
 /// token, register the turn, and describe what the harness gets.
+#[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard
 pub(crate) fn project(
     yard: &Yard,
     record: &Record,
@@ -428,6 +430,7 @@ fn prepend(dir: &Path, inherited: Option<std::ffi::OsString>) -> String {
 
 /// Write `content` to `path` unless it is already there, through a
 /// temporary file and a rename, so concurrent turns never see half a file.
+#[allow(clippy::expect_used)] // ratchet: branchyard
 fn install(path: &Path, content: &str) -> Result<(), Error> {
     if fs::read_to_string(path).is_ok_and(|current| current == content) {
         return Ok(());

@@ -1,6 +1,7 @@
 //! One function per command, each a thin call into the SDK locally or into
 //! `branchyard-client` remotely ([`crate::remote`]).
 
+#![allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 use std::fmt;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;

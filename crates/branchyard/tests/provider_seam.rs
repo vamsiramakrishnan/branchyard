@@ -13,6 +13,7 @@
 //!
 //! See "Adding a provider" in `docs/providers.md`.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::path::{Path, PathBuf};
 

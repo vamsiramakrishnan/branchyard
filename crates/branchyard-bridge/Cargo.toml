@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "The in-sandbox exec bridge for sandboxes without an exec API, and its host-side client"
+
+[lints]
+workspace = true
 
 [dependencies]
 branchyard-support = { path = "../branchyard-support" }

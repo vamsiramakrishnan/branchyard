@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "A Herdr plugin that shows a Branchyard server's branches as Herdr panes"
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "branchyard-herdr"

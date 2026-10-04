@@ -5,6 +5,7 @@
 //! through the gateway by `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY`.
 //! Requires `git`, `sh` and `python3`.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::path::PathBuf;
 use std::process::Output;

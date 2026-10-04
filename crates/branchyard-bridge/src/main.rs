@@ -113,6 +113,7 @@ fn main() -> ExitCode {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 fn serve(args: ServeArgs) -> Result<(), String> {
     // Before any thread starts, so every thread leaves these signals to
     // the bridge's supervisor.

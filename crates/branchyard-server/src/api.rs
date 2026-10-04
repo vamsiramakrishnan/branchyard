@@ -600,7 +600,7 @@ impl App {
     }
 
     /// Options every request that runs a harness shares.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // ratchet: branchyard-server
     pub(crate) fn options(
         &self,
         repo: &RepoState,
@@ -973,6 +973,7 @@ struct RequestId(String);
 /// looks safe to reuse, else a fresh one), so the access log line above
 /// and the response both carry it. Headers, including `Authorization`,
 /// are never logged.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
 async fn request_id(mut request: Request, next: Next) -> Response {
     let id = request
         .headers()

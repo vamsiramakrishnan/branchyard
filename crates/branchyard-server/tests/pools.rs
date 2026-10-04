@@ -4,6 +4,7 @@
 //! `/metrics` reports the slots, the hit, the fills and the start latency
 //! by pool use.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

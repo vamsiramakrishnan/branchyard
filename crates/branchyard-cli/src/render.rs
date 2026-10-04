@@ -103,6 +103,7 @@ fn pad_right(text: &str, columns: usize) -> String {
 
 /// A tool invocation's input as one short line: the field a person would
 /// recognize (a command, a path) when there is one, else compact JSON.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 pub fn compact_input(input: &Value) -> String {
     const KEYS: [&str; 7] = [
         "command",
@@ -240,6 +241,7 @@ pub fn decision_line(tool: &str, allowed: bool, message: Option<&str>, style: St
 
 /// A workspace lifecycle phase: one line, and when it failed the last
 /// lines of its output, indented.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 pub fn workspace_line(report: &branchyard::WorkspaceReport, style: Style) -> String {
     use branchyard::WorkspacePhase;
     let secs = report.duration_ms as f64 / 1000.0;
@@ -870,6 +872,7 @@ pub fn candidate_text(candidate: Option<&CandidateInfo>) -> String {
     }
 }
 
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 pub fn cost_text(cost: Option<f64>) -> String {
     cost.map(usd).unwrap_or_else(|| "-".into())
 }

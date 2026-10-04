@@ -264,6 +264,7 @@ impl Vapid {
     }
 
     /// A fresh key, kept in memory only: for tests.
+    #[allow(clippy::expect_used)] // ratchet: branchyard-server
     pub fn ephemeral(subject: &str) -> Vapid {
         let rng = SystemRandom::new();
         let document = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
@@ -368,6 +369,7 @@ pub fn decode_b64(text: &str) -> Result<Vec<u8>, String> {
 /// §3.4): the content encryption key and nonce, from the shared ECDH
 /// secret, the subscription's authentication secret, both public keys and
 /// the message's salt.
+#[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-server
 fn derive(
     ecdh_secret: &[u8],
     auth_secret: &[u8],
@@ -675,6 +677,7 @@ pub(crate) async fn fan_out(
     (delivered, failures)
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 async fn drop_subscription(companion: &super::Companion, endpoint: &str) {
     let (store, endpoint) = (companion.store.clone(), endpoint.to_owned());
     let _ = tokio::task::spawn_blocking(move || store.unsubscribe(&endpoint, None)).await;
@@ -863,6 +866,7 @@ impl Follower {
 /// `repo` names a repository no other test of the store uses. Panics on a
 /// violation. Run on SQLite here and on PostgreSQL by `tests/postgres.rs`.
 #[doc(hidden)]
+#[allow(clippy::unwrap_used)] // ratchet: branchyard-server
 pub fn check_claims(one: &dyn OperationStore, other: &dyn OperationStore, repo: &str) {
     let now = branchyard_support::time::now_ms();
     let ready = |seq: u64, branch: &str| FeedEntry {

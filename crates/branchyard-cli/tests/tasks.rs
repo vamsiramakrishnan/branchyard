@@ -5,6 +5,7 @@
 //! task, and is removed without touching it; rewind and fork by task.
 //! Hermetic: `BRANCHYARD_HOME` is the test's own directory.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

@@ -342,6 +342,7 @@ impl SandboxProvider for FakeProvider {
         }))
     }
 
+    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-sandbox
     fn exec(&self, name: &str, spec: &ExecSpec) -> Result<Box<dyn Process>, ProviderError> {
         let (mapped, rootfs) = {
             let mut state = self.lock();
@@ -584,6 +585,7 @@ impl SandboxProvider for FakeProvider {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

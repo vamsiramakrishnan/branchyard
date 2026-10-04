@@ -630,6 +630,7 @@ impl Run<'_> {
         }
     }
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn attempt(&self, base: &str, prompt: &str, seed_offset: u64) -> Attempt {
         let (branch, earlier) = match self.start(base, prompt, seed_offset) {
             Ok(started) => started,
@@ -771,6 +772,7 @@ impl Run<'_> {
         Ok(())
     }
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn reduce(&self, reduce: &str, dir: &Path, rows: &[MapRow]) -> Result<MapReduce, Error> {
         let prompt = reduce_prompt(reduce, &self.spec.name, rows);
         let digest = blake3::hash(prompt.as_bytes()).to_hex()[..16].to_owned();

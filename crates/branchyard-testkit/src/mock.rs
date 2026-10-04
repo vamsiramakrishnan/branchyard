@@ -11,6 +11,7 @@
 //! One thing is deliberately not an error: a connection that closes before
 //! sending a single byte (a port probe).
 
+#![allow(clippy::expect_used, clippy::panic)] // tests: a panic is the failure report
 use std::collections::BTreeMap;
 use std::io::{BufReader, ErrorKind, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};

@@ -348,6 +348,7 @@ impl Notifier {
 
 /// Show `notice` on `out` and, when configured, on the desktop. Best
 /// effort: a notification never fails the command.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 pub fn show(settings: &Settings, notice: &Notice, out: &mut Option<Box<dyn Write + Send>>) {
     if !settings.enabled {
         return;
@@ -374,6 +375,7 @@ pub fn show(settings: &Settings, notice: &Notice, out: &mut Option<Box<dyn Write
     }
 }
 
+#[allow(clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,6 +3,7 @@
 //! the way a person would. Hermetic: no editor, harness or network is used.
 //! Requires `git`, `sh` and `sed`.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;

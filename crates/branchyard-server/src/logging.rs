@@ -36,6 +36,7 @@ impl LogFormat {
 /// (see [`LogFormat::resolve`]). Idempotent: a second call (as in a test
 /// binary that runs several integration tests linked together) is a
 /// harmless no-op.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 pub fn init(quiet: bool, format: Option<LogFormat>) {
     let filter = std::env::var("BRANCHYARD_LOG")
         .or_else(|_| std::env::var("RUST_LOG"))
@@ -65,6 +66,7 @@ pub fn init(quiet: bool, format: Option<LogFormat>) {
 /// anywhere in the workspace (`branchyard-support`) log at `warn`, so this
 /// is what makes a swallowed cleanup error visible to the person running the
 /// command. Idempotent, like [`init`].
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 pub fn init_for_commands() {
     let filter = std::env::var("BRANCHYARD_LOG")
         .or_else(|_| std::env::var("RUST_LOG"))

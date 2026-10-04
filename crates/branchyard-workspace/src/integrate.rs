@@ -161,6 +161,7 @@ impl Repository {
     /// promotion happened. A dirty-tree edit made between the final check and
     /// the CAS is not detected before promotion, but `read-tree -m -u` will
     /// not overwrite it.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
     pub fn integrate(
         &self,
         candidate: &Candidate,
@@ -356,6 +357,7 @@ impl Repository {
 
 /// Merges the candidate head into the detached `expected` in `dir`; returns
 /// the merge commit.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
 fn merge(
     dir: &Path,
     candidate: &Candidate,
@@ -484,6 +486,7 @@ impl TempWorktree {
 }
 
 impl Drop for TempWorktree {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
     fn drop(&mut self) {
         let removed = Git::new(&self.root)
             .args(["worktree", "remove", "--force", "--force"])

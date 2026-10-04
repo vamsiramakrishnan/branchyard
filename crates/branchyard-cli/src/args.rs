@@ -4038,6 +4038,7 @@ where
 }
 
 /// Run `f` on a thread with [`PARSE_STACK`], passing on its panic.
+#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 fn on_parse_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
     std::thread::Builder::new()
         .name("by-args".into())
@@ -4048,6 +4049,7 @@ fn on_parse_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> 
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
+#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 fn parse_argv(argv: Vec<OsString>) -> Result<Cli, clap::Error> {
     let mut cmd = build_command();
     let matches = cmd
@@ -4346,6 +4348,7 @@ fn label(text: &str) -> Result<(String, String), String> {
         .ok_or_else(|| "needs KEY=VALUE".into())
 }
 
+#[allow(clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

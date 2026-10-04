@@ -127,6 +127,7 @@ pub fn routed(
 
 /// The judge for `names`: `--harness`, else the [fleet] entry's for their
 /// kind, else none.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn chosen_judge(
     yard: &Yard,
     names: &[String],

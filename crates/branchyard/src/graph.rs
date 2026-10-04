@@ -553,6 +553,7 @@ fn dependents_of(store: &Store, name: &str) -> Vec<String> {
 
 /// `name`'s turn or state changed: look at what waits for it. Errors are
 /// not the finished turn's; they leave the dependents to the next look.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn settled(yard: &Yard, name: &str, options: Option<&TaskOptions>) {
     let store = yard.store();
     let dependents = dependents_of(&store, name);
@@ -736,6 +737,7 @@ pub(crate) fn check_bindings(
 /// Take what `record`'s bindings need for a turn: check each read-only
 /// area is still readable and take each exclusive area's writer lock. On
 /// failure, the locks taken are released and the reason returned.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn bind(yard: &Yard, record: &Record) -> Result<(), String> {
     let name = &record.info.name;
     let mut taken = Vec::new();
@@ -764,6 +766,7 @@ pub(crate) fn bind(yard: &Yard, record: &Record) -> Result<(), String> {
 }
 
 /// Release the writer locks `record`'s exclusive bindings took.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn unbind(yard: &Yard, record: &Record) {
     for binding in &record.bindings {
         if binding.access == Access::ExclusiveWrite {
@@ -773,6 +776,7 @@ pub(crate) fn unbind(yard: &Yard, record: &Record) {
 }
 
 /// Record on `name`'s log that it was cancelled before it started.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn cancel_unstarted(store: &Store, record: &Record, by: &str) -> Result<bool, Error> {
     let done = settle_unstarted(store, record, BranchStatus::Interrupted)?;
     if done {

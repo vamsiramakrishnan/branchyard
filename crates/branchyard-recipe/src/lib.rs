@@ -327,6 +327,7 @@ impl Ran {
 /// `BRANCHYARD_RECIPE_INSTANCE`, `BRANCHYARD_ROOT` and
 /// `BRANCHYARD_RECIPE_RESULT_SCHEMA_VERSION` added to this process's, and
 /// the last [`MAX_CAPTURE_BYTES`] of each stream kept.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-recipe
 pub fn run(
     recipe: &Recipe,
     command: &str,

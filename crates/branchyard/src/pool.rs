@@ -40,6 +40,7 @@
 //!   and is removed. Recovery ([`crate::Yard::recover`]) does this, as
 //!   does every fill and drain.
 
+#![allow(clippy::let_underscore_must_use, clippy::map_unwrap_or)] // ratchet: branchyard
 use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -984,8 +985,19 @@ fn environment(yard: &Yard, spec: &WorkspaceSpec, path: &Path) -> Result<Detail,
             if yard.hub.scripts_denied() {
                 return Err(crate::workspace::DENIED.into());
             }
-            let built = envs::build_in(yard, spec, path, "pool", "pool", &key, &recipe, inputs)
-                .map_err(|e| e.to_string())?;
+            let built = envs::build_in(
+                yard,
+                spec,
+                path,
+                envs::BuildFor {
+                    by: "pool",
+                    branch: "pool",
+                    key: &key,
+                    recipe: &recipe,
+                    inputs,
+                },
+            )
+            .map_err(|e| e.to_string())?;
             drop(lock);
             // Copied files are the branch's to copy, fresh, when it starts.
             for rel in &built.copied {

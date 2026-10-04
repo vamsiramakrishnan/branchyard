@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Environment recipes (repository scripts that create a VM) and a sandbox provider over them"
+
+[lints]
+workspace = true
 
 [dependencies]
 branchyard-support = { path = "../branchyard-support" }

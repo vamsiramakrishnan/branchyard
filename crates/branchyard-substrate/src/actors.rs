@@ -322,6 +322,7 @@ impl Actors {
     ///
     /// The actor must already be stopped. Checkpointing does not suspend
     /// implicitly: the caller chooses the quiescent point.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-substrate
     pub async fn checkpoint(
         &mut self,
         actor: &ActorHandle,

@@ -276,6 +276,7 @@ impl Engine {
     }
 
     /// Fire a claimed run, record what happened, and return it.
+    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
     pub fn fire(&self, mut run: TriggerRun, fence: i64) -> io::Result<TriggerRun> {
         let trigger = self.store.get(&run.trigger)?;
         let pause_after = trigger
@@ -331,6 +332,7 @@ impl Engine {
         Ok(request)
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-server
     fn attempt(&self, trigger: &StoredTrigger, run: &mut TriggerRun) {
         let fail = |run: &mut TriggerRun, why: String| {
             run.state = RunState::Failed;
@@ -394,6 +396,7 @@ impl Engine {
     }
 
     /// Record how fired runs' tasks ended, for those that have.
+    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
     pub fn settle(&self) -> io::Result<usize> {
         let mut settled = 0;
         for run in self.store.unsettled(&self.repo_names())? {
@@ -567,6 +570,7 @@ fn state(state: OperationState) -> &'static str {
     }
 }
 
+#[allow(clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

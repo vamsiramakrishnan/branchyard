@@ -5,6 +5,11 @@
 //! moves past policy or an input changes, or they age out, and a filler
 //! killed midway leaves nothing behind once recovery runs.
 
+#![allow(
+    clippy::expect_used,
+    clippy::let_underscore_must_use,
+    clippy::unwrap_used
+)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

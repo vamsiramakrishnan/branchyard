@@ -5,6 +5,7 @@
 //! removal, a yard that denies scripts, and setup recovered after its
 //! engine is killed mid-setup (a real SIGKILL of a child process).
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

@@ -4,7 +4,7 @@
 //! tests may create schemas in; each test gets a schema of its own.
 
 #![cfg(feature = "postgres")]
-
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::sync::atomic::{AtomicU64, Ordering};

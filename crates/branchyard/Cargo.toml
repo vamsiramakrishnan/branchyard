@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Delegate coding work to agent harnesses on git branches, and merge only validated results"
+
+[lints]
+workspace = true
 
 [features]
 # Run harnesses in Microsandbox microVMs. Needs libcap-ng-dev to link; see

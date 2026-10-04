@@ -8,6 +8,7 @@
 //! conformance suite, the email deliveries on PostgreSQL, and two servers
 //! on one database firing a schedule time once.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::sync::atomic::{AtomicU64, Ordering};

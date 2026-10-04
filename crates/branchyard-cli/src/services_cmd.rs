@@ -140,6 +140,7 @@ fn owner(service: &Service) -> String {
     }
 }
 
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn render(env: &Env, services: &[Service], now: u64) -> String {
     let columns = [
         Column {

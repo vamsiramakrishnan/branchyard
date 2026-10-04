@@ -60,6 +60,7 @@ struct State {
 
 impl State {
     /// Output is best effort: a closed stdout must not fail the branch.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
     fn write(&mut self, text: &str) {
         if !text.is_empty() {
             let _ = self.out.write_all(text.as_bytes());
@@ -179,6 +180,7 @@ pub fn terminal_prompt(question: &str) -> io::Result<String> {
     Ok(answer)
 }
 
+#[allow(clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

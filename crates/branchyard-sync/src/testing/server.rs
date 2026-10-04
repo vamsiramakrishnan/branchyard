@@ -196,6 +196,7 @@ pub struct MockServer {
 }
 
 impl MockServer {
+    #[allow(clippy::expect_used)] // ratchet: branchyard-sync
     pub fn start(handler: Handler) -> MockServer {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
         let port = listener.local_addr().expect("local address").port();
@@ -229,6 +230,7 @@ impl MockServer {
 }
 
 impl Drop for MockServer {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(("127.0.0.1", self.port));
@@ -238,6 +240,7 @@ impl Drop for MockServer {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
 fn serve(stream: TcpStream, handler: &Handler, log: &Mutex<Vec<String>>) {
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
     let mut reader = BufReader::new(match stream.try_clone() {

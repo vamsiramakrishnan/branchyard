@@ -5,6 +5,11 @@
 //! sync series in `/metrics`; and a run whose lease is taken over
 //! cancelled, failed with `sync_lease_lost` and no longer pushed.
 
+#![allow(
+    clippy::let_underscore_must_use,
+    clippy::map_unwrap_or,
+    clippy::unwrap_used
+)] // tests: a panic is the failure report
 mod common;
 
 use std::sync::Arc;

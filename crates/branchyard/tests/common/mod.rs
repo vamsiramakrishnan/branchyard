@@ -2,7 +2,7 @@
 //! Requires `git` and `sh`; runs no real harness and makes no network calls.
 
 #![allow(dead_code)]
-
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

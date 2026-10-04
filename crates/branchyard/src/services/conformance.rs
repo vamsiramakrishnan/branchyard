@@ -41,6 +41,7 @@ fn gateway(id: &str, owner_id: &str, connectors: &[&str], until: u64) -> Service
 
 /// Register, renew, resolve, expire, reap, deregister, refuse a second
 /// owner, follow changes and prune, on `store`, which must be empty.
+#[allow(clippy::panic, clippy::unwrap_used)] // ratchet: branchyard
 pub fn check(store: &dyn ServiceStore, label: &str) {
     let t0 = 1_000_000_u64;
     // Register: live, stamped, with the next change number.
@@ -300,6 +301,7 @@ pub fn check(store: &dyn ServiceStore, label: &str) {
 /// Several handles (`stores`, one per thread, as separate processes or
 /// connections would have) registering at once: every record lands, each
 /// change number once.
+#[allow(clippy::unwrap_used)] // ratchet: branchyard
 pub fn check_concurrent(stores: Vec<Arc<dyn ServiceStore>>, each: usize, label: &str) {
     let barrier = Arc::new(Barrier::new(stores.len()));
     let threads: Vec<_> = stores

@@ -123,6 +123,7 @@ impl MicrosandboxProvider {
         Ok(sandbox)
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-microsandbox
     fn handle(&self) -> &Handle {
         self.runtime
             .as_ref()
@@ -143,6 +144,7 @@ impl MicrosandboxProvider {
 }
 
 impl Drop for MicrosandboxProvider {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-microsandbox
     fn drop(&mut self) {
         let kept = std::mem::take(&mut *self.kept.lock_recovering("kept"));
         let held: Vec<Arc<Sandbox>> = self
@@ -316,6 +318,7 @@ impl SandboxProvider for MicrosandboxProvider {
         plan::capabilities_with(self.live_branch)
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-microsandbox
     fn ensure(&self, spec: &SandboxSpec) -> Result<SandboxInfo, ProviderError> {
         let CreatePlan {
             name,

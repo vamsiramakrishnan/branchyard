@@ -1,5 +1,6 @@
 //! Hermetic tests against temporary repositories. Requires `git` and `sh`.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 use branchyard_testkit::wait;
 use std::fs;
 use std::path::{Path, PathBuf};

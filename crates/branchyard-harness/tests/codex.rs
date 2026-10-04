@@ -1,6 +1,7 @@
 //! Codex driver against a recorded codex-cli 0.157.1 app-server session and
 //! frames shaped by the schema `codex app-server generate-json-schema` emits.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use branchyard_harness::codex::Codex;
 use branchyard_harness::conformance::{decode, feed, handshake, Replay, Transcript};
 use branchyard_harness::{

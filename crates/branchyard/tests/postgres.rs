@@ -6,7 +6,7 @@
 //! otherwise each test says it was skipped.
 
 #![cfg(feature = "postgres")]
-
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::process::{Command, Stdio};

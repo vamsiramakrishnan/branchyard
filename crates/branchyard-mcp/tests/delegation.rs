@@ -2,6 +2,7 @@
 //! agent starts the MCP server the engine projected into its session, speaks
 //! MCP to it, and reports each tool result in its reply.
 
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

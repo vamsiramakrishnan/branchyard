@@ -1,3 +1,4 @@
+#![allow(clippy::panic)] // tests: a panic is the failure report
 use std::path::{Path, PathBuf};
 
 /// A temporary directory, removed when dropped.

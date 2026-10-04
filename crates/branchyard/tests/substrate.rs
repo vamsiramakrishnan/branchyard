@@ -5,6 +5,11 @@
 //! worktree changed since, and deletes its actor. Hermetic; not evidence
 //! about a Substrate cluster.
 
+#![allow(
+    clippy::expect_used,
+    clippy::let_underscore_must_use,
+    clippy::unwrap_used
+)] // tests: a panic is the failure report
 mod common;
 
 use std::path::PathBuf;

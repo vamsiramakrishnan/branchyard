@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Named best-effort steps, poison-tolerant locks, panic-reporting threads, the one clock, ids and seedable randomness, shared by every Branchyard crate"
+
+[lints]
+workspace = true
 
 [features]
 # `testing::capture`, a tracing subscriber that collects events, for the tests

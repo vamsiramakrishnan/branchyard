@@ -1,6 +1,7 @@
 //! The server over real HTTP on 127.0.0.1, with the fake ACP agent as the
 //! `gemini-cli` harness.
 
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::collections::HashSet;

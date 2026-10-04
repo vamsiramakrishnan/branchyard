@@ -9,6 +9,7 @@
 //! an owner killed on this host is known gone at once. Requires `git`,
 //! `sh`, `sleep`, `ps` and `python3`.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

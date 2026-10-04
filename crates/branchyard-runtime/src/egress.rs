@@ -30,6 +30,7 @@
 //!   can reach the network is the caller's business: see
 //!   [`crate::LocalProvider::spawn_confined`].
 
+#![allow(clippy::let_underscore_must_use, clippy::map_unwrap_or)] // ratchet: branchyard-runtime
 use branchyard_support::LockExt as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};

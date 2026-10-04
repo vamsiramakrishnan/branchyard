@@ -345,6 +345,7 @@ impl Session {
     /// Like [`Session::start`], but confined to its own network namespace
     /// with one listener on `127.0.0.1:port` inside it, which is returned
     /// for the caller to serve ([`LocalProvider::spawn_confined`]).
+    #[allow(clippy::expect_used)] // ratchet: branchyard-runtime
     pub fn start_confined(
         driver: Box<dyn Driver>,
         open: Open,

@@ -9,6 +9,7 @@
 //! cost. Under a required egress policy the confined harness reaches the
 //! gateway and nothing else. Hermetic: nothing leaves this host.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};

@@ -42,6 +42,7 @@
 //! reached over ssh). The second needs `sh`, `cat`, `tar` and `mkdir`
 //! there too, and `tar` on this host.
 
+#![allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-substrate
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;

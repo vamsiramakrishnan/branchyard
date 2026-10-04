@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Selected upstream harness controls, adapted for Branchyard"
+
+[lints]
+workspace = true
 
 [dependencies]
 # The catalogs in catalog/*.toml, embedded and read at run time.

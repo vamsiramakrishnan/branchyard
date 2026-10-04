@@ -680,6 +680,7 @@ pub fn gateway_call(url: &str, token: &str, tool: &str, arguments: Value) -> Res
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

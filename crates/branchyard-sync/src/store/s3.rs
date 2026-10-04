@@ -174,6 +174,7 @@ impl S3Store {
         }
     }
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
     fn abort(&self, key: &str, upload: &str) {
         let _ = self.call(Request::new(
             "DELETE",

@@ -1,6 +1,11 @@
 //! The kit's own tests: a helper that can pass while broken is worse than
 //! none, so each failure mode is shown to fail.
 
+#![allow(
+    clippy::expect_used,
+    clippy::let_underscore_must_use,
+    clippy::unwrap_used
+)] // tests: a panic is the failure report
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};

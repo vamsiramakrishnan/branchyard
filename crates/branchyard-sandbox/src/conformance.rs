@@ -27,6 +27,12 @@
 //! conformance::run_all(provider.as_ref(), &setup);
 //! ```
 
+#![allow(
+    clippy::expect_used,
+    clippy::let_underscore_must_use,
+    clippy::panic,
+    clippy::unwrap_used
+)] // ratchet: branchyard-sandbox
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};

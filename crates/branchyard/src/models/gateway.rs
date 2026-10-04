@@ -13,6 +13,7 @@
 //! URL's path. Every response is streamed to the harness as it arrives,
 //! with `Transfer-Encoding: chunked` and `Connection: close`.
 
+#![allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::io::{self, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -930,6 +931,7 @@ fn append(state: &TurnState, activity: ModelActivity) {
     let _ = state.yard.store().append(&state.branch, &event, None);
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

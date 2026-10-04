@@ -173,6 +173,7 @@ pub fn contract() -> Value {
 
 /// [`contract`], pretty-printed with a trailing newline, as
 /// `schema/contract.json` is checked in.
+#[allow(clippy::expect_used)] // ratchet: branchyard-client
 pub fn contract_json() -> String {
     format!(
         "{}\n",

@@ -464,22 +464,34 @@ pub(crate) struct Acquired {
     pub origin: SandboxOrigin,
 }
 
+/// The sandbox a turn wants, for [`acquire`].
+pub(crate) struct Wanted<'a> {
+    pub record: &'a Record,
+    pub fence: &'a Fence,
+    /// The provider's key, as recorded on its sandboxes.
+    pub key: &'a str,
+    pub spec: &'a SandboxSpec,
+    pub environment: Option<&'a crate::environments::SandboxEnvironment>,
+}
+
 /// Get the turn's sandbox for `record` through `provider`: the branch's
 /// kept one, resumed; else one branched from its seed's snapshot; else a
 /// fresh one from `spec`. `journal` is called with the sandbox's name
 /// before anything is created or resumed. A kept or seeded sandbox that
 /// cannot be used is a fallback to a fresh one, with the reason.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn acquire(
     store: &Store,
-    record: &Record,
-    fence: &Fence,
     provider: &dyn SandboxProvider,
-    key: &str,
-    spec: &SandboxSpec,
-    environment: Option<&crate::environments::SandboxEnvironment>,
     journal: &dyn Fn(&str) -> Result<(), String>,
+    wanted: Wanted<'_>,
 ) -> Result<Acquired, String> {
+    let Wanted {
+        record,
+        fence,
+        key,
+        spec,
+        environment,
+    } = wanted;
     let mut reasons: Vec<String> = Vec::new();
     // The branch's kept sandbox.
     let kept = store
@@ -800,6 +812,7 @@ pub(crate) fn release_environment(
 /// End a turn's sandbox `name`: park it (pause and record it for the next
 /// turn) when the branch keeps its sandbox and the provider can pause, then
 /// evict beyond `max_paused`; otherwise destroy it. Returns what to record.
+#[allow(clippy::let_underscore_must_use, clippy::map_unwrap_or)] // ratchet: branchyard
 pub(crate) fn park(
     yard: &Yard,
     record: &Record,
@@ -947,6 +960,7 @@ pub(crate) fn evict(yard: &Yard, key: &str, max: u32, except: &str) -> Vec<Activ
 /// provider snapshot, keeping the newest `snapshots`. Journaled as
 /// [`STEP_SNAPSHOT`] before anything is taken. Returns the snapshot, and
 /// what to record.
+#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn snapshot_turn(
     yard: &Yard,
     fence: &Fence,

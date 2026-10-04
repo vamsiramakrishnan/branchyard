@@ -10,6 +10,12 @@
 //! candidate. Nothing is installed from the network and no real harness
 //! runs. Requires `git`, `sh` and `python3`.
 
+#![allow(
+    clippy::let_underscore_must_use,
+    clippy::panic,
+    clippy::unwrap_in_result,
+    clippy::unwrap_used
+)] // tests: a panic is the failure report
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

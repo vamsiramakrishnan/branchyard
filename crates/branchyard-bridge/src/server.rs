@@ -584,6 +584,7 @@ impl Bridge {
     /// and not dumpable (Linux), and reaps orphans; SIGTERM and SIGINT end
     /// it as the module documentation says if [`block_signals`] was called
     /// before any thread started, and otherwise act as they would.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
     pub fn serve(self) -> io::Result<()> {
         harden();
         {
@@ -740,6 +741,7 @@ fn connection(shared: &Arc<Shared>, mut stream: Stream) -> io::Result<()> {
 }
 
 /// Close the WebSocket and wait briefly for the client to close too.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 fn finish(mut reader: WsReader, writer: &Arc<Mutex<WsWriter>>) {
     let _ = writer.lock_recovering("writer").close();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -821,6 +823,7 @@ fn wait_exited(pid: u32) {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 fn pump(
     mut pipe: impl Read,
     send: impl Fn(Frame) -> io::Result<()>,
@@ -846,7 +849,7 @@ fn pump(
     let _ = send(closed);
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 fn exec(
     shared: &Arc<Shared>,
     seq: u64,

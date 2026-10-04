@@ -4,6 +4,7 @@
 //! collected and scrubbed; then the same through an encrypted remote.
 //! Hermetic: no network. Requires `git` and `sh`.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

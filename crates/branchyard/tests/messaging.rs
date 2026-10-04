@@ -2,6 +2,7 @@
 //! follows the delegation tree, `ask --wait` answers across the store's
 //! waits, and pending messages are delivered at a branch's next turn.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::time::Duration;

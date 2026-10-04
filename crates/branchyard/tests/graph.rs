@@ -5,6 +5,7 @@
 //! scratch-area bindings. The MCP tool, the CLI, the Python module and the
 //! server are tested in their own crates.
 
+#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::process::{Child, Command, Stdio};

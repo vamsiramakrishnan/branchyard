@@ -28,6 +28,7 @@ fn kms_error(status: u16, why: &str) -> MockResponse {
 }
 
 impl MockKms {
+    #[allow(clippy::expect_used, clippy::unwrap_used)] // ratchet: branchyard-sync
     pub fn start() -> MockKms {
         let master = crate::util::random_bytes(32).expect("random");
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -171,6 +172,7 @@ pub const IDENTITY_HEADER: &str = "identity-secret";
 impl MockMetadata {
     /// `account_key` is the PEM private key whose JWTs the OAuth endpoint
     /// accepts.
+    #[allow(clippy::expect_used)] // ratchet: branchyard-sync
     pub fn start(account_key: &str) -> MockMetadata {
         let der = crate::auth::google::pem_der(account_key).expect("PEM");
         let public = RsaKeyPair::from_pkcs8(&der)

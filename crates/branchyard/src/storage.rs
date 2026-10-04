@@ -426,6 +426,7 @@ impl Drop for TempBlob {
 /// install exactly that file at its content address. Returns the digest
 /// and size. Opening `path` once and never again means the stored bytes are
 /// the bytes that were hashed, whatever happens to `path` meanwhile.
+#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard
 fn store_blob(dir: &Path, path: &Path) -> Result<(String, u64), Error> {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let io = |what: &str, p: &Path, e: std::io::Error| {
@@ -487,6 +488,7 @@ fn store_blob(dir: &Path, path: &Path) -> Result<(String, u64), Error> {
 /// digest, and records provenance whether or not another artifact already
 /// has the same digest (bytes are kept until no artifact references them;
 /// see [`gc_after_removal`]).
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 pub(crate) fn publish(
     yard: &Yard,
     branch: &str,

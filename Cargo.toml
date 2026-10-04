@@ -30,6 +30,7 @@ version = "0.0.1"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
+rust-version = "1.94"
 
 # Every dependency used by more than one member is declared here once; members
 # say `workspace = true` and add only their own features. tools/check_workspace_deps.py
@@ -65,3 +66,23 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 url = "2"
 uuid = { version = "1.26.1", features = ["v4"] }
 webpki-roots = "1"
+
+# Error discipline, enforced by Clippy at deny. Existing violations carry a
+# targeted `#[allow(..)]` with a `// ratchet:` marker; tools/check_lint_ratchet.py
+# lets the per-crate marker count fall but never rise. See CONTRIBUTING.md,
+# "Lints and the ratchet".
+[workspace.lints.rust]
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+let_underscore_must_use = "deny"
+let_underscore_future = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unwrap_in_result = "deny"
+map_unwrap_or = "deny"
+too_many_arguments = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"

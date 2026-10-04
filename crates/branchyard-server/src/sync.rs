@@ -211,6 +211,7 @@ impl ServerSync {
     }
 
     /// Queue an operation's branches and wake the replicator.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
     pub fn end(&self, repo: &str, branches: &[String]) {
         let Some(r) = self.repos.get(repo) else {
             return;

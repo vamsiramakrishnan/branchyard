@@ -28,7 +28,15 @@ Name the lock after what it guards (`"claims"`, `"conn"`), not its type. Nothing
 
 Two checks enforce this, in CI and locally:
 
-- `cargo test -p branchyard-support` scans every crate and fails on the poison idiom; `python3 tools/check_silent_failures.py` does the same and also counts bare `let _ =` in non-test code per crate against `tools/silent_failures.json`. A count may not rise. When you remove some, run `python3 tools/check_silent_failures.py --update` and commit the lower baseline, so the gain is kept. Do not raise it: convert the new site instead. Where discarding really is right (a `write!` to a closed pipe, a `send` to a receiver that hung up), a `let _ =` is allowed only if the baseline is raised for that crate in the same change and the line says why.
+- `cargo test -p branchyard-support` scans every crate and fails on the poison idiom; `python3 tools/check_silent_failures.py` does the same. A bare `let _ =` on a fallible value is denied by Clippy (`let_underscore_must_use`): see [Lints and the ratchet](#lints-and-the-ratchet).
+
+## Lints and the ratchet
+
+The root `Cargo.toml` has a `[workspace.lints]` table and every crate says `[lints]` `workspace = true` (and `rust-version.workspace = true`, which equals the channel in `rust-toolchain.toml`). The table denies, through Clippy: `let_underscore_must_use`, `let_underscore_future`, `unwrap_used`, `expect_used`, `panic`, `unwrap_in_result`, `map_unwrap_or`, `too_many_arguments` (more than 7), `todo`, `unimplemented`, `dbg_macro`, and `unused_must_use`. `clippy.toml` lets `unwrap`, `expect` and `panic!` stand in tests (`#[test]` functions and `#[cfg(test)]` modules). Integration tests, examples and the testkit carry a file-level `#![allow(..)] // tests: ...` for the helpers Clippy does not see as tests. `missing_docs` is not in the table: it keeps its own counted ratchet (see Validation).
+
+New code meets the table: propagate with `?`, give the error a type or a message, or, where failure is acceptable, say so with `branchyard_support::best_effort`. Code that predates the table carries a targeted `#[allow(clippy::..)] // ratchet: <crate>` (an item where practical, a whole file otherwise). `python3 tools/check_lint_ratchet.py` (CI, next to the other checks) counts those markers per crate against `tools/lint_ratchet.json`. A count may not rise, and an allow of a denied lint without a marker fails. It also checks that every crate inherits the workspace lints and that the lint table is complete.
+
+To lower a count: delete a `// ratchet:` allow, make Clippy pass without it (`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, and with the `postgres`, `schema` and `microsandbox` features that CI lints), then run `python3 tools/check_lint_ratchet.py --update` and commit the lower `tools/lint_ratchet.json`. Narrowing an allow to the lints still needed counts as progress too; do not raise a count. A function with more than 7 parameters takes a context struct instead of an allow.
 
 ## Time, ids and randomness
 

@@ -3,6 +3,7 @@
 //! binary, running the ignored `rewind_child` or `try_child` test) aborts at
 //! an injected fault point between an intent and its effect.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::collections::BTreeMap;

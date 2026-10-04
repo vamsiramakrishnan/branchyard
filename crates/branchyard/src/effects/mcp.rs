@@ -479,6 +479,7 @@ impl Client {
 
     /// `initialize` and `notifications/initialized`: the session id, if
     /// the gateway keeps sessions.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn open(&self, target: &Target) -> Result<Option<String>, String> {
         let init = json!({
             "jsonrpc": "2.0", "id": 0, "method": "initialize",
@@ -510,6 +511,7 @@ impl Client {
         Ok(session)
     }
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn close(&self, target: &Target, session: Option<&str>) {
         if let Some(session) = session {
             let headers = vec![
@@ -583,6 +585,7 @@ impl Client {
     }
 
     /// Every tool the gateway lists for this token.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     pub fn list_tools(&self) -> Result<Vec<Value>, String> {
         let target = Target::parse(&self.url)?;
         let session = self.open(&target)?;
@@ -691,6 +694,7 @@ pub fn confirmed(tool: Option<&Value>, arguments: &Value) -> Value {
 }
 
 /// A `tools/call` answer from its HTTP response.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 pub fn called(response: &upstream::Response, body: &[u8], id: &Value) -> Called {
     let answer = rpc_answer(response.header("content-type"), body, id);
     let result = answer.as_ref().and_then(|a| a.get("result")).cloned();

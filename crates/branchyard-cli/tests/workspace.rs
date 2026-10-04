@@ -5,6 +5,7 @@
 //! by a harness), `by workspace show` and `run`, and teardown on `by rm`
 //! and `by merge --rm`. Hermetic; requires `git` and `sh`.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};

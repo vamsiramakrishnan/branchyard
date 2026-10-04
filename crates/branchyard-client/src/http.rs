@@ -317,6 +317,7 @@ pub fn decode_form_bytes(value: &[u8]) -> Vec<u8> {
     percent_encoding::percent_decode(&spaced).collect()
 }
 
+#[allow(clippy::let_underscore_must_use, clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

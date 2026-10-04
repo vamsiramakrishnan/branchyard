@@ -32,6 +32,7 @@ pub(crate) enum CheckOutcome {
     TimedOut,
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
 pub(crate) fn run(check: &Check, dir: &Path) -> io::Result<(CheckOutcome, String)> {
     let Some((program, args)) = check.argv.split_first() else {
         return Err(io::Error::new(

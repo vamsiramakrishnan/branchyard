@@ -86,6 +86,7 @@ impl ClientTls {
 
     /// Trust the Mozilla root certificates bundled at build time
     /// (`webpki-roots`), not the host's certificate store.
+    #[allow(clippy::expect_used)] // ratchet: branchyard-bridge
     pub fn public_roots() -> ClientTls {
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -205,6 +206,7 @@ fn drain(conn: &mut Connection, out: &mut Vec<u8>, buf: &mut [u8]) -> bool {
 
 /// Move bytes between the TLS session on `tcp` and the local end `app`
 /// until both directions have ended.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 fn pump(mut conn: Connection, mut tcp: TcpStream, mut app: UnixStream) {
     if tcp.set_nonblocking(true).is_err() || app.set_nonblocking(true).is_err() {
         return;

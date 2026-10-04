@@ -9,6 +9,7 @@ use crate::plan::{ArtifactKind, Plan, PlannedFile};
 use crate::probe::{Entropy, Facts, Probe};
 use crate::Topic;
 
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-setup
 pub fn questions(facts: &Facts, _answers: &Answers) -> Vec<Question> {
     vec![
         Question::new(
@@ -53,6 +54,7 @@ pub fn questions(facts: &Facts, _answers: &Answers) -> Vec<Question> {
     ]
 }
 
+#[allow(clippy::expect_used)] // ratchet: branchyard-setup
 pub fn plan(
     facts: &Facts,
     answers: &Answers,

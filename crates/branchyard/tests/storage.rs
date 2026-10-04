@@ -4,6 +4,7 @@
 //! [`Yard`] handles on one repository, as other durability tests use to
 //! stand in for two engines).
 
+#![allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 mod common;
 
 use std::collections::BTreeMap;

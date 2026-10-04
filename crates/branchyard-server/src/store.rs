@@ -29,6 +29,12 @@
 //! without changing the transaction's shape. [`FileStore`], the JSON-lines
 //! file earlier versions used, is only read, to import it once.
 
+#![allow(
+    clippy::expect_used,
+    clippy::let_underscore_must_use,
+    clippy::map_unwrap_or,
+    clippy::unwrap_used
+)] // ratchet: branchyard-server
 use branchyard_support::LockExt as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};

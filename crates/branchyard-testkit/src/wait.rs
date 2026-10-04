@@ -24,6 +24,7 @@
 //! assert_eq!(ok, 5);
 //! ```
 
+#![allow(clippy::expect_used, clippy::panic)] // tests: a panic is the failure report
 use std::fmt::Debug;
 use std::time::{Duration, Instant};
 

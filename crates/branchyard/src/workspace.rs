@@ -273,6 +273,7 @@ impl WorkspaceReport {
     }
 
     /// One line on why it failed, for a branch's status.
+    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard
     pub fn failure(&self) -> String {
         let what = match self.phase {
             WorkspacePhase::Copy => "copying files".to_owned(),
@@ -649,12 +650,14 @@ impl Setup<'_> {
                 run_in_sandbox(
                     report,
                     &self.spec.setup,
-                    *provider,
-                    sandbox,
-                    cwd,
-                    &env,
-                    SETUP_TIMEOUT,
-                    self.cancel,
+                    InSandbox {
+                        provider: *provider,
+                        sandbox,
+                        cwd,
+                        env: &env,
+                        timeout: SETUP_TIMEOUT,
+                        cancel: self.cancel,
+                    },
                 );
             }
         }
@@ -685,6 +688,7 @@ impl Setup<'_> {
 /// worktree has from setup, and the environment used. Shared paths are
 /// added to `excluded` (they are links into `.branchyard`, and must never
 /// reach a snapshot).
+#[allow(clippy::expect_used)] // ratchet: branchyard
 fn prepared(
     setup: &Setup<'_>,
     recorder: &mut Recorder,
@@ -794,12 +798,14 @@ fn prepared(
                 envs::record_failure(
                     root,
                     setup.spec,
-                    &key,
-                    &recipe,
-                    envs::HOST,
-                    inputs,
-                    setup.name,
-                    &reason,
+                    envs::Failed {
+                        key: &key,
+                        recipe: &recipe,
+                        place: envs::HOST,
+                        inputs,
+                        branch: setup.name,
+                        reason: &reason,
+                    },
                 );
                 drop(lock);
                 // Its own build failed: the last good one of its recipe
@@ -1021,12 +1027,14 @@ pub(crate) fn teardown(
                     run_in_sandbox(
                         &mut report,
                         &state.spec.teardown,
-                        provider,
-                        name,
-                        &cwd,
-                        &env,
-                        TEARDOWN_TIMEOUT,
-                        &|| None,
+                        InSandbox {
+                            provider,
+                            sandbox: name,
+                            cwd: &cwd,
+                            env: &env,
+                            timeout: TEARDOWN_TIMEOUT,
+                            cancel: &|| None,
+                        },
                     );
                 }
                 if let Some(warning) = placement.discard() {
@@ -1304,7 +1312,7 @@ fn copy_one(root: &Path, worktree: &Path, rel: &str) -> Result<(), String> {
 /// Run `commands` in order with `sh -c` in `cwd`, stopping at the first
 /// that fails, into `report`. Each leads its own process group, which is
 /// killed at `timeout` or when `cancel` returns a reason.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // ratchet: branchyard
 pub(crate) fn run_commands(
     report: &mut WorkspaceReport,
     commands: &[String],
@@ -1438,22 +1446,30 @@ pub(crate) fn run_commands(
     Ok(())
 }
 
+/// Where, and under what limits, [`run_in_sandbox`] runs its commands.
+pub(crate) struct InSandbox<'a> {
+    pub provider: &'a dyn branchyard_sandbox::SandboxProvider,
+    pub sandbox: &'a str,
+    pub cwd: &'a str,
+    pub env: &'a [(String, String)],
+    pub timeout: Duration,
+    pub cancel: &'a dyn Fn() -> Option<String>,
+}
+
 /// [`run_commands`], each command exec'd with `sh -c` in `sandbox`
 /// through `provider`, in `cwd`. Each exec is its own process group in the
 /// sandbox; it is torn down when the command ends, at `timeout`, or when
 /// `cancel` returns a reason. Nothing is recorded as a host process: the
 /// sandbox is the turn's journaled `sandbox`, which recovery destroys.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_in_sandbox(
-    report: &mut WorkspaceReport,
-    commands: &[String],
-    provider: &dyn branchyard_sandbox::SandboxProvider,
-    sandbox: &str,
-    cwd: &str,
-    env: &[(String, String)],
-    timeout: Duration,
-    cancel: &dyn Fn() -> Option<String>,
-) {
+pub(crate) fn run_in_sandbox(report: &mut WorkspaceReport, commands: &[String], at: InSandbox<'_>) {
+    let InSandbox {
+        provider,
+        sandbox,
+        cwd,
+        env,
+        timeout,
+        cancel,
+    } = at;
     use std::sync::{Arc, Mutex};
     let started = Instant::now();
     let deadline = started + timeout;
@@ -1554,6 +1570,7 @@ impl Tail {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

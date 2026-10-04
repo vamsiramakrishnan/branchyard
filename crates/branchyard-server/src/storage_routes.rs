@@ -145,6 +145,7 @@ type IdemEntry = (String, StatusCode, serde_json::Value);
 pub struct StorageIdem(Mutex<HashMap<(String, String), IdemEntry>>);
 
 impl StorageIdem {
+    #[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-server
     fn get(
         &self,
         caller: &str,
@@ -165,6 +166,7 @@ impl StorageIdem {
         }
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-server
     fn put(
         &self,
         caller: &str,

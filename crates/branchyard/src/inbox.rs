@@ -363,6 +363,7 @@ pub(crate) fn waiting_for_answer(store: &Store, branch: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

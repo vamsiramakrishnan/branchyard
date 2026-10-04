@@ -747,6 +747,7 @@ pub(crate) fn chunks_reachable(dir: &Path, rev: &str) -> Result<BTreeSet<String>
     Ok(chunks)
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,6 +2,12 @@
 //! fake `herdr` on `PATH` that records every call and hands out pane IDs.
 //! Hermetic; requires `git`, `sh`, `mkdir`, `sleep` and `kill`.
 
+#![allow(
+    clippy::let_underscore_must_use,
+    clippy::map_unwrap_or,
+    clippy::panic,
+    clippy::unwrap_used
+)] // tests: a panic is the failure report
 use branchyard_testkit::{wait, Scratch};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};

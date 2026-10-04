@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Branchyard's setup interview: declarative questions, detected defaults and validated file plans, with no I/O"
+
+[lints]
+workspace = true
 
 [dependencies]
 branchyard-harness = { version = "0.0.1", path = "../branchyard-harness" }

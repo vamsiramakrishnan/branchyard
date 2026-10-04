@@ -7,6 +7,7 @@
 //! delegated child's policy is never wider than its parent's. Hermetic:
 //! every host is a listener on this machine's loopback.
 
+#![allow(clippy::panic, clippy::unwrap_in_result, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 mod egress_common;
 

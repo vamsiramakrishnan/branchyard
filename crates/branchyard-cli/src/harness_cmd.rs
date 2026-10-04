@@ -4,6 +4,7 @@
 //! policy are the SDK's (`branchyard::inventory`); this picks the machine,
 //! asks, renders and records. See docs/harness-lifecycle.md.
 
+#![allow(clippy::expect_used, clippy::map_unwrap_or, clippy::unwrap_in_result)] // ratchet: branchyard-cli
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -265,7 +266,7 @@ fn attach_quota(found: &mut Inventory) {
 // Commands.
 
 /// `by harnesses [ACTION]`.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // ratchet: branchyard-cli
 pub fn main(
     env: &Env,
     target: &Target,

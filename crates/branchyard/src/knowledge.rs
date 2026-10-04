@@ -648,6 +648,7 @@ pub(crate) fn brief(
 }
 
 /// The kind a branch's task has: its route's, else the classifier's.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 pub(crate) fn kind_of(record: &Record, events: &[RecordedEvent]) -> TaskKind {
     recorded_route(events)
         .map(|d| d.kind)
@@ -1177,6 +1178,7 @@ pub(crate) fn distill(
 /// Distill `name` when the yard's settings ask for it on `trigger`:
 /// top-level branches only, never a judge's scratch branch. Best-effort:
 /// it never changes what happened to the branch.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn on_end(yard: &Yard, name: &str, trigger: DistillTrigger) {
     let settings = yard.knowledge_settings();
     if !settings.distill_on.contains(&trigger) {

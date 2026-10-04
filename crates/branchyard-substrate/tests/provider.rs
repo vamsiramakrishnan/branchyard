@@ -2,6 +2,7 @@
 //! over real gRPC, a router and real bridge processes, all in the fake
 //! cluster. Not evidence about a Substrate cluster.
 
+#![allow(clippy::unwrap_in_result, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::io::{self, BufRead, BufReader, Read};

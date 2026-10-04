@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "The by command: delegate coding work to agent harnesses on git branches"
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "by"

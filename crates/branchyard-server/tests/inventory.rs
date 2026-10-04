@@ -7,6 +7,7 @@
 //! and the `postgres` feature is on. The inventories are canned: no
 //! harness is detected or run.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::sync::Arc;

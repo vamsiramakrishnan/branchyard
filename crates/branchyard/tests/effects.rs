@@ -3,6 +3,7 @@
 //! call the gateway the way Anvil's packaged SDKs do. Hermetic: nothing
 //! leaves the machine.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 #[path = "mock_gateway/mod.rs"]
 mod mock_gateway;

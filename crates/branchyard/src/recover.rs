@@ -38,6 +38,7 @@ use branchyard_support::time::now_ms;
 /// Recover every branch that needs it. A branch that cannot be recovered
 /// does not stop the others; the first such error is returned after all
 /// were tried.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn all(yard: &Yard) -> Result<Vec<Recovery>, Error> {
     let store = yard.store();
     let now = now_ms();

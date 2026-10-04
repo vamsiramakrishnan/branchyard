@@ -170,6 +170,7 @@ enum Progress {
 }
 
 /// Bytes a session holds, from a 308's `Range: bytes=0-N`.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-sync
 fn persisted(response: &Response) -> usize {
     response
         .header("range")

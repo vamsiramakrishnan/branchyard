@@ -5,6 +5,7 @@
 //! holds and retention, quotas, bounds on concurrency and bandwidth, and
 //! incremental packs. Time comes from manual clocks.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

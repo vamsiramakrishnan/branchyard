@@ -13,6 +13,7 @@
 //!
 //! Requires `git`, `sh` and `python3`; nothing leaves loopback.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;

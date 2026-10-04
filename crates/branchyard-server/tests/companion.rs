@@ -3,6 +3,12 @@
 //! limit, scopes, revocation), and Web Push to a mock push service that
 //! checks the VAPID signature and decrypts the message as a browser would.
 
+#![allow(
+    clippy::let_underscore_must_use,
+    clippy::map_unwrap_or,
+    clippy::panic,
+    clippy::unwrap_used
+)] // tests: a panic is the failure report
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};

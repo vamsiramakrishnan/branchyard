@@ -5,6 +5,7 @@
 //! unknown that `by effects reconcile` settles through its lookup, and an
 //! undo rewinds the files and performs the chosen inverse. Hermetic.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 #[path = "../../branchyard/tests/mock_gateway/mod.rs"]
 mod mock_gateway;
 

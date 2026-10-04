@@ -25,6 +25,12 @@
 //! Times are the dispatchers' clocks ([`super::Clock`]), not the
 //! database's: keep the hosts' clocks synchronized.
 
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_in_result,
+    clippy::unwrap_used
+)] // ratchet: branchyard-server
 use branchyard_support::LockExt as _;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -1785,6 +1791,7 @@ pub mod conformance {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

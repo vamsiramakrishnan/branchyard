@@ -210,6 +210,7 @@ pub fn clone_or_copy(source: &Path, target: &Path) -> io::Result<Method> {
     }
 }
 
+#[allow(clippy::expect_used)] // ratchet: branchyard-workspace
 fn copy_dir(source: &Path, target: &Path, method: &mut Method) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = fs::metadata(source)?.permissions().mode();
@@ -236,6 +237,7 @@ fn copy_dir(source: &Path, target: &Path, method: &mut Method) -> io::Result<()>
 }
 
 /// Clone one regular file, or copy it when the filesystem cannot clone.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
 pub fn clone_file(source: &Path, target: &Path) -> io::Result<Method> {
     let method = match platform::clone(source, target) {
         Ok(()) => Method::Clone,
@@ -322,6 +324,7 @@ mod platform {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

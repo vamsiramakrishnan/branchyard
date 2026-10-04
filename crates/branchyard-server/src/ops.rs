@@ -34,6 +34,7 @@
 //! queued ones stay queued for the next worker, here after a restart or on
 //! another server.
 
+#![allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-server
 use branchyard_support::time::now_ms;
 use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::HashMap;
@@ -1035,6 +1036,7 @@ impl Drop for Hold {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

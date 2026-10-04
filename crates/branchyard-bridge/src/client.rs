@@ -1,6 +1,7 @@
 //! The host side of the bridge: connect through a router to a sandbox's
 //! bridge and run requests, with a [`Process`] for exec.
 
+#![allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};

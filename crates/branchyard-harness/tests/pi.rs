@@ -1,6 +1,7 @@
 //! Pi driver against RPC transcripts recorded from pi 0.87.1 without a
 //! model call, and against the RPC documentation and `rpc-mode.js`.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use branchyard_harness::conformance::{decode, feed, handshake, Replay, Transcript};
 use branchyard_harness::pi::Pi;
 use branchyard_harness::{

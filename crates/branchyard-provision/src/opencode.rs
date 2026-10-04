@@ -51,6 +51,7 @@ impl Provisioner for OpenCode {
         Some("opencode")
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-provision
     fn plan(&self, context: &Context) -> Result<Plan, Refused> {
         let why = "Scion's OpenCode provisioner has no verified setting for it";
         if context.model.is_some() {

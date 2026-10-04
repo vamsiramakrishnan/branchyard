@@ -71,6 +71,7 @@ impl MockAzure {
         format!("{}/{ACCOUNT}", self.server.url)
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-sync
     pub fn store(
         &self,
         container: &str,

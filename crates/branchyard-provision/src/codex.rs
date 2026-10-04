@@ -90,6 +90,7 @@ impl Provisioner for Codex {
         Some("codex")
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-provision
     fn plan(&self, context: &Context) -> Result<Plan, Refused> {
         let mut plan = Plan::default();
         pass_session(context, &mut plan);

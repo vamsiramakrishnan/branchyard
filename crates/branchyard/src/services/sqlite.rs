@@ -230,6 +230,7 @@ impl LocalRegistry {
     }
 
     /// An in-memory registry, for tests and embedding.
+    #[allow(clippy::expect_used)] // ratchet: branchyard
     pub fn memory() -> LocalRegistry {
         let conn = Connection::open_in_memory().expect("an in-memory database");
         conn.execute_batch(SCHEMA)

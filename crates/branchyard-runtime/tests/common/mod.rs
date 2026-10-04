@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-
+#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

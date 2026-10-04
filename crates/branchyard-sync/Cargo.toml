@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Replicates Branchyard task repositories to durable object storage: content-addressed objects, one manifest per task swapped by compare-and-swap, leases, envelope encryption and garbage collection"
+
+[lints]
+workspace = true
 
 [features]
 # In-process stand-ins for S3, Google Cloud Storage, Azure Blob, the three

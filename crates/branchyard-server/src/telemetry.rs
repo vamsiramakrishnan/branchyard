@@ -23,6 +23,7 @@
 //! (`http/protobuf`, the default, or `http/json`; `grpc` is not built in),
 //! `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME` and `OTEL_SDK_DISABLED`.
 
+#![allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-server
 use branchyard_support::time::now_ms;
 use branchyard_support::LockExt as _;
 use std::collections::HashMap;
@@ -853,6 +854,7 @@ pub mod otlp {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

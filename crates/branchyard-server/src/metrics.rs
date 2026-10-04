@@ -312,6 +312,7 @@ pub const FAMILIES: &[Family] = &[
     ),
 ];
 
+#[allow(clippy::panic)] // ratchet: branchyard-server
 fn declared(name: &str) -> &'static Family {
     FAMILIES
         .iter()
@@ -523,6 +524,7 @@ fn label_set(labels: &[(String, String)], extra: Option<(&str, &str)>) -> String
 /// `snapshot` in the text exposition format, every declared family in
 /// [`FAMILIES`] order with its `HELP` and `TYPE` lines, series sorted by
 /// labels. A family with no series is written with no samples.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 pub fn encode(snapshot: &Snapshot) -> String {
     let mut out = String::new();
     for family in FAMILIES {

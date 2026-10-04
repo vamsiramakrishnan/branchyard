@@ -908,6 +908,7 @@ impl Signals {
     }
 
     /// The next SIGINT or SIGTERM (Ctrl-C where there are no signals).
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
     async fn recv(&mut self) {
         #[cfg(unix)]
         if let Some((interrupt, terminate)) = &mut self.streams {
@@ -923,6 +924,7 @@ impl Signals {
 
 /// Run the server with `args` (after the program name); `program` names it
 /// in messages.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 pub fn main(args: &[String], program: &str) -> ExitCode {
     let flags = match parse_cli(args, program) {
         Ok(Cli {
@@ -1066,6 +1068,7 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
     code
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

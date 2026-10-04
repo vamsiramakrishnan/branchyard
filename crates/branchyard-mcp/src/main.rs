@@ -3,6 +3,7 @@
 
 use std::process::ExitCode;
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-mcp
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match branchyard_mcp::main_with_args(&args) {

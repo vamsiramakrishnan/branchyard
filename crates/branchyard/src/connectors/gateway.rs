@@ -209,6 +209,7 @@ impl Drop for Supervisor {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn note(log: &Path, text: &str) {
     if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(log) {
         let _ = writeln!(file, "branchyard: {text}");
@@ -271,6 +272,7 @@ fn supervise(
 }
 
 /// SIGTERM, then SIGKILL after five seconds.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn terminate(child: &mut Child) {
     if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
         let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);

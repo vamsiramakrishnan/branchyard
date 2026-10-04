@@ -517,6 +517,7 @@ fn short(commit: &str) -> &str {
     commit.get(..10).unwrap_or(commit)
 }
 
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn age(now_ms: u64, at: Option<u64>) -> String {
     at.map(|at| crate::render::age_text(now_ms.saturating_sub(at) / 1000))
         .unwrap_or_else(|| "-".into())
@@ -581,6 +582,7 @@ pub fn main(env: &Env, target: &Target, asked: &Asked<'_>) -> Outcome {
     }
 }
 
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn list_text(env: &Env, yard: &Yard, shown: &[&Session], now: u64) -> Outcome {
     if shown.is_empty() {
         return print(&format!(

@@ -4,7 +4,7 @@
 //! a connection that never finishes its request. Unix only; requires
 //! `kill`.
 #![cfg(unix)]
-
+#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::io::{BufRead, BufReader, Write};

@@ -27,6 +27,7 @@ pub struct QrCode {
 
 impl QrCode {
     /// `data` in the smallest version that holds it, with the best mask.
+    #[allow(clippy::expect_used)] // ratchet: branchyard-server
     pub fn encode(data: &[u8]) -> Result<QrCode, String> {
         let version = (1..=MAX_VERSION)
             .find(|&v| data.len() <= capacity(v))
@@ -378,6 +379,7 @@ fn version_word(version: usize) -> u32 {
 }
 
 /// Mode, count, bytes, terminator and padding, as codewords.
+#[allow(clippy::expect_used)] // ratchet: branchyard-server
 fn data_codewords(version: usize, data: &[u8]) -> Vec<u8> {
     let mut bits: Vec<bool> = Vec::new();
     let mut put = |value: u32, len: u32| {

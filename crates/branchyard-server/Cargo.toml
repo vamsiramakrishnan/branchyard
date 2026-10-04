@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Serves Branchyard repositories over an authenticated HTTP JSON and SSE API"
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "branchyard-server"

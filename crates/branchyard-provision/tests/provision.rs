@@ -14,6 +14,7 @@
 //! diff. Cases follow Scion's provisioner tests at the pinned revision;
 //! each says which.
 
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};

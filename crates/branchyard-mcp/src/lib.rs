@@ -548,6 +548,7 @@ impl Server {
         }
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-mcp
     fn call(&self, tool: &str, arguments: Value) -> Result<Value, branchyard::Error> {
         let mut delegate = self.delegate.lock_recovering("delegate");
         if delegate.is_none() {

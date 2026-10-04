@@ -540,6 +540,7 @@ fn tail(output: &str) -> String {
 /// undecided goal, verify it, and send a follow-up turn with what is
 /// missing, until it is met, the rounds run out, or a turn ends otherwise.
 /// Returns the branch as it ends.
+#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn pursue(yard: &Yard, branch: Branch, options: &TaskOptions) -> Result<Branch, Error> {
     let name = branch.info().name.clone();
     let custom = options.goal.as_ref().and_then(|g| g.custom.clone());

@@ -45,6 +45,7 @@ pub(crate) struct Broker {
 }
 
 impl Broker {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     pub fn start(yard: Yard) -> io::Result<Broker> {
         let file = format!(
             "broker-{}-{}.sock",
@@ -96,6 +97,7 @@ impl Broker {
 
     /// Stop accepting connections and remove the socket. Connections
     /// already open keep being served, but their tokens have been revoked.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::Release);
         // Wake the accept loop so it sees the flag.
@@ -108,6 +110,7 @@ impl Broker {
 }
 
 /// Answer one connection's requests until it closes.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn serve(yard: &Yard, stream: UnixStream) {
     let Ok(mut writer) = stream.try_clone() else {
         return;
@@ -189,6 +192,7 @@ impl Remote {
     }
 
     /// Outer error: transport; inner: the engine's answer.
+    #[allow(clippy::expect_used)] // ratchet: branchyard
     fn exchange(&mut self, tool: &str, arguments: Value) -> Result<Result<Value, Error>, Error> {
         if self.connection.is_none() {
             let stream = UnixStream::connect(&self.socket).map_err(|e| {

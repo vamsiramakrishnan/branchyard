@@ -70,6 +70,7 @@
 //! environment, and, for an argument after `--mcp-config` that names a
 //! file, that file's mode and the servers it lists.
 
+#![allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-runtime
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};

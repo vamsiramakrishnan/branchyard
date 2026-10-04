@@ -5,6 +5,7 @@
 //! Passing here shows the adapter's request mapping and error handling; it is
 //! not evidence about a Substrate cluster.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use branchyard_sandbox::SandboxState;

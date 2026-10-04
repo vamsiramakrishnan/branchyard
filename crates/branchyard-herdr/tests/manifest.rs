@@ -2,6 +2,7 @@
 //! loader applies (herdr fff6c82, `src/app/api/plugins/manifest.rs`), and
 //! against what this binary expects of it.
 
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item};

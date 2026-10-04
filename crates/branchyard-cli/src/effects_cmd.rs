@@ -367,6 +367,7 @@ fn outcomes_text(outcomes: &[UndoOutcome]) -> String {
 
 /// Ask which upstream effects to undo: empty for every reversible one (and
 /// staged calls), `all` adds the compensable ones, `none`, or ids.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn choose(env: &Env, plan: &UndoPlan) -> Result<Vec<String>, Failure> {
     if !(env.stdin_tty && env.stderr_tty) {
         return Err(Failure::Message(

@@ -235,6 +235,7 @@ fn gateway_command(
 /// How often the gateway's supervisor reconciles the effect ledger.
 const RECONCILE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 pub fn main(target: &Target, action: &GatewayAction, as_json: bool) -> Outcome {
     local_only(target, "by gateway")?;
     let yard = commands::open()?;
@@ -461,6 +462,7 @@ fn reclaim_of(pid: Option<u32>) -> Option<Reclaim> {
 /// until interrupted, registered in the repository's service registry
 /// with the gateway process to reclaim should this process stop without
 /// stopping it.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn supervise(
     yard: &Yard,
     config: &Connectors,

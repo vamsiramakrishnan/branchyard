@@ -75,6 +75,7 @@ struct Tail {
 }
 
 impl Tail {
+    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
     fn append(&mut self, chunk: &str) {
         self.content.push_str(chunk);
         let chars = self.content.chars().count();
@@ -121,6 +122,7 @@ fn collect(mut stream: impl Read + Send + 'static) -> Arc<Mutex<Tail>> {
 
 /// Run `command` with `sh -c` in `cwd`, with `env` added to this
 /// process's environment, for at most `timeout`.
+#[allow(clippy::expect_used)] // ratchet: branchyard-server
 pub fn run(
     command: &str,
     timeout: Duration,

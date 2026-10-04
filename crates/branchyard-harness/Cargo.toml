@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Harness driver contract and protocol drivers for Claude Code, Codex and ACP agents"
+
+[lints]
+workspace = true
 
 [features]
 # Derive schemars::JsonSchema on wire event types, for schema/contract.json;

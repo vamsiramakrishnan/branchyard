@@ -11,7 +11,7 @@
 //! and server tests through `#[path]`.
 
 #![allow(dead_code)]
-
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -585,7 +585,7 @@ fn perform(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // tests: one request, every part of it a parameter
 fn call(
     stream: TcpStream,
     shared: &Arc<(Mutex<State>, Condvar)>,

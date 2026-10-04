@@ -26,6 +26,7 @@ fn short(commit: &str) -> &str {
 
 /// Ask `question` on the terminal; true only for an explicit yes. Without a
 /// terminal nothing is asked and the answer is no.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 pub fn confirm(env: &Env, question: &str) -> bool {
     if !(env.stdin_tty && env.stderr_tty) {
         return false;
@@ -214,6 +215,7 @@ pub(crate) fn rewind_in(
 }
 
 /// `by try`, `by try --off` and `by try --status`.
+#[allow(clippy::expect_used)] // ratchet: branchyard-cli
 pub fn try_branch(
     _env: &Env,
     target: &Target,
@@ -466,6 +468,7 @@ pub fn duration_text(ms: Option<u64>) -> String {
 }
 
 /// `by compare`'s table: one row per attempt.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 pub fn compare_table(attempts: &[Attempt], style: Style) -> String {
     let column = |header, max, right| Column { header, max, right };
     let columns = [

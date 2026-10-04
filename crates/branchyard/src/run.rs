@@ -734,6 +734,7 @@ pub(crate) fn run_attempts(
 /// prepared sandbox is destroyed. Anything that does not work leaves the
 /// branch on the ordinary path, with the reason recorded when its sandbox
 /// starts. See `docs/sandbox-snapshots.md`.
+#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard
 fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease)]) {
     use crate::placement::SandboxPlan;
     use crate::snapshots::{SandboxOrigin, SnapshotMethod};
@@ -1412,6 +1413,7 @@ pub(crate) struct Reincarnation {
 }
 
 /// [`reincarnate`], as a failover (`crate::fleet`) needs it.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn reincarnate_with(
     yard: &Yard,
     name: &str,

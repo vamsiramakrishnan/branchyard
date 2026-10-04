@@ -2,6 +2,7 @@
 //! envelopes, budgets, authority and cancellation. The MCP server and a
 //! harness calling it are tested end to end in `branchyard-mcp`.
 
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

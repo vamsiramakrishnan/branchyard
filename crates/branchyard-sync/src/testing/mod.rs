@@ -213,6 +213,7 @@ impl ObjectStore for SlowStore {
 }
 
 /// Run git in `dir` for a test, panicking on failure; returns stdout.
+#[allow(clippy::expect_used)] // ratchet: branchyard-sync
 pub fn git(dir: &std::path::Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -236,6 +237,7 @@ pub fn git(dir: &std::path::Path, args: &[&str]) -> String {
 }
 
 /// A new repository at `dir` with one commit on `main`.
+#[allow(clippy::expect_used)] // ratchet: branchyard-sync
 pub fn repo(dir: &std::path::Path) {
     std::fs::create_dir_all(dir).expect("mkdir");
     git(dir, &["init", "--quiet", "--initial-branch=main"]);
@@ -245,6 +247,7 @@ pub fn repo(dir: &std::path::Path) {
 }
 
 /// Commit `files` on the branch checked out in `dir`; returns the commit.
+#[allow(clippy::expect_used)] // ratchet: branchyard-sync
 pub fn commit(dir: &std::path::Path, message: &str, files: &[(&str, &str)]) -> String {
     for (path, text) in files {
         let path = dir.join(path);

@@ -54,6 +54,7 @@ fn max_attempts() -> u32 {
 }
 
 /// Overridable with `BY_TEST_WEBHOOK_RETRY_MS`; see [`max_attempts`].
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-server
 fn retry_base() -> Duration {
     static V: OnceLock<Duration> = OnceLock::new();
     *V.get_or_init(|| {
@@ -108,6 +109,7 @@ fn wants(webhook: &WebhookConfig, kinds: &[&str]) -> bool {
 type HmacSha256 = Hmac<Sha256>;
 
 /// Hex-encoded HMAC-SHA256 of `body` with `secret`.
+#[allow(clippy::expect_used)] // ratchet: branchyard-server
 fn sign(secret: &str, body: &[u8]) -> String {
     let mut mac =
         HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts a key of any length");

@@ -29,6 +29,7 @@ pub struct Captured {
 struct Text(String);
 
 impl Visit for Text {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-support
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         if !self.0.is_empty() {
             self.0.push(' ');

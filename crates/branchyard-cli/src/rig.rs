@@ -1304,6 +1304,7 @@ pub mod schema {
     /// matching `schema/rig.json` byte for byte. Only the freshness test
     /// calls it; `by` is a binary with no command that prints it.
     #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(clippy::expect_used)] // ratchet: branchyard-cli
     pub fn rig_json() -> String {
         let schema = schemars::schema_for!(super::RawRig);
         let mut value = serde_json::to_value(&schema).expect("a JSON Schema document serializes");

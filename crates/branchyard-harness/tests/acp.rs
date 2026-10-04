@@ -2,6 +2,7 @@
 //! frame the driver writes is checked against the official
 //! `agent-client-protocol-schema` request types.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use agent_client_protocol_schema::v1::{
     CancelNotification, InitializeRequest, LoadSessionRequest, McpServer as AcpMcpServer,
     NewSessionRequest, PromptRequest, RequestPermissionResponse, ResumeSessionRequest,

@@ -71,6 +71,7 @@ impl Provisioner for Antigravity {
         Some("antigravity")
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-provision
     fn plan(&self, context: &Context) -> Result<Plan, Refused> {
         let why = "Branchyard's translation of Scion's Antigravity provisioner has no setting \
                    for it";

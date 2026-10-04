@@ -1299,6 +1299,7 @@ impl WorkspaceConfig {
 
     /// The run script `by workspace run` runs for `name`, or, given none,
     /// the default one, or the only one.
+    #[allow(clippy::expect_used)] // ratchet: branchyard-setup
     pub fn run_script(&self, name: Option<&str>) -> Result<(String, Vec<String>), String> {
         let names = || self.run.keys().cloned().collect::<Vec<_>>().join(", ");
         let chosen = match name {

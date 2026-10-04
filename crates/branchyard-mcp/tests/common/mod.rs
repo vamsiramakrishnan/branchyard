@@ -2,7 +2,7 @@
 //! server's stdio. Hermetic: requires `git`; no real harness, no network.
 
 #![allow(dead_code)]
-
+#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};

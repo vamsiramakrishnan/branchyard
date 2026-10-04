@@ -5,6 +5,7 @@
 //! stands in for `anvil package harness` and `anvil connectors index`; no
 //! gateway runs.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

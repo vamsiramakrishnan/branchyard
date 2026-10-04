@@ -6,6 +6,7 @@
 //! excluding what a machine cannot run. Nothing is installed from the
 //! network. Requires `sh`.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;

@@ -128,6 +128,7 @@ impl Running {
     /// supervisor's stop timeout, such as `docker stop`'s, must exceed.
     /// Operations still running after it are recorded as interrupted;
     /// their threads end with the process.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
     pub async fn wait(self) -> Stopped {
         let mut begun = self.shutdown.subscribe();
         let _ = begun.wait_for(|stop| *stop).await;
@@ -215,6 +216,7 @@ fn tls_acceptor(files: &TlsFiles) -> Result<TlsAcceptor, String> {
 /// Open every repository (recovering branches whose engine stopped), the
 /// registry and the feeds, bind, and start
 /// serving. Needs a multi-threaded Tokio runtime.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 pub async fn start(config: Config) -> Result<Running, String> {
     config.validate()?;
     // Installed once per process, idempotently: our own TLS acceptor
@@ -866,6 +868,7 @@ enum Accepted {
 }
 
 impl Listener {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
     async fn accept(&self) -> std::io::Result<Accepted> {
         match self {
             Listener::Tcp(listener) => listener.accept().await.map(|(tcp, _)| {
@@ -933,6 +936,7 @@ async fn accept_loop(
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 async fn serve_connection<I>(io: I, service: TowerToHyperService<axum::Router>, watcher: Watcher)
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,

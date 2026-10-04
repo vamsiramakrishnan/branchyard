@@ -388,6 +388,7 @@ fn login_check(id: &str) -> Option<&'static LoginCheck> {
     LOGIN_CHECKS.iter().find(|c| c.harness == id)
 }
 
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 fn version_args(id: &str) -> &'static [&'static str] {
     VERSION_ARGS
         .iter()
@@ -816,6 +817,7 @@ pub fn detect_local(options: &DetectOptions) -> Result<Inventory, String> {
 /// Run the detection script with the command `make` returns for it: the
 /// script goes on its stdin when `stdin` (`sh -s`, `ssh host sh -s`);
 /// otherwise `make` puts it in the arguments (`sh -c SCRIPT`).
+#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard
 pub fn detect_with(
     options: &DetectOptions,
     stdin: bool,
@@ -944,6 +946,7 @@ impl InventoryCache {
 
     /// The cached inventory when fresh, else a new detection here, kept.
     /// Only a detection of every harness is kept.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     pub fn local(&self, options: &DetectOptions, refresh: bool) -> Result<Inventory, String> {
         if !refresh && options.only.is_none() {
             if let Some(inventory) = self.get(options) {
@@ -1434,6 +1437,7 @@ impl LocalGate {
 }
 
 impl HarnessGate for LocalGate {
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn check(&self, harness: &str) -> Result<(), String> {
         let mut inventory = self.inventory.lock_recovering("inventory");
         if catalog::harness(harness).is_none() || !inventory.checked(harness) {

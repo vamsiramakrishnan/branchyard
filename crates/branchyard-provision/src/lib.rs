@@ -1055,6 +1055,7 @@ pub fn plan(context: &Context) -> Result<Plan, Refused> {
 
 /// Record in the home what the plan installs: its native MCP entries and,
 /// with what earlier turns recorded, every credential file it writes.
+#[allow(clippy::expect_used)] // ratchet: branchyard-provision
 fn record_installed(context: &Context, plan: &mut Plan) {
     let mut credentials = context.installed.credentials.clone();
     for file in &plan.files {
@@ -1148,6 +1149,7 @@ pub(crate) fn unsupported(context: &Context, what: &str, why: &str) -> Refused {
 
 /// A JSON document rendered with sorted keys, two-space indentation and a
 /// trailing newline, as Scion's `atomic_write_json` writes it.
+#[allow(clippy::expect_used)] // ratchet: branchyard-provision
 pub(crate) fn json_text(value: &serde_json::Value) -> String {
     let mut text =
         serde_json::to_string_pretty(&edit::sorted(value)).expect("JSON values serialize");

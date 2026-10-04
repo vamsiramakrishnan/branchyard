@@ -135,6 +135,7 @@ impl Repository {
     ///
     /// Fails with [`GitError::BranchExists`] rather than reusing a branch.
     /// A relative `dir` is taken relative to the current process directory.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
     pub fn create_branch(
         &self,
         name: &BranchName,
@@ -183,6 +184,7 @@ impl Repository {
     /// collide. An existing branch is refused before `from` is touched;
     /// a later failure removes the worktree wherever it is, and leaves
     /// neither the branch nor its base record behind.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
     pub fn adopt_worktree(
         &self,
         name: &BranchName,

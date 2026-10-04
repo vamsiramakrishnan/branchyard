@@ -290,6 +290,7 @@ fn reply(events: &[RecordedEvent]) -> String {
 /// Settle a planning turn that just ended, in `conclude`: one that
 /// completed proposes its reply as the plan and leaves the branch awaiting
 /// approval. Any other ending leaves it planning, as its status says.
+#[allow(clippy::expect_used)] // ratchet: branchyard
 pub(crate) fn conclude(
     yard: &Yard,
     record: &mut Record,
@@ -340,6 +341,7 @@ pub(crate) fn conclude(
 
 /// After a turn's lease is released: a delegated child whose plan now
 /// awaits approval escalates it to its parent's inbox, once per round.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn settled(yard: &Yard, name: &str) {
     let store = yard.store();
     let Ok(record) = store.read(name) else {
@@ -564,6 +566,7 @@ pub(crate) fn approve(
 
 /// Reject `name`'s plan: end the branch, or with `replan`, run another
 /// read-only planning turn with the reason.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn reject(
     yard: &Yard,
     name: &str,

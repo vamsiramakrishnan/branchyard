@@ -585,6 +585,7 @@ fn outcome_id(branch: &str, created_ms: u64) -> String {
 /// branches only, not a judge's scratch branch. `judged` sets the score
 /// and, when picked, `judged_best`. Best-effort for callers: it never
 /// changes what happened to the branch.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 pub(crate) fn observe(
     yard: &Yard,
     name: &str,
@@ -855,7 +856,8 @@ pub(crate) type Availability<'a> = &'a dyn Fn(&FleetCandidate) -> Result<(), Str
 /// outcomes for this kind, ties going to the earlier candidate. Each round
 /// picks without replacement; more attempts than candidates start another
 /// round.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::expect_used)] // ratchet: branchyard
+#[allow(clippy::too_many_arguments)] // ratchet: branchyard
 pub(crate) fn plan(
     kind: TaskKind,
     kind_source: &str,

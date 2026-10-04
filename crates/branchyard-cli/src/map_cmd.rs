@@ -326,6 +326,7 @@ fn launch() -> Value {
 
 /// Run `name` again with the command line that started it, from where it
 /// ran, with its recorded items.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-cli
 fn resume(env: &Env, name: &str, retry_failed: bool, json: bool) -> Outcome {
     let yard = commands::open()?;
     let stored = yard.map_spec(name)?;

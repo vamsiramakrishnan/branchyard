@@ -91,6 +91,7 @@ pub fn installed(home: &Path) -> Installed {
 /// ([`Installed::credentials`]): a whole file, or only Branchyard's
 /// variables or keys in it, and forget them. What else the harness or a
 /// person put there stays. Files already gone are skipped.
+#[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-provision
 pub fn remove_credentials(home: &Path) -> Result<Applied, ApplyError> {
     let mut record = installed(home);
     if record.credentials.is_empty() {
@@ -226,6 +227,7 @@ fn read_regular(path: &Path) -> Result<Option<String>, String> {
     Ok(Some(text))
 }
 
+#[allow(clippy::expect_used)] // ratchet: branchyard-provision
 fn write_atomically(target: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     let dir = target.parent().expect("a resolved path has a directory");
     let name = target.file_name().unwrap_or_default().to_string_lossy();

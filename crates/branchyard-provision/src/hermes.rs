@@ -71,6 +71,7 @@ impl Provisioner for Hermes {
         Some("hermes")
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-provision
     fn plan(&self, context: &Context) -> Result<Plan, Refused> {
         let why = "Scion's Hermes provisioner has no setting for it";
         if context.effort.is_some() {

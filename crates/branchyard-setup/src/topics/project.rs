@@ -31,6 +31,7 @@ fn target(facts: &Facts, answers: &Answers) -> (String, Option<ProjectConfig>) {
     }
 }
 
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-setup
 pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
     let (_, existing) = target(facts, answers);
     let current = existing.clone().unwrap_or_default();
@@ -407,6 +408,7 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
 /// `[workspace]`, for the project file only: detected install commands,
 /// `.env` files, a dev server on the branch's port, and a Compose stack's
 /// teardown, each a default the person confirms.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-setup
 fn workspace_questions(facts: &Facts, current: &ProjectConfig, qs: &mut Vec<Question>) {
     let detected = &facts.workspace;
     let existing = current.workspace.as_ref();
@@ -518,6 +520,7 @@ fn workspace_questions(facts: &Facts, current: &ProjectConfig, qs: &mut Vec<Ques
     ));
 }
 
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard-setup
 pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
     let (path, existing) = target(facts, answers);
     let mut flat = existing.clone().unwrap_or_default().flatten();

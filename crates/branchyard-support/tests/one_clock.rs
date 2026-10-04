@@ -14,6 +14,7 @@
 //! `new_ulid`. See CONTRIBUTING.md, "Time, ids and randomness". This runs
 //! with the crate's tests in CI.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::path::{Path, PathBuf};
 

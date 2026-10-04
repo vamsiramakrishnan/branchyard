@@ -2,6 +2,7 @@
 //! documentation. None is recorded: Amp prints no protocol line without an
 //! account and its server.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use branchyard_harness::amp::Amp;
 use branchyard_harness::conformance::{decode, feed, Replay, Transcript};
 use branchyard_harness::{

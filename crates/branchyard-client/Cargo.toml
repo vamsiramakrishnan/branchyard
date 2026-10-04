@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 description = "Blocking Rust client for the Branchyard server API: the remote SDK"
+
+[lints]
+workspace = true
 
 [features]
 # Derive schemars::JsonSchema on every wire request/response type, and build

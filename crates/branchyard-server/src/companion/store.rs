@@ -9,6 +9,7 @@
 //! - A paired token is revoked by stamping `revoked_at_ms`; every request
 //!   reads the row, so a revocation holds at once everywhere.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)] // ratchet: branchyard-server
 use branchyard_support::LockExt as _;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -1063,6 +1064,7 @@ pub mod conformance {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;

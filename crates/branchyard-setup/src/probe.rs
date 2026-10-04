@@ -345,6 +345,7 @@ impl Facts {
 
     /// The harness to suggest: Claude Code or Codex when installed, else
     /// the first installed, else Claude Code.
+    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-setup
     pub fn preferred_harness(&self) -> String {
         for preferred in ["claude-code", "codex"] {
             if self.installed().any(|h| h.harness == preferred) {
@@ -357,6 +358,7 @@ impl Facts {
             .unwrap_or_else(|| "claude-code".into())
     }
 
+    #[allow(clippy::map_unwrap_or)] // ratchet: branchyard-setup
     pub fn repo_name(&self) -> String {
         let base = self
             .git

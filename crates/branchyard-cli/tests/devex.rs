@@ -11,6 +11,11 @@
 //! Requires `git` and `sh`; the port tests also `python3`, and say so and
 //! pass without it.
 
+#![allow(
+    clippy::let_underscore_must_use,
+    clippy::map_unwrap_or,
+    clippy::unwrap_used
+)] // tests: a panic is the failure report
 use std::collections::BTreeMap;
 use std::fs;
 use std::net::TcpListener;

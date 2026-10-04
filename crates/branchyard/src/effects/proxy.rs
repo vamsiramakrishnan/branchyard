@@ -213,6 +213,7 @@ impl EffectProxy {
         self.address.port()
     }
 
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn shut(&mut self) {
         if self.state.stop.swap(true, Ordering::SeqCst) {
             return;
@@ -333,6 +334,7 @@ fn reason(status: u16) -> &'static str {
     }
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn respond(out: &mut TcpStream, status: u16, headers: &[(String, String)], body: &[u8]) {
     let mut head = format!("HTTP/1.1 {status} {}\r\n", reason(status));
     for (name, value) in headers {
@@ -554,6 +556,7 @@ fn rest_tool(request: &Request) -> Option<String> {
         .map(std::borrow::Cow::into_owned)
 }
 
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn handle(stream: TcpStream, state: &ProxyState) {
     let Ok(mut out) = stream.try_clone() else {
         return;
@@ -975,6 +978,7 @@ fn perform(
 }
 
 /// Stage the call: its draft form when it declares one, else the outbox.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn stage(state: &ProxyState, request: &Request, call: &Call, out: &mut TcpStream) {
     let ledger = state.yard.store();
     let id = match ulid(now_ms()) {

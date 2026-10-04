@@ -103,6 +103,7 @@ impl MockGcs {
         )
     }
 
+    #[allow(clippy::expect_used)] // ratchet: branchyard-sync
     pub fn store(
         &self,
         bucket: &str,

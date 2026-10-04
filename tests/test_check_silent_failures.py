@@ -23,31 +23,17 @@ def tree(files):
     return root
 
 
-class Ratchet(unittest.TestCase):
-    def run_check(self, files, baseline):
-        counts, idiom = check.scan(tree(files))
-        return check.check(counts, idiom, baseline)
+class PoisonIdiom(unittest.TestCase):
+    def run_check(self, files):
+        return check.check(check.scan(tree(files)))
 
-    def test_clean_tree_at_baseline_passes(self):
-        files = {"crates/a/src/lib.rs": "fn f() {\n    let _ = g();\n}\n"}
-        self.assertEqual(self.run_check(files, {"a": 1}), [])
+    def test_clean_tree_passes(self):
+        self.assertEqual(self.run_check({"crates/a/src/lib.rs": "fn f() {\n    let _ = g();\n}\n"}), [])
 
-    def test_a_new_let_underscore_fails(self):
-        files = {"crates/a/src/lib.rs": "fn f() {\n    let _ = g();\n    let _ = h();\n}\n"}
-        self.assertTrue(self.run_check(files, {"a": 1}))
-
-    def test_a_crate_missing_from_the_baseline_fails(self):
-        files = {"crates/b/src/lib.rs": "fn f() {\n    let _ = g();\n}\n"}
-        self.assertTrue(self.run_check(files, {}))
-
-    def test_a_fall_must_lower_the_baseline(self):
-        files = {"crates/a/src/lib.rs": "fn f() {}\n"}
-        problems = self.run_check(files, {"a": 1})
-        self.assertTrue(problems and "lower it" in problems[0])
-
-    def test_test_code_is_not_counted(self):
-        files = {"crates/a/src/lib.rs": "fn f() {}\n#[cfg(test)]\nmod t { fn x() { let _ = y(); } }\n"}
-        self.assertEqual(self.run_check(files, {}), [])
+    def test_test_code_is_not_scanned(self):
+        test_mod = "mod t { fn x() { m.lock().unwrap_or_else(|e| e.into_inner()); } }"
+        files = {"crates/a/src/lib.rs": f"fn f() {{}}\n#[cfg(test)]\n{test_mod}\n"}
+        self.assertEqual(self.run_check(files), [])
 
     def test_the_poison_idiom_fails_in_every_spelling(self):
         for spelling in (
@@ -56,12 +42,10 @@ class Ratchet(unittest.TestCase):
             "m.lock().unwrap_or_else(PoisonError::into_inner)",
         ):
             files = {"crates/a/src/lib.rs": f"fn f() {{ {spelling}; }}\n"}
-            self.assertTrue(self.run_check(files, {}), spelling)
+            self.assertTrue(self.run_check(files), spelling)
 
-    def test_the_repository_is_at_baseline(self):
-        counts, idiom = check.scan(ROOT)
-        baseline = check.json.loads(check.BASELINE.read_text())
-        self.assertEqual(check.check(counts, idiom, baseline), [])
+    def test_the_repository_is_clean(self):
+        self.assertEqual(check.check(check.scan(ROOT)), [])
 
 
 if __name__ == "__main__":

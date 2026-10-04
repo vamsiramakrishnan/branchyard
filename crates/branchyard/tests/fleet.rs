@@ -2,6 +2,7 @@
 //! No model is called: a judge harness is the fake agent answering a canned
 //! verdict from a file.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::sync::Arc;

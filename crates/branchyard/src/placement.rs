@@ -103,6 +103,7 @@ pub(crate) fn fan_spec(yard: &Yard, record: &Record) -> Result<Option<Planned>, 
 /// Journal `record`'s turn's `sandbox` step for a sandbox made for it
 /// before its turn (a fan's), so recovery destroys it if this engine stops
 /// first.
+#[allow(clippy::map_unwrap_or)] // ratchet: branchyard
 pub(crate) fn journal_handed(
     yard: &Yard,
     record: &Record,
@@ -402,13 +403,15 @@ impl Placement {
                 let environment = environment(yard, record, &key);
                 snapshots::acquire(
                     &store,
-                    record,
-                    fence,
                     provider.as_ref(),
-                    &key,
-                    &spec,
-                    environment.as_ref(),
                     &journal,
+                    snapshots::Wanted {
+                        record,
+                        fence,
+                        key: &key,
+                        spec: &spec,
+                        environment: environment.as_ref(),
+                    },
                 )
                 .inspect_err(|_| {
                     branchyard_support::best_effort(
@@ -507,6 +510,7 @@ impl Placement {
 
     /// A sandbox the worktree and home are copied into, and back from when
     /// the turn ends.
+    #[allow(clippy::let_underscore_must_use, clippy::map_unwrap_or)] // ratchet: branchyard
     fn copied(
         yard: &Yard,
         record: &Record,
@@ -552,13 +556,15 @@ impl Placement {
                 let environment = environment(yard, record, &key);
                 snapshots::acquire(
                     &store,
-                    record,
-                    fence,
                     remote.provider(),
-                    &key,
-                    &spec,
-                    environment.as_ref(),
                     &journal,
+                    snapshots::Wanted {
+                        record,
+                        fence,
+                        key: &key,
+                        spec: &spec,
+                        environment: environment.as_ref(),
+                    },
                 )
             }
         };
@@ -891,6 +897,7 @@ pub(crate) fn staging(yard: &Yard, actor: &str) -> PathBuf {
 /// step finished with it kept) stays, recorded for the next turn; a kept
 /// record for one destroyed here is removed. Returns what recovery should
 /// report, if anything.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn recover(
     yard: &Yard,
     record: &Record,

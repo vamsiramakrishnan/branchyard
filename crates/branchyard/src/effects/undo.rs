@@ -248,6 +248,7 @@ pub struct UndoOutcome {
 
 /// Perform the inverses of `chosen` (entry ids from `plan`) at `now_ms`,
 /// approved by `by` through `surface`.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn execute(
     yard: &Yard,
     plan: &UndoPlan,

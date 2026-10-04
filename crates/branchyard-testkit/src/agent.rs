@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used, clippy::panic)] // tests: a panic is the failure report
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;

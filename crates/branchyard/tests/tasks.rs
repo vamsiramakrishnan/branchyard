@@ -6,6 +6,7 @@
 //! conversation together; large files chunked, shared between tasks and
 //! restored byte for byte; and what sync reads.
 
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::collections::BTreeMap;

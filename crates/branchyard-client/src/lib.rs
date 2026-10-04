@@ -835,6 +835,7 @@ impl EventStream {
     /// Read a snapshot (such as [`Repo::branches`]) after this, then apply
     /// the entries that follow, and nothing recorded in between is missed.
     /// Call it before the first `next`; it does not retry.
+    #[allow(clippy::expect_used)] // ratchet: branchyard-client
     pub fn open(&mut self) -> Result<u64, Error> {
         if self.reader.is_none() {
             self.connect()?;
@@ -888,6 +889,7 @@ impl EventStream {
 impl Iterator for EventStream {
     type Item = Result<FeedEntry, Error>;
 
+    #[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-client
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.done {

@@ -603,6 +603,7 @@ impl Yard {
     /// Merge `branch`'s candidate into the local branch `target`, running the
     /// branch's check. Refuses if `target` moved since the check started, if
     /// the check fails, or if the merge conflicts.
+    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     pub fn merge(&self, branch: &str, target: &str) -> Result<Merged, Error> {
         let merged = ops::merge(self, branch, target)?;
         // The outcome store learns the merge; it never undoes one.
