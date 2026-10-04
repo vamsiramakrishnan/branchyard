@@ -59,6 +59,14 @@ pub(crate) struct Opened {
     pub effects: Arc<dyn EffectBackend>,
     /// [`Opened::again`], as [`EffectBackend`].
     pub again_effects: Box<dyn Fn() -> Arc<dyn EffectBackend> + Send + Sync>,
+    /// Runs SQL on the store's own database, behind the backend's back: to
+    /// plant rows no backend writes (see [`corrupt`]).
+    pub raw: Box<dyn Fn(&str)>,
+    /// The tables' name prefix: `""` on SQLite, `"by_"` on PostgreSQL.
+    pub prefix: &'static str,
+    /// The repository column's value on PostgreSQL, where every repository
+    /// shares the tables; `None` on SQLite, a file of one repository.
+    pub scope: Option<String>,
     _cleanup: Box<dyn std::any::Any>,
 }
 
@@ -115,7 +123,19 @@ pub(crate) fn sqlite(name: &str) -> Opened {
         let dir = dir.clone();
         move || Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap()) as Arc<dyn EffectBackend>
     };
+    let raw = {
+        let dir = dir.clone();
+        move |sql: &str| {
+            rusqlite::Connection::open(dir.join("state.db"))
+                .unwrap()
+                .execute_batch(sql)
+                .unwrap()
+        }
+    };
     Opened {
+        raw: Box::new(raw),
+        prefix: "",
+        scope: None,
         effects: shared.clone(),
         again_effects: Box::new(open_effects),
         pool: shared.clone(),
@@ -197,7 +217,19 @@ pub(crate) fn postgres(name: &str) -> Option<Opened> {
         let scope = scope.clone();
         move || Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap()) as Arc<dyn EffectBackend>
     };
+    let raw = {
+        let url = url.clone();
+        move |sql: &str| {
+            crate::pg::connect(&url)
+                .unwrap()
+                .batch_execute(sql)
+                .unwrap()
+        }
+    };
     Some(Opened {
+        raw: Box::new(raw),
+        prefix: "by_",
+        scope: Some(scope.clone()),
         effects: shared.clone(),
         again_effects: Box::new(open_effects),
         pool: shared.clone(),
@@ -2152,12 +2184,232 @@ pub(crate) fn pools(s: Opened) {
     assert_eq!(ids(again.slots(Some("h:/repo")).unwrap()), ["b"]);
 }
 
+/// `result` is an error that names `field`: a bad value is refused and says
+/// where, never clamped or defaulted.
+#[track_caller]
+fn refuses<T: std::fmt::Debug>(result: Result<T, Error>, field: &str) {
+    match result {
+        Ok(value) => panic!("expected an error naming {field:?}, got {value:?}"),
+        Err(error) => assert!(
+            error.to_string().contains(field),
+            "the error should name {field:?}: {error}"
+        ),
+    }
+}
+
+/// A number the database cannot hold is an error naming its column, not a
+/// clamped value; the largest one it can hold comes back unchanged.
+pub(crate) fn limits(s: Opened) {
+    use crate::models::{Api, Tokens, UsageRecord};
+    let store = &s.backend;
+    let too_large = u64::MAX;
+    let largest = i64::MAX as u64;
+
+    let mut huge = record("huge");
+    huge.created_ms = too_large;
+    refuses(store.write(&huge, None), "created_ms");
+    assert!(store.read("huge").unwrap().is_none(), "nothing was stored");
+
+    store.write(&record("a"), None).unwrap();
+    let late = RecordedEvent {
+        at_ms: too_large,
+        activity: Activity::Warning("late".into()),
+    };
+    refuses(store.append("a", &late, None), "at_ms");
+    assert_eq!(store.event_count("a").unwrap(), 0, "nothing was appended");
+    let edge = RecordedEvent {
+        at_ms: largest,
+        ..event(1)
+    };
+    store.append("a", &edge, None).unwrap();
+    assert_eq!(
+        store.events_since("a", 0, 10).unwrap()[0].1.at_ms,
+        largest,
+        "the largest storable value is not changed"
+    );
+
+    let outcome = OutcomeRecord {
+        id: "a#1".into(),
+        repo: "/src/app".into(),
+        branch: "a".into(),
+        kind: TaskKind::Bugfix,
+        harness: "codex".into(),
+        model: None,
+        effort: None,
+        outcome: BranchOutcome::Ready,
+        score: None,
+        cost_usd: None,
+        duration_ms: None,
+        turns: 1,
+        routed: false,
+        recorded_ms: too_large,
+    };
+    refuses(s.outcomes.put_outcome(&outcome), "recorded_ms");
+    assert!(s.outcomes.outcomes(None).unwrap().is_empty());
+
+    let usage = UsageRecord {
+        id: "u".into(),
+        at_ms: too_large,
+        branch: "a".into(),
+        turn: 1,
+        subject: "local:me".into(),
+        model: "m".into(),
+        api: Api::Generic,
+        backend: "b".into(),
+        tokens: Tokens {
+            input: too_large,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            cache_write_1h: 0,
+        },
+        cost_usd: None,
+        latency_ms: 1,
+        status: 200,
+        streamed: false,
+    };
+    refuses(s.usage.put_usage(&usage), "at_ms");
+    let tokens = UsageRecord {
+        at_ms: 1,
+        ..usage.clone()
+    };
+    refuses(s.usage.put_usage(&tokens), "input");
+    assert!(s.usage.usage_since(0).unwrap().is_empty());
+}
+
+/// Rows a backend never writes (a negative timestamp or PID, text no
+/// variant has) make a load fail naming the field. They are never read as
+/// `0`, as a default variant or as a refusal.
+pub(crate) fn corrupt(s: Opened) {
+    use crate::graph::{After, Dependency, GraphCommit};
+    use crate::models::{Api, Tokens, UsageRecord};
+    let store = &s.backend;
+    let (p, raw) = (s.prefix, &s.raw);
+    let scope = match &s.scope {
+        Some(repo) => format!("repo = '{repo}'"),
+        None => "1 = 1".to_owned(),
+    };
+
+    // A negative timestamp.
+    store.write(&record("a"), None).unwrap();
+    store.append("a", &event(1), None).unwrap();
+    raw(&format!("UPDATE {p}events SET at_ms = -5 WHERE {scope}"));
+    refuses(store.events_since("a", 0, 10), "at_ms");
+    refuses(store.feed_since(0, 10), "at_ms");
+
+    // A steer state no state has: not a refusal.
+    store.reserve("b", &owner("o")).unwrap();
+    let fence = granted(store.acquire(&record("b"), &owner("o"), TTL).unwrap());
+    let steer = store
+        .request_steer("b", "alice", "one", None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(store.pending_steers(&fence).unwrap().len(), 1);
+    raw(&format!(
+        "UPDATE {p}steers SET state = 'bogus' WHERE id = {steer}"
+    ));
+    refuses(store.steer("b", steer), "steer state");
+
+    // A dependency that waits for no known moment: not `settled`.
+    store
+        .write(&record_with_parent("root", None), None)
+        .unwrap();
+    let waiting = |name: &str| {
+        let mut record = record_with_parent(name, Some("root"));
+        record.info.status = BranchStatus::Waiting;
+        record
+    };
+    s.graph
+        .commit_graph(&GraphCommit {
+            parent: "root".into(),
+            expected: None,
+            create: vec![waiting("x"), waiting("y")],
+            add: vec![Dependency {
+                dependent: "y".into(),
+                prerequisite: "x".into(),
+                after: After::Integrated,
+            }],
+            remove: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(s.graph.dependencies("root").unwrap().len(), 1);
+    raw(&format!(
+        "UPDATE {p}graph_edges SET after = 'eventually' WHERE {scope}"
+    ));
+    refuses(s.graph.dependencies("root"), "after");
+
+    // An outcome and a task kind no router recorded.
+    let outcome = OutcomeRecord {
+        id: "a#1".into(),
+        repo: "/src/app".into(),
+        branch: "a".into(),
+        kind: TaskKind::Bugfix,
+        harness: "codex".into(),
+        model: None,
+        effort: None,
+        outcome: BranchOutcome::Ready,
+        score: None,
+        cost_usd: None,
+        duration_ms: None,
+        turns: 1,
+        routed: false,
+        recorded_ms: 5,
+    };
+    s.outcomes.put_outcome(&outcome).unwrap();
+    raw(&format!(
+        "UPDATE {p}outcomes SET outcome = 'bogus' WHERE {scope}"
+    ));
+    refuses(s.outcomes.outcomes(None), "outcome");
+    raw(&format!(
+        "UPDATE {p}outcomes SET outcome = 'ready', kind = 'nonsense' WHERE {scope}"
+    ));
+    refuses(s.outcomes.outcomes(None), "kind");
+
+    // A model API and a token count no gateway wrote.
+    let usage = UsageRecord {
+        id: "u".into(),
+        at_ms: 5,
+        branch: "a".into(),
+        turn: 1,
+        subject: "local:me".into(),
+        model: "m".into(),
+        api: Api::Anthropic,
+        backend: "b".into(),
+        tokens: Tokens {
+            input: 1,
+            output: 1,
+            cache_read: 0,
+            cache_write: 0,
+            cache_write_1h: 0,
+        },
+        cost_usd: None,
+        latency_ms: 1,
+        status: 200,
+        streamed: false,
+    };
+    s.usage.put_usage(&usage).unwrap();
+    assert_eq!(s.usage.usage_since(0).unwrap(), [usage]);
+    raw(&format!(
+        "UPDATE {p}model_usage SET api = 'bogus' WHERE {scope}"
+    ));
+    refuses(s.usage.usage_since(0), "api");
+    raw(&format!(
+        "UPDATE {p}model_usage SET api = 'anthropic', input = -1 WHERE {scope}"
+    ));
+    refuses(s.usage.usage_since(0), "input");
+
+    // A negative PID: not the kernel's reserved PID 0.
+    assert_eq!(store.leases().unwrap().len(), 1);
+    raw(&format!("UPDATE {p}leases SET pid = -1 WHERE {scope}"));
+    refuses(store.leases(), "pid");
+}
+
 /// Generate one `#[test]` per conformance check for a backend.
 macro_rules! suite {
     ($open:expr) => {
         suite!($open; fencing, expiry, steps, cancels, steers, records, reservations, events,
             concurrent_appends, races, storage, messages, delivery, graph, ports, sandboxes,
-            outcomes, knowledge, pools, usage, effects);
+            outcomes, knowledge, pools, usage, effects, limits, corrupt);
     };
     ($open:expr; $($check:ident),*) => {
         $(

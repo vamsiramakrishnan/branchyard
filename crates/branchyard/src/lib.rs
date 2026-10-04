@@ -137,6 +137,8 @@ mod pull_request;
 mod record;
 mod recover;
 mod run;
+#[cfg(test)]
+mod schema_parity;
 mod seats;
 pub mod services;
 mod snapshots;
