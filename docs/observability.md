@@ -113,6 +113,8 @@ Some failures are acceptable (a temporary directory that cannot be removed, a pr
 - A lock whose holder panicked (std calls it poisoned) is used anyway, as before, but the first use logs `lock `NAME` was poisoned by a panic in another thread; recovering its data (taken at FILE:LINE)`, once per poisoning.
 - A branch's turn thread that panics appends a `warning` event ("the turn's thread panicked: ...") to the branch's own event log, besides the log line, so `by events` and `by watch` show it.
 - A thread joined during shutdown that ended in a panic logs `join the NAME thread: it panicked: ...` instead of dropping the payload.
+- A system clock set before 1970 reads as the epoch, and the first read logs `the system clock is set before 1970-01-01; reading it as the epoch`. Every part of Branchyard reads the clock through `branchyard_support::time::now_ms`, so this is one message, not one silent zero per crate.
+- A failed read of the system random generator is an error where an id is made (`by run` and the other commands that start a task say `the system random generator failed`); it no longer yields an id made from zeros. A seed for jitter or routing that cannot be had from the system falls back to one mixed from the clock and process id, and logs `seeding from the clock and process id instead`.
 
 Set `BRANCHYARD_LOG=branchyard_support=off` to silence them; there is no other switch, on purpose.
 

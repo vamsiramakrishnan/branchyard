@@ -30,6 +30,27 @@ Two checks enforce this, in CI and locally:
 
 - `cargo test -p branchyard-support` scans every crate and fails on the poison idiom; `python3 tools/check_silent_failures.py` does the same and also counts bare `let _ =` in non-test code per crate against `tools/silent_failures.json`. A count may not rise. When you remove some, run `python3 tools/check_silent_failures.py --update` and commit the lower baseline, so the gain is kept. Do not raise it: convert the new site instead. Where discarding really is right (a `write!` to a closed pipe, a `send` to a receiver that hung up), a `let _ =` is allowed only if the baseline is raised for that crate in the same change and the line says why.
 
+## Time, ids and randomness
+
+Do not read the system clock, split a date, or write a random generator yourself. [`branchyard-support`](crates/branchyard-support/src/lib.rs) has one of each, on `jiff` and `getrandom`; add `branchyard-support = { path = "../branchyard-support" }` to the crate if it is not there. Times are milliseconds since the epoch in a `u64`, as everywhere in Branchyard.
+
+| You want | Use |
+| --- | --- |
+| the time now | `branchyard_support::time::now_ms()` (seconds: `now_ms() / 1000`; a unique-name salt: `now_nanos()`); a clock set before 1970 reads as 0 and logs once |
+| the time of a file | `time::system_time_ms(metadata.modified()?)` |
+| to write a time | `rfc3339(ms)` (`2026-09-26T12:34:56.789Z`), `rfc3339_secs(ms)`, `utc_minute(ms)` (`2026-10-01 14:30 UTC`), `amz_date(ms)`, `http_date(ms)` |
+| to read a time | `parse_rfc3339(text)` or `parse_http_date(text)`; both return `Result<u64, TimeError>`, so a malformed time is an error with its text, not a silent `None` (`.ok()` where you really mean "absent") |
+| the start of the UTC day and month | `period_starts(ms)` |
+| a duration (`30s`, `5m`, `1.5h`, `7d`) | `parse_duration(text)` and `human_duration(d)` |
+| a seeded generator, the same sequence on every platform and release | `rng::SplitMix64::new(seed)` (`next_u64`, `below`, `uniform`); `rng::splitmix64(state)` is a `const fn` for fixed tables |
+| a seed that differs on every run | `rng::fresh_seed()` |
+| random bytes, with the failure | `rng::fill_random(&mut buf)?` (returns `EntropyError`; it converts into `std::io::Error`) |
+| an id that sorts by creation time | `branchyard_support::new_ulid()?` (fails, rather than minting an id from zeros, when the system generator does) |
+
+A seeded generator is `SplitMix64` and not `rand`'s `SmallRng` on purpose: a seeded route, a retry schedule in a test and the chunk table in `tasks/large.rs` promise to repeat, and `rand` does not promise its stream across versions. Keys and tokens do not come from here; they use `ring`.
+
+`cargo test -p branchyard-support` (test `one_clock`) fails on a crate that spells the calendar or SplitMix64 constants, defines its own `now_ms`, `now_secs` or `unix_now`, or names `SystemTime::now` or `UNIX_EPOCH`. There are no exceptions to ratchet: the count is zero. A new date format goes into `time.rs` with a row in the golden table of `crates/branchyard-support/tests/clock.rs` (produced by an independent implementation, not by the code under test), so a format that drifts fails there before it reaches a stored file.
+
 ## Changing copied controls
 
 `vendor/` is a pinned reference snapshot of upstream files, not a promise to stay byte-identical with upstream. `vendor.lock.json` pins every file to an upstream commit with its Git blob ID and SHA-256 as fetched; keep those pins as they are (they describe upstream, not the local copy), and keep each file's path and license.
