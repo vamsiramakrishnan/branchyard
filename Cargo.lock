@@ -646,10 +646,10 @@ dependencies = [
  "branchyard-substrate",
  "branchyard-support",
  "branchyard-testkit",
+ "branchyard-wire",
  "branchyard-workspace",
  "glob",
  "hex",
- "httparse",
  "percent-encoding",
  "postgres",
  "rcgen",
@@ -706,6 +706,7 @@ dependencies = [
  "branchyard-support",
  "branchyard-sync",
  "branchyard-testkit",
+ "branchyard-wire",
  "branchyard-workspace",
  "clap",
  "clap_complete",
@@ -732,7 +733,7 @@ dependencies = [
  "backon",
  "blake3",
  "branchyard",
- "httparse",
+ "branchyard-wire",
  "percent-encoding",
  "rustls",
  "rustls-pki-types",
@@ -962,8 +963,8 @@ dependencies = [
  "branchyard-client",
  "branchyard-support",
  "branchyard-sync",
+ "branchyard-wire",
  "hex",
- "httparse",
  "ring",
  "rusqlite",
  "rustls",
@@ -979,6 +980,13 @@ dependencies = [
  "branchyard-support",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "branchyard-wire"
+version = "0.0.1"
+dependencies = [
+ "httparse",
 ]
 
 [[package]]

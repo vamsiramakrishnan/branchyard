@@ -1,0 +1,18 @@
+{
+  "_about": "What tools/check_wire.py still tolerates outside crates/branchyard-wire, per file. A count may only fall: lower an entry when the code shrinks, never raise one or add a file. See CONTRIBUTING.md.",
+  "framing_literals": {
+    "crates/branchyard-bridge/src/ws.rs": 1,
+    "crates/branchyard-sync/src/auth/sigv4.rs": 1,
+    "crates/branchyard-sync/src/store/azure.rs": 2,
+    "crates/branchyard-sync/src/store/s3.rs": 1,
+    "crates/branchyard-sync/src/testing/azure.rs": 1,
+    "crates/branchyard-sync/src/testing/s3.rs": 1,
+    "crates/branchyard-sync/src/testing/server.rs": 2,
+    "crates/branchyard/src/effects/proxy.rs": 4,
+    "crates/branchyard/src/models/gateway.rs": 4
+  },
+  "hand_written_heads": {
+    "crates/branchyard-bridge/src/ws.rs": 1,
+    "crates/branchyard-runtime/src/egress.rs": 1
+  }
+}

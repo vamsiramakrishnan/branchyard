@@ -76,6 +76,7 @@ Shared test infrastructure lives in one crate, `crates/branchyard-testkit`, a de
 `BY_TEST_TIMEOUT_SCALE=3` multiplies every wait's timeout (`wait::until` and friends, and the mock server's read timeout) by three; use it to check a test against a slow machine. It does not stretch `wait::settle`: that is time against the code under test's own clocks. A test you write must pass with it.
 
 The hygiene check also keeps three counted ratchets in `tools/test_hygiene_ratchet.json`: calls to `wait::settle`, hand-rolled `std::env::temp_dir()` directories and hand-rolled `TcpListener::bind` servers, per file. A count above the file fails; a count below it fails until the file is lowered (`python3 tools/check_test_hygiene.py --lower`). They can only fall: when you touch one of the listed files, move it onto the kit and lower its count.
+
 ## Storing values in a state store
 
 Anything a store keeps in a column (SQLite, PostgreSQL, the server's operation, trigger and companion stores) converts through [`crates/branchyard/src/store_codec.rs`](crates/branchyard/src/store_codec.rs), re-exported to the server as `branchyard::store_codec`. Both databases hold signed 64-bit integers; the code holds unsigned ones. Do not write `as i64`, `as u64`, `as u32`, `as u16`, `as i32`, `as usize`, `i64::try_from(x).unwrap_or(i64::MAX)` or `u32::try_from(x).unwrap_or(0)`: they turn a value the column cannot hold into a different value (a saturated timestamp, PID `0`, a negative stored PID wrapped into someone else's). Instead:
@@ -96,6 +97,22 @@ A `wait`, `max_duration` or similar whose huge value (`Duration::MAX`, an enormo
 Enum text stored in a column comes from the enum, not a hand-written `match` with a default arm: derive `strum::Display`, `strum::EnumString`, `strum::EnumIter` and `strum::IntoStaticStr` with `#[strum(serialize_all = "snake_case")]` next to serde's `rename_all = "snake_case"`, write it with `Display` (or `<&'static str>::from`) and read it with `parse_text`. A test in `store_codec.rs` checks that strum's text equals serde's for each such enum; add yours there.
 
 When you add a table or column, add it to **both** `sqlite.rs` (`SCHEMA`) and `pg.rs` (`TABLES`/`STEPS`); `schema_parity.rs` fails otherwise, and a real difference goes in its `ALLOWED` list with the reason. Test a new column's edge in `conformance.rs` (it runs on SQLite always, and on PostgreSQL when `BY_TEST_POSTGRES_URL` is set): see `limits` and `corrupt`. `store_codec.rs` also holds a guard that fails on a lossy conversion in the store files and a per-file ratchet (`CAST_BUDGET`) of the `as i64`/`as u64`/`as u32`/`as u16`/`as i32`/`as usize` casts left in each guarded file, each budget justified in a comment; lower a number when you remove a cast, never raise it. A stored PID, port, turn, count or priority is never one of the casts that are left.
+
+## Speaking HTTP/1.1: use `branchyard-wire`
+
+Every hand-written HTTP/1.1 reader or writer goes through [`crates/branchyard-wire`](crates/branchyard-wire). It is the only place that parses a head, decides how a body is framed, decodes `Transfer-Encoding: chunked`, or splits an `http(s)` URL, and it answers malformed input with a typed `WireError` rather than a default. Do not call `httparse`, parse a chunk size, or `parse::<u64>()` a `Content-Length` anywhere else; `python3 tools/check_wire.py` (in CI) fails on the first two and counts the rest.
+
+How to:
+
+- **Read a request** (a server): `read_request_head(&mut reader, MAX_HEAD)?`, then `request_framing(&head.headers)?` (refuses `Content-Length` with `Transfer-Encoding`, duplicate or non-decimal lengths, an unframeable coding), then `read_body(&mut reader, framing, MAX_BODY)?`. Answer any `Err` with `400`.
+- **Read a response** (a client): `read_response_head`, `response_framing(status, &headers, head_only)?`, then `Body::new(reader, framing)`, which is an `io::Read` that errors when the body is cut short or a chunk is malformed. `wire_error(&io_error)` gets the typed cause back.
+- **Write a request**: `request_head(method, target, headers, content_length)?`, which refuses a header name or value that could split the head. Write chunks with `write_chunk` and end with `LAST_CHUNK`.
+- **Parse a URL**: `HttpUrl::parse` (strict: no userinfo, fragment, whitespace or stray `:`), then `host_header`, `origin`, `target`. Do not split on `://` by hand.
+- **Reuse the client**: to call an HTTP API from the CLI, sync or server crates, use `branchyard_client::http` (`Endpoint`, `connect`, `send`), which already speaks the codec and TLS. Do not open a raw socket for it.
+
+To add a malformed case (a vector that must be refused, or a valid one that must be read), put it in `crates/branchyard-wire/src/corpus.rs`. The wire crate's tests, the gateway's request reader, the backend and SDK response readers and the sync mock server all run the whole corpus, so one vector tests every consumer.
+
+`tools/wire_ratchet.json` lists what is still hand-written outside the crate, per file (header drop lists and serialisers, and two head readers: the WebSocket handshake in `branchyard-bridge` and the egress proxy in `branchyard-runtime`). A count may only fall. If you remove a site, lower its number (the check fails until you do); never raise one or add a file. Migrate a site to the wire crate instead.
 
 ## Validation
 

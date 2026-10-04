@@ -14,7 +14,7 @@ schema = ["dep:schemars", "branchyard/schema"]
 [dependencies]
 blake3 = "1"
 branchyard = { path = "../branchyard" }
-httparse = "1"
+branchyard-wire = { path = "../branchyard-wire" }
 percent-encoding = "2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }

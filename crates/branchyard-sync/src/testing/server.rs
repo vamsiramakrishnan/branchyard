@@ -3,11 +3,13 @@
 
 use branchyard_support::LockExt as _;
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+
+use branchyard_wire as wire;
 
 use crate::http::{Request, Url};
 use crate::util::query_pairs;
@@ -242,44 +244,31 @@ fn serve(stream: TcpStream, handler: &Handler, log: &Mutex<Vec<String>>) {
         Ok(s) => s,
         Err(_) => return,
     });
-    let mut head = Vec::new();
-    loop {
-        let before = head.len();
-        match reader.read_until(b'\n', &mut head) {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {}
+    // Heads and bodies are the wire codec's: a request it cannot frame
+    // (both lengths, a bad chunk, a short body) is answered 400.
+    let read = |reader: &mut BufReader<TcpStream>| -> Result<Option<_>, wire::WireError> {
+        let Some(head) = wire::read_request_head(reader, 64 * 1024)? else {
+            return Ok(None);
+        };
+        let framing = wire::request_framing(&head.headers)?;
+        let body = wire::read_body(&mut *reader, framing, 256 << 20)?;
+        Ok(Some((head, body)))
+    };
+    let (head, body) = match read(&mut reader) {
+        Ok(Some(request)) => request,
+        Ok(None) => return,
+        Err(why) => {
+            let text = why.to_string();
+            let mut stream = stream;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{text}",
+                text.len()
+            );
+            return;
         }
-        let line = &head[before..];
-        if line == b"\r\n" || line == b"\n" {
-            break;
-        }
-    }
-    let mut headers = [httparse::EMPTY_HEADER; 64];
-    let mut parsed = httparse::Request::new(&mut headers);
-    if !matches!(parsed.parse(&head), Ok(httparse::Status::Complete(_))) {
-        return;
-    }
-    let method = parsed.method.unwrap_or("GET").to_owned();
-    let target = parsed.path.unwrap_or("/").to_owned();
-    let headers: Vec<(String, String)> = parsed
-        .headers
-        .iter()
-        .map(|h| {
-            (
-                h.name.to_owned(),
-                String::from_utf8_lossy(h.value).trim().to_owned(),
-            )
-        })
-        .collect();
-    let length: usize = headers
-        .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, v)| v.parse().ok())
-        .unwrap_or(0);
-    let mut body = vec![0u8; length];
-    if reader.read_exact(&mut body).is_err() {
-        return;
-    }
+    };
+    let (method, target, headers) = (head.method, head.target, head.headers);
     let (path, query) = match target.split_once('?') {
         Some((p, q)) => (p.to_owned(), q.to_owned()),
         None => (target.clone(), String::new()),

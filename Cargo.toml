@@ -20,6 +20,7 @@ members = [
     "crates/branchyard-support",
     "crates/branchyard-sync",
     "crates/branchyard-testkit",
+    "crates/branchyard-wire",
     "crates/branchyard-workspace",
 ]
 resolver = "2"
