@@ -6,60 +6,22 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Once, OnceLock};
+use std::sync::Once;
 
 use branchyard::{Activity, Event, RecordedEvent, TaskBuilder, TaskOptions, Yard};
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-static HERMETIC: Once = Once::new();
+pub use branchyard_testkit::fake_agent_here as fake_agent;
 
-/// The `fake-acp-agent` binary from branchyard-runtime, built once per test
-/// binary into this build's target directory.
-pub fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| built("branchyard-runtime", "fake-acp-agent"))
-}
-
-/// The `branchyard-bridge` binary, built once per test binary.
+/// The `branchyard-bridge` binary, built once per target directory.
 pub fn bridge_binary() -> &'static Path {
-    static BRIDGE: OnceLock<PathBuf> = OnceLock::new();
-    BRIDGE.get_or_init(|| built("branchyard-bridge", "branchyard-bridge"))
+    branchyard_testkit::built(
+        "branchyard-bridge",
+        "branchyard-bridge",
+        &std::env::current_exe().unwrap(),
+    )
 }
 
-/// Build `bin` of `package` into this build's target directory. Cargo
-/// exposes a binary's path only to its own package's tests, so it is built
-/// here.
-fn built(package: &str, bin: &str) -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    // target/<profile>/deps/<test binary>
-    let profile_dir = exe.parent().and_then(Path::parent).unwrap().to_path_buf();
-    let target_dir = profile_dir.parent().unwrap();
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut command = Command::new(cargo);
-    command
-        .args(["build", "--quiet", "--offline", "--manifest-path"])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-        .args(["-p", package, "--bin", bin])
-        .env("CARGO_TARGET_DIR", target_dir);
-    match profile_dir.file_name().and_then(|n| n.to_str()) {
-        Some("debug") => {}
-        Some("release") => {
-            command.arg("--release");
-        }
-        Some(other) => {
-            command.args(["--profile", other]);
-        }
-        None => panic!("unexpected test binary location {}", exe.display()),
-    }
-    let status = command
-        .status()
-        .unwrap_or_else(|e| panic!("run cargo to build {bin}: {e}"));
-    assert!(status.success(), "building {bin} failed");
-    let path = profile_dir.join(bin);
-    assert!(path.is_file(), "{} was not built", path.display());
-    path
-}
+static HERMETIC: Once = Once::new();
 
 /// A temporary directory holding a repository at `repo/` with one commit
 /// on `main`. Removed on drop.
@@ -67,6 +29,8 @@ pub struct Fixture {
     pub dir: PathBuf,
     pub root: PathBuf,
     pub yard: Yard,
+
+    _scratch: branchyard_testkit::Scratch,
 }
 
 impl Fixture {
@@ -85,14 +49,9 @@ impl Fixture {
         // differently from `cargo test --workspace`), which must not count
         // against a test's own timing.
         fake_agent();
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-sdk-test-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
+        let scratch = branchyard_testkit::Scratch::new("sdk");
+        let dir = scratch.path().to_path_buf();
         fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
         let root = dir.join("repo");
         git(&root, &["init", "-q", "-b", "main"]);
         git(&root, &["config", "user.name", "Test"]);
@@ -102,7 +61,12 @@ impl Fixture {
         git(&root, &["add", "."]);
         git(&root, &["commit", "-q", "-m", "initial"]);
         let yard = Yard::open(&root).unwrap();
-        Fixture { dir, root, yard }
+        Fixture {
+            dir,
+            root,
+            yard,
+            _scratch: scratch,
+        }
     }
 
     pub fn git(&self, args: &[&str]) -> String {
@@ -120,12 +84,6 @@ impl Fixture {
 
     pub fn task(&self, prompt: &str) -> TaskBuilder {
         self.yard.task(prompt).options(self.options())
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 

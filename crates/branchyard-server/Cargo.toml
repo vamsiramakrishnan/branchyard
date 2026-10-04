@@ -62,6 +62,7 @@ ring = "0.17"
 base64 = "0.22"
 
 [dev-dependencies]
+branchyard-testkit = { path = "../branchyard-testkit" }
 blake3 = "1"
 branchyard-sync = { path = "../branchyard-sync", features = ["testing"] }
 tempfile = "3.27.0"

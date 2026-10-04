@@ -5,73 +5,29 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::process::Output;
 
+use branchyard_testkit::fake_agent;
+use branchyard_testkit::wait;
 use serde_json::Value;
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
+/// The kit's repository, plus what this file adds.
+struct Repo(branchyard_testkit::Repo);
 
-/// Built once per test binary, as in `tests/cli.rs`.
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(env!("CARGO_BIN_EXE_by"));
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        profile_dir.join("fake-acp-agent")
-    })
-}
-
-struct Repo {
-    dir: PathBuf,
-    root: PathBuf,
+impl std::ops::Deref for Repo {
+    type Target = branchyard_testkit::Repo;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl Repo {
     fn new() -> Repo {
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-review-test-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
-        let repo = Repo {
-            root: dir.join("repo"),
-            dir,
-        };
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@localhost"]);
-        fs::write(repo.root.join("a.txt"), "one\nkeep\n").unwrap();
-        repo.git(&["add", "."]);
-        repo.git(&["commit", "-q", "-m", "initial"]);
-        repo
+        let mut kit = branchyard_testkit::repo!(&[("a.txt", "one\nkeep\n")]);
+        kit.remove_env("VISUAL");
+        kit.remove_env("EDITOR");
+        Repo(kit)
     }
 
     /// A fake editor: runs `script` with the review file as `$1`.
@@ -80,39 +36,6 @@ impl Repo {
         fs::write(&path, format!("#!/bin/sh\nset -e\n{script}\n")).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         path.display().to_string()
-    }
-
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
-        command
-            .current_dir(&self.root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("NO_COLOR", "1")
-            .env(
-                "BRANCHYARD_USER_CONFIG",
-                "/nonexistent/branchyard-config.toml",
-            )
-            .env_remove("VISUAL")
-            .env_remove("EDITOR");
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-            "BRANCHYARD_REMOTE",
-            "BRANCHYARD_TOKEN_FILE",
-            "BRANCHYARD_REPO",
-        ] {
-            command.env_remove(var);
-        }
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let out = self.command("git").args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", stderr(&out));
-        String::from_utf8(out.stdout).unwrap()
     }
 
     /// `by <args>` with `EDITOR` set to `editor`.
@@ -125,7 +48,7 @@ impl Repo {
     }
 
     fn agent(&self) -> String {
-        fake_agent().display().to_string()
+        fake_agent!().display().to_string()
     }
 
     fn ok(&self, out: Output) -> String {
@@ -154,12 +77,6 @@ impl Repo {
         self.root
             .join(".branchyard/review")
             .join(format!("{branch}.diff"))
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -339,22 +256,16 @@ fn detach_sends_in_the_background() {
     let error = stderr(&out);
     assert!(out.status.success(), "{error}");
     assert!(error.contains("sending in the background"), "{error}");
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while repo.prompts("feat").len() < 2 {
-        assert!(Instant::now() < deadline, "the background send never ran");
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    wait::until("the background send to run", || {
+        repo.prompts("feat").len() >= 2
+    });
     assert!(repo.prompts("feat")[1].contains(EXPECTED));
     // Let the background turn end before the repository is removed.
-    loop {
+    wait::until("the background turn to end", || {
         let show: Value =
             serde_json::from_str(&repo.ok(repo.by(None, &["show", "feat", "--json"]))).unwrap();
-        if show["status"] != "running" {
-            break;
-        }
-        assert!(Instant::now() < deadline, "the background turn never ended");
-        std::thread::sleep(Duration::from_millis(200));
-    }
+        show["status"] != "running"
+    });
     // Other send options cannot be carried to the background.
     let out = repo.by(
         Some(&commenting),

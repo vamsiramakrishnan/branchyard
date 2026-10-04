@@ -26,7 +26,8 @@ use branchyard_server::config::WorkspaceScripts;
 use branchyard_server::triggers::events::sign;
 use branchyard_server::triggers::Clock;
 use branchyard_server::Config;
-use common::{eventually, post, raw, run, task, wait, Fixture, Server};
+use branchyard_testkit::wait;
+use common::{await_operation, post, raw, run, task, Fixture, Server};
 
 /// 2026-09-21T14:13:20Z.
 const T0: u64 = 1_790_000_000_000;
@@ -70,7 +71,7 @@ fn runs_when(
     done: impl Fn(&[TriggerRun]) -> bool,
 ) -> Vec<TriggerRun> {
     let mut runs = Vec::new();
-    eventually(what, || {
+    wait::until(what, || {
         runs = client.trigger_runs(trigger, 50).unwrap();
         done(&runs)
     });
@@ -136,7 +137,10 @@ fn a_schedule_fires_once_when_the_clock_reaches_it_and_its_outcome_is_recorded()
     assert_eq!(trigger.next_due_ms, Some(T0 + 3_600_000));
     assert_eq!(trigger.webhook_url, None);
     // Nothing before its time, however often the dispatcher looks.
-    std::thread::sleep(Duration::from_millis(300));
+    wait::settle(
+        "the dispatcher looks often and still finds nothing due",
+        Duration::from_millis(300),
+    );
     assert!(client.trigger_runs("nightly", 10).unwrap().is_empty());
 
     clock.store(T0 + 3_600_000 + 5_000, Ordering::SeqCst);
@@ -147,7 +151,7 @@ fn a_schedule_fires_once_when_the_clock_reaches_it_and_its_outcome_is_recorded()
     let fired = &runs[0];
     assert_eq!(fired.key, format!("schedule:{}", T0 + 3_600_000));
     assert_eq!(fired.branches, ["nightly-20260921-1513"]);
-    let op = wait(&client, fired.operation.as_ref().unwrap());
+    let op = await_operation(&client, fired.operation.as_ref().unwrap());
     assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
     let runs = runs_when(&client, "nightly", "the run to settle", |runs| {
         runs[0].outcome.is_some()
@@ -156,7 +160,7 @@ fn a_schedule_fires_once_when_the_clock_reaches_it_and_its_outcome_is_recorded()
     let shown = client.trigger("nightly").unwrap();
     assert_eq!(shown.next_due_ms, Some(T0 + 7_200_000));
     // Still once, after more ticks at the same time.
-    std::thread::sleep(Duration::from_millis(300));
+    wait::settle("more ticks at the same time", Duration::from_millis(300));
     assert_eq!(client.trigger_runs("nightly", 10).unwrap().len(), 1);
     let prompt = client.repo("app").branch("nightly-20260921-1513").unwrap();
     assert_eq!(prompt.name, "nightly-20260921-1513");
@@ -205,7 +209,7 @@ fn github_deliveries_are_verified_matched_rendered_and_never_fired_twice() {
     let fired = &runs[0];
     assert_eq!(fired.branches, ["fix-42"]);
     assert_eq!(fired.event.as_ref().unwrap().number.as_deref(), Some("42"));
-    let op = wait(&client, fired.operation.as_ref().unwrap());
+    let op = await_operation(&client, fired.operation.as_ref().unwrap());
     assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
     let diff = client.repo("app").diff("fix-42").unwrap();
     assert!(diff.contains("issue-42.txt"), "{diff}");
@@ -577,7 +581,10 @@ fn a_run_recorded_before_a_restart_fires_after_it() {
     let body = r#"{"id":"r-1"}"#;
     let headers = generic_headers(created.secret.as_ref().unwrap(), body);
     assert_eq!(deliver(&server, &created.trigger.id, &headers, body).0, 202);
-    std::thread::sleep(Duration::from_millis(200));
+    wait::settle(
+        "a delivery that must stay pending would have moved by now",
+        Duration::from_millis(200),
+    );
     assert_eq!(
         client.trigger_runs("later", 10).unwrap()[0].state,
         RunState::Pending
@@ -593,7 +600,7 @@ fn a_run_recorded_before_a_restart_fires_after_it() {
     });
     assert_eq!(runs.len(), 1);
     assert_eq!(
-        wait(&client, runs[0].operation.as_ref().unwrap()).state,
+        await_operation(&client, runs[0].operation.as_ref().unwrap()).state,
         OperationState::Succeeded
     );
 }
@@ -702,7 +709,7 @@ fn email_deliveries_fire_once(config: Config) {
     assert_eq!(fired.branches, ["mail-reply"]);
     let email = fired.event.as_ref().unwrap().email.as_ref().unwrap();
     assert_eq!(email.from, "bob@partner.example");
-    let op = wait(&client, fired.operation.as_ref().unwrap());
+    let op = await_operation(&client, fired.operation.as_ref().unwrap());
     assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
     let diff = client.repo("app").diff("mail-reply").unwrap();
     assert!(diff.contains("+bob@partner.example"), "{diff}");
@@ -879,7 +886,7 @@ fn email_deliveries_fire_once(config: Config) {
         runs.iter().any(|r| r.state == RunState::Fired)
     });
     let fired = runs.iter().find(|r| r.state == RunState::Fired).unwrap();
-    let op = wait(&client, fired.operation.as_ref().unwrap());
+    let op = await_operation(&client, fired.operation.as_ref().unwrap());
     assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
     assert_eq!(runs.len(), 2, "{runs:?}");
 }
@@ -1034,11 +1041,14 @@ mod postgres {
         let runs = runs_when(&client, "both", "the scheduled run to fire", |runs| {
             runs.iter().any(|r| r.state == RunState::Fired)
         });
-        std::thread::sleep(Duration::from_millis(500));
+        wait::settle(
+            "the other server would have fired too, if it was going to",
+            Duration::from_millis(500),
+        );
         let runs_b = b.client().trigger_runs("both", 10).unwrap();
         assert_eq!(runs_b.len(), 1, "{runs_b:?}");
         assert_eq!(
-            wait(&client, runs[0].operation.as_ref().unwrap()).state,
+            await_operation(&client, runs[0].operation.as_ref().unwrap()).state,
             OperationState::Succeeded
         );
     }

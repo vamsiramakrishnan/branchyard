@@ -10,16 +10,13 @@ mod mock_gateway;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
+use branchyard_testkit::fake_agent;
+use branchyard_testkit::wait;
 use mock_gateway::MockGateway;
 use serde_json::Value;
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Anvil's packaging commands, as far as Branchyard calls them.
 const FAKE_ANVIL: &str = r##"#!/usr/bin/env python3
@@ -41,69 +38,34 @@ else:
 
 const BUNDLES: [&str; 4] = ["slack", "github", "gmail", "legacy"];
 
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(env!("CARGO_BIN_EXE_by"));
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        profile_dir.join("fake-acp-agent")
-    })
-}
-
+/// The kit's repository, plus what this file adds.
 struct Repo {
-    dir: PathBuf,
-    root: PathBuf,
+    kit: branchyard_testkit::Repo,
     mock: MockGateway,
     script: String,
+}
+
+impl std::ops::Deref for Repo {
+    type Target = branchyard_testkit::Repo;
+    fn deref(&self) -> &Self::Target {
+        &self.kit
+    }
 }
 
 impl Repo {
     /// A repository whose gateway is the mock, with `approvals` as its
     /// `[approvals]` table's lines.
     fn new(approvals: &str) -> Repo {
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-cli-effects-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
-        let root = dir.join("repo");
+        let mut kit = branchyard_testkit::repo!();
+        kit.set_env("USER", "ana");
         let mock = MockGateway::start();
-        let script = dir.join("call.py");
+        let script = kit.dir.join("call.py");
         fs::write(&script, mock_gateway::CALL_PY).unwrap();
         let repo = Repo {
-            root,
             mock,
             script: script.display().to_string(),
-            dir,
+            kit,
         };
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@localhost"]);
-        fs::write(repo.root.join("a.txt"), "one\n").unwrap();
         let anvil = repo.dir.join("fake-anvil");
         fs::write(&anvil, FAKE_ANVIL).unwrap();
         fs::set_permissions(&anvil, fs::Permissions::from_mode(0o755)).unwrap();
@@ -127,45 +89,8 @@ impl Repo {
         )
         .unwrap();
         repo.git(&["add", "."]);
-        repo.git(&["commit", "-q", "-m", "initial"]);
+        repo.git(&["commit", "-q", "--amend", "--no-edit"]);
         repo
-    }
-
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
-        command
-            .current_dir(&self.root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("NO_COLOR", "1")
-            .env("USER", "ana")
-            .env(
-                "BRANCHYARD_USER_CONFIG",
-                "/nonexistent/branchyard-config.toml",
-            );
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-        ] {
-            command.env_remove(var);
-        }
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let out = self.command("git").args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}");
-        String::from_utf8(out.stdout).unwrap()
-    }
-
-    fn by(&self, args: &[&str]) -> Output {
-        self.command(env!("CARGO_BIN_EXE_by"))
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -199,7 +124,7 @@ impl Repo {
                 "--harness",
                 "gemini-cli",
                 "--command",
-                &fake_agent().display().to_string(),
+                &fake_agent!().display().to_string(),
                 "--yes",
             ]
             .iter()
@@ -223,12 +148,6 @@ impl Repo {
     }
 }
 
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
-    }
-}
-
 fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
@@ -242,18 +161,6 @@ fn python() -> bool {
         .arg("--version")
         .output()
         .is_ok_and(|o| o.status.success())
-}
-
-/// Wait for `ready`, at most a minute.
-fn until<T>(what: &str, mut ready: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        if let Some(found) = ready() {
-            return found;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
 }
 
 #[test]
@@ -398,7 +305,7 @@ fn an_ask_is_answered_from_another_by_and_a_killed_engine_is_reconciled() {
         &repo.call("github__issues_create", r#"{"title": "t"}"#),
         "asker",
     );
-    let asks = until("an ask", || {
+    let asks = wait::until("an ask", || {
         let asks = repo.json(&["approvals", "--json"]);
         (!asks.as_array().unwrap().is_empty()).then_some(asks)
     });

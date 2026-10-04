@@ -644,6 +644,7 @@ dependencies = [
  "branchyard-runtime",
  "branchyard-sandbox",
  "branchyard-substrate",
+ "branchyard-testkit",
  "branchyard-workspace",
  "glob",
  "httparse",
@@ -667,6 +668,7 @@ name = "branchyard-bridge"
 version = "0.0.1"
 dependencies = [
  "branchyard-sandbox",
+ "branchyard-testkit",
  "clap",
  "libc",
  "rcgen",
@@ -692,6 +694,7 @@ dependencies = [
  "branchyard-setup",
  "branchyard-substrate",
  "branchyard-sync",
+ "branchyard-testkit",
  "branchyard-workspace",
  "clap",
  "clap_complete",
@@ -753,6 +756,7 @@ version = "0.0.1"
 dependencies = [
  "branchyard",
  "branchyard-client",
+ "branchyard-testkit",
  "clap",
  "serde",
  "serde_json",
@@ -767,6 +771,7 @@ name = "branchyard-mcp"
 version = "0.0.1"
 dependencies = [
  "branchyard",
+ "branchyard-testkit",
  "clap",
  "rmcp",
  "serde_json",
@@ -821,6 +826,7 @@ version = "0.0.1"
 dependencies = [
  "branchyard-harness",
  "branchyard-sandbox",
+ "branchyard-testkit",
  "rustix",
  "serde_json",
 ]
@@ -841,6 +847,7 @@ dependencies = [
  "branchyard-client",
  "branchyard-setup",
  "branchyard-sync",
+ "branchyard-testkit",
  "clap",
  "futures-util",
  "hex",
@@ -892,6 +899,7 @@ dependencies = [
  "branchyard-bridge",
  "branchyard-sandbox",
  "branchyard-substrate",
+ "branchyard-testkit",
  "branchyard-workspace",
  "prost",
  "prost-types",
@@ -923,9 +931,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "branchyard-testkit"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "branchyard-workspace"
 version = "0.0.1"
 dependencies = [
+ "branchyard-testkit",
  "rustix",
 ]
 

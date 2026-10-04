@@ -12,7 +12,8 @@ use branchyard_client::api::{
     TaskRequest,
 };
 use branchyard_client::{new_key, Client};
-use common::{get, post, raw, run, task, wait, Fixture, Server, TOKEN};
+use branchyard_testkit::wait;
+use common::{await_operation, get, post, raw, run, task, Fixture, Server, TOKEN};
 use serde_json::Value;
 
 fn json(body: &str) -> Value {
@@ -234,7 +235,7 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
         (op.kind, op.branches.as_slice()),
         (OperationKind::Spawn, &["kid".to_owned()][..])
     );
-    let op = wait(&client, &op.id);
+    let op = await_operation(&client, &op.id);
     assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
     let result = op.result.unwrap();
     let inspection = result.inspection.unwrap();
@@ -277,7 +278,7 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
     let no_parent = repo.report("root", "root has no parent").unwrap_err();
     assert_eq!(no_parent.code(), Some("denied"));
 
-    let op = wait(&client, &repo.integrate("kid", &new_key()).unwrap().id);
+    let op = await_operation(&client, &repo.integrate("kid", &new_key()).unwrap().id);
     assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
     assert_eq!(op.kind, OperationKind::Integrate);
     let merged = op.result.unwrap().merged.unwrap();
@@ -316,7 +317,7 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
         .unwrap_err();
     assert_eq!(busy.code(), Some("branch_busy"), "{busy}");
     assert_eq!(repo.remove("root").unwrap_err().code(), Some("branch_busy"));
-    let hang = wait(&client, &hang.id);
+    let hang = await_operation(&client, &hang.id);
     assert_eq!(hang.state, OperationState::Succeeded, "{hang:?}");
     assert!(matches!(
         repo.branch("hung").unwrap().status,
@@ -324,7 +325,7 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
     ));
 
     // The envelope binds a person through the server as it does locally.
-    let op = wait(
+    let op = await_operation(
         &client,
         &repo
             .spawn(
@@ -433,14 +434,9 @@ fn a_person_applies_a_graph_through_the_server() {
         }
         other => panic!("{other:?}"),
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while repo.inspect("second").unwrap().status != BranchStatus::Ready {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "second never finished"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    wait::until("second to finish", || {
+        repo.inspect("second").unwrap().status == BranchStatus::Ready
+    });
     let yard = Yard::open(&f.root).unwrap();
     assert_eq!(repo.graph("root").unwrap(), yard.graph("root").unwrap());
     let (status, _, body) = raw(
@@ -511,7 +507,10 @@ fn a_spawn_that_waits_goes_through_the_queue_and_starts_after_its_prerequisite()
     let lib = repo
         .spawn("root", &spawn("lib", "WRITE lib.txt=1", &[]), &new_key())
         .unwrap();
-    assert_eq!(wait(&client, &lib.id).state, OperationState::Succeeded);
+    assert_eq!(
+        await_operation(&client, &lib.id).state,
+        OperationState::Succeeded
+    );
     let app = repo
         .spawn(
             "root",
@@ -520,7 +519,7 @@ fn a_spawn_that_waits_goes_through_the_queue_and_starts_after_its_prerequisite()
         )
         .unwrap();
     assert_eq!(app.kind, OperationKind::Spawn);
-    let app = wait(&client, &app.id);
+    let app = await_operation(&client, &app.id);
     assert_eq!(app.state, OperationState::Succeeded, "{app:?}");
     let inspection = app.result.unwrap().inspection.unwrap();
     assert_eq!(inspection.status, BranchStatus::Waiting);
@@ -528,13 +527,13 @@ fn a_spawn_that_waits_goes_through_the_queue_and_starts_after_its_prerequisite()
     assert_eq!(repo.graph("root").unwrap().dependencies.len(), 1);
     assert_eq!(repo.branch("app").unwrap().turns, 0);
 
-    let integrated = wait(&client, &repo.integrate("lib", &new_key()).unwrap().id);
+    let integrated = await_operation(&client, &repo.integrate("lib", &new_key()).unwrap().id);
     assert_eq!(
         integrated.state,
         OperationState::Succeeded,
         "{integrated:?}"
     );
-    common::eventually("app to start and finish", || {
+    wait::until("app to start and finish", || {
         repo.branch("app").unwrap().status == BranchStatus::Ready
     });
     let app = repo.branch("app").unwrap();

@@ -9,79 +9,34 @@
 //! Requires `git`, `sh` and `kill`.
 
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use branchyard_testkit::fake_agent;
+use branchyard_testkit::wait;
 use serde_json::Value;
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const BY: &str = env!("CARGO_BIN_EXE_by");
 
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(BY);
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        let agent = profile_dir.join("fake-acp-agent");
-        assert!(agent.is_file());
-        agent
-    })
-}
+/// The kit's repository, plus what this file adds.
+struct Repo(branchyard_testkit::Repo);
 
-struct Repo {
-    dir: PathBuf,
-    root: PathBuf,
+impl std::ops::Deref for Repo {
+    type Target = branchyard_testkit::Repo;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl Repo {
     fn new() -> Repo {
-        fake_agent();
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-cli-map-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
-        let repo = Repo {
-            root: dir.join("repo"),
-            dir,
-        };
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@localhost"]);
-        fs::write(repo.root.join("a.txt"), "one\n").unwrap();
-        fs::write(repo.root.join(".gitignore"), "branchyard.toml\n").unwrap();
-        repo.git(&["add", "."]);
-        repo.git(&["commit", "-q", "-m", "initial"]);
-        repo
+        fake_agent!();
+        Repo(branchyard_testkit::repo!(&[
+            ("a.txt", "one\n"),
+            (".gitignore", "branchyard.toml\n")
+        ]))
     }
 
     /// A file outside the repository, with `text`; its path.
@@ -92,76 +47,6 @@ impl Repo {
         }
         fs::write(&path, text).unwrap();
         path.display().to_string()
-    }
-
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
-        command
-            .current_dir(&self.root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("NO_COLOR", "1")
-            .env("BRANCHYARD_USER_CONFIG", self.dir.join("user/config.toml"))
-            .env("PAGER", "cat");
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-            "BRANCHYARD_REMOTE",
-            "BRANCHYARD_TOKEN_FILE",
-            "BRANCHYARD_REPO",
-        ] {
-            command.env_remove(var);
-        }
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let out = self.command("git").args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}");
-        String::from_utf8(out.stdout).unwrap()
-    }
-
-    fn by(&self, args: &[&str]) -> Output {
-        self.command(BY)
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
-    }
-
-    fn by_with_stdin(&self, args: &[&str], input: &str) -> Output {
-        let mut child = self
-            .command(BY)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-        child.wait_with_output().unwrap()
-    }
-
-    fn ok(&self, args: &[&str]) -> Output {
-        let out = self.by(args);
-        assert!(
-            out.status.success(),
-            "by {args:?}\nstdout:\n{}\nstderr:\n{}",
-            stdout(&out),
-            stderr(&out)
-        );
-        out
-    }
-
-    fn json(&self, args: &[&str]) -> Value {
-        serde_json::from_slice(&self.ok(args).stdout).unwrap()
     }
 
     /// The branch names `by ls` lists.
@@ -179,17 +64,11 @@ impl Repo {
 
     /// `by map` with the fake agent as the harness.
     fn map(&self, args: &[&str]) -> Output {
-        let agent = fake_agent().display().to_string();
+        let agent = fake_agent!().display().to_string();
         let mut all = vec!["map"];
         all.extend(args);
         all.extend(["--harness", "gemini-cli", "--command", &agent, "--yes"]);
         self.by(&all)
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -290,7 +169,7 @@ fn items_come_from_every_format_and_fill_the_template() {
             "--harness",
             "gemini-cli",
             "--command",
-            &fake_agent().display().to_string(),
+            &fake_agent!().display().to_string(),
             "--yes",
         ],
         &array,
@@ -500,7 +379,7 @@ fn an_interrupted_map_resumes_without_redoing_what_is_done() {
     )
     .unwrap();
     let csv = repo.dir.join("out.csv");
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let args = [
         "map",
         "{{item.cmd}}",
@@ -530,9 +409,7 @@ fn an_interrupted_map_resumes_without_redoing_what_is_done() {
         .spawn()
         .unwrap();
     // Wait until item a is recorded and item b's branch is mid-turn.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        assert!(Instant::now() < deadline, "the map never reached item b");
+    wait::until("the map to reach item b", || {
         assert!(first.try_wait().unwrap().is_none(), "the map ended early");
         let recorded = fs::read_to_string(repo.root.join(".branchyard/maps/halted/results.jsonl"))
             .unwrap_or_default();
@@ -542,11 +419,8 @@ fn an_interrupted_map_resumes_without_redoing_what_is_done() {
             .unwrap()
             .iter()
             .any(|b| b["name"] == "halted-b" && b["status"]["state"] == "running");
-        if recorded.contains("\"id\":\"a\"") && running {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+        recorded.contains("\"id\":\"a\"") && running
+    });
     let shown = repo.json(&["map", "show", "halted", "--json"]);
     assert_eq!(shown["running"], true, "{shown}");
     assert_eq!(shown["done"], 1);
@@ -604,7 +478,7 @@ fn by_map_resume_reruns_the_recorded_command_with_its_items() {
     let schema = repo.file("schema.json", SCHEMA);
     // The items arrive on standard input, which a resume cannot read again.
     let input = format!("REPLY_FILE {}\n", answer.display());
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let out = repo.by_with_stdin(
         &[
             "map",
@@ -803,7 +677,7 @@ fn the_total_budget_stops_starting_items() {
 #[test]
 fn a_routed_map_fails_over_from_a_harness_that_exits() {
     let repo = Repo::new();
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     fs::write(
         repo.root.join("branchyard.toml"),
         format!(
@@ -998,12 +872,11 @@ impl Drop for Served {
         let _ = Command::new("kill")
             .args(["-TERM", &self.child.id().to_string()])
             .status();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while Instant::now() < deadline {
-            if self.child.try_wait().unwrap().is_some() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        let exited = wait::try_until_for(Duration::from_secs(20), || {
+            self.child.try_wait().unwrap().is_some()
+        });
+        if exited.is_ok() {
+            return;
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -1028,7 +901,7 @@ fn a_map_runs_as_a_server_operation_with_remote() {
         ),
     );
     let out_file = repo.dir.join("remote.jsonl");
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let out = server.by(
         &repo,
         &[

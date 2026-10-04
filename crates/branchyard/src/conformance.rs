@@ -3,7 +3,6 @@
 //! database the tests may create tables in. Each test gets its own store:
 //! a fresh SQLite file, or a fresh repository scope in the database.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
@@ -62,9 +61,11 @@ pub(crate) struct Opened {
     _cleanup: Box<dyn std::any::Any>,
 }
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
+/// A name no other test in this process (or database scope) uses.
+#[cfg(feature = "postgres")]
 fn unique(name: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     format!(
         "{}-{}-{name}",
         std::process::id(),
@@ -73,15 +74,8 @@ fn unique(name: &str) -> String {
 }
 
 pub(crate) fn sqlite(name: &str) -> Opened {
-    struct Temp(std::path::PathBuf);
-    impl Drop for Temp {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    let dir = std::env::temp_dir().join(format!("branchyard-conformance-{}", unique(name)));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = branchyard_testkit::Scratch::new(&format!("conformance-{name}"));
+    let dir = scratch.path().to_path_buf();
     let shared = Arc::new(crate::sqlite::Sqlite::open(&dir).unwrap());
     let open = {
         let dir = dir.clone();
@@ -134,7 +128,7 @@ pub(crate) fn sqlite(name: &str) -> Opened {
         again: Box::new(open),
         again_ports: Box::new(open_ports),
         again_sandboxes: Box::new(open_sandboxes),
-        _cleanup: Box::new(Temp(dir)),
+        _cleanup: Box::new(scratch),
     }
 }
 
@@ -929,7 +923,8 @@ pub(crate) fn delivery(s: Opened) {
     // `other` was delivered by another path first.
     store.mark_delivered(&[other]).unwrap();
     // Delivery is told apart by its millisecond stamp.
-    std::thread::sleep(Duration::from_millis(5));
+    let before = now_ms();
+    branchyard_testkit::wait::until("the millisecond clock to tick", || now_ms() > before);
     let intent = serde_json::json!({"prompt": "p", "messages": [one, two, other]});
 
     // Fenced: neither the step nor the delivery.
@@ -2181,11 +2176,8 @@ mod sqlite {
     fn upgrade() {
         use crate::sqlite::Sqlite;
         use std::sync::Arc;
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-conformance-{}",
-            super::unique("upgrade")
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = branchyard_testkit::Scratch::new("conformance-upgrade");
+        let dir = scratch.path().to_path_buf();
         let backend = Sqlite::open(&dir).unwrap();
         let conn = rusqlite::Connection::open(dir.join("state.db")).unwrap();
         crate::conformance::upgrade(
@@ -2195,7 +2187,7 @@ mod sqlite {
             None,
             &|| Arc::new(Sqlite::open(&dir).unwrap()),
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        scratch.close();
     }
 }
 

@@ -13,45 +13,19 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use branchyard_testkit::fake_agent;
+use branchyard_testkit::wait;
+use branchyard_testkit::{MockHttp, Request, Response};
 use serde_json::{json, Value};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(env!("CARGO_BIN_EXE_by"));
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(command.status().unwrap().success());
-        profile_dir.join("fake-acp-agent")
-    })
-}
 
 struct Repo {
     dir: PathBuf,
@@ -151,7 +125,7 @@ impl Repo {
 
     /// A branch run by the fake agent, as `gemini-cli`.
     fn agent(&self, args: &[&str]) -> Output {
-        let agent = fake_agent().display().to_string();
+        let agent = fake_agent!().display().to_string();
         let mut all: Vec<&str> = args.to_vec();
         all.extend(["--command", &agent, "--yes", "--harness", "gemini-cli"]);
         self.by(&all)
@@ -299,7 +273,7 @@ fn usage_reads_both_logins_and_the_guard_warns_or_refuses() {
     assert_eq!(usage["logins"][0]["five_hour"]["source"], "budget");
 
     // The guard: warn by default, refuse when asked, nothing created.
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let run = |name: &str| {
         repo.by(&[
             "run",
@@ -375,7 +349,7 @@ fn the_router_skips_a_candidate_over_skip_over() {
             .join(".codex/sessions/2026/10/01/rollout-2026-10-01T00-00-00-c1.jsonl"),
         &codex_rollout(now - 600_000, 99.0, 10.0),
     );
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     fs::write(
         repo.root.join("branchyard.toml"),
         format!(
@@ -395,74 +369,21 @@ fn the_router_skips_a_candidate_over_skip_over() {
 
 // Issue trackers.
 
-/// One request a mock server received.
-#[derive(Clone, Debug)]
-struct Seen {
-    method: String,
-    path: String,
-    headers: BTreeMap<String, String>,
-    body: String,
-}
-
-/// A local HTTP server answering each request with `answer`, recording
-/// what it got.
+/// A mock server answering each request with `answer` (status, extra
+/// headers, JSON body); its URL, and the server itself, which records the
+/// requests and fails the test if any connection errs.
 fn serve(
-    answer: impl Fn(&Seen) -> (u16, Vec<(String, String)>, String) + Send + 'static,
-) -> (String, Arc<Mutex<Vec<Seen>>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let log = seen.clone();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut line = String::new();
-            if reader.read_line(&mut line).is_err() {
-                continue;
-            }
-            let mut parts = line.split_whitespace();
-            let (method, path) = (
-                parts.next().unwrap_or_default().to_owned(),
-                parts.next().unwrap_or_default().to_owned(),
-            );
-            let mut headers = BTreeMap::new();
-            loop {
-                let mut header = String::new();
-                if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim().is_empty() {
-                    break;
-                }
-                if let Some((k, v)) = header.trim_end().split_once(": ") {
-                    headers.insert(k.to_ascii_lowercase(), v.to_owned());
-                }
-            }
-            let length: usize = headers
-                .get("content-length")
-                .and_then(|l| l.parse().ok())
-                .unwrap_or(0);
-            let mut body = vec![0; length];
-            let _ = reader.read_exact(&mut body);
-            let request = Seen {
-                method,
-                path,
-                headers,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            };
-            let (status, extra, text) = answer(&request);
-            log.lock().unwrap().push(request);
-            let mut head = format!(
-                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
-                text.len()
-            );
-            for (k, v) in extra {
-                head.push_str(&format!("{k}: {v}\r\n"));
-            }
-            head.push_str("\r\n");
-            let _ = stream.write_all(head.as_bytes());
-            let _ = stream.write_all(text.as_bytes());
+    answer: impl Fn(&Request) -> (u16, Vec<(String, String)>, String) + Send + Sync + 'static,
+) -> (String, MockHttp) {
+    let mock = MockHttp::start(move |request| {
+        let (status, headers, body) = answer(request);
+        let mut response = Response::new(status, body).header("Content-Type", "application/json");
+        for (name, value) in headers {
+            response = response.header(&name, &value);
         }
+        response
     });
-    (url, seen)
+    (mock.url(), mock)
 }
 
 /// The prompt and `issue_linked` event of `branch`.
@@ -481,13 +402,13 @@ fn linked(repo: &Repo, branch: &str) -> (String, Value) {
 
 #[test]
 fn issues_come_from_linear_jira_and_gitlab_and_tokens_stay_out_of_sight() {
-    let (linear, linear_seen) = serve(|_| {
+    let (linear, linear_mock) = serve(|_| {
         (200, vec![], json!({"data": {"issue": {
             "identifier": "ENG-12", "title": "Parser panics", "description": "It **panics** on `\"\"`.",
             "url": "https://linear.app/acme/issue/ENG-12/parser-panics",
             "labels": {"nodes": [{"name": "bug"}]}}}}).to_string())
     });
-    let (jira, jira_seen) = serve(|_| {
+    let (jira, jira_mock) = serve(|_| {
         (200, vec![], json!({"key": "PROJ-7", "fields": {"summary": "Login times out",
             "labels": ["auth"],
             "description": {"type": "doc", "version": 1, "content": [
@@ -495,7 +416,7 @@ fn issues_come_from_linear_jira_and_gitlab_and_tokens_stay_out_of_sight() {
                 {"type": "bulletList", "content": [{"type": "listItem", "content": [
                     {"type": "paragraph", "content": [{"type": "text", "text": "open /login"}]}]}]}]}}}).to_string())
     });
-    let (gitlab, gitlab_seen) = serve(|seen| match seen.path.as_str() {
+    let (gitlab, gitlab_mock) = serve(|seen| match seen.path.as_str() {
         "/api/v4/projects/acme%2Fwidgets/issues/12" => (
             200,
             vec![],
@@ -532,13 +453,13 @@ fn issues_come_from_linear_jira_and_gitlab_and_tokens_stay_out_of_sight() {
     assert_eq!(link["tracker"], "linear");
     assert_eq!(link["key"], "ENG-12");
     assert_eq!(link["number"], 12);
-    let request = linear_seen.lock().unwrap()[0].clone();
+    let request = linear_mock.requests()[0].clone();
     assert_eq!(
         (request.method.as_str(), request.path.as_str()),
         ("POST", "/graphql")
     );
     assert_eq!(request.headers["authorization"], "lin_api_SECRET1");
-    let body: Value = serde_json::from_str(&request.body).unwrap();
+    let body: Value = request.json();
     assert_eq!(body["variables"]["id"], "ENG-12");
     assert!(body["query"]
         .as_str()
@@ -558,7 +479,7 @@ fn issues_come_from_linear_jira_and_gitlab_and_tokens_stay_out_of_sight() {
     );
     assert!(prompt.contains("Steps:\n\n- open /login"), "{prompt}");
     assert_eq!(link["tracker"], "jira");
-    let request = jira_seen.lock().unwrap()[0].clone();
+    let request = jira_mock.requests()[0].clone();
     assert_eq!(
         request.path,
         "/rest/api/3/issue/PROJ-7?fields=summary,description,labels"
@@ -578,7 +499,7 @@ fn issues_come_from_linear_jira_and_gitlab_and_tokens_stay_out_of_sight() {
     );
     assert_eq!(link["key"], "acme/widgets#12");
     assert_eq!(
-        gitlab_seen.lock().unwrap()[0].headers["private-token"],
+        gitlab_mock.requests()[0].headers["private-token"],
         "glpat-SECRET3"
     );
 
@@ -623,8 +544,8 @@ fn issues_come_from_linear_jira_and_gitlab_and_tokens_stay_out_of_sight() {
 
 #[test]
 fn an_issue_comes_through_the_connector_gateway_without_a_token() {
-    let (gateway, seen) = serve(|seen| {
-        let request: Value = serde_json::from_str(&seen.body).unwrap_or_default();
+    let (gateway, mock) = serve(|seen| {
+        let request: Value = serde_json::from_slice(&seen.body).unwrap_or_default();
         let id = request["id"].clone();
         let session = vec![("Mcp-Session-Id".to_owned(), "sess-1".to_owned())];
         match request["method"].as_str() {
@@ -649,11 +570,11 @@ fn an_issue_comes_through_the_connector_gateway_without_a_token() {
         "{prompt}"
     );
     assert_eq!(link["key"], "ENG-5");
-    let seen = seen.lock().unwrap().clone();
+    let seen = mock.requests();
     let methods: Vec<String> = seen
         .iter()
         .map(|s| {
-            serde_json::from_str::<Value>(&s.body).unwrap()["method"]
+            serde_json::from_slice::<Value>(&s.body).unwrap()["method"]
                 .as_str()
                 .unwrap()
                 .to_owned()
@@ -663,7 +584,7 @@ fn an_issue_comes_through_the_connector_gateway_without_a_token() {
         methods,
         ["initialize", "notifications/initialized", "tools/call"]
     );
-    let call: Value = serde_json::from_str(&seen[2].body).unwrap();
+    let call: Value = seen[2].json();
     assert_eq!(call["params"]["name"], "linear__get_issue");
     assert_eq!(call["params"]["arguments"]["id"], "ENG-5");
     assert_eq!(seen[2].headers["mcp-session-id"], "sess-1");
@@ -737,7 +658,7 @@ fn a_branch_starts_from_a_pull_requests_head() {
         bin.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let out = repo
         .command(env!("CARGO_BIN_EXE_by"))
         .env("PATH", &path)
@@ -791,21 +712,6 @@ fn python() -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// Wait, up to a generous bound, until `done` says so.
-fn until<T>(what: &str, mut done: impl FnMut() -> Option<T>) -> T {
-    let start = Instant::now();
-    loop {
-        if let Some(value) = done() {
-            return value;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(60),
-            "timed out waiting for {what}"
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
-
 const SERVE: &str = "exec python3 -m http.server --bind 127.0.0.1 $BRANCHYARD_PORT";
 
 #[test]
@@ -845,7 +751,7 @@ fn listening_ports_belong_to_their_branch_and_can_be_browsed_and_stopped() {
         .unwrap();
     assert_eq!(ports[0], reserved);
 
-    let listening = until("both servers", || {
+    let listening = wait::until("both servers", || {
         let list = repo.json(&["workspace", "ports", "srv", "--json"]);
         (list.as_array().unwrap().len() == 2).then_some(list)
     });
@@ -893,7 +799,7 @@ fn listening_ports_belong_to_their_branch_and_can_be_browsed_and_stopped() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let by_cwd = until("the hand-started server", || {
+    let by_cwd = wait::until("the hand-started server", || {
         repo.json(&["workspace", "ports", "srv", "--json"])
             .as_array()
             .unwrap()
@@ -955,7 +861,7 @@ fn listening_ports_belong_to_their_branch_and_can_be_browsed_and_stopped() {
     let killed = repo.json(&["workspace", "kill", "srv", "--yes", "--json"]);
     assert_eq!(killed["stopped"].as_array().unwrap().len(), 3);
     let _ = manual.wait();
-    until("the servers to stop", || {
+    wait::until("the servers to stop", || {
         repo.json(&["workspace", "ports", "srv", "--json"])
             .as_array()
             .unwrap()
@@ -1096,7 +1002,7 @@ fn adopt_lists_this_repositorys_sessions_and_resumes_one_natively() {
     assert_eq!(event["adopted"]["harness"], "claude-code");
 
     // Its next turn resumes the session natively.
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let out = repo.by(&["send", "faster", "WHOAMI", "--command", &agent, "--yes"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(

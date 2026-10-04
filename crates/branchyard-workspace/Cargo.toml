@@ -8,3 +8,6 @@ description = "Git branches, candidates, and validated integration for Branchyar
 
 [target."cfg(unix)".dependencies]
 rustix = { version = "1.1", default-features = false, features = ["std", "process", "fs"] }
+
+[dev-dependencies]
+branchyard-testkit = { path = "../branchyard-testkit" }

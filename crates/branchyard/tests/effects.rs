@@ -10,7 +10,7 @@ mod mock_gateway;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use branchyard::connectors::{Bundle, Gateway, GrantEntry, Packager};
 use branchyard::effects::{
@@ -20,6 +20,7 @@ use branchyard::{
     Activity, BranchStatus, Budget, DecisionSource, Envelope, Error, Policy, Provisioning, Spawn,
     TaskOptions,
 };
+use branchyard_testkit::wait;
 use common::{fake_agent, text, Fixture};
 use mock_gateway::MockGateway;
 
@@ -105,18 +106,6 @@ fn calls(script: &str, calls: &[(&str, &str)]) -> String {
         .map(|(tool, arguments)| format!("SH python3 {script} {tool} '{arguments}'"))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Wait for `ready`, polling the store, at most a minute.
-fn until<T>(what: &str, mut ready: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        if let Some(found) = ready() {
-            return found;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
 }
 
 #[test]
@@ -325,7 +314,7 @@ fn a_deletion_asks_even_when_allowed_and_the_answer_is_recorded() {
                 .name("deleter")
                 .run()
         });
-        let ask = until("an ask", || {
+        let ask = wait::until("an ask", || {
             f.yard.approvals(true).unwrap().into_iter().next()
         });
         assert_eq!(ask.branch, "deleter");
@@ -387,7 +376,7 @@ fn a_denied_ask_is_never_called() {
             .run()
         });
         // Compensable asks by default.
-        let ask = until("an ask", || {
+        let ask = wait::until("an ask", || {
             f.yard.approvals(true).unwrap().into_iter().next()
         });
         assert_eq!(ask.resolved.as_ref().unwrap().layer, Layer::Default);
@@ -413,7 +402,7 @@ fn a_tool_approval_asks_and_never_loosens_the_policy() {
                 .name("tool")
                 .run()
         });
-        let ask = until("an ask", || {
+        let ask = wait::until("an ask", || {
             f.yard.approvals(true).unwrap().into_iter().next()
         });
         assert_eq!(
@@ -545,7 +534,7 @@ fn a_childs_ask_is_escalated_to_its_parent_which_answers_it() {
             ..Spawn::default()
         })
         .unwrap();
-    let ask = until("the child's ask", || {
+    let ask = wait::until("the child's ask", || {
         f.yard
             .approvals(true)
             .unwrap()
@@ -553,7 +542,7 @@ fn a_childs_ask_is_escalated_to_its_parent_which_answers_it() {
             .find(|a| a.branch == "kid")
     });
     // It reached the parent's inbox.
-    let inbox = until("the escalation", || {
+    let inbox = wait::until("the escalation", || {
         delegate
             .inbox()
             .unwrap()
@@ -1104,15 +1093,17 @@ fn the_audit_log_settles_a_lost_answer_and_records_calls_around_the_proxy() {
     assert_eq!(mock.calls_to("flaky__charge").len(), 1);
     // The gateway's audit line for that call carries its key: it happened.
     // A second line is a call that did not go through the proxy, and says
-    // its effect.
+    // its effect. The lines are dated far ahead so that they sort after the
+    // real call whenever the test runs (they were once dated "next week",
+    // and the test failed from the day that date passed).
     let audit = f.root.join(".branchyard/gateway/audit.jsonl");
     let lines = format!(
         "{}\n{}\n",
-        serde_json::json!({"time": "2026-10-03T10:00:00Z", "by_branch": "audited", "by_turn": "1",
+        serde_json::json!({"time": "2099-10-03T10:00:00Z", "by_branch": "audited", "by_turn": "1",
             "sub": "local:me", "connector": "flaky", "operation": "flaky.charges.create",
             "decision": "allowed", "upstream_status": 200, "error_code": null,
             "effect_class": "compensable", "ledger_id": lost.id, "staged_for": null}),
-        serde_json::json!({"time": "2026-10-03T10:00:01Z", "by_branch": "audited", "by_turn": "1",
+        serde_json::json!({"time": "2099-10-03T10:00:01Z", "by_branch": "audited", "by_turn": "1",
             "sub": "local:me", "connector": "slack", "operation": "slack.chat.post",
             "decision": "allowed", "upstream_status": 200, "error_code": null,
             "effect_class": "reversible", "ledger_id": null, "staged_for": null}),
@@ -1120,7 +1111,7 @@ fn the_audit_log_settles_a_lost_answer_and_records_calls_around_the_proxy() {
     // A draft's line settles nothing and records nothing.
     let lines = format!(
         "{lines}{}\n",
-        serde_json::json!({"time": "2026-10-03T10:00:02Z", "by_branch": "audited", "by_turn": "1",
+        serde_json::json!({"time": "2099-10-03T10:00:02Z", "by_branch": "audited", "by_turn": "1",
             "sub": "local:me", "connector": "gmail", "operation": "gmail.drafts.create",
             "decision": "allowed", "upstream_status": 200, "error_code": null,
             "effect_class": "irreversible", "ledger_id": null, "staged_for": "gmail.send"})

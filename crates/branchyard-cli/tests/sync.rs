@@ -8,42 +8,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 
+use branchyard_testkit::fake_agent;
 use serde_json::Value;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Built once per test binary, as in `tests/cli.rs`.
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(env!("CARGO_BIN_EXE_by"));
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        profile_dir.join("fake-acp-agent")
-    })
-}
 
 struct World {
     dir: PathBuf,
@@ -130,7 +99,7 @@ impl World {
         fs::write(root.join("a.txt"), "one\n").unwrap();
         self.git(&root, &["add", "."]);
         self.git(&root, &["commit", "-q", "-m", "initial"]);
-        let agent = fake_agent().display().to_string();
+        let agent = fake_agent!().display().to_string();
         let out = self.by(
             &root,
             &[
@@ -288,7 +257,7 @@ fn by_sync_carries_a_folder_task_beside_the_branches() {
     let folder = w.dir.join("folder");
     fs::create_dir_all(&folder).unwrap();
     fs::write(folder.join("notes.txt"), "draft\n").unwrap();
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let out = w.by(
         &w.dir,
         &[

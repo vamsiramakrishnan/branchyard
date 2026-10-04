@@ -16,7 +16,8 @@ use branchyard_client::api::{InventoryReport, OperationState, TaskRequest};
 use branchyard_client::{new_key, Client};
 use branchyard_server::ops::InventorySource;
 use branchyard_server::store::test_inventory;
-use common::{eventually, task, wait, Fixture, Server};
+use branchyard_testkit::wait;
+use common::{await_operation, task, Fixture, Server};
 
 /// A source that always finds `ids` installed and logged in, or nothing.
 fn source(ids: &[&str]) -> InventorySource {
@@ -34,7 +35,7 @@ fn source(ids: &[&str]) -> InventorySource {
 }
 
 fn advertised(client: &Client, workers: usize) -> InventoryReport {
-    eventually("the workers to advertise their inventories", || {
+    wait::until("the workers to advertise their inventories", || {
         let report = client.inventory().unwrap();
         report.workers.len() >= workers && report.workers.iter().all(|w| w.inventory.is_some())
     });
@@ -66,7 +67,7 @@ fn a_worker_advertises_its_harnesses_and_work_follows_them_on_sqlite() {
     needs.require_labels = vec!["harness:codex".into()];
     let op = client.repo("app").submit_task(&needs, &new_key()).unwrap();
     assert_eq!(op.requires, ["harness:codex"]);
-    eventually("the operation to say why it waits", || {
+    wait::until("the operation to say why it waits", || {
         client.operation(&op.id).unwrap().waiting.is_some()
     });
     let reason = client.operation(&op.id).unwrap().waiting.unwrap();
@@ -77,7 +78,7 @@ fn a_worker_advertises_its_harnesses_and_work_follows_them_on_sqlite() {
         .submit_task(&by_name("codex", "codex-anywhere"), &new_key())
         .unwrap();
     assert!(plain.requires.is_empty(), "{:?}", plain.requires);
-    wait(&client, &plain.id);
+    await_operation(&client, &plain.id);
 
     // A worker whose machine has Codex claims it with no label configured.
     server.stop();
@@ -85,7 +86,7 @@ fn a_worker_advertises_its_harnesses_and_work_follows_them_on_sqlite() {
     config.inventory_source = Some(source(&["codex"]));
     let server = Server::start(config);
     let client = server.client();
-    let done = wait(&client, &op.id);
+    let done = await_operation(&client, &op.id);
     assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
     let report = advertised(&client, 1);
     let me = report.workers.iter().find(|w| w.this).unwrap();
@@ -100,19 +101,19 @@ fn a_worker_advertises_its_harnesses_and_work_follows_them_on_sqlite() {
         .submit_task(&by_name("codex", "codex-steered"), &new_key())
         .unwrap();
     assert_eq!(steered.requires, ["harness:codex"]);
-    wait(&client, &steered.id);
+    await_operation(&client, &steered.id);
     let goose = client
         .repo("app")
         .submit_task(&by_name("goose", "goose-anywhere"), &new_key())
         .unwrap();
     assert!(goose.requires.is_empty());
-    wait(&client, &goose.id);
+    await_operation(&client, &goose.id);
     let commanded = client
         .repo("app")
         .submit_task(&task("WRITE c.txt=1", "commanded"), &new_key())
         .unwrap();
     assert!(commanded.requires.is_empty());
-    wait(&client, &commanded.id);
+    await_operation(&client, &commanded.id);
 }
 
 #[test]
@@ -123,7 +124,7 @@ fn a_server_without_inventory_advertises_none() {
     config.inventory_source = Some(source(&["codex"]));
     let server = Server::start(config);
     let client = server.client();
-    eventually("the worker to beat", || {
+    wait::until("the worker to beat", || {
         !client.inventory().unwrap().workers.is_empty()
     });
     let report = client.inventory().unwrap();
@@ -175,7 +176,7 @@ mod postgres {
         let mut needs = task("WRITE needs.txt=1", "needs-codex");
         needs.require_labels = vec!["harness:codex".into()];
         let op = client.repo("app").submit_task(&needs, &new_key()).unwrap();
-        eventually("the operation to say why it waits", || {
+        wait::until("the operation to say why it waits", || {
             client.operation(&op.id).unwrap().waiting.is_some()
         });
 
@@ -185,7 +186,7 @@ mod postgres {
         worker.worker_only = true;
         worker.inventory_source = Some(source(&["codex"]));
         let worker = Server::start(worker);
-        let done = wait(&client, &op.id);
+        let done = await_operation(&client, &op.id);
         assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
         let report = advertised(&client, 2);
         assert_eq!(report.workers.len(), 2, "{report:?}");
@@ -198,7 +199,7 @@ mod postgres {
             .submit_task(&by_name("codex", "codex-steered"), &new_key())
             .unwrap();
         assert_eq!(steered.requires, ["harness:codex"]);
-        wait(&client, &steered.id);
+        await_operation(&client, &steered.id);
         drop(worker);
     }
 }

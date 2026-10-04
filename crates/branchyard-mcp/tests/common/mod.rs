@@ -7,56 +7,25 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Once, OnceLock};
+use std::sync::Once;
 
 use branchyard::{Activity, Envelope, Event, Policy, RecordedEvent, TaskOptions, Yard};
+use branchyard_testkit::wait;
 use serde_json::{json, Value};
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
+pub use branchyard_testkit::fake_agent_here as fake_agent;
+
 static HERMETIC: Once = Once::new();
 
 pub const SERVER: &str = env!("CARGO_BIN_EXE_branchyard-mcp");
-
-/// The `fake-acp-agent` binary from branchyard-runtime, built once per test
-/// binary; cargo exposes a binary's path only to its own package's tests.
-pub fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        // target/<profile>/branchyard-mcp
-        let profile_dir = Path::new(SERVER).parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {SERVER}"),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        let agent = profile_dir.join("fake-acp-agent");
-        assert!(agent.is_file());
-        agent
-    })
-}
 
 /// A temporary repository with one commit on `main`. Removed on drop.
 pub struct Fixture {
     pub dir: PathBuf,
     pub root: PathBuf,
     pub yard: Yard,
+
+    _scratch: branchyard_testkit::Scratch,
 }
 
 impl Fixture {
@@ -66,14 +35,9 @@ impl Fixture {
             std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
         });
         fake_agent();
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-mcp-test-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
+        let scratch = branchyard_testkit::Scratch::new("mcp");
+        let dir = scratch.path().to_path_buf();
         fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
         let root = dir.join("repo");
         git(&root, &["init", "-q", "-b", "main"]);
         git(&root, &["config", "user.name", "Test"]);
@@ -82,7 +46,12 @@ impl Fixture {
         git(&root, &["add", "."]);
         git(&root, &["commit", "-q", "-m", "initial"]);
         let yard = Yard::open(&root).unwrap();
-        Fixture { dir, root, yard }
+        Fixture {
+            dir,
+            root,
+            yard,
+            _scratch: scratch,
+        }
     }
 
     pub fn git(&self, args: &[&str]) -> String {
@@ -100,12 +69,6 @@ impl Fixture {
             delegation_server: Some(vec![SERVER.into()]),
             ..TaskOptions::default()
         }
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -211,17 +174,11 @@ impl Client {
     /// Close stdin and wait for the server to exit on its own.
     pub fn finish(mut self) -> std::process::ExitStatus {
         self.stdin.take();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                return status;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the server did not exit when its input closed"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        wait::until_for(
+            "the server to exit when its input closed",
+            std::time::Duration::from_secs(10),
+            || self.child.try_wait().unwrap(),
+        )
     }
 }
 

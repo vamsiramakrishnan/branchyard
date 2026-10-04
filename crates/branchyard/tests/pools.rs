@@ -11,12 +11,13 @@ use std::fs;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use branchyard::{
     Activity, BranchStatus, EnvironmentOrigin, PoolFill, PoolSlotState, PoolSpec, PoolUse,
     RecordedEvent, TaskOptions, WorkspaceReport, WorkspaceSpec, Yard,
 };
+use branchyard_testkit::wait;
 use common::{git, text, Fixture};
 
 fn setup_report(events: &[RecordedEvent]) -> WorkspaceReport {
@@ -311,15 +312,6 @@ fn branches_asking_at_once_never_share_a_slot() {
     assert_eq!(setups(&f), 1);
 }
 
-/// Wait until `ready` holds, at most a minute.
-fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !ready() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
 #[test]
 fn a_keeper_refills_after_a_claim_without_holding_it_up() {
     let f = fixture("v1");
@@ -335,7 +327,7 @@ fn a_keeper_refills_after_a_claim_without_holding_it_up() {
             move |filled| fills.lock().unwrap().push(filled.clone()),
         )
     };
-    wait_for("the first fill", || ready(&f, &spec).len() == 1);
+    wait::until("the first fill", || ready(&f, &spec).len() == 1);
     let first = ready(&f, &spec)[0].clone();
     let a = f
         .yard
@@ -346,7 +338,7 @@ fn a_keeper_refills_after_a_claim_without_holding_it_up() {
         .unwrap();
     assert!(finished(&a));
     assert_eq!(pool_use(&a).slot.as_deref(), Some(first.as_str()));
-    wait_for("a refill", || {
+    wait::until("a refill", || {
         let now = ready(&f, &spec);
         now.len() == 1 && now[0] != first
     });
@@ -519,7 +511,7 @@ fn a_filler_killed_midway_leaves_nothing_once_recovery_runs() {
         .spawn()
         .unwrap();
     let mut child = Killed(child);
-    wait_for("setup in the slot", || marker.exists());
+    wait::until("setup in the slot", || marker.exists());
     child.0.kill().unwrap();
     child.0.wait().unwrap();
     // The killed filler's slot is recorded, and on disk.

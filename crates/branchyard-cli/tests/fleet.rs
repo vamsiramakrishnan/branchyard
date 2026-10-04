@@ -6,134 +6,37 @@
 //! model is called. Requires `git` and `sh`.
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::process::Output;
 
+use branchyard_testkit::fake_agent;
 use serde_json::Value;
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
+/// The kit's repository, plus what this file adds.
+struct Repo(branchyard_testkit::Repo);
 
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(env!("CARGO_BIN_EXE_by"));
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        let agent = profile_dir.join("fake-acp-agent");
-        assert!(agent.is_file());
-        agent
-    })
-}
-
-struct Repo {
-    dir: PathBuf,
-    root: PathBuf,
+impl std::ops::Deref for Repo {
+    type Target = branchyard_testkit::Repo;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl Repo {
     fn new() -> Repo {
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-cli-fleet-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
-        let repo = Repo {
-            root: dir.join("repo"),
-            dir,
-        };
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@localhost"]);
-        fs::write(repo.root.join("a.txt"), "one\n").unwrap();
-        fs::write(repo.root.join(".gitignore"), "branchyard.toml\n").unwrap();
-        repo.git(&["add", "."]);
-        repo.git(&["commit", "-q", "-m", "initial"]);
-        repo
+        Repo(branchyard_testkit::repo!(&[
+            ("a.txt", "one\n"),
+            (".gitignore", "branchyard.toml\n")
+        ]))
     }
 
     /// Write `branchyard.toml`, with `AGENT` replaced by the fake agent.
     fn config(&self, text: &str) {
-        let agent = fake_agent().display().to_string();
+        let agent = fake_agent!().display().to_string();
         fs::write(
             self.root.join("branchyard.toml"),
             text.replace("AGENT", &agent),
         )
         .unwrap();
-    }
-
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
-        command
-            .current_dir(&self.root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("NO_COLOR", "1")
-            .env("BRANCHYARD_USER_CONFIG", self.dir.join("user/config.toml"))
-            .env("PAGER", "cat");
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-            "BRANCHYARD_REMOTE",
-        ] {
-            command.env_remove(var);
-        }
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let out = self.command("git").args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}");
-        String::from_utf8(out.stdout).unwrap()
-    }
-
-    fn by(&self, args: &[&str]) -> Output {
-        self.command(env!("CARGO_BIN_EXE_by"))
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
-    }
-
-    fn ok(&self, args: &[&str]) -> Output {
-        let out = self.by(args);
-        assert!(
-            out.status.success(),
-            "by {args:?}\nstdout:\n{}\nstderr:\n{}",
-            stdout(&out),
-            stderr(&out)
-        );
-        out
-    }
-
-    fn json(&self, args: &[&str]) -> Value {
-        serde_json::from_slice(&self.ok(args).stdout).unwrap()
     }
 
     /// A seed under which `by fleet route` picks `harness` first.
@@ -145,12 +48,6 @@ impl Repo {
                 route["picks"][0]["candidate"]["harness"] == harness
             })
             .expect("a seed picks it")
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -212,7 +109,7 @@ fn a_fleet_routes_a_run_that_names_no_harness_and_records_its_outcome() {
     assert!(table.contains("bugfix"), "{table}");
 
     // A named harness is not routed; --kind is still recorded.
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     repo.ok(&[
         "run",
         "WRITE d.txt=1",

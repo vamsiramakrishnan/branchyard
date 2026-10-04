@@ -14,8 +14,9 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::OnceLock;
 
+use branchyard_testkit::fake_agent;
+use branchyard_testkit::wait;
 use serde_json::Value;
 
 const BY: &str = env!("CARGO_BIN_EXE_by");
@@ -23,36 +24,6 @@ const FAKE_SSH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../branchyard-recipe/tests/fixtures/fake-ssh"
 );
-
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(BY);
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        profile_dir.join("fake-acp-agent")
-    })
-}
 
 fn which(program: &str) -> PathBuf {
     std::env::var_os("PATH")
@@ -236,7 +207,7 @@ impl World {
     /// `$HOME/.local/bin`; version `9.9.9` is "installed" without changing
     /// anything, so verification fails.
     fn fake_npm(&self) {
-        let agent = fake_agent().display().to_string();
+        let agent = fake_agent!().display().to_string();
         let codex = codex_script("@VERSION@").replace('\'', "'\\''");
         self.script(
             "npm",
@@ -779,7 +750,7 @@ fn the_router_skips_what_cannot_run_and_installs_on_demand_under_auto() {
     w.fake_npm();
     // Codex installed but logged out (verified by its status command).
     w.fake_codex(&w.bin, "0.157.1");
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let fleet = format!(
         "[fleet.default]\ncandidates = [\n  {{ harness = \"codex\" }},\n  {{ harness = \
          \"qwen-code\" }},\n  {{ harness = \"gemini-cli\", command = \"{agent}\" }},\n]\n"
@@ -890,20 +861,16 @@ fn a_server_shows_its_workers_harnesses_and_says_where_to_log_in() {
         w.by(&all)
     };
     // The worker detects in the background and advertises with its beats.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    let report = loop {
+    let report = wait::until("the worker to advertise its inventory", || {
         let out = remote(&["harnesses", "--json"]);
         assert!(out.status.success(), "{}", text(&out.stderr));
         let report: Value = serde_json::from_slice(&out.stdout).unwrap();
         if report["workers"][0]["inventory"].is_object() {
-            break report;
+            Ok(report)
+        } else {
+            Err(report)
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no inventory: {report}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    };
+    });
     let worker = &report["workers"][0];
     assert_eq!(worker["this"], true);
     assert_eq!(worker["repos"], serde_json::json!(["app"]));

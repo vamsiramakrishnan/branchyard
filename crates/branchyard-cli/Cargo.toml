@@ -60,6 +60,7 @@ branchyard-sandbox = { path = "../branchyard-sandbox" }
 branchyard-sync = { path = "../branchyard-sync" }
 
 [dev-dependencies]
+branchyard-testkit = { path = "../branchyard-testkit" }
 branchyard-bridge = { path = "../branchyard-bridge" }
 branchyard-substrate = { path = "../branchyard-substrate", features = ["fake"] }
 tempfile = "3.27.0"

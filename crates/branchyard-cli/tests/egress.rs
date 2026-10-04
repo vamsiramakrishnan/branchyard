@@ -10,15 +10,12 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 use std::thread;
 
+use branchyard_testkit::fake_agent;
 use serde_json::Value;
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const PROBE: &str = r#"import socket, sys, urllib.error, urllib.request
 mode, port = sys.argv[1], int(sys.argv[2])
@@ -35,36 +32,6 @@ else:
     except OSError:
         print(f"direct {port}: blocked")
 "#;
-
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(env!("CARGO_BIN_EXE_by"));
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        profile_dir.join("fake-acp-agent")
-    })
-}
 
 /// A listener answering every request with `upstream <port>`.
 fn upstream() -> u16 {
@@ -93,77 +60,34 @@ fn upstream() -> u16 {
     port
 }
 
+/// The kit's repository, plus what this file adds.
 struct Repo {
-    dir: PathBuf,
-    root: PathBuf,
+    kit: branchyard_testkit::Repo,
     probe: PathBuf,
-    /// `off` turns confinement off for every `by` this runs.
-    netns: Option<&'static str>,
+}
+
+impl std::ops::Deref for Repo {
+    type Target = branchyard_testkit::Repo;
+    fn deref(&self) -> &Self::Target {
+        &self.kit
+    }
 }
 
 impl Repo {
+    /// `netns`, when set, is `BRANCHYARD_EGRESS_NETNS` for every `by` this
+    /// runs (`off` turns confinement off).
     fn new(netns: Option<&'static str>) -> Repo {
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-cli-egress-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
+        let mut kit = branchyard_testkit::repo!();
+        match netns {
+            Some(value) => kit.set_env("BRANCHYARD_EGRESS_NETNS", value),
+            None => kit.remove_env("BRANCHYARD_EGRESS_NETNS"),
+        }
         let repo = Repo {
-            root: dir.join("repo"),
-            probe: dir.join("probe.py"),
-            dir,
-            netns,
+            probe: kit.dir.join("probe.py"),
+            kit,
         };
         fs::write(&repo.probe, PROBE).unwrap();
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@localhost"]);
-        fs::write(repo.root.join("a.txt"), "one\n").unwrap();
-        repo.git(&["add", "."]);
-        repo.git(&["commit", "-q", "-m", "initial"]);
         repo
-    }
-
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
-        command
-            .current_dir(&self.root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("NO_COLOR", "1")
-            .env(
-                "BRANCHYARD_USER_CONFIG",
-                "/nonexistent/branchyard-config.toml",
-            );
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-            "BRANCHYARD_EGRESS_NETNS",
-        ] {
-            command.env_remove(var);
-        }
-        if let Some(value) = self.netns {
-            command.env("BRANCHYARD_EGRESS_NETNS", value);
-        }
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let out = self.command("git").args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}");
-        String::from_utf8(out.stdout).unwrap()
-    }
-
-    fn by(&self, args: &[&str]) -> Output {
-        self.command(env!("CARGO_BIN_EXE_by"))
-            .args(args)
-            .output()
-            .unwrap()
     }
 
     /// `by run` on the fake agent with `flags`, the prompt running the
@@ -173,7 +97,7 @@ impl Repo {
             .iter()
             .map(|(mode, port)| format!("SH python3 {} {mode} {port}", self.probe.display()))
             .collect();
-        let agent = fake_agent().display().to_string();
+        let agent = fake_agent!().display().to_string();
         let mut args = vec![
             "run",
             "--name",
@@ -187,18 +111,6 @@ impl Repo {
         let prompt = prompt.join("\n");
         args.extend(["--", &prompt]);
         self.by(&args)
-    }
-
-    fn json(&self, args: &[&str]) -> Value {
-        let out = self.by(args);
-        assert!(out.status.success(), "{args:?}: {}", stderr(&out));
-        serde_json::from_slice(&out.stdout).unwrap()
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -372,7 +284,7 @@ fn without_confinement_a_policy_is_advisory_or_refused() {
 #[test]
 fn permission_presets_decide_tool_requests() {
     let repo = Repo::new(Some("off"));
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let ask = |name: &str, preset: &str| {
         repo.by(&[
             "run",

@@ -1,0 +1,50 @@
+{
+  "format": 1,
+  "settle": {
+    "crates/branchyard-bridge/tests/bridge.rs": 2,
+    "crates/branchyard-server/tests/api.rs": 1,
+    "crates/branchyard-server/tests/postgres.rs": 4,
+    "crates/branchyard-server/tests/signals.rs": 2,
+    "crates/branchyard-server/tests/sync.rs": 2,
+    "crates/branchyard-server/tests/triggers.rs": 4,
+    "crates/branchyard-server/tests/webhook.rs": 1,
+    "crates/branchyard-substrate/tests/provider.rs": 1,
+    "crates/branchyard-workspace/tests/workspace.rs": 1,
+    "crates/branchyard/tests/checkpoints.rs": 1,
+    "crates/branchyard/tests/durable.rs": 1,
+    "crates/branchyard/tests/engine.rs": 3,
+    "crates/branchyard/tests/environments.rs": 1,
+    "crates/branchyard/tests/messaging.rs": 1,
+    "crates/branchyard/tests/postgres.rs": 1,
+    "crates/branchyard/tests/storage.rs": 1
+  },
+  "temp_dir": {
+    "crates/branchyard-bridge/tests/bridge.rs": 2,
+    "crates/branchyard-cli/tests/anvil_e2e.rs": 1,
+    "crates/branchyard-cli/tests/devex.rs": 1,
+    "crates/branchyard-cli/tests/remote.rs": 1,
+    "crates/branchyard-cli/tests/services.rs": 1,
+    "crates/branchyard-cli/tests/setup.rs": 1,
+    "crates/branchyard-cli/tests/substrate.rs": 1,
+    "crates/branchyard-cli/tests/sync.rs": 1,
+    "crates/branchyard-cli/tests/tasks.rs": 1,
+    "crates/branchyard-cli/tests/triggers.rs": 1,
+    "crates/branchyard-mcp/tests/protocol.rs": 1,
+    "crates/branchyard-provision/tests/provision.rs": 1,
+    "crates/branchyard-substrate/tests/cluster.rs": 1,
+    "crates/branchyard-substrate/tests/common/mod.rs": 1,
+    "crates/branchyard-workspace/tests/workspace.rs": 1
+  },
+  "tcp_listener": {
+    "crates/branchyard-cli/tests/anvil_e2e.rs": 1,
+    "crates/branchyard-cli/tests/connectors.rs": 1,
+    "crates/branchyard-cli/tests/devex.rs": 1,
+    "crates/branchyard-cli/tests/egress.rs": 1,
+    "crates/branchyard-cli/tests/services.rs": 1,
+    "crates/branchyard-runtime/tests/egress.rs": 2,
+    "crates/branchyard-server/tests/companion.rs": 1,
+    "crates/branchyard/tests/egress_common/mod.rs": 1,
+    "crates/branchyard/tests/mock_gateway/mod.rs": 1,
+    "crates/branchyard/tests/models.rs": 2
+  }
+}

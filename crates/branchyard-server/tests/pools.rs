@@ -11,7 +11,8 @@ use std::fs;
 use branchyard::{Activity, PoolSlotState, WorkspacePhase};
 use branchyard_client::api::OperationState;
 use branchyard_server::config::{MetricsConfig, WorkspaceScripts};
-use common::{eventually, get, raw, run, task, Fixture, Server, TOKEN};
+use branchyard_testkit::wait;
+use common::{get, raw, run, task, Fixture, Server, TOKEN};
 
 const PROJECT: &str = r#"
 [workspace]
@@ -100,7 +101,7 @@ fn the_server_keeps_the_pool_full_and_a_task_starts_from_it() {
     config.labels = vec!["warm".into()];
     let server = Server::start(config);
     let client = server.client();
-    eventually("the server to fill the pool", || ready(&f).len() == 1);
+    wait::until("the server to fill the pool", || ready(&f).len() == 1);
     let first = ready(&f).remove(0);
 
     let done = run(&client, &task("SH cat deps/lib.txt", "warm"));
@@ -118,7 +119,7 @@ fn the_server_keeps_the_pool_full_and_a_task_starts_from_it() {
     assert!(said.contains("built"), "{said}");
 
     // The claim woke the keeper: a new slot, without a restart.
-    eventually("a refill", || {
+    wait::until("a refill", || {
         let now = ready(&f);
         now.len() == 1 && now[0] != first
     });

@@ -17,7 +17,8 @@ use branchyard_sandbox::{
     admit, Capabilities, ExecSpec, Mount, Process, ProviderError, Requirements, Resources,
     SandboxInfo, SandboxProvider, SandboxSpec, SandboxState,
 };
-use common::{alive, workdir, WAIT};
+use branchyard_testkit::wait;
+use common::{workdir, WAIT};
 
 /// A setup whose workspace is a fresh directory; local mounts are identity.
 fn setup(name: &str) -> Setup {
@@ -187,17 +188,10 @@ fn stop_kills_background_children_and_blocks_exec() {
     let mut stdout = std::io::BufReader::new(process.take_stdout().unwrap());
     std::io::BufRead::read_line(&mut stdout, &mut line).unwrap();
     let child: u32 = line.trim().parse().unwrap();
-    assert!(alive(child));
+    assert!(wait::alive(child));
     provider.stop(&spec.name).unwrap();
     process.wait().unwrap();
-    let deadline = std::time::Instant::now() + WAIT;
-    while alive(child) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{child} survived stop"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait::gone(child);
     assert_eq!(
         provider.inspect(&spec.name).unwrap().unwrap().state,
         SandboxState::Stopped

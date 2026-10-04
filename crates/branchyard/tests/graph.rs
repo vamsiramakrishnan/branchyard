@@ -8,12 +8,12 @@
 mod common;
 
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
 
 use branchyard::{
     Access, After, Binding, BranchStatus, Budget, ChildBudget, Dependency, DependencyRef, Envelope,
     Error, GraphEdit, Policy, SpawnSpec, TaskOptions, Yard,
 };
+use branchyard_testkit::wait;
 use common::{fake_agent, Fixture};
 
 /// Root options that may delegate. No prompt here starts the MCP server,
@@ -47,14 +47,6 @@ fn spawn(name: &str, prompt: &str, depends_on: &[&str]) -> GraphEdit {
 
 fn status(yard: &Yard, name: &str) -> BranchStatus {
     yard.branch(name).unwrap().info().status.clone()
-}
-
-fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
 }
 
 fn denied(result: Result<impl std::fmt::Debug, Error>, needle: &str) {
@@ -113,7 +105,7 @@ fn a_dependent_starts_only_after_its_prerequisite_settles() {
         ]
     );
     // Waiting children have no worktree and ran no turn.
-    wait_until("a to wait for steering", || {
+    wait::until("a to wait for steering", || {
         delegate
             .inspect("a")
             .is_ok_and(|i| i.last_message.contains("waiting for steering"))
@@ -193,7 +185,7 @@ fn a_prerequisite_that_fails_blocks_its_dependents_until_the_graph_changes() {
             0,
         )
         .unwrap();
-    wait_until("bad to fail", || {
+    wait::until("bad to fail", || {
         matches!(status(&f.yard, "bad"), BranchStatus::Failed { .. })
     });
     delegate.cancel("hang").unwrap();
@@ -700,7 +692,7 @@ fn bindings_take_a_scratch_areas_writer_lock_for_each_turn() {
             0,
         )
         .unwrap();
-    wait_until("writer to hold the lock", || {
+    wait::until("writer to hold the lock", || {
         f.yard
             .scratch_lock_state("notes")
             .unwrap()
@@ -713,7 +705,7 @@ fn bindings_take_a_scratch_areas_writer_lock_for_each_turn() {
             1,
         )
         .unwrap();
-    wait_until("second to fail", || {
+    wait::until("second to fail", || {
         matches!(status(&f.yard, "second"), BranchStatus::Failed { .. })
     });
     match status(&f.yard, "second") {
@@ -844,7 +836,7 @@ fn a_prerequisite_whose_engine_was_killed_blocks_its_dependent_on_recovery() {
             .spawn()
             .unwrap(),
     );
-    wait_until("the prerequisite to run and its dependent to wait", || {
+    wait::until("the prerequisite to run and its dependent to wait", || {
         let yard = Yard::open(&f.root).unwrap();
         // Its prompt is recorded just before it is submitted.
         yard.branch("stuck").is_ok_and(|b| {

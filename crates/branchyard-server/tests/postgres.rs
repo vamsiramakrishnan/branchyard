@@ -13,7 +13,7 @@ use std::time::Duration;
 use branchyard::BranchStatus;
 use branchyard_client::api::{OperationState, SendRequest};
 use branchyard_client::new_key;
-use common::{eventually, run, task, wait, Fixture, Server};
+use common::{await_operation, run, task, Fixture, Server};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -54,7 +54,7 @@ fn a_server_keeps_branches_and_operations_in_postgres_across_a_restart() {
 
     let first = run(&client, &task("WRITE hello.txt=hi", "hello"));
     assert_eq!(first.state, OperationState::Succeeded, "{first:?}");
-    let sent = wait(
+    let sent = await_operation(
         &client,
         &repo
             .send(
@@ -72,7 +72,7 @@ fn a_server_keeps_branches_and_operations_in_postgres_across_a_restart() {
 
     // A held turn, cancelled through the server.
     let held = repo.submit_task(&task("HANG", "held"), &new_key()).unwrap();
-    eventually("the held turn to start", || {
+    wait::until("the held turn to start", || {
         repo.events("held", 0)
             .map(|e| {
                 e.events
@@ -82,7 +82,7 @@ fn a_server_keeps_branches_and_operations_in_postgres_across_a_restart() {
             .unwrap_or(false)
     });
     assert_eq!(repo.cancel("held").unwrap(), ["held"]);
-    let held = wait(&client, &held.id);
+    let held = await_operation(&client, &held.id);
     assert_eq!(
         held.result.unwrap().branches[0].status,
         BranchStatus::Interrupted
@@ -107,7 +107,7 @@ fn a_server_keeps_branches_and_operations_in_postgres_across_a_restart() {
     let branches = client.repo("app").branches().unwrap();
     let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(names, ["hello", "held"]);
-    let merged = wait(
+    let merged = await_operation(
         &client,
         &client
             .repo("app")
@@ -134,7 +134,7 @@ fn a_server_marks_operations_interrupted_in_postgres() {
         .repo("app")
         .submit_task(&long, &new_key())
         .unwrap();
-    eventually("the operation to run", || {
+    wait::until("the operation to run", || {
         server.client().operation(&op.id).unwrap().state == OperationState::Running
     });
     assert_eq!(server.stop().interrupted, 1);
@@ -145,7 +145,7 @@ fn a_server_marks_operations_interrupted_in_postgres() {
     assert_eq!(op.error.unwrap().code, "interrupted");
     // The turn's thread outlives the stopped server in this test process;
     // let it finish before cleaning up.
-    eventually("the orphaned turn to end", || {
+    wait::until("the orphaned turn to end", || {
         client
             .repo("app")
             .branch("long")
@@ -164,6 +164,7 @@ use branchyard_server::store::{
     Admission, AdmissionQuota, Idempotency, OperationStore, PostgresStore, StoredOperation, Worker,
 };
 use branchyard_server::work::Work;
+use branchyard_testkit::wait;
 
 /// Prompts the branch's harness was sent: one per turn that ran.
 fn prompts(client: &Client, branch: &str) -> usize {
@@ -255,7 +256,7 @@ fn a_crash_between_admission_and_execution_is_run_once_by_a_worker() {
     config.database = Some(url);
     let server = Server::start(config);
     let client = server.client();
-    let done = wait(&client, &op.id);
+    let done = await_operation(&client, &op.id);
     assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
     assert_eq!(prompts(&client, "crash"), 1, "run exactly once");
     // The client that lost the response finds the operation by its key.
@@ -289,7 +290,7 @@ fn two_servers_on_one_database_run_each_operation_once() {
     for (n, op) in ops.iter().enumerate() {
         // Either server answers for any operation.
         let other = if n % 2 == 0 { &cb } else { &ca };
-        let done = wait(other, &op.id);
+        let done = await_operation(other, &op.id);
         assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
         assert_eq!(prompts(&ca, &format!("b{n}")), 1, "b{n} ran once");
     }
@@ -318,7 +319,7 @@ fn two_servers_on_one_database_run_each_operation_once() {
     assert!(status == 200 || status == 202, "{status} {head}");
     assert!(head.contains("idempotent-replayed: true"), "{head}");
     assert_eq!(cb.operation_by_key(&key).unwrap().id, first.id);
-    let done = wait(&cb, &first.id);
+    let done = await_operation(&cb, &first.id);
     assert_eq!(done.state, OperationState::Succeeded);
     assert_eq!(prompts(&ca, "keyed"), 1);
 
@@ -328,7 +329,7 @@ fn two_servers_on_one_database_run_each_operation_once() {
         .repo("app")
         .submit_task(&task("HANG", "held"), &new_key())
         .unwrap();
-    eventually("the held turn to start", || prompts_seen(&cb, "held"));
+    wait::until("the held turn to start", || prompts_seen(&cb, "held"));
     let send = SendRequest {
         prompt: "WHOAMI".into(),
         ..SendRequest::default()
@@ -338,9 +339,9 @@ fn two_servers_on_one_database_run_each_operation_once() {
     let busy = cb.repo("app").remove("held").unwrap_err();
     assert_eq!(busy.code(), Some("branch_busy"), "{busy:?}");
     assert_eq!(cb.repo("app").cancel("held").unwrap(), ["held"]);
-    wait(&cb, &held.id);
+    await_operation(&cb, &held.id);
     // Released with the operation's outcome: the other server may now.
-    let sent = wait(
+    let sent = await_operation(
         &cb,
         &cb.repo("app").send("held", &send, &new_key()).unwrap().id,
     );
@@ -376,10 +377,10 @@ fn an_expired_claim_is_taken_over_and_a_started_operation_is_not_run_again() {
     config.operation_lease = Duration::from_secs(2);
     let server = Server::start(config);
     let client = server.client();
-    let done = wait(&client, &unstarted.id);
+    let done = await_operation(&client, &unstarted.id);
     assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
     assert_eq!(prompts(&client, "unstarted"), 1);
-    let taken = wait(&client, &started.id);
+    let taken = await_operation(&client, &started.id);
     assert_eq!(taken.state, OperationState::Interrupted);
     assert_eq!(taken.error.unwrap().message, WORKER_LOST);
     assert!(client.repo("app").branch("started").is_err(), "never run");
@@ -429,7 +430,10 @@ fn a_failed_queue_write_rolls_the_admission_back() {
     db.batch_execute("DROP TRIGGER fail_enqueue ON by_operation_queue")
         .unwrap();
     let op = client.repo("app").submit_task(&request, &key).unwrap();
-    assert_eq!(wait(&client, &op.id).state, OperationState::Succeeded);
+    assert_eq!(
+        await_operation(&client, &op.id).state,
+        OperationState::Succeeded
+    );
 }
 
 // Tenants on the durable queue: quotas counted in the admission's
@@ -494,7 +498,7 @@ fn max_running_holds_across_two_servers_on_one_database() {
     assert_eq!(admitted.len(), 2, "{admitted:?}");
     let (ca, cb) = (a.client(), b.client());
     for (name, _) in &admitted {
-        eventually("the admitted turn to start", || {
+        wait::until("the admitted turn to start", || {
             common::started(&ca, "app", name)
         });
     }
@@ -507,7 +511,10 @@ fn max_running_holds_across_two_servers_on_one_database() {
     // Released by either server's outcome.
     for (name, op) in &admitted {
         assert_eq!(cb.repo("app").cancel(name).unwrap(), [name.as_str()]);
-        assert_eq!(wait(&ca, &op.id).state, OperationState::Succeeded);
+        assert_eq!(
+            await_operation(&ca, &op.id).state,
+            OperationState::Succeeded
+        );
     }
     let after = run(&cb, &task("WRITE a.txt=x", "late"));
     assert_eq!(after.state, OperationState::Succeeded, "{after:?}");
@@ -525,7 +532,7 @@ fn max_running_holds_across_a_restart_with_queued_operations() {
         .repo("app")
         .submit_task(&task("HANG", "h1"), &new_key())
         .unwrap();
-    eventually("h1 to start", || common::started(&client, "app", "h1"));
+    wait::until("h1 to start", || common::started(&client, "app", "h1"));
     let queued = client
         .repo("app")
         .submit_task(&task("HANG", "h2"), &new_key())
@@ -545,7 +552,7 @@ fn max_running_holds_across_a_restart_with_queued_operations() {
         client.operation(&first.id).unwrap().state,
         OperationState::Interrupted
     );
-    eventually("h2 to start", || common::started(&client, "app", "h2"));
+    wait::until("h2 to start", || common::started(&client, "app", "h2"));
     let third = client
         .repo("app")
         .submit_task(&task("WRITE a.txt=x", "h3"), &new_key())
@@ -557,8 +564,14 @@ fn max_running_holds_across_a_restart_with_queued_operations() {
     assert_eq!(denied.code(), Some("quota_exceeded"));
     assert!(denied.to_string().contains("(2 of 2)"), "{denied}");
     assert_eq!(client.repo("app").cancel("h2").unwrap(), ["h2"]);
-    assert_eq!(wait(&client, &queued.id).state, OperationState::Succeeded);
-    assert_eq!(wait(&client, &third.id).state, OperationState::Succeeded);
+    assert_eq!(
+        await_operation(&client, &queued.id).state,
+        OperationState::Succeeded
+    );
+    assert_eq!(
+        await_operation(&client, &third.id).state,
+        OperationState::Succeeded
+    );
 }
 
 fn stored(id: &str, tenant: &str, lock: &str, creates: &[&str]) -> StoredOperation {
@@ -718,7 +731,7 @@ fn a_worker_runs_another_tenants_operation_as_its_principal_without_leaking_it()
     worker.worker_only = true;
     let worker = Server::start(worker);
     let store = PostgresStore::open(&url).unwrap();
-    eventually("the worker to run acme's operation", || {
+    wait::until("the worker to run acme's operation", || {
         store
             .get(&op.id)
             .unwrap()
@@ -820,18 +833,14 @@ fn finished(url: &str, id: &str) -> Operation {
         },
     )
     .unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    loop {
+    wait::until(&format!("operation {id} to finish"), || {
         let op = registry.get(id).unwrap().unwrap();
         if op.state.is_terminal() {
-            return op;
+            Ok(op)
+        } else {
+            Err(format!("{:?}", op.state))
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "operation {id} did not finish"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    })
 }
 
 #[test]
@@ -900,7 +909,7 @@ fn a_spawn_that_waits_is_queued_run_by_a_worker_and_started_later() {
     assert_eq!(status("app"), BranchStatus::Waiting);
     assert_eq!(yard.branch("app").unwrap().info().turns, 0);
     // Several recovery ticks pass: it keeps waiting for the integration.
-    std::thread::sleep(Duration::from_millis(500));
+    wait::settle("several recovery ticks pass", Duration::from_millis(500));
     assert_eq!(status("app"), BranchStatus::Waiting);
 
     // Integrating lib, also queued work the worker runs, starts app there,
@@ -920,7 +929,7 @@ fn a_spawn_that_waits_is_queued_run_by_a_worker_and_started_later() {
         OperationState::Succeeded,
         "{integrated:?}"
     );
-    eventually("app to start and finish", || {
+    wait::until("app to start and finish", || {
         status("app") == BranchStatus::Ready
     });
     let app = yard.branch("app").unwrap().info().clone();
@@ -985,11 +994,11 @@ fn servers_and_a_worker_resuming_graphs_on_one_database_start_a_dependent_once()
         )
         .unwrap();
     assert_eq!(applied.spawned[1].status, BranchStatus::Waiting);
-    eventually("first to finish", || {
+    wait::until("first to finish", || {
         repo.branch("first").unwrap().status == BranchStatus::Ready
     });
     // Recovery ticks on all three pass over a dependent still waiting.
-    std::thread::sleep(Duration::from_millis(500));
+    wait::settle("recovery ticks pass", Duration::from_millis(500));
     assert_eq!(repo.branch("second").unwrap().status, BranchStatus::Waiting);
     // The state an engine that stopped between settling the prerequisite
     // and starting the dependent leaves: satisfied, never claimed. Every
@@ -1002,14 +1011,14 @@ fn servers_and_a_worker_resuming_graphs_on_one_database_start_a_dependent_once()
         )
         .unwrap();
     assert_eq!(changed, 1);
-    eventually("second to start and settle", || {
+    wait::until("second to start and settle", || {
         matches!(
             repo.branch("second").unwrap().status,
             BranchStatus::Ready | BranchStatus::NoChanges
         )
     });
     // Many more ticks on every process: still one turn.
-    std::thread::sleep(Duration::from_millis(1000));
+    wait::settle("many more ticks pass", Duration::from_millis(1000));
     assert_eq!(prompts(&client, "second"), 1, "started exactly once");
     assert_eq!(repo.branch("second").unwrap().turns, 1);
     assert_eq!(prompts(&b.client(), "second"), 1);
@@ -1183,7 +1192,7 @@ fn a_registry_opened_beside_a_working_server_does_not_deadlock_with_it() {
         std::thread::scope(|scope| {
             let opening = scope.spawn(|| PostgresStore::open(&url).map(drop));
             // Long enough for the open to reach the queue.
-            std::thread::sleep(Duration::from_millis(500));
+            wait::settle("the open to reach the queue", Duration::from_millis(500));
             tx.execute(
                 "UPDATE by_operations SET body = '{\"done\":true}' WHERE id = 'op-old'",
                 &[],

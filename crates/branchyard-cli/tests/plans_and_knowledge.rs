@@ -7,119 +7,43 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::process::{Output, Stdio};
 
+use branchyard_testkit::fake_agent;
 use serde_json::Value;
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(env!("CARGO_BIN_EXE_by"));
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        let agent = profile_dir.join("fake-acp-agent");
-        // Already built (by a non-root run's builder, say): use it as is.
-        if !agent.is_file() {
-            assert!(
-                command.status().unwrap().success(),
-                "building fake-acp-agent failed"
-            );
-        }
-        assert!(agent.is_file());
-        agent
-    })
+/// The kit's repository, plus what this file adds.
+struct Repo {
+    kit: branchyard_testkit::Repo,
 }
 
-struct Repo {
-    dir: PathBuf,
-    root: PathBuf,
+impl std::ops::Deref for Repo {
+    type Target = branchyard_testkit::Repo;
+    fn deref(&self) -> &Self::Target {
+        &self.kit
+    }
 }
 
 impl Repo {
     fn new() -> Repo {
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-cli-plans-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
-        let repo = Repo {
-            root: dir.join("repo"),
-            dir,
-        };
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Test"]);
-        repo.git(&["config", "user.email", "test@localhost"]);
-        fs::write(repo.root.join("a.txt"), "one\n").unwrap();
-        fs::write(repo.root.join(".gitignore"), "branchyard.toml\n").unwrap();
-        repo.git(&["add", "."]);
-        repo.git(&["commit", "-q", "-m", "initial"]);
-        repo
+        let mut kit =
+            branchyard_testkit::repo!(&[("a.txt", "one\n"), (".gitignore", "branchyard.toml\n")]);
+        kit.set_env("USER", "ana");
+        kit.remove_env("VISUAL");
+        kit.remove_env("EDITOR");
+        Repo { kit }
     }
 
     /// Write `branchyard.toml`, with `AGENT` replaced by the fake agent and
     /// `DIR` by the test's directory.
     fn config(&self, text: &str) {
-        let agent = fake_agent().display().to_string();
+        let agent = fake_agent!().display().to_string();
         fs::write(
             self.root.join("branchyard.toml"),
             text.replace("AGENT", &agent)
                 .replace("DIR", &self.dir.display().to_string()),
         )
         .unwrap();
-    }
-
-    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
-        command
-            .current_dir(&self.root)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("NO_COLOR", "1")
-            .env("USER", "ana")
-            .env("BRANCHYARD_USER_CONFIG", self.dir.join("user/config.toml"))
-            .env("PAGER", "cat");
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-            "BRANCHYARD_REMOTE",
-            "VISUAL",
-            "EDITOR",
-        ] {
-            command.env_remove(var);
-        }
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let out = self.command("git").args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}");
-        String::from_utf8(out.stdout).unwrap()
     }
 
     fn by_with(&self, args: &[&str], stdin: &str) -> Output {
@@ -164,7 +88,7 @@ impl Repo {
             "--harness".into(),
             "gemini-cli".into(),
             "--command".into(),
-            fake_agent().display().to_string(),
+            fake_agent!().display().to_string(),
         ]
     }
 
@@ -174,12 +98,6 @@ impl Repo {
         args.extend(extra.iter().map(|a| (*a).to_owned()));
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         self.by(&args)
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 

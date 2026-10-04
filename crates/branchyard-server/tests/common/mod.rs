@@ -9,53 +9,20 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Once, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::Once;
+use std::time::Duration;
 
 use branchyard_client::api::{Operation, PolicySpec, TaskRequest};
 use branchyard_client::{new_key, Client};
 use branchyard_server::config::{Principal, TenantPolicy, Token};
 use branchyard_server::{Config, Running, Stopped};
+use branchyard_testkit::wait;
+
+pub use branchyard_testkit::fake_agent_here as fake_agent;
 
 pub const TOKEN: &str = "test-token-0123456789";
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
 static HERMETIC: Once = Once::new();
-
-/// The `fake-acp-agent` binary from branchyard-runtime, built once per test
-/// binary into this build's target directory.
-pub fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let exe = std::env::current_exe().unwrap();
-        // target/<profile>/deps/<test binary>
-        let profile_dir = exe.parent().and_then(Path::parent).unwrap().to_path_buf();
-        let target_dir = profile_dir.parent().unwrap();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", target_dir);
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected test binary location {}", exe.display()),
-        }
-        let status = command.status().expect("run cargo to build fake-acp-agent");
-        assert!(status.success(), "building fake-acp-agent failed");
-        let agent = profile_dir.join("fake-acp-agent");
-        assert!(agent.is_file(), "{} was not built", agent.display());
-        agent
-    })
-}
 
 pub fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -77,6 +44,8 @@ pub struct Fixture {
     pub dir: PathBuf,
     pub root: PathBuf,
     pub data: PathBuf,
+
+    _scratch: branchyard_testkit::Scratch,
 }
 
 impl Fixture {
@@ -87,14 +56,9 @@ impl Fixture {
         });
         // Build the agent before any test body starts timing.
         fake_agent();
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-server-test-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
+        let scratch = branchyard_testkit::Scratch::new("server");
+        let dir = scratch.path().to_path_buf();
         fs::create_dir_all(dir.join("repo")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
         let root = dir.join("repo");
         git(&root, &["init", "-q", "-b", "main"]);
         git(&root, &["config", "user.name", "Test"]);
@@ -107,6 +71,7 @@ impl Fixture {
             data: dir.join("data"),
             dir,
             root,
+            _scratch: scratch,
         }
     }
 
@@ -150,12 +115,6 @@ impl Fixture {
             std::sync::Arc::new(|| None),
         ));
         config
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -270,19 +229,7 @@ pub fn task(prompt: &str, name: &str) -> TaskRequest {
 /// Submit and wait for the result.
 pub fn run(client: &Client, request: &TaskRequest) -> Operation {
     let op = client.repo("app").submit_task(request, &new_key()).unwrap();
-    wait(client, &op.id)
-}
-
-pub fn wait(client: &Client, id: &str) -> Operation {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let op = client.operation(id).unwrap();
-        if op.state.is_terminal() {
-            return op;
-        }
-        assert!(Instant::now() < deadline, "operation {id} did not finish");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    await_operation(client, &op.id)
 }
 
 /// A raw HTTP/1.1 exchange: status and body.
@@ -328,11 +275,14 @@ pub fn get(path: &str, token: Option<&str>) -> String {
     format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n{auth}\r\n")
 }
 
-/// Poll `check` until it holds.
-pub fn eventually(what: &str, mut check: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !check() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+/// Wait for operation `id` to reach a terminal state; returns it.
+pub fn await_operation(client: &Client, id: &str) -> Operation {
+    wait::until(&format!("operation {id} to finish"), || {
+        let op = client.operation(id).unwrap();
+        if op.state.is_terminal() {
+            Ok(op)
+        } else {
+            Err(format!("{:?}", op.state))
+        }
+    })
 }
