@@ -131,33 +131,22 @@ pub fn ensure_vault_key(path: &Path) -> Result<(), Error> {
     let mut bytes = [0u8; 32];
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes)
         .map_err(|_| Error::State("could not generate a vault key".into()))?;
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    keys::write_private(path, hex.as_bytes())
+    keys::write_private(path, hex::encode(bytes).as_bytes())
 }
 
 /// The port of an `http://host:port/...` URL (80 or 443 when it names
 /// none), and its host.
 pub fn host_port(url: &str) -> Option<(String, u16)> {
-    let (scheme, rest) = url.split_once("://")?;
-    let authority = rest.split('/').next()?;
-    let authority = authority.rsplit('@').next()?;
-    let default = match scheme {
-        "http" => 80,
-        "https" => 443,
-        _ => return None,
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = match parsed.host()? {
+        url::Host::Domain(domain) => domain.to_owned(),
+        url::Host::Ipv4(addr) => addr.to_string(),
+        url::Host::Ipv6(addr) => addr.to_string(),
     };
-    if let Some(v6) = authority.strip_prefix('[') {
-        let (host, rest) = v6.split_once(']')?;
-        let port = match rest.strip_prefix(':') {
-            Some(p) => p.parse().ok()?,
-            None => default,
-        };
-        return Some((host.to_owned(), port));
-    }
-    match authority.split_once(':') {
-        Some((host, port)) => Some((host.to_owned(), port.parse().ok()?)),
-        None => Some((authority.to_owned(), default)),
-    }
+    Some((host, parsed.port_or_known_default()?))
 }
 
 /// Whether something accepts connections at `url`'s host and port.

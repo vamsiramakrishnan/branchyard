@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use crate::http::{Request, Url};
-use crate::util::{query_pairs, uri_decode};
+use crate::util::query_pairs;
 
 /// A received request.
 #[derive(Clone, Debug)]
@@ -46,7 +46,7 @@ impl MockRequest {
 
     /// The decoded path.
     pub fn decoded_path(&self) -> String {
-        uri_decode(&self.path, false)
+        branchyard_client::http::decode(&self.path)
     }
 
     /// As the client's request type, for checking signatures.

@@ -51,45 +51,12 @@ impl Endpoint {
                 unix: Some(path.to_path_buf()),
             });
         }
-        let (tls, rest) = if let Some(rest) = url.strip_prefix("https://") {
-            (true, rest)
-        } else if let Some(rest) = url.strip_prefix("http://") {
-            (false, rest)
-        } else {
-            return Err(format!("{url:?} is not an http:// or https:// URL"));
-        };
-        let (authority, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, ""),
-        };
-        if authority.is_empty() || authority.contains('@') {
-            return Err(format!("{url:?} has no usable host"));
-        }
-        if path.contains(['?', '#']) {
-            return Err(format!("{url:?} must not have a query or fragment"));
-        }
-        let default_port = if tls { 443 } else { 80 };
-        let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
-            let (host, after) = v6
-                .split_once(']')
-                .ok_or_else(|| format!("{url:?} has an unterminated IPv6 address"))?;
-            let port = match after.strip_prefix(':') {
-                Some(port) => parse_port(url, port)?,
-                None if after.is_empty() => default_port,
-                None => return Err(format!("{url:?} has a malformed host")),
-            };
-            (host.to_owned(), port)
-        } else {
-            match authority.rsplit_once(':') {
-                Some((host, port)) => (host.to_owned(), parse_port(url, port)?),
-                None => (authority.to_owned(), default_port),
-            }
-        };
+        let base = branchyard::models::BaseUrl::parse(url)?;
         Ok(Endpoint {
-            tls,
-            host,
-            port,
-            prefix: path.trim_end_matches('/').to_owned(),
+            tls: base.tls,
+            host: base.host,
+            port: base.port,
+            prefix: base.prefix,
             unix: None,
         })
     }
@@ -114,11 +81,6 @@ impl fmt::Display for Endpoint {
         let scheme = if self.tls { "https" } else { "http" };
         write!(f, "{scheme}://{}{}", self.host_header(), self.prefix)
     }
-}
-
-fn parse_port(url: &str, port: &str) -> Result<u16, String> {
-    port.parse()
-        .map_err(|_| format!("{url:?} has an invalid port {port:?}"))
 }
 
 /// TLS settings: the Mozilla roots from `webpki-roots`, plus the
@@ -461,18 +423,41 @@ impl Read for Chunked {
     }
 }
 
+/// Everything but `A-Z a-z 0-9 - . _ ~`.
+const COMPONENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
 /// Percent-encode one path segment or query value.
 pub fn encode(text: &str) -> String {
-    let mut out = String::new();
-    for byte in text.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
+    percent_encoding::utf8_percent_encode(text, COMPONENT).to_string()
+}
+
+/// Undo [`encode`]: `%XX` escapes become bytes (a trailing `%41` too), a
+/// malformed escape (`%zz`, a lone `%4`) stays as written, and bytes that
+/// are not UTF-8 become U+FFFD. `+` is not a space; see [`decode_form`].
+pub fn decode(text: &str) -> String {
+    percent_encoding::percent_decode_str(text)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+/// [`decode`] for an `application/x-www-form-urlencoded` query value, where
+/// a literal `+` is a space (an encoded one, `%2B`, stays a plus).
+pub fn decode_form(text: &str) -> String {
+    decode(&text.replace('+', " "))
+}
+
+/// [`decode_form`] on bytes, which need not be UTF-8 (a webhook's form body
+/// carries a JSON payload as bytes).
+pub fn decode_form_bytes(value: &[u8]) -> Vec<u8> {
+    let spaced: Vec<u8> = value
+        .iter()
+        .map(|b| if *b == b'+' { b' ' } else { *b })
+        .collect();
+    percent_encoding::percent_decode(&spaced).collect()
 }
 
 #[cfg(test)]
@@ -515,5 +500,47 @@ mod tests {
     fn encoding_keeps_unreserved_bytes() {
         assert_eq!(encode("fix-it_1.2~"), "fix-it_1.2~");
         assert_eq!(encode("a b/c"), "a%20b%2Fc");
+    }
+
+    /// The decoding cases every percent-decoding call site shares: the
+    /// server's query values, OTLP headers and storage routes all go
+    /// through `decode`/`decode_form`.
+    #[test]
+    fn decoding_handles_the_edges() {
+        // A trailing escape decodes (the hand-rolled decoders it replaced
+        // left `%41` at the end of input as written).
+        assert_eq!(decode("%41"), "A");
+        assert_eq!(decode("a%41"), "aA");
+        // Malformed escapes stay as written.
+        assert_eq!(decode("%zz"), "%zz");
+        assert_eq!(decode("%4"), "%4");
+        assert_eq!(decode("100%"), "100%");
+        assert_eq!(decode("%%41"), "%A");
+        // Multi-byte UTF-8, whole and cut.
+        assert_eq!(decode("%C3%A9"), "\u{e9}");
+        assert_eq!(decode("%E2%82%AC"), "\u{20ac}");
+        assert_eq!(decode("%C3"), "\u{fffd}");
+        // `+` is a space only in a form value.
+        assert_eq!(decode("a+b"), "a+b");
+        assert_eq!(decode_form("a+b%2Bc%20d"), "a b+c d");
+        assert_eq!(decode_form("%41"), "A");
+        assert_eq!(decode_form_bytes(b"a+b%2Bc%FF%41"), b"a b+c\xffA");
+    }
+
+    #[test]
+    fn encoding_round_trips() {
+        for text in [
+            "",
+            "plain",
+            "a b/c?d=e&f",
+            "100%",
+            "%41",
+            "caf\u{e9} \u{20ac} \u{1f600}",
+            "+ plus",
+            "~-._",
+        ] {
+            assert_eq!(decode(&encode(text)), text, "{text:?}");
+            assert_eq!(decode_form(&encode(text)), text, "{text:?}");
+        }
     }
 }

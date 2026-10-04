@@ -30,44 +30,40 @@ pub struct Target {
 
 impl Target {
     pub fn parse(url: &str) -> Result<Target, String> {
-        let (tls, rest) = match url.split_once("://") {
-            Some(("https", rest)) => (true, rest),
-            Some(("http", rest)) => (false, rest),
+        let tls = match url.split_once("://") {
+            Some(("https", _)) => true,
+            Some(("http", _)) => false,
             _ => return Err(format!("{url:?} is not an http:// or https:// URL")),
         };
-        let (authority, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, ""),
-        };
-        if authority.is_empty() || authority.contains('@') || path.contains(['?', '#']) {
-            return Err(format!("{url:?} must be a base URL: a host and a path"));
+        let not_base = || format!("{url:?} must be a base URL: a host and a path");
+        // `url` reads `http:///x` as host `x`; a base URL names its host.
+        if url
+            .split_once("://")
+            .is_some_and(|(_, rest)| rest.starts_with(['/', '\\']))
+        {
+            return Err(not_base());
         }
-        let default = if tls { 443 } else { 80 };
-        let (host, port) = match authority.strip_prefix('[') {
-            Some(v6) => {
-                let (host, after) = v6
-                    .split_once(']')
-                    .ok_or_else(|| format!("{url:?} has an unterminated IPv6 address"))?;
-                let port = match after.strip_prefix(':') {
-                    Some(p) => p.parse().map_err(|_| format!("{url:?} has a bad port"))?,
-                    None if after.is_empty() => default,
-                    None => return Err(format!("{url:?} has a malformed host")),
-                };
-                (host.to_owned(), port)
-            }
-            None => match authority.rsplit_once(':') {
-                Some((host, p)) => (
-                    host.to_owned(),
-                    p.parse().map_err(|_| format!("{url:?} has a bad port"))?,
-                ),
-                None => (authority.to_owned(), default),
-            },
+        let parsed = url::Url::parse(url).map_err(|e| format!("{url:?} is not a URL: {e}"))?;
+        let host = match parsed.host() {
+            Some(url::Host::Domain(domain)) => domain.to_owned(),
+            Some(url::Host::Ipv4(addr)) => addr.to_string(),
+            Some(url::Host::Ipv6(addr)) => addr.to_string(),
+            None => return Err(not_base()),
         };
+        if !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(not_base());
+        }
         Ok(Target {
             tls,
             host,
-            port,
-            prefix: path.trim_end_matches('/').to_owned(),
+            port: parsed
+                .port_or_known_default()
+                .unwrap_or(if tls { 443 } else { 80 }),
+            prefix: parsed.path().trim_end_matches('/').to_owned(),
         })
     }
 

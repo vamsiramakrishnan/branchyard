@@ -1294,7 +1294,7 @@ async fn operation_by_key(
         .unwrap_or("")
         .split('&')
         .find_map(|pair| pair.strip_prefix("idempotency_key="))
-        .map(percent_decode)
+        .map(branchyard_client::http::decode_form)
         .filter(|k| !k.is_empty())
         .ok_or_else(|| ApiError::bad_request("give idempotency_key"))?;
     let registry = app.registry.clone();
@@ -1306,32 +1306,6 @@ async fn operation_by_key(
     found
         .map(Json)
         .ok_or_else(|| unknown_operation(format!("with idempotency key {key}")))
-}
-
-/// `%XX` escapes and `+` in a query value.
-pub(crate) fn percent_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
-                match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                    Some(byte) => {
-                        out.push(byte);
-                        i += 3;
-                        continue;
-                    }
-                    None => out.push(b'%'),
-                }
-            }
-            b'+' => out.push(b' '),
-            byte => out.push(byte),
-        }
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Admit `work` as an operation: durably enqueued before this returns.
@@ -2130,7 +2104,7 @@ async fn repo_operations(
         .unwrap_or("")
         .split('&')
         .find_map(|pair| pair.strip_prefix("branch="))
-        .map(percent_decode);
+        .map(branchyard_client::http::decode_form);
     let registry = app.registry.clone();
     let tenant = caller.tenant().to_owned();
     let unfinished = blocking(move || registry.unfinished(&tenant)).await??;

@@ -208,7 +208,7 @@ impl World {
     /// anything, so verification fails.
     fn fake_npm(&self) {
         let agent = fake_agent!().display().to_string();
-        let codex = codex_script("@VERSION@").replace('\'', "'\\''");
+        let codex = branchyard_recipe::quote(&codex_script("@VERSION@"));
         self.script(
             "npm",
             &format!(
@@ -226,7 +226,7 @@ esac
 mkdir -p "$HOME/.local/bin"
 case $name in
   @openai/codex)
-    printf '%s' '{codex}' | sed "s/@VERSION@/${{version:-0.150.0}}/" > "$HOME/.local/bin/codex"
+    printf '%s' {codex} | sed "s/@VERSION@/${{version:-0.150.0}}/" > "$HOME/.local/bin/codex"
     chmod +x "$HOME/.local/bin/codex";;
   @qwen-code/qwen-code)
     printf '#!/bin/sh\nif [ "$1" = --version ]; then echo 0.5.0; exit 0; fi\nexec %s\n' '{agent}' > "$HOME/.local/bin/qwen"
@@ -627,9 +627,9 @@ fn installs_and_logins_reach_another_machine_over_ssh() {
     let out = w.ok(&["harnesses", "login", "codex", "--on", "ssh://dev@vm.test"]);
     // Codex is off PATH there, so the login names the executable found.
     let said = text(&out.stdout);
-    assert!(said.contains("run `ssh -t dev@vm.test '"), "{said}");
+    assert!(said.contains("run `ssh -t dev@vm.test /"), "{said}");
     assert!(
-        said.contains(".local/bin/codex' login --device-auth`"),
+        said.contains(".local/bin/codex login --device-auth`"),
         "{said}"
     );
     // With one, through `ssh -t`: the device code reaches the person, and

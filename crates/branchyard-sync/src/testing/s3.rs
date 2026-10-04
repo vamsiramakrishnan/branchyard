@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use super::server::{Faults, MockRequest, MockResponse, MockServer};
 use crate::auth::sigv4::{self, Credentials};
 use crate::store::xml;
-use crate::util::{hex, xml_escape};
+use crate::util::xml_escape;
 
 pub const ACCESS_KEY: &str = "AKIDSTANDIN";
 pub const SECRET_KEY: &str = "standin/secret/key";
@@ -35,7 +35,7 @@ pub struct MockS3 {
 }
 
 fn etag_of(data: &[u8]) -> String {
-    format!("\"{}\"", hex(&blake3::hash(data).as_bytes()[..16]))
+    format!("\"{}\"", hex::encode(&blake3::hash(data).as_bytes()[..16]))
 }
 
 fn error(status: u16, code: &str) -> MockResponse {
@@ -244,7 +244,7 @@ fn handle(state: &Mutex<State>, bucket: &str, page: usize, r: &MockRequest) -> M
             s.uploads.remove(&id);
             let etag = format!(
                 "\"{}-{}\"",
-                hex(&blake3::hash(&data).as_bytes()[..16]),
+                hex::encode(&blake3::hash(&data).as_bytes()[..16]),
                 listed.len()
             );
             s.objects.insert(

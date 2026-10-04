@@ -191,28 +191,6 @@ fn replayed(status: StatusCode, value: serde_json::Value) -> Response {
     response
 }
 
-/// One query parameter's decoded value, percent-decoded like
-/// `branchyard_client::http::encode` encoded it.
-fn percent_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) =
-                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
-            {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 /// `name`, `media_type` and repeated `label=KEY=VALUE` query parameters,
 /// as [`branchyard_client::Repo::publish_artifact`] sends them.
 fn parse_publish_query(query: &str) -> (Option<String>, Option<String>, BTreeMap<String, String>) {
@@ -223,7 +201,7 @@ fn parse_publish_query(query: &str) -> (Option<String>, Option<String>, BTreeMap
         let Some((key, value)) = pair.split_once('=') else {
             continue;
         };
-        let value = percent_decode(value);
+        let value = branchyard_client::http::decode(value);
         match key {
             "name" => name = Some(value),
             "media_type" => media_type = Some(value),
@@ -487,6 +465,13 @@ async fn lock_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_values_decode_like_every_other_call_site() {
+        let (name, media_type, _) = parse_publish_query("name=x%41&media_type=%zz%4+%C3%A9");
+        assert_eq!(name.as_deref(), Some("xA"));
+        assert_eq!(media_type.as_deref(), Some("%zz%4+\u{e9}"));
+    }
 
     #[test]
     fn queries_round_trip_percent_encoding() {

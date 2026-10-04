@@ -1,0 +1,73 @@
+# Signatures of codecs that first-party Rust must not re-implement, checked by
+# tools/check_handrolled.py (CI: .github/workflows/check.yml). The vetted crate
+# or the one shared helper to call instead is each ban's `use`.
+#
+# [[ban]]   id       a short name; [[allow]] rows refer to it
+#           pattern  a regex matched against each non-comment line of the Rust
+#                    under crates/, tests/, sdk/ and examples/
+#           use      what to call instead
+# [[allow]] ban, path, count, reason: a counted allowlist and a ratchet. The
+#           count may only fall: more matches is a new hand-rolled codec, fewer
+#           means lower it (or delete the row) in the same change.
+#
+# Other mechanisms append their rows here rather than starting a new gate.
+
+[[ban]]
+id = "percent-codec"
+pattern = '\bfn\s+(percent_decode|percent_encode|uri_decode|url_decode|url_encode|urlencode|urldecode|form_urlencode)\b'
+use = "branchyard_client::http::{encode, decode, decode_form} (built on the percent-encoding crate), or percent_encoding directly where branchyard-client is not a dependency"
+
+[[ban]]
+id = "percent-escape"
+pattern = '''format!\("%\{[A-Za-z_]+:02[xX]\}"\)'''
+use = "percent_encoding::utf8_percent_encode / branchyard_client::http::encode"
+
+[[ban]]
+id = "hex-codec"
+pattern = '\bfn\s+(hex|unhex|hex_encode|hex_decode|encode_hex|decode_hex|to_hex|bytes_to_hex)\s*\(\s*\w+\s*:\s*&(\[u8\]|str)'
+use = "hex::encode / hex::decode"
+
+[[ban]]
+id = "base64-alphabet"
+pattern = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789[+\-][/_]'
+use = "base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}"
+
+[[ban]]
+id = "base64-codec"
+pattern = '\bfn\s+(b64encode|b64decode|b64_encode|b64_decode|base64_encode|base64_decode|base64url_encode|base64url_decode)\b'
+use = "the base64 crate's Engine"
+
+[[ban]]
+id = "shell-quote"
+pattern = '\bfn\s+(shell_quote|shell_words|shell_split|split_shell|sh_quote|shquote|posix_quote)\b|replace\(\s*\x27\\\x27\x27\s*,\s*r?"\x27\\\\?\x27\x27"\s*\)'
+use = "branchyard_recipe::quote (shlex::try_quote) to quote, shlex::split (branchyard_setup::config::split_words) to split"
+
+[[ban]]
+id = "host-port"
+pattern = '\bfn\s+(host_port|host_port_of|parse_host_port|split_host_port|parse_authority)\b'
+use = "url::Url (host(), port_or_known_default()) or branchyard::models::BaseUrl::parse"
+
+[[ban]]
+id = "tar-format"
+pattern = 'b"ustar'
+use = "the tar crate (see crates/branchyard/src/tarball.rs)"
+
+# What is left. Every row is a place a human decided a crate does not fit.
+
+[[allow]]
+ban = "percent-escape"
+path = "crates/branchyard-cli/src/adf.rs"
+count = 1
+reason = "Sanitises a link while leaving valid %XX escapes in place and escaping only the characters ADF rejects; percent-encoding's AsciiSet would double-encode the existing escapes."
+
+[[allow]]
+ban = "shell-quote"
+path = "crates/branchyard-provision/src/claude.rs"
+count = 1
+reason = "The apiKeyHelper command always single-quotes the key file's path, and the golden provisioning fixtures (tests/golden/claude-api-key) pin that exact text; shlex leaves a plain path bare."
+
+[[allow]]
+ban = "host-port"
+path = "crates/branchyard/src/connectors/gateway.rs"
+count = 1
+reason = "A two-line wrapper over url::Url that the gateway supervisor and `by gateway` share; it parses nothing itself."

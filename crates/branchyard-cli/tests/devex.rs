@@ -578,20 +578,10 @@ fn an_issue_comes_through_the_connector_gateway_without_a_token() {
 }
 
 fn base64_url(text: &str) -> Vec<u8> {
-    let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut bits = 0u32;
-    let mut count = 0;
-    let mut out = Vec::new();
-    for c in text.bytes().filter(|c| *c != b'=') {
-        let v = table.iter().position(|t| *t == c).unwrap() as u32;
-        bits = bits << 6 | v;
-        count += 6;
-        if count >= 8 {
-            count -= 8;
-            out.push((bits >> count) as u8);
-        }
-    }
-    out
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(text.trim_end_matches('='))
+        .unwrap()
 }
 
 #[test]

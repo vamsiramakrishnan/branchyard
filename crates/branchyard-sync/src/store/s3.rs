@@ -182,7 +182,7 @@ impl S3Store {
     }
 
     fn multipart(&self, key: &str, data: &[u8], journal: &dyn UploadJournal) -> Result<Generation> {
-        let digest = crate::util::hex(&blake3::hash(data).as_bytes()[..16]);
+        let digest = hex::encode(&blake3::hash(data).as_bytes()[..16]);
         let mut state: Multipart = journal
             .load(key)
             .and_then(|s| serde_json::from_str(&s).ok())

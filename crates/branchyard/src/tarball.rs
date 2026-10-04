@@ -1,16 +1,18 @@
-//! A minimal, deterministic USTAR tar writer and reader for portable
-//! artifact bundles (`by artifact export`/`import`, [`crate::bundle`]).
+//! A deterministic USTAR tar writer and reader for portable artifact
+//! bundles (`by artifact export`/`import`, [`crate::bundle`]), on the `tar`
+//! crate.
 //!
-//! Not a general tar implementation: every member is a plain file, sorted
-//! by the caller before it is passed in, with a fixed mtime, uid, gid and
-//! mode, so the same set of bytes always produces the same archive bytes
-//! (`docs/storage.md` "Portable bundles"). No long-name (GNU) extension,
-//! no directories, no symlinks: [`write`] refuses a name over 100 bytes
-//! rather than silently truncating or extending the format.
+//! Every member is a plain file, sorted by the caller before it is passed
+//! in, with a fixed mtime, uid, gid, mode, user and group, so the same set
+//! of bytes always produces the same archive bytes (`docs/storage.md`
+//! "Portable bundles"; `tests/golden/bundle.tar` pins them). [`write`]
+//! refuses a name over 100 bytes rather than silently truncating or
+//! extending the format with a long-name header.
+
+use std::io::Read;
 
 use crate::Error;
 
-const BLOCK: usize = 512;
 /// Regular file, fixed for every member: `0644`.
 const MODE: u32 = 0o644;
 /// Fixed at the Unix epoch, never the wall clock, so a re-export of the
@@ -19,62 +21,43 @@ const MTIME: u64 = 0;
 const UNAME: &str = "branchyard";
 const GNAME: &str = "branchyard";
 
-fn octal_field(value: u64, width: usize) -> Vec<u8> {
-    // `width` includes the trailing NUL.
-    let digits = width - 1;
-    let mut out = format!("{value:0digits$o}").into_bytes();
-    out.push(0);
-    out
-}
-
-fn str_field(value: &str, width: usize) -> Vec<u8> {
-    let mut out = vec![0u8; width];
-    let bytes = value.as_bytes();
-    let n = bytes.len().min(width);
-    out[..n].copy_from_slice(&bytes[..n]);
-    out
-}
-
-fn set(header: &mut [u8; BLOCK], offset: usize, field: &[u8]) {
-    header[offset..offset + field.len()].copy_from_slice(field);
+fn corrupt(what: impl std::fmt::Display) -> Error {
+    Error::State(format!("tar archive: {what}"))
 }
 
 /// One member's USTAR header, checksummed. Refuses a name the format
 /// cannot carry rather than corrupting or truncating it.
-fn header(name: &str, size: u64) -> Result<[u8; BLOCK], Error> {
+fn header(name: &str, size: u64) -> Result<tar::Header, Error> {
     if name.len() > 100 {
         return Err(Error::State(format!(
             "tar member name is longer than this bundle format supports: {name}"
         )));
     }
-    let mut h = [0u8; BLOCK];
-    set(&mut h, 0, &str_field(name, 100));
-    set(&mut h, 100, &octal_field(MODE as u64, 8));
-    set(&mut h, 108, &octal_field(0, 8)); // uid
-    set(&mut h, 116, &octal_field(0, 8)); // gid
-    set(&mut h, 124, &octal_field(size, 12));
-    set(&mut h, 136, &octal_field(MTIME, 12));
-    set(&mut h, 148, b"        "); // chksum: spaces while computing
-    h[156] = b'0'; // typeflag: regular file
-    set(&mut h, 257, b"ustar\0");
-    set(&mut h, 263, b"00");
-    set(&mut h, 265, &str_field(UNAME, 32));
-    set(&mut h, 297, &str_field(GNAME, 32));
-    set(&mut h, 329, &octal_field(0, 8)); // devmajor
-    set(&mut h, 337, &octal_field(0, 8)); // devminor
-    let checksum: u32 = h.iter().map(|b| u32::from(*b)).sum();
-    let field = format!("{checksum:06o}\0 ");
-    set(&mut h, 148, field.as_bytes());
+    let mut h = tar::Header::new_ustar();
+    h.set_path(name)
+        .map_err(|e| Error::State(format!("tar member name {name}: {e}")))?;
+    h.set_entry_type(tar::EntryType::Regular);
+    h.set_mode(MODE);
+    h.set_uid(0);
+    h.set_gid(0);
+    h.set_size(size);
+    h.set_mtime(MTIME);
+    h.set_username(UNAME)
+        .map_err(|e| corrupt(format_args!("user name: {e}")))?;
+    h.set_groupname(GNAME)
+        .map_err(|e| corrupt(format_args!("group name: {e}")))?;
+    h.set_device_major(0)
+        .map_err(|e| corrupt(format_args!("device major: {e}")))?;
+    h.set_device_minor(0)
+        .map_err(|e| corrupt(format_args!("device minor: {e}")))?;
+    // The `tar` crate writes the checksum as seven digits and a space; this
+    // format has always written six digits, a NUL and a space (what GNU tar
+    // writes too), and bundles are compared byte for byte. Both read back.
+    let mut block = *h.as_bytes();
+    block[148..156].fill(b' ');
+    let sum: u32 = block.iter().map(|b| u32::from(*b)).sum();
+    h.as_mut_bytes()[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
     Ok(h)
-}
-
-fn pad_len(size: u64) -> usize {
-    let rem = (size as usize) % BLOCK;
-    if rem == 0 {
-        0
-    } else {
-        BLOCK - rem
-    }
 }
 
 /// Write `members` (already in the order they should appear) as a
@@ -82,32 +65,16 @@ fn pad_len(size: u64) -> usize {
 /// terminated by the two zero blocks the format ends on. The same
 /// `members`, in the same order, always produce the same bytes.
 pub(crate) fn write(members: &[(String, Vec<u8>)]) -> Result<Vec<u8>, Error> {
-    let mut out = Vec::new();
+    let mut builder = tar::Builder::new(Vec::new());
     for (name, bytes) in members {
-        out.extend_from_slice(&header(name, bytes.len() as u64)?);
-        out.extend_from_slice(bytes);
-        out.resize(out.len() + pad_len(bytes.len() as u64), 0);
+        let h = header(name, bytes.len() as u64)?;
+        builder
+            .append(&h, bytes.as_slice())
+            .map_err(|e| corrupt(format_args!("write {name}: {e}")))?;
     }
-    out.resize(out.len() + 2 * BLOCK, 0);
-    Ok(out)
-}
-
-fn parse_octal(field: &[u8]) -> Result<u64, Error> {
-    let text = String::from_utf8_lossy(field);
-    let text = text.trim_matches(|c: char| c == '\0' || c == ' ');
-    if text.is_empty() {
-        return Ok(0);
-    }
-    u64::from_str_radix(text, 8).map_err(|_| {
-        Error::State(format!(
-            "tar header has a malformed numeric field: {text:?}"
-        ))
-    })
-}
-
-fn parse_name(field: &[u8]) -> String {
-    let end = field.iter().position(|b| *b == 0).unwrap_or(field.len());
-    String::from_utf8_lossy(&field[..end]).into_owned()
+    builder
+        .into_inner()
+        .map_err(|e| corrupt(format_args!("finish: {e}")))
 }
 
 /// Read back what [`write`] wrote: every member's name and bytes, in
@@ -117,46 +84,27 @@ fn parse_name(field: &[u8]) -> String {
 /// entry type other than a regular file, since this format never writes
 /// one.
 pub(crate) fn read(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, Error> {
+    let mut archive = tar::Archive::new(bytes);
+    let entries = archive
+        .entries()
+        .map_err(|e| corrupt(format_args!("unreadable: {e}")))?;
     let mut members = Vec::new();
-    let mut offset = 0usize;
-    loop {
-        if offset + BLOCK > bytes.len() {
-            return Err(Error::State(
-                "tar archive is truncated: an incomplete header".into(),
-            ));
-        }
-        let header = &bytes[offset..offset + BLOCK];
-        if header.iter().all(|b| *b == 0) {
-            break; // the end-of-archive marker; the rest is padding.
-        }
-        let recorded: u32 = parse_octal(&header[148..156])? as u32;
-        let mut for_sum = header.to_vec();
-        for_sum[148..156].copy_from_slice(b"        ");
-        let computed: u32 = for_sum.iter().map(|b| u32::from(*b)).sum();
-        if computed != recorded {
-            return Err(Error::State(format!(
-                "tar header checksum mismatch at offset {offset}: the archive is corrupted"
+    for entry in entries {
+        let mut entry = entry.map_err(|e| corrupt(format_args!("{e}")))?;
+        let name = String::from_utf8_lossy(&entry.path_bytes()).into_owned();
+        let kind = entry.header().entry_type();
+        if kind != tar::EntryType::Regular {
+            return Err(corrupt(format_args!(
+                "member {name} is not a regular file (typeflag {}); this bundle format never \
+                 writes one",
+                kind.as_byte()
             )));
         }
-        let typeflag = header[156];
-        if typeflag != b'0' && typeflag != 0 {
-            return Err(Error::State(format!(
-                "tar member is not a regular file (typeflag {typeflag}); this bundle format never writes one"
-            )));
-        }
-        let name = parse_name(&header[0..100]);
-        let size = parse_octal(&header[124..136])?;
-        let data_start = offset + BLOCK;
-        let data_end = data_start
-            .checked_add(size as usize)
-            .ok_or_else(|| Error::State("tar member size overflows".into()))?;
-        if data_end > bytes.len() {
-            return Err(Error::State(format!(
-                "tar archive is truncated: member {name} claims {size} bytes past the end"
-            )));
-        }
-        members.push((name, bytes[data_start..data_end].to_vec()));
-        offset = data_end + pad_len(size);
+        let mut data = Vec::new();
+        entry
+            .read_to_end(&mut data)
+            .map_err(|e| corrupt(format_args!("truncated: member {name}: {e}")))?;
+        members.push((name, data));
     }
     Ok(members)
 }
@@ -212,9 +160,35 @@ mod tests {
         // asserting a guarantee this module does not make.
         let members = vec![("a".to_owned(), vec![1, 2, 3])];
         let mut archive = write(&members).unwrap();
-        let data_start = BLOCK;
+        let data_start = 512;
         archive[data_start] ^= 0xFF;
         let back = read(&archive).unwrap();
         assert_eq!(back[0].1, vec![254, 2, 3]);
+    }
+
+    /// The members behind `tests/golden/bundle.tar`: an index and three
+    /// artifacts of 0, 512 (a whole block, so no padding) and 1337 bytes.
+    fn golden_members() -> Vec<(String, Vec<u8>)> {
+        let pattern = |len: usize| -> Vec<u8> { (0..len).map(|i| (i * 7 % 251) as u8).collect() };
+        vec![
+            (
+                "index.json".to_owned(),
+                b"{\n  \"version\": 1,\n  \"entries\": []\n}".to_vec(),
+            ),
+            ("artifacts/art_0001".to_owned(), pattern(0)),
+            ("artifacts/art_0002".to_owned(), pattern(512)),
+            ("artifacts/art_0003".to_owned(), pattern(1337)),
+        ]
+    }
+
+    /// The bytes the hand-written writer produced before the `tar` crate
+    /// took over, for these members: a bundle exported by an older build
+    /// must stay byte-identical (and so must its digest).
+    #[test]
+    fn the_archive_bytes_match_the_golden_file() {
+        let golden = include_bytes!("../tests/golden/bundle.tar");
+        let written = write(&golden_members()).unwrap();
+        assert!(written == golden, "the bundle tar bytes changed");
+        assert_eq!(read(golden).unwrap(), golden_members());
     }
 }

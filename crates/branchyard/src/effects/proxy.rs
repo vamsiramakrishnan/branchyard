@@ -539,24 +539,19 @@ fn rest_tool(request: &Request) -> Option<String> {
     }
     let path = request.target.split(['?', '#']).next().unwrap_or("");
     let tool = path.strip_prefix("/call/")?;
-    let bytes = tool.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
-                decoded.push(u8::from_str_radix(hex, 16).ok()?);
-                i += 3;
-            }
-            b'%' => return None,
-            b => {
-                decoded.push(b);
-                i += 1;
-            }
-        }
+    // Strict: a malformed escape is not a tool name, so it is not a REST call.
+    let well_formed = tool.split('%').skip(1).all(|rest| {
+        rest.as_bytes()
+            .get(..2)
+            .is_some_and(|pair| pair.iter().all(u8::is_ascii_hexdigit))
+    });
+    if !well_formed {
+        return None;
     }
-    String::from_utf8(decoded).ok()
+    percent_encoding::percent_decode_str(tool)
+        .decode_utf8()
+        .ok()
+        .map(std::borrow::Cow::into_owned)
 }
 
 fn handle(stream: TcpStream, state: &ProxyState) {
@@ -1163,6 +1158,12 @@ mod tests {
         assert_eq!(rest_tool(&request("GET", "/call/g__x", b"")), None);
         assert_eq!(rest_tool(&request("POST", "/calls/g__x", b"")), None);
         assert_eq!(rest_tool(&request("POST", "/call/g__%4", b"")), None);
+        assert_eq!(rest_tool(&request("POST", "/call/g__%zz", b"")), None);
+        // An escape at the very end of the name decodes.
+        assert_eq!(
+            rest_tool(&request("POST", "/call/g__x%5F", b"")).as_deref(),
+            Some("g__x_")
+        );
         let body: Value = serde_json::from_slice(&Wire::Rest.body(&rest, "K", true)).unwrap();
         assert_eq!(body, json!({"arguments": {}, "stage": true}));
     }

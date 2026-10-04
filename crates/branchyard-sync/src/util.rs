@@ -1,31 +1,12 @@
-//! Small helpers every layer shares: hex, base64, percent-encoding and
-//! random bytes. Dates in the formats the cloud APIs sign and return are
-//! `branchyard_support::time`; the jitter generator is
+//! Small helpers every layer shares: base64, percent-encoding and random
+//! bytes. Hex is the `hex` crate. Dates in the formats the cloud APIs sign
+//! and return are `branchyard_support::time`; the jitter generator is
 //! `branchyard_support::rng`.
 
 use base64::Engine as _;
+use branchyard_client::http::decode_form;
 
 use crate::error::{Error, Result};
-
-pub fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(DIGITS[(b >> 4) as usize] as char);
-        out.push(DIGITS[(b & 15) as usize] as char);
-    }
-    out
-}
-
-pub fn unhex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
-        .collect()
-}
 
 pub fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -57,46 +38,11 @@ pub fn random_bytes(n: usize) -> Result<Vec<u8>> {
 /// Percent-encode as SigV4 and the cloud APIs want: everything but
 /// `A-Z a-z 0-9 - . _ ~`, and `/` too unless `keep_slash`.
 pub fn uri_encode(text: &str, keep_slash: bool) -> String {
-    let mut out = String::with_capacity(text.len());
-    for byte in text.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(byte as char)
-            }
-            b'/' if keep_slash => out.push('/'),
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
+    let encoded = branchyard_client::http::encode(text);
+    match keep_slash {
+        true => encoded.replace("%2F", "/"),
+        false => encoded,
     }
-    out
-}
-
-/// Undo percent-encoding (and `+` as a space when `plus`).
-pub fn uri_decode(text: &str, plus: bool) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                match std::str::from_utf8(&bytes[i + 1..i + 3])
-                    .ok()
-                    .and_then(|h| u8::from_str_radix(h, 16).ok())
-                    .ok_or(())
-                {
-                    Ok(b) => {
-                        out.push(b);
-                        i += 3;
-                        continue;
-                    }
-                    Err(_) => out.push(b'%'),
-                }
-            }
-            b'+' if plus => out.push(b' '),
-            b => out.push(b),
-        }
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Parse `a=b&c=d` into decoded pairs.
@@ -105,8 +51,8 @@ pub fn query_pairs(query: &str) -> Vec<(String, String)> {
         .split('&')
         .filter(|p| !p.is_empty())
         .map(|p| match p.split_once('=') {
-            Some((k, v)) => (uri_decode(k, true), uri_decode(v, true)),
-            None => (uri_decode(p, true), String::new()),
+            Some((k, v)) => (decode_form(k), decode_form(v)),
+            None => (decode_form(p), String::new()),
         })
         .collect()
 }
@@ -145,16 +91,19 @@ mod tests {
     fn encodings_round_trip() {
         assert_eq!(uri_encode("a b/c~d", true), "a%20b/c~d");
         assert_eq!(uri_encode("a b/c", false), "a%20b%2Fc");
-        assert_eq!(uri_decode("a%20b%2Fc+d", true), "a b/c d");
-        assert_eq!(uri_decode("100%", false), "100%");
+        assert_eq!(uri_encode("100%", true), "100%25");
         assert_eq!(
-            unhex(&hex(&[0, 1, 254, 255])).unwrap(),
+            hex::decode(hex::encode([0, 1, 254, 255])).unwrap(),
             vec![0, 1, 254, 255]
         );
-        assert!(unhex("abc").is_none());
+        assert!(hex::decode("abc").is_err());
         assert_eq!(unb64url(&b64url(b"hello?")).unwrap(), b"hello?");
         let pairs = query_pairs("endpoint=http%3A%2F%2Fx&flag");
         assert_eq!(pairs[0], ("endpoint".into(), "http://x".into()));
         assert_eq!(pairs[1], ("flag".into(), String::new()));
+        // Form values: `+` is a space, `%2B` a plus, a trailing escape decodes.
+        let pairs = query_pairs("a=b+c%2Bd&e=%41");
+        assert_eq!(pairs[0], ("a".into(), "b c+d".into()));
+        assert_eq!(pairs[1], ("e".into(), "A".into()));
     }
 }

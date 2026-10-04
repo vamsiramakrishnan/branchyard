@@ -122,7 +122,7 @@ impl Outbox {
         let name = format!(
             "{}-{}",
             crate::engine::default_device(),
-            crate::util::hex(&crate::util::random_bytes(2)?)
+            hex::encode(&crate::util::random_bytes(2)?)
         );
         self.with(|c| {
             c.execute(

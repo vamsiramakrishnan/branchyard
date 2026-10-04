@@ -292,7 +292,7 @@ fn handle(
         return MockResponse::json(200, &out);
     }
     if let Some(encoded) = r.path.strip_prefix(&object_prefix) {
-        let name = crate::util::uri_decode(encoded, false);
+        let name = branchyard_client::http::decode(encoded);
         match r.method.as_str() {
             "GET" => {
                 let Some(o) = s.objects.get(&name) else {

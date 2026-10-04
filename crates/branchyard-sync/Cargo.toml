@@ -16,6 +16,7 @@ testing = ["dep:httparse"]
 [dependencies]
 branchyard-support = { path = "../branchyard-support" }
 base64 = "0.22"
+hex = "0.4"
 blake3 = "1"
 branchyard = { path = "../branchyard" }
 # The blocking HTTP/1.1 client (rustls, Mozilla roots) every backend speaks

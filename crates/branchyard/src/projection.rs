@@ -470,7 +470,7 @@ pub(crate) fn new_token() -> Result<String, Error> {
     fs::File::open("/dev/urandom")
         .and_then(|mut random| random.read_exact(&mut bytes))
         .map_err(|e| Error::State(format!("could not read /dev/urandom for a token: {e}")))?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hex::encode(bytes))
 }
 
 /// Compare without stopping at the first difference.

@@ -440,15 +440,49 @@ impl fmt::Debug for Postgres {
 }
 
 /// `url` without a password.
+///
+/// `url::Url` does the work when it can, but a password is not always
+/// something it can see: a multi-host URL (`h1:5432,h2:5432`) does not parse,
+/// and a password with a raw `/`, `#` or `?` (as deploy/compose.yaml
+/// produces from a base64 secret) either fails to parse or parses with the
+/// password folded into the host or path. Those fall back to textual masking,
+/// which over-redacts rather than leaks.
 pub(crate) fn redact(url: &str) -> String {
+    // More than one `@` means the parser may have ended the password early
+    // (`by:a@b/c@db`); only the textual pass masks up to the last one.
+    if at_signs(url) <= 1 {
+        if let Ok(mut parsed) = url::Url::parse(url) {
+            if parsed.password().is_some() {
+                if let Ok(()) = parsed.set_password(Some("***")) {
+                    return parsed.to_string();
+                }
+            } else if !parsed.username().is_empty() || at_signs(url) == 0 {
+                return url.to_owned();
+            }
+            // No password, no username, yet an `@`: `by:12/pw@db` parses as
+            // host `by`, port 12, path `/pw@db`.
+        }
+    }
+    redact_text(url)
+}
+
+/// How many `@` the text after `://` holds.
+fn at_signs(url: &str) -> usize {
+    url.split_once("://")
+        .map_or(0, |(_, rest)| rest.matches('@').count())
+}
+
+/// Mask what follows the first `:` of the userinfo, which ends at the last
+/// `@` of the text; no `://`, no `@` or no `:` in the userinfo leaves `url`.
+fn redact_text(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_owned();
     };
-    match rest.split_once('@') {
-        Some((user, host)) => match user.split_once(':') {
-            Some((name, _)) => format!("{scheme}://{name}:***@{host}"),
-            None => url.to_owned(),
-        },
+    let Some(at) = rest.rfind('@') else {
+        return url.to_owned();
+    };
+    match rest[..at].split_once(':') {
+        Some((name, _)) => format!("{scheme}://{name}:***{}", &rest[at..]),
         None => url.to_owned(),
     }
 }
@@ -3334,5 +3368,62 @@ impl PoolBackend for Postgres {
                 .map_err(db("pool slot"))?;
             Ok(changed == 1)
         })
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact;
+
+    #[test]
+    fn a_password_is_hidden_and_a_url_without_one_is_left_alone() {
+        assert_eq!(
+            redact("postgres://by:s3cret@db.example:5432/yard"),
+            "postgres://by:***@db.example:5432/yard"
+        );
+        assert_eq!(
+            redact("postgres://by@db.example/yard"),
+            "postgres://by@db.example/yard"
+        );
+        assert_eq!(redact("host=db user=by"), "host=db user=by");
+    }
+
+    #[test]
+    fn a_multi_host_url_is_masked() {
+        assert_eq!(
+            redact("postgresql://by:pw@h1:5432,h2:5432/db"),
+            "postgresql://by:***@h1:5432,h2:5432/db"
+        );
+    }
+
+    #[test]
+    fn a_password_with_a_raw_delimiter_is_masked() {
+        for pw in [
+            "a/b", "a#b", "a?b", "12/b", "12#b", "12?b", "a/b/c", "p@ss/w",
+        ] {
+            let url = format!("postgres://by:{pw}@db:5432/yard");
+            let shown = redact(&url);
+            assert_eq!(shown, "postgres://by:***@db:5432/yard", "{url}");
+        }
+        assert_eq!(
+            redact("postgres://by:a/b@db/yard?sslmode=require"),
+            "postgres://by:***@db/yard?sslmode=require"
+        );
+    }
+
+    #[test]
+    fn an_empty_host_url_is_masked() {
+        assert_eq!(
+            redact("postgres://by:pw@/db?host=/run/pg"),
+            "postgres://by:***@/db?host=/run/pg"
+        );
+    }
+
+    #[test]
+    fn an_at_sign_after_the_authority_is_not_a_password() {
+        assert_eq!(
+            redact("postgres://by@db/yard?application_name=x"),
+            "postgres://by@db/yard?application_name=x"
+        );
     }
 }

@@ -75,20 +75,6 @@ impl fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn unhex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
-        .collect()
-}
-
 impl Claims {
     fn payload(&self) -> Result<String, Refusal> {
         let fields = [
@@ -200,7 +186,7 @@ impl Signer {
 
     /// The verifying key, as the bridge reads it from [`KEY_ENV`].
     pub fn public_key(&self) -> String {
-        hex(self.pair.public_key().as_ref())
+        hex::encode(self.pair.public_key().as_ref())
     }
 
     pub fn sign(&self, claims: &Claims) -> Result<String, Refusal> {
@@ -208,8 +194,8 @@ impl Signer {
         let signature = self.pair.sign(payload.as_bytes());
         Ok(format!(
             "{PREFIX}.{}.{}",
-            hex(payload.as_bytes()),
-            hex(signature.as_ref())
+            hex::encode(payload.as_bytes()),
+            hex::encode(signature.as_ref())
         ))
     }
 }
@@ -222,7 +208,7 @@ pub struct Verifier {
 
 impl Verifier {
     pub fn from_hex(text: &str) -> io::Result<Verifier> {
-        match unhex(text.trim()) {
+        match hex::decode(text.trim()).ok() {
             Some(key) if key.len() == 32 => Ok(Verifier { key }),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -241,9 +227,9 @@ impl Verifier {
         else {
             return Err(Refusal::Malformed("not a byb1 credential".into()));
         };
-        let payload = unhex(payload).ok_or_else(|| Refusal::Malformed("bad payload".into()))?;
-        let signature =
-            unhex(signature).ok_or_else(|| Refusal::Malformed("bad signature encoding".into()))?;
+        let payload = hex::decode(payload).map_err(|_| Refusal::Malformed("bad payload".into()))?;
+        let signature = hex::decode(signature)
+            .map_err(|_| Refusal::Malformed("bad signature encoding".into()))?;
         UnparsedPublicKey::new(&ED25519, &self.key)
             .verify(&payload, &signature)
             .map_err(|_| Refusal::BadSignature)?;

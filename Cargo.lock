@@ -648,7 +648,9 @@ dependencies = [
  "branchyard-testkit",
  "branchyard-workspace",
  "glob",
+ "hex",
  "httparse",
+ "percent-encoding",
  "postgres",
  "rcgen",
  "ring",
@@ -658,9 +660,11 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
  "tokio",
  "toml_edit",
+ "url",
  "webpki-roots",
 ]
 
@@ -668,10 +672,12 @@ dependencies = [
 name = "branchyard-bridge"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "branchyard-sandbox",
  "branchyard-support",
  "branchyard-testkit",
  "clap",
+ "hex",
  "libc",
  "rcgen",
  "ring",
@@ -684,6 +690,7 @@ dependencies = [
 name = "branchyard-cli"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "branchyard",
  "branchyard-bridge",
  "branchyard-client",
@@ -704,6 +711,7 @@ dependencies = [
  "clap_mangen",
  "cliclack",
  "dirs",
+ "hex",
  "ratatui",
  "schemars 1.2.2",
  "serde",
@@ -713,6 +721,7 @@ dependencies = [
  "tempfile",
  "toml_edit",
  "unicode-width",
+ "url",
 ]
 
 [[package]]
@@ -723,6 +732,7 @@ dependencies = [
  "blake3",
  "branchyard",
  "httparse",
+ "percent-encoding",
  "rustls",
  "rustls-pki-types",
  "schemars 1.2.2",
@@ -825,6 +835,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "shlex",
  "tempfile",
 ]
 
@@ -901,6 +912,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "shlex",
  "similar",
  "toml",
 ]
@@ -949,6 +961,7 @@ dependencies = [
  "branchyard-client",
  "branchyard-support",
  "branchyard-sync",
+ "hex",
  "httparse",
  "ring",
  "rusqlite",

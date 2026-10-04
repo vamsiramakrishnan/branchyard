@@ -55,7 +55,7 @@ pub mod provider;
 mod transport;
 
 pub use provider::RecipeProvider;
-pub use transport::Transport;
+pub use transport::{quote, Transport};
 
 /// Output kept per stream, as Orca keeps: the last 1 MiB.
 pub const MAX_CAPTURE_BYTES: usize = 1024 * 1024;

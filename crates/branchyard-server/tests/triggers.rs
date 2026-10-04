@@ -627,14 +627,7 @@ fn deliver_mail(
 
 /// A form value, URL-encoded.
 fn encoded(value: &str) -> String {
-    value
-        .bytes()
-        .map(|b| match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'.' | b'_' => (b as char).to_string(),
-            b' ' => "+".into(),
-            other => format!("%{other:02X}"),
-        })
-        .collect()
+    branchyard_client::http::encode(value).replace("%20", "+")
 }
 
 /// Mailgun's form for one message, signed with `key` at `timestamp`

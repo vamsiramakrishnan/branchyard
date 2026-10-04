@@ -33,11 +33,12 @@ impl ChunkId {
     }
 
     pub fn hex(&self) -> String {
-        crate::util::hex(&self.0)
+        hex::encode(self.0)
     }
 
     pub fn parse(hex: &str) -> Result<ChunkId> {
-        let bytes = crate::util::unhex(hex.trim())
+        let bytes = hex::decode(hex.trim())
+            .ok()
             .filter(|b| b.len() == 32)
             .ok_or_else(|| Error::corrupt(format!("{hex:?} is not a chunk ID")))?;
         let mut id = [0u8; 32];
@@ -79,7 +80,7 @@ pub fn write_chunk(dir: &Path, id: &ChunkId, data: &[u8]) -> Result<()> {
     std::fs::create_dir_all(parent)?;
     let temp = parent.join(format!(
         ".{}.tmp",
-        crate::util::hex(&crate::util::random_bytes(6)?)
+        hex::encode(&crate::util::random_bytes(6)?)
     ));
     std::fs::write(&temp, data)?;
     std::fs::rename(&temp, &path)?;

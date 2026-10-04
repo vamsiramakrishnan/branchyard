@@ -33,6 +33,11 @@
 pub(crate) mod gateway;
 pub mod pricing;
 pub(crate) mod upstream;
+
+/// A backend's or server's base URL, parsed: scheme, host, port and path
+/// prefix. The one parser for them; `branchyard_client::http::Endpoint`
+/// builds on it.
+pub use upstream::Target as BaseUrl;
 mod usage;
 
 use branchyard_support::LockExt as _;

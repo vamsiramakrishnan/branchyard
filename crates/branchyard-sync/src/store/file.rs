@@ -59,7 +59,7 @@ impl FileStore {
     }
 
     fn temp(&self) -> PathBuf {
-        let name = crate::util::hex(&crate::util::random_bytes(12).unwrap_or_default());
+        let name = hex::encode(crate::util::random_bytes(12).unwrap_or_default());
         self.root.join(".tmp").join(name)
     }
 
@@ -293,9 +293,9 @@ impl ObjectStore for FileStore {
         journal: &dyn UploadJournal,
     ) -> Result<Generation> {
         self.path(key)?;
-        let id = crate::util::hex(&blake3::hash(key.as_bytes()).as_bytes()[..12]);
+        let id = hex::encode(&blake3::hash(key.as_bytes()).as_bytes()[..12]);
         let partial = self.root.join(".tmp").join(format!("{id}.partial"));
-        let digest = crate::util::hex(&blake3::hash(data).as_bytes()[..16]);
+        let digest = hex::encode(&blake3::hash(data).as_bytes()[..16]);
         let mut done: u64 = journal
             .load(key)
             .and_then(|state| {

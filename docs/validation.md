@@ -109,6 +109,8 @@ python3 tools/verify_vendor.py
 python3 tests/test_verify_vendor.py
 python3 tools/verify_derivatives.py
 python3 tools/check_catalog.py
+python3 tools/check_handrolled.py
+python3 tests/test_check_handrolled.py
 python3 tools/check_docs.py
 python3 tools/check_test_hygiene.py
 python3 tests/test_check_test_hygiene.py

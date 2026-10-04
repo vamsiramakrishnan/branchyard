@@ -82,3 +82,23 @@ The hygiene check also keeps three counted ratchets in `tools/test_hygiene_ratch
 Run the commands in [validation](docs/validation.md). Add regression tests for behavioral changes and contract failures. Keep external provider smoke tests opt-in and document the exact profile they qualify. Use immutable fixtures for protocol parsing; a fake driver cannot establish sandbox isolation.
 
 Describe each change in terms of the developer-visible behavior, the failure condition it handles, and the evidence collected. Update the support matrix only when the corresponding profile has actually passed its gate.
+
+## Use a vetted crate for a codec
+
+Do not write a percent, hex, base64, shell-quoting, URL or tar codec by hand. Five copies of `percent_decode` once disagreed about `+` and all dropped a trailing `%41`. Call the crate, or the one shared helper built on it:
+
+| You need | Call |
+| --- | --- |
+| Percent-encode or decode a URL component or query value | `branchyard_client::http::{encode, decode, decode_form, decode_form_bytes}` (the `percent-encoding` crate; call `percent_encoding` directly from a crate that cannot depend on `branchyard-client`) |
+| Hex | `hex::encode`, `hex::decode` |
+| Base64 | `base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}` with `base64::Engine` |
+| Quote a word for a POSIX shell | `branchyard_recipe::quote` (`shlex::try_quote`) |
+| Split a command line | `branchyard_setup::config::split_words` (`shlex::split`); never `split_whitespace` on text that may hold quotes |
+| Parse a base URL into host, port and path | `branchyard::models::BaseUrl::parse`, or `url::Url` |
+| Read or write a tar | the `tar` crate, as in `crates/branchyard/src/tarball.rs` |
+
+A crate that parses a secret-bearing URL must not return the original text when `url::Url::parse` fails: `url` rejects multi-host and empty-host URLs and cannot see a password holding a raw `/`, `#` or `?`. `branchyard::pg::redact` falls back to textual masking for those; keep its `redact_tests` cases (CI's postgres job runs them) when you touch it.
+
+Add the dependency to the crate that needs it, prefer a package already in `Cargo.lock`, and commit the `Cargo.lock` change (CI builds with `--offline --locked`; `cargo fetch --locked` must pass).
+
+`python3 tools/check_handrolled.py` (CI runs it, and `tests/test_check_handrolled.py`) fails on a re-implementation: `fn percent_decode`, `fn hex(bytes: &[u8])`, a base64 alphabet literal, a `'\''` quote idiom, `b"ustar"`, and the other signatures in [`tools/handrolled_banlist.toml`](tools/handrolled_banlist.toml). If a crate truly does not fit, add an `[[allow]]` row there with the file, the number of matches and the reason. The count is a ratchet: it may only fall, and the check fails when a file has fewer matches than its row says, so lower the count (or delete the row) when you remove one. To ban a new signature, add a `[[ban]]` row with its regex and what to use instead, and a case to `tests/test_check_handrolled.py`.

@@ -19,7 +19,8 @@ use crate::args::{HarnessChange, HarnessesAction};
 use crate::commands::{print, Env, Failure, Outcome, Target};
 use crate::json;
 use crate::render::{table, Cell, Column, Style, Tone};
-use crate::ssh_remote::{quote, SshUrl};
+use crate::ssh_remote::SshUrl;
+use branchyard_recipe::quote;
 
 /// The machine a command acts on.
 enum Machine {

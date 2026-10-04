@@ -78,7 +78,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318 OTEL_SERVICE_NAME=by-prod by s
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | The collector's base URL; spans go to `<it>/v1/traces` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | The full traces URL, used as is; wins over the above |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` (or `..._TRACES_PROTOCOL`) | `http/protobuf` (the default) or `http/json`. `grpc` is not built in: the server warns and exports nothing; point it at the collector's HTTP port, 4318 |
-| `OTEL_EXPORTER_OTLP_HEADERS` (or `..._TRACES_HEADERS`) | `key=value,key2=value2`, percent-decoded, sent with each export (an API key, a tenant header) |
+| `OTEL_EXPORTER_OTLP_HEADERS` (or `..._TRACES_HEADERS`) | `key=value,key2=value2`, percent-decoded (`+` stays a plus), sent with each export (an API key, a tenant header) |
 | `OTEL_SERVICE_NAME` | The resource's `service.name`; default `branchyard-server` |
 | `OTEL_SDK_DISABLED=true`, `OTEL_TRACES_EXPORTER=none` | No export |
 
