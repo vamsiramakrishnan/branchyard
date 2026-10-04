@@ -123,7 +123,7 @@ cargo run -p branchyard-qualify -- --profile gemini-cli-acp --workdir /tmp/qual 
     --max-cost-usd 3 --report docs/qualification/gemini-cli-acp.json
 ```
 
-The work directory must exist. `--command` replaces the executable when it is installed elsewhere. The runner strips `ANTHROPIC*`, `CLAUDE*`, `OPENAI*` and `CODEX*` variables unless kept with `--keep-env NAME`. Scenarios make real model calls; `--max-cost-usd` applies only to profiles that report cost. The runner exits non-zero if any scenario fails, and still writes the report.
+The work directory must exist. `--command` replaces the executable when it is installed elsewhere. The runner strips <!-- fact:runtime.strip_prefixes -->`ANTHROPIC*`, `CLAUDE*`, `OPENAI*` and `CODEX*`<!-- /fact --> variables unless kept with `--keep-env NAME`. Scenarios make real model calls; `--max-cost-usd` applies only to profiles that report cost. The runner exits non-zero if any scenario fails, and still writes the report.
 
 Then:
 

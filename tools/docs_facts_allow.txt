@@ -1,0 +1,3 @@
+# Server routes allowed to be undocumented (a ratchet: it may only shrink).
+# One route per line, as registered in crates/branchyard-server. An entry that
+# has since been documented must be removed, or tools/docs_facts.py --check fails.

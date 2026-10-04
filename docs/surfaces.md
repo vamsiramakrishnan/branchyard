@@ -11,6 +11,8 @@ Surfaces:
 - **client**: `branchyard-client`, the typed Rust client of that API.
 - **delegation**: a harness acting as its branch through `by` in its shell, the Python module, `Delegate` in Rust, or the MCP tools (`by mcp`). The four reach one set of operations and give the same answers ([delegation](delegation.md)); they work in local mode and on a server that allows delegation.
 
+The server registers <!-- fact:http.route_count -->85<!-- /fact --> routes; each is documented in [the server reference](server.md) or on this page, and `tools/docs_facts.py --check` fails when one is not.
+
 **yes** means supported; **no** gives the reason; a server opt-in is named where the server's operator must allow something first.
 
 ## Branch operations
