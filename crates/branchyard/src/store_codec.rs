@@ -106,6 +106,19 @@ pub fn deadline(now_ms: u64, ttl: Duration) -> u64 {
     now_ms.saturating_add(ttl_ms)
 }
 
+/// The latest moment a column can hold, in milliseconds: "never".
+pub const FOREVER_MS: u64 = i64::MAX as u64;
+
+/// When a wait or limit of `span` starting at `now_ms` runs out, for a
+/// deadline whose absurd length means "no deadline in practice" (a `wait`
+/// of [`Duration::MAX`], a huge `max_duration`). Unlike [`deadline`] it
+/// caps at [`FOREVER_MS`] instead of letting [`to_db`] refuse the value,
+/// so the call waits as it was asked to. A lease TTL is not one of these:
+/// use [`deadline`], which fails on an absurd TTL.
+pub fn deadline_capped(now_ms: u64, span: Duration) -> u64 {
+    deadline(now_ms, span).min(FOREVER_MS)
+}
+
 /// A duration in milliseconds for scheduling arithmetic, where more than
 /// `i64::MAX` just means "effectively forever". Never for a stored value:
 /// use [`millis_to_db`], which fails instead.
@@ -204,6 +217,21 @@ mod tests {
         assert!(from_db_opt("x", Some(-3)).is_err());
         assert!(millis_to_db("x", Duration::MAX).is_err());
         assert_eq!(millis_to_db("x", Duration::from_secs(2)), Ok(2000));
+    }
+
+    #[test]
+    fn forever_deadlines_cap_where_ttls_still_fail() {
+        assert_eq!(deadline_capped(5, Duration::from_secs(1)), 1_005);
+        assert_eq!(deadline_capped(5, Duration::MAX), FOREVER_MS);
+        assert_eq!(deadline_capped(u64::MAX, Duration::MAX), FOREVER_MS);
+        // A capped deadline is always storable.
+        assert_eq!(
+            to_db("until_ms", deadline_capped(u64::MAX, Duration::MAX)),
+            Ok(i64::MAX)
+        );
+        // A lease TTL is not a wait: an absurd one still fails where it is
+        // stored.
+        assert!(to_db("lease_until_ms", deadline(5, Duration::MAX)).is_err());
     }
 
     #[test]

@@ -34,6 +34,7 @@ use crate::placement::{Placement, SandboxPlan};
 use crate::projection::{ENV_BRANCH, ENV_ROOT};
 use crate::record::Recorder;
 use crate::state::{now_ms, Begun, Fence, Lease, ProcessRow, Record, Store};
+use crate::store_codec::deadline_capped;
 use crate::{
     git, names, Activity, Branch, BranchStatus, Budget, CandidateInfo, DecisionSource,
     DeliveredVia, Error, Event, NativeSession, PermissionDecision, PermissionRequest, Policy,
@@ -306,7 +307,7 @@ fn drive(
     let deadline_ms = bounds
         .budget
         .max_duration
-        .map(|limit| now_ms().saturating_add(limit.as_millis() as u64));
+        .map(|limit| deadline_capped(now_ms(), limit));
     store.backend().set_deadline(fence, deadline_ms)?;
     let driven = run(recorder, turn, record, bounds, lease, started, deadline)?;
     journal(
@@ -377,9 +378,8 @@ fn run(
     // token in its home, before the sandbox exists. The token file is
     // removed, and the gateway's audit log read a last time, when this
     // function returns.
-    let deadline_ms = deadline.map(|at| {
-        now_ms().saturating_add(at.saturating_duration_since(Instant::now()).as_millis() as u64)
-    });
+    let deadline_ms =
+        deadline.map(|at| deadline_capped(now_ms(), at.saturating_duration_since(Instant::now())));
     // One scope: the person's ceiling over what the branch asked for,
     // which its connectors, models, network and token all follow.
     let (scoped, narrowed) = crate::access::scoped(turn.yard, record);

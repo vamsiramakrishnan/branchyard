@@ -1019,7 +1019,9 @@ impl Store {
         timeout: Duration,
         mut ready: impl FnMut() -> Result<Option<T>, Error>,
     ) -> Result<Option<T>, Error> {
-        let deadline = Instant::now() + timeout;
+        // A timeout too long to add to the clock (`Duration::MAX`) is a wait
+        // with no deadline.
+        let deadline = Instant::now().checked_add(timeout);
         loop {
             let seen = *self
                 .signal
@@ -1030,19 +1032,18 @@ impl Store {
                 return Ok(Some(found));
             }
             let now = Instant::now();
-            if now >= deadline {
-                return Ok(None);
-            }
+            let remaining = match deadline {
+                Some(deadline) if now >= deadline => return Ok(None),
+                Some(deadline) => POLL.min(deadline - now),
+                None => POLL,
+            };
             let appended = self
                 .signal
                 .appended
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             if *appended == seen {
-                let _ = self
-                    .signal
-                    .changed
-                    .wait_timeout(appended, POLL.min(deadline - now));
+                let _ = self.signal.changed.wait_timeout(appended, remaining);
             }
         }
     }
