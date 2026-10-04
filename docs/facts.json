@@ -37,6 +37,23 @@
     },
     "patched": 0
   },
+  "derivatives": {
+    "scion": {
+      "derivatives": 12,
+      "sources": 28,
+      "rewritten": 1
+    },
+    "orca": {
+      "derivatives": 2,
+      "sources": 3
+    },
+    "ports": {
+      "derivatives": 17,
+      "sources": 84,
+      "rust": 14,
+      "catalogs": 3
+    }
+  },
   "tests": {
     "total": 1556,
     "ignored": 27,

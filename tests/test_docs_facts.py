@@ -4,6 +4,7 @@ tree: a fact derived from the code cannot be hand-edited or go stale, a new
 route needs documenting, the allowlist only shrinks, and an opening date line
 cannot be older than a dated section below it."""
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -21,7 +22,7 @@ KEEP = shutil.ignore_patterns("target", "node_modules", "__pycache__", ".git")
 def copy_tree(root):
     for name in ("Cargo.toml", "vendor.lock.json", "vendor.patches.json", "README.md", "CONTRIBUTING.md"):
         shutil.copy(REPO / name, root / name)
-    for name in ("docs", "tools"):
+    for name in ("docs", "tools", "patches"):
         shutil.copytree(REPO / name, root / name, ignore=KEEP)
     for crate in (REPO / "crates").iterdir():
         for part in ("Cargo.toml", "src", "tests"):
@@ -103,6 +104,33 @@ class DocsFacts(Tree):
         self.assertNotEqual(self.facts("--check").returncode, 0)
         self.assertEqual(self.facts("--write").returncode, 0)
         self.assertIn("`GEMINI*`", (self.root / "docs" / "provisioning.md").read_text())
+
+    def test_derivative_counts_come_from_the_manifests(self):
+        ports = json.loads((self.root / "patches" / "ports.json").read_text())
+        validation = (self.root / "docs" / "validation.md").read_text()
+        count = len(ports["derivatives"])
+        self.assertIn(f"<!-- fact:derivatives.ports -->{count}<!-- /fact -->", validation)
+        sources = sum(len(s) for d in ports["derivatives"] for s in d["from"].values())
+        self.assertIn(f"<!-- fact:derivatives.ports_sources -->{sources}<!-- /fact -->", validation)
+        ports["derivatives"].pop()
+        (self.root / "patches" / "ports.json").write_text(json.dumps(ports, indent=2) + "\n")
+        done = self.facts("--check")
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("docs/validation.md", done.stderr)
+        self.assertEqual(self.facts("--write").returncode, 0)
+        validation = (self.root / "docs" / "validation.md").read_text()
+        self.assertIn(f"<!-- fact:derivatives.ports -->{count - 1}<!-- /fact -->", validation)
+
+    def test_the_qualification_page_takes_the_prefix_list_from_the_runtime(self):
+        self.edit("crates/branchyard-runtime/src/lib.rs", '"CODEX"]', '"CODEX", "GEMINI"]')
+        self.edit("crates/branchyard-runtime/src/lib.rs", "[&str; 4]", "[&str; 5]")
+        self.assertEqual(self.facts("--write").returncode, 0)
+        self.assertIn("`GEMINI*`", (self.root / "docs" / "qualification" / "README.md").read_text())
+
+    def test_the_test_count_is_not_called_what_cargo_runs(self):
+        claim = re.compile(r"cargo test --workspace[^|\n]*?\bruns\b[^|\n]*fact:tests\.total")
+        for path in (REPO / "docs").rglob("*.md"):
+            self.assertIsNone(claim.search(path.read_text()), path)
 
     def test_a_new_route_must_be_documented(self):
         api = self.root / "crates/branchyard-server/src/api.rs"
