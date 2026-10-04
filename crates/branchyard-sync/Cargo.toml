@@ -14,21 +14,21 @@ description = "Replicates Branchyard task repositories to durable object storage
 testing = ["dep:httparse"]
 
 [dependencies]
-base64 = "0.22"
-blake3 = "1"
+base64 = { workspace = true }
+blake3 = { workspace = true }
 branchyard = { path = "../branchyard" }
 # The blocking HTTP/1.1 client (rustls, Mozilla roots) every backend speaks
 # through.
 branchyard-client = { path = "../branchyard-client" }
 # AES-256-GCM, ChaCha20-Poly1305, HMAC-SHA256, SHA-256, PBKDF2, HKDF and
 # RSA PKCS#1 SHA-256 (service-account JWTs). Already in Cargo.lock.
-ring = "0.17"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rusqlite = { version = "0.39", default-features = false, features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-httparse = { version = "1", optional = true }
+ring = { workspace = true }
+rustls = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+httparse = { workspace = true, optional = true }
 
 [dev-dependencies]
 branchyard-sync = { path = ".", features = ["testing"] }
-tempfile = "3.27.0"
+tempfile = { workspace = true }

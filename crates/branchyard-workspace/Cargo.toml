@@ -7,4 +7,4 @@ publish.workspace = true
 description = "Git branches, candidates, and validated integration for Branchyard"
 
 [target."cfg(unix)".dependencies]
-rustix = { version = "1.1", default-features = false, features = ["std", "process", "fs"] }
+rustix = { workspace = true, features = ["fs"] }

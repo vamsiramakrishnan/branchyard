@@ -17,4 +17,4 @@ branchyard-sandbox = { path = "../branchyard-sandbox" }
 # The local runtime and the network type surface only: no cloud backend, no
 # build-time runtime download, no keyring.
 microsandbox = { version = "=0.7.3", default-features = false, features = ["local", "net"], optional = true }
-tokio = { version = "1.52", features = ["rt-multi-thread"], optional = true }
+tokio = { workspace = true, features = ["rt-multi-thread"], optional = true }

@@ -27,3 +27,35 @@ version = "0.0.1"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
+
+# Every dependency used by more than one member is declared here once; members
+# say `workspace = true` and add only their own features. tools/check_workspace_deps.py
+# keeps it that way.
+[workspace.dependencies]
+backon = { version = "1.6", default-features = false, features = ["std"] }
+base64 = "0.22"
+blake3 = "1"
+clap = { version = "4.6", features = ["derive"] }
+glob = "0.3"
+hex = "0.4.3"
+httparse = "1"
+postgres = "0.19"
+prost = "0.14"
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
+ring = "0.17"
+rusqlite = { version = "0.39", default-features = false, features = ["bundled"] }
+rustix = { version = "1.1", default-features = false, features = ["process", "std"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+schemars = "1"
+serde = "1.0.229"
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+tempfile = "3.27.0"
+tokio = { version = "1.52", default-features = false }
+toml = "1.1.6"
+toml_edit = { version = "0.25.15", default-features = false, features = ["parse"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+uuid = { version = "1.26.1", features = ["v4"] }
+webpki-roots = "1"

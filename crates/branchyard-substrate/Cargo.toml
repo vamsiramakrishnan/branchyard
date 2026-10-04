@@ -14,9 +14,9 @@ fake = ["dep:tokio-stream", "tokio/net"]
 branchyard-bridge = { path = "../branchyard-bridge" }
 branchyard-sandbox = { path = "../branchyard-sandbox" }
 branchyard-workspace = { version = "0.0.1", path = "../branchyard-workspace" }
-prost = "0.14"
+prost = { workspace = true }
 prost-types = "0.14"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 tokio-stream = { version = "0.1", features = ["net"], optional = true }
 tonic = { version = "0.14", features = ["tls-ring", "tls-webpki-roots"] }
 tonic-prost = "0.14"
@@ -26,6 +26,6 @@ protoc-bin-vendored = "3"
 tonic-prost-build = "0.14"
 
 [dev-dependencies]
-rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
+rcgen = { workspace = true }
 branchyard-substrate = { path = ".", features = ["fake"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
