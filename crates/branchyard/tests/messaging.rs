@@ -9,6 +9,7 @@ use std::time::Duration;
 use branchyard::{
     Activity, BranchStatus, Budget, DeliveredVia, Envelope, Error, Policy, Spawn, TaskOptions,
 };
+use branchyard_testkit::wait;
 use common::{fake_agent, text, Fixture};
 
 fn delegating(f: &Fixture, envelope: Envelope) -> TaskOptions {
@@ -236,18 +237,6 @@ fn messaging_authority_follows_the_delegation_tree() {
     }
 }
 
-/// Wait up to 30 seconds for `done`.
-fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while !done() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
 fn events(f: &Fixture, branch: &str) -> Vec<branchyard::RecordedEvent> {
     f.yard.branch(branch).unwrap().events().unwrap()
 }
@@ -286,7 +275,7 @@ fn parent_and_child(f: &Fixture, options: &TaskOptions) -> branchyard::Delegate 
         .unwrap()
         .spawn(spawn("say hi", "kid"))
         .unwrap();
-    wait_until("kid's turn to end", || {
+    wait::until("kid's turn to end", || {
         f.yard.branch("kid").unwrap().info().status != BranchStatus::Running
     });
     f.yard
@@ -308,7 +297,7 @@ fn a_message_is_steered_into_the_parents_running_turn_and_never_repeated() {
         let options = options.clone();
         std::thread::spawn(move || root.send("AWAIT_STEER", options))
     };
-    wait_until("root to wait for steering", || {
+    wait::until("root to wait for steering", || {
         text(&events(&f, "root")).contains("waiting for steering")
     });
 
@@ -368,7 +357,7 @@ fn a_message_waits_for_the_next_turn_when_the_parent_cannot_steer() {
     };
     let root = f.yard.branch("root").unwrap();
     let turn = std::thread::spawn(move || root.send("HANG", no_steer));
-    wait_until("root's turn to run", || {
+    wait::until("root's turn to run", || {
         prompts(&events(&f, "root")).len() == 2
     });
 
@@ -384,7 +373,7 @@ fn a_message_waits_for_the_next_turn_when_the_parent_cannot_steer() {
     };
     assert!(!root_inbox().messages[0].delivered, "left pending");
     // Its steered input was refused, and the turn goes on.
-    wait_until("the steer to be refused", || {
+    wait::until("the steer to be refused", || {
         events(&f, "root").iter().any(|e| {
             matches!(&e.activity,
             Activity::Warning(w) if w.contains("was not delivered"))
@@ -438,7 +427,7 @@ fn a_turn_waiting_for_an_answer_is_not_stalled() {
     };
     let branch = f.yard.branch("kid").unwrap();
     let turn = std::thread::spawn(move || branch.send("HANG", stalling));
-    wait_until("kid's turn to run", || {
+    wait::until("kid's turn to run", || {
         prompts(&events(&f, "kid")).len() == 2
     });
     // The harness blocks in `ask --wait`: the same call a harness's `by ask
@@ -455,7 +444,7 @@ fn a_turn_waiting_for_an_answer_is_not_stalled() {
     let asked = asking.join().unwrap().unwrap();
     assert!(asked.answer.is_none());
     // Once the wait is over, the turn's idle time counts again.
-    wait_until("kid to stall", || stalled(&f));
+    wait::until("kid to stall", || stalled(&f));
     assert!(!f.yard.cancel("kid").unwrap().is_empty());
     let kid = turn.join().unwrap().unwrap();
     assert_eq!(kid.info().status, BranchStatus::Interrupted);

@@ -12,9 +12,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use branchyard_testkit::fake_agent;
 use serde_json::Value;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -105,36 +105,6 @@ try:
 except urllib.error.HTTPError as e:
     print("call %s: %d" % (sys.argv[1], e.code))
 "#;
-
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(env!("CARGO_BIN_EXE_by"));
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        profile_dir.join("fake-acp-agent")
-    })
-}
 
 struct Repo {
     dir: PathBuf,
@@ -296,7 +266,7 @@ fn the_gateway_runs_supervised_a_granted_turn_calls_it_and_by_log_shows_the_call
     assert!(jwks["keys"][0].get("d").is_none());
 
     // A turn granted github:read reads and is refused a write.
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let call = repo.dir.join("call.py").display().to_string();
     let prompt = format!(
         "SH python3 {call} issues.list\nSH python3 {call} issues.create\n\
@@ -410,7 +380,7 @@ fn connectors_without_a_private_home_are_refused_before_a_branch_exists() {
         "--harness",
         "gemini-cli",
         "--command",
-        &fake_agent().display().to_string(),
+        &fake_agent!().display().to_string(),
         "--yes",
     ]);
     assert!(!out.status.success());

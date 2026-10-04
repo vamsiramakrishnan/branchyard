@@ -8,49 +8,17 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Once, OnceLock};
+use std::sync::Once;
 
 use branchyard::{Activity, Envelope, Event, Policy, RecordedEvent, TaskOptions, Yard};
 use serde_json::{json, Value};
+
+pub use branchyard_testkit::fake_agent_here as fake_agent;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 static HERMETIC: Once = Once::new();
 
 pub const SERVER: &str = env!("CARGO_BIN_EXE_branchyard-mcp");
-
-/// The `fake-acp-agent` binary from branchyard-runtime, built once per test
-/// binary; cargo exposes a binary's path only to its own package's tests.
-pub fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        // target/<profile>/branchyard-mcp
-        let profile_dir = Path::new(SERVER).parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {SERVER}"),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        let agent = profile_dir.join("fake-acp-agent");
-        assert!(agent.is_file());
-        agent
-    })
-}
 
 /// A temporary repository with one commit on `main`. Removed on drop.
 pub struct Fixture {

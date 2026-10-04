@@ -19,6 +19,7 @@ use branchyard_bridge::Signer;
 use branchyard_substrate::fake::FakeCluster;
 use branchyard_substrate::pb;
 use branchyard_substrate::template::{bridge_template, BridgeTemplate};
+use branchyard_testkit::wait;
 use common::{bridge_binary, fake_agent, git, stored_record, text, Fixture};
 
 const ATESPACE: &str = "yard";
@@ -197,7 +198,7 @@ fn the_home_and_session_carry_over_between_turns_and_nothing_stays_running() {
         .nth(1)
         .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
         .unwrap_or_else(|| panic!("no background pid in {said:?}"));
-    wait_gone(pid);
+    wait::gone(pid);
     assert!(fake.actor_names().is_empty());
     assert_eq!(sent.info().turns, 4);
 }
@@ -308,26 +309,6 @@ fn delegation_is_refused_to_a_harness_in_an_actor() {
     assert!(fake.actor_names().is_empty());
 }
 
-fn alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        let state = stat
-            .rsplit(')')
-            .next()
-            .unwrap_or("")
-            .split_whitespace()
-            .next();
-        !matches!(state, Some("Z") | Some("X"))
-    })
-}
-
-fn wait_gone(pid: u32) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while alive(pid) {
-        assert!(Instant::now() < deadline, "pid {pid} is still running");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
 /// Run a turn with the provider in `BY_CHILD_PROVIDER` on a branch named
 /// `crashy`. Run only as the child of the recovery test, which kills it.
 #[test]
@@ -403,7 +384,7 @@ fn kill_engine_mid_turn(
     // The dead engine's connection closed, so the bridge ended the harness;
     // the actor itself outlives the engine until recovery.
     for pid in &pids {
-        wait_gone(*pid);
+        wait::gone(*pid);
     }
     assert_eq!(fake.actor_names(), vec![actor.clone()]);
     (actor, bridge)
@@ -463,7 +444,7 @@ fn recovery_brings_back_the_work_of_an_engine_that_died_and_deletes_its_actor() 
         "prompt received\n"
     );
     assert!(fake.actor_names().is_empty());
-    wait_gone(bridge);
+    wait::gone(bridge);
     assert!(
         !f.root.join(".branchyard/transfer").join(&actor).exists(),
         "the dead engine's transfer staging was left behind"
@@ -502,7 +483,7 @@ fn recovery_does_not_apply_an_actors_work_over_a_worktree_changed_since() {
         "changed on the host\n"
     );
     assert!(fake.actor_names().is_empty());
-    wait_gone(bridge);
+    wait::gone(bridge);
     assert!(!f.root.join(".branchyard/transfer").join(&actor).exists());
 }
 

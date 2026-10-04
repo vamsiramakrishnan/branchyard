@@ -8,54 +8,21 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use branchyard_testkit::fake_agent;
 use serde_json::Value;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const BY: &str = env!("CARGO_BIN_EXE_by");
 
-/// Built once per test binary, before any test starts timing.
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(BY);
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        let agent = profile_dir.join("fake-acp-agent");
-        assert!(agent.is_file());
-        agent
-    })
-}
-
 /// A temporary directory holding repositories. Removed on drop.
 struct Dir(PathBuf);
 
 impl Dir {
     fn new() -> Dir {
-        fake_agent();
+        fake_agent!();
         let dir = std::env::temp_dir().join(format!(
             "branchyard-remote-test-{}-{}",
             std::process::id(),
@@ -210,7 +177,7 @@ impl Drop for Served {
 fn with_agent(args: &[&str]) -> Vec<String> {
     let mut all: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     if matches!(args[0], "run" | "fan" | "send" | "fork") {
-        all.extend(["--command".into(), fake_agent().display().to_string()]);
+        all.extend(["--command".into(), fake_agent!().display().to_string()]);
         if args[0] == "run" && !args.contains(&"--harness") {
             all.extend(["--harness".into(), "gemini-cli".into()]);
         }
@@ -604,7 +571,7 @@ fn remote_mode_is_configured_by_flags_or_environment() {
     let dir = Dir::new();
     let one = dir.repo("one");
     let two = dir.repo("two");
-    let agent = format!("gemini-cli={}", fake_agent().display());
+    let agent = format!("gemini-cli={}", fake_agent!().display());
     let server = Served::start(
         &dir.0,
         &[("one", &one), ("two", &two)],
@@ -1079,7 +1046,7 @@ fn rig_runs_print_what_local_ones_do() {
     let spec = dir.0.join("team.toml");
     fs::write(&spec, TEAM).unwrap();
     let spec = spec.display().to_string();
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let prompt = [
         "SH by spawn --seat worker 'WRITE w.txt=w' --wait --json",
         "SH by integrate team-worker --json",

@@ -13,7 +13,8 @@ use std::os::unix::fs::PermissionsExt;
 use branchyard::connectors::GrantEntry;
 use branchyard::{Activity, Provisioning};
 use branchyard_server::config::ConnectorsConfig;
-use common::{eventually, get, raw, run, task, Fixture, Server};
+use branchyard_testkit::wait;
+use common::{get, raw, run, task, Fixture, Server};
 
 const FAKE_ANVIL: &str = r##"#!/bin/sh
 case "$1 $2" in
@@ -129,7 +130,7 @@ fn a_turns_token_names_the_principal_and_the_repository_and_audit_lines_become_e
         )
     };
     fs::write(&audit, line("app/granted") + &line("other/granted")).unwrap();
-    eventually("a connector_call event", || {
+    wait::until("a connector_call event", || {
         client
             .repo("app")
             .events("granted", 0)

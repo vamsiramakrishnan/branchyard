@@ -10,12 +10,12 @@ mod mock_gateway;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
+use branchyard_testkit::fake_agent;
+use branchyard_testkit::wait;
 use mock_gateway::MockGateway;
 use serde_json::Value;
 
@@ -40,36 +40,6 @@ else:
 "##;
 
 const BUNDLES: [&str; 4] = ["slack", "github", "gmail", "legacy"];
-
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(env!("CARGO_BIN_EXE_by"));
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        profile_dir.join("fake-acp-agent")
-    })
-}
 
 struct Repo {
     dir: PathBuf,
@@ -199,7 +169,7 @@ impl Repo {
                 "--harness",
                 "gemini-cli",
                 "--command",
-                &fake_agent().display().to_string(),
+                &fake_agent!().display().to_string(),
                 "--yes",
             ]
             .iter()
@@ -242,18 +212,6 @@ fn python() -> bool {
         .arg("--version")
         .output()
         .is_ok_and(|o| o.status.success())
-}
-
-/// Wait for `ready`, at most a minute.
-fn until<T>(what: &str, mut ready: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        if let Some(found) = ready() {
-            return found;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
 }
 
 #[test]
@@ -398,7 +356,7 @@ fn an_ask_is_answered_from_another_by_and_a_killed_engine_is_reconciled() {
         &repo.call("github__issues_create", r#"{"title": "t"}"#),
         "asker",
     );
-    let asks = until("an ask", || {
+    let asks = wait::until("an ask", || {
         let asks = repo.json(&["approvals", "--json"]);
         (!asks.as_array().unwrap().is_empty()).then_some(asks)
     });

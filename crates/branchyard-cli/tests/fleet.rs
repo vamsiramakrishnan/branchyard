@@ -6,46 +6,14 @@
 //! model is called. Requires `git` and `sh`.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 
+use branchyard_testkit::fake_agent;
 use serde_json::Value;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(env!("CARGO_BIN_EXE_by"));
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        let agent = profile_dir.join("fake-acp-agent");
-        assert!(agent.is_file());
-        agent
-    })
-}
 
 struct Repo {
     dir: PathBuf,
@@ -78,7 +46,7 @@ impl Repo {
 
     /// Write `branchyard.toml`, with `AGENT` replaced by the fake agent.
     fn config(&self, text: &str) {
-        let agent = fake_agent().display().to_string();
+        let agent = fake_agent!().display().to_string();
         fs::write(
             self.root.join("branchyard.toml"),
             text.replace("AGENT", &agent),
@@ -212,7 +180,7 @@ fn a_fleet_routes_a_run_that_names_no_harness_and_records_its_outcome() {
     assert!(table.contains("bugfix"), "{table}");
 
     // A named harness is not routed; --kind is still recorded.
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     repo.ok(&[
         "run",
         "WRITE d.txt=1",

@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use branchyard::{Activity, BranchStatus, Error, Policy, Yard};
+use branchyard_testkit::wait;
 use common::{fake_agent, text, Fixture};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -56,14 +57,6 @@ impl Pg {
 
     fn open(&self) -> Yard {
         Yard::open_postgres(&self.f.root, &self.url, &self.scope).unwrap()
-    }
-}
-
-fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -165,7 +158,7 @@ fn two_yards_never_drive_one_branch_and_a_cancel_reaches_the_other() {
         let task = pg.yard.task("HANG").options(pg.f.options()).name("held");
         std::thread::spawn(move || task.run())
     };
-    wait_until("the prompt", || prompts(&pg.yard, "held") == 1);
+    wait::until("the prompt", || prompts(&pg.yard, "held") == 1);
     let other = pg.open();
     assert!(other.recover().unwrap().is_empty());
     let held = other.branch("held").unwrap();
@@ -230,7 +223,7 @@ fn a_killed_engine_is_recovered_from_postgres_and_nothing_resubmitted() {
         .spawn()
         .unwrap();
     let mut pids: Vec<u32> = Vec::new();
-    wait_until("the harness to report its processes", || {
+    wait::until("the harness to report its processes", || {
         let said = pg
             .yard
             .branch("crashy")
@@ -673,7 +666,7 @@ fn a_warm_pool_is_kept_in_postgres_across_restarts_and_claimed_once() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    wait_until("setup in the slot", || marker.exists());
+    wait::until("setup in the slot", || marker.exists());
     child.kill().unwrap();
     child.wait().unwrap();
     let left = pg.yard.pool_slots().unwrap();

@@ -15,7 +15,8 @@ use branchyard_client::api::{
     BudgetSpec, ForkRequest, MergeRequest, OperationKind, OperationState, PolicySpec, SendRequest,
 };
 use branchyard_client::{new_key, Client};
-use common::{eventually, get, post, raw, raw_bytes, run, task, wait, Fixture, Server, TOKEN};
+use branchyard_testkit::wait;
+use common::{await_operation, get, post, raw, raw_bytes, run, task, Fixture, Server, TOKEN};
 use serde_json::Value;
 
 fn json(body: &str) -> Value {
@@ -83,7 +84,7 @@ fn a_repeated_idempotency_key_runs_once() {
     let ids: HashSet<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     assert_eq!(ids.len(), 1, "{ids:?}");
     let id = ids.into_iter().next().unwrap();
-    let done = wait(repo.client(), &id);
+    let done = await_operation(repo.client(), &id);
     assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
 
     // After it finished, the key still returns it, with its result.
@@ -113,7 +114,7 @@ fn a_repeated_idempotency_key_runs_once() {
         .submit_task(&task("WRITE once.txt=1", "again"), "key-2")
         .unwrap();
     assert_eq!(
-        wait(repo.client(), &again.id).state,
+        await_operation(repo.client(), &again.id).state,
         OperationState::Succeeded
     );
     assert_eq!(repo.branches().unwrap().len(), 2);
@@ -145,7 +146,7 @@ fn a_task_runs_through_merge_over_http() {
     );
     assert_eq!(accepted["kind"], "task");
     assert_eq!(accepted["branches"], serde_json::json!(["hello"]));
-    let done = wait(&client, &id);
+    let done = await_operation(&client, &id);
     assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
     let info = &done.result.as_ref().unwrap().branches[0];
     assert_eq!(info.status, BranchStatus::Ready);
@@ -177,7 +178,7 @@ fn a_task_runs_through_merge_over_http() {
             &new_key(),
         )
         .unwrap();
-    let sent = wait(&client, &sent.id);
+    let sent = await_operation(&client, &sent.id);
     assert_eq!(sent.kind, OperationKind::Send);
     assert_eq!(sent.result.unwrap().branches[0].turns, 2);
     assert!(common_text(&repo, "hello").contains("resumed=true"));
@@ -195,7 +196,7 @@ fn a_task_runs_through_merge_over_http() {
         )
         .unwrap();
     assert_eq!(forked.branches, ["hello-fork"]);
-    let forked = wait(&client, &forked.id);
+    let forked = await_operation(&client, &forked.id);
     let fork_info = &forked.result.unwrap().branches[0];
     assert_eq!(fork_info.parent.as_deref(), Some("hello"));
     assert_eq!(fork_info.status, BranchStatus::Ready);
@@ -204,7 +205,7 @@ fn a_task_runs_through_merge_over_http() {
     let merge = repo
         .merge("hello", &MergeRequest::default(), &new_key())
         .unwrap();
-    let merged = wait(&client, &merge.id);
+    let merged = await_operation(&client, &merge.id);
     assert_eq!(merged.state, OperationState::Succeeded, "{merged:?}");
     let result = merged.result.unwrap();
     let info = result.merged.unwrap();
@@ -221,7 +222,7 @@ fn a_task_runs_through_merge_over_http() {
     let again = repo
         .merge("hello", &MergeRequest::default(), &new_key())
         .unwrap();
-    let again = wait(&client, &again.id);
+    let again = await_operation(&client, &again.id);
     assert_eq!(again.state, OperationState::Failed);
     let error = again.error.unwrap();
     assert_eq!(error.code, "already_merged");
@@ -403,7 +404,7 @@ fn a_running_turn_is_cancelled_over_http() {
     let client = server.client();
     let repo = client.repo("app");
     let op = repo.submit_task(&task("HANG", "held"), &new_key()).unwrap();
-    eventually("the prompt to be submitted", || {
+    wait::until("the prompt to be submitted", || {
         repo.events("held", 0).is_ok_and(|page| {
             page.events
                 .iter()
@@ -412,7 +413,7 @@ fn a_running_turn_is_cancelled_over_http() {
     });
     // The branch lock is the operation's; a cancel does not need it.
     assert_eq!(repo.cancel("held").unwrap(), ["held"]);
-    let done = wait(&client, &op.id);
+    let done = await_operation(&client, &op.id);
     assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
     assert_eq!(
         done.result.unwrap().branches[0].status,
@@ -447,7 +448,7 @@ fn a_running_turn_is_steered_over_http() {
     let op = repo
         .submit_task(&task("AWAIT_STEER", "live"), &new_key())
         .unwrap();
-    eventually("the prompt to be submitted", || {
+    wait::until("the prompt to be submitted", || {
         repo.events("live", 0).is_ok_and(|page| {
             page.events
                 .iter()
@@ -464,7 +465,7 @@ fn a_running_turn_is_steered_over_http() {
         ),
         "{steer:?}"
     );
-    let done = wait(&client, &op.id);
+    let done = await_operation(&client, &op.id);
     assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
     assert_eq!(
         done.result.unwrap().branches[0].status,
@@ -506,7 +507,7 @@ fn operations_survive_a_restart() {
         ..BudgetSpec::default()
     };
     let hanging = repo.submit_task(&hang, &key).unwrap();
-    eventually("the hanging turn to start", || {
+    wait::until("the hanging turn to start", || {
         client.operation(&hanging.id).unwrap().state == OperationState::Running
     });
     // A graceful shutdown lets running turns finish.
@@ -541,7 +542,7 @@ fn operations_survive_a_restart() {
     let mut long = task("HANG", "long");
     long.budget.max_seconds = Some(2.0);
     let long = repo.submit_task(&long, &new_key()).unwrap();
-    eventually("the long turn to start", || {
+    wait::until("the long turn to start", || {
         client.operation(&long.id).unwrap().state == OperationState::Running
     });
     let stopped = server.stop();
@@ -553,7 +554,7 @@ fn operations_survive_a_restart() {
     assert_eq!(op.error.unwrap().code, "interrupted");
     // In this test the turn's thread outlives the stopped server (a real
     // process exit would end it); let it finish before cleaning up.
-    eventually("the orphaned turn to end", || {
+    wait::until("the orphaned turn to end", || {
         client
             .repo("app")
             .branch("long")
@@ -583,7 +584,7 @@ fn a_client_disconnect_does_not_stop_a_turn() {
     drop(reader);
     let watching = repo.stream(Some(0)).next().unwrap().unwrap();
     assert_eq!(watching.branch, "left");
-    eventually("the branch to start", || {
+    wait::until("the branch to start", || {
         repo.branch("left")
             .is_ok_and(|b| b.status == BranchStatus::Running)
     });
@@ -600,7 +601,7 @@ fn a_client_disconnect_does_not_stop_a_turn() {
         .unwrap_err();
     assert_eq!(busy.code(), Some("branch_busy"));
     assert_eq!(repo.remove("left").unwrap_err().code(), Some("branch_busy"));
-    eventually("the turn to reach its own limit", || {
+    wait::until("the turn to reach its own limit", || {
         matches!(
             repo.branch("left").unwrap().status,
             BranchStatus::BudgetExceeded { .. }
@@ -623,7 +624,10 @@ fn a_client_disconnect_does_not_stop_a_turn() {
     let op = repo
         .submit_task(&task("WRITE r.txt=1", "retried"), "retry-1")
         .unwrap();
-    assert_eq!(wait(&client, &op.id).state, OperationState::Succeeded);
+    assert_eq!(
+        await_operation(&client, &op.id).state,
+        OperationState::Succeeded
+    );
     let named: Vec<_> = repo
         .branches()
         .unwrap()
@@ -904,7 +908,7 @@ fn an_operation_queued_at_shutdown_runs_after_a_restart_and_is_found_by_its_key(
     let mut long = task("HANG", "long");
     long.budget.max_seconds = Some(2.0);
     let long = repo.submit_task(&long, &new_key()).unwrap();
-    eventually("the long turn to start", || {
+    wait::until("the long turn to start", || {
         client.operation(&long.id).unwrap().state == OperationState::Running
     });
     let key = new_key();
@@ -918,7 +922,7 @@ fn an_operation_queued_at_shutdown_runs_after_a_restart_and_is_found_by_its_key(
 
     let server = Server::start(config);
     let client = server.client();
-    let done = wait(&client, &queued.id);
+    let done = await_operation(&client, &queued.id);
     assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
     assert_eq!(client.operation_by_key(&key).unwrap(), done);
     let missing = client.operation_by_key("no-such-key").unwrap_err();
@@ -929,7 +933,7 @@ fn an_operation_queued_at_shutdown_runs_after_a_restart_and_is_found_by_its_key(
         client.operation(&long.id).unwrap().state,
         OperationState::Interrupted
     );
-    eventually("the orphaned turn to end", || {
+    wait::until("the orphaned turn to end", || {
         client
             .repo("app")
             .branch("long")

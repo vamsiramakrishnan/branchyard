@@ -11,21 +11,13 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
 
 use branchyard::{
     Activity, BranchStatus, RecordedEvent, TaskOptions, WorkspacePhase, WorkspaceReport,
     WorkspaceSpec, Yard,
 };
+use branchyard_testkit::wait;
 use common::{fake_agent, text, Fixture};
-
-fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
 
 fn reports(events: &[RecordedEvent]) -> Vec<WorkspaceReport> {
     events
@@ -523,7 +515,7 @@ fn setup_cut_short_by_a_killed_engine_is_recovered_and_runs_again() {
         .unwrap();
     let mut child = Killed(child);
     let pid_file = f.dir.join("sleeper");
-    wait_until("setup to start its sleeper", || {
+    wait::until("setup to start its sleeper", || {
         fs::read_to_string(&pid_file).is_ok_and(|t| t.trim().parse::<u32>().is_ok())
     });
     let sleeper: u32 = fs::read_to_string(&pid_file)
@@ -557,7 +549,7 @@ fn setup_cut_short_by_a_killed_engine_is_recovered_and_runs_again() {
         "{reason}"
     );
     assert!(killed.contains(&sleeper), "{killed:?}");
-    wait_until("the setup's sleeper to die", || !running(sleeper));
+    wait::until("the setup's sleeper to die", || !running(sleeper));
     assert_eq!(prompts(&events), 0);
     assert!(!yard.workspace("slow").unwrap().ready);
 

@@ -19,8 +19,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
 
+use branchyard_testkit::wait;
 use serde_json::Value;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -233,26 +233,6 @@ fn python() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-fn alive(pid: u64) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        let state = stat
-            .rsplit(')')
-            .next()
-            .unwrap_or("")
-            .split_whitespace()
-            .next();
-        !matches!(state, Some("Z") | Some("X"))
-    })
-}
-
-fn until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 /// The pids whose parent is `parent`.
 fn children(parent: u64) -> Vec<u64> {
     fs::read_dir("/proc")
@@ -298,7 +278,7 @@ fn an_unpinned_gateway_is_registered_found_and_reclaimed_after_its_supervisor_di
     let supervisor = started["pid"].as_u64().unwrap();
     // Healthy once the supervisor has seen it listen.
     let mut service = Value::Null;
-    until("the gateway's record to be healthy", || {
+    wait::until("the gateway's record to be healthy", || {
         service = repo.json(&["services", "--kind", "connector_gateway", "--json"])["services"][0]
             .clone();
         service["health"] == "healthy" && service["reclaim"]["type"] == "process"
@@ -345,8 +325,11 @@ fn an_unpinned_gateway_is_registered_found_and_reclaimed_after_its_supervisor_di
         .status()
         .unwrap();
     assert!(killed.success());
-    until("the supervisor to die", || !alive(supervisor));
-    assert!(alive(gateway_pid), "the gateway outlived its supervisor");
+    wait::until("the supervisor to die", || !wait::alive(supervisor));
+    assert!(
+        wait::alive(gateway_pid),
+        "the gateway outlived its supervisor"
+    );
     let reaped = repo.json(&["services", "gc", "--json"]);
     let reaped = reaped["reaped"].as_array().unwrap();
     let ours = reaped
@@ -361,7 +344,7 @@ fn an_unpinned_gateway_is_registered_found_and_reclaimed_after_its_supervisor_di
             .contains(&format!("pid {gateway_pid}")),
         "{ours}"
     );
-    until("the leaked gateway to stop", || !alive(gateway_pid));
+    wait::until("the leaked gateway to stop", || !wait::alive(gateway_pid));
     let listed = repo.json(&["services", "--all", "--json"]);
     let record = listed["services"]
         .as_array()

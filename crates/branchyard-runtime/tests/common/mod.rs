@@ -57,17 +57,6 @@ pub fn start(name: &str) -> (Session, PathBuf) {
     (session, dir)
 }
 
-/// True while `pid` is a live, non-zombie process.
-pub fn alive(pid: u32) -> bool {
-    let out = Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-        .unwrap();
-    let stat = String::from_utf8_lossy(&out.stdout);
-    let stat = stat.trim();
-    !stat.is_empty() && !stat.starts_with('Z')
-}
-
 pub fn background_pid(text: &str) -> u32 {
     text.strip_prefix("background pid ")
         .and_then(|pid| pid.trim().parse().ok())

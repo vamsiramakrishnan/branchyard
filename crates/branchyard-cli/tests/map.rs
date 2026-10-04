@@ -13,46 +13,14 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use branchyard_testkit::fake_agent;
 use serde_json::Value;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const BY: &str = env!("CARGO_BIN_EXE_by");
-
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(BY);
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(
-            command.status().unwrap().success(),
-            "building fake-acp-agent failed"
-        );
-        let agent = profile_dir.join("fake-acp-agent");
-        assert!(agent.is_file());
-        agent
-    })
-}
 
 struct Repo {
     dir: PathBuf,
@@ -61,7 +29,7 @@ struct Repo {
 
 impl Repo {
     fn new() -> Repo {
-        fake_agent();
+        fake_agent!();
         let dir = std::env::temp_dir().join(format!(
             "branchyard-cli-map-{}-{}",
             std::process::id(),
@@ -179,7 +147,7 @@ impl Repo {
 
     /// `by map` with the fake agent as the harness.
     fn map(&self, args: &[&str]) -> Output {
-        let agent = fake_agent().display().to_string();
+        let agent = fake_agent!().display().to_string();
         let mut all = vec!["map"];
         all.extend(args);
         all.extend(["--harness", "gemini-cli", "--command", &agent, "--yes"]);
@@ -290,7 +258,7 @@ fn items_come_from_every_format_and_fill_the_template() {
             "--harness",
             "gemini-cli",
             "--command",
-            &fake_agent().display().to_string(),
+            &fake_agent!().display().to_string(),
             "--yes",
         ],
         &array,
@@ -500,7 +468,7 @@ fn an_interrupted_map_resumes_without_redoing_what_is_done() {
     )
     .unwrap();
     let csv = repo.dir.join("out.csv");
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let args = [
         "map",
         "{{item.cmd}}",
@@ -604,7 +572,7 @@ fn by_map_resume_reruns_the_recorded_command_with_its_items() {
     let schema = repo.file("schema.json", SCHEMA);
     // The items arrive on standard input, which a resume cannot read again.
     let input = format!("REPLY_FILE {}\n", answer.display());
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let out = repo.by_with_stdin(
         &[
             "map",
@@ -803,7 +771,7 @@ fn the_total_budget_stops_starting_items() {
 #[test]
 fn a_routed_map_fails_over_from_a_harness_that_exits() {
     let repo = Repo::new();
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     fs::write(
         repo.root.join("branchyard.toml"),
         format!(
@@ -1028,7 +996,7 @@ fn a_map_runs_as_a_server_operation_with_remote() {
         ),
     );
     let out_file = repo.dir.join("remote.jsonl");
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let out = server.by(
         &repo,
         &[

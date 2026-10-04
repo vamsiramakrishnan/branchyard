@@ -14,7 +14,7 @@ use branchyard_client::knowledge_api::{
     KnowledgeAddRequest, KnowledgeEditRequest, PlanApproveRequest, PlanRejectRequest,
 };
 use branchyard_client::new_key;
-use common::{run, task, wait, Fixture, Server};
+use common::{await_operation, run, task, Fixture, Server};
 
 #[test]
 fn knowledge_is_a_persons_decision_over_http_and_reaches_harnesses() {
@@ -95,7 +95,10 @@ fn knowledge_is_a_persons_decision_over_http_and_reaches_harnesses() {
             &new_key(),
         )
         .unwrap();
-    assert_eq!(wait(&client, &sent.id).state, OperationState::Succeeded);
+    assert_eq!(
+        await_operation(&client, &sent.id).state,
+        OperationState::Succeeded
+    );
     let distilled = repo.distill("notes").unwrap();
     assert_eq!(distilled.proposed.len(), 1);
     assert_eq!(
@@ -149,7 +152,7 @@ fn a_planned_task_waits_and_its_approval_is_an_operation() {
         )
         .unwrap();
     assert_eq!(approved.kind, OperationKind::ApprovePlan);
-    let done = wait(&client, &approved.id);
+    let done = await_operation(&client, &approved.id);
     assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
     let info = repo.branch("planned").unwrap();
     assert_eq!(info.status, BranchStatus::Ready);

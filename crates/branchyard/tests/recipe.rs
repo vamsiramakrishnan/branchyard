@@ -22,6 +22,7 @@ use branchyard::{
     Activity, BranchStatus, Effort, Policy, Provider, Provisioning, RecipeOptions, SandboxEvent,
     SandboxKeep, SandboxOrigin, SecretSource, TaskOptions, Yard,
 };
+use branchyard_testkit::wait;
 use common::{fake_agent, git, stored_record, text, Fixture};
 
 const FAKE_SSH: &str = concat!(
@@ -341,26 +342,6 @@ fn a_recipe_without_suspend_cannot_keep_its_machine() {
     assert!(log(&f).is_empty(), "nothing ran");
 }
 
-fn alive(pid: u32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        let state = stat
-            .rsplit(')')
-            .next()
-            .unwrap_or("")
-            .split_whitespace()
-            .next();
-        !matches!(state, Some("Z") | Some("X"))
-    })
-}
-
-fn wait_gone(pid: u32) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while alive(pid) {
-        assert!(Instant::now() < deadline, "pid {pid} is still running");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
 /// Run a turn with the provider in `BY_CHILD_PROVIDER` on a branch named
 /// `crashy`. Run only as the child of the recovery test, which kills it.
 #[test]
@@ -444,7 +425,7 @@ fn recovery_brings_back_the_work_of_an_engine_that_died_and_destroys_its_machine
     child.wait().unwrap();
     // Unlike a bridge, ssh leaves the harness running on the machine when
     // the engine's connection closes.
-    assert!(pids.iter().all(|pid| alive(*pid)), "{pids:?}");
+    assert!(pids.iter().all(|pid| wait::alive(*pid)), "{pids:?}");
     let worktree = f.root.join(".branchyard/worktrees/crashy");
     assert!(!worktree.join("orphan.log").exists(), "still only there");
 
@@ -470,7 +451,7 @@ fn recovery_brings_back_the_work_of_an_engine_that_died_and_destroys_its_machine
         reasons[0]
     );
     for pid in &pids {
-        wait_gone(*pid);
+        wait::gone(*pid);
     }
     assert_eq!(
         fs::read_to_string(worktree.join("orphan.log")).unwrap(),

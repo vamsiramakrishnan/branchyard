@@ -32,6 +32,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 
+use branchyard_testkit::fake_agent;
 use serde_json::Value;
 
 const DEFAULT_ANVIL: &str = "/home/user/anvil/packages/cli/dist/bin-anvil.js";
@@ -89,21 +90,6 @@ fn anvil_root(bin: &Path) -> PathBuf {
         .nth(4)
         .map(Path::to_path_buf)
         .unwrap_or_default()
-}
-
-fn fake_agent() -> PathBuf {
-    let by = PathBuf::from(env!("CARGO_BIN_EXE_by"));
-    let profile_dir = by.parent().unwrap().to_path_buf();
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
-        .args(["build", "--quiet", "--offline", "--manifest-path"])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-        .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-        .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap())
-        .status()
-        .unwrap();
-    assert!(status.success(), "building fake-acp-agent failed");
-    profile_dir.join("fake-acp-agent")
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -361,7 +347,7 @@ fn a_branch_granted_github_read_lists_issues_and_is_refused_a_write_through_anvi
 
     // The turn: the fake agent runs the harness's Python script.
     fs::write(dir.join("harness.py"), HARNESS).unwrap();
-    let agent = fake_agent();
+    let agent = fake_agent!();
     let prompt = format!(
         "SH python3 {}\nSH head -3 \"$HOME/.branchyard/connectors/INDEX.md\"",
         dir.join("harness.py").display()
@@ -506,7 +492,7 @@ fn the_effect_ledger_records_anvils_reports_and_undoes_through_its_gateway() {
         return;
     };
     fs::write(dir.join("effects.py"), EFFECTS_HARNESS).unwrap();
-    let agent = fake_agent();
+    let agent = fake_agent!();
     let out = by(&root)
         .args([
             "run",

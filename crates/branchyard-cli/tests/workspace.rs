@@ -10,38 +10,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 
+use branchyard_testkit::fake_agent;
 use serde_json::{json, Value};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn fake_agent() -> &'static Path {
-    static AGENT: OnceLock<PathBuf> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let by = PathBuf::from(env!("CARGO_BIN_EXE_by"));
-        let profile_dir = by.parent().unwrap().to_path_buf();
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .args(["build", "--quiet", "--offline", "--manifest-path"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-            .args(["-p", "branchyard-runtime", "--bin", "fake-acp-agent"])
-            .env("CARGO_TARGET_DIR", profile_dir.parent().unwrap());
-        match profile_dir.file_name().and_then(|n| n.to_str()) {
-            Some("debug") => {}
-            Some("release") => {
-                command.arg("--release");
-            }
-            Some(other) => {
-                command.args(["--profile", other]);
-            }
-            None => panic!("unexpected binary location {}", by.display()),
-        }
-        assert!(command.status().unwrap().success());
-        profile_dir.join("fake-acp-agent")
-    })
-}
 
 struct Repo {
     dir: PathBuf,
@@ -129,7 +102,7 @@ impl Repo {
     }
 
     fn by_agent(&self, args: &[&str]) -> Output {
-        let agent = fake_agent().display().to_string();
+        let agent = fake_agent!().display().to_string();
         let mut all: Vec<&str> = args.to_vec();
         all.extend(["--command", &agent, "--yes"]);
         if args[0] != "send" {
@@ -472,7 +445,7 @@ fn a_terminal_is_asked_once_and_a_yes_is_remembered() {
         return;
     }
     let repo = Repo::new(WORKSPACE);
-    let agent = fake_agent().display().to_string();
+    let agent = fake_agent!().display().to_string();
     let line = format!(
         "{} run 'WRITE x.txt=1' --name asked --yes --harness gemini-cli --command {agent}",
         env!("CARGO_BIN_EXE_by")

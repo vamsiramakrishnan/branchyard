@@ -8,7 +8,8 @@ mod common;
 use branchyard::{BranchStatus, Envelope};
 use branchyard_client::api::{OperationState, PolicySpec, SendRequest, SpawnRequest, TaskRequest};
 use branchyard_client::new_key;
-use common::{eventually, run, task, wait, Fixture, Server};
+use branchyard_testkit::wait;
+use common::{await_operation, run, task, Fixture, Server};
 
 #[test]
 fn artifacts_publish_list_get_and_grants_over_http() {
@@ -42,7 +43,7 @@ fn artifacts_publish_list_get_and_grants_over_http() {
                 &new_key(),
             )
             .unwrap();
-        wait(&client, &op.id)
+        await_operation(&client, &op.id)
     };
     let a = spawn("a");
     assert_eq!(a.state, OperationState::Succeeded, "{a:?}");
@@ -184,7 +185,7 @@ fn scratch_areas_are_created_and_lock_contention_is_enforced_across_two_clients(
             &new_key(),
         )
         .unwrap();
-    eventually("root running", || {
+    wait::until("root running", || {
         matches!(repo_a.branch("root").unwrap().status, BranchStatus::Running)
     });
 
@@ -218,7 +219,7 @@ fn scratch_areas_are_created_and_lock_contention_is_enforced_across_two_clients(
 
     // Clean up the hung turn.
     repo_a.cancel("root").unwrap();
-    let hang = wait(&client_a, &hang.id);
+    let hang = await_operation(&client_a, &hang.id);
     assert_eq!(hang.state, OperationState::Succeeded, "{hang:?}");
 }
 

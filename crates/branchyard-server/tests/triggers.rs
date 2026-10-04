@@ -26,7 +26,8 @@ use branchyard_server::config::WorkspaceScripts;
 use branchyard_server::triggers::events::sign;
 use branchyard_server::triggers::Clock;
 use branchyard_server::Config;
-use common::{eventually, post, raw, run, task, wait, Fixture, Server};
+use branchyard_testkit::wait;
+use common::{await_operation, post, raw, run, task, Fixture, Server};
 
 /// 2026-09-21T14:13:20Z.
 const T0: u64 = 1_790_000_000_000;
@@ -70,7 +71,7 @@ fn runs_when(
     done: impl Fn(&[TriggerRun]) -> bool,
 ) -> Vec<TriggerRun> {
     let mut runs = Vec::new();
-    eventually(what, || {
+    wait::until(what, || {
         runs = client.trigger_runs(trigger, 50).unwrap();
         done(&runs)
     });
@@ -147,7 +148,7 @@ fn a_schedule_fires_once_when_the_clock_reaches_it_and_its_outcome_is_recorded()
     let fired = &runs[0];
     assert_eq!(fired.key, format!("schedule:{}", T0 + 3_600_000));
     assert_eq!(fired.branches, ["nightly-20260921-1513"]);
-    let op = wait(&client, fired.operation.as_ref().unwrap());
+    let op = await_operation(&client, fired.operation.as_ref().unwrap());
     assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
     let runs = runs_when(&client, "nightly", "the run to settle", |runs| {
         runs[0].outcome.is_some()
@@ -205,7 +206,7 @@ fn github_deliveries_are_verified_matched_rendered_and_never_fired_twice() {
     let fired = &runs[0];
     assert_eq!(fired.branches, ["fix-42"]);
     assert_eq!(fired.event.as_ref().unwrap().number.as_deref(), Some("42"));
-    let op = wait(&client, fired.operation.as_ref().unwrap());
+    let op = await_operation(&client, fired.operation.as_ref().unwrap());
     assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
     let diff = client.repo("app").diff("fix-42").unwrap();
     assert!(diff.contains("issue-42.txt"), "{diff}");
@@ -593,7 +594,7 @@ fn a_run_recorded_before_a_restart_fires_after_it() {
     });
     assert_eq!(runs.len(), 1);
     assert_eq!(
-        wait(&client, runs[0].operation.as_ref().unwrap()).state,
+        await_operation(&client, runs[0].operation.as_ref().unwrap()).state,
         OperationState::Succeeded
     );
 }
@@ -702,7 +703,7 @@ fn email_deliveries_fire_once(config: Config) {
     assert_eq!(fired.branches, ["mail-reply"]);
     let email = fired.event.as_ref().unwrap().email.as_ref().unwrap();
     assert_eq!(email.from, "bob@partner.example");
-    let op = wait(&client, fired.operation.as_ref().unwrap());
+    let op = await_operation(&client, fired.operation.as_ref().unwrap());
     assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
     let diff = client.repo("app").diff("mail-reply").unwrap();
     assert!(diff.contains("+bob@partner.example"), "{diff}");
@@ -879,7 +880,7 @@ fn email_deliveries_fire_once(config: Config) {
         runs.iter().any(|r| r.state == RunState::Fired)
     });
     let fired = runs.iter().find(|r| r.state == RunState::Fired).unwrap();
-    let op = wait(&client, fired.operation.as_ref().unwrap());
+    let op = await_operation(&client, fired.operation.as_ref().unwrap());
     assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
     assert_eq!(runs.len(), 2, "{runs:?}");
 }
@@ -1038,7 +1039,7 @@ mod postgres {
         let runs_b = b.client().trigger_runs("both", 10).unwrap();
         assert_eq!(runs_b.len(), 1, "{runs_b:?}");
         assert_eq!(
-            wait(&client, runs[0].operation.as_ref().unwrap()).state,
+            await_operation(&client, runs[0].operation.as_ref().unwrap()).state,
             OperationState::Succeeded
         );
     }

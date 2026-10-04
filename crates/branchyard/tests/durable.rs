@@ -17,15 +17,8 @@ use std::time::{Duration, Instant};
 use branchyard::{
     Activity, BranchStatus, Error, Event, Policy, RecordedEvent, SteerState, TurnOutcome, Yard,
 };
+use branchyard_testkit::wait;
 use common::{edit_record, fake_agent, text, Fixture};
-
-fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
 
 /// Whether `pid` is a running (not zombie) process.
 fn running(pid: u32) -> bool {
@@ -130,7 +123,7 @@ fn a_killed_engine_is_recovered_its_harness_killed_and_nothing_resubmitted() {
     let report = pending_report(&f, "crashy");
     let mut child = start_child(&f, "ORPHAN", &[]);
     let mut pids = Vec::new();
-    wait_until("the harness to report its processes", || {
+    wait::until("the harness to report its processes", || {
         let said = text(&events(&f.yard, "crashy"));
         pids = said
             .strip_prefix("orphan ")
@@ -171,7 +164,7 @@ fn a_killed_engine_is_recovered_its_harness_killed_and_nothing_resubmitted() {
         killed.contains(&agent) && killed.contains(&sleeper),
         "{killed:?}"
     );
-    wait_until("the harness's process group to die", || {
+    wait::until("the harness's process group to die", || {
         !running(agent) && !running(sleeper)
     });
     assert_eq!(
@@ -216,7 +209,7 @@ fn a_crash_before_the_prompt_was_submitted_says_the_turn_never_ran() {
     let report = pending_report(&f, "crashy");
     let mut child = start_child(&f, "WRITE never.txt=1", &[("FAKE_ACP_SILENT", "1")]);
     let db = f.root.join(".branchyard/state.db");
-    wait_until("the harness to start", || {
+    wait::until("the harness to start", || {
         rusqlite::Connection::open(&db)
             .and_then(|c| c.query_row("SELECT COUNT(*) FROM processes", [], |r| r.get(0)))
             .is_ok_and(|n: i64| n == 1)
@@ -253,7 +246,7 @@ fn two_yards_never_drive_one_branch_and_a_cancel_reaches_the_other() {
         let task = f.task("HANG").name("held");
         std::thread::spawn(move || task.run())
     };
-    wait_until("the prompt", || prompts(&events(&f.yard, "held")) == 1);
+    wait::until("the prompt", || prompts(&events(&f.yard, "held")) == 1);
 
     // Another engine on the same repository: it recovers nothing, since
     // the lease is live, and may not start a turn, merge or remove.
@@ -558,7 +551,7 @@ fn an_event_of_a_turn_that_lost_its_lease_is_refused() {
         let task = f.task("HANG").name("fenced");
         std::thread::spawn(move || task.run())
     };
-    wait_until("the prompt", || prompts(&events(&f.yard, "fenced")) == 1);
+    wait::until("the prompt", || prompts(&events(&f.yard, "fenced")) == 1);
     // Another engine takes the lease over, as recovery of an expired lease
     // does; the running turn notices at its next heartbeat and stops.
     let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
@@ -718,7 +711,7 @@ fn a_harness_started_just_before_its_engine_stopped_is_found_by_its_marker() {
     let f = Fixture::new();
     let mut child = start_child(&f, "ORPHAN", &[]);
     let mut pids = Vec::new();
-    wait_until("the harness to report its processes", || {
+    wait::until("the harness to report its processes", || {
         let said = text(&events(&f.yard, "crashy"));
         pids = said
             .strip_prefix("orphan ")
@@ -762,7 +755,7 @@ fn a_harness_started_just_before_its_engine_stopped_is_found_by_its_marker() {
         killed.contains(&agent) && killed.contains(&sleeper),
         "{killed:?}"
     );
-    wait_until("the unrecorded harness to die", || {
+    wait::until("the unrecorded harness to die", || {
         !running(agent) && !running(sleeper)
     });
 }
@@ -794,7 +787,7 @@ fn steered(events: &[RecordedEvent]) -> Vec<(u64, String, String)> {
 fn input_steered_from_another_process_reaches_the_running_turn() {
     let f = Fixture::new();
     let mut child = Reaped(start_child(&f, "AWAIT_STEER", &[]));
-    wait_until("the harness to wait for steering", || {
+    wait::until("the harness to wait for steering", || {
         text(&events(&f.yard, "crashy")).contains("waiting for steering")
     });
     // Another yard on the repository, as a separate process would open it.
@@ -850,7 +843,7 @@ fn input_steered_from_another_process_reaches_the_running_turn() {
 fn steering_an_agent_without_the_extension_is_refused_not_an_interrupt() {
     let f = Fixture::new();
     let mut child = Reaped(start_child(&f, "HANG", &[("FAKE_ACP_NO_STEER", "1")]));
-    wait_until("the prompt", || prompts(&events(&f.yard, "crashy")) == 1);
+    wait::until("the prompt", || prompts(&events(&f.yard, "crashy")) == 1);
     let steer = f.yard.steer_as("crashy", "hello", "a test").unwrap();
     let settled = f
         .yard

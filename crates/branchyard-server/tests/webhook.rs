@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use branchyard_server::config::WebhookConfig;
-use common::{eventually, run, task, Fixture, Server};
+use branchyard_testkit::wait;
+use common::{run, task, Fixture, Server};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
@@ -176,7 +177,7 @@ fn deliveries_are_signed_and_carry_the_original_activity() {
     let client = server.client();
     run(&client, &task("WRITE a.txt=1", "one"));
 
-    eventually("a status delivery", || {
+    wait::until("a status delivery", || {
         receiver
             .deliveries()
             .iter()
@@ -234,7 +235,7 @@ fn a_failing_receiver_is_retried_and_still_delivers() {
     let client = server.client();
     run(&client, &task("WRITE a.txt=1", "one"));
 
-    eventually("a delivery to arrive despite two failures", || {
+    wait::until("a delivery to arrive despite two failures", || {
         receiver
             .deliveries()
             .iter()
@@ -266,7 +267,7 @@ fn a_receiver_that_never_succeeds_is_dead_lettered_and_the_cursor_still_advances
     // ever "succeeds", but the second branch's status must still have been
     // attempted (the cursor moved past the first branch's dead-lettered
     // entries) within a reasonable time.
-    eventually("both branches to have been attempted", || {
+    wait::until("both branches to have been attempted", || {
         let seen: std::collections::HashSet<String> = receiver
             .deliveries()
             .iter()
@@ -289,7 +290,7 @@ fn a_restart_resumes_from_its_saved_cursor_instead_of_replaying() {
     let server = Server::start(config.clone());
     let client = server.client();
     run(&client, &task("WRITE a.txt=1", "one"));
-    eventually("the first branch delivered", || {
+    wait::until("the first branch delivered", || {
         receiver
             .deliveries()
             .iter()
@@ -317,7 +318,7 @@ fn a_restart_resumes_from_its_saved_cursor_instead_of_replaying() {
     // A third branch after the restart, so there is definitely new
     // activity to wake the webhook task promptly.
     run(&client, &task("WRITE c.txt=1", "three"));
-    eventually("the second and third branches delivered", || {
+    wait::until("the second and third branches delivered", || {
         let seen: std::collections::HashSet<String> = receiver
             .deliveries()
             .iter()
@@ -359,7 +360,7 @@ fn a_stall_notification_reaches_a_webhook() {
         .repo("app")
         .submit_task(&request, &branchyard_client::new_key())
         .unwrap();
-    eventually("a stall delivery", || {
+    wait::until("a stall delivery", || {
         receiver.deliveries().iter().any(|d| {
             d.json()["kinds"]
                 .as_array()
@@ -369,7 +370,7 @@ fn a_stall_notification_reaches_a_webhook() {
         })
     });
     let _ = client.repo("app").cancel("stalls");
-    let _ = common::wait(&client, &op.id);
+    let _ = common::await_operation(&client, &op.id);
     server.stop();
 }
 
@@ -549,7 +550,7 @@ fn a_hanging_receiver_never_delays_the_operation_or_the_feed() {
         start.elapsed()
     );
 
-    eventually("the hanging receiver to have accepted the delivery", || {
+    wait::until("the hanging receiver to have accepted the delivery", || {
         receiver.accepted() > 0
     });
 
@@ -589,7 +590,7 @@ fn a_receiver_that_resets_the_connection_never_delays_the_operation() {
         start.elapsed()
     );
 
-    eventually(
+    wait::until(
         "the resetting receiver to have been hit at least once",
         || receiver.accepted() > 0,
     );
@@ -622,7 +623,7 @@ fn deliveries_carry_the_operations_traceparent_and_are_counted() {
     let server = Server::start(config);
     let client = server.client();
     let op = run(&client, &task("WRITE a.txt=1", "one"));
-    eventually("a status delivery", || {
+    wait::until("a status delivery", || {
         receiver
             .deliveries()
             .iter()

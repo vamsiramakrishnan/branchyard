@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use branchyard_bridge::{Claims, ClientTls, Endpoint, Signer};
 use branchyard_sandbox::{ExecSpec, Process, ProviderError};
+use branchyard_testkit::wait;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -207,37 +208,6 @@ fn refused(endpoint: &Endpoint) -> String {
     }
 }
 
-fn alive(pid: u32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        let state = stat
-            .rsplit(')')
-            .next()
-            .unwrap_or("")
-            .split_whitespace()
-            .next();
-        !matches!(state, Some("Z") | Some("X"))
-    })
-}
-
-/// Wait until `pid` runs `name`: a forked child is named after its parent
-/// until it execs.
-fn wait_exec(pid: u32, name: &str) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default() != format!("{name}\n")
-    {
-        assert!(Instant::now() < deadline, "pid {pid} never ran {name}");
-        thread::sleep(Duration::from_millis(5));
-    }
-}
-
-fn wait_gone(pid: u32) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while alive(pid) {
-        assert!(Instant::now() < deadline, "pid {pid} survived");
-        thread::sleep(Duration::from_millis(20));
-    }
-}
-
 #[test]
 fn an_exec_relays_stdio_env_and_exit_status() {
     let bridge = Bridge::start();
@@ -297,11 +267,11 @@ fn teardown_names_and_kills_what_outlived_the_process() {
         .unwrap();
     let sleeper: u32 = line.trim().parse().unwrap();
     assert!(process.wait().unwrap().success());
-    assert!(alive(sleeper));
-    wait_exec(sleeper, "sleep");
+    assert!(wait::alive(sleeper));
+    wait::exec(sleeper, "sleep");
     let survivors = process.teardown();
     assert_eq!(survivors, vec!["sleep".to_owned()]);
-    wait_gone(sleeper);
+    wait::gone(sleeper);
 
     // Dropping a process ends its group too.
     let mut process = endpoint
@@ -313,7 +283,7 @@ fn teardown_names_and_kills_what_outlived_the_process() {
         .unwrap();
     let sleeper: u32 = line.trim().parse().unwrap();
     drop(process);
-    wait_gone(sleeper);
+    wait::gone(sleeper);
 }
 
 #[test]
@@ -396,10 +366,10 @@ fn an_ended_or_superseded_attempt_is_never_accepted_again() {
     let mut stdout = BufReader::new(process.take_stdout().unwrap());
     stdout.read_line(&mut line).unwrap();
     let sleeper: u32 = line.trim().parse().unwrap();
-    wait_exec(sleeper, "sleep");
+    wait::exec(sleeper, "sleep");
     let killed = first.end_attempt().unwrap();
     assert!(killed.iter().any(|name| name == "sleep"), "{killed:?}");
-    wait_gone(sleeper);
+    wait::gone(sleeper);
     assert!(!process.wait().unwrap().success());
     assert!(refused(&first).contains("ended"));
 
@@ -887,7 +857,7 @@ fn status_names_the_running_execs_and_what_they_run() {
     let mut stdout = BufReader::new(process.take_stdout().unwrap());
     stdout.read_line(&mut line).unwrap();
     let sleeper: u32 = line.trim().parse().unwrap();
-    wait_exec(sleeper, "sleep");
+    wait::exec(sleeper, "sleep");
     let status = endpoint.status().unwrap();
     assert!(!status.tampered);
     assert_eq!(status.execs.len(), 1, "{status:?}");

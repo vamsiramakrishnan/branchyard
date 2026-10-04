@@ -10,7 +10,8 @@ use branchyard_harness::{
     Event, NativeSession, PermissionDecision, PermissionRequest, Rejected, SessionMode, TurnOutcome,
 };
 use branchyard_runtime::{Environment, RuntimeError, Session};
-use common::{alive, background_pid, open, start, start_with, workdir, WAIT};
+use branchyard_testkit::wait;
+use common::{background_pid, open, start, start_with, workdir, WAIT};
 use serde_json::Value;
 
 fn allow(_: &PermissionRequest) -> PermissionDecision {
@@ -186,11 +187,11 @@ fn close_names_and_kills_descendants_that_outlive_the_harness() {
     let (mut session, _) = start("survivors");
     let report = session.run_turn("BACKGROUND", &mut allow, WAIT).unwrap();
     let pid = background_pid(&report.text);
-    assert!(alive(pid));
+    assert!(wait::alive(pid));
     let closed = session.close(WAIT).unwrap();
     assert!(!closed.forced);
     assert_eq!(closed.survivors, ["sleep"]);
-    assert!(!alive(pid), "the survivor is still running");
+    assert!(!wait::alive(pid), "the survivor is still running");
 }
 
 #[test]
@@ -201,14 +202,7 @@ fn dropping_a_session_kills_its_process_group() {
     drop(session);
     // Dropping signals the whole group; a grandchild dies asynchronously,
     // so on a loaded machine give the kill a moment to land.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while alive(pid) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the descendant is still running"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    wait::gone(pid);
 }
 
 #[test]

@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use branchyard_server::companion::{self, link, push, store};
-use common::{eventually, get, post, raw, Fixture, Server, TOKEN};
+use branchyard_testkit::wait;
+use common::{get, post, raw, Fixture, Server, TOKEN};
 use ring::agreement;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::Value;
@@ -296,7 +297,7 @@ fn expired_codes_and_tokens_are_refused() {
     assert_eq!(status, 200, "{body}");
     let token = json(&body)["token"].as_str().unwrap().to_owned();
     assert_eq!(raw(server.addr, &get("/v1/repos", Some(&token))).0, 200);
-    eventually("the token to expire", || {
+    wait::until("the token to expire", || {
         std::thread::sleep(Duration::from_millis(200));
         raw(server.addr, &get("/v1/repos", Some(&token))).0 == 401
     });
@@ -536,7 +537,7 @@ fn push_notifications_reach_a_subscribed_browser() {
         branchyard_client::api::OperationState::Succeeded,
         "{op:?}"
     );
-    eventually("a push for the permission request", || mock.count() >= 1);
+    wait::until("a push for the permission request", || mock.count() >= 1);
     let (path, head, body) = mock.received.lock().unwrap()[0].clone();
     assert_eq!(path, "/push/one");
     assert_eq!(header(&head, "content-encoding"), Some("aes128gcm"));
@@ -555,7 +556,7 @@ fn push_notifications_reach_a_subscribed_browser() {
     assert_eq!(notice["url"], "#/b/app/asks");
     assert!(notice["body"].as_str().unwrap().contains("asks to use"));
     // Then the finished turn.
-    eventually("a push for the finished turn", || mock.count() >= 2);
+    wait::until("a push for the finished turn", || mock.count() >= 2);
 
     // A push service that says the subscription is gone loses it.
     let (_, public2, auth2) = browser_keys();
