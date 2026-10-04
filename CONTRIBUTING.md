@@ -24,3 +24,13 @@ The Warp collection is AGPL source reference material and excluded from the Carg
 Run the commands in [validation](docs/validation.md). Add regression tests for behavioral changes and contract failures. Keep external provider smoke tests opt-in and document the exact profile they qualify. Use immutable fixtures for protocol parsing; a fake driver cannot establish sandbox isolation.
 
 Describe each change in terms of the developer-visible behavior, the failure condition it handles, and the evidence collected. Update the support matrix only when the corresponding profile has actually passed its gate.
+
+## CI gates
+
+Besides tests and Clippy, CI gates the workspace's health; [CI gates](docs/ci-gates.md) says what each one fails on and how to run it. The ones you will meet:
+
+- **A dependency.** Declare it in your crate with its version. When a second crate uses it, move it to the root `Cargo.toml`'s `[workspace.dependencies]` and write `dep = { workspace = true }` in both (add `features` and `optional` per crate). `python3 tools/check_workspace_deps.py` fails on a version spelled twice. A new license goes in `deny.toml` with the reason in the commit message; `cargo deny --locked check` and `cargo machete` (install with `python3 tools/install_ci_tool.py <tool>`) check licenses, advisories and unused dependencies.
+- **A new source file or function.** Write its test in the same change. A source file with no covered line fails the coverage job. After adding tests, run the coverage commands in [CI gates](docs/ci-gates.md#coverage) and `python3 tools/check_coverage.py lcov.info --unit unit.lcov --update` to raise the floors in `tools/coverage_floor.json`, and commit the result. Floors only go up; the `uncovered` list only shrinks.
+- **A doc comment.** `cargo doc` runs with `-D warnings`: do not link to private or feature-gated items with `[`...`]`, and put `<placeholders>` in backticks. Doc comments on clap types are `--help` text, and doc comments on schema types are schema descriptions; keep their wording, and use an item-level `#[allow(rustdoc::...)]` with a comment where a lint cannot apply.
+- **A feature.** CI checks the workspace with `--all-features`; a feature that cannot be enabled beside the others fails there.
+- **Python in `tools/` or `tests/`.** `ruff check`, `ruff format` and `mypy` (versions in `.github/workflows/check.yml`); `ruff.toml` holds the settings.

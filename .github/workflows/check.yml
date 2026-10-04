@@ -23,6 +23,9 @@ jobs:
       - run: python tools/verify_derivatives.py
       - run: python tools/check_catalog.py
       - run: python tools/check_docs.py
+      # Dependency versions are declared once, in [workspace.dependencies].
+      - run: python tools/check_workspace_deps.py
+      - run: python tests/test_check_workspace_deps.py
       - run: python tools/test_scion.py --qualified
       - name: Verify the recorded upstream Claude compatibility
         run: python tools/check_scion_compatibility.py
@@ -80,3 +83,94 @@ jobs:
       - run: cargo fetch --locked
       - run: cargo clippy -p branchyard-microsandbox -p branchyard -p branchyard-cli --all-targets --locked --offline --features branchyard-cli/microsandbox -- -D warnings
       - run: cargo test -p branchyard-microsandbox --locked --offline --features microsandbox
+  docs:
+    # Rustdoc with every warning an error: broken or private intra-doc links,
+    # bad HTML in doc comments. Offline, like the build.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: cargo fetch --locked
+      - run: cargo doc --workspace --no-deps --locked --offline
+  all-features:
+    # Every optional feature at once (postgres, microsandbox, schema, fake,
+    # testing), tests and examples included. The other jobs pick features by
+    # hand; this one catches a feature that stops building beside another.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+      - run: cargo fetch --locked
+      - run: cargo check --workspace --all-targets --all-features --locked --offline
+  unused-deps:
+    # A dependency no source file names. False positives (generated code) go
+    # in the crate's [package.metadata.cargo-machete] with the reason.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: python tools/install_ci_tool.py cargo-machete
+      - run: cargo machete
+  deny:
+    # The supply-chain gate (deny.toml): advisories, licenses, duplicate
+    # versions, sources. It reads the advisory database from the network, so
+    # it runs on its own, not in the offline build job.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: python tools/install_ci_tool.py cargo-deny
+      - run: cargo fetch --locked
+      - run: cargo deny --locked check
+  coverage:
+    # Line coverage per crate and per watched file may not fall below
+    # tools/coverage_floor.json (docs/coverage.md). Two reports: the whole
+    # workspace's tests, and the unit tests alone for the files whose floor
+    # must not be carried by integration tests.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: rustup component add llvm-tools
+      - run: python tools/install_ci_tool.py cargo-llvm-cov
+      - run: cargo fetch --locked
+      - run: cargo llvm-cov --workspace --locked --offline --lcov --output-path lcov.info
+      - run: cargo llvm-cov -p branchyard -p branchyard-provision -p branchyard-substrate --lib --locked --offline --lcov --output-path unit.lcov
+      - run: python tools/check_coverage.py lcov.info --unit unit.lcov
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lcov
+          path: |
+            lcov.info
+            unit.lcov
+  python:
+    # Lint, format and type-check the Python in tools/ and tests/ (ruff.toml).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: pip install ruff==0.15.8 mypy==2.4.0
+      - run: ruff check tools tests
+      - run: ruff format --check tools tests
+      - run: mypy --python-version 3.12 --ignore-missing-imports --explicit-package-bases tools tests
+      - run: python tests/test_install_ci_tool.py
+      - run: python tests/test_check_coverage.py
