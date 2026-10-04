@@ -26,6 +26,7 @@ pub mod qr;
 mod qr_fixtures;
 pub mod store;
 
+use branchyard_support::LockExt as _;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -140,7 +141,7 @@ impl Companion {
 
     /// Count a redemption attempt; false when over the limit.
     fn attempt(&self, now: Instant) -> Result<(), Duration> {
-        let mut attempts = self.attempts.lock().unwrap_or_else(|p| p.into_inner());
+        let mut attempts = self.attempts.lock_recovering("attempts");
         while attempts
             .front()
             .is_some_and(|t| now.duration_since(*t) >= PAIR_WINDOW)
@@ -209,7 +210,7 @@ pub(crate) async fn verify_paired(
         .await
         .ok()?
         .ok()??;
-    if !token.usable_at(crate::ops::now_ms()) {
+    if !token.usable_at(branchyard_support::time::now_ms()) {
         return None;
     }
     Some((
@@ -238,7 +239,7 @@ pub(crate) fn bound(app: &Shared, verified: &Verified, response: Response) -> Re
     let hash = verified.token_sha256.clone();
     let ended = async move {
         loop {
-            let now = crate::ops::now_ms();
+            let now = branchyard_support::time::now_ms();
             if now >= expires_at_ms {
                 return;
             }
@@ -250,7 +251,7 @@ pub(crate) fn bound(app: &Shared, verified: &Verified, response: Response) -> Re
                 .ok()
                 .and_then(Result::ok)
                 .flatten()
-                .is_some_and(|t| t.usable_at(crate::ops::now_ms()));
+                .is_some_and(|t| t.usable_at(branchyard_support::time::now_ms()));
             if !still {
                 return;
             }
@@ -416,7 +417,7 @@ async fn pair(
             &code_hash,
             &token_hash,
             device.as_deref(),
-            crate::ops::now_ms(),
+            branchyard_support::time::now_ms(),
         )
     })
     .await?
@@ -534,7 +535,7 @@ async fn subscribe(
         p256dh: request.keys.p256dh,
         auth: request.keys.auth,
         kinds: request.kinds,
-        created_at_ms: crate::ops::now_ms(),
+        created_at_ms: branchyard_support::time::now_ms(),
     };
     let store = companion.store.clone();
     blocking(move || store.subscribe(&subscription))

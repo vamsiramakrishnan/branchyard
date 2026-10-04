@@ -24,8 +24,9 @@ use crate::store::xml;
 use crate::store::{
     check_key, check_prefix, join, Entry, Generation, Object, ObjectStore, UploadJournal,
 };
-use crate::util::{parse_http_date, parse_rfc3339, uri_encode, xml_escape};
+use crate::util::{uri_encode, xml_escape};
 use branchyard::services::Clock;
+use branchyard_support::time::{parse_http_date, parse_rfc3339};
 
 pub const DEFAULT_PART: usize = 8 << 20;
 
@@ -339,7 +340,9 @@ impl ObjectStore for S3Store {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0),
                 generation: etag(&response)?,
-                modified_ms: response.header("last-modified").and_then(parse_http_date),
+                modified_ms: response
+                    .header("last-modified")
+                    .and_then(|t| parse_http_date(t).ok()),
             })),
             404 => Ok(None),
             _ => Err(self.fail(&response, &format!("HEAD {key}"))),
@@ -389,7 +392,8 @@ impl ObjectStore for S3Store {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0),
                     generation: xml::text(item, "ETag").unwrap_or_default(),
-                    modified_ms: xml::text(item, "LastModified").and_then(|t| parse_rfc3339(&t)),
+                    modified_ms: xml::text(item, "LastModified")
+                        .and_then(|t| parse_rfc3339(&t).ok()),
                 });
             }
             match (

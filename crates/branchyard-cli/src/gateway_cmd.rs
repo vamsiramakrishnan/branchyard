@@ -9,6 +9,7 @@
 //! gateway (a `file:` URL), and reads the gateway's audit log from
 //! `audit.jsonl` there.
 
+use branchyard_support::time::now_ms;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -421,13 +422,6 @@ fn adopt(yard: &Yard, config: &Connectors, gw: &Gateway) -> Result<Service, Fail
     Ok(yard.services()?.register(&service, now)?)
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// The gateway at `gw.url` as a service: what it serves, for whom, and
 /// where.
 fn describe(yard: &Yard, config: &Connectors, gw: &Gateway, owner: ServiceOwner) -> Service {
@@ -487,10 +481,7 @@ fn supervise(
         log.to_path_buf(),
         Box::new(move || {
             let _ = reader.ingest_connector_audit();
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+            let now = branchyard_support::time::now_ms() / 1000;
             let last = reconciled.load(std::sync::atomic::Ordering::Relaxed);
             if now.saturating_sub(last) >= RECONCILE_EVERY.as_secs() {
                 reconciled.store(now, std::sync::atomic::Ordering::Relaxed);
@@ -647,7 +638,7 @@ pub fn connect(
         command.arg("--open");
     }
     let status = command.status();
-    let _ = std::fs::remove_file(&file);
+    branchyard_support::cleanup_file(&file);
     let status =
         status.map_err(|e| Failure::Message(format!("could not run {}: {e}", anvil[0])))?;
     match status.success() {

@@ -14,7 +14,7 @@ use crate::error::{Kind, Result};
 use crate::manifest::{chunk_key, Manifest, CONTENT_PREFIXES};
 use crate::source::{read_chunk, ChunkId};
 use crate::store::ObjectStore as _;
-use crate::util::SplitMix;
+use branchyard_support::rng::SplitMix64;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScrubReport {
@@ -94,7 +94,7 @@ impl Remote {
             }
         }
         // A deterministic sample: a partial Fisher-Yates shuffle.
-        let mut rng = SplitMix::new(seed);
+        let mut rng = SplitMix64::new(seed);
         let n = sample.min(listing.len());
         for i in 0..n {
             let j = i + rng.below_or_at((listing.len() - 1 - i) as u64) as usize;

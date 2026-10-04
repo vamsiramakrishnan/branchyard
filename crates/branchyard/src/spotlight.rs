@@ -34,8 +34,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::checkpoint::fault;
-use crate::state::now_ms;
 use crate::{git, DirLock, Error, Yard};
+use branchyard_support::time::now_ms;
 use branchyard_workspace::Git;
 
 const HEAD_REF: &str = "refs/branchyard-try/head";

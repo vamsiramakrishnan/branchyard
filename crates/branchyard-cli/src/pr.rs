@@ -13,6 +13,7 @@
 //! [`publish`] and [`readiness`] take no terminal and print nothing, so
 //! `by watch` can bind keys to them.
 
+use branchyard_support::time::now_ms;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -762,13 +763,6 @@ pub fn show_readiness(
             (r.json, Some(line))
         }
     }
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 // The log line.

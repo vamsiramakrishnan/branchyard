@@ -25,6 +25,7 @@
 //!    when the gateway described nothing; `failed` on a refusal or a tool
 //!    error; `unknown` when the answer was lost after the call was sent.
 
+use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -45,8 +46,8 @@ use super::{
 use crate::connectors::{GrantEntry, GrantMode};
 use crate::models::gateway::{presented, read_request, same, Request};
 use crate::models::upstream::{self, Failure, Target};
-use crate::state::now_ms;
 use crate::Yard;
+use branchyard_support::time::now_ms;
 
 /// How long a turn's end waits for calls still in flight.
 const DRAIN: Duration = Duration::from_secs(5);
@@ -85,7 +86,7 @@ impl ProxyState {
     }
 
     fn listed<T>(&self, read: impl FnOnce(&Listed) -> T) -> T {
-        let mut tools = self.tools.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tools = self.tools.lock_recovering("tools");
         let listed = tools.get_or_insert_with(|| {
             Listed::of(
                 &mcp::Client::new(&self.upstream, &self.token)
@@ -222,20 +223,17 @@ impl EffectProxy {
         }
         let _ = TcpStream::connect_timeout(&wake, Duration::from_secs(1));
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            branchyard_support::join_reporting("effect proxy accept", thread);
         }
         let (count, idle) = &*self.in_flight;
         let deadline = std::time::Instant::now() + DRAIN;
-        let mut active = count.lock().unwrap_or_else(|e| e.into_inner());
+        let mut active = count.lock_recovering("count");
         while *active > 0 {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
                 break;
             }
-            active = idle
-                .wait_timeout(active, left)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
+            active = idle.wait_timeout_recovering(active, left, "idle").0;
         }
     }
 }
@@ -271,14 +269,14 @@ fn accept(listener: TcpListener, state: Arc<ProxyState>, in_flight: Arc<(Mutex<u
         }
         let Ok(stream) = stream else { continue };
         let (state, in_flight) = (state.clone(), in_flight.clone());
-        *in_flight.0.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        *in_flight.0.lock_recovering("in-flight count") += 1;
         let n = THREADS.fetch_add(1, Ordering::Relaxed);
         let spawned = std::thread::Builder::new()
             .name(format!("by-effects-{n}"))
             .spawn(move || {
                 handle(stream, &state);
                 let (count, idle) = &*in_flight;
-                *count.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+                *count.lock_recovering("count") -= 1;
                 idle.notify_all();
             });
         if spawned.is_err() {

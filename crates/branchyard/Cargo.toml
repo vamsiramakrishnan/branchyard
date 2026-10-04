@@ -18,6 +18,7 @@ postgres = ["dep:postgres", "dep:tokio"]
 schema = ["dep:schemars", "branchyard-provision/schema", "branchyard-harness/schema"]
 
 [dependencies]
+branchyard-support = { path = "../branchyard-support" }
 blake3 = "1"
 branchyard-bridge = { path = "../branchyard-bridge" }
 branchyard-controls = { path = "../branchyard-controls" }
@@ -50,6 +51,7 @@ toml_edit = { version = "0.25", default-features = false, features = ["parse", "
 
 [dev-dependencies]
 branchyard-testkit = { path = "../branchyard-testkit" }
+branchyard-support = { path = "../branchyard-support", features = ["testing"] }
 branchyard-substrate = { path = "../branchyard-substrate", features = ["fake"] }
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
 tempfile = "3.27.0"

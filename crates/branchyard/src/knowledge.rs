@@ -29,8 +29,9 @@ use serde::{Deserialize, Serialize};
 use crate::fleet::{classify, recorded_route, FleetActivity, TaskKind};
 use crate::judge::{Judge, JudgedBy};
 use crate::record::Recorder;
-use crate::state::{now_ms, Record};
+use crate::state::Record;
 use crate::{Activity, Error, RecordedEvent, Yard};
+use branchyard_support::time::now_ms;
 
 /// Where an entry applies: the whole repository, files matching a path
 /// glob, a kind of task, or both of the last two. Serialized as

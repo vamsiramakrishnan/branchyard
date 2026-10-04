@@ -29,6 +29,7 @@
 //! without changing the transaction's shape. [`FileStore`], the JSON-lines
 //! file earlier versions used, is only read, to import it once.
 
+use branchyard_support::LockExt as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
@@ -273,8 +274,9 @@ impl Default for Scheduling {
 
 impl Scheduling {
     /// The time claims are measured at.
-    pub fn now_ms(&self) -> i64 {
-        self.clock_ms.unwrap_or_else(crate::ops::now_ms) as i64
+    pub fn at_ms(&self) -> i64 {
+        self.clock_ms
+            .unwrap_or_else(branchyard_support::time::now_ms) as i64
     }
 
     fn weight(&self, tenant: &str) -> f64 {
@@ -753,7 +755,7 @@ impl FileStore {
     pub fn save(&self, operation: &StoredOperation) -> io::Result<()> {
         let mut line = serde_json::to_vec(operation)?;
         line.push(b'\n');
-        let mut file = self.file.lock().unwrap_or_else(|p| p.into_inner());
+        let mut file = self.file.lock_recovering("file");
         file.write_all(&line)?;
         file.sync_data()
     }
@@ -937,7 +939,7 @@ fn sqlite_wal(conn: &rusqlite::Connection) -> rusqlite::Result<String> {
 }
 
 fn sqlite_now() -> i64 {
-    crate::ops::now_ms() as i64
+    branchyard_support::time::now_ms() as i64
 }
 
 type Conn = rusqlite::Connection;
@@ -1027,7 +1029,7 @@ impl SqliteStore {
     }
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Conn> {
-        self.conn.lock().unwrap_or_else(|p| p.into_inner())
+        self.conn.lock_recovering("conn")
     }
 
     /// Run `f` in a `BEGIN IMMEDIATE` transaction, committed when it
@@ -1358,7 +1360,7 @@ impl OperationStore for SqliteStore {
         let labels = serde_json::to_string(labels)?;
         self.immediate(|tx| {
             let clock = sqlite_now();
-            let now = scheduling.now_ms();
+            let now = scheduling.at_ms();
             sqlite_reap(tx, worker, clock)?;
             // Each tenant's usage per unit of weight, from its live claims
             // and its decayed recent ones: computed here, inside the
@@ -2036,7 +2038,7 @@ impl PostgresStore {
         &self,
         f: impl FnOnce(&mut postgres::Client) -> Result<T, postgres::Error> + Send,
     ) -> io::Result<T> {
-        let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.conn.lock_recovering("conn");
         let conn: &mut Option<postgres::Client> = &mut guard;
         let url = &self.url;
         std::thread::scope(|scope| {
@@ -2063,7 +2065,7 @@ impl Drop for PostgresStore {
     /// The client blocks to close its connection, which a Tokio runtime's
     /// thread may not.
     fn drop(&mut self) {
-        let conn = self.conn.get_mut().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.get_mut_recovering("conn");
         if let Some(client) = conn.take() {
             std::thread::scope(|scope| {
                 scope.spawn(move || drop(client));
@@ -2289,7 +2291,7 @@ impl OperationStore for PostgresStore {
         let repos = repos.to_vec();
         let labels = labels.to_vec();
         let lease = pg_lease(lease);
-        let now = scheduling.now_ms();
+        let now = scheduling.at_ms();
         let aging = scheduling.aging_ms();
         let window = ms(scheduling.window);
         let (tenants, weights) = scheduling.weight_arrays();
@@ -2865,23 +2867,6 @@ pub fn test_inventory(id: &str) -> branchyard::inventory::Inventory {
     }
 }
 
-/// A small deterministic generator for the scheduling property check
-/// (xorshift64*), so a failure names a seed that reproduces it.
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 >> 12;
-        self.0 ^= self.0 << 25;
-        self.0 ^= self.0 >> 27;
-        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
-    }
-
-    fn below(&mut self, n: u64) -> u64 {
-        self.next() % n
-    }
-}
-
 /// What the scheduling conformance admits: an operation of `repo` for
 /// `tenant`, at `priority`, admitted `age_ms` before the fixed clock.
 fn scheduled(
@@ -2933,7 +2918,7 @@ struct Model {
 
 impl Model {
     fn pick(&self, scheduling: &Scheduling, gpu: bool) -> Option<usize> {
-        let now = scheduling.now_ms();
+        let now = scheduling.at_ms();
         let share = |tenant: &str| {
             let running = self
                 .ops
@@ -3100,7 +3085,7 @@ pub fn check_scheduling(store: &dyn OperationStore, repo: &str) {
 
     // Two workers racing for mixed priorities and tenants claim each
     // operation exactly once.
-    let mut rng = Rng(0x5eed_0001);
+    let mut rng = branchyard_support::rng::SplitMix64::new(0x5eed_0001);
     let mut expected: Vec<String> = Vec::new();
     for n in 0..24 {
         let tenant = format!("{repo}-race{}", rng.below(3));
@@ -3144,7 +3129,7 @@ pub fn check_scheduling(store: &dyn OperationStore, repo: &str) {
     // Random submissions, finishes and claims by a worker with and one
     // without the `gpu` label, checked against the model claim by claim.
     for seed in 1..=4u64 {
-        let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let mut rng = branchyard_support::rng::SplitMix64::new(seed);
         let tag = format!("prop{seed}");
         let tenants: Vec<String> = (0..3).map(|t| format!("{repo}-{tag}-t{t}")).collect();
         let weights = [("t0", 1.0), ("t1", 2.0), ("t2", 0.5)];

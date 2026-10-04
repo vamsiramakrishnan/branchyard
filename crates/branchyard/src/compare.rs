@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use branchyard_workspace::{Check, CheckResult, Commit};
 use serde::{Deserialize, Serialize};
 
-use crate::state::now_ms;
 use crate::{git, ops, Activity, BranchInfo, BranchStatus, Error, Event, RecordedEvent, Yard};
+use branchyard_support::time::now_ms;
 
 /// One attempt, as `by compare` shows it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

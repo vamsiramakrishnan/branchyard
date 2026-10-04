@@ -490,7 +490,7 @@ impl Drop for TempWorktree {
             .arg(&self.path)
             .run();
         if removed.is_err() || self.path.exists() {
-            let _ = fs::remove_dir_all(&self.path);
+            branchyard_support::cleanup_dir(&self.path);
             let _ = Git::new(&self.root).args(["worktree", "prune"]).run();
         }
     }

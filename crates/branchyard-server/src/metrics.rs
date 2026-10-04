@@ -14,6 +14,7 @@
 //! age, live workers) describe the shared database, so every server
 //! reports the same values: take one, or `max`, not the sum.
 
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Mutex;
@@ -358,7 +359,7 @@ impl std::fmt::Debug for Metrics {
 
 impl Metrics {
     fn with<T>(&self, f: impl FnOnce(&mut Snapshot) -> T) -> T {
-        f(&mut self.series.lock().unwrap_or_else(|p| p.into_inner()))
+        f(&mut self.series.lock_recovering("series"))
     }
 
     /// Add `by` to a counter.

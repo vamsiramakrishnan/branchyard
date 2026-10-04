@@ -6,7 +6,8 @@
 use ring::{digest, hmac};
 
 use crate::http::Request;
-use crate::util::{amz_date, hex, query_pairs, uri_encode};
+use crate::util::{hex, query_pairs, uri_encode};
+use branchyard_support::time::amz_date;
 
 /// SHA-256 of nothing, the payload hash of an empty body.
 pub const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";

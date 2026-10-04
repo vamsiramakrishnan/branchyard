@@ -1093,17 +1093,19 @@ fn the_audit_log_settles_a_lost_answer_and_records_calls_around_the_proxy() {
     assert_eq!(mock.calls_to("flaky__charge").len(), 1);
     // The gateway's audit line for that call carries its key: it happened.
     // A second line is a call that did not go through the proxy, and says
-    // its effect. The lines are dated far ahead so that they sort after the
-    // real call whenever the test runs (they were once dated "next week",
-    // and the test failed from the day that date passed).
+    // its effect.
     let audit = f.root.join(".branchyard/gateway/audit.jsonl");
+    // The ledger is in the order calls were made, and a line's time is when
+    // its call was: these come after the call above, whenever the test runs.
+    let started = branchyard_support::time::now_ms();
+    let at = |seconds: u64| branchyard_support::time::rfc3339(started + 1_000 * (seconds + 1));
     let lines = format!(
         "{}\n{}\n",
-        serde_json::json!({"time": "2099-10-03T10:00:00Z", "by_branch": "audited", "by_turn": "1",
+        serde_json::json!({"time": at(0), "by_branch": "audited", "by_turn": "1",
             "sub": "local:me", "connector": "flaky", "operation": "flaky.charges.create",
             "decision": "allowed", "upstream_status": 200, "error_code": null,
             "effect_class": "compensable", "ledger_id": lost.id, "staged_for": null}),
-        serde_json::json!({"time": "2099-10-03T10:00:01Z", "by_branch": "audited", "by_turn": "1",
+        serde_json::json!({"time": at(1), "by_branch": "audited", "by_turn": "1",
             "sub": "local:me", "connector": "slack", "operation": "slack.chat.post",
             "decision": "allowed", "upstream_status": 200, "error_code": null,
             "effect_class": "reversible", "ledger_id": null, "staged_for": null}),
@@ -1111,7 +1113,7 @@ fn the_audit_log_settles_a_lost_answer_and_records_calls_around_the_proxy() {
     // A draft's line settles nothing and records nothing.
     let lines = format!(
         "{lines}{}\n",
-        serde_json::json!({"time": "2099-10-03T10:00:02Z", "by_branch": "audited", "by_turn": "1",
+        serde_json::json!({"time": at(2), "by_branch": "audited", "by_turn": "1",
             "sub": "local:me", "connector": "gmail", "operation": "gmail.drafts.create",
             "decision": "allowed", "upstream_status": 200, "error_code": null,
             "effect_class": "irreversible", "ledger_id": null, "staged_for": "gmail.send"})

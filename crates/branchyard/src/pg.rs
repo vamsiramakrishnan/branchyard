@@ -25,6 +25,7 @@
 //! Lease expiry compares times from the engines' own clocks, as with
 //! SQLite. Engines on several hosts need synchronized clocks.
 
+use branchyard_support::LockExt as _;
 use std::fmt;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -35,15 +36,16 @@ use serde_json::Value;
 
 use crate::graph::{After, Dependency, GraphBackend, GraphCommit};
 use crate::state::{
-    now_ms, pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PoolBackend,
-    PortBackend, ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow,
-    SlotRow, SlotState, SteerRow, StepRow,
+    pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PoolBackend, PortBackend,
+    ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow, SlotRow,
+    SlotState, SteerRow, StepRow,
 };
 use crate::storage::{
     ArtifactRef, ArtifactRow, Identity, LegacyBinder, LegacyBranch, LockOutcome, NewArtifact,
     NewScratch, ScratchArea, ScratchLock, ScratchRow, Share, StorageBackend,
 };
 use crate::{Activity, BranchStatus, Error, Message, RecordedEvent, SteerState};
+use branchyard_support::time::now_ms;
 
 /// 2: grants bound to incarnations (see `crate::storage::LegacyBinder`).
 const SCHEMA: i64 = 2;
@@ -527,7 +529,7 @@ pub(crate) fn close(client: Client) {
 
 impl Drop for Postgres {
     fn drop(&mut self) {
-        let conn = self.conn.get_mut().unwrap_or_else(|e| e.into_inner());
+        let conn = self.conn.get_mut_recovering("conn");
         if let Some(client) = conn.take() {
             close(client);
         }
@@ -617,7 +619,7 @@ impl Postgres {
     }
 
     fn lock(&self) -> MutexGuard<'_, Option<Client>> {
-        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+        self.conn.lock_recovering("conn")
     }
 
     /// The connection, reconnecting after it closed.

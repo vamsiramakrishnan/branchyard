@@ -21,6 +21,7 @@ postgres = ["branchyard-server/postgres"]
 schema = ["dep:schemars"]
 
 [dependencies]
+branchyard-support = { path = "../branchyard-support" }
 branchyard = { path = "../branchyard" }
 branchyard-client = { path = "../branchyard-client" }
 branchyard-server = { path = "../branchyard-server" }

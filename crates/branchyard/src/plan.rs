@@ -15,10 +15,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::{self, Turn};
 use crate::record::Recorder;
-use crate::state::{now_ms, Record};
+use crate::state::Record;
 use crate::{
     Activity, Branch, BranchStatus, Error, Event, Policy, RecordedEvent, TaskOptions, Yard,
 };
+use branchyard_support::time::now_ms;
 
 /// The first line of a planning turn's prompt.
 pub const PLAN_HEADER: &str = "[branchyard plan mode]";

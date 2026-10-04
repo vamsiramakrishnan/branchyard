@@ -39,6 +39,7 @@
 //! does ([`crate::TaskOptions::workspace`]), after its own trust decision.
 //! [`crate::Yard::deny_workspace_scripts`] makes a yard refuse to run any.
 
+use branchyard_support::LockExt as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
@@ -1294,7 +1295,7 @@ fn copy_one(root: &Path, worktree: &Path, rel: &str) -> Result<(), String> {
     if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink() || m.is_dir()) {
         return Err("the worktree already has a link or directory there".into());
     }
-    let _ = fs::remove_file(&target);
+    branchyard_support::cleanup_file(&target);
     branchyard_workspace::materialize::clone_file(&source, &target)
         .map(|_| ())
         .map_err(|e| format!("could not be copied: {e}"))
@@ -1397,12 +1398,12 @@ pub(crate) fn run_commands(
             }
             if Instant::now() >= deadline {
                 proc::kill_group(pid, &start);
-                let _ = child.wait();
+                branchyard_support::best_effort("reap child", child.wait());
                 break Err(format!("timed out after {}s", timeout.as_secs()));
             }
             if let Some(why) = cancel() {
                 proc::kill_group(pid, &start);
-                let _ = child.wait();
+                branchyard_support::best_effort("reap child", child.wait());
                 break Err(format!("stopped: {why}"));
             }
             std::thread::sleep(TICK);
@@ -1483,10 +1484,7 @@ pub(crate) fn run_in_sandbox(
                     loop {
                         match pipe.read(&mut buffer) {
                             Ok(0) | Err(_) => break,
-                            Ok(n) => output
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .push(&buffer[..n]),
+                            Ok(n) => output.lock_recovering("output").push(&buffer[..n]),
                         }
                     }
                 })
@@ -1499,11 +1497,11 @@ pub(crate) fn run_in_sandbox(
                 Err(e) => break Err(format!("could not wait for it: {e}")),
             }
             if Instant::now() >= deadline {
-                let _ = process.kill();
+                branchyard_support::best_effort("kill process", process.kill());
                 break Err(format!("timed out after {}s", timeout.as_secs()));
             }
             if let Some(why) = cancel() {
-                let _ = process.kill();
+                branchyard_support::best_effort("kill process", process.kill());
                 break Err(format!("stopped: {why}"));
             }
             std::thread::sleep(TICK);
@@ -1512,7 +1510,7 @@ pub(crate) fn run_in_sandbox(
         // output open; it goes with the command.
         process.teardown();
         for reader in readers {
-            let _ = reader.join();
+            branchyard_support::join_reporting("reader", reader);
         }
         match status {
             Ok(status) if status.success() => report.exit_code = status.code,
@@ -1531,7 +1529,7 @@ pub(crate) fn run_in_sandbox(
             }
         }
     }
-    report.output = output.lock().unwrap_or_else(|e| e.into_inner()).text();
+    report.output = output.lock_recovering("output").text();
     report.duration_ms = started.elapsed().as_millis() as u64;
 }
 

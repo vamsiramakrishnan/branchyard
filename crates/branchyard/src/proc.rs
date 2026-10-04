@@ -195,24 +195,12 @@ fn marked(_marker: &str) -> Vec<u32> {
 /// SIGKILL `pid`, through kill(2) rather than a `kill` process. Best
 /// effort: a process already gone is not an error.
 fn signal(pid: u32) {
-    #[cfg(unix)]
-    if let Some(pid) = i32::try_from(pid)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    {
-        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
-    }
+    branchyard_support::kill_process(pid);
 }
 
 /// SIGKILL every process in group `pgid`, through killpg(2).
 fn signal_group(pgid: u32) {
-    #[cfg(unix)]
-    if let Some(pgid) = i32::try_from(pgid)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    {
-        let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
-    }
+    branchyard_support::kill_group(pgid);
 }
 
 /// Live members of process group `pgid` that started no earlier than

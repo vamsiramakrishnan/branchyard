@@ -5,6 +5,7 @@
 //! The probe reports whether a variable is set, never its value. The only
 //! file contents it hashes are token files `by init` itself generates.
 
+use branchyard_support::LockExt as _;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -195,8 +196,8 @@ fn first_line(
             }
             Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(20)),
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                branchyard_support::best_effort("kill child", child.kill());
+                branchyard_support::best_effort("reap child", child.wait());
                 return None;
             }
         }
@@ -343,10 +344,7 @@ struct Staging {
 
 impl Staging {
     fn new(files: &[PlannedFile]) -> std::io::Result<Staging> {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default();
+        let nanos = branchyard_support::time::now_nanos();
         let dir = std::env::temp_dir().join(format!("by-init-{}-{nanos}", std::process::id()));
         {
             use std::os::unix::fs::DirBuilderExt;
@@ -379,7 +377,7 @@ impl Staging {
 
 impl Drop for Staging {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+        branchyard_support::cleanup_dir(&self.dir);
     }
 }
 
@@ -473,7 +471,7 @@ pub fn write_file(path: &Path, body: &str, mode: u32) -> std::io::Result<()> {
         .and_then(|_| fs::set_permissions(&temp, fs::Permissions::from_mode(mode)))
         .and_then(|_| fs::rename(&temp, path));
     if result.is_err() {
-        let _ = fs::remove_file(&temp);
+        branchyard_support::cleanup_file(&temp);
     }
     result
 }
@@ -572,7 +570,7 @@ impl<P: Probe> Probe for CachedProbe<P> {
         self.inner.env_is_set(name)
     }
     fn tool(&self, program: &str) -> Option<String> {
-        let mut tools = self.tools.lock().unwrap_or_else(|p| p.into_inner());
+        let mut tools = self.tools.lock_recovering("tools");
         tools
             .entry(program.to_owned())
             .or_insert_with(|| self.inner.tool(program))

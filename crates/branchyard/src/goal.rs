@@ -25,8 +25,9 @@ use crate::compare::AttemptCheck;
 use crate::fleet::JudgeSpec;
 use crate::judge::{HarnessJudge, Judge, JudgedBy};
 use crate::record::Recorder;
-use crate::state::{now_ms, Record};
+use crate::state::Record;
 use crate::{Activity, Branch, BranchStatus, Error, Event, RecordedEvent, TaskOptions, Yard};
+use branchyard_support::time::now_ms;
 
 /// The first line of a goal's follow-up turn.
 pub const FOLLOW_UP_HEADER: &str = "[branchyard goal not met]";

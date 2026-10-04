@@ -34,11 +34,13 @@
 //! queued ones stay queued for the next worker, here after a restart or on
 //! another server.
 
+use branchyard_support::time::now_ms;
+use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::HashMap;
 use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use branchyard_client::api::{
@@ -55,13 +57,6 @@ use crate::store::{
     Worker,
 };
 use crate::telemetry::SpanContext;
-
-pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
 
 /// What a finished operation reports.
 pub struct Finished {
@@ -286,7 +281,7 @@ impl Registry {
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|p| p.into_inner())
+        self.state.lock_recovering("state")
     }
 
     /// This registry's worker identity, as its claims record it.
@@ -316,10 +311,7 @@ impl Registry {
 
     /// This worker's harness inventory, once detected.
     pub fn inventory(&self) -> Option<branchyard::inventory::Inventory> {
-        self.inventory
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        self.inventory.lock_recovering("inventory").clone()
     }
 
     /// The labels this worker claims with: its configured ones and those
@@ -353,7 +345,7 @@ impl Registry {
         loop {
             let found = (source.0)();
             if found.is_some() {
-                *self.inventory.lock().unwrap_or_else(|p| p.into_inner()) = found;
+                *self.inventory.lock_recovering("inventory") = found;
                 // Beat with it now rather than at the next beat.
                 self.changed.notify_all();
             }
@@ -369,8 +361,7 @@ impl Registry {
                 }
                 state = self
                     .changed
-                    .wait_timeout(state, left)
-                    .unwrap_or_else(|p| p.into_inner())
+                    .wait_timeout_recovering(state, left, "changed")
                     .0;
             }
         }
@@ -621,10 +612,7 @@ impl Registry {
             let wait = self.options.poll.min(renew_every);
             let state = self.lock();
             if !state.admitted || !free {
-                let _ = self
-                    .changed
-                    .wait_timeout(state, wait)
-                    .unwrap_or_else(|p| p.into_inner());
+                let _ = self.changed.wait_timeout_recovering(state, wait, "changed");
             }
         }
     }
@@ -712,7 +700,10 @@ impl Registry {
             let mut state = self.lock();
             if state.closed || !state.accepting {
                 drop(state);
-                let _ = self.store.release(&self.worker, &id, claim.fence);
+                branchyard_support::best_effort(
+                    "self.store.release",
+                    self.store.release(&self.worker, &id, claim.fence),
+                );
                 return;
             }
             state.running.insert(id.clone(), claim.fence);
@@ -724,7 +715,10 @@ impl Registry {
             .spawn(move || registry.work(claim, executor));
         if let Err(error) = spawned {
             tracing::error!(%id, %error, "could not start a worker thread for an operation");
-            let _ = self.store.release(&self.worker, &id, fence);
+            branchyard_support::best_effort(
+                "self.store.release",
+                self.store.release(&self.worker, &id, fence),
+            );
             self.done(&id);
         }
     }
@@ -760,7 +754,10 @@ impl Registry {
             }
             Err(e) => {
                 tracing::error!(%id, error = %e, "could not record an operation as running");
-                let _ = self.store.release(&self.worker, &id, fence);
+                branchyard_support::best_effort(
+                    "self.store.release",
+                    self.store.release(&self.worker, &id, fence),
+                );
                 self.done(&id);
                 return;
             }
@@ -913,10 +910,11 @@ impl Registry {
                 return false;
             }
             let state = self.lock();
-            let _ = self
-                .changed
-                .wait_timeout(state, (deadline - now).min(Duration::from_millis(20)))
-                .unwrap_or_else(|p| p.into_inner());
+            let _ = self.changed.wait_timeout_recovering(
+                state,
+                (deadline - now).min(Duration::from_millis(20)),
+                "changed",
+            );
         }
     }
 

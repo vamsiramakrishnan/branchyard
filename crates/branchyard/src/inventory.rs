@@ -22,6 +22,8 @@
 //! ([`HarnessLog`]). The router consults the inventory through
 //! [`HarnessGate`].
 
+use branchyard_support::time::now_ms;
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -806,14 +808,6 @@ pub fn parse_version(line: &str) -> Option<String> {
     None
 }
 
-/// Milliseconds since the Unix epoch.
-pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// Run the detection script on this machine with `/bin/sh -s`.
 pub fn detect_local(options: &DetectOptions) -> Result<Inventory, String> {
     detect_with(options, true, |_| {
@@ -949,7 +943,7 @@ impl InventoryCache {
 
     /// Forget it.
     pub fn clear(&self) {
-        let _ = std::fs::remove_file(&self.path);
+        branchyard_support::cleanup_file(&self.path);
     }
 
     /// The cached inventory when fresh, else a new detection here, kept.
@@ -1435,10 +1429,7 @@ impl LocalGate {
 
     /// The inventory as it stands, after any installs.
     pub fn inventory(&self) -> Inventory {
-        self.inventory
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        self.inventory.lock_recovering("inventory").clone()
     }
 
     pub fn into_arc(self) -> Arc<dyn HarnessGate> {
@@ -1448,7 +1439,7 @@ impl LocalGate {
 
 impl HarnessGate for LocalGate {
     fn check(&self, harness: &str) -> Result<(), String> {
-        let mut inventory = self.inventory.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inventory = self.inventory.lock_recovering("inventory");
         if catalog::harness(harness).is_none() || !inventory.checked(harness) {
             // Not something detection knows: the PATH check decides.
             return Ok(());

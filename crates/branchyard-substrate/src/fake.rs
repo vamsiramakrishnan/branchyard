@@ -30,6 +30,7 @@
 //! Nothing here is evidence about a real cluster: the real router's
 //! addressing, activation and authentication are not modelled.
 
+use branchyard_support::LockExt as _;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
@@ -67,8 +68,8 @@ impl Bridge {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        branchyard_support::best_effort("kill child", self.child.kill());
+        branchyard_support::best_effort("reap child", self.child.wait());
     }
 }
 
@@ -124,7 +125,7 @@ struct Inner {
 
 impl Inner {
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        self.state.lock_recovering("state")
     }
 
     fn name_of(&self, reference: Option<pb::ObjectRef>) -> Result<String, Status> {
@@ -183,8 +184,8 @@ impl Inner {
         match address {
             Some(address) => Ok(Bridge { child, address }),
             None => {
-                let _ = child.kill();
-                let _ = child.wait();
+                branchyard_support::best_effort("kill child", child.kill());
+                branchyard_support::best_effort("reap child", child.wait());
                 Err(Status::internal(format!(
                     "the bridge did not start: {line:?}"
                 )))
@@ -196,7 +197,7 @@ impl Inner {
     /// name and template before `rpc` acts on it.
     fn maybe_replace(&self, rpc: &str, name: &str) {
         let wanted = {
-            let mut replace = self.replace.lock().unwrap_or_else(|e| e.into_inner());
+            let mut replace = self.replace.lock_recovering("replace");
             match replace.iter().position(|(r, n)| r == rpc && n == name) {
                 Some(at) => {
                     replace.remove(at);
@@ -236,7 +237,7 @@ impl Inner {
         if let Some(bridge) = old.bridge {
             bridge.stop();
         }
-        let _ = fs::remove_dir_all(old.root);
+        branchyard_support::cleanup_dir(old.root);
     }
 
     fn transition(
@@ -379,19 +380,13 @@ impl Control for Service {
             .scratch
             .join("actors")
             .join(format!("{name}-{}", metadata.uid));
-        let _ = fs::remove_dir_all(&root);
+        branchyard_support::cleanup_dir(&root);
         fs::create_dir_all(&root).map_err(|e| Status::internal(e.to_string()))?;
         if let Some(seed) = seed {
             copy_dir(&seed, &root).map_err(|e| Status::internal(e.to_string()))?;
         }
-        for path in self
-            .0
-            .fresh
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-        {
-            let _ = fs::remove_dir_all(path);
+        for path in self.0.fresh.lock_recovering("fresh").iter() {
+            branchyard_support::cleanup_dir(path);
         }
         set_state(&mut actor, pb::ActorState::Suspended);
         state.actors.insert(
@@ -523,7 +518,7 @@ impl Control for Service {
         }
         metadata.uid = format!("tag-{}", metadata.name);
         let copy = self.0.scratch.join("tags").join(&metadata.name);
-        let _ = fs::remove_dir_all(&copy);
+        branchyard_support::cleanup_dir(&copy);
         copy_dir(&from, &copy).map_err(|e| Status::internal(e.to_string()))?;
         tag.status = Some(pb::TagStatus {
             snapshot: Some(pb::ExternalSnapshot {
@@ -556,7 +551,7 @@ impl Control for Service {
         }
         let (tag, copy) = state.tags.remove(&name).expect("checked above");
         drop(state);
-        let _ = fs::remove_dir_all(copy);
+        branchyard_support::cleanup_dir(copy);
         Ok(Response::new(tag))
     }
 
@@ -605,7 +600,7 @@ impl Control for Service {
             if let Some(bridge) = bridge {
                 bridge.stop();
             }
-            let _ = fs::remove_dir_all(root);
+            branchyard_support::cleanup_dir(root);
         })
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -673,7 +668,7 @@ fn route(inner: &Inner, client: TcpStream) -> io::Result<()> {
     });
     let _ = io::copy(&mut upstream, &mut client);
     let _ = client.shutdown(Shutdown::Write);
-    let _ = up.join();
+    branchyard_support::join_reporting("fake upstream relay", up);
     Ok(())
 }
 
@@ -798,11 +793,7 @@ impl FakeCluster {
     /// Remove `path` whenever an actor is created, as a fresh root
     /// filesystem would not have it.
     pub fn fresh_on_create(&self, path: impl Into<PathBuf>) {
-        self.inner
-            .fresh
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(path.into());
+        self.inner.fresh.lock_recovering("fresh").push(path.into());
     }
 
     /// Just before the next `rpc` (`ResumeActor`, `SuspendActor`,
@@ -812,8 +803,7 @@ impl FakeCluster {
     pub fn replace_before(&self, rpc: &str, actor: &str) {
         self.inner
             .replace
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("replace")
             .push((rpc.to_owned(), actor.to_owned()));
     }
 

@@ -6,7 +6,7 @@ use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use branchyard::{
     Activity, Branch, BranchInfo, BranchStatus, Budget, Delegate, Envelope, Event, Policy,
@@ -153,13 +153,6 @@ pub(crate) fn configure(yard: Yard) -> Result<Yard, branchyard::Error> {
     crate::knowledge_cmd::configure(&yard)
         .map_err(|e| branchyard::Error::Unsupported(format!("[knowledge]: {e}")))?;
     Ok(yard)
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// Console and policy for commands that run a harness.
@@ -787,7 +780,11 @@ pub fn ls(env: &Env, target: &Target, as_json: bool) -> Outcome {
     }
     print(&format!(
         "{}{maps}",
-        render::branch_table(&infos, now(), env.style())
+        render::branch_table(
+            &infos,
+            branchyard_support::time::now_ms() / 1000,
+            env.style()
+        )
     ))
 }
 
@@ -926,7 +923,12 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         extra.push(("listening", crate::ports::lines(&listening).join("; ")));
     }
     extra.extend(crate::plan_cmd::show_lines(&info.name, &events));
-    let mut text = render::details(&info, now(), env.style(), extra);
+    let mut text = render::details(
+        &info,
+        branchyard_support::time::now_ms() / 1000,
+        env.style(),
+        extra,
+    );
     text.push_str(&crate::attempts::checkpoint_lines(
         &checkpoints,
         env.style(),
@@ -1636,7 +1638,11 @@ pub fn children(env: &Env, target: &Target, branch: Option<String>, json: bool) 
     };
     emit(json, result, |c| match c.descendants.is_empty() {
         true => format!("{} has no children\n", c.branch),
-        false => render::branch_table(&c.descendants, now(), env.style()),
+        false => render::branch_table(
+            &c.descendants,
+            branchyard_support::time::now_ms() / 1000,
+            env.style(),
+        ),
     })
 }
 

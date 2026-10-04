@@ -13,6 +13,7 @@ description = "A Branchyard sandbox provider on the Microsandbox microVM runtime
 microsandbox = ["dep:microsandbox", "dep:tokio"]
 
 [dependencies]
+branchyard-support = { path = "../branchyard-support" }
 branchyard-sandbox = { path = "../branchyard-sandbox" }
 # The local runtime and the network type surface only: no cloud backend, no
 # build-time runtime download, no keyring.

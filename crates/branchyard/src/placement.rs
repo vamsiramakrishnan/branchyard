@@ -55,10 +55,11 @@ use branchyard_substrate::SubstrateProvider;
 use serde_json::{json, Value};
 
 use crate::snapshots::{self, SandboxEvent, SandboxOrigin};
-use crate::state::{now_ms, Begun, Fence, Record, SandboxKind};
+use crate::state::{Begun, Fence, Record, SandboxKind};
 use crate::{
     git, harness, Activity, Error, Provider, RecipeOptions, SandboxOptions, SubstrateOptions, Yard,
 };
+use branchyard_support::time::now_ms;
 
 /// Where the worktree appears in a sandbox.
 pub const WORKSPACE: &str = "/workspace";
@@ -527,7 +528,10 @@ impl Placement {
             SandboxPlan::Fresh(reason) => {
                 journal(&spec.name)?;
                 provider.ensure(&spec).map_err(|e| {
-                    let _ = provider.destroy(&spec.name);
+                    branchyard_support::best_effort(
+                        "provider.destroy",
+                        provider.destroy(&spec.name),
+                    );
                     format!("could not create sandbox {}: {e}", spec.name)
                 })?;
                 snapshots::Acquired {
@@ -551,16 +555,22 @@ impl Placement {
                     &journal,
                 )
                 .inspect_err(|_| {
-                    let _ = provider.destroy(&spec.name);
+                    branchyard_support::best_effort(
+                        "provider.destroy",
+                        provider.destroy(&spec.name),
+                    );
                 })?
             }
         };
         let store = yard.store();
-        let _ = store.backend().finish_step(
-            fence,
-            fence.turn,
-            STEP_SANDBOX,
-            &json!({ "created": true, "sandbox": acquired.name }),
+        branchyard_support::best_effort(
+            "store.backend.finish_step",
+            store.backend().finish_step(
+                fence,
+                fence.turn,
+                STEP_SANDBOX,
+                &json!({ "created": true, "sandbox": acquired.name }),
+            ),
         );
         let service = register_sandbox(yard, record, &acquired.name);
         Ok(Placement {
@@ -1152,7 +1162,7 @@ fn recover_actor(yard: &Yard, record: &Record, options: &SubstrateOptions, actor
         Ok(existed)
     });
     if let Some(stage) = &stage {
-        let _ = std::fs::remove_dir_all(stage);
+        branchyard_support::cleanup_dir(stage);
     }
     said.push(match deleted {
         Ok(true) => format!("deleted its Substrate actor {actor}"),
@@ -1178,7 +1188,7 @@ fn bring_back(
         let endpoint = provider.endpoint(actor).map_err(|e| e.to_string())?;
         let paths = (Path::new(options.workdir()), Path::new(options.home()));
         let pulled = pull_staged(&endpoint, record, paths, stage);
-        let _ = provider.end_attempt(actor);
+        branchyard_support::best_effort("provider.end_attempt", provider.end_attempt(actor));
         pulled
     })();
     said_back(pulled, "actor", actor)
@@ -1279,7 +1289,7 @@ fn recover_machine(yard: &Yard, record: &Record, options: &RecipeOptions, machin
     }
     let destroyed = provider.destroy(machine);
     if let Some(stage) = &stage {
-        let _ = std::fs::remove_dir_all(stage);
+        branchyard_support::cleanup_dir(stage);
     }
     said.push(match (destroyed, existed) {
         (Ok(()), true) => format!("destroyed its machine {machine} (recipe {})", options.name),

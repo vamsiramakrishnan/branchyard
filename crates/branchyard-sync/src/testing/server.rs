@@ -1,6 +1,7 @@
 //! A small HTTP/1.1 server on loopback for the stand-ins: one thread per
 //! connection, `Content-Length` bodies, `Connection: close`.
 
+use branchyard_support::LockExt as _;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -143,25 +144,22 @@ struct Rule {
 
 impl Faults {
     pub fn fail(&self, method: &str, contains: &str, status: u16, skip: usize, times: usize) {
-        self.rules
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push_back(Rule {
-                method: method.to_owned(),
-                contains: contains.to_owned(),
-                status,
-                skip,
-                times,
-            });
+        self.rules.lock_recovering("rules").push_back(Rule {
+            method: method.to_owned(),
+            contains: contains.to_owned(),
+            status,
+            skip,
+            times,
+        });
     }
 
     pub fn clear(&self) {
-        self.rules.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.rules.lock_recovering("rules").clear();
     }
 
     /// The injected failure for `request`, if one applies.
     pub fn check(&self, request: &MockRequest) -> Option<MockResponse> {
-        let mut rules = self.rules.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rules = self.rules.lock_recovering("rules");
         let line = request.line();
         for rule in rules.iter_mut() {
             if rule.times == 0
@@ -224,7 +222,7 @@ impl MockServer {
     }
 
     pub fn requests(&self) -> Vec<String> {
-        self.log.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.log.lock_recovering("log").clone()
     }
 }
 
@@ -233,7 +231,7 @@ impl Drop for MockServer {
         self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(("127.0.0.1", self.port));
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            branchyard_support::join_reporting("mock server", t);
         }
     }
 }
@@ -293,9 +291,7 @@ fn serve(stream: TcpStream, handler: &Handler, log: &Mutex<Vec<String>>) {
         headers,
         body,
     };
-    log.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(request.line());
+    log.lock_recovering("log").push(request.line());
     let response = handler(&request);
     let mut out = format!("HTTP/1.1 {} X\r\nConnection: close\r\n", response.status);
     let mut has_length = false;

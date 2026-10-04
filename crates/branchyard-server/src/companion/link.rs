@@ -3,6 +3,7 @@
 //! directory's `state.db`, or its database), so they work whether or not
 //! the server is running and take effect on it at once.
 
+use branchyard_support::time::{human_duration, now_ms, utc_minute};
 use std::io::IsTerminal;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -155,22 +156,6 @@ pub fn create(
     Ok((link, code))
 }
 
-fn human(d: Duration) -> String {
-    let s = d.as_secs();
-    match s {
-        s if s % 86_400 == 0 => format!("{}d", s / 86_400),
-        s if s % 3600 == 0 => format!("{}h", s / 3600),
-        s if s % 60 == 0 => format!("{}m", s / 60),
-        s => format!("{s}s"),
-    }
-}
-
-fn when(ms: u64) -> String {
-    jiff::Timestamp::from_millisecond(ms as i64)
-        .map(|t| t.strftime("%Y-%m-%d %H:%M UTC").to_string())
-        .unwrap_or_else(|_| ms.to_string())
-}
-
 /// `token new --link`: print the link on stdout and, on a terminal, a QR
 /// code of it on stderr.
 pub fn new_link(config: &Config, request: LinkRequest, program: &str) -> ExitCode {
@@ -181,7 +166,7 @@ pub fn new_link(config: &Config, request: LinkRequest, program: &str) -> ExitCod
             return ExitCode::FAILURE;
         }
     };
-    let (link, _) = match create(config, store.as_ref(), &request, crate::ops::now_ms()) {
+    let (link, _) = match create(config, store.as_ref(), &request, now_ms()) {
         Ok(made) => made,
         Err(error) => {
             eprintln!("{program}: {error}");
@@ -202,8 +187,8 @@ pub fn new_link(config: &Config, request: LinkRequest, program: &str) -> ExitCod
         link.name,
         request.tenant,
         request.scopes.join(","),
-        when(link.expires_at_ms),
-        human(link.token_ttl),
+        utc_minute(link.expires_at_ms),
+        human_duration(link.token_ttl),
         link.name,
     );
     if !config.app.enabled {
@@ -225,7 +210,7 @@ pub fn list(config: &Config, program: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let now = crate::ops::now_ms();
+    let now = now_ms();
     let mut rows = vec![[
         "NAME".to_owned(),
         "TENANT".to_owned(),
@@ -244,7 +229,7 @@ pub fn list(config: &Config, program: &str) -> ExitCode {
             code.principal.tenant.clone(),
             scopes(&code.principal),
             state.into(),
-            when(code.expires_at_ms),
+            utc_minute(code.expires_at_ms),
             String::new(),
         ]);
     }
@@ -259,7 +244,7 @@ pub fn list(config: &Config, program: &str) -> ExitCode {
             token.principal.tenant.clone(),
             scopes(&token.principal),
             state.into(),
-            when(token.revoked_at_ms.unwrap_or(token.expires_at_ms)),
+            utc_minute(token.revoked_at_ms.unwrap_or(token.expires_at_ms)),
             token.device.clone().unwrap_or_default(),
         ]);
     }
@@ -289,7 +274,7 @@ fn scopes(p: &Principal) -> String {
 pub fn revoke(config: &Config, name: &str, tenant: Option<&str>, program: &str) -> ExitCode {
     let revoked = super::store::open(config).and_then(|store| {
         store
-            .revoke(name, tenant, crate::ops::now_ms())
+            .revoke(name, tenant, now_ms())
             .map_err(|e| e.to_string())
     });
     match revoked {
@@ -338,8 +323,8 @@ mod tests {
         for bad in ["15", "m", "0m", "1w", "-1h", ""] {
             assert!(duration(bad).is_err(), "{bad}");
         }
-        assert_eq!(human(Duration::from_secs(86_400)), "1d");
-        assert_eq!(human(Duration::from_secs(900)), "15m");
+        assert_eq!(human_duration(Duration::from_secs(86_400)), "1d");
+        assert_eq!(human_duration(Duration::from_secs(900)), "15m");
     }
 
     #[test]

@@ -644,6 +644,7 @@ dependencies = [
  "branchyard-runtime",
  "branchyard-sandbox",
  "branchyard-substrate",
+ "branchyard-support",
  "branchyard-testkit",
  "branchyard-workspace",
  "glob",
@@ -668,6 +669,7 @@ name = "branchyard-bridge"
 version = "0.0.1"
 dependencies = [
  "branchyard-sandbox",
+ "branchyard-support",
  "branchyard-testkit",
  "clap",
  "libc",
@@ -693,6 +695,7 @@ dependencies = [
  "branchyard-server",
  "branchyard-setup",
  "branchyard-substrate",
+ "branchyard-support",
  "branchyard-sync",
  "branchyard-testkit",
  "branchyard-workspace",
@@ -756,6 +759,7 @@ version = "0.0.1"
 dependencies = [
  "branchyard",
  "branchyard-client",
+ "branchyard-support",
  "branchyard-testkit",
  "clap",
  "serde",
@@ -771,6 +775,7 @@ name = "branchyard-mcp"
 version = "0.0.1"
 dependencies = [
  "branchyard",
+ "branchyard-support",
  "branchyard-testkit",
  "clap",
  "rmcp",
@@ -783,6 +788,7 @@ name = "branchyard-microsandbox"
 version = "0.0.1"
 dependencies = [
  "branchyard-sandbox",
+ "branchyard-support",
  "microsandbox",
  "tokio",
 ]
@@ -793,6 +799,7 @@ version = "0.0.1"
 dependencies = [
  "branchyard-controls",
  "branchyard-harness",
+ "branchyard-support",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -814,6 +821,7 @@ name = "branchyard-recipe"
 version = "0.0.1"
 dependencies = [
  "branchyard-sandbox",
+ "branchyard-support",
  "rustix",
  "serde",
  "serde_json",
@@ -826,6 +834,7 @@ version = "0.0.1"
 dependencies = [
  "branchyard-harness",
  "branchyard-sandbox",
+ "branchyard-support",
  "branchyard-testkit",
  "rustix",
  "serde_json",
@@ -834,6 +843,9 @@ dependencies = [
 [[package]]
 name = "branchyard-sandbox"
 version = "0.0.1"
+dependencies = [
+ "branchyard-support",
+]
 
 [[package]]
 name = "branchyard-server"
@@ -846,6 +858,7 @@ dependencies = [
  "branchyard",
  "branchyard-client",
  "branchyard-setup",
+ "branchyard-support",
  "branchyard-sync",
  "branchyard-testkit",
  "clap",
@@ -899,6 +912,7 @@ dependencies = [
  "branchyard-bridge",
  "branchyard-sandbox",
  "branchyard-substrate",
+ "branchyard-support",
  "branchyard-testkit",
  "branchyard-workspace",
  "prost",
@@ -913,6 +927,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "branchyard-support"
+version = "0.0.1"
+dependencies = [
+ "branchyard-support",
+ "getrandom 0.4.3",
+ "jiff",
+ "rustix",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
 name = "branchyard-sync"
 version = "0.0.1"
 dependencies = [
@@ -920,6 +946,7 @@ dependencies = [
  "blake3",
  "branchyard",
  "branchyard-client",
+ "branchyard-support",
  "branchyard-sync",
  "httparse",
  "ring",
@@ -942,6 +969,7 @@ dependencies = [
 name = "branchyard-workspace"
 version = "0.0.1"
 dependencies = [
+ "branchyard-support",
  "branchyard-testkit",
  "rustix",
 ]
@@ -6458,6 +6486,15 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "ulid"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "947dde63b6d514cc5e044edad4e0ca7261afd1099d16c83d942cb2b2f348689c"
+dependencies = [
+ "web-time",
+]
 
 [[package]]
 name = "unicase"

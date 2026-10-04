@@ -28,11 +28,12 @@ use serde_json::Value;
 
 use crate::engine::{self, Driven, End, STEP_START, STEP_SUBMIT, STEP_TURN_END};
 use crate::record::{self, Recorder};
-use crate::state::{now_ms, Lease, LeaseRow, Record, Taken, LEASE_TTL};
+use crate::state::{Lease, LeaseRow, Record, Taken, LEASE_TTL};
 use crate::{
     placement, proc, Activity, BranchStatus, Error, Event, NativeSession, RecordedEvent, Recovery,
     Yard,
 };
+use branchyard_support::time::now_ms;
 
 /// Recover every branch that needs it. A branch that cannot be recovered
 /// does not stop the others; the first such error is returned after all

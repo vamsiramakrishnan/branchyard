@@ -170,13 +170,6 @@ fn event_value(e: &TriggerEvent, field: &str) -> String {
     }
 }
 
-/// RFC 3339 in UTC, to the second.
-pub fn rfc3339(ms: u64) -> String {
-    jiff::Timestamp::from_millisecond(i64::try_from(ms).unwrap_or(i64::MAX))
-        .map(|t| t.strftime("%Y-%m-%dT%H:%M:%SZ").to_string())
-        .unwrap_or_default()
-}
-
 /// `template` with each placeholder replaced; one [`check`] accepted.
 pub fn render(template: &str, cx: &Context<'_>) -> Result<String, String> {
     let mut out = String::new();
@@ -189,7 +182,9 @@ pub fn render(template: &str, cx: &Context<'_>) -> Result<String, String> {
             Some(("trigger", "id")) => cx.trigger_id.to_owned(),
             Some(("trigger", "repo")) => cx.trigger_repo.to_owned(),
             Some(("run", "id")) => cx.run_id.to_owned(),
-            None if name == "scheduled_at" => rfc3339(cx.scheduled_at_ms),
+            None if name == "scheduled_at" => {
+                branchyard_support::time::rfc3339_secs(cx.scheduled_at_ms)
+            }
             _ => return Err(format!("{{{{{name}}}}} is not a placeholder")),
         };
         out.push_str(&value);

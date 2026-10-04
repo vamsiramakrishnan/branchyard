@@ -447,7 +447,7 @@ fn default_name(trigger: &StoredTrigger, run: &TriggerRun) -> String {
             }
         }
         None => {
-            let at = template::rfc3339(run.scheduled_ms.unwrap_or(run.at_ms));
+            let at = branchyard_support::time::rfc3339_secs(run.scheduled_ms.unwrap_or(run.at_ms));
             // 2026-10-01T09:00:00Z -> 20261001-0900
             let digits: String = at.chars().filter(char::is_ascii_digit).collect();
             format!("{name}-{}-{}", &digits[..8], &digits[8..12])
@@ -486,7 +486,7 @@ pub fn run_precheck(
         &env,
     );
     drop(worktree);
-    let _ = std::fs::remove_file(&event_file);
+    branchyard_support::cleanup_file(&event_file);
     Ok(result)
 }
 

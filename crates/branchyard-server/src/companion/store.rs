@@ -9,6 +9,7 @@
 //! - A paired token is revoked by stamping `revoked_at_ms`; every request
 //!   reads the row, so a revocation holds at once everywhere.
 
+use branchyard_support::LockExt as _;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -262,7 +263,7 @@ impl SqliteCompanion {
         &self,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> io::Result<T>,
     ) -> io::Result<T> {
-        let mut conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut conn = self.conn.lock_recovering("conn");
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(sql)?;
@@ -380,7 +381,7 @@ impl CompanionStore for SqliteCompanion {
     }
 
     fn token(&self, token_sha256: &str) -> io::Result<Option<PairedToken>> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.lock_recovering("conn");
         let row: Option<TokenRow> = conn
             .query_row(
                 &format!("SELECT {TOKEN_COLUMNS} FROM companion_tokens WHERE token_sha256 = ?1"),
@@ -393,7 +394,7 @@ impl CompanionStore for SqliteCompanion {
     }
 
     fn tokens(&self) -> io::Result<(Vec<PairedToken>, Vec<Pairing>)> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.lock_recovering("conn");
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT {TOKEN_COLUMNS} FROM companion_tokens ORDER BY seq"
@@ -510,7 +511,7 @@ impl CompanionStore for SqliteCompanion {
     }
 
     fn subscriptions(&self) -> io::Result<Vec<Subscription>> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.lock_recovering("conn");
         let mut stmt = conn
             .prepare(
                 "SELECT endpoint, token_sha256, p256dh, auth, kinds, created_at_ms \
@@ -659,7 +660,7 @@ impl PostgresCompanion {
         &self,
         f: impl FnOnce(&mut postgres::Client) -> Result<T, postgres::Error> + Send,
     ) -> io::Result<T> {
-        let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.conn.lock_recovering("conn");
         let conn: &mut Option<postgres::Client> = &mut guard;
         let url = &self.url;
         std::thread::scope(|scope| {
@@ -683,7 +684,7 @@ impl PostgresCompanion {
 #[cfg(feature = "postgres")]
 impl Drop for PostgresCompanion {
     fn drop(&mut self) {
-        let conn = self.conn.get_mut().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.get_mut_recovering("conn");
         if let Some(client) = conn.take() {
             std::thread::scope(|scope| {
                 scope.spawn(move || drop(client));

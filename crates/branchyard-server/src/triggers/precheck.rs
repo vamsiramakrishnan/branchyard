@@ -21,6 +21,7 @@
 //! SIGKILL two seconds later, as Orca's `killLocalPrecheckProcessTree`
 //! does.
 
+use branchyard_support::LockExt as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -110,22 +111,12 @@ fn collect(mut stream: impl Read + Send + 'static) -> Arc<Mutex<Tail>> {
                     };
                     let text = String::from_utf8_lossy(&pending[..valid]).into_owned();
                     pending.drain(..valid);
-                    sink.lock().unwrap_or_else(|p| p.into_inner()).append(&text);
+                    sink.lock_recovering("sink").append(&text);
                 }
             }
         }
     });
     tail
-}
-
-#[cfg(unix)]
-fn signal_group(pid: u32, signal: rustix::process::Signal) {
-    if let Some(pgid) = i32::try_from(pid)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    {
-        let _ = rustix::process::kill_process_group(pgid, signal);
-    }
 }
 
 /// Run `command` with `sh -c` in `cwd`, with `env` added to this
@@ -184,15 +175,15 @@ pub fn run(
         if !timed_out && now >= deadline {
             timed_out = true;
             #[cfg(unix)]
-            signal_group(child.id(), rustix::process::Signal::TERM);
+            branchyard_support::terminate_group(child.id());
             #[cfg(not(unix))]
-            let _ = child.kill();
+            branchyard_support::best_effort("kill child", child.kill());
             force_at = Some(now + FORCE_KILL_AFTER);
         }
         if force_at.is_some_and(|at| now >= at) {
             #[cfg(unix)]
-            signal_group(child.id(), rustix::process::Signal::KILL);
-            let _ = child.kill();
+            branchyard_support::kill_group(child.id());
+            branchyard_support::best_effort("kill child", child.kill());
             force_at = None;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -205,9 +196,7 @@ pub fn run(
     {
         std::thread::sleep(Duration::from_millis(5));
     }
-    let take = |tail: &Arc<Mutex<Tail>>| {
-        std::mem::take(&mut *tail.lock().unwrap_or_else(|p| p.into_inner()))
-    };
+    let take = |tail: &Arc<Mutex<Tail>>| std::mem::take(&mut *tail.lock_recovering("tail"));
     let out = Some((take(&stdout), take(&stderr)));
     match status {
         Err(e) => result(None, timed_out, Some(e.to_string()), out),
@@ -278,8 +267,11 @@ impl Drop for Worktree {
     fn drop(&mut self) {
         let target = self.path.to_string_lossy().into_owned();
         if git(&self.root, &["worktree", "remove", "--force", &target]).is_err() {
-            let _ = std::fs::remove_dir_all(&self.path);
-            let _ = git(&self.root, &["worktree", "prune"]);
+            branchyard_support::cleanup_dir(&self.path);
+            branchyard_support::best_effort(
+                "prune the precheck worktrees",
+                git(&self.root, &["worktree", "prune"]),
+            );
         }
     }
 }

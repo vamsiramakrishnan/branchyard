@@ -15,11 +15,12 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::now_ms;
 use crate::{
     harness, placement, run, Activity, Branch, BranchStatus, Budget, Effort, Error, Provisioning,
     RecordedEvent, TaskOptions, Yard,
 };
+use branchyard_support::rng::SplitMix64;
+use branchyard_support::time::now_ms;
 
 // ---------------------------------------------------------------------------
 // Task kinds
@@ -777,27 +778,23 @@ pub fn stats(rows: &[OutcomeRecord]) -> Vec<CandidateStats> {
 // ---------------------------------------------------------------------------
 // The router
 
-/// SplitMix64: small, seedable and the same everywhere, so a seeded route
-/// is reproducible.
+/// A seeded generator for the router, [`SplitMix64`]: the same everywhere,
+/// so a seeded route is reproducible.
 #[derive(Clone, Debug)]
-pub struct Rng(u64);
+pub struct Rng(SplitMix64);
 
 impl Rng {
     pub fn new(seed: u64) -> Rng {
-        Rng(seed)
+        Rng(SplitMix64::new(seed))
     }
 
     pub fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
+        self.0.next_u64()
     }
 
     /// Uniform in the open interval (0, 1).
     pub fn uniform(&mut self) -> f64 {
-        ((self.next_u64() >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        self.0.uniform()
     }
 
     fn normal(&mut self) -> f64 {
@@ -835,11 +832,7 @@ impl Rng {
 
 /// A seed from the clock and the process, for unseeded routes.
 pub fn fresh_seed() -> u64 {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    Rng::new(nanos ^ (u64::from(std::process::id()) << 32)).next_u64()
+    branchyard_support::rng::fresh_seed()
 }
 
 /// One candidate the router chose.

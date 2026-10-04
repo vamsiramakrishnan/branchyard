@@ -3,6 +3,7 @@
 //! everything that changes branches or worktrees goes through
 //! `branchyard_workspace`'s repository API.
 
+use branchyard_support::LockExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -17,7 +18,7 @@ use crate::Error;
 static WRITES: Mutex<()> = Mutex::new(());
 
 pub(crate) fn lock() -> MutexGuard<'static, ()> {
-    WRITES.lock().unwrap_or_else(|e| e.into_inner())
+    WRITES.lock_recovering("WRITES")
 }
 
 /// Run git in `dir` and return stdout, or the exit's stderr as an error.

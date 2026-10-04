@@ -19,6 +19,7 @@
 //! still invalid, or the branch not ending ready, the attempt failed, and
 //! a retry starts a new branch.
 
+use branchyard_support::LockExt as _;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::Write;
@@ -31,8 +32,8 @@ use serde_json::Value;
 
 use crate::json_schema::JsonSchema;
 use crate::map_input::{self, MapItem, TemplateContext};
-use crate::state::now_ms;
 use crate::{Branch, BranchStatus, Error, Fleet, RouteOptions, TaskKind, TaskOptions, Yard};
+use branchyard_support::time::now_ms;
 
 /// Branches running at once when none is said.
 pub const DEFAULT_CONCURRENCY: u32 = 4;
@@ -413,8 +414,8 @@ pub(crate) fn list(yard: &Yard) -> Result<Vec<MapSummary>, Error> {
             .or_else(|_| fs::metadata(spec_path(&dir)))
             .and_then(|m| m.modified())
             .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(spec.created_ms, |d| d.as_millis() as u64);
+            .and_then(branchyard_support::time::system_time_ms)
+            .unwrap_or(spec.created_ms);
         out.push(MapSummary {
             name: spec.name,
             prompt: spec.prompt,
@@ -562,7 +563,7 @@ fn add_cost(total: &mut Option<f64>, cost: Option<f64>) {
 impl Run<'_> {
     /// What is left of the total budget; `None` without one.
     fn remaining(&self) -> Option<f64> {
-        let spent = *self.spent.lock().unwrap_or_else(|e| e.into_inner());
+        let spent = *self.spent.lock_recovering("spent");
         self.spec.total_usd.map(|total| total - spent)
     }
 
@@ -720,7 +721,7 @@ impl Run<'_> {
             let outcome = self.attempt(&base, &prompt, (index as u64) << 8 | attempt as u64);
             add_cost(&mut row.cost_usd, outcome.cost);
             if let Some(cost) = outcome.cost {
-                *self.spent.lock().unwrap_or_else(|e| e.into_inner()) += cost;
+                *self.spent.lock_recovering("spent") += cost;
             }
             row.branch = outcome.branches.last().cloned().or(row.branch);
             row.branches.extend(outcome.branches);
@@ -741,13 +742,13 @@ impl Run<'_> {
     /// Append `row` and tell the caller.
     fn record(&self, row: MapRow) -> Result<(), Error> {
         {
-            let mut file = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+            let mut file = self.rows.lock_recovering("rows");
             let line = serde_json::to_string(&row).map_err(|e| Error::State(e.to_string()))?;
             file.write_all(format!("{line}\n").as_bytes())?;
             file.sync_data()?;
         }
         let (done, failed) = {
-            let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+            let mut counts = self.counts.lock_recovering("counts");
             match row.status {
                 MapStatus::Ok => counts.0 += 1,
                 MapStatus::Failed => counts.1 += 1,
@@ -756,7 +757,7 @@ impl Run<'_> {
         };
         if row.status == MapStatus::Ok && self.spec.remove_done {
             for name in &row.branches {
-                let _ = self.yard.remove(name);
+                branchyard_support::best_effort("self.yard.remove", self.yard.remove(name));
             }
         }
         if let Some(progress) = &self.options.progress {
@@ -799,7 +800,10 @@ impl Run<'_> {
                         outcome.status = MapStatus::Ok;
                         outcome.text = Some(reply.trim().to_owned());
                         if self.spec.remove_done {
-                            let _ = self.yard.remove(&branch.info().name);
+                            branchyard_support::best_effort(
+                                "self.yard.remove",
+                                self.yard.remove(&branch.info().name),
+                            );
                         }
                     }
                     Err(error) => outcome.error = Some(error),
@@ -956,7 +960,7 @@ pub(crate) fn run(
                         if run.stopped.load(Ordering::SeqCst) {
                             return Ok(());
                         }
-                        let next = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+                        let next = queue.lock_recovering("queue").pop_front();
                         let Some((index, item)) = next else {
                             return Ok(());
                         };

@@ -33,12 +33,13 @@ use crate::graph;
 use crate::placement::{Placement, SandboxPlan};
 use crate::projection::{ENV_BRANCH, ENV_ROOT};
 use crate::record::Recorder;
-use crate::state::{now_ms, Begun, Fence, Lease, ProcessRow, Record, Store};
+use crate::state::{Begun, Fence, Lease, ProcessRow, Record, Store};
 use crate::{
     git, names, Activity, Branch, BranchStatus, Budget, CandidateInfo, DecisionSource,
     DeliveredVia, Error, Event, NativeSession, PermissionDecision, PermissionRequest, Policy,
     StallAction, SteerState, TaskOptions, TurnOutcome, Yard,
 };
+use branchyard_support::time::now_ms;
 
 /// How long a harness may take to complete its handshake.
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -224,7 +225,10 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
             record.info.status = BranchStatus::Failed {
                 reason: error.to_string(),
             };
-            let _ = store.backend().finish(&fence, Some(&record), None);
+            branchyard_support::best_effort(
+                "store.backend.finish",
+                store.backend().finish(&fence, Some(&record), None),
+            );
             Err(error)
         }
     };

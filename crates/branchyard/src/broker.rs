@@ -57,7 +57,7 @@ impl Broker {
         if path.as_os_str().len() > SOCKET_PATH_MAX {
             path = std::env::temp_dir().join(format!("by-{file}"));
         }
-        let _ = std::fs::remove_file(&path);
+        branchyard_support::cleanup_file(&path);
         let listener = UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -79,7 +79,7 @@ impl Broker {
         let accept = match accept {
             Ok(accept) => accept,
             Err(error) => {
-                let _ = std::fs::remove_file(&path);
+                branchyard_support::cleanup_file(&path);
                 return Err(error);
             }
         };
@@ -101,9 +101,9 @@ impl Broker {
         // Wake the accept loop so it sees the flag.
         let _ = UnixStream::connect(&self.path);
         if let Some(accept) = self.accept.take() {
-            let _ = accept.join();
+            branchyard_support::join_reporting("broker accept", accept);
         }
-        let _ = std::fs::remove_file(&self.path);
+        branchyard_support::cleanup_file(&self.path);
     }
 }
 

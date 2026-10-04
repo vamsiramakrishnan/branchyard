@@ -2,6 +2,7 @@
 //! (a token bucket), and the sleeping both do, which tests replace with a
 //! clock they move by hand.
 
+use branchyard_support::LockExt as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -9,7 +10,7 @@ use std::time::Duration;
 use branchyard::services::Clock;
 
 use crate::error::Result;
-use crate::util::SplitMix;
+use branchyard_support::rng::SplitMix64;
 
 /// How waiting happens.
 pub trait Sleeper: Send + Sync {
@@ -65,14 +66,14 @@ impl Default for RetryPolicy {
             attempts: 6,
             base: Duration::from_millis(200),
             cap: Duration::from_secs(30),
-            seed: crate::util::random_seed(),
+            seed: branchyard_support::rng::fresh_seed(),
         }
     }
 }
 
 impl RetryPolicy {
     /// The wait before retry `n` (1-based), drawn from `rng`.
-    pub fn delay(&self, n: u32, rng: &mut SplitMix) -> Duration {
+    pub fn delay(&self, n: u32, rng: &mut SplitMix64) -> Duration {
         let ceiling = self
             .base
             .as_millis()
@@ -86,13 +87,13 @@ impl RetryPolicy {
 pub struct Retrier {
     pub policy: RetryPolicy,
     pub sleeper: Arc<dyn Sleeper>,
-    rng: Mutex<SplitMix>,
+    rng: Mutex<SplitMix64>,
     pub retries: AtomicU64,
 }
 
 impl Retrier {
     pub fn new(policy: RetryPolicy, sleeper: Arc<dyn Sleeper>) -> Retrier {
-        let rng = Mutex::new(SplitMix::new(policy.seed));
+        let rng = Mutex::new(SplitMix64::new(policy.seed));
         Retrier {
             policy,
             sleeper,
@@ -103,7 +104,7 @@ impl Retrier {
 
     /// The next jittered wait before retry `n`.
     pub fn backoff(&self, n: u32) -> Duration {
-        let mut rng = self.rng.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rng = self.rng.lock_recovering("rng");
         self.policy.delay(n, &mut rng)
     }
 
@@ -152,7 +153,7 @@ impl Budget {
 
     /// Take `bytes`, waiting until the bucket has them.
     pub fn take(&self, bytes: u64) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock_recovering("state");
         let capacity = self.rate as f64;
         let now = self.clock.now();
         let (tokens, last) = *state;
@@ -182,7 +183,7 @@ mod tests {
             cap: Duration::from_millis(1000),
             seed: 42,
         };
-        let mut rng = SplitMix::new(1);
+        let mut rng = SplitMix64::new(1);
         for n in 1..12 {
             let ceiling = (100u64 << n).min(1000);
             for _ in 0..50 {

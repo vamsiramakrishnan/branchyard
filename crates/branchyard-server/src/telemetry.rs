@@ -23,10 +23,12 @@
 //! (`http/protobuf`, the default, or `http/json`; `grpc` is not built in),
 //! `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME` and `OTEL_SDK_DISABLED`.
 
+use branchyard_support::time::now_ms;
+use branchyard_support::LockExt as _;
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 /// A span's identity: its trace and its own ID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -213,16 +215,13 @@ pub struct MemoryExporter {
 
 impl MemoryExporter {
     pub fn spans(&self) -> Vec<SpanData> {
-        self.spans.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.spans.lock_recovering("spans").clone()
     }
 }
 
 impl SpanExporter for MemoryExporter {
     fn export(&self, batch: Vec<SpanData>) -> Result<(), String> {
-        self.spans
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .extend(batch);
+        self.spans.lock_recovering("spans").extend(batch);
         Ok(())
     }
 }
@@ -263,13 +262,6 @@ impl Default for Tracer {
     fn default() -> Tracer {
         Tracer::disabled()
     }
-}
-
-pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 impl Tracer {
@@ -328,7 +320,7 @@ impl Tracer {
     /// Record a finished span.
     pub fn record(&self, span: SpanData) {
         if let Some(sender) = &self.0.sender {
-            let sender = sender.lock().unwrap_or_else(|p| p.into_inner());
+            let sender = sender.lock_recovering("sender");
             let _ = sender.send(Message::Span(Box::new(span)));
         }
     }
@@ -340,10 +332,7 @@ impl Tracer {
             return;
         };
         let (done, wait) = mpsc::channel();
-        let sent = sender
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .send(Message::Flush(done));
+        let sent = sender.lock_recovering("sender").send(Message::Flush(done));
         if sent.is_ok() {
             let _ = wait.recv_timeout(timeout);
         }
@@ -383,7 +372,7 @@ impl Tracer {
     /// Remember that `repo`'s `branch` is being worked on in `traceparent`'s
     /// trace, for webhook deliveries of its activity.
     pub fn note_branch(&self, repo: &str, branch: &str, traceparent: &str) {
-        let mut branches = self.0.branches.lock().unwrap_or_else(|p| p.into_inner());
+        let mut branches = self.0.branches.lock_recovering("branches");
         if branches.len() >= REMEMBERED {
             branches.clear();
         }
@@ -394,8 +383,7 @@ impl Tracer {
     pub fn branch_trace(&self, repo: &str, branch: &str) -> Option<String> {
         self.0
             .branches
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .lock_recovering("branches")
             .get(&format!("{repo}/{branch}"))
             .cloned()
     }

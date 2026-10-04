@@ -8,8 +8,8 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::{ulid, ApprovalAsk, AskAbout, AskAnswer, EffectActivity, Resolved};
-use crate::state::now_ms;
 use crate::{Activity, Error, RecordedEvent, TaskOptions, Yard};
+use branchyard_support::time::now_ms;
 
 /// What to ask.
 pub(crate) struct AskSpec {

@@ -16,10 +16,7 @@ static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
 /// A process-unique suffix for scratch paths.
 pub(crate) fn unique_suffix() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
+    let nanos = (branchyard_support::time::now_nanos() % 1_000_000_000) as u32;
     format!(
         "{}-{nanos:08x}-{}",
         std::process::id(),
@@ -210,7 +207,7 @@ impl Repository {
                 .args(["worktree", "remove", "--force"])
                 .arg(at)
                 .run();
-            let _ = fs::remove_dir_all(at);
+            branchyard_support::cleanup_dir(at);
             let _ = Git::new(&self.root).args(["config", "--unset", &key]).run();
         };
         let moved = Git::new(&self.root)
@@ -584,9 +581,9 @@ struct RemoveOnDrop<'a>(&'a Path);
 
 impl Drop for RemoveOnDrop<'_> {
     fn drop(&mut self) {
-        let _ = fs::remove_file(self.0);
+        branchyard_support::cleanup_file(self.0);
         let mut lock = self.0.as_os_str().to_owned();
         lock.push(".lock");
-        let _ = fs::remove_file(PathBuf::from(lock));
+        branchyard_support::cleanup_file(PathBuf::from(lock));
     }
 }

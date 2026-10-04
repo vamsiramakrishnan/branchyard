@@ -15,22 +15,16 @@ use serde_json::Value;
 use super::ask::note;
 use super::mcp::EffectMeta;
 use super::proxy::{described, task_of};
-use super::{
-    request_digest, EffectActivity, EffectClass, EffectEntry, EffectMove, EffectState, CROCKFORD,
-};
+use super::{request_digest, EffectActivity, EffectClass, EffectEntry, EffectMove, EffectState};
 use crate::Yard;
 
 /// A ULID whose random part comes from `seed`: the same line always makes
 /// the same id, so a line read twice is recorded once.
 fn ulid_from(ms: u64, seed: &[u8]) -> String {
     let hash = blake3::hash(seed);
-    let mut value: u128 = u128::from(ms & 0xFFFF_FFFF_FFFF) << 80;
-    for (i, byte) in hash.as_bytes()[..10].iter().enumerate() {
-        value |= u128::from(*byte) << (8 * (9 - i));
-    }
-    (0..26)
-        .map(|i| CROCKFORD[((value >> (5 * (25 - i))) & 0x1F) as usize] as char)
-        .collect()
+    let mut random = [0u8; 10];
+    random.copy_from_slice(&hash.as_bytes()[..10]);
+    branchyard_support::ulid_from_parts(ms, random)
 }
 
 fn text<'a>(line: &'a Value, keys: &[&str]) -> Option<&'a str> {

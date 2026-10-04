@@ -39,10 +39,11 @@ use serde_json::json;
 
 use branchyard_workspace::Git;
 
-use crate::state::{now_ms, Record};
+use crate::state::Record;
 use crate::{
     Activity, BranchInfo, BranchStatus, Checkpoint, Error, Event, RecordedEvent, TaskOptions, Yard,
 };
+use branchyard_support::time::now_ms;
 
 pub use folder::{accept_owned, create, home_tasks, open_home, remove_home, Accepted, NewTask};
 pub use large::{ChunkStore, Pointer};
@@ -197,7 +198,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
         fs::rename(&temp, path)
     })();
     if written.is_err() {
-        let _ = fs::remove_file(&temp);
+        branchyard_support::cleanup_file(&temp);
     }
     Ok(written?)
 }
@@ -268,7 +269,7 @@ pub fn task_of(root: &Path, name: &str) -> Result<Option<Task>, Error> {
 /// Forget that `name` is an attempt, as its branch is removed. Its marker
 /// in the task stays, so the task still lists it, as removed.
 pub(crate) fn forget(root: &Path, name: &str) {
-    let _ = fs::remove_file(index_dir(root).join(encode(name)));
+    branchyard_support::cleanup_file(index_dir(root).join(encode(name)));
 }
 
 fn marker(root: &Path, id: &str, name: &str) -> Result<Option<AttemptMarker>, Error> {
@@ -323,41 +324,10 @@ fn tasks_in(root: &Path) -> Result<Vec<Task>, Error> {
 }
 
 /// A new ULID: 48 bits of milliseconds and 80 random bits, in Crockford's
-/// base 32.
-pub fn new_id() -> String {
-    use ring::rand::SecureRandom;
-    const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-    let mut random = [0u8; 10];
-    let _ = ring::rand::SystemRandom::new().fill(&mut random);
-    let mut bytes = [0u8; 16];
-    bytes[6..].copy_from_slice(&random);
-    let value = ((now_ms() as u128 & ((1 << 48) - 1)) << 80) | u128::from_be_bytes(bytes);
-    (0..26)
-        .map(|i| ALPHABET[((value >> (125 - 5 * i)) & 31) as usize] as char)
-        .collect()
-}
-
-/// `2026-10-03T12:00:00Z` for milliseconds since the epoch.
-pub fn utc(ms: u64) -> String {
-    let secs = ms / 1000;
-    let days = (secs / 86_400) as i64;
-    let rem = secs % 86_400;
-    // Howard Hinnant's civil_from_days.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        rem / 3600,
-        rem % 3600 / 60,
-        rem % 60
-    )
+/// base 32. It fails when the system's random generator does; an id is never
+/// made from zeros.
+pub fn new_id() -> Result<String, Error> {
+    Ok(branchyard_support::new_ulid().map_err(std::io::Error::from)?)
 }
 
 /// The first line of `prompt`, at most 72 characters.
@@ -424,7 +394,7 @@ pub(crate) fn joining(
     }
     Ok(Joining {
         task: Task {
-            id: new_id(),
+            id: new_id()?,
             title: title(prompt),
             asked: prompt.to_owned(),
             by: who(&yard.root, options),
@@ -506,7 +476,7 @@ fn task_toml(task: &Task, info: &BranchInfo) -> String {
     doc["asked"] = toml_edit::value(&task.asked);
     doc["by"] = toml_edit::value(&task.by);
     doc["policy"] = toml_edit::value(&task.policy);
-    doc["created"] = toml_edit::value(utc(task.created_ms));
+    doc["created"] = toml_edit::value(branchyard_support::time::rfc3339_secs(task.created_ms));
     doc["files"] = toml_edit::value(match &task.files {
         TaskFiles::Repository => "repository",
         TaskFiles::Folder { .. } => "folder",
@@ -1017,9 +987,9 @@ mod tests {
 
     #[test]
     fn ids_are_ulids_in_creation_order() {
-        let a = new_id();
+        let a = new_id().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(2));
-        let b = new_id();
+        let b = new_id().unwrap();
         assert_eq!(a.len(), 26);
         assert!(a
             .bytes()
@@ -1029,8 +999,9 @@ mod tests {
 
     #[test]
     fn times_are_utc() {
-        assert_eq!(utc(0), "1970-01-01T00:00:00Z");
-        assert_eq!(utc(1_791_028_800_000), "2026-10-03T12:00:00Z");
+        use branchyard_support::time::rfc3339_secs;
+        assert_eq!(rfc3339_secs(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_secs(1_791_028_800_000), "2026-10-03T12:00:00Z");
     }
 
     #[test]

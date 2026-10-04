@@ -10,7 +10,8 @@ pub mod gcs;
 pub mod s3;
 pub mod server;
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use branchyard_support::LockExt as _;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,6 +27,8 @@ pub struct FaultyStore {
     /// After this many more successful writes, every write fails.
     pub writes_left: Mutex<Option<usize>>,
     pub writes: AtomicUsize,
+    /// Deletes fail while this is set.
+    pub fail_deletes: AtomicBool,
 }
 
 impl FaultyStore {
@@ -35,25 +38,27 @@ impl FaultyStore {
             fail_writes_of: Mutex::new(None),
             writes_left: Mutex::new(None),
             writes: AtomicUsize::new(0),
+            fail_deletes: AtomicBool::new(false),
         }
     }
 
+    /// Make every delete fail (or stop failing them).
+    pub fn fail_deletes(&self, fail: bool) {
+        self.fail_deletes.store(fail, Ordering::SeqCst);
+    }
+
     pub fn fail_writes_of(&self, text: Option<&str>) {
-        *self
-            .fail_writes_of
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = text.map(str::to_owned);
+        *self.fail_writes_of.lock_recovering("fail_writes_of") = text.map(str::to_owned);
     }
 
     pub fn crash_after(&self, writes: Option<usize>) {
-        *self.writes_left.lock().unwrap_or_else(|e| e.into_inner()) = writes;
+        *self.writes_left.lock_recovering("writes_left") = writes;
     }
 
     fn write(&self, key: &str) -> Result<()> {
         if let Some(text) = self
             .fail_writes_of
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("fail_writes_of")
             .as_deref()
         {
             if key.contains(text) {
@@ -62,7 +67,7 @@ impl FaultyStore {
                 )));
             }
         }
-        let mut left = self.writes_left.lock().unwrap_or_else(|e| e.into_inner());
+        let mut left = self.writes_left.lock_recovering("writes_left");
         if let Some(n) = left.as_mut() {
             if *n == 0 {
                 return Err(Error::refused(format!(
@@ -101,6 +106,9 @@ impl ObjectStore for FaultyStore {
         self.inner.list(prefix)
     }
     fn delete_if_match(&self, key: &str, generation: &str) -> Result<()> {
+        if self.fail_deletes.load(Ordering::SeqCst) {
+            return Err(Error::refused(format!("simulated failure deleting {key}")));
+        }
         self.inner.delete_if_match(key, generation)
     }
     fn resumable_put(

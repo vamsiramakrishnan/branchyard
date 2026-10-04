@@ -13,6 +13,7 @@
 //! (`events/*.jsonl`) written by earlier versions are imported in one
 //! transaction, then moved to `legacy/`.
 
+use branchyard_support::LockExt as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -24,15 +25,16 @@ use serde_json::Value;
 
 use crate::graph::{After, Dependency, GraphBackend, GraphCommit};
 use crate::state::{
-    now_ms, pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PoolBackend,
-    PortBackend, ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow,
-    SlotRow, SlotState, SteerRow, StepRow,
+    pick_port, Acquired, Backend, Begun, FeedRow, Fence, LeaseRow, Owner, PoolBackend, PortBackend,
+    ProcessRow, Record, ReservationRow, SandboxBackend, SandboxKind, SandboxRow, SlotRow,
+    SlotState, SteerRow, StepRow,
 };
 use crate::storage::{
     ArtifactRef, ArtifactRow, Identity, LegacyBinder, LegacyBranch, LockOutcome, NewArtifact,
     NewScratch, ScratchArea, ScratchLock, ScratchRow, Share, StorageBackend,
 };
 use crate::{Activity, BranchStatus, Error, Message, RecordedEvent, SteerState};
+use branchyard_support::time::now_ms;
 
 /// How long a write waits for another process's transaction.
 const BUSY: Duration = Duration::from_secs(30);
@@ -782,7 +784,7 @@ impl Sqlite {
     }
 
     fn lock(&self) -> MutexGuard<'_, Conn> {
-        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+        self.conn.lock_recovering("conn")
     }
 
     /// Run `f` in an immediate transaction; `full` chooses the commit's

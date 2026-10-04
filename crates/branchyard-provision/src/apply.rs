@@ -230,7 +230,7 @@ fn write_atomically(target: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     let dir = target.parent().expect("a resolved path has a directory");
     let name = target.file_name().unwrap_or_default().to_string_lossy();
     let temp = dir.join(format!(".{name}.{}.by-tmp", std::process::id()));
-    let _ = fs::remove_file(&temp);
+    branchyard_support::cleanup_file(&temp);
     let written = (|| {
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -244,7 +244,7 @@ fn write_atomically(target: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
         fs::rename(&temp, target)
     })();
     if written.is_err() {
-        let _ = fs::remove_file(&temp);
+        branchyard_support::cleanup_file(&temp);
     }
     written
 }

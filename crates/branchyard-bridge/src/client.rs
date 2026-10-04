@@ -1,6 +1,7 @@
 //! The host side of the bridge: connect through a router to a sandbox's
 //! bridge and run requests, with a [`Process`] for exec.
 
+use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::ffi::OsStrExt;
@@ -358,10 +359,7 @@ struct Connection {
 
 impl Connection {
     fn send(&mut self, frame: &Frame) -> io::Result<()> {
-        self.writer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .send(&frame.encode())
+        self.writer.lock_recovering("writer").send(&frame.encode())
     }
 
     fn recv(&mut self) -> io::Result<Frame> {
@@ -393,11 +391,7 @@ impl Connection {
     }
 
     fn close(mut self) {
-        let _ = self
-            .writer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .close();
+        let _ = self.writer.lock_recovering("writer").close();
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             match self.reader.recv() {
@@ -405,10 +399,7 @@ impl Connection {
                 _ => break,
             }
         }
-        self.writer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .abort();
+        self.writer.lock_recovering("writer").abort();
     }
 }
 
@@ -427,7 +418,7 @@ struct Shared {
 
 impl Shared {
     fn update(&self, f: impl FnOnce(&mut State)) {
-        f(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()));
+        f(&mut self.state.lock_recovering("state"));
         self.changed.notify_all();
     }
 
@@ -437,19 +428,18 @@ impl Shared {
         mut ready: impl FnMut(&mut State) -> Option<T>,
     ) -> Option<T> {
         let deadline = timeout.map(|t| Instant::now() + t);
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock_recovering("state");
         loop {
             if let Some(value) = ready(&mut state) {
                 return Some(value);
             }
             match deadline {
-                None => state = self.changed.wait(state).unwrap_or_else(|e| e.into_inner()),
+                None => state = self.changed.wait_recovering(state, "changed"),
                 Some(deadline) => {
                     let left = deadline.checked_duration_since(Instant::now())?;
                     state = self
                         .changed
-                        .wait_timeout(state, left)
-                        .unwrap_or_else(|e| e.into_inner())
+                        .wait_timeout_recovering(state, left, "changed")
                         .0;
                 }
             }
@@ -490,10 +480,7 @@ struct Stdin {
 
 impl Stdin {
     fn send(&self, frame: Frame) -> io::Result<()> {
-        self.writer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .send(&frame.encode())
+        self.writer.lock_recovering("writer").send(&frame.encode())
     }
 }
 
@@ -569,18 +556,11 @@ impl BridgeProcess {
     }
 
     fn send(&self, frame: Frame) -> io::Result<()> {
-        self.writer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .send(&frame.encode())
+        self.writer.lock_recovering("writer").send(&frame.encode())
     }
 
     fn gone(&self) -> bool {
-        self.shared
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .gone
+        self.shared.state.lock_recovering("state").gone
     }
 }
 
@@ -603,7 +583,7 @@ impl Process for BridgeProcess {
     }
 
     fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        let state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.shared.state.lock_recovering("state");
         Ok(match (state.status, state.gone) {
             (Some(status), _) => Some(status),
             (None, true) => Some(ExitStatus::default()),
@@ -652,7 +632,7 @@ impl Drop for BridgeProcess {
     /// Closing the connection makes the bridge tear the exec down.
     fn drop(&mut self) {
         drop(self.stdin.take());
-        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut writer = self.writer.lock_recovering("writer");
         if !self.torn_down {
             let _ = writer.send(&Frame::Teardown.encode());
         }

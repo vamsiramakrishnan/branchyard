@@ -12,12 +12,13 @@ use crate::graph::GraphBackend;
 use crate::knowledge::KnowledgeBackend;
 use crate::models::UsageBackend;
 use crate::state::{
-    now_ms, Acquired, Backend, Begun, Fence, Owner, PoolBackend, PortBackend, ProcessRow, Record,
+    Acquired, Backend, Begun, Fence, Owner, PoolBackend, PortBackend, ProcessRow, Record,
     SandboxBackend, SandboxKind, SandboxRow, SlotRow, SlotState,
 };
 use crate::storage::StorageBackend;
 use crate::{Activity, BranchStatus, Error, RecordedEvent, SteerState};
 use crate::{KnowledgeEntry, KnowledgeScope, KnowledgeSource, KnowledgeStatus};
+use branchyard_support::time::now_ms;
 
 const TTL: Duration = Duration::from_secs(30);
 

@@ -83,7 +83,7 @@ impl FileStore {
         let _lock = self.lock()?;
         let current = generation_of(&path)?;
         if let Err(e) = check(current) {
-            let _ = fs::remove_file(temp);
+            branchyard_support::cleanup_file(temp);
             return Err(e);
         }
         if let Some(parent) = path.parent() {
@@ -124,8 +124,7 @@ fn generation(meta: &fs::Metadata) -> Generation {
     let modified = meta
         .modified()
         .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
+        .and_then(branchyard_support::time::system_time_nanos)
         .unwrap_or(0);
     format!("{modified:x}-{:x}", meta.len())
 }
@@ -133,8 +132,7 @@ fn generation(meta: &fs::Metadata) -> Generation {
 fn modified_ms(meta: &fs::Metadata) -> Option<u64> {
     meta.modified()
         .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
+        .and_then(branchyard_support::time::system_time_ms)
 }
 
 fn missing(key: &str) -> Error {

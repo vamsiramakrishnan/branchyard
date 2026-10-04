@@ -30,6 +30,7 @@
 //! Nothing here is evidence about a real provider: memory, processes and
 //! isolation are not modelled.
 
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
@@ -196,7 +197,7 @@ impl FakeProvider {
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        self.state.lock_recovering("state")
     }
 
     /// Every call so far, in order.
@@ -247,9 +248,9 @@ impl FakeProvider {
     /// Remove `name` without recording a call, as if it vanished.
     pub fn vanish(&self, name: &str) {
         if let Some(sandbox) = self.lock().sandboxes.remove(name) {
-            let _ = fs::remove_dir_all(sandbox.rootfs);
+            branchyard_support::cleanup_dir(sandbox.rootfs);
         }
-        let _ = self.inner.destroy(name);
+        branchyard_support::best_effort("self.inner.destroy", self.inner.destroy(name));
     }
 
     fn refuse(&self, operation: Operation) -> Result<(), ProviderError> {
@@ -423,7 +424,7 @@ impl SandboxProvider for FakeProvider {
         }
         let removed = self.lock().sandboxes.remove(name);
         if let Some(sandbox) = removed {
-            let _ = fs::remove_dir_all(sandbox.rootfs);
+            branchyard_support::cleanup_dir(sandbox.rootfs);
         }
         self.inner.destroy(name)
     }
@@ -577,7 +578,7 @@ impl SandboxProvider for FakeProvider {
             reference: checkpoint.reference.clone(),
         });
         if let Some(dir) = state.checkpoints.remove(&checkpoint.reference) {
-            let _ = fs::remove_dir_all(dir);
+            branchyard_support::cleanup_dir(dir);
         }
         Ok(())
     }
@@ -626,10 +627,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "by-fake-provider-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            branchyard_support::time::now_nanos()
         ));
         fs::create_dir_all(&dir).unwrap();
         dir

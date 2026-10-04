@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use branchyard::BranchInfo;
 use branchyard_client::api::FeedEntry;
@@ -270,10 +270,7 @@ impl<'a> Bridge<'a> {
     /// Strictly increasing across restarts, as Herdr's `--seq` needs:
     /// milliseconds since the epoch, or one more than the last.
     fn next_seq(&mut self) -> u64 {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now = branchyard_support::time::now_ms();
         self.seq = now.max(self.seq + 1);
         self.seq
     }

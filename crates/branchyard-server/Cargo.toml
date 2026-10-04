@@ -19,6 +19,7 @@ postgres = ["dep:postgres", "branchyard/postgres"]
 schema = ["dep:schemars"]
 
 [dependencies]
+branchyard-support = { path = "../branchyard-support" }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
 branchyard = { path = "../branchyard" }
 branchyard-client = { path = "../branchyard-client" }

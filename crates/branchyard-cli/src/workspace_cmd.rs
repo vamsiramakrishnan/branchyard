@@ -21,7 +21,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use branchyard::{WorkspacePhase, WorkspaceReport, WorkspaceSpec, Yard};
 use branchyard_setup::config::{self, ProjectConfig, WorkspaceConfig, WorkspaceOrigin};
@@ -285,10 +285,7 @@ fn trust(resolved: &Resolved) -> Result<(), Failure> {
         resolved.root.display().to_string(),
         Trusted {
             digest: resolved.digest.clone(),
-            trusted_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+            trusted_at: branchyard_support::time::now_ms() / 1000,
         },
     );
     write_trust(&file)
@@ -1024,10 +1021,7 @@ pub(crate) fn record_trust(key: &str, digest: &str) -> Result<(), Failure> {
         key.to_owned(),
         Trusted {
             digest: digest.to_owned(),
-            trusted_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+            trusted_at: branchyard_support::time::now_ms() / 1000,
         },
     );
     write_trust(&file)

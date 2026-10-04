@@ -394,7 +394,7 @@ pub fn run(
         false => String::new(),
     };
     if writer.is_finished() {
-        let _ = writer.join();
+        branchyard_support::join_reporting("writer", writer);
     }
     Ok(Ran {
         code: status.code(),
@@ -405,12 +405,7 @@ pub fn run(
 }
 
 fn kill_group(pid: u32) {
-    if let Some(pgid) = i32::try_from(pid)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    {
-        let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
-    }
+    branchyard_support::kill_group(pid);
 }
 
 fn tail_reader(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<String> {

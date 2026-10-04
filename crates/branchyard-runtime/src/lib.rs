@@ -48,6 +48,7 @@ mod local;
 #[cfg(target_os = "linux")]
 mod netns;
 
+use branchyard_support::LockExt as _;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::fmt;
@@ -432,7 +433,7 @@ impl Session {
                 if n == 0 {
                     break;
                 }
-                let mut bytes = sink.bytes.lock().unwrap_or_else(|e| e.into_inner());
+                let mut bytes = sink.bytes.lock_recovering("bytes");
                 bytes.extend_from_slice(&chunk[..n]);
                 let excess = bytes.len().saturating_sub(STDERR_KEEP);
                 bytes.drain(..excess);
@@ -605,7 +606,7 @@ impl Session {
 
     /// The last few hundred bytes of the harness's stderr.
     pub fn stderr_tail(&self) -> String {
-        let bytes = self.stderr.bytes.lock().unwrap_or_else(|e| e.into_inner());
+        let bytes = self.stderr.bytes.lock_recovering("bytes");
         let start = bytes.len().saturating_sub(STDERR_TAIL);
         String::from_utf8_lossy(&bytes[start..]).trim().to_owned()
     }
@@ -629,7 +630,7 @@ impl Session {
             let remaining = deadline.remaining();
             if remaining.is_zero() {
                 forced = true;
-                let _ = self.process.kill();
+                branchyard_support::best_effort("kill process", self.process.kill());
                 break;
             }
             let slice = remaining.min(Duration::from_millis(50));
@@ -658,7 +659,7 @@ impl Session {
     pub fn kill(mut self) -> Result<Vec<Event>, RuntimeError> {
         let start = self.events.len();
         self.process.teardown();
-        let _ = self.process.kill();
+        branchyard_support::best_effort("kill process", self.process.kill());
         self.process.wait().map_err(io_error("wait"))?;
         self.teardown();
         self.drain();
@@ -784,8 +785,8 @@ impl Drop for Session {
     fn drop(&mut self) {
         if !self.finished {
             self.process.teardown();
-            let _ = self.process.kill();
-            let _ = self.process.wait();
+            branchyard_support::best_effort("kill process", self.process.kill());
+            branchyard_support::best_effort("reap process", self.process.wait());
         }
     }
 }

@@ -17,6 +17,7 @@ members = [
     "crates/branchyard-server",
     "crates/branchyard-setup",
     "crates/branchyard-substrate",
+    "crates/branchyard-support",
     "crates/branchyard-sync",
     "crates/branchyard-testkit",
     "crates/branchyard-workspace",

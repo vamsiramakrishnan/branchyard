@@ -42,6 +42,7 @@ pub mod pg;
 pub(crate) mod reclaim;
 pub mod sqlite;
 
+use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
@@ -49,7 +50,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -652,10 +653,7 @@ impl Default for Clock {
 }
 
 fn system_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    branchyard_support::time::now_ms()
 }
 
 impl Clock {
@@ -1197,10 +1195,10 @@ impl Registration {
     }
 
     fn halt(&mut self) {
-        *self.renewal.stop.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        *self.renewal.stop.lock_recovering("stop") = true;
         self.renewal.wake.notify_all();
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            branchyard_support::join_reporting("service heartbeat", thread);
         }
     }
 
@@ -1226,7 +1224,7 @@ impl Drop for Registration {
 }
 
 fn lock(service: &Mutex<Service>) -> std::sync::MutexGuard<'_, Service> {
-    service.lock().unwrap_or_else(|e| e.into_inner())
+    service.lock_recovering("service")
 }
 
 fn renew_once(
@@ -1259,19 +1257,19 @@ fn renew_loop(
     clock: &Clock,
 ) {
     let every = ttl / 3;
-    let mut stop = renewal.stop.lock().unwrap_or_else(|e| e.into_inner());
+    let mut stop = renewal.stop.lock_recovering("stop");
     loop {
-        let (next, _) = renewal
-            .wake
-            .wait_timeout_while(stop, every, |stopped| !*stopped)
-            .unwrap_or_else(|e| e.into_inner());
+        let (next, _) =
+            renewal
+                .wake
+                .wait_timeout_while_recovering(stop, every, |stopped| !*stopped, "wake");
         stop = next;
         if *stop {
             return;
         }
         drop(stop);
         let _ = renew_once(store, service, ttl, clock);
-        stop = renewal.stop.lock().unwrap_or_else(|e| e.into_inner());
+        stop = renewal.stop.lock_recovering("stop");
     }
 }
 

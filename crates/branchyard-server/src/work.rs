@@ -13,6 +13,7 @@
 //! [`Work::run`] is the executor: it rebuilds the engine's options with
 //! the same rules the handlers check at admission, and calls the SDK.
 
+use branchyard_support::LockExt as _;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
@@ -426,12 +427,11 @@ fn run_under_leases<T>(
                         let reason = format!("sync: {reason}");
                         tracing::warn!(repo = %repo.name, task = %held.task, %reason, "a sync lease was lost; stopping the run");
                         sync.fence(&repo.name, &held.task, &reason);
-                        lost.lock()
-                            .unwrap_or_else(|e| e.into_inner())
+                        lost.lock_recovering("lost")
                             .get_or_insert(reason);
                     }
                 }
-                let reason = lost.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let reason = lost.lock_recovering("lost").clone();
                 if let Some(reason) = reason {
                     for branch in branches.iter().chain(leases.iter().map(|h| &h.branch)) {
                         let _ = repo.yard.cancel_as(branch, &reason);
@@ -448,7 +448,7 @@ fn run_under_leases<T>(
         result
     });
     // A loss the watcher had not seen yet still counts.
-    let mut lost = lost.into_inner().unwrap_or_else(|e| e.into_inner());
+    let mut lost = lost.into_inner_recovering("lost");
     for held in leases {
         if let Some(reason) = held.keeper.lost_reason() {
             let reason = format!("sync: {reason}");

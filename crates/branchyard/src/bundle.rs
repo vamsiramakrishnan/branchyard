@@ -79,7 +79,7 @@ struct TempFile(PathBuf);
 
 impl Drop for TempFile {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        branchyard_support::cleanup_file(&self.0);
     }
 }
 
@@ -88,7 +88,7 @@ fn temp_path(dir: &Path, what: &str) -> PathBuf {
     dir.join(format!(
         ".bundle-{what}.{}.{}.{}.tmp",
         std::process::id(),
-        crate::state::now_ms(),
+        branchyard_support::time::now_ms(),
         N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ))
 }

@@ -169,6 +169,9 @@ pub fn check(store: Arc<dyn ObjectStore>, options: Options) {
 
     // Clean up what this run made.
     for entry in s.list(&p).unwrap() {
-        let _ = s.delete_if_match(&entry.key, &entry.generation);
+        branchyard_support::best_effort(
+            "s.delete_if_match",
+            s.delete_if_match(&entry.key, &entry.generation),
+        );
     }
 }

@@ -135,8 +135,8 @@ pub fn spawn(command: &mut Command, port: u16) -> io::Result<(Child, TcpListener
         Some(fd) => Ok((child, TcpListener::from(fd))),
         None => {
             let mut child = child;
-            let _ = child.kill();
-            let _ = child.wait();
+            branchyard_support::best_effort("kill child", child.kill());
+            branchyard_support::best_effort("reap child", child.wait());
             Err(io::Error::other(
                 "the confined process did not hand back its listener",
             ))

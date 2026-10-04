@@ -4,6 +4,7 @@
 //! terminal until it is answered. Decisions are printed from the engine's
 //! record of them, whoever made them.
 
+use branchyard_support::LockExt as _;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -82,9 +83,7 @@ impl Console {
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state.lock_recovering("state")
     }
 
     pub fn event(&self, event: &BranchEvent) {

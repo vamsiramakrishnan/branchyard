@@ -64,13 +64,7 @@ fn provider() -> SubstrateProvider {
 }
 
 fn unique(what: &str) -> String {
-    format!(
-        "by-qual-{what}-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    )
+    format!("by-qual-{what}-{}", branchyard_support::time::now_ms())
 }
 
 #[test]

@@ -22,6 +22,7 @@
 //! With a state directory, each machine's result is kept in a file, so a
 //! later process can exec in, pause, resume or destroy it by name.
 
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -147,7 +148,7 @@ impl RecipeProvider {
     }
 
     fn machine(&self, name: &str) -> Option<Machine> {
-        let mut machines = self.machines.lock().unwrap_or_else(|e| e.into_inner());
+        let mut machines = self.machines.lock_recovering("machines");
         if let Some(machine) = machines.get(name) {
             return Some(machine.clone());
         }
@@ -158,7 +159,7 @@ impl RecipeProvider {
     }
 
     fn record(&self, name: &str, machine: Option<Machine>) -> Result<(), ProviderError> {
-        let mut machines = self.machines.lock().unwrap_or_else(|e| e.into_inner());
+        let mut machines = self.machines.lock_recovering("machines");
         match &machine {
             Some(machine) => {
                 machines.insert(name.to_owned(), machine.clone());
@@ -188,7 +189,7 @@ impl RecipeProvider {
                 std::fs::rename(&temporary, &file)?;
             }
             None => {
-                let _ = std::fs::remove_file(&file);
+                branchyard_support::cleanup_file(&file);
             }
         }
         Ok(())
@@ -547,13 +548,8 @@ impl RemoteProcess {
     }
 
     fn kill_local(&mut self) {
-        if let Some(pgid) = i32::try_from(self.child.id())
-            .ok()
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
-        }
-        let _ = self.child.kill();
+        branchyard_support::kill_group(self.child.id());
+        branchyard_support::best_effort("kill child", self.child.kill());
     }
 }
 
@@ -631,7 +627,7 @@ impl Drop for RemoteProcess {
             _ => {
                 let _ = self.remote(KILL);
                 let _ = self.teardown();
-                let _ = self.child.wait();
+                branchyard_support::best_effort("reap child", self.child.wait());
             }
         }
     }

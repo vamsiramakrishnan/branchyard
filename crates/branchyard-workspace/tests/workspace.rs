@@ -334,12 +334,10 @@ fn a_same_size_rewrite_in_the_checkout_second_is_diffed() {
     for attempt in 0.. {
         // Start just after a second begins, so the checkout and the rewrite
         // share it.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap();
+        let subsec_nanos = (branchyard_support::time::now_nanos() % 1_000_000_000) as u64;
         wait::settle(
             "to just after a second begins",
-            Duration::from_nanos(1_000_000_000 - u64::from(now.subsec_nanos())),
+            Duration::from_nanos(1_000_000_000 - subsec_nanos),
         );
         let ws = fixture.workspace(&format!("racy{attempt}"));
         let file = ws.path.join("a.txt");
@@ -358,10 +356,7 @@ fn a_same_size_rewrite_in_the_checkout_second_is_diffed() {
         // The diff runs in a later second than the checkout and the write.
         let next = Duration::from_secs(written.mtime() as u64 + 1);
         wait::until("the clock to reach the next second", || {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                >= next
+            Duration::from_millis(branchyard_support::time::now_ms()) >= next
         });
         let diff = ws.diff().unwrap();
         assert!(diff.contains("-two\n+TWO"), "{diff:?}");
