@@ -22,6 +22,9 @@ jobs:
       - run: python tests/test_verify_vendor.py
       - run: python tools/verify_derivatives.py
       - run: python tools/check_catalog.py
+      # No hand-rolled percent/hex/base64/shell/tar codecs (tools/handrolled_banlist.toml).
+      - run: python tools/check_handrolled.py
+      - run: python tests/test_check_handrolled.py
       - run: python tools/check_docs.py
       - run: python tools/test_scion.py --qualified
       - name: Verify the recorded upstream Claude compatibility
