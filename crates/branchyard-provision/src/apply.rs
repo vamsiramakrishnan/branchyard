@@ -248,3 +248,325 @@ fn write_atomically(target: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     }
     written
 }
+
+#[cfg(test)]
+mod tests {
+    //! The executor on a temporary home: what it writes and with which mode,
+    //! that a second application changes nothing, and each way a path may
+    //! not leave the home. Whole-provisioner cases are in `tests/provision.rs`.
+    use std::os::unix::fs::symlink;
+
+    use super::*;
+
+    fn home() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    fn plan_of(path: &str, secret: bool, edit: Edit) -> Plan {
+        let mut plan = Plan::default();
+        plan.edit(path, secret, edit);
+        plan
+    }
+
+    fn put(text: &str) -> Edit {
+        Edit::Put(text.into())
+    }
+
+    fn mode(path: &Path) -> u32 {
+        fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    fn refused(plan: &Plan, home: &Path) -> ApplyError {
+        apply(plan, home).expect_err("must be refused")
+    }
+
+    #[test]
+    fn a_new_file_is_written_0644_in_new_0700_directories() {
+        let h = home();
+        let applied = apply(&plan_of("a/b/c.txt", false, put("hi\n")), h.path()).unwrap();
+        assert_eq!(applied.written, ["a/b/c.txt"]);
+        let file = h.path().join("a/b/c.txt");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "hi\n");
+        assert_eq!(mode(&file), 0o644);
+        assert_eq!(mode(&h.path().join("a")), 0o700);
+        assert_eq!(mode(&h.path().join("a/b")), 0o700);
+    }
+
+    #[test]
+    fn applying_twice_changes_nothing_the_second_time() {
+        let h = home();
+        let plan = plan_of("x.txt", false, put("same"));
+        assert_eq!(apply(&plan, h.path()).unwrap().written, ["x.txt"]);
+        let second = apply(&plan, h.path()).unwrap();
+        assert_eq!(second.unchanged, ["x.txt"]);
+        assert!(second.written.is_empty() && second.removed.is_empty());
+    }
+
+    #[test]
+    fn a_secret_file_is_0600_and_a_wrong_mode_is_corrected() {
+        let h = home();
+        let file = h.path().join("key");
+        fs::write(&file, "secret").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        // Content is already right, the mode is not: it is rewritten.
+        let applied = apply(&plan_of("key", true, put("secret")), h.path()).unwrap();
+        assert_eq!(applied.written, ["key"]);
+        assert_eq!(mode(&file), 0o600);
+        let again = apply(&plan_of("key", true, put("secret")), h.path()).unwrap();
+        assert_eq!(again.unchanged, ["key"]);
+    }
+
+    #[test]
+    fn an_existing_non_secret_file_keeps_its_mode() {
+        let h = home();
+        let file = h.path().join("run.sh");
+        fs::write(&file, "old").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o750)).unwrap();
+        apply(&plan_of("run.sh", false, put("new")), h.path()).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "new");
+        assert_eq!(mode(&file), 0o750);
+    }
+
+    #[test]
+    fn no_temporary_file_is_left_behind() {
+        let h = home();
+        apply(&plan_of("d/f", false, put("1")), h.path()).unwrap();
+        let names: Vec<_> = fs::read_dir(h.path().join("d"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["f"]);
+    }
+
+    #[test]
+    fn remove_deletes_a_file_and_skips_a_missing_one() {
+        let h = home();
+        fs::write(h.path().join("gone"), "x").unwrap();
+        let mut plan = plan_of("gone", false, Edit::Remove);
+        plan.edit("never-there", false, Edit::Remove);
+        let applied = apply(&plan, h.path()).unwrap();
+        assert_eq!(applied.removed, ["gone"]);
+        assert_eq!(applied.unchanged, ["never-there"]);
+        assert!(!h.path().join("gone").exists());
+    }
+
+    #[test]
+    fn a_json_edit_merges_into_what_is_there_and_keeps_the_rest() {
+        let h = home();
+        fs::write(h.path().join("c.json"), "{\"keep\": 1}\n").unwrap();
+        let edit = Edit::Json {
+            edits: vec![JsonEdit::Set(
+                vec!["a".into(), "b".into()],
+                serde_json::json!(2),
+            )],
+            comment_lines: false,
+        };
+        apply(&plan_of("c.json", false, edit), h.path()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(h.path().join("c.json")).unwrap()).unwrap();
+        assert_eq!(value, serde_json::json!({"keep": 1, "a": {"b": 2}}));
+    }
+
+    #[test]
+    fn paths_that_leave_the_home_are_refused() {
+        let h = home();
+        for bad in ["../escape", "/etc/passwd", "a/../../b", "./x", ""] {
+            let err = refused(&plan_of(bad, false, put("x")), h.path());
+            assert_eq!(err.path, bad);
+            assert!(!err.reason.is_empty(), "{bad}");
+        }
+        assert!(!h.path().parent().unwrap().join("escape").exists());
+    }
+
+    #[test]
+    fn a_symbolic_link_directory_on_the_way_is_not_followed() {
+        let h = home();
+        let outside = home();
+        symlink(outside.path(), h.path().join("link")).unwrap();
+        let err = refused(&plan_of("link/secret", true, put("s3cret")), h.path());
+        assert!(err.reason.contains("symbolic link"), "{err}");
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_file_where_a_directory_is_needed_is_refused() {
+        let h = home();
+        fs::write(h.path().join("dir"), "i am a file").unwrap();
+        let err = refused(&plan_of("dir/x", false, put("x")), h.path());
+        assert!(err.reason.contains("is not a directory"), "{err}");
+    }
+
+    #[test]
+    fn a_symbolic_link_at_the_target_is_replaced_not_followed() {
+        let h = home();
+        let outside = home();
+        let victim = outside.path().join("victim");
+        fs::write(&victim, "untouched").unwrap();
+        symlink(&victim, h.path().join("cred")).unwrap();
+        let applied = apply(&plan_of("cred", true, put("s3cret")), h.path()).unwrap();
+        assert_eq!(applied.written, ["cred"]);
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched");
+        let target = h.path().join("cred");
+        assert!(!fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "s3cret");
+    }
+
+    #[test]
+    fn a_directory_at_the_target_and_an_unreadable_file_are_refused() {
+        let h = home();
+        fs::create_dir(h.path().join("d")).unwrap();
+        let err = refused(&plan_of("d", false, put("x")), h.path());
+        assert!(err.reason.contains("not a regular file"), "{err}");
+
+        fs::write(h.path().join("bin"), [0xff, 0xfe, 0x00]).unwrap();
+        let err = refused(
+            &plan_of("bin", false, Edit::DotenvUnset(vec!["A".into()])),
+            h.path(),
+        );
+        assert!(err.reason.contains("UTF-8"), "{err}");
+    }
+
+    #[test]
+    fn a_file_over_the_size_limit_is_refused_without_reading_it() {
+        let h = home();
+        let big = fs::File::create(h.path().join("big")).unwrap();
+        big.set_len(MAX_FILE + 1).unwrap();
+        let err = refused(&plan_of("big", false, put("x")), h.path());
+        assert!(err.reason.contains("is larger than"), "{err}");
+    }
+
+    #[test]
+    fn the_home_must_be_an_existing_directory() {
+        let h = home();
+        let plan = plan_of("x", false, put("x"));
+        let missing = refused(&plan, &h.path().join("nope"));
+        assert!(missing.reason.contains("not usable"), "{missing}");
+        fs::write(h.path().join("file"), "").unwrap();
+        let file = refused(&plan, &h.path().join("file"));
+        assert!(file.reason.contains("not a directory"), "{file}");
+    }
+
+    #[test]
+    fn an_error_names_the_file_and_the_problem_but_not_the_content() {
+        let h = home();
+        fs::create_dir(h.path().join("d")).unwrap();
+        let err = refused(&plan_of("d", true, put("TOP-SECRET-VALUE")), h.path());
+        let text = err.to_string();
+        assert!(text.starts_with("d: "), "{text}");
+        assert!(!text.contains("TOP-SECRET-VALUE"));
+    }
+
+    #[test]
+    fn the_first_failing_file_stops_the_plan_after_earlier_files_were_written() {
+        let h = home();
+        let mut plan = plan_of("first", false, put("1"));
+        plan.edit("../second", false, put("2"));
+        plan.edit("third", false, put("3"));
+        let err = refused(&plan, h.path());
+        assert_eq!(err.path, "../second");
+        assert!(h.path().join("first").exists());
+        assert!(!h.path().join("third").exists());
+    }
+
+    #[test]
+    fn installed_is_empty_without_a_record_or_with_a_broken_one() {
+        let h = home();
+        assert_eq!(installed(h.path()), Installed::default());
+        fs::create_dir(h.path().join(".branchyard")).unwrap();
+        fs::write(h.path().join(INSTALLED_PATH), "not json").unwrap();
+        assert_eq!(installed(h.path()), Installed::default());
+    }
+
+    fn record(home: &Path, record: &Installed) {
+        let text = json_text(&serde_json::to_value(record).unwrap());
+        apply(&plan_of(INSTALLED_PATH, false, Edit::Put(text)), home).unwrap();
+    }
+
+    #[test]
+    fn the_installed_record_round_trips() {
+        let h = home();
+        let want = Installed {
+            mcp_servers: vec!["one".into()],
+            credentials: vec![Credential::File { path: "k".into() }],
+        };
+        record(h.path(), &want);
+        assert_eq!(installed(h.path()), want);
+    }
+
+    #[test]
+    fn removing_credentials_with_none_recorded_does_nothing() {
+        let h = home();
+        assert_eq!(remove_credentials(h.path()).unwrap(), Applied::default());
+        assert!(!h.path().join(INSTALLED_PATH).exists());
+    }
+
+    #[test]
+    fn removing_credentials_takes_only_branchyards_and_forgets_them() {
+        let h = home();
+        fs::write(h.path().join("whole"), "token").unwrap();
+        fs::write(h.path().join(".env"), "# mine\nKEEP=1\nBY_KEY=secret\n").unwrap();
+        fs::write(
+            h.path().join("auth.json"),
+            "{\"mine\": true, \"token\": \"t\"}\n",
+        )
+        .unwrap();
+        record(
+            h.path(),
+            &Installed {
+                mcp_servers: vec!["srv".into()],
+                credentials: vec![
+                    Credential::File {
+                        path: "whole".into(),
+                    },
+                    Credential::Dotenv {
+                        path: ".env".into(),
+                        keys: vec!["BY_KEY".into()],
+                    },
+                    Credential::Json {
+                        path: "auth.json".into(),
+                        keys: vec![vec!["token".into()]],
+                    },
+                    Credential::File {
+                        path: "already-gone".into(),
+                    },
+                ],
+            },
+        );
+        let applied = remove_credentials(h.path()).unwrap();
+        assert_eq!(applied.removed, ["whole"]);
+        assert!(!h.path().join("whole").exists());
+        assert_eq!(
+            fs::read_to_string(h.path().join(".env")).unwrap(),
+            "# mine\nKEEP=1\n"
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(h.path().join("auth.json")).unwrap()).unwrap();
+        assert_eq!(json, serde_json::json!({"mine": true}));
+        // The MCP record stays; the credentials are forgotten.
+        let left = installed(h.path());
+        assert_eq!(left.mcp_servers, ["srv"]);
+        assert!(left.credentials.is_empty());
+        // And a second removal has nothing to do.
+        assert_eq!(remove_credentials(h.path()).unwrap(), Applied::default());
+    }
+
+    #[test]
+    fn removing_the_last_record_removes_the_record_file() {
+        let h = home();
+        fs::write(h.path().join("whole"), "token").unwrap();
+        record(
+            h.path(),
+            &Installed {
+                mcp_servers: vec![],
+                credentials: vec![Credential::File {
+                    path: "whole".into(),
+                }],
+            },
+        );
+        remove_credentials(h.path()).unwrap();
+        assert!(!h.path().join(INSTALLED_PATH).exists());
+    }
+}

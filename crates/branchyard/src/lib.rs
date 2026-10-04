@@ -2342,6 +2342,8 @@ pub enum Activity {
     /// A harness-to-harness message was sent or delivered; see
     /// [`crate::inbox`]. Recorded on both the sending and the receiving
     /// branch's event log.
+    // The doc comment is the schema description, so the private link stays.
+    #[allow(rustdoc::private_intra_doc_links)]
     Message(Message),
     /// Inbox messages reached this branch's turn, and by which path; see
     /// `docs/delegation.md#delivery`. Each message is delivered once.

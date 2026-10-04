@@ -13,12 +13,12 @@ testing = []
 
 [dependencies]
 getrandom = "0.4"
-jiff = { version = "0.2.37", default-features = false, features = ["std"] }
-tracing = "0.1.44"
+jiff = { workspace = true, features = ["std"] }
+tracing = { workspace = true }
 ulid = { version = "3.0.0", default-features = false }
 
 [target."cfg(unix)".dependencies]
-rustix = { version = "1.1", default-features = false, features = ["std", "process"] }
+rustix = { workspace = true }
 
 [dev-dependencies]
 # Its own `testing` feature, for the integration tests.

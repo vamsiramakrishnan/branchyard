@@ -175,7 +175,7 @@ pub fn sign(
 }
 
 /// Check a received request's `Authorization` against `secret`, as a
-/// server would: the stand-ins in [`crate::testing`] use it.
+/// server would: the stand-ins in `crate::testing` use it.
 pub fn verify(request: &Request, secret: &str, payload_hash: &str) -> Result<(), String> {
     let auth = request
         .find("authorization")

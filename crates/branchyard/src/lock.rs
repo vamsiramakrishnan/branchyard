@@ -37,7 +37,7 @@ impl DirLock {
     /// this process) holds it; the error names who holds it, as that
     /// holder wrote.
     ///
-    /// A lock that stays held for [`WAIT`] is refused; one released within
+    /// A lock that stays held for `WAIT` is refused; one released within
     /// it, such as a copy a starting child held for an instant, is taken.
     pub fn acquire(dir: &Path, what: &str) -> Result<DirLock, Error> {
         Self::acquire_within(dir, what, WAIT)

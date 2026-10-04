@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """tools/verify_vendor.py against small fixture trees: pins, recorded
 patches, stale or incomplete patch entries, and the Warp license boundary."""
+
 import hashlib
 import json
 import sys
@@ -9,7 +10,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-import verify_vendor  # noqa: E402
+import verify_vendor
 
 COMMIT = "a" * 40
 
@@ -49,13 +50,11 @@ class VerifyVendor(unittest.TestCase):
         self.tmp.cleanup()
 
     def write_lock(self):
-        lock = {"format": 1, "files": [pin(rel, data, lic)
-                                       for rel, (data, lic) in self.files.items()]}
+        lock = {"format": 1, "files": [pin(rel, data, lic) for rel, (data, lic) in self.files.items()]}
         (self.root / "vendor.lock.json").write_text(json.dumps(lock))
 
     def write_patches(self, patches):
-        (self.root / "vendor.patches.json").write_text(
-            json.dumps({"format": 1, "patches": patches}))
+        (self.root / "vendor.patches.json").write_text(json.dumps({"format": 1, "patches": patches}))
 
     def problems(self):
         return verify_vendor.verify(self.root)[0]
@@ -73,24 +72,19 @@ class VerifyVendor(unittest.TestCase):
 
     def test_a_recorded_patch_passes(self):
         (self.root / "vendor/up/a.txt").write_bytes(b"patched\n")
-        self.write_patches([{"path": "vendor/up/a.txt", "reason": "fix a typo",
-                             "upstream_commit": COMMIT}])
+        self.write_patches([{"path": "vendor/up/a.txt", "reason": "fix a typo", "upstream_commit": COMMIT}])
         self.assertEqual(verify_vendor.verify(self.root), ([], 2, 1))
 
     def test_patch_entries_must_be_complete_current_and_known(self):
-        self.write_patches([{"path": "vendor/up/a.txt", "reason": "x",
-                             "upstream_commit": COMMIT}])
+        self.write_patches([{"path": "vendor/up/a.txt", "reason": "x", "upstream_commit": COMMIT}])
         self.assert_problem("listed as patched but matches its pin")
         (self.root / "vendor/up/a.txt").write_bytes(b"patched\n")
-        self.write_patches([{"path": "vendor/up/a.txt", "reason": " ",
-                             "upstream_commit": "b" * 40}])
+        self.write_patches([{"path": "vendor/up/a.txt", "reason": " ", "upstream_commit": "b" * 40}])
         self.assert_problem("needs a reason")
         self.assert_problem("is pinned at " + COMMIT)
-        self.write_patches([{"path": "vendor/up/a.txt", "reason": "x",
-                             "upstream_commit": "abc"}])
+        self.write_patches([{"path": "vendor/up/a.txt", "reason": "x", "upstream_commit": "abc"}])
         self.assert_problem("full 40-character commit")
-        self.write_patches([{"path": "vendor/up/nope.txt", "reason": "x",
-                             "upstream_commit": COMMIT}])
+        self.write_patches([{"path": "vendor/up/nope.txt", "reason": "x", "upstream_commit": COMMIT}])
         self.assert_problem("which vendor.lock.json does not pin")
         (self.root / "vendor.patches.json").unlink()
         self.assert_problem("vendor.patches.json is missing")
@@ -100,16 +94,13 @@ class VerifyVendor(unittest.TestCase):
         self.assert_problem("untracked or missing vendor files")
 
     def test_the_warp_license_boundary(self):
-        (self.root / "crates/c/Cargo.toml").write_text(
-            '[dependencies]\nwarp = { path = "../../vendor/warp-agpl" }\n')
+        (self.root / "crates/c/Cargo.toml").write_text('[dependencies]\nwarp = { path = "../../vendor/warp-agpl" }\n')
         self.assert_problem("crates/c/Cargo.toml refers to vendor/warp-agpl")
         (self.root / "crates/c/Cargo.toml").unlink()
-        (self.root / "crates/c/src/lib.rs").write_text(
-            'include!("../../../vendor/warp-agpl/w.rs");\n')
+        (self.root / "crates/c/src/lib.rs").write_text('include!("../../../vendor/warp-agpl/w.rs");\n')
         self.assert_problem("crates/c/src/lib.rs refers to vendor/warp-agpl")
         (self.root / "crates/c/src/lib.rs").write_text("\n")
-        (self.root / "Cargo.toml").write_text(
-            '[workspace]\nmembers = ["crates/c", "vendor/warp-agpl"]\n')
+        (self.root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/c", "vendor/warp-agpl"]\n')
         self.assert_problem("no workspace member may live under vendor/")
         (self.root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/c"]\n')
         self.files["vendor/up/a.txt"] = (b"upstream\n", "AGPL-3.0-only")

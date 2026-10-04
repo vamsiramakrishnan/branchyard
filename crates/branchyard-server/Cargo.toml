@@ -24,46 +24,45 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 branchyard = { path = "../branchyard" }
 branchyard-client = { path = "../branchyard-client" }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-hex = "0.4"
+hex = { workspace = true }
 hmac = "0.13"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service", "server", "server-graceful"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
-rusqlite = { version = "0.39", default-features = false, features = ["bundled"] }
-postgres = { version = "0.19", optional = true }
+rusqlite = { workspace = true }
+postgres = { workspace = true, optional = true }
 # OTLP's protobuf messages for trace export (docs/observability.md); already
 # in the workspace through the Substrate provider.
-prost = "0.14"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pki-types = { version = "1", features = ["std"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "sync", "time", "macros", "io-util"] }
+prost = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "sync", "time", "macros", "io-util"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tower = { version = "0.5", features = ["limit", "util"] }
 # The command line, also `by serve` and `by worker`.
-clap = { version = "4.6", features = ["derive"] }
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 tower-http = { version = "0.6.11", features = ["trace", "tracing"] }
-schemars = { version = "1", optional = true }
-backon = { version = "1.6", default-features = false, features = ["std", "tokio-sleep"] }
+schemars = { workspace = true, optional = true }
+backon = { workspace = true, features = ["tokio-sleep"] }
 branchyard-setup = { version = "0.0.1", path = "../branchyard-setup" }
 # `sync`: served repositories replicated to durable storage (docs/sync.md).
 branchyard-sync = { path = "../branchyard-sync" }
 # Cron schedules in a time zone (docs/triggers.md). Already in Cargo.lock.
-jiff = "0.2"
+jiff = { workspace = true, features = ["default"] }
 # A trigger precheck's process group, stopped on a timeout.
-rustix = { version = "1.1", default-features = false, features = ["std", "process"] }
+rustix = { workspace = true }
 # The web companion's pairing secrets, VAPID signing and Web Push
 # encryption (docs/companion.md); both already in Cargo.lock (ring via
 # rustls).
-ring = "0.17"
-base64 = "0.22"
+ring = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 branchyard-testkit = { path = "../branchyard-testkit" }
-blake3 = "1"
+blake3 = { workspace = true }
 branchyard-sync = { path = "../branchyard-sync", features = ["testing"] }
-tempfile = "3.27.0"
+tempfile = { workspace = true }

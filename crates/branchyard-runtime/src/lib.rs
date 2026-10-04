@@ -530,7 +530,7 @@ impl Session {
     }
 
     /// Deliver `text` into the turn in flight, as the driver's
-    /// [`Driver::steer`](branchyard_harness::Driver::steer) does. The
+    /// [`Driver::steer`] does. The
     /// harness confirms or refuses it with `SteerAccepted` or
     /// `SteerRejected`.
     pub fn steer(&mut self, text: &str) -> Result<(), RuntimeError> {

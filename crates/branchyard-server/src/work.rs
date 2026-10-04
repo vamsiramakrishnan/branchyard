@@ -10,7 +10,7 @@
 //! would refuse the request fails the operation with the same error the
 //! request would have got from it.
 //!
-//! [`Work::run`] is the executor: it rebuilds the engine's options with
+//! `Work::run` is the executor: it rebuilds the engine's options with
 //! the same rules the handlers check at admission, and calls the SDK.
 
 use branchyard_support::LockExt as _;

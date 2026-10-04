@@ -10,10 +10,10 @@
 //!
 //! A pointer is a short text file ([`Pointer`]). Branchyard applies it
 //! itself, never through git filters or git-lfs: when it commits a task's
-//! files ([`stage`], and the folder snapshot), a file of at least the task's
+//! files (`stage`, and the folder snapshot), a file of at least the task's
 //! threshold is stored as chunks and its index entry becomes the pointer,
 //! marked `skip-worktree` so git leaves the real file on disk alone; when it
-//! checks files out ([`restore`]: a new worktree, a rewind, an accept), each
+//! checks files out (`restore`: a new worktree, a rewind, an accept), each
 //! pointer is replaced by the file it names, verified byte for byte.
 
 use std::collections::{BTreeMap, BTreeSet};

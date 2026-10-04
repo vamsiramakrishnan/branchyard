@@ -28,21 +28,21 @@ branchyard-wire = { path = "../branchyard-wire" }
 branchyard-server = { path = "../branchyard-server" }
 branchyard-workspace = { path = "../branchyard-workspace" }
 branchyard-mcp = { path = "../branchyard-mcp" }
-serde = "1"
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 # `by rig` spec files: parsed, then deserialized with its serde support
 # (which keeps each value's span, so errors cite line and column).
-toml_edit = { version = "0.25", default-features = false, features = ["parse", "serde"] }
+toml_edit = { workspace = true, features = ["serde"] }
 # The command line; `env` reads BRANCHYARD_REMOTE and the other globals.
-clap = { version = "4.6", features = ["derive", "env"] }
+clap = { workspace = true, features = ["env"] }
 # `by completions` and `by man`.
 clap_complete = "4.6"
 clap_mangen = "0.3.3"
 # `--check` and `--command` splitting. Already in Cargo.lock.
-shlex = "2"
-base64 = "0.22"
-url = "2"
-hex = "0.4"
+shlex = { workspace = true }
+base64 = { workspace = true }
+url = { workspace = true }
+hex = { workspace = true }
 # `by init`'s interactive wizard, and the setup engine it drives.
 cliclack = "0.5.6"
 branchyard-setup = { version = "0.0.1", path = "../branchyard-setup" }
@@ -50,14 +50,14 @@ dirs = "7"
 branchyard-harness = { version = "0.0.1", path = "../branchyard-harness" }
 # `by harnesses --all` and `by connectors catalog`: the generated catalogs.
 branchyard-controls = { path = "../branchyard-controls" }
-schemars = { version = "1", optional = true }
+schemars = { workspace = true, optional = true }
 # `by watch`'s dashboard. On crossterm 0.29, already in Cargo.lock; ratatui
 # 0.30 needs Rust 1.88.
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
 unicode-width = "0.2.2"
 # `by --remote ssh://`: names each remote's private directories. Already in
 # Cargo.lock.
-sha2 = "0.11"
+sha2 = { workspace = true }
 # `by recipe`: environment recipes and their sandbox provider.
 branchyard-recipe = { path = "../branchyard-recipe" }
 branchyard-sandbox = { path = "../branchyard-sandbox" }
@@ -68,4 +68,4 @@ branchyard-sync = { path = "../branchyard-sync" }
 branchyard-testkit = { path = "../branchyard-testkit" }
 branchyard-bridge = { path = "../branchyard-bridge" }
 branchyard-substrate = { path = "../branchyard-substrate", features = ["fake"] }
-tempfile = "3.27.0"
+tempfile = { workspace = true }

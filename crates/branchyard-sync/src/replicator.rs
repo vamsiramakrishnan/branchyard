@@ -177,7 +177,7 @@ impl Replicator {
     }
 
     /// Sync one task now, recording the outcome. A fenced task is refused
-    /// ([`Kind::LeaseHeld`]) and left queued.
+    /// (`Kind::LeaseHeld`) and left queued.
     pub fn sync_task(&self, task: &str) -> Result<SyncReport> {
         if let Some(reason) = self.fenced(task) {
             return Err(Error::new(

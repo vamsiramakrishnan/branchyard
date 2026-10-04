@@ -31,7 +31,7 @@
 //!   machine shares; `BRANCHYARD_REGISTRY` names another file, to share one
 //!   registry between repositories. A server keeps its fleet's records in
 //!   its operation store, in SQLite or PostgreSQL, through the same
-//!   operations ([`sqlite`], [`pg`]).
+//!   operations ([`sqlite`], `pg`).
 //!
 //! Times are milliseconds since the Unix epoch, from the caller's
 //! [`Clock`], so a test can move time without waiting.
@@ -82,7 +82,7 @@ pub const MIN_TTL: Duration = Duration::from_secs(1);
 /// The longest lease a registrant may ask for.
 pub const MAX_TTL: Duration = Duration::from_secs(24 * 3600);
 /// How long a record that left or was reclaimed stays listed (for `by
-/// services` and watchers) before [`prune`] removes it.
+/// services` and watchers) before `prune` removes it.
 pub const KEEP_ENDED: Duration = Duration::from_secs(3600);
 /// How long a reclaim may stay under way before another reaper takes it
 /// over (its reaper stopped mid-way).

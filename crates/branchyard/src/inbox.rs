@@ -59,7 +59,7 @@ pub(crate) const CLOSE_TAG: &str = "</branchyard-inbox>";
 /// running. Every [`Yard`] starts with [`SteerDelivery`]; replace it with
 /// [`crate::Yard::set_delivery_hook`], or clear it with
 /// [`crate::Yard::clear_delivery_hook`] so that every message waits for the
-/// branch's next turn to start ([`begin_submit`]).
+/// branch's next turn to start (`begin_submit`).
 pub trait DeliveryHook: Send + Sync {
     /// Try to deliver `message` to `branch`'s current turn right now, from
     /// `yard`. `true` acknowledges it: it will not be delivered again, at a

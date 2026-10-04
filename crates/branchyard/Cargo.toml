@@ -19,7 +19,7 @@ schema = ["dep:schemars", "branchyard-provision/schema", "branchyard-harness/sch
 
 [dependencies]
 branchyard-support = { path = "../branchyard-support" }
-blake3 = "1"
+blake3 = { workspace = true }
 branchyard-bridge = { path = "../branchyard-bridge" }
 branchyard-controls = { path = "../branchyard-controls" }
 branchyard-harness = { path = "../branchyard-harness" }
@@ -30,39 +30,39 @@ branchyard-sandbox = { path = "../branchyard-sandbox" }
 branchyard-recipe = { path = "../branchyard-recipe" }
 branchyard-substrate = { path = "../branchyard-substrate" }
 branchyard-workspace = { path = "../branchyard-workspace" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 # Enum text for stored columns (Display/EnumString derives), see
 # src/store_codec.rs. Already in Cargo.lock at this version.
 strum = { version = "0.28", features = ["derive"] }
-rusqlite = { version = "0.39", default-features = false, features = ["bundled"] }
-postgres = { version = "0.19", optional = true }
-tokio = { version = "1", optional = true, default-features = false, features = ["rt"] }
-schemars = { version = "1", optional = true }
-glob = "0.3"
+rusqlite = { workspace = true }
+postgres = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["rt"], optional = true }
+schemars = { workspace = true, optional = true }
+glob = { workspace = true }
 # Connector gateway tokens: Ed25519 (EdDSA) signatures over compact JWS,
 # and their base64url encoding. Both already in Cargo.lock.
-ring = "0.17"
-base64 = "0.22"
+ring = { workspace = true }
+base64 = { workspace = true }
 # The deterministic bundle writer and reader (src/tarball.rs). Already in Cargo.lock.
 tar = { version = "0.4", default-features = false }
-percent-encoding = "2"
-hex = "0.4"
-url = "2"
+percent-encoding = { workspace = true }
+hex = { workspace = true }
+url = { workspace = true }
 # The model gateway (docs/model-gateway.md): its HTTP/1.1 wire codec, TLS to
 # backends with the Mozilla roots, and catalog/pricing.toml. All already
 # in Cargo.lock.
 branchyard-wire = { path = "../branchyard-wire" }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-webpki-roots = "1"
-toml_edit = { version = "0.25", default-features = false, features = ["parse", "serde"] }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+toml_edit = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 branchyard-testkit = { path = "../branchyard-testkit" }
 branchyard-support = { path = "../branchyard-support", features = ["testing"] }
 branchyard-substrate = { path = "../branchyard-substrate", features = ["fake"] }
-rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
-tempfile = "3.27.0"
+rcgen = { workspace = true }
+tempfile = { workspace = true }
 
 [target."cfg(unix)".dependencies]
-rustix = { version = "1.1", default-features = false, features = ["std", "process"] }
+rustix = { workspace = true }

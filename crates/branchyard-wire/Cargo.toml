@@ -8,4 +8,4 @@ description = "The one HTTP/1.1 wire codec: request and response heads, body fra
 
 [dependencies]
 # Head parsing. Already in Cargo.lock.
-httparse = "1"
+httparse = { workspace = true }

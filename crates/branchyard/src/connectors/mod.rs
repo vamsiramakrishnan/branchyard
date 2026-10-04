@@ -5,7 +5,7 @@
 //! Branchyard is the access broker. A branch's grant
 //! ([`Provisioning::connectors`](crate::Provisioning::connectors)) is
 //! stored with it; a delegated child's is narrowed to its parent's. When a
-//! turn of a branch with a grant starts, [`prepare`] checks every granted
+//! turn of a branch with a grant starts, `prepare` checks every granted
 //! connector is one the gateway serves, places each one's harness package
 //! and the grant's `INDEX.md` under `~/.branchyard/connectors/` in the
 //! branch's private home, signs a token for the turn with the yard's
@@ -13,7 +13,7 @@
 //! variables the harness's Anvil CLIs and SDKs read. The gateway verifies
 //! the token against the yard's public keys and enforces the grant;
 //! [`ingest`] records each line of its audit log on the branch it names as
-//! an [`Activity::ConnectorCall`](crate::Activity::ConnectorCall).
+//! an [`Activity::ConnectorCall`].
 
 pub mod gateway;
 pub mod keys;

@@ -7,6 +7,7 @@ A page that opens with a date line ("Written 30 September 2026 ...", "Prepared
 a table row whose result cell starts with a date. Update the opening line when
 you add a newer one. No network checks.
 """
+
 import re
 from datetime import date
 from pathlib import Path

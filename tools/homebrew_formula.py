@@ -6,6 +6,7 @@
 Fails when SHA256SUMS lacks an archive the formula names. Publishes
 nothing. See docs/distribution.md.
 """
+
 import argparse
 import re
 import sys
@@ -50,7 +51,7 @@ def main():
     try:
         sys.stdout.write(render(args.version.lstrip("v"), args.sums.read_text()))
     except ValueError as error:
-        raise SystemExit(f"homebrew_formula.py: {error}")
+        raise SystemExit(f"homebrew_formula.py: {error}") from error
 
 
 if __name__ == "__main__":
