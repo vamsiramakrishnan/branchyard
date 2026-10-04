@@ -30,6 +30,7 @@ allowlist shrinks as the code does and never grows.
 
 Run `python3 tools/check_wire.py`; `--list` prints the current counts.
 """
+
 import json
 import re
 import sys
@@ -79,9 +80,7 @@ def scan(root=ROOT):
                             "branchyard_wire::ChunkedReader (or parse_chunk_size)"
                         )
             if HTTPARSE.search(text):
-                problems.append(
-                    f"{rel}: uses httparse; use branchyard_wire's heads instead"
-                )
+                problems.append(f"{rel}: uses httparse; use branchyard_wire's heads instead")
     for manifest in sorted((root / "crates").glob("*/Cargo.toml")):
         rel = manifest.relative_to(root).as_posix()
         if rel.startswith(WIRE):
@@ -111,8 +110,7 @@ def compare(counts, allowed):
                 )
             elif have < may:
                 problems.append(
-                    f"{rel}: {kind} fell to {have} (ratchet says {may}); lower it in "
-                    f"{RATCHET} so it can only fall"
+                    f"{rel}: {kind} fell to {have} (ratchet says {may}); lower it in {RATCHET} so it can only fall"
                 )
     return problems
 

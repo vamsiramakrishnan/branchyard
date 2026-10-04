@@ -3,6 +3,7 @@
 tree: a fact derived from the code cannot be hand-edited or go stale, a new
 route needs documenting, the allowlist only shrinks, and an opening date line
 cannot be older than a dated section below it."""
+
 import json
 import re
 import shutil
@@ -45,8 +46,9 @@ class Tree(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_tool(self, *args):
-        return subprocess.run([sys.executable, str(self.root / "tools" / args[0]), *args[1:]],
-                              capture_output=True, text=True)
+        return subprocess.run(
+            [sys.executable, str(self.root / "tools" / args[0]), *args[1:]], capture_output=True, text=True
+        )
 
     def facts(self, *args):
         return self.run_tool("docs_facts.py", *args)
@@ -60,8 +62,9 @@ class Tree(unittest.TestCase):
 
 class DocsFacts(Tree):
     def test_the_repository_is_current(self):
-        done = subprocess.run([sys.executable, str(REPO / "tools" / "docs_facts.py"), "--check"],
-                              capture_output=True, text=True)
+        done = subprocess.run(
+            [sys.executable, str(REPO / "tools" / "docs_facts.py"), "--check"], capture_output=True, text=True
+        )
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
     def test_a_vendored_file_added_without_write_fails(self):
@@ -165,25 +168,35 @@ class DateOrder(unittest.TestCase):
         return check_docs.date_problems(REPO / "docs" / "dated.md", text)
 
     def test_the_repository_dates_run_forwards(self):
-        done = subprocess.run([sys.executable, str(REPO / "tools" / "check_docs.py")],
-                              capture_output=True, text=True)
+        done = subprocess.run([sys.executable, str(REPO / "tools" / "check_docs.py")], capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
     def test_an_opening_date_older_than_a_status_paragraph_fails(self):
-        found = self.problems("# Dated\n\nWritten 30 September 2026 from studies.\n\n"
-                              "**Status, 3 October 2026.** Done.\n")
+        found = self.problems(
+            "# Dated\n\nWritten 30 September 2026 from studies.\n\n**Status, 3 October 2026.** Done.\n"
+        )
         self.assertEqual(len(found), 1)
         self.assertIn("docs/dated.md:5", found[0])
 
     def test_a_table_row_dated_after_the_opening_line_fails(self):
-        self.assertEqual(len(self.problems(
-            "# Dated\n\nPrepared 1 October 2026.\n\n| Check | Result |\n|---|---|\n"
-            "| Sync | 3 October 2026, hermetic |\n")), 1)
+        self.assertEqual(
+            len(
+                self.problems(
+                    "# Dated\n\nPrepared 1 October 2026.\n\n| Check | Result |\n|---|---|\n"
+                    "| Sync | 3 October 2026, hermetic |\n"
+                )
+            ),
+            1,
+        )
 
     def test_an_updated_opening_line_passes(self):
-        self.assertEqual(self.problems(
-            "# Dated\n\nWritten 30 September 2026 and updated 3 October 2026.\n\n"
-            "**Status, 3 October 2026.** Done.\n"), [])
+        self.assertEqual(
+            self.problems(
+                "# Dated\n\nWritten 30 September 2026 and updated 3 October 2026.\n\n"
+                "**Status, 3 October 2026.** Done.\n"
+            ),
+            [],
+        )
 
     def test_a_page_without_an_opening_date_is_not_checked(self):
         self.assertEqual(self.problems("# Dated\n\nNothing here.\n\n**Status, 3 October 2026.** Done.\n"), [])

@@ -31,8 +31,7 @@ BASELINE = ROOT / "tools" / "silent_failures.json"
 LET_UNDERSCORE = re.compile(r"^\s*let _ = ", re.M)
 # The idiom in any spelling, found on text with whitespace removed.
 CLOSURE_IDIOM = re.compile(r"unwrap_or_else\(\|(\w+)\|\1\.into_inner\(\)\)")
-PATH_IDIOM = ("unwrap_or_else(PoisonError::into_inner)",
-              "unwrap_or_else(std::sync::PoisonError::into_inner)")
+PATH_IDIOM = ("unwrap_or_else(PoisonError::into_inner)", "unwrap_or_else(std::sync::PoisonError::into_inner)")
 # branchyard-support implements the helpers and documents the idiom.
 EXEMPT = {"crates/branchyard-support/src/locks.rs"}
 
@@ -67,15 +66,14 @@ def check(counts, idiom_files, baseline):
     problems = []
     for rel in idiom_files:
         problems.append(
-            f"{rel}: retypes the poison-recovery idiom; use "
-            "branchyard_support::LockExt::lock_recovering(\"name\")"
+            f'{rel}: retypes the poison-recovery idiom; use branchyard_support::LockExt::lock_recovering("name")'
         )
     for crate in sorted(set(counts) | set(baseline)):
         now, allowed = counts.get(crate, 0), baseline.get(crate, 0)
         if now > allowed:
             problems.append(
                 f"{crate}: {now} `let _ =` (baseline {allowed}); use "
-                "branchyard_support::best_effort(\"what\", expr) so the failure is logged"
+                'branchyard_support::best_effort("what", expr) so the failure is logged'
             )
         elif now < allowed:
             problems.append(

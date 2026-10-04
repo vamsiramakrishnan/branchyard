@@ -2,6 +2,7 @@
 """tools/check_test_hygiene.py against small fixture trees, and against this
 repository: a local wait_until, fake_agent or raw sleep in a test fails; the
 counted ratchets (settle, temp_dir, tcp_listener) can fall but not grow."""
+
 import json
 import sys
 import tempfile
@@ -9,7 +10,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-import check_test_hygiene as hygiene  # noqa: E402
+import check_test_hygiene as hygiene
 
 
 class Hygiene(unittest.TestCase):
@@ -17,7 +18,7 @@ class Hygiene(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         (self.root / "tools").mkdir()
-        self.write("crates/a/tests/ok.rs", "use branchyard_testkit::wait;\nfn t() { wait::until(\"x\", || true); }\n")
+        self.write("crates/a/tests/ok.rs", 'use branchyard_testkit::wait;\nfn t() { wait::until("x", || true); }\n')
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -77,7 +78,7 @@ class Hygiene(unittest.TestCase):
         self.assertEqual(len(self.problems()), 1)
 
     def test_a_ratchet_count_may_not_grow(self):
-        self.write("crates/a/tests/s.rs", "fn t() { wait::settle(\"w\", D); wait::settle(\"w\", D); }\n")
+        self.write("crates/a/tests/s.rs", 'fn t() { wait::settle("w", D); wait::settle("w", D); }\n')
         self.ratchet(settle={"crates/a/tests/s.rs": 1})
         found = self.problems()
         self.assertEqual(len(found), 1, found)
@@ -92,14 +93,14 @@ class Hygiene(unittest.TestCase):
         self.assertEqual(len(self.problems()), 2)
 
     def test_a_ratchet_that_is_too_high_must_be_lowered(self):
-        self.write("crates/a/tests/s.rs", "fn t() { wait::settle(\"w\", D); }\n")
+        self.write("crates/a/tests/s.rs", 'fn t() { wait::settle("w", D); }\n')
         self.ratchet(settle={"crates/a/tests/s.rs": 3})
         found = self.problems()
         self.assertEqual(len(found), 1, found)
         self.assertIn("still allows 3", found[0])
 
     def test_lower_rewrites_only_downwards(self):
-        self.write("crates/a/tests/s.rs", "fn t() { wait::settle(\"w\", D); }\n")
+        self.write("crates/a/tests/s.rs", 'fn t() { wait::settle("w", D); }\n')
         self.ratchet(
             settle={"crates/a/tests/s.rs": 3, "crates/a/tests/gone.rs": 2},
             temp_dir={},
@@ -109,7 +110,7 @@ class Hygiene(unittest.TestCase):
         data = json.loads((self.root / hygiene.RATCHET).read_text())
         self.assertEqual(data["settle"], {"crates/a/tests/s.rs": 1})
         # Growing is never rewritten: it still fails.
-        self.write("crates/a/tests/s.rs", "fn t() { wait::settle(\"w\", D); wait::settle(\"w\", D); }\n")
+        self.write("crates/a/tests/s.rs", 'fn t() { wait::settle("w", D); wait::settle("w", D); }\n')
         self.assertEqual(len(self.problems(lower=True)), 1)
 
     def test_this_repository_passes(self):

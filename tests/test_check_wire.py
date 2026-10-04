@@ -2,6 +2,7 @@
 """tools/check_wire.py against small fixture trees: the hard rules (a chunk
 size parsed by hand, httparse outside the wire crate), the ratchet (a count
 may fall, never rise, and the file list never grows), and the real tree."""
+
 import json
 import sys
 import tempfile
@@ -9,7 +10,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-import check_wire  # noqa: E402
+import check_wire
 
 CHUNK_PARSER = """
 fn read_chunk(line: &str) -> usize {
@@ -100,7 +101,7 @@ class CheckWire(unittest.TestCase):
     def test_a_hand_written_head_reader_is_counted(self):
         self.write(
             "crates/a/src/lib.rs",
-            'fn head(r: &mut impl std::io::BufRead) { let _ = "HTTP/1.1"; r.read_until(b\'\\n\', &mut Vec::new()); }\n',
+            "fn head(r: &mut impl std::io::BufRead) { let _ = \"HTTP/1.1\"; r.read_until(b'\\n', &mut Vec::new()); }\n",
         )
         self.assert_problem("1 hand_written_heads (ratchet allows 0)")
 

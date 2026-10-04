@@ -2,8 +2,9 @@
 """Documentation facts derived from the code, not typed by hand.
 
 Counts, lists and matrices that the code already knows (how many files are
-vendored, how many derivatives follow how many vendored sources, which crates exist, how many tests there are, which environment
-prefixes the runtime strips, which routes the server registers) are computed
+vendored, how many derivatives follow how many vendored sources, which crates
+exist, how many tests there are, which environment prefixes the runtime
+strips, which routes the server registers) are computed
 here from the source of truth and written in two places:
 
 - docs/facts.json, the full set, committed so a change shows in review;
@@ -27,6 +28,7 @@ The test count is every `#[test]` and `#[tokio::test]` attribute in `src` and
 default `cargo test --workspace` runs, and the Markdown must not say so.
 No network, no build: everything here is read from files.
 """
+
 import argparse
 import json
 import re
@@ -75,6 +77,7 @@ def vendor_facts():
 
 def derivative_facts():
     """Derivatives and the vendored sources they follow, as tools/verify_derivatives.py counts them."""
+
     def load(name):
         return json.loads((ROOT / "patches" / name).read_text())
 
@@ -151,11 +154,7 @@ def join_and(items):
 def regions(facts):
     """Every region name the Markdown may use, with its exact rendering."""
     vendor, tests, derived = facts["vendor"], facts["tests"], facts["derivatives"]
-    by_crate = [
-        f"{count['tests']} in `{name}`"
-        for name, count in tests["by_crate"].items()
-        if count["tests"]
-    ]
+    by_crate = [f"{count['tests']} in `{name}`" for name, count in tests["by_crate"].items() if count["tests"]]
     return {
         "vendor.files": str(vendor["files"]),
         "vendor.sources": join_and([f"{n} from {s}" for s, n in vendor["by_source"].items()]),
@@ -216,17 +215,12 @@ def coverage(facts):
     missing = {r for r in facts["http"]["routes"] if not route_documented(r, lines)}
     allowed = set()
     if ALLOW.exists():
-        allowed = {
-            line.strip() for line in ALLOW.read_text().splitlines()
-            if line.strip() and not line.startswith("#")
-        }
+        allowed = {line.strip() for line in ALLOW.read_text().splitlines() if line.strip() and not line.startswith("#")}
     problems = []
     for route in sorted(missing - allowed):
         problems.append(f"route {route} is documented in neither docs/server.md nor docs/surfaces.md")
     for route in sorted(allowed - missing):
-        problems.append(
-            f"tools/docs_facts_allow.txt lists {route}, which is documented or gone now; remove it"
-        )
+        problems.append(f"tools/docs_facts_allow.txt lists {route}, which is documented or gone now; remove it")
     return problems
 
 
@@ -258,15 +252,18 @@ def main():
         if args.write:
             path.write_text(updated)
         else:
-            problems.append(f"{name}: a generated fact was edited by hand or is stale; "
-                            "run python3 tools/docs_facts.py --write")
+            problems.append(
+                f"{name}: a generated fact was edited by hand or is stale; run python3 tools/docs_facts.py --write"
+            )
 
     if args.check:
         problems += coverage(facts)
     if problems:
         sys.exit("docs facts differ from the code:\n" + "\n".join(f"  {p}" for p in problems))
-    print(f"docs facts: {len(rendered)} fact kinds, {len(used)} used in the Markdown, "
-          f"{facts['http']['route_count']} routes checked.")
+    print(
+        f"docs facts: {len(rendered)} fact kinds, {len(used)} used in the Markdown, "
+        f"{facts['http']['route_count']} routes checked."
+    )
 
 
 if __name__ == "__main__":

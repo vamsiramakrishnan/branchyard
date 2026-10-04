@@ -29,6 +29,7 @@ lowered with --lower):
 
 Usage: tools/check_test_hygiene.py [--lower]
 """
+
 import json
 import re
 import sys
@@ -48,7 +49,7 @@ BANNED_FNS = (
     "until",
     "poll_until",
 )
-FN_RE = re.compile(r"\bfn\s+(%s)\b" % "|".join(BANNED_FNS))
+FN_RE = re.compile(rf"\bfn\s+({'|'.join(BANNED_FNS)})\b")
 SLEEP_RE = re.compile(r"\bthread::sleep\b|\btime::sleep\b")
 
 RATCHETED = {
@@ -57,8 +58,7 @@ RATCHETED = {
     "tcp_listener": re.compile(r"\bTcpListener::bind\("),
 }
 ADVICE = {
-    "settle": "wait::settle is for time that must pass; if an event marks the "
-    "moment, wait::until it instead",
+    "settle": "wait::settle is for time that must pass; if an event marks the moment, wait::until it instead",
     "temp_dir": "use branchyard_testkit::Scratch (or Repo) for a scratch directory",
     "tcp_listener": "use branchyard_testkit::MockHttp for a mock server",
 }
@@ -100,7 +100,7 @@ def scan(root):
                 violations.append(
                     f"{rel}:{number}: raw sleep in a test; wait for the event "
                     "with wait::until, or say why time must pass with "
-                    "wait::settle(\"why\", duration)"
+                    'wait::settle("why", duration)'
                 )
             for name, pattern in RATCHETED.items():
                 found = len(pattern.findall(line))
@@ -130,9 +130,7 @@ def check(root, lower=False):
             have = counts[name].get(rel, 0)
             may = allowed[name].get(rel, 0)
             if have > may:
-                problems.append(
-                    f"{rel}: {have} {name} (the ratchet allows {may}); {ADVICE[name]}"
-                )
+                problems.append(f"{rel}: {have} {name} (the ratchet allows {may}); {ADVICE[name]}")
             elif have < may:
                 if lower:
                     changed = True

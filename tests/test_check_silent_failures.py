@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("check", ROOT / "tools" / "check_silent_failures.py")
+assert spec is not None and spec.loader is not None
 check = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check)
 

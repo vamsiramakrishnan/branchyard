@@ -14,11 +14,24 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
-MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
-          "September", "October", "November", "December"]
-DATE = re.compile(r"\b(\d{1,2}) (%s) (\d{4})\b" % "|".join(MONTHS))
+MONTHS = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+]
+MONTH_NAMES = "|".join(MONTHS)
+DATE = re.compile(rf"\b(\d{{1,2}}) ({MONTH_NAMES}) (\d{{4}})\b")
 FRONT = re.compile(r"(Written|Prepared|Updated|Last updated|Set) ")
-SECTION = re.compile(r"(\*\*Status|Written |Set |\| [^|]*\| *(\*\*)?\d{1,2} (%s) \d{4})" % "|".join(MONTHS))
+SECTION = re.compile(rf"(\*\*Status|Written |Set |\| [^|]*\| *(\*\*)?\d{{1,2}} ({MONTH_NAMES}) \d{{4}})")
 
 
 def dates(text):
@@ -35,7 +48,7 @@ def date_problems(source, text):
     if not opening:
         return []
     problems = []
-    for number, line in enumerate(lines[front + 1:], front + 2):
+    for number, line in enumerate(lines[front + 1 :], front + 2):
         if not SECTION.match(line):
             continue
         # A table row's date opens its second cell; otherwise look near the start.
@@ -64,7 +77,10 @@ def main():
                 errors.append(f"{source.relative_to(ROOT)} -> {target}")
     if errors:
         raise SystemExit("Documentation problems (broken local links, or dates out of order):\n" + "\n".join(errors))
-    print(f"Verified local file links and date order in {len(files)} documentation files (anchors and external URLs excluded).")
+    print(
+        f"Verified local file links and date order in {len(files)} documentation files "
+        "(anchors and external URLs excluded)."
+    )
 
 
 if __name__ == "__main__":

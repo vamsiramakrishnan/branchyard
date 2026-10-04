@@ -19,6 +19,7 @@ main one.
     python3 tools/check_missing_docs.py           check against the ratchet
     python3 tools/check_missing_docs.py --write   record the current counts
 """
+
 import json
 import os
 import subprocess
@@ -34,8 +35,7 @@ def count():
     env = dict(os.environ)
     env["RUSTFLAGS"] = (env.get("RUSTFLAGS", "") + " -W missing_docs").strip()
     env["CARGO_TARGET_DIR"] = str(Path(env.get("CARGO_TARGET_DIR", ROOT / "target")) / "missing-docs")
-    command = ["cargo", "check", "--workspace", "--lib", "--locked", "--offline",
-               "--message-format=json"]
+    command = ["cargo", "check", "--workspace", "--lib", "--locked", "--offline", "--message-format=json"]
     done = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True)
     if done.returncode != 0:
         sys.exit(f"cargo check failed:\n{done.stderr[-2000:]}")
@@ -74,8 +74,9 @@ def main():
         if now > before:
             problems.append(f"{name}: {now} undocumented public items, up from {before}; document the new ones")
         elif now < before:
-            problems.append(f"{name}: down to {now} from {before}; lower it with "
-                            "python3 tools/check_missing_docs.py --write")
+            problems.append(
+                f"{name}: down to {now} from {before}; lower it with python3 tools/check_missing_docs.py --write"
+            )
     if problems:
         sys.exit("missing_docs ratchet:\n" + "\n".join(f"  {p}" for p in problems))
     print(f"missing_docs: {sum(counts.values())} undocumented public items, none more than recorded.")

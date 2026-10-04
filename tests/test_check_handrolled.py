@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """tools/check_handrolled.py passes on this tree and fails when a banned codec
 is re-added, when the ratchet is not lowered, and on a stale allowlist row."""
+
 import importlib.util
 import shutil
 import tempfile
@@ -9,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("check_handrolled", ROOT / "tools/check_handrolled.py")
+assert spec is not None and spec.loader is not None
 check_handrolled = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check_handrolled)
 

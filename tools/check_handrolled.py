@@ -15,6 +15,7 @@ only fall. Rows for other mechanisms are appended to the same file.
 
 Usage: tools/check_handrolled.py [--root DIR] [--banlist FILE]
 """
+
 import argparse
 import re
 import sys
@@ -91,9 +92,7 @@ def check(root, banlist):
         row = allow.get((ban_id, path))
         where = ", ".join(f"{path}:{n}" for n in lines)
         if row is None:
-            errors.append(
-                f"[{ban_id}] hand-rolled codec at {where}\n    use {bans[ban_id]['use']}"
-            )
+            errors.append(f"[{ban_id}] hand-rolled codec at {where}\n    use {bans[ban_id]['use']}")
         elif len(lines) > row["count"]:
             errors.append(
                 f"[{ban_id}] {path} has {len(lines)} matches, the allowlist permits "
@@ -104,11 +103,9 @@ def check(root, banlist):
                 f"[{ban_id}] {path} has {len(lines)} matches but the allowlist says "
                 f"{row['count']}: lower the count (or delete the row) so it only falls"
             )
-    for (ban_id, path), row in sorted(allow.items()):
+    for ban_id, path in sorted(allow):
         if (ban_id, path) not in found:
-            errors.append(
-                f"[{ban_id}] allowlist row for {path} matches nothing: delete it"
-            )
+            errors.append(f"[{ban_id}] allowlist row for {path} matches nothing: delete it")
     return errors, found, allow
 
 
@@ -118,9 +115,9 @@ def main(argv=None):
     parser.add_argument("--banlist", type=Path)
     args = parser.parse_args(argv)
     banlist = args.banlist or args.root / "tools" / "handrolled_banlist.toml"
-    errors, found, allow = check(args.root, banlist)
+    errors, _found, allow = check(args.root, banlist)
     if errors:
-        print("Hand-rolled codecs (see CONTRIBUTING.md, \"Use a vetted crate\"):", file=sys.stderr)
+        print('Hand-rolled codecs (see CONTRIBUTING.md, "Use a vetted crate"):', file=sys.stderr)
         for error in errors:
             print(f"  {error}", file=sys.stderr)
         return 1
