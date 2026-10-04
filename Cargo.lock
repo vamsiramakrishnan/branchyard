@@ -833,7 +833,6 @@ version = "0.0.1"
 dependencies = [
  "branchyard-sandbox",
  "branchyard-support",
- "rustix",
  "serde",
  "serde_json",
  "shlex",
@@ -885,7 +884,6 @@ dependencies = [
  "reqwest",
  "ring",
  "rusqlite",
- "rustix",
  "rustls",
  "schemars 1.2.2",
  "serde",

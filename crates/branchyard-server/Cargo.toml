@@ -53,8 +53,6 @@ branchyard-setup = { version = "0.0.1", path = "../branchyard-setup" }
 branchyard-sync = { path = "../branchyard-sync" }
 # Cron schedules in a time zone (docs/triggers.md). Already in Cargo.lock.
 jiff = { workspace = true, features = ["default"] }
-# A trigger precheck's process group, stopped on a timeout.
-rustix = { workspace = true }
 # The web companion's pairing secrets, VAPID signing and Web Push
 # encryption (docs/companion.md); both already in Cargo.lock (ring via
 # rustls).

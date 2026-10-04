@@ -13,8 +13,6 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 # Shell words quoted for a remote `sh -c`. Already in Cargo.lock.
 shlex = { workspace = true }
-# A recipe script's process group, stopped on a timeout. Already in Cargo.lock.
-rustix = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
