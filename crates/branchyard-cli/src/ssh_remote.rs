@@ -40,6 +40,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
+use branchyard_recipe::quote;
 use serde_json::json;
 
 use crate::commands::{print, Failure, Outcome};
@@ -141,15 +142,7 @@ impl SshUrl {
 
 fn digest(text: &str) -> String {
     use sha2::{Digest, Sha256};
-    Sha256::digest(text.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-/// One single-quoted shell word.
-pub fn quote(word: &str) -> String {
-    format!("'{}'", word.replace('\'', "'\\''"))
+    hex::encode(Sha256::digest(text.as_bytes()))
 }
 
 /// This machine's directory for one remote, and the files in it.
@@ -463,9 +456,16 @@ fn arguments(url: &SshUrl) -> Vec<String> {
         .unwrap_or_else(|| "by".into());
     let mut args = vec![url.path.clone(), url.remote_key(), by];
     if let Ok(extra) = std::env::var("BRANCHYARD_SSH_SERVE_ARGS") {
-        args.extend(extra.split_whitespace().map(str::to_owned));
+        args.extend(serve_args(&extra));
     }
     args
+}
+
+/// `BRANCHYARD_SSH_SERVE_ARGS` as shell words, so an argument can hold
+/// spaces when quoted. Text with an unterminated quote falls back to
+/// whitespace splitting, as it always has.
+fn serve_args(text: &str) -> Vec<String> {
+    shlex::split(text).unwrap_or_else(|| text.split_whitespace().map(str::to_owned).collect())
 }
 
 fn remote_failure(what: &str, url: &SshUrl, out: &Output) -> Failure {
@@ -695,8 +695,21 @@ mod tests {
 
     #[test]
     fn words_are_quoted_for_the_remote_shell() {
-        assert_eq!(quote("a b"), "'a b'");
-        assert_eq!(quote("it's"), "'it'\\''s'");
+        for word in ["a b", "it's", "", "$HOME `x` \"q\" \\ ;&|*", "plain-1.2/x"] {
+            assert_eq!(shlex::split(&quote(word)).unwrap(), [word], "{word:?}");
+        }
+        assert_eq!(quote("plain"), "plain");
+    }
+
+    #[test]
+    fn serve_arguments_split_like_a_shell() {
+        assert_eq!(serve_args("--a --b"), ["--a", "--b"]);
+        assert_eq!(
+            serve_args("--label 'two words' --name=\"x y\""),
+            ["--label", "two words", "--name=x y"]
+        );
+        assert_eq!(serve_args("--bad 'open"), ["--bad", "'open"]);
+        assert!(serve_args("  ").is_empty());
     }
 
     /// The vendored emdash sources still have the shape this follows

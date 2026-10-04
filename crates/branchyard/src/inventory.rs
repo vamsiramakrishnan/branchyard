@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use branchyard_controls::catalog;
+use branchyard_recipe::quote;
 use serde::{Deserialize, Serialize};
 
 /// Labels derived from an inventory: `harness:<id>` for each harness that
@@ -474,11 +475,6 @@ impl DetectOptions {
             })
             .collect()
     }
-}
-
-/// One single-quoted shell word.
-fn quote(word: &str) -> String {
-    format!("'{}'", word.replace('\'', "'\\''"))
 }
 
 /// A directory as a shell word: `$HOME/x` keeps `$HOME` for the machine to
@@ -1664,10 +1660,10 @@ mod tests {
             ..DetectOptions::default()
         });
         assert!(text.contains("[ -n \"${OPENAI_API_KEY:-}\" ] && echo 'env codex OPENAI_API_KEY'"));
-        assert!(text.contains("'login' 'status'"));
+        assert!(text.contains(" login status"));
         assert!(!text.contains("echo \"$OPENAI_API_KEY"));
         assert!(!text.contains("checked claude-code"));
-        assert!(text.contains("\"$HOME\"/'.local/bin'"));
+        assert!(text.contains("\"$HOME\"/.local/bin"));
     }
 
     #[test]

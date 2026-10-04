@@ -142,14 +142,10 @@ pub fn in_directory(cwd: Option<&str>, command: String) -> String {
 
 /// `word` quoted for `sh` where it needs it.
 pub fn quote_word(word: &str) -> String {
-    let plain = !word.is_empty()
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_./-+=:@%".contains(c));
-    match plain {
-        true => word.to_owned(),
-        false => format!("'{}'", word.replace('\'', "'\\''")),
-    }
+    // Only a NUL byte cannot be quoted, and no shell word holds one.
+    shlex::try_quote(&word.replace('\0', ""))
+        .map(|quoted| quoted.into_owned())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -189,6 +185,9 @@ mod tests {
         );
         assert_eq!(in_directory(Some("."), "bun dev".into()), "bun dev");
         assert_eq!(in_directory(Some("my app"), "x".into()), "cd 'my app' && x");
-        assert_eq!(quote_word("it's"), "'it'\\''s'");
+        for word in ["it's", "a b", "", "$x `y`", "plain-1.2/x"] {
+            assert_eq!(shlex::split(&quote_word(word)).unwrap(), [word], "{word:?}");
+        }
+        assert_eq!(quote_word("plain"), "plain");
     }
 }

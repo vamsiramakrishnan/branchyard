@@ -4191,21 +4191,10 @@ pub fn server_call(args: &[OsString]) -> Option<ServerCall> {
     })
 }
 
-/// Split a command line into words the way a POSIX shell quotes them:
-/// single quotes, double quotes, backslash escapes, and `#` comments. There
-/// is no variable, glob or operator expansion; the result runs without a
-/// shell.
-pub fn split_words(line: &str) -> Result<Vec<String>, String> {
-    shlex::split(line).ok_or_else(|| "unterminated quote or trailing backslash".to_owned())
-}
+pub use branchyard_setup::config::split_words;
 
 /// Quote `word` for a POSIX shell, leaving plain words as they are.
-pub fn shell_quote(word: &str) -> String {
-    // Only a NUL byte cannot be quoted; no branch name holds one.
-    shlex::try_quote(&word.replace('\0', ""))
-        .map(|quoted| quoted.into_owned())
-        .unwrap_or_default()
-}
+pub use branchyard_recipe::quote as shell_quote;
 
 // Value parsers. Each error reads after "invalid value 'X' for '--flag
 // <VALUE>': ".

@@ -2331,62 +2331,11 @@ fn flatten_into(prefix: &str, map: &Map<String, Value>, flat: &mut BTreeMap<Stri
     }
 }
 
-/// Split a command line like a shell does for `--check`: whitespace,
-/// single and double quotes, backslash escapes.
+/// Split a command line like a shell does for `--check` and `--command`:
+/// single and double quotes, backslash escapes and `#` comments. There is no
+/// variable, glob or operator expansion; the result runs without a shell.
 pub fn split_words(line: &str) -> Result<Vec<String>, String> {
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut in_word = false;
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\'' => {
-                in_word = true;
-                loop {
-                    match chars.next() {
-                        Some('\'') => break,
-                        Some(c) => word.push(c),
-                        None => return Err("unterminated single quote".into()),
-                    }
-                }
-            }
-            '"' => {
-                in_word = true;
-                loop {
-                    match chars.next() {
-                        Some('"') => break,
-                        Some('\\') => match chars.next() {
-                            Some(c) => word.push(c),
-                            None => return Err("unterminated double quote".into()),
-                        },
-                        Some(c) => word.push(c),
-                        None => return Err("unterminated double quote".into()),
-                    }
-                }
-            }
-            '\\' => {
-                in_word = true;
-                match chars.next() {
-                    Some(c) => word.push(c),
-                    None => return Err("trailing backslash".into()),
-                }
-            }
-            c if c.is_whitespace() => {
-                if in_word {
-                    words.push(std::mem::take(&mut word));
-                    in_word = false;
-                }
-            }
-            c => {
-                in_word = true;
-                word.push(c);
-            }
-        }
-    }
-    if in_word {
-        words.push(word);
-    }
-    Ok(words)
+    shlex::split(line).ok_or_else(|| "unterminated quote or trailing backslash".to_owned())
 }
 
 /// A TOML string literal.
