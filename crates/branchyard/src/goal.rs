@@ -589,7 +589,10 @@ pub(crate) fn pursue(yard: &Yard, branch: Branch, options: &TaskOptions) -> Resu
                 ),
             };
             recorder.finish(lease, &record)?;
-            best_effort("fleet.observe", crate::fleet::observe(yard, &name, None));
+            best_effort(
+                "record the fleet outcome",
+                crate::fleet::observe(yard, &name, None),
+            );
             return yard.branch(&name);
         }
         goal.used += 1;

@@ -86,10 +86,10 @@ impl DirLock {
         }
         // Who holds it, for the next process's error; the lock itself does
         // not depend on this.
-        best_effort("file.set_len", file.set_len(0));
-        best_effort("file.seek", file.seek(SeekFrom::Start(0)));
+        best_effort("truncate the lock file", file.set_len(0));
+        best_effort("rewind the lock file", file.seek(SeekFrom::Start(0)));
         let _ = writeln!(file, "{what} (pid {})", std::process::id());
-        best_effort("file.sync_data", file.sync_data());
+        best_effort("sync the lock file", file.sync_data());
         Ok(DirLock { path, _file: file })
     }
 

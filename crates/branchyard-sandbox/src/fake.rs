@@ -250,7 +250,7 @@ impl FakeProvider {
         if let Some(sandbox) = self.lock().sandboxes.remove(name) {
             branchyard_support::cleanup_dir(sandbox.rootfs);
         }
-        branchyard_support::best_effort("self.inner.destroy", self.inner.destroy(name));
+        branchyard_support::best_effort("destroy the wrapped sandbox", self.inner.destroy(name));
     }
 
     fn refuse(&self, operation: Operation) -> Result<(), ProviderError> {

@@ -377,7 +377,7 @@ impl Actors {
         // newer actor's state and is deleted, fenced by its own UID.
         if let Err(error) = self.confirm(actor, "CreateTag", None).await {
             best_effort(
-                "default.await",
+                "delete the stale actor's tag",
                 self.client
                     .delete_tag(pb::DeleteTagRequest {
                         tag: self.reference(&metadata.name),

@@ -127,7 +127,7 @@ impl TurnGateway {
             });
         }
         best_effort(
-            "TcpStream.connect_timeout",
+            "connect to wake the accept loop",
             TcpStream::connect_timeout(&wake, Duration::from_secs(1)),
         );
         if let Some(thread) = self.thread.take() {
@@ -435,7 +435,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
         return;
     };
     best_effort(
-        "stream.set_read_timeout",
+        "restore the stream's read timeout",
         stream.set_read_timeout(Some(Duration::from_secs(300))),
     );
     let mut reader = BufReader::new(stream);
@@ -761,7 +761,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
         *state.metered.lock_recovering("metered") += cost;
     }
     best_effort(
-        "usage.put_usage",
+        "record the model usage",
         state.yard.store().usage().put_usage(&row),
     );
     done(&mut call, decision, status, reason);
@@ -941,7 +941,7 @@ fn append(state: &TurnState, activity: ModelActivity) {
         activity: Activity::Model(Box::new(activity)),
     };
     best_effort(
-        "store.append",
+        "append the event to the branch's log",
         state.yard.store().append(&state.branch, &event, None),
     );
 }

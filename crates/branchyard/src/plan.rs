@@ -378,7 +378,7 @@ pub(crate) fn settled(yard: &Yard, name: &str) {
     if let Ok(message) = delegate.escalate(&text) {
         if let Ok(mut recorder) = Recorder::open(&store, name, None) {
             best_effort(
-                "recorder.record",
+                "record the activity",
                 recorder.record(Activity::Plan(Box::new(PlanActivity::Escalated {
                     to: parent.clone(),
                     message: message.id,
@@ -612,7 +612,10 @@ pub(crate) fn reject(
     let mut recorder = Recorder::fenced(&store, lease.fence(), options.observer.clone());
     recorder.record(Activity::Plan(Box::new(activity)))?;
     recorder.finish(lease, &record)?;
-    best_effort("fleet.observe", crate::fleet::observe(yard, name, None));
+    best_effort(
+        "record the fleet outcome",
+        crate::fleet::observe(yard, name, None),
+    );
     yard.branch(name)
 }
 

@@ -211,7 +211,7 @@ impl Yard {
         // The approval's own record, when it still waits.
         if held.as_ref().is_some_and(ApprovalAsk::pending) {
             best_effort(
-                "ask.answer",
+                "answer the approval ask",
                 ask::answer(
                     self,
                     &staged.ask,

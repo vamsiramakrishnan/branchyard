@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use branchyard_support::testing::capture;
 use branchyard_support::{
-    best_effort, cleanup_dir, set_failure_sink, spawn_named, CondvarExt, Failure, LockExt,
-    RwLockExt,
+    best_effort, best_effort_once, cleanup_dir, set_failure_sink, spawn_named, CondvarExt, Failure,
+    LockExt, RwLockExt,
 };
 
 fn poison<T: Send + 'static>(lock: &Arc<Mutex<T>>) {
@@ -178,4 +178,48 @@ fn the_failure_sink_receives_every_survived_failure() {
             .any(|f| f.context == "unique-sink-context" && f.error == "nope"),
         "{seen:?}"
     );
+}
+
+#[test]
+fn a_persistent_failure_in_a_loop_logs_once_and_its_recovery_logs_again() {
+    let (_, events) = capture(|| {
+        for _ in 0..50 {
+            best_effort_once("poll the fixture log", Err::<(), _>("disk gone"));
+        }
+        best_effort_once("poll the fixture log", Ok::<_, String>(()));
+        best_effort_once("poll the fixture log", Ok::<_, String>(()));
+        for _ in 0..50 {
+            best_effort_once("poll the fixture log", Err::<(), _>("disk gone again"));
+        }
+    });
+    let warnings: Vec<_> = events
+        .iter()
+        .filter(|e| e.level == tracing::Level::WARN)
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        2,
+        "once per outage, not per tick: {events:?}"
+    );
+    assert!(warnings[0].text.contains("poll the fixture log"));
+    let recoveries: Vec<_> = events
+        .iter()
+        .filter(|e| e.level == tracing::Level::INFO)
+        .collect();
+    assert_eq!(
+        recoveries.len(),
+        1,
+        "the recovery is logged once: {events:?}"
+    );
+    assert!(recoveries[0].text.contains("recovered"));
+}
+
+#[test]
+fn failures_of_different_steps_are_told_apart() {
+    let (_, events) = capture(|| {
+        best_effort_once("cancel the fixture branch a", Err::<(), _>("lost"));
+        best_effort_once("cancel the fixture branch b", Err::<(), _>("lost"));
+        best_effort_once("cancel the fixture branch a", Err::<(), _>("lost"));
+    });
+    assert_eq!(events.len(), 2, "{events:?}");
 }

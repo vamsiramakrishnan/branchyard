@@ -1195,7 +1195,7 @@ pub(crate) fn on_end(yard: &Yard, name: &str, trigger: DistillTrigger) {
         return;
     }
     best_effort(
-        "distill",
+        "distill the branch's knowledge",
         distill(yard, name, settings.distiller.as_ref(), trigger.as_str()),
     );
 }

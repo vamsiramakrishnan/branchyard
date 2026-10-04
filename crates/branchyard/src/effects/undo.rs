@@ -304,7 +304,7 @@ pub(crate) fn execute(
         let deny_ask = || {
             if let Some(staged) = &entry.staged {
                 best_effort(
-                    "ask.answer",
+                    "answer the approval ask",
                     super::ask::answer(
                         yard,
                         &staged.ask,

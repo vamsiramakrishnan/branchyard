@@ -953,7 +953,7 @@ impl InventoryCache {
         }
         let inventory = detect_local(options)?;
         if options.only.is_none() {
-            best_effort("self.put", self.put(options, &inventory));
+            best_effort("store the inventory", self.put(options, &inventory));
         }
         Ok(inventory)
     }
@@ -1477,7 +1477,7 @@ impl HarnessGate for LocalGate {
         );
         if let Some(log) = &self.log {
             best_effort(
-                "log.append",
+                "log the harness install",
                 log.append(&HarnessEvent {
                     at_ms: now_ms(),
                     on: "local".into(),

@@ -877,7 +877,7 @@ pub fn pull(endpoint: &dyn Guest, pushed: &Pushed, worktree: &Path) -> Result<Pu
             // left for the engine to record.
             if changed {
                 branchyard_support::best_effort(
-                    "host",
+                    "restore the files as they were before the failed patch",
                     host(
                         worktree,
                         &["read-tree", "-m", "-u", after.trim(), before.trim()],
@@ -946,7 +946,7 @@ fn advance(worktree: &Path, base: &str, head: &str) -> Result<(), Error> {
     // Refresh stat information; files that differ from `head` are the
     // uncommitted changes, so a non-zero exit is expected.
     branchyard_support::best_effort(
-        "host_output",
+        "refresh the git index",
         host_output(worktree, &["update-index", "-q", "--refresh"], &[]),
     );
     Ok(())
@@ -1052,7 +1052,7 @@ pub fn pull_tree(endpoint: &dyn Guest, from: &Path, to: &Path) -> Result<(), Err
         fs::rename(to, &old)?;
     }
     if let Err(error) = fs::rename(&incoming, to) {
-        branchyard_support::best_effort("fs.rename", fs::rename(&old, to));
+        branchyard_support::best_effort("restore the replaced file", fs::rename(&old, to));
         return Err(error.into());
     }
     branchyard_support::cleanup_dir(&old);

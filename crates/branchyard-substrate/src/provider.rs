@@ -430,7 +430,7 @@ impl SubstrateProvider {
         let handle = self
             .handle(name)?
             .ok_or_else(|| ProviderError::NotFound(name.to_owned()))?;
-        branchyard_support::best_effort("self.end_attempt", self.end_attempt(name));
+        branchyard_support::best_effort("end the substrate attempt", self.end_attempt(name));
         let claims = Claims {
             atespace: handle.atespace.clone(),
             actor: handle.name.clone(),
@@ -587,7 +587,7 @@ impl SubstrateProvider {
                 ProviderError::Runtime(format!("could not stop the processes in {name}: {e}"))
             })?;
         }
-        branchyard_support::best_effort("self.end_attempt", self.end_attempt(name));
+        branchyard_support::best_effort("end the substrate attempt", self.end_attempt(name));
         self.block(async move |actors| actors.stop(&handle).await)
     }
 
@@ -741,7 +741,7 @@ impl SandboxProvider for SubstrateProvider {
     }
 
     fn destroy(&self, name: &str) -> Result<(), ProviderError> {
-        branchyard_support::best_effort("self.end_attempt", self.end_attempt(name));
+        branchyard_support::best_effort("end the substrate attempt", self.end_attempt(name));
         self.delete(name)
     }
 
@@ -767,7 +767,7 @@ impl SandboxProvider for SubstrateProvider {
         // A paused actor runs nothing; suspending uploads its node-local
         // snapshot, which the tag then names.
         if self.inspect(name)?.map(|i| i.state) == Some(SandboxState::Paused) {
-            branchyard_support::best_effort("self.end_attempt", self.end_attempt(name));
+            branchyard_support::best_effort("end the substrate attempt", self.end_attempt(name));
             let paused = handle.clone();
             self.block(async move |actors| actors.stop(&paused).await)?;
         }
@@ -822,7 +822,7 @@ impl SandboxProvider for SubstrateProvider {
         if self.inspect(name)?.map(|i| i.state) == Some(SandboxState::Paused) {
             return Ok(());
         }
-        branchyard_support::best_effort("self.end_attempt", self.end_attempt(name));
+        branchyard_support::best_effort("end the substrate attempt", self.end_attempt(name));
         self.block(async move |actors| actors.pause(&handle).await)
     }
 

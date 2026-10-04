@@ -77,7 +77,10 @@ pub(crate) fn all(yard: &Yard) -> Result<Vec<Recovery>, Error> {
     // registry that cannot be read never keeps the repository from
     // opening; `by services gc` says why.
     if yard.has_services() {
-        best_effort("yard.reclaim_services", yard.reclaim_services());
+        best_effort(
+            "reclaim the services of stopped processes",
+            yard.reclaim_services(),
+        );
     }
     // Effects whose turn stopped between writing the ledger and recording
     // the gateway's answer: unknown, for reconciliation, never retried.

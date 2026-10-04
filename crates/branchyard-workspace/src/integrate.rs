@@ -245,7 +245,7 @@ impl Repository {
         let mut stale_checkouts = Vec::new();
         for worktree in checkouts {
             best_effort(
-                "args.output",
+                "refresh the git index of a checkout",
                 Git::new(&worktree)
                     .args(["update-index", "-q", "--refresh"])
                     .output(),
@@ -383,7 +383,7 @@ fn merge(
             .args(["diff", "--name-only", "-z", "--diff-filter=U"])
             .run();
         best_effort(
-            "args.output",
+            "abort the merge",
             Git::new(dir).args(["merge", "--abort"]).output(),
         );
         let files: Vec<String> = unmerged

@@ -227,7 +227,7 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
                 reason: error.to_string(),
             };
             branchyard_support::best_effort(
-                "store.backend.finish",
+                "finish the turn's journal step",
                 store.backend().finish(&fence, Some(&record), None),
             );
             Err(error)
@@ -239,7 +239,7 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
     // changes what happened.
     if result.is_ok() {
         branchyard_support::best_effort(
-            "fleet.observe",
+            "record the fleet outcome",
             crate::fleet::observe(turn.yard, &fence.branch, None),
         );
         // A delegated child's plan awaiting approval goes to its parent.

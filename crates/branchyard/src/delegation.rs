@@ -1246,7 +1246,7 @@ pub(crate) fn start_turn(
         move || {
             // The outcome is the branch's status; errors are recorded there.
             branchyard_support::best_effort(
-                "engine.execute",
+                "run the delegated turn",
                 engine::execute(
                     Turn {
                         yard: &thread_yard,
@@ -1394,7 +1394,7 @@ impl Local {
             Err(error) => (error.to_string(), true),
         };
         branchyard_support::best_effort(
-            "recorder.record",
+            "record the activity",
             recorder.record(Activity::Delegation {
                 tool: tool.to_owned(),
                 branch: branch.to_owned(),
@@ -2460,7 +2460,7 @@ impl Local {
             if let Ok(mut recorder) = Recorder::open(&store, branch, self.options.observer.clone())
             {
                 branchyard_support::best_effort(
-                    "recorder.record",
+                    "record the activity",
                     recorder.record(Activity::Message(message.clone())),
                 );
             }

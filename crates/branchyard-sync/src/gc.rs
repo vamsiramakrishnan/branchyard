@@ -141,7 +141,7 @@ impl Remote {
         let result = self.collect(&mut report, dry_run);
         if let Some(generation) = lock {
             branchyard_support::best_effort(
-                "self.store.delete_if_match",
+                "delete the object if it is unchanged",
                 self.store.delete_if_match(SWEEP, &generation),
             );
         }
@@ -161,7 +161,7 @@ impl Remote {
                 Some(r) if self.lock_live(&r) => live_writers += 1,
                 _ if !dry_run => {
                     branchyard_support::best_effort(
-                        "self.store.delete_if_match",
+                        "delete the object if it is unchanged",
                         self.store.delete_if_match(&entry.key, &entry.generation),
                     );
                 }

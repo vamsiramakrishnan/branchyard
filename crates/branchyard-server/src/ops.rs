@@ -704,7 +704,7 @@ impl Registry {
             if state.closed || !state.accepting {
                 drop(state);
                 branchyard_support::best_effort(
-                    "self.store.release",
+                    "release the operation's branch lock",
                     self.store.release(&self.worker, &id, claim.fence),
                 );
                 return;
@@ -719,7 +719,7 @@ impl Registry {
         if let Err(error) = spawned {
             tracing::error!(%id, %error, "could not start a worker thread for an operation");
             branchyard_support::best_effort(
-                "self.store.release",
+                "release the operation's branch lock",
                 self.store.release(&self.worker, &id, fence),
             );
             self.done(&id);
@@ -758,7 +758,7 @@ impl Registry {
             Err(e) => {
                 tracing::error!(%id, error = %e, "could not record an operation as running");
                 branchyard_support::best_effort(
-                    "self.store.release",
+                    "release the operation's branch lock",
                     self.store.release(&self.worker, &id, fence),
                 );
                 self.done(&id);
@@ -944,7 +944,7 @@ impl Registry {
                 count += 1;
             }
         }
-        branchyard_support::best_effort("store.leave", self.store.leave(&self.worker));
+        branchyard_support::best_effort("leave the worker pool", self.store.leave(&self.worker));
         self.lock().closed = true;
         self.changed.notify_all();
         count

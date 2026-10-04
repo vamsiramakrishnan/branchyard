@@ -167,7 +167,7 @@ fn bring_back(
         let endpoint = provider.endpoint(actor).map_err(|e| e.to_string())?;
         let paths = (Path::new(options.workdir()), Path::new(options.home()));
         let pulled = pull_staged(&endpoint, record, paths, stage);
-        branchyard_support::best_effort("provider.end_attempt", provider.end_attempt(actor));
+        branchyard_support::best_effort("end the substrate attempt", provider.end_attempt(actor));
         pulled
     })();
     said_back(pulled, "actor", actor)

@@ -353,7 +353,7 @@ impl UploadJournal for OutboxJournal {
 
     fn save(&self, key: &str, state: &str) {
         best_effort(
-            "0.with",
+            "record the upload state",
             self.0.with(|c| {
                 c.execute(
                     "INSERT INTO uploads (key, state) VALUES (?1, ?2)
@@ -366,7 +366,7 @@ impl UploadJournal for OutboxJournal {
 
     fn clear(&self, key: &str) {
         best_effort(
-            "0.with",
+            "record the upload state",
             self.0
                 .with(|c| c.execute("DELETE FROM uploads WHERE key = ?1", params![key])),
         );

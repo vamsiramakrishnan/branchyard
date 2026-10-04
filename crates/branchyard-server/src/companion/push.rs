@@ -681,7 +681,7 @@ pub(crate) async fn fan_out(
 async fn drop_subscription(companion: &super::Companion, endpoint: &str) {
     let (store, endpoint) = (companion.store.clone(), endpoint.to_owned());
     best_effort(
-        "unsubscribe.await",
+        "unsubscribe the push subscription",
         tokio::task::spawn_blocking(move || store.unsubscribe(&endpoint, None)).await,
     );
 }

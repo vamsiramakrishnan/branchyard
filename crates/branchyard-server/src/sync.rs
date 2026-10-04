@@ -218,7 +218,7 @@ impl ServerSync {
         };
         for branch in branches {
             if let Ok(task) = r.tasks.task_id(branch) {
-                best_effort("replicator.enqueue", r.replicator.enqueue(&task));
+                best_effort("queue the task for sync", r.replicator.enqueue(&task));
             }
         }
         for handle in self.handles.lock_recovering("handles").iter() {

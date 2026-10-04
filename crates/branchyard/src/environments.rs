@@ -692,7 +692,7 @@ pub(crate) fn clear_failed(worktree: &Path, produced: &[String], keep: &[String]
         }
         let target = worktree.join(rel);
         best_effort(
-            "symlink_metadata.map",
+            "remove the file the failed build left",
             match fs::symlink_metadata(&target).map(|m| m.is_dir()) {
                 Ok(true) => fs::remove_dir_all(&target),
                 Ok(false) => fs::remove_file(&target),
@@ -767,7 +767,7 @@ pub(crate) fn capture(
             Err((error, _)) => json!({ "error": error }),
         };
         best_effort(
-            "backend.finish_step",
+            "finish the journal step",
             store
                 .backend()
                 .finish_step(fence, fence.turn, STEP_ENVIRONMENT, &outcome),
@@ -783,7 +783,10 @@ fn stage(capture: &Capture<'_>, staging: &Path) -> Result<EnvironmentInfo, Strin
     let undo = |moved: &[String]| {
         if let Some(worktree) = capture.worktree {
             for rel in moved {
-                best_effort("fs.rename", fs::rename(into.join(rel), worktree.join(rel)));
+                best_effort(
+                    "move the produced file into the worktree",
+                    fs::rename(into.join(rel), worktree.join(rel)),
+                );
             }
         }
         branchyard_support::cleanup_dir(staging);
@@ -852,7 +855,10 @@ fn stage(capture: &Capture<'_>, staging: &Path) -> Result<EnvironmentInfo, Strin
     }
     if let Err(e) = fs::rename(staging, &target) {
         if replaced {
-            best_effort("fs.rename", fs::rename(&old, &target));
+            best_effort(
+                "restore the replaced environment",
+                fs::rename(&old, &target),
+            );
         }
         undo(&moved);
         return Err(format!("could not keep the environment: {e}"));
@@ -1000,18 +1006,7 @@ pub(crate) fn prune(yard: &Yard, keep: usize, max_age: Duration, only: &[String]
                     .is_some_and(|age| age > LOCK_WAIT + Duration::from_secs(60));
                 if stale {
                     let _lock = crate::git::lock();
-                    best_effort(
-                        "git.run",
-                        crate::git::run(
-                            root,
-                            &[
-                                "worktree",
-                                "remove",
-                                "--force",
-                                &entry.path().display().to_string(),
-                            ],
-                        ),
-                    );
+                    crate::git::remove_worktree(root, &entry.path());
                     branchyard_support::cleanup_dir(entry.path());
                 }
                 continue;
@@ -1090,13 +1085,7 @@ pub(crate) fn rebuild(yard: &Yard, spec: &WorkspaceSpec) -> Result<EnvironmentBu
     }
     let cleanup = || {
         let _lock = crate::git::lock();
-        best_effort(
-            "git.run",
-            crate::git::run(
-                root,
-                &["worktree", "remove", "--force", &work.display().to_string()],
-            ),
-        );
+        crate::git::remove_worktree(root, &work);
         branchyard_support::cleanup_dir(&work);
     };
     let inputs = inputs(&work, spec);
@@ -1424,7 +1413,7 @@ pub(crate) fn after_sandbox_setup(
         Err((why, taken)) => {
             if let Some(taken) = taken {
                 best_effort(
-                    "snapshots.release_environment",
+                    "release the snapshot's environment",
                     crate::snapshots::release_environment(*provider, &taken),
                 );
             }

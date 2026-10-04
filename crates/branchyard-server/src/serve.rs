@@ -136,7 +136,7 @@ impl Running {
         drop(self.pools);
         let services = self.services;
         best_effort(
-            "drop.await",
+            "close the databases",
             tokio::task::spawn_blocking(move || drop(services)).await,
         );
         for poller in self.pollers {
@@ -164,7 +164,7 @@ impl Running {
             .unwrap_or(0);
         if let Some(sync) = self.sync {
             best_effort(
-                "finish.await",
+                "finish the sync engine",
                 tokio::task::spawn_blocking(move || sync.finish()).await,
             );
         }

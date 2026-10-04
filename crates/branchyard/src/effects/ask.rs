@@ -31,7 +31,10 @@ pub(crate) fn note(yard: &Yard, branch: &str, activity: EffectActivity) {
         at_ms: now_ms(),
         activity: Activity::Effect(Box::new(activity)),
     };
-    best_effort("store.append", yard.store().append(branch, &event, None));
+    best_effort(
+        "append the event to the branch's log",
+        yard.store().append(branch, &event, None),
+    );
 }
 
 /// Store the ask, record it on the branch, and escalate it to a delegating
@@ -84,7 +87,10 @@ fn escalate(yard: &Yard, ask: &ApprovalAsk) {
         ask.id
     );
     if let Ok(delegate) = crate::delegation::trusted(yard, &ask.branch, TaskOptions::default()) {
-        best_effort("delegate.escalate", delegate.escalate(&text));
+        best_effort(
+            "escalate the question to the parent",
+            delegate.escalate(&text),
+        );
     }
 }
 

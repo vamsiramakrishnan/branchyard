@@ -108,7 +108,10 @@ pub(crate) fn spec(
     if let Ok(areas) = crate::storage::authorized_scratch(yard, &record.info.name) {
         for area in &areas {
             let host = crate::storage::scratch_dir(&yard.store(), &area.name);
-            best_effort("fs.create_dir_all", std::fs::create_dir_all(&host));
+            best_effort(
+                "create the sandbox's mount directory",
+                std::fs::create_dir_all(&host),
+            );
             let guest = format!("{SCRATCH_MOUNT_BASE}/{}", area.name);
             mounts.push(Mount::writable(&host, &guest));
             env.insert(

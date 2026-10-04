@@ -157,7 +157,7 @@ impl<'a> Sandbox<'a> {
     }
 
     fn ensure_spec(provider: &'a dyn SandboxProvider, setup: &'a Setup, spec: SandboxSpec) -> Self {
-        branchyard_support::best_effort("provider.destroy", provider.destroy(&spec.name));
+        branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
         let info = provider
             .ensure(&spec)
             .unwrap_or_else(|e| panic!("ensure {}: {e}", spec.name));
@@ -353,12 +353,12 @@ pub fn env_and_cwd(provider: &dyn SandboxProvider, setup: &Setup) {
 /// nothing.
 fn mount_refused(provider: &dyn SandboxProvider, mut spec: SandboxSpec) {
     spec.name.push_str("-refused");
-    branchyard_support::best_effort("provider.destroy", provider.destroy(&spec.name));
+    branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
     match provider.ensure(&spec) {
         Err(ProviderError::Invalid(_) | ProviderError::Unsupported(_)) => {}
         Err(other) => panic!("ensure with a mount it cannot honor: {other}"),
         Ok(_) => {
-            branchyard_support::best_effort("provider.destroy", provider.destroy(&spec.name));
+            branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
             panic!("a provider without mounts created a sandbox with a mount")
         }
     }
@@ -394,10 +394,10 @@ pub fn read_only_mount(provider: &dyn SandboxProvider, setup: &Setup) {
     if !setup.mounts {
         return mount_refused(provider, spec);
     }
-    branchyard_support::best_effort("provider.destroy", provider.destroy(&spec.name));
+    branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
     match provider.ensure(&spec) {
         Err(ProviderError::Invalid(_) | ProviderError::Unsupported(_)) => {
-            branchyard_support::best_effort("provider.destroy", provider.destroy(&spec.name));
+            branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
         }
         Err(other) => panic!("ensure with a read-only mount: {other}"),
         Ok(_) => {

@@ -101,7 +101,7 @@ pub(crate) fn adopt(yard: &Yard, spec: AdoptSpec) -> Result<Branch, Error> {
     let (mut record, lease) = run::materialize(yard, record, lease)?;
     if let BranchStatus::Failed { reason } = &record.info.status {
         let reason = reason.clone();
-        branchyard_support::best_effort("lease.finish", lease.finish(Some(&record), None));
+        branchyard_support::best_effort("finish the lease", lease.finish(Some(&record), None));
         return Err(Error::State(format!("{name}: {reason}")));
     }
     if let Some(diff) = spec.diff.as_ref().filter(|d| !d.is_empty()) {
@@ -113,8 +113,8 @@ pub(crate) fn adopt(yard: &Yard, spec: AdoptSpec) -> Result<Branch, Error> {
             record.info.status = BranchStatus::Failed {
                 reason: format!("the session's diff did not apply: {error}"),
             };
-            branchyard_support::best_effort("lease.finish", lease.finish(Some(&record), None));
-            branchyard_support::best_effort("yard.remove", yard.remove(&name));
+            branchyard_support::best_effort("finish the lease", lease.finish(Some(&record), None));
+            branchyard_support::best_effort("remove the branch", yard.remove(&name));
             return Err(Error::State(format!(
                 "the session's uncommitted diff does not apply to {}: {error}",
                 record.info.base

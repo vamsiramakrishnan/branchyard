@@ -384,7 +384,7 @@ impl Placement {
                 journal(&spec.name)?;
                 provider.ensure(&spec).map_err(|e| {
                     branchyard_support::best_effort(
-                        "provider.destroy",
+                        "destroy the sandbox",
                         provider.destroy(&spec.name),
                     );
                     format!("could not create sandbox {}: {e}", spec.name)
@@ -413,7 +413,7 @@ impl Placement {
                 )
                 .inspect_err(|_| {
                     branchyard_support::best_effort(
-                        "provider.destroy",
+                        "destroy the sandbox",
                         provider.destroy(&spec.name),
                     );
                 })?
@@ -421,7 +421,7 @@ impl Placement {
         };
         let store = yard.store();
         branchyard_support::best_effort(
-            "store.backend.finish_step",
+            "finish the journal step",
             store.backend().finish_step(
                 fence,
                 fence.turn,
@@ -580,7 +580,7 @@ impl Placement {
             Remote::Recipe(_) => json!({ "created": acquired.is_ok(), "sandbox": name }),
         };
         branchyard_support::best_effort(
-            "backend.finish_step",
+            "finish the journal step",
             store
                 .backend()
                 .finish_step(fence, fence.turn, STEP_SANDBOX, &finished),
@@ -914,7 +914,7 @@ pub(crate) fn recover(
     }
     let said = providers::of(record.provider.as_ref()).recover(yard, record, &name)?;
     branchyard_support::best_effort(
-        "sandboxes.take_sandbox",
+        "take the sandbox's row",
         yard.store()
             .sandboxes()
             .take_sandbox(&record.info.name, SandboxKind::Kept, &name),

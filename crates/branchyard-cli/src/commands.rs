@@ -1072,7 +1072,10 @@ pub fn log(env: &Env, target: &Target, branch: &str, as_json: bool, follow: bool
         Target::Local => {
             let yard = open()?;
             // The gateway's newest calls, if it has written any.
-            best_effort("yard.ingest_connector_audit", yard.ingest_connector_audit());
+            best_effort(
+                "ingest the connector audit log",
+                yard.ingest_connector_audit(),
+            );
             yard.branch(branch)?.events()?
         }
         Target::Remote(remote) => remote.repo.events(branch, 0)?.events,
@@ -1109,7 +1112,10 @@ fn log_follow(env: &Env, target: &Target, branch: &str, as_json: bool) -> Outcom
             (Some(branch), _) => {
                 // The gateway's newest calls, as connector_call events.
                 if let Some(yard) = &yard {
-                    best_effort("yard.ingest_connector_audit", yard.ingest_connector_audit());
+                    branchyard_support::best_effort_once(
+                        "ingest the connector audit log",
+                        yard.ingest_connector_audit(),
+                    );
                 }
                 let page = branch.wait_for_events(cursor, 500, FOLLOW_POLL)?;
                 (page.events, page.next_cursor)

@@ -616,7 +616,7 @@ impl Remote {
             match self.read_lock("locks/sweep")? {
                 Some((sweep, _)) if self.lock_live(&sweep) => {
                     branchyard_support::best_effort(
-                        "self.store.delete_if_match",
+                        "delete the object if it is unchanged",
                         self.store.delete_if_match(&key, &generation),
                     );
                     self.retrier.sleeper.sleep(self.retrier.backoff(attempt));
@@ -671,7 +671,7 @@ impl Remote {
     /// Remove this writer's mark.
     pub fn end_write(&self, mark: Mark) {
         branchyard_support::best_effort(
-            "self.store.delete_if_match",
+            "delete the object if it is unchanged",
             self.store.delete_if_match(&mark.key, &mark.generation),
         );
     }

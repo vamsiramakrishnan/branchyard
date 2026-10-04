@@ -558,7 +558,10 @@ pub(crate) fn settled(yard: &Yard, name: &str, options: Option<&TaskOptions>) {
     let store = yard.store();
     let dependents = dependents_of(&store, name);
     if !dependents.is_empty() {
-        best_effort("advance", advance(yard, &dependents, options));
+        best_effort(
+            "advance the dependent branches",
+            advance(yard, &dependents, options),
+        );
     }
 }
 
@@ -753,7 +756,7 @@ pub(crate) fn bind(yard: &Yard, record: &Record) -> Result<(), String> {
             Err(error) => {
                 for scratch in taken {
                     best_effort(
-                        "storage.unlock_scratch",
+                        "unlock the scratch area",
                         crate::storage::unlock_scratch(yard, name, scratch),
                     );
                 }
@@ -772,7 +775,7 @@ pub(crate) fn unbind(yard: &Yard, record: &Record) {
     for binding in &record.bindings {
         if binding.access == Access::ExclusiveWrite {
             best_effort(
-                "storage.unlock_scratch",
+                "unlock the scratch area",
                 crate::storage::unlock_scratch(yard, &record.info.name, &binding.scratch),
             );
         }
@@ -785,7 +788,7 @@ pub(crate) fn cancel_unstarted(store: &Store, record: &Record, by: &str) -> Resu
     if done {
         if let Ok(mut recorder) = Recorder::open(store, &record.info.name, None) {
             best_effort(
-                "recorder.record",
+                "record the activity",
                 recorder.record(Activity::Warning(format!(
                     "cancelled by {by} before its prerequisites settled; it never ran"
                 ))),

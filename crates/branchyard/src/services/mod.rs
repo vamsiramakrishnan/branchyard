@@ -1219,7 +1219,7 @@ impl Drop for Registration {
         self.halt();
         let service = lock(&self.service).clone();
         best_effort(
-            "store.deregister",
+            "deregister the service",
             self.store
                 .deregister(&service.id, &service.owner.id, self.clock.now()),
         );
@@ -1271,7 +1271,10 @@ fn renew_loop(
             return;
         }
         drop(stop);
-        best_effort("renew_once", renew_once(store, service, ttl, clock));
+        branchyard_support::best_effort_once(
+            "renew a service lease",
+            renew_once(store, service, ttl, clock),
+        );
         stop = renewal.stop.lock_recovering("stop");
     }
 }

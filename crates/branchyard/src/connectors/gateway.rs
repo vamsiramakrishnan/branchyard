@@ -275,7 +275,7 @@ fn supervise(
 fn terminate(child: &mut Child) {
     if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
         branchyard_support::best_effort(
-            "process.kill_process",
+            "stop the gateway process",
             rustix::process::kill_process(pid, rustix::process::Signal::TERM),
         );
     }

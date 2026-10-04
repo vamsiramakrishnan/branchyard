@@ -207,13 +207,14 @@ impl Repository {
             .args(["config", &key, base.as_str()])
             .run()?;
         let undo = |at: &Path| {
-            best_effort(
-                "arg.run",
-                Git::new(&self.root)
-                    .args(["worktree", "remove", "--force"])
-                    .arg(at)
-                    .run(),
-            );
+            let removed = Git::new(&self.root)
+                .args(["worktree", "remove", "--force"])
+                .arg(at)
+                .run();
+            // A worktree that was never made is nothing to report.
+            if !matches!(&removed, Err(e) if e.to_string().contains("is not a working tree")) {
+                best_effort("remove the new worktree", removed);
+            }
             branchyard_support::cleanup_dir(at);
             best_effort(
                 "git config --unset",
@@ -238,7 +239,7 @@ impl Repository {
         if let Err(e) = switched {
             undo(&dir);
             best_effort(
-                "branch.run",
+                "delete the new branch",
                 Git::new(&self.root)
                     .args(["branch", "-D", &name.branch()])
                     .run(),

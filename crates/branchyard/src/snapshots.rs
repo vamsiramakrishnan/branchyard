@@ -536,7 +536,7 @@ pub(crate) fn acquire(
                     }
                     Err(error) => {
                         branchyard_support::best_effort(
-                            "provider.destroy",
+                            "destroy the sandbox",
                             provider.destroy(&row.name),
                         );
                         reasons.push(format!(
@@ -681,7 +681,7 @@ fn branch_from_seed(
             method,
         })),
         Err(error) => {
-            branchyard_support::best_effort("provider.destroy", provider.destroy(&spec.name));
+            branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
             Err(format!(
                 "could not branch from {}'s snapshot at checkpoint {turn}: {error}",
                 seed.branch
@@ -751,7 +751,7 @@ pub(crate) fn take_environment(
             )
         })
         .map_err(|e| {
-            branchyard_support::best_effort("provider.destroy", provider.destroy(planned));
+            branchyard_support::best_effort("destroy the sandbox", provider.destroy(planned));
             e.to_string()
         })
 }
@@ -786,7 +786,7 @@ fn branch_environment(
     match made {
         Ok(_) => Ok(snapshot.method),
         Err(error) => {
-            branchyard_support::best_effort("provider.destroy", provider.destroy(&spec.name));
+            branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
             Err(error.to_string())
         }
     }
@@ -889,13 +889,13 @@ pub(crate) fn park(
         }
         Err(error) => {
             branchyard_support::best_effort(
-                "sandboxes.take_sandbox",
+                "take the sandbox's row",
                 store
                     .sandboxes()
                     .take_sandbox(&row.branch, SandboxKind::Kept, name),
             );
             branchyard_support::best_effort(
-                "store.backend.finish_step",
+                "finish the journal step",
                 store.backend().finish_step(
                     fence,
                     fence.turn,
@@ -993,7 +993,7 @@ pub(crate) fn snapshot_turn(
     };
     kept.turn = Some(turn);
     branchyard_support::best_effort(
-        "sandboxes.put_sandbox",
+        "record the sandbox's row",
         store.sandboxes().put_sandbox(&kept),
     );
     if policy.snapshots == 0 {
@@ -1045,7 +1045,10 @@ pub(crate) fn snapshot_turn(
                     (planned.clone(), Detail::of(&guarantee))
                 })
                 .map_err(|e| {
-                    branchyard_support::best_effort("provider.destroy", provider.destroy(&planned));
+                    branchyard_support::best_effort(
+                        "destroy the sandbox",
+                        provider.destroy(&planned),
+                    );
                     e.to_string()
                 })
         }
@@ -1082,11 +1085,11 @@ pub(crate) fn snapshot_turn(
                 used_ms: now_ms(),
             };
             branchyard_support::best_effort(
-                "sandboxes.put_sandbox",
+                "record the sandbox's row",
                 store.sandboxes().put_sandbox(&row),
             );
             branchyard_support::best_effort(
-                "store.backend.finish_step",
+                "finish the journal step",
                 store.backend().finish_step(
                     fence,
                     fence.turn,
@@ -1104,7 +1107,7 @@ pub(crate) fn snapshot_turn(
         }
         Err(reason) => {
             branchyard_support::best_effort(
-                "store.backend.finish_step",
+                "finish the journal step",
                 store.backend().finish_step(
                     fence,
                     fence.turn,
@@ -1327,7 +1330,7 @@ pub(crate) fn recover_steps(
     }
     let options = record.provider.as_ref()?;
     let provider = open(yard, options).ok()?;
-    branchyard_support::best_effort("provider.destroy", provider.destroy(&planned));
+    branchyard_support::best_effort("destroy the sandbox", provider.destroy(&planned));
     Some(format!(
         "destroyed the unfinished snapshot sandbox {planned}"
     ))

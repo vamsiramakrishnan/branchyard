@@ -8,7 +8,9 @@
 //! - [`best_effort()`] and [`best_effort!`] run a fallible step whose failure
 //!   the caller survives. The failure is logged at `warn` through `tracing`
 //!   with a context string naming the step, and handed to the installed
-//!   [`set_failure_sink`], so a server can put it in an event log.
+//!   [`set_failure_sink`], so a process can put it in an event log.
+//! - [`best_effort_once()`] is the same for a step a loop repeats: a
+//!   persistent failure is logged once, and its recovery is logged too.
 //! - [`cleanup_dir`], [`cleanup_file`], [`kill_process`] and [`kill_group`]
 //!   are the repeated cleanup steps built on it.
 //! - [`LockExt`], [`RwLockExt`] and [`CondvarExt`] take a lock whose holder
@@ -37,7 +39,8 @@ pub mod time;
 pub mod testing;
 
 pub use best_effort::{
-    best_effort, cleanup_dir, cleanup_file, set_failure_sink, Failure, FailureSink,
+    best_effort, best_effort_once, cleanup_dir, cleanup_file, set_failure_sink, Failure,
+    FailureSink,
 };
 pub use id::{new_ulid, ulid_from_parts};
 pub use locks::{CondvarExt, LockExt, RwLockExt};

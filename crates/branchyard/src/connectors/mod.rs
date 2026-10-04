@@ -629,7 +629,10 @@ impl AuditTail {
                 .name("by-audit".into())
                 .spawn(move || {
                     while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                        best_effort("ingest", ingest(&yard));
+                        branchyard_support::best_effort_once(
+                            "ingest the connector audit log",
+                            ingest(&yard),
+                        );
                         std::thread::sleep(AuditTail::EVERY);
                     }
                 })
@@ -649,7 +652,7 @@ impl Drop for AuditTail {
         if let Some(thread) = self.thread.take() {
             branchyard_support::join_reporting("connector supervisor", thread);
         }
-        best_effort("ingest", ingest(&self.yard));
+        best_effort("ingest the connector audit log", ingest(&self.yard));
     }
 }
 

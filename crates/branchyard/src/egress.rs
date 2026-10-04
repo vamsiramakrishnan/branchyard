@@ -382,7 +382,10 @@ fn proxy(yard: &Yard, branch: &str, network: Network) -> Proxy {
                     reason: decision.reason.clone(),
                 })),
             };
-            best_effort("store.append", yard.store().append(&branch, &event, None));
+            best_effort(
+                "append the event to the branch's log",
+                yard.store().append(&branch, &event, None),
+            );
         },
     )
 }

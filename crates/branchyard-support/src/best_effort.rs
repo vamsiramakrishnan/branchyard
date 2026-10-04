@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
@@ -14,8 +15,8 @@ pub struct Failure {
     pub error: String,
 }
 
-/// Where survived failures go besides the log: a server installs one that
-/// writes them to an event log. It runs on whatever thread hit the failure,
+/// Where survived failures go besides the log: a process may install one that
+/// writes them to an event log; none is installed by default. It runs on whatever thread hit the failure,
 /// possibly inside a `Drop`, so it must be quick and must not block.
 pub trait FailureSink: Send + Sync {
     /// Take note of one survived failure.
@@ -63,6 +64,39 @@ pub fn best_effort<T, E: Display>(context: &str, result: Result<T, E>) -> Option
         Ok(value) => Some(value),
         Err(error) => {
             report(context, &error);
+            None
+        }
+    }
+}
+
+static FAILING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+/// [`best_effort()`] for a step a loop repeats: a persistent failure is
+/// logged on its first occurrence only, and a success after failures logs
+/// that the step recovered. Failures are told apart by `context`, so put
+/// anything that tells two steps apart (a branch, a path) in it. Everything
+/// else is as [`best_effort()`]; the failure sink hears the first failure
+/// only.
+pub fn best_effort_once<T, E: Display>(context: &str, result: Result<T, E>) -> Option<T> {
+    match result {
+        Ok(value) => {
+            let was_failing = FAILING
+                .lock_recovering("failing steps")
+                .as_mut()
+                .is_some_and(|failing| failing.remove(context));
+            if was_failing {
+                tracing::info!(context = %context, "best-effort step recovered: {context}");
+            }
+            Some(value)
+        }
+        Err(error) => {
+            let first = FAILING
+                .lock_recovering("failing steps")
+                .get_or_insert_with(HashSet::new)
+                .insert(context.to_owned());
+            if first {
+                report(context, &error);
+            }
             None
         }
     }

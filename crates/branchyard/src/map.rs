@@ -649,7 +649,7 @@ impl Run<'_> {
         }
         branches.push(branch.info().name.clone());
         // Children it delegated to end before its answer is read.
-        branchyard_support::best_effort("branch.wait_subtree", branch.wait_subtree());
+        branchyard_support::best_effort("wait for the branch's subtree", branch.wait_subtree());
         let mut current = branch;
         let first = self.answer(&current);
         let mut answer = first.clone().map_err(|errors| errors.join("; "));
@@ -663,7 +663,7 @@ impl Run<'_> {
                     match crate::run::send(self.yard, &current.info().name, &follow_up, &options) {
                         Ok(next) => {
                             branchyard_support::best_effort(
-                                "next.wait_subtree",
+                                "wait for the branch's subtree",
                                 next.wait_subtree(),
                             );
                             current = next;
@@ -760,7 +760,7 @@ impl Run<'_> {
         };
         if row.status == MapStatus::Ok && self.spec.remove_done {
             for name in &row.branches {
-                branchyard_support::best_effort("self.yard.remove", self.yard.remove(name));
+                branchyard_support::best_effort("remove the branch", self.yard.remove(name));
             }
         }
         if let Some(progress) = &self.options.progress {
@@ -794,7 +794,10 @@ impl Run<'_> {
         };
         match self.start(&base, &prompt, u64::MAX >> 1) {
             Ok((branch, _)) => {
-                branchyard_support::best_effort("branch.wait_subtree", branch.wait_subtree());
+                branchyard_support::best_effort(
+                    "wait for the branch's subtree",
+                    branch.wait_subtree(),
+                );
                 outcome.branch = Some(branch.info().name.clone());
                 outcome.cost_usd = branch.info().cost_usd;
                 match settled(branch.info()) {
@@ -804,7 +807,7 @@ impl Run<'_> {
                         outcome.text = Some(reply.trim().to_owned());
                         if self.spec.remove_done {
                             branchyard_support::best_effort(
-                                "self.yard.remove",
+                                "remove the branch",
                                 self.yard.remove(&branch.info().name),
                             );
                         }

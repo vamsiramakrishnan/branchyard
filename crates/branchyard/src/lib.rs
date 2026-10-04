@@ -607,7 +607,10 @@ impl Yard {
     pub fn merge(&self, branch: &str, target: &str) -> Result<Merged, Error> {
         let merged = ops::merge(self, branch, target)?;
         // The outcome store learns the merge; it never undoes one.
-        best_effort("fleet.observe", fleet::observe(self, branch, None));
+        best_effort(
+            "record the fleet outcome",
+            fleet::observe(self, branch, None),
+        );
         // So may the knowledge store, as proposals a person reviews.
         knowledge::on_end(self, branch, DistillTrigger::Merged);
         Ok(merged)

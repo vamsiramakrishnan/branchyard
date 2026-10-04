@@ -171,7 +171,7 @@ pub fn check(store: Arc<dyn ObjectStore>, options: Options) {
     // Clean up what this run made.
     for entry in s.list(&p).unwrap() {
         branchyard_support::best_effort(
-            "s.delete_if_match",
+            "delete the object if it is unchanged",
             s.delete_if_match(&entry.key, &entry.generation),
         );
     }

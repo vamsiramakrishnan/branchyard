@@ -13,7 +13,6 @@
 //! `Work::run` is the executor: it rebuilds the engine's options with
 //! the same rules the handlers check at admission, and calls the SDK.
 
-use branchyard_support::best_effort;
 use branchyard_support::LockExt as _;
 use std::sync::Arc;
 
@@ -435,7 +434,16 @@ fn run_under_leases<T>(
                 let reason = lost.lock_recovering("lost").clone();
                 if let Some(reason) = reason {
                     for branch in branches.iter().chain(leases.iter().map(|h| &h.branch)) {
-                        best_effort("yard.cancel_as", repo.yard.cancel_as(branch, &reason));
+                        match repo.yard.cancel_as(branch, &reason) {
+                            // Already gone: nothing left to stop.
+                            Err(branchyard::Error::UnknownBranch(_)) => {}
+                            result => {
+                                branchyard_support::best_effort_once(
+                                    &format!("stop branch {branch} after a lost sync lease"),
+                                    result,
+                                );
+                            }
+                        }
                     }
                 }
                 match finished.recv_timeout(LEASE_POLL) {

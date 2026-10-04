@@ -373,7 +373,7 @@ impl<'a> Bridge<'a> {
             .map_err(|e| e.to_string())?;
         let label = format!("by: {branch}");
         best_effort(
-            "herdr.call",
+            "name the herdr pane and tab",
             self.herdr.call(&[
                 "pane".into(),
                 "rename".into(),
@@ -383,7 +383,7 @@ impl<'a> Bridge<'a> {
         );
         if let Some(tab) = &opened.tab_id {
             best_effort(
-                "herdr.call",
+                "name the herdr pane and tab",
                 self.herdr
                     .call(&["tab".into(), "rename".into(), tab.clone(), label]),
             );

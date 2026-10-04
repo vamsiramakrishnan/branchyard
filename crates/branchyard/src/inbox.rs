@@ -197,7 +197,7 @@ pub(crate) fn try_deliver_now(yard: &Yard, store: &Store, to: &str, message: &Me
     };
     if hook.try_deliver(yard, to, message) {
         branchyard_support::best_effort(
-            "store.backend.mark_delivered",
+            "mark the message delivered",
             store.backend().mark_delivered(&[message.id]),
         );
     }
@@ -348,7 +348,7 @@ pub(crate) fn wait_for_answer(
     let answer = store.wait(wait, || store.backend().answer_to(id));
     // A waiter that dies before this still stops counting at its deadline.
     branchyard_support::best_effort(
-        "store.backend.set_awaiting",
+        "mark the branch awaiting an answer",
         store.backend().set_awaiting(id, None),
     );
     answer

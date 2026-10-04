@@ -396,12 +396,23 @@ fn restore(yard: &Yard, mut state: TryState) -> Result<(), Error> {
         write_entry(yard, &file.path, file.before.as_ref())?;
     }
     for dir in state.created_dirs.iter().rev() {
-        // Only if empty: anything else in it is not the try's.
-        best_effort("fs.remove_dir", fs::remove_dir(root.join(dir)));
+        // Only if empty: anything else in it is not the try's, and a
+        // directory already gone is as good as removed.
+        if let Err(e) = fs::remove_dir(root.join(dir)) {
+            if !matches!(
+                e.kind(),
+                std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::NotFound
+            ) {
+                branchyard_support::best_effort(
+                    &format!("remove the try's directory {dir}"),
+                    Err::<(), _>(e),
+                );
+            }
+        }
     }
     // The index keeps HEAD's entries; refresh their stat data.
     best_effort(
-        "git.run",
+        "refresh the git index",
         git::run(root, &["update-index", "-q", "--refresh"]),
     );
     clear(yard)

@@ -97,7 +97,7 @@ impl Judge for HarnessJudge {
         let events = branch.events();
         let status = branch.info().status.clone();
         // A scratch branch: nothing of it stays.
-        branchyard_support::best_effort("yard.remove", yard.remove(&name));
+        branchyard_support::best_effort("remove the branch", yard.remove(&name));
         let events = events?;
         match status {
             BranchStatus::Ready | BranchStatus::NoChanges => Ok(message(&events)),

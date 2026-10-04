@@ -267,7 +267,10 @@ impl Drop for BridgedProcess {
             branchyard_support::best_effort("kill control", self.control.kill());
         }
         if !self.torn_down {
-            branchyard_support::best_effort("control.teardown", self.control.teardown(self.pid));
+            branchyard_support::best_effort(
+                "tear down the microsandbox control process",
+                self.control.teardown(self.pid),
+            );
         }
     }
 }

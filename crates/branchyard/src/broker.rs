@@ -73,7 +73,7 @@ impl Broker {
                     let Ok(stream) = stream else { continue };
                     let yard = yard.clone();
                     best_effort(
-                        "into.spawn",
+                        "start the connection thread",
                         std::thread::Builder::new()
                             .name("by-broker-conn".into())
                             .spawn(move || serve(&yard, stream)),

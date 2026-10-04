@@ -918,7 +918,7 @@ impl Signals {
             }
             return;
         }
-        best_effort("ctrl_c.await", tokio::signal::ctrl_c().await);
+        best_effort("wait for ctrl-c", tokio::signal::ctrl_c().await);
     }
 }
 

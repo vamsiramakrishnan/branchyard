@@ -293,7 +293,7 @@ pub(crate) fn materialize(
             record.info.status = BranchStatus::Failed {
                 reason: format!("could not create the branch: {error}"),
             };
-            branchyard_support::best_effort("lease.finish", lease.finish(Some(&record), None));
+            branchyard_support::best_effort("finish the lease", lease.finish(Some(&record), None));
             Err(error)
         }
     }
@@ -304,7 +304,7 @@ pub(crate) fn abandon(lease: Lease, mut record: Record, why: &Error) {
     record.info.status = BranchStatus::Failed {
         reason: format!("its turn did not start: {why}"),
     };
-    branchyard_support::best_effort("lease.finish", lease.finish(Some(&record), None));
+    branchyard_support::best_effort("finish the lease", lease.finish(Some(&record), None));
 }
 
 /// Start a new top-level branch's plan and goal, as `options` ask, under
@@ -781,7 +781,7 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
     // an engine that stops mid-fan leaves it nothing to clean up.
     spec.persist = false;
     if let Err(error) = provider.ensure(&spec) {
-        branchyard_support::best_effort("provider.destroy", provider.destroy(&spec.name));
+        branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
         return fresh(
             turns,
             format!("could not create the prepared sandbox: {error}"),
@@ -810,20 +810,20 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
     match prepared {
         Ok(Ok(())) => {}
         Ok(Err(why)) => {
-            branchyard_support::best_effort("provider.destroy", provider.destroy(&spec.name));
+            branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
             return fresh(
                 turns,
                 format!("its setup failed in the prepared sandbox: {why}"),
             );
         }
         Err(error) => {
-            branchyard_support::best_effort("provider.destroy", provider.destroy(&spec.name));
+            branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
             return fresh(turns, format!("its setup could not run: {error}"));
         }
     }
     // Paused, every child is captured at the same point.
     if capabilities.has(branchyard_sandbox::PAUSE) {
-        branchyard_support::best_effort("provider.pause", provider.pause(&spec.name));
+        branchyard_support::best_effort("pause the sandbox", provider.pause(&spec.name));
     }
     let mut children = Vec::new();
     for (turn, lease) in turns.iter() {
@@ -840,13 +840,13 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
             _ => SandboxSpec::new(format!("{}-unplaced", turn.record.info.name)),
         };
         branchyard_support::best_effort(
-            "placement.journal_handed",
+            "journal the handed-over sandbox",
             crate::placement::journal_handed(yard, &turn.record, lease.fence(), &child.name),
         );
         children.push(child);
     }
     let made = provider.branch_live(&spec.name, &children);
-    branchyard_support::best_effort("provider.destroy", provider.destroy(&spec.name));
+    branchyard_support::best_effort("destroy the sandbox", provider.destroy(&spec.name));
     for (((turn, _), child), made) in turns.iter_mut().zip(children).zip(made) {
         turn.sandbox = match made {
             Ok(_) => SandboxPlan::Handed {
@@ -892,7 +892,7 @@ fn prepare_fan(yard: &Yard, options: &TaskOptions, turns: &mut [(Turn<'_>, Lease
         let mut recorder =
             crate::record::Recorder::fenced(&store, lease.fence(), turn.options.observer.clone());
         branchyard_support::best_effort(
-            "workspace.prepare",
+            "prepare the workspace in the fan's sandbox",
             crate::workspace::prepare(
                 yard,
                 &mut turn.record,

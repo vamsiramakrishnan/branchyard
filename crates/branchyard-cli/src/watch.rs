@@ -15,7 +15,6 @@
 mod actions;
 mod tui;
 
-use branchyard_support::best_effort;
 use branchyard_support::time::now_ms;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -487,7 +486,10 @@ impl Source {
         Ok(match self {
             Source::Local { yard, .. } => {
                 // The gateway's newest calls, as connector_call events.
-                best_effort("yard.ingest_connector_audit", yard.ingest_connector_audit());
+                branchyard_support::best_effort_once(
+                    "ingest the connector audit log",
+                    yard.ingest_connector_audit(),
+                );
                 yard.branches()?
             }
             Source::Remote { repo, .. } => repo.branches()?,

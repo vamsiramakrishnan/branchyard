@@ -223,7 +223,7 @@ impl EffectProxy {
             wake.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
         }
         best_effort(
-            "TcpStream.connect_timeout",
+            "connect to wake the accept loop",
             TcpStream::connect_timeout(&wake, Duration::from_secs(1)),
         );
         if let Some(thread) = self.thread.take() {
@@ -564,7 +564,7 @@ fn handle(stream: TcpStream, state: &ProxyState) {
         return;
     };
     best_effort(
-        "stream.set_read_timeout",
+        "restore the stream's read timeout",
         stream.set_read_timeout(Some(Duration::from_secs(300))),
     );
     let mut reader = BufReader::new(stream);
@@ -1097,7 +1097,7 @@ fn stage(state: &ProxyState, request: &Request, call: &Call, out: &mut TcpStream
             })
             .detail(format!("the draft call: {why}"));
             best_effort(
-                "effects.move_effect",
+                "move the effect in the ledger",
                 ledger
                     .effects()
                     .move_effect(&id, &[EffectState::Staged], &change, now_ms()),

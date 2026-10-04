@@ -177,7 +177,7 @@ impl S3Store {
 
     fn abort(&self, key: &str, upload: &str) {
         best_effort(
-            "self.call",
+            "abort the multipart upload",
             self.call(Request::new(
                 "DELETE",
                 self.object_url(key, &format!("uploadId={}", uri_encode(upload, false))),

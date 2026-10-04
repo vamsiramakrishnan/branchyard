@@ -424,13 +424,7 @@ fn remove_files(root: &Path, path: &Path, shared: &[String]) {
     branchyard_workspace::materialize::remove_links(path, shared);
     if path.exists() {
         let _lock = crate::git::lock();
-        best_effort(
-            "arg.run",
-            Git::new(root)
-                .args(["worktree", "remove", "--force"])
-                .arg(path)
-                .run(),
-        );
+        crate::git::remove_worktree(root, path);
     }
     branchyard_support::cleanup_dir(path);
 }
@@ -470,7 +464,10 @@ fn take_for_removal(yard: &Yard, row: &SlotRow, why: &str) -> bool {
 /// files, then its row.
 fn discard(yard: &Yard, row: &SlotRow) {
     remove_files(&yard.root, Path::new(&row.path), &Detail::of(row).shared);
-    best_effort("pool.delete_slot", yard.store().pool().delete_slot(&row.id));
+    best_effort(
+        "delete the pool slot",
+        yard.store().pool().delete_slot(&row.id),
+    );
 }
 
 /// Remove what stopped processes left: rows filling or claiming whose
@@ -501,7 +498,7 @@ pub(crate) fn reclaim(yard: &Yard) -> Vec<(String, String)> {
         match row.state {
             SlotState::Ready => {
                 if !path.is_dir() && take_for_removal(yard, row, "its worktree is gone") {
-                    best_effort("pool.delete_slot", store.pool().delete_slot(&row.id));
+                    best_effort("delete the pool slot", store.pool().delete_slot(&row.id));
                     pruned = true;
                     done.push((row.id.clone(), "its worktree is gone".into()));
                 }
@@ -525,13 +522,7 @@ pub(crate) fn reclaim(yard: &Yard) -> Vec<(String, String)> {
                     if target.is_dir() && on.as_deref() != Some(&format!("by/{branch}")) {
                         branchyard_workspace::materialize::remove_links(target, &detail.shared);
                         let _lock = crate::git::lock();
-                        best_effort(
-                            "arg.run",
-                            Git::new(root)
-                                .args(["worktree", "remove", "--force"])
-                                .arg(target)
-                                .run(),
-                        );
+                        crate::git::remove_worktree(root, target);
                     }
                 }
                 if store.pool().delete_slot(&row.id).unwrap_or(false) {
@@ -772,7 +763,7 @@ pub(crate) fn take(yard: &Yard, record: &Record, base: &str) -> Result<Taken, St
 /// The claim is done: the slot is the branch's worktree now.
 pub(crate) fn settle(yard: &Yard, taken: &Taken) {
     best_effort(
-        "pool.delete_slot",
+        "delete the pool slot",
         yard.store().pool().delete_slot(&taken.row.id),
     );
     wake(&yard.root);
@@ -1014,7 +1005,7 @@ fn environment(yard: &Yard, spec: &WorkspaceSpec, path: &Path) -> Result<Detail,
             for rel in &built.copied {
                 let target = path.join(rel);
                 best_effort(
-                    "symlink_metadata.map",
+                    "remove the file the failed build left",
                     match fs::symlink_metadata(&target).map(|m| m.is_dir()) {
                         Ok(true) => fs::remove_dir_all(&target),
                         Ok(false) => fs::remove_file(&target),

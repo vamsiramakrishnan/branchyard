@@ -478,7 +478,10 @@ impl SandboxProvider for RecipeProvider {
         };
         if machine.held == Held::Running {
             // Best effort: the machine is going away regardless.
-            branchyard_support::best_effort("self.remote", self.remote(name, STOP, &[&key(name)]));
+            branchyard_support::best_effort(
+                "send the command to the remote provider",
+                self.remote(name, STOP, &[&key(name)]),
+            );
         }
         if let Some(destroy) = &self.recipe.destroy {
             self.lifecycle(name, destroy, Mode::Destroy, &machine.result)?;
@@ -612,7 +615,7 @@ impl Process for RemoteProcess {
         self.torn_down = true;
         let names = self.remote(TEARDOWN).unwrap_or_default();
         self.kill_local();
-        branchyard_support::best_effort("child.try_wait", self.child.try_wait());
+        branchyard_support::best_effort("check whether the wrapper exited", self.child.try_wait());
         names
             .lines()
             .map(str::trim)
@@ -629,10 +632,16 @@ impl Drop for RemoteProcess {
         }
         match self.try_wait() {
             Ok(Some(_)) => {
-                branchyard_support::best_effort("self.remote", self.remote(FORGET));
+                branchyard_support::best_effort(
+                    "send the command to the remote provider",
+                    self.remote(FORGET),
+                );
             }
             _ => {
-                branchyard_support::best_effort("self.remote", self.remote(KILL));
+                branchyard_support::best_effort(
+                    "send the command to the remote provider",
+                    self.remote(KILL),
+                );
                 let _ = self.teardown();
                 branchyard_support::best_effort("reap child", self.child.wait());
             }

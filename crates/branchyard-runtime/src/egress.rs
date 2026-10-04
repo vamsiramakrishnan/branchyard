@@ -170,16 +170,13 @@ impl Drop for Proxy {
 /// Wake a thread blocked in `accept` on `listener`: shutting a listening
 /// socket down does that on Linux; connecting to it does it anywhere this
 /// host can reach it.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-runtime
 fn wake(listener: &Listening) {
-    best_effort(
-        "net.shutdown",
-        rustix::net::shutdown(&listener.socket, rustix::net::Shutdown::Both),
-    );
+    // Both are expected to fail somewhere: on Linux the shutdown ends the
+    // listening, so the connect is then refused. Neither is worth a log line.
+    let _ = rustix::net::shutdown(&listener.socket, rustix::net::Shutdown::Both);
     if let Some(local) = listener.local {
-        best_effort(
-            "TcpStream.connect_timeout",
-            TcpStream::connect_timeout(&local, Duration::from_secs(1)),
-        );
+        let _ = TcpStream::connect_timeout(&local, Duration::from_secs(1));
     }
 }
 
@@ -193,7 +190,7 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
             Ok((stream, _)) => {
                 let shared = shared.clone();
                 best_effort(
-                    "into.spawn",
+                    "start the connection thread",
                     thread::Builder::new()
                         .name("by-egress-conn".into())
                         .spawn(move || handle(stream, &shared)),
@@ -225,7 +222,7 @@ struct Head {
 #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-runtime
 fn handle(stream: TcpStream, shared: &Shared) {
     best_effort(
-        "stream.set_read_timeout",
+        "restore the stream's read timeout",
         stream.set_read_timeout(Some(HEAD_TIMEOUT)),
     );
     let Ok(writer) = stream.try_clone() else {
@@ -295,7 +292,7 @@ fn handle(stream: TcpStream, shared: &Shared) {
     };
     (shared.report)(&decision);
     best_effort(
-        "get_ref.set_read_timeout",
+        "restore the client stream's read timeout",
         client.get_ref().set_read_timeout(None),
     );
     let mut upstream_writer = match upstream.try_clone() {
@@ -355,10 +352,8 @@ fn relay(
         });
     let _ = io::copy(&mut upstream_read, &mut client_write);
     let _ = client_write.shutdown(Shutdown::Both);
-    best_effort(
-        "upstream_read.shutdown",
-        upstream_read.shutdown(Shutdown::Both),
-    );
+    // ENOTCONN when the client closed first: routine, not worth a log line.
+    let _ = upstream_read.shutdown(Shutdown::Both);
     if let Ok(up) = up {
         branchyard_support::join_reporting("egress upstream relay", up);
     }
