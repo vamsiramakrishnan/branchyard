@@ -7,6 +7,7 @@ publish.workspace = true
 description = "Runs a harness driver against a harness process, locally or through a sandbox provider"
 
 [dependencies]
+branchyard-support = { path = "../branchyard-support" }
 branchyard-harness = { path = "../branchyard-harness" }
 branchyard-sandbox = { path = "../branchyard-sandbox" }
 serde_json = "1"

@@ -149,6 +149,7 @@ mod tarball;
 pub mod tasks;
 mod workspace;
 
+use branchyard_support::LockExt as _;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -396,11 +397,7 @@ impl Yard {
     /// its granted packages; see `docs/connectors.md`. Replaces any gateway
     /// set before. Shared by every clone of this `Yard`.
     pub fn use_connectors(&self, gateway: connectors::Gateway) {
-        *self
-            .hub
-            .connectors
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(gateway));
+        *self.hub.connectors.lock_recovering("connectors") = Some(Arc::new(gateway));
     }
 
     /// Give this yard's branches the model gateway `gateway`: a branch on
@@ -408,16 +405,12 @@ impl Yard {
     /// see `docs/model-gateway.md`. Replaces any set before. Shared by
     /// every clone of this `Yard`.
     pub fn use_models(&self, gateway: models::Gateway) {
-        *self.hub.models.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(gateway));
+        *self.hub.models.lock_recovering("models") = Some(Arc::new(gateway));
     }
 
     /// The model gateway set with [`Yard::use_models`], if any.
     pub fn models(&self) -> Option<Arc<models::Gateway>> {
-        self.hub
-            .models
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.hub.models.lock_recovering("models").clone()
     }
 
     /// Calls through the model gateway at or after `since_ms` (since the
@@ -432,26 +425,21 @@ impl Yard {
     /// server's principal). Replaces any set before. See
     /// `docs/model-gateway.md#one-scope`.
     pub fn use_ceilings(&self, ceilings: std::collections::BTreeMap<String, Ceiling>) {
-        *self.hub.ceilings.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(ceilings);
+        *self.hub.ceilings.lock_recovering("ceilings") = Arc::new(ceilings);
     }
 
     /// The ceiling of `subject`, if one is set.
     pub fn ceiling(&self, subject: &str) -> Option<Ceiling> {
         self.hub
             .ceilings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("ceilings")
             .get(subject)
             .cloned()
     }
 
     /// The connector gateway set with [`Yard::use_connectors`], if any.
     pub fn connectors(&self) -> Option<Arc<connectors::Gateway>> {
-        self.hub
-            .connectors
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.hub.connectors.lock_recovering("connectors").clone()
     }
 
     /// Record the gateway's new audit lines on the branches they name, as
@@ -465,27 +453,18 @@ impl Yard {
     /// start; see [`DeliveryHook`]. Replaces any hook set before. Shared by
     /// every clone of this `Yard`.
     pub fn set_delivery_hook(&self, hook: Arc<dyn DeliveryHook>) {
-        *self
-            .hub
-            .delivery_hook
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(hook);
+        *self.hub.delivery_hook.lock_recovering("delivery_hook") = Some(hook);
     }
 
     /// Stop trying a hook set with [`Yard::set_delivery_hook`].
     pub fn clear_delivery_hook(&self) {
-        *self
-            .hub
-            .delivery_hook
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self.hub.delivery_hook.lock_recovering("delivery_hook") = None;
     }
 
     pub(crate) fn delivery_hook(&self) -> Option<Arc<dyn DeliveryHook>> {
         self.hub
             .delivery_hook
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("delivery_hook")
             .clone()
     }
 
@@ -519,7 +498,7 @@ impl Yard {
     /// shared by every process on this machine; opened once per yard and
     /// its clones. See `docs/registry.md`.
     pub fn services(&self) -> Result<Arc<services::LocalRegistry>, Error> {
-        let mut held = self.hub.services.lock().unwrap_or_else(|e| e.into_inner());
+        let mut held = self.hub.services.lock_recovering("services");
         if let Some(registry) = &*held {
             return Ok(registry.clone());
         }
@@ -533,11 +512,7 @@ impl Yard {
     /// Whether this repository has a registry file yet: what lets a
     /// reader skip opening one that would be empty.
     pub fn has_services(&self) -> bool {
-        self.hub
-            .services
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some()
+        self.hub.services.lock_recovering("services").is_some()
             || services::local_path(&self.root).is_file()
     }
 

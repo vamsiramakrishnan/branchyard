@@ -20,6 +20,7 @@
 //! runs what. Expiry compares clocks across machines: the allowed skew
 //! (30 seconds by default) is the bound sync assumes.
 
+use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -265,16 +266,13 @@ impl LeaseKeeper {
             std::thread::Builder::new()
                 .name("by-sync-lease".into())
                 .spawn(move || loop {
-                    let guard = stop.stopped.lock().unwrap_or_else(|e| e.into_inner());
-                    let (guard, _) = stop
-                        .wake
-                        .wait_timeout(guard, ttl / 3)
-                        .unwrap_or_else(|e| e.into_inner());
+                    let guard = stop.stopped.lock_recovering("stopped");
+                    let (guard, _) = stop.wake.wait_timeout_recovering(guard, ttl / 3, "wake");
                     if *guard {
                         return;
                     }
                     drop(guard);
-                    let mut slot = lease.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut slot = lease.lock_recovering("lease");
                     if let Some(held) = slot.as_mut() {
                         match remote.renew_lease(held) {
                             Ok(()) => {}
@@ -314,23 +312,21 @@ impl LeaseKeeper {
             return None;
         }
         self.reason
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("reason")
             .clone()
             .or_else(|| Some("the lease was lost".into()))
     }
 
     pub fn record(&self) -> Option<LeaseRecord> {
         self.lease
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("lease")
             .as_ref()
             .map(|l| l.record.clone())
     }
 
     /// Renew now.
     pub fn renew(&self) -> Result<()> {
-        let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = self.lease.lock_recovering("lease");
         match slot.as_mut() {
             Some(lease) => self.remote.renew_lease(lease).inspect_err(|e| {
                 if e.is(Kind::LeaseHeld) {
@@ -344,12 +340,12 @@ impl LeaseKeeper {
 
 impl Drop for LeaseKeeper {
     fn drop(&mut self) {
-        *self.stop.stopped.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        *self.stop.stopped.lock_recovering("stopped") = true;
         self.stop.wake.notify_all();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        if let Some(lease) = self.lease.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(lease) = self.lease.lock_recovering("lease").take() {
             let _ = self.remote.release_lease(lease);
         }
         drop(self.registration.take());
@@ -372,7 +368,7 @@ fn record_loss(
         ),
         _ => String::new(),
     };
-    *reason.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("{}{now}", error.message));
+    *reason.lock_recovering("reason") = Some(format!("{}{now}", error.message));
     lost.store(true, Ordering::SeqCst);
 }
 

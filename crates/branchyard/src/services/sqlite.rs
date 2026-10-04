@@ -2,6 +2,7 @@
 //! file, and [`SqliteRows`], which a server's operation store uses on its
 //! own connection with [`SCHEMA`] among its tables.
 
+use branchyard_support::LockExt as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -272,7 +273,7 @@ impl ServiceStore for LocalRegistry {
         &self,
         f: &mut (dyn FnMut(&mut dyn Rows) -> io::Result<()> + Send),
     ) -> io::Result<()> {
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.conn.lock_recovering("conn");
         transact(&mut conn, f)
     }
 }

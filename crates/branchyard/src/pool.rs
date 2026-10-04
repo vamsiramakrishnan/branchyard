@@ -40,6 +40,7 @@
 //!   and is removed. Recovery ([`crate::Yard::recover`]) does this, as
 //!   does every fill and drain.
 
+use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -363,8 +364,7 @@ fn signal(root: &Path) -> Arc<Signal> {
     static SIGNALS: OnceLock<Mutex<HashMap<PathBuf, Arc<Signal>>>> = OnceLock::new();
     SIGNALS
         .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .lock_recovering("pool signals")
         .entry(root.to_path_buf())
         .or_default()
         .clone()
@@ -372,7 +372,7 @@ fn signal(root: &Path) -> Arc<Signal> {
 
 fn wake(root: &Path) {
     let signal = signal(root);
-    *signal.claims.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+    *signal.claims.lock_recovering("claims") += 1;
     signal.changed.notify_all();
 }
 
@@ -1087,7 +1087,7 @@ impl PoolKeeper {
                 .name("by-pool".into())
                 .spawn(move || {
                     let signal = signal(&yard.root);
-                    let mut seen = *signal.claims.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut seen = *signal.claims.lock_recovering("claims");
                     while !stop.load(Ordering::SeqCst) {
                         if let Some(spec) = spec().filter(|s| s.pool.is_some()) {
                             match fill(&yard, &spec) {
@@ -1099,7 +1099,7 @@ impl PoolKeeper {
                             }
                         }
                         let deadline = Instant::now() + every;
-                        let mut claims = signal.claims.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut claims = signal.claims.lock_recovering("claims");
                         while *claims == seen && !stop.load(Ordering::SeqCst) {
                             let left = deadline.saturating_duration_since(Instant::now());
                             if left.is_zero() {
@@ -1107,8 +1107,7 @@ impl PoolKeeper {
                             }
                             claims = signal
                                 .changed
-                                .wait_timeout(claims, left)
-                                .unwrap_or_else(|e| e.into_inner())
+                                .wait_timeout_recovering(claims, left, "changed")
                                 .0;
                         }
                         seen = *claims;
@@ -1139,7 +1138,7 @@ impl PoolKeeper {
         let signal = signal(&self.root);
         // Under the lock, so the keeper is either waiting (and woken) or
         // will see the flag before it waits.
-        drop(signal.claims.lock().unwrap_or_else(|e| e.into_inner()));
+        drop(signal.claims.lock_recovering("claims"));
         signal.changed.notify_all();
     }
 }

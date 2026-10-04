@@ -27,6 +27,7 @@
 //! trait method blocks on it. Call them from ordinary threads, never from
 //! inside a Tokio runtime. Drop every [`Process`] before its provider.
 
+use branchyard_support::LockExt as _;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -96,10 +97,7 @@ impl MicrosandboxProvider {
     }
 
     fn keep(&self, name: &str) {
-        self.kept
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(name.to_owned());
+        self.kept.lock_recovering("kept").insert(name.to_owned());
     }
 
     fn live(&self, operation: Operation) -> Result<(), ProviderError> {
@@ -133,7 +131,7 @@ impl MicrosandboxProvider {
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<String, Arc<Sandbox>>> {
-        self.sandboxes.lock().unwrap_or_else(|e| e.into_inner())
+        self.sandboxes.lock_recovering("sandboxes")
     }
 
     fn held(&self, name: &str) -> Result<Arc<Sandbox>, ProviderError> {
@@ -146,7 +144,7 @@ impl MicrosandboxProvider {
 
 impl Drop for MicrosandboxProvider {
     fn drop(&mut self) {
-        let kept = std::mem::take(&mut *self.kept.lock().unwrap_or_else(|e| e.into_inner()));
+        let kept = std::mem::take(&mut *self.kept.lock_recovering("kept"));
         let held: Vec<Arc<Sandbox>> = self
             .lock()
             .drain()
@@ -271,7 +269,7 @@ struct Control {
 
 impl GuestControl for Control {
     fn write_stdin(&self, data: &[u8]) -> io::Result<()> {
-        let stdin = self.stdin.lock().unwrap_or_else(|e| e.into_inner());
+        let stdin = self.stdin.lock_recovering("stdin");
         let Some(sink) = stdin.as_ref() else {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "stdin is closed"));
         };
@@ -281,7 +279,7 @@ impl GuestControl for Control {
     }
 
     fn close_stdin(&self) -> io::Result<()> {
-        let sink = self.stdin.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let sink = self.stdin.lock_recovering("stdin").take();
         match sink {
             Some(sink) => self
                 .runtime
@@ -417,10 +415,7 @@ impl SandboxProvider for MicrosandboxProvider {
 
     fn destroy(&self, name: &str) -> Result<(), ProviderError> {
         let held = self.lock().remove(name);
-        self.kept
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(name);
+        self.kept.lock_recovering("kept").remove(name);
         let destroyed = match held {
             Some(sandbox) => self.handle().block_on(sandbox.destroy()),
             None => match self.handle().block_on(Sandbox::get(name)) {

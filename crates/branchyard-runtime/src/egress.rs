@@ -30,6 +30,7 @@
 //!   can reach the network is the caller's business: see
 //!   [`crate::LocalProvider::spawn_confined`].
 
+use branchyard_support::LockExt as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -138,14 +139,11 @@ impl Proxy {
         let thread = thread::Builder::new()
             .name("by-egress".into())
             .spawn(move || accept_loop(listener, shared))?;
-        self.listening
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(Listening {
-                socket,
-                local,
-                thread: Some(thread),
-            });
+        self.listening.lock_recovering("listening").push(Listening {
+            socket,
+            local,
+            thread: Some(thread),
+        });
         Ok(())
     }
 }
@@ -153,7 +151,7 @@ impl Proxy {
 impl Drop for Proxy {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Release);
-        let mut listening = self.listening.lock().unwrap_or_else(|e| e.into_inner());
+        let mut listening = self.listening.lock_recovering("listening");
         for listener in listening.iter_mut() {
             wake(listener);
             if let Some(thread) = listener.thread.take() {

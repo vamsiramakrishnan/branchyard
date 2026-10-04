@@ -28,6 +28,7 @@
 //!   and the ID was reused, an unrelated group would be signalled. The same
 //!   window exists for any tool that kills a group after reaping its leader.
 
+use branchyard_support::LockExt as _;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -174,7 +175,7 @@ impl LocalProvider {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Local>> {
-        self.sandboxes.lock().unwrap_or_else(|e| e.into_inner())
+        self.sandboxes.lock_recovering("sandboxes")
     }
 }
 

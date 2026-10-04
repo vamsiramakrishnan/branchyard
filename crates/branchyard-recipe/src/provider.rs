@@ -22,6 +22,7 @@
 //! With a state directory, each machine's result is kept in a file, so a
 //! later process can exec in, pause, resume or destroy it by name.
 
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -147,7 +148,7 @@ impl RecipeProvider {
     }
 
     fn machine(&self, name: &str) -> Option<Machine> {
-        let mut machines = self.machines.lock().unwrap_or_else(|e| e.into_inner());
+        let mut machines = self.machines.lock_recovering("machines");
         if let Some(machine) = machines.get(name) {
             return Some(machine.clone());
         }
@@ -158,7 +159,7 @@ impl RecipeProvider {
     }
 
     fn record(&self, name: &str, machine: Option<Machine>) -> Result<(), ProviderError> {
-        let mut machines = self.machines.lock().unwrap_or_else(|e| e.into_inner());
+        let mut machines = self.machines.lock_recovering("machines");
         match &machine {
             Some(machine) => {
                 machines.insert(name.to_owned(), machine.clone());

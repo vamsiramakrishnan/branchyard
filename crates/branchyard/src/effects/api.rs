@@ -1,6 +1,7 @@
 //! The ledger and approvals on [`Yard`]: what every surface (`by`, the
 //! server, the companion, a delegating parent) calls.
 
+use branchyard_support::LockExt as _;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -22,16 +23,12 @@ impl Yard {
     /// and the people's (`docs/effects.md#approvals`). Replaces any set
     /// before. Shared by every clone of this `Yard`.
     pub fn use_approvals(&self, settings: ApprovalSettings) {
-        *self.hub.approvals.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(settings);
+        *self.hub.approvals.lock_recovering("approvals") = Arc::new(settings);
     }
 
     /// The settings set with [`Yard::use_approvals`].
     pub fn approval_settings(&self) -> Arc<ApprovalSettings> {
-        self.hub
-            .approvals
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.hub.approvals.lock_recovering("approvals").clone()
     }
 
     /// The ledger, or one branch's, oldest first. Entries outlive their

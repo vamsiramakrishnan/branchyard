@@ -15,6 +15,7 @@
 //! turns becomes one push, and the lag reported is from the oldest change
 //! not yet pushed.
 
+use branchyard_support::LockExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -99,7 +100,7 @@ impl Outbox {
     }
 
     fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = self.conn.lock_recovering("conn");
         Ok(f(&conn)?)
     }
 

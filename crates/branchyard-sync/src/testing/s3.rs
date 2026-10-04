@@ -3,6 +3,7 @@
 //! deletes and multipart completion, ranges, ListObjectsV2 with paging,
 //! and multipart uploads.
 
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -100,8 +101,7 @@ impl MockS3 {
     /// Every key and its bytes, as stored.
     pub fn objects(&self) -> BTreeMap<String, Vec<u8>> {
         self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("state")
             .objects
             .iter()
             .map(|(k, o)| (k.clone(), o.data.clone()))
@@ -110,7 +110,7 @@ impl MockS3 {
 
     /// Change a stored object's bytes in place (to test integrity checks).
     pub fn corrupt(&self, key: &str) {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.state.lock_recovering("state");
         if let Some(o) = s.objects.get_mut(key) {
             if let Some(b) = o.data.last_mut() {
                 *b ^= 0x55;
@@ -119,11 +119,7 @@ impl MockS3 {
     }
 
     pub fn uploads_open(&self) -> usize {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .uploads
-            .len()
+        self.state.lock_recovering("state").uploads.len()
     }
 }
 
@@ -145,7 +141,7 @@ fn handle(state: &Mutex<State>, bucket: &str, page: usize, r: &MockRequest) -> M
     if b != bucket {
         return error(404, "NoSuchBucket");
     }
-    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = state.lock_recovering("state");
     if key.is_empty() {
         if r.method == "GET" && r.param("list-type").as_deref() == Some("2") {
             return list(&s, page, r);

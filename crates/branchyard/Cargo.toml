@@ -18,6 +18,7 @@ postgres = ["dep:postgres", "dep:tokio"]
 schema = ["dep:schemars", "branchyard-provision/schema", "branchyard-harness/schema"]
 
 [dependencies]
+branchyard-support = { path = "../branchyard-support" }
 blake3 = "1"
 branchyard-bridge = { path = "../branchyard-bridge" }
 branchyard-controls = { path = "../branchyard-controls" }

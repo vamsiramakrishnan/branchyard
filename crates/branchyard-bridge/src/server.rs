@@ -48,6 +48,7 @@
 //! - Confidentiality on the wire unless it is served over TLS, by the
 //!   bridge ([`Config::tls`]) or by a router in front of it.
 
+use branchyard_support::LockExt as _;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -126,7 +127,7 @@ struct Group {
 
 impl Group {
     fn kill_leader(&self) {
-        let reaped = self.reaped.lock().unwrap_or_else(|e| e.into_inner());
+        let reaped = self.reaped.lock_recovering("reaped");
         if !*reaped {
             // SAFETY: plain syscall on a PID that has not been reaped.
             unsafe { libc::kill(self.pgid as i32, libc::SIGKILL) };
@@ -189,7 +190,7 @@ impl Shared {
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        self.state.lock_recovering("state")
     }
 
     /// Write `attempts` to the state file, readable and writable by the
@@ -241,7 +242,7 @@ impl Shared {
     /// Tear down the groups `select` picks; returns the survivors' names.
     fn teardown(&self, select: impl Fn(&Group) -> bool) -> Vec<String> {
         let groups: Vec<Arc<Group>> = {
-            let mut groups = self.groups.lock().unwrap_or_else(|e| e.into_inner());
+            let mut groups = self.groups.lock_recovering("groups");
             groups.retain(|g| g.strong_count() > 0);
             groups.iter().filter_map(Weak::upgrade).collect()
         };
@@ -298,7 +299,7 @@ impl Shared {
     /// The groups still alive: an exec whose connection is open, or whose
     /// group still has live members.
     fn live_groups(&self) -> Vec<Arc<Group>> {
-        let mut groups = self.groups.lock().unwrap_or_else(|e| e.into_inner());
+        let mut groups = self.groups.lock_recovering("groups");
         groups.retain(|g| g.strong_count() > 0);
         groups.iter().filter_map(Weak::upgrade).collect()
     }
@@ -314,7 +315,7 @@ impl Shared {
             .live_groups()
             .into_iter()
             .filter_map(|group| {
-                let running = !*group.reaped.lock().unwrap_or_else(|e| e.into_inner());
+                let running = !*group.reaped.lock_recovering("reaped");
                 let members = group_members(group.pgid);
                 (running || !members.is_empty()).then(|| ExecReport {
                     pid: group.pgid,
@@ -331,7 +332,7 @@ impl Shared {
     /// Reap every zombie child that no exec is waiting for: orphans
     /// reparented to the bridge as process 1 or as a subreaper.
     fn reap_orphans(&self) {
-        let children = self.children.lock().unwrap_or_else(|e| e.into_inner());
+        let children = self.children.lock_recovering("children");
         for pid in zombie_children() {
             if !children.contains(&pid) {
                 let mut status = 0;
@@ -698,12 +699,8 @@ fn connection(shared: &Arc<Shared>, mut stream: Stream) -> io::Result<()> {
     };
     stream.set_read_timeout(None)?;
     let (mut reader, writer) = ws::server_accept(stream, &head, SUBPROTOCOL)?;
-    let send = |frame: Frame| -> io::Result<()> {
-        writer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .send(&frame.encode())
-    };
+    let send =
+        |frame: Frame| -> io::Result<()> { writer.lock_recovering("writer").send(&frame.encode()) };
     let Some(first) = reader.recv()? else {
         return Ok(());
     };
@@ -747,7 +744,7 @@ fn connection(shared: &Arc<Shared>, mut stream: Stream) -> io::Result<()> {
 
 /// Close the WebSocket and wait briefly for the client to close too.
 fn finish(mut reader: WsReader, writer: &Arc<Mutex<WsWriter>>) {
-    let _ = writer.lock().unwrap_or_else(|e| e.into_inner()).close();
+    let _ = writer.lock_recovering("writer").close();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         match reader.recv() {
@@ -755,7 +752,7 @@ fn finish(mut reader: WsReader, writer: &Arc<Mutex<WsWriter>>) {
             _ => break,
         }
     }
-    writer.lock().unwrap_or_else(|e| e.into_inner()).abort();
+    writer.lock_recovering("writer").abort();
 }
 
 fn next_frame(reader: &mut WsReader) -> io::Result<Frame> {
@@ -865,14 +862,11 @@ fn exec(
     let send = {
         let writer = writer.clone();
         move |frame: Frame| -> io::Result<()> {
-            writer
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .send(&frame.encode())
+            writer.lock_recovering("writer").send(&frame.encode())
         }
     };
     let running = shared.live_groups().len();
-    let children = shared.children.lock().unwrap_or_else(|e| e.into_inner());
+    let children = shared.children.lock_recovering("children");
     let spawned = match argv.split_first() {
         None => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -938,8 +932,7 @@ fn exec(
     });
     shared
         .groups
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .lock_recovering("groups")
         .push(Arc::downgrade(&group));
     let stdout = child.stdout.take().expect("piped");
     let stderr = child.stderr.take().expect("piped");
@@ -980,8 +973,8 @@ fn exec(
         thread::spawn(move || {
             wait_exited(pid);
             let status = {
-                let mut children = shared.children.lock().unwrap_or_else(|e| e.into_inner());
-                let mut reaped = group.reaped.lock().unwrap_or_else(|e| e.into_inner());
+                let mut children = shared.children.lock_recovering("children");
+                let mut reaped = group.reaped.lock_recovering("reaped");
                 let status = child.wait();
                 *reaped = true;
                 children.remove(&pid);
@@ -1028,7 +1021,7 @@ fn exec(
     group.teardown();
     group.kill_leader();
     let _ = waiter.join();
-    writer.lock().unwrap_or_else(|e| e.into_inner()).abort();
+    writer.lock_recovering("writer").abort();
     Ok(())
 }
 

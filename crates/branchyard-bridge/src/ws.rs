@@ -9,6 +9,7 @@
 //! the RFC requires; the server does not check that they are, since
 //! masking protects intermediaries, not the endpoints.
 
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
@@ -269,13 +270,13 @@ impl WsReader {
                     }
                 }
                 OP_PING => {
-                    let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut writer = self.writer.lock_recovering("writer");
                     let _ = writer.frame(OP_PONG, &payload);
                 }
                 OP_PONG => {}
                 OP_CLOSE => {
                     self.closed = true;
-                    let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut writer = self.writer.lock_recovering("writer");
                     let _ = writer.frame(OP_CLOSE, &payload[..payload.len().min(2)]);
                     let _ = writer.stream.shutdown(Shutdown::Write);
                     return Ok(None);

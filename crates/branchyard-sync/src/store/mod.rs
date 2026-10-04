@@ -30,6 +30,7 @@ pub mod memory;
 pub mod s3;
 pub(crate) mod xml;
 
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -81,26 +82,21 @@ pub struct MemoryJournal(Mutex<BTreeMap<String, String>>);
 
 impl MemoryJournal {
     pub fn entries(&self) -> BTreeMap<String, String> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.0.lock_recovering("journal").clone()
     }
 }
 
 impl UploadJournal for MemoryJournal {
     fn load(&self, key: &str) -> Option<String> {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(key)
-            .cloned()
+        self.0.lock_recovering("journal").get(key).cloned()
     }
     fn save(&self, key: &str, state: &str) {
         self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("journal")
             .insert(key.to_owned(), state.to_owned());
     }
     fn clear(&self, key: &str) {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+        self.0.lock_recovering("journal").remove(key);
     }
 }
 

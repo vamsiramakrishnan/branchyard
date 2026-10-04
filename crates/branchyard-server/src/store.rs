@@ -29,6 +29,7 @@
 //! without changing the transaction's shape. [`FileStore`], the JSON-lines
 //! file earlier versions used, is only read, to import it once.
 
+use branchyard_support::LockExt as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
@@ -753,7 +754,7 @@ impl FileStore {
     pub fn save(&self, operation: &StoredOperation) -> io::Result<()> {
         let mut line = serde_json::to_vec(operation)?;
         line.push(b'\n');
-        let mut file = self.file.lock().unwrap_or_else(|p| p.into_inner());
+        let mut file = self.file.lock_recovering("file");
         file.write_all(&line)?;
         file.sync_data()
     }
@@ -1027,7 +1028,7 @@ impl SqliteStore {
     }
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Conn> {
-        self.conn.lock().unwrap_or_else(|p| p.into_inner())
+        self.conn.lock_recovering("conn")
     }
 
     /// Run `f` in a `BEGIN IMMEDIATE` transaction, committed when it
@@ -2036,7 +2037,7 @@ impl PostgresStore {
         &self,
         f: impl FnOnce(&mut postgres::Client) -> Result<T, postgres::Error> + Send,
     ) -> io::Result<T> {
-        let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.conn.lock_recovering("conn");
         let conn: &mut Option<postgres::Client> = &mut guard;
         let url = &self.url;
         std::thread::scope(|scope| {
@@ -2063,7 +2064,7 @@ impl Drop for PostgresStore {
     /// The client blocks to close its connection, which a Tokio runtime's
     /// thread may not.
     fn drop(&mut self) {
-        let conn = self.conn.get_mut().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.get_mut_recovering("conn");
         if let Some(client) = conn.take() {
             std::thread::scope(|scope| {
                 scope.spawn(move || drop(client));

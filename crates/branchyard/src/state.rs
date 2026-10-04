@@ -23,6 +23,7 @@
 //! engine adds them): every other write keeps the list in the
 //! store, so a turn that ends after it spawned children cannot drop them.
 
+use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -760,8 +761,7 @@ fn signal_for(path: &Path) -> Arc<Signal> {
     static SIGNALS: OnceLock<Mutex<HashMap<PathBuf, Arc<Signal>>>> = OnceLock::new();
     let mut signals = SIGNALS
         .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .lock_recovering("task signals");
     signals.entry(path.to_path_buf()).or_default().clone()
 }
 
@@ -994,11 +994,7 @@ impl Store {
 
     /// Wake readers waiting in this process.
     pub fn notify(&self) {
-        let mut appended = self
-            .signal
-            .appended
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut appended = self.signal.appended.lock_recovering("appended");
         *appended += 1;
         self.signal.changed.notify_all();
     }
@@ -1013,11 +1009,7 @@ impl Store {
     ) -> Result<Option<T>, Error> {
         let deadline = Instant::now() + timeout;
         loop {
-            let seen = *self
-                .signal
-                .appended
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let seen = *self.signal.appended.lock_recovering("appended");
             if let Some(found) = ready()? {
                 return Ok(Some(found));
             }
@@ -1025,11 +1017,7 @@ impl Store {
             if now >= deadline {
                 return Ok(None);
             }
-            let appended = self
-                .signal
-                .appended
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let appended = self.signal.appended.lock_recovering("appended");
             if *appended == seen {
                 let _ = self
                     .signal
@@ -1128,15 +1116,12 @@ impl Heartbeat {
             .name(format!("by-lease-{}", fence.branch))
             .spawn(move || {
                 let (flag, wake) = &*stopping;
-                let mut stopped = flag.lock().unwrap_or_else(|e| e.into_inner());
+                let mut stopped = flag.lock_recovering("heartbeat stop flag");
                 loop {
                     let deadline = Instant::now() + HEARTBEAT;
                     while !*stopped && Instant::now() < deadline {
                         let left = deadline.saturating_duration_since(Instant::now());
-                        stopped = wake
-                            .wait_timeout(stopped, left)
-                            .unwrap_or_else(|e| e.into_inner())
-                            .0;
+                        stopped = wake.wait_timeout_recovering(stopped, left, "wake").0;
                     }
                     if *stopped {
                         return;
@@ -1165,7 +1150,7 @@ impl Heartbeat {
 impl Drop for Heartbeat {
     fn drop(&mut self) {
         let (flag, wake) = &*self.stop;
-        *flag.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        *flag.lock_recovering("heartbeat stop flag") = true;
         wake.notify_all();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();

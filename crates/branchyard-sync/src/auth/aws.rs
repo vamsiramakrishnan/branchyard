@@ -7,6 +7,7 @@
 //! `AWS_EC2_METADATA_SERVICE_ENDPOINT` names another). Temporary
 //! credentials are cached until five minutes before they run out.
 
+use branchyard_support::LockExt as _;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -31,7 +32,7 @@ impl AwsCredentials {
 
     /// Credentials good for at least a few more minutes at `now_ms`.
     pub fn get(&self, now_ms: u64) -> Result<Credentials> {
-        let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cached = self.cached.lock_recovering("cached");
         if let Some(c) = cached.as_ref() {
             if c.expires_ms.is_none_or(|t| t > now_ms + REFRESH_EARLY_MS) {
                 return Ok(c.clone());

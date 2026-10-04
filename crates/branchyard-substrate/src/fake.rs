@@ -30,6 +30,7 @@
 //! Nothing here is evidence about a real cluster: the real router's
 //! addressing, activation and authentication are not modelled.
 
+use branchyard_support::LockExt as _;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
@@ -124,7 +125,7 @@ struct Inner {
 
 impl Inner {
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        self.state.lock_recovering("state")
     }
 
     fn name_of(&self, reference: Option<pb::ObjectRef>) -> Result<String, Status> {
@@ -196,7 +197,7 @@ impl Inner {
     /// name and template before `rpc` acts on it.
     fn maybe_replace(&self, rpc: &str, name: &str) {
         let wanted = {
-            let mut replace = self.replace.lock().unwrap_or_else(|e| e.into_inner());
+            let mut replace = self.replace.lock_recovering("replace");
             match replace.iter().position(|(r, n)| r == rpc && n == name) {
                 Some(at) => {
                     replace.remove(at);
@@ -384,13 +385,7 @@ impl Control for Service {
         if let Some(seed) = seed {
             copy_dir(&seed, &root).map_err(|e| Status::internal(e.to_string()))?;
         }
-        for path in self
-            .0
-            .fresh
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-        {
+        for path in self.0.fresh.lock_recovering("fresh").iter() {
             let _ = fs::remove_dir_all(path);
         }
         set_state(&mut actor, pb::ActorState::Suspended);
@@ -798,11 +793,7 @@ impl FakeCluster {
     /// Remove `path` whenever an actor is created, as a fresh root
     /// filesystem would not have it.
     pub fn fresh_on_create(&self, path: impl Into<PathBuf>) {
-        self.inner
-            .fresh
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(path.into());
+        self.inner.fresh.lock_recovering("fresh").push(path.into());
     }
 
     /// Just before the next `rpc` (`ResumeActor`, `SuspendActor`,
@@ -812,8 +803,7 @@ impl FakeCluster {
     pub fn replace_before(&self, rpc: &str, actor: &str) {
         self.inner
             .replace
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("replace")
             .push((rpc.to_owned(), actor.to_owned()));
     }
 

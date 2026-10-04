@@ -26,6 +26,7 @@ pub mod qr;
 mod qr_fixtures;
 pub mod store;
 
+use branchyard_support::LockExt as _;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -140,7 +141,7 @@ impl Companion {
 
     /// Count a redemption attempt; false when over the limit.
     fn attempt(&self, now: Instant) -> Result<(), Duration> {
-        let mut attempts = self.attempts.lock().unwrap_or_else(|p| p.into_inner());
+        let mut attempts = self.attempts.lock_recovering("attempts");
         while attempts
             .front()
             .is_some_and(|t| now.duration_since(*t) >= PAIR_WINDOW)

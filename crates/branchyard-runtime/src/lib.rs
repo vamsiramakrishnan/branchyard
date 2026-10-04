@@ -48,6 +48,7 @@ mod local;
 #[cfg(target_os = "linux")]
 mod netns;
 
+use branchyard_support::LockExt as _;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::fmt;
@@ -432,7 +433,7 @@ impl Session {
                 if n == 0 {
                     break;
                 }
-                let mut bytes = sink.bytes.lock().unwrap_or_else(|e| e.into_inner());
+                let mut bytes = sink.bytes.lock_recovering("bytes");
                 bytes.extend_from_slice(&chunk[..n]);
                 let excess = bytes.len().saturating_sub(STDERR_KEEP);
                 bytes.drain(..excess);
@@ -605,7 +606,7 @@ impl Session {
 
     /// The last few hundred bytes of the harness's stderr.
     pub fn stderr_tail(&self) -> String {
-        let bytes = self.stderr.bytes.lock().unwrap_or_else(|e| e.into_inner());
+        let bytes = self.stderr.bytes.lock_recovering("bytes");
         let start = bytes.len().saturating_sub(STDERR_TAIL);
         String::from_utf8_lossy(&bytes[start..]).trim().to_owned()
     }

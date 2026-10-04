@@ -13,6 +13,7 @@
 //! (`events/*.jsonl`) written by earlier versions are imported in one
 //! transaction, then moved to `legacy/`.
 
+use branchyard_support::LockExt as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -782,7 +783,7 @@ impl Sqlite {
     }
 
     fn lock(&self) -> MutexGuard<'_, Conn> {
-        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+        self.conn.lock_recovering("conn")
     }
 
     /// Run `f` in an immediate transaction; `full` chooses the commit's

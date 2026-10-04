@@ -34,6 +34,7 @@
 //! queued ones stay queued for the next worker, here after a restart or on
 //! another server.
 
+use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::collections::HashMap;
 use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -286,7 +287,7 @@ impl Registry {
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|p| p.into_inner())
+        self.state.lock_recovering("state")
     }
 
     /// This registry's worker identity, as its claims record it.
@@ -316,10 +317,7 @@ impl Registry {
 
     /// This worker's harness inventory, once detected.
     pub fn inventory(&self) -> Option<branchyard::inventory::Inventory> {
-        self.inventory
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        self.inventory.lock_recovering("inventory").clone()
     }
 
     /// The labels this worker claims with: its configured ones and those
@@ -353,7 +351,7 @@ impl Registry {
         loop {
             let found = (source.0)();
             if found.is_some() {
-                *self.inventory.lock().unwrap_or_else(|p| p.into_inner()) = found;
+                *self.inventory.lock_recovering("inventory") = found;
                 // Beat with it now rather than at the next beat.
                 self.changed.notify_all();
             }
@@ -369,8 +367,7 @@ impl Registry {
                 }
                 state = self
                     .changed
-                    .wait_timeout(state, left)
-                    .unwrap_or_else(|p| p.into_inner())
+                    .wait_timeout_recovering(state, left, "changed")
                     .0;
             }
         }
@@ -621,10 +618,7 @@ impl Registry {
             let wait = self.options.poll.min(renew_every);
             let state = self.lock();
             if !state.admitted || !free {
-                let _ = self
-                    .changed
-                    .wait_timeout(state, wait)
-                    .unwrap_or_else(|p| p.into_inner());
+                let _ = self.changed.wait_timeout_recovering(state, wait, "changed");
             }
         }
     }
@@ -913,10 +907,11 @@ impl Registry {
                 return false;
             }
             let state = self.lock();
-            let _ = self
-                .changed
-                .wait_timeout(state, (deadline - now).min(Duration::from_millis(20)))
-                .unwrap_or_else(|p| p.into_inner());
+            let _ = self.changed.wait_timeout_recovering(
+                state,
+                (deadline - now).min(Duration::from_millis(20)),
+                "changed",
+            );
         }
     }
 

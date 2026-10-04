@@ -47,6 +47,7 @@
 //! [`SandboxProvider::release_checkpoint`] deletes the tag. `branch_live`
 //! is not offered.
 
+use branchyard_support::LockExt as _;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::IpAddr;
@@ -386,7 +387,7 @@ impl SubstrateProvider {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Live>> {
-        self.live.lock().unwrap_or_else(|e| e.into_inner())
+        self.live.lock_recovering("live")
     }
 
     /// The capabilities of the configured template, or an error if it

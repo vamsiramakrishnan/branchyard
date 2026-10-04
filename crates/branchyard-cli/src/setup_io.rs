@@ -5,6 +5,7 @@
 //! The probe reports whether a variable is set, never its value. The only
 //! file contents it hashes are token files `by init` itself generates.
 
+use branchyard_support::LockExt as _;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -572,7 +573,7 @@ impl<P: Probe> Probe for CachedProbe<P> {
         self.inner.env_is_set(name)
     }
     fn tool(&self, program: &str) -> Option<String> {
-        let mut tools = self.tools.lock().unwrap_or_else(|p| p.into_inner());
+        let mut tools = self.tools.lock_recovering("tools");
         tools
             .entry(program.to_owned())
             .or_insert_with(|| self.inner.tool(program))

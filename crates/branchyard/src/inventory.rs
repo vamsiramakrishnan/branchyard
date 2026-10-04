@@ -22,6 +22,7 @@
 //! ([`HarnessLog`]). The router consults the inventory through
 //! [`HarnessGate`].
 
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -1435,10 +1436,7 @@ impl LocalGate {
 
     /// The inventory as it stands, after any installs.
     pub fn inventory(&self) -> Inventory {
-        self.inventory
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        self.inventory.lock_recovering("inventory").clone()
     }
 
     pub fn into_arc(self) -> Arc<dyn HarnessGate> {
@@ -1448,7 +1446,7 @@ impl LocalGate {
 
 impl HarnessGate for LocalGate {
     fn check(&self, harness: &str) -> Result<(), String> {
-        let mut inventory = self.inventory.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inventory = self.inventory.lock_recovering("inventory");
         if catalog::harness(harness).is_none() || !inventory.checked(harness) {
             // Not something detection knows: the PATH check decides.
             return Ok(());

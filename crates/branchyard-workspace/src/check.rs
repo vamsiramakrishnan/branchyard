@@ -1,5 +1,6 @@
 //! Running a trusted check command with a timeout.
 
+use branchyard_support::LockExt as _;
 use std::collections::VecDeque;
 use std::io::{self, Read};
 use std::path::Path;
@@ -66,7 +67,7 @@ pub(crate) fn run(check: &Check, dir: &Path) -> io::Result<(CheckOutcome, String
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
             while let Ok(n @ 1..) = reader.read(&mut buf) {
-                let mut tail = tail.lock().unwrap_or_else(|e| e.into_inner());
+                let mut tail = tail.lock_recovering("tail");
                 tail.extend(&buf[..n]);
                 let excess = tail.len().saturating_sub(OUTPUT_TAIL_BYTES);
                 tail.drain(..excess);
@@ -101,12 +102,7 @@ pub(crate) fn run(check: &Check, dir: &Path) -> io::Result<(CheckOutcome, String
     kill_group(child.id());
     // A process that escaped the group may hold the pipe open; do not wait on it.
     let _ = done_rx.recv_timeout(Duration::from_secs(1));
-    let bytes: Vec<u8> = tail
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .copied()
-        .collect();
+    let bytes: Vec<u8> = tail.lock_recovering("tail").iter().copied().collect();
     Ok((outcome, String::from_utf8_lossy(&bytes).into_owned()))
 }
 

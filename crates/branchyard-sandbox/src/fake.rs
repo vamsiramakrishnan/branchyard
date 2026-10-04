@@ -30,6 +30,7 @@
 //! Nothing here is evidence about a real provider: memory, processes and
 //! isolation are not modelled.
 
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
@@ -196,7 +197,7 @@ impl FakeProvider {
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        self.state.lock_recovering("state")
     }
 
     /// Every call so far, in order.

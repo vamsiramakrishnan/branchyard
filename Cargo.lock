@@ -644,6 +644,7 @@ dependencies = [
  "branchyard-runtime",
  "branchyard-sandbox",
  "branchyard-substrate",
+ "branchyard-support",
  "branchyard-workspace",
  "glob",
  "httparse",
@@ -667,6 +668,7 @@ name = "branchyard-bridge"
 version = "0.0.1"
 dependencies = [
  "branchyard-sandbox",
+ "branchyard-support",
  "clap",
  "libc",
  "rcgen",
@@ -691,6 +693,7 @@ dependencies = [
  "branchyard-server",
  "branchyard-setup",
  "branchyard-substrate",
+ "branchyard-support",
  "branchyard-sync",
  "branchyard-workspace",
  "clap",
@@ -767,6 +770,7 @@ name = "branchyard-mcp"
 version = "0.0.1"
 dependencies = [
  "branchyard",
+ "branchyard-support",
  "clap",
  "rmcp",
  "serde_json",
@@ -778,6 +782,7 @@ name = "branchyard-microsandbox"
 version = "0.0.1"
 dependencies = [
  "branchyard-sandbox",
+ "branchyard-support",
  "microsandbox",
  "tokio",
 ]
@@ -809,6 +814,7 @@ name = "branchyard-recipe"
 version = "0.0.1"
 dependencies = [
  "branchyard-sandbox",
+ "branchyard-support",
  "rustix",
  "serde",
  "serde_json",
@@ -821,6 +827,7 @@ version = "0.0.1"
 dependencies = [
  "branchyard-harness",
  "branchyard-sandbox",
+ "branchyard-support",
  "rustix",
  "serde_json",
 ]
@@ -828,6 +835,9 @@ dependencies = [
 [[package]]
 name = "branchyard-sandbox"
 version = "0.0.1"
+dependencies = [
+ "branchyard-support",
+]
 
 [[package]]
 name = "branchyard-server"
@@ -840,6 +850,7 @@ dependencies = [
  "branchyard",
  "branchyard-client",
  "branchyard-setup",
+ "branchyard-support",
  "branchyard-sync",
  "clap",
  "futures-util",
@@ -892,6 +903,7 @@ dependencies = [
  "branchyard-bridge",
  "branchyard-sandbox",
  "branchyard-substrate",
+ "branchyard-support",
  "branchyard-workspace",
  "prost",
  "prost-types",
@@ -905,6 +917,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "branchyard-support"
+version = "0.0.1"
+dependencies = [
+ "branchyard-support",
+ "rustix",
+ "tracing",
+]
+
+[[package]]
 name = "branchyard-sync"
 version = "0.0.1"
 dependencies = [
@@ -912,6 +933,7 @@ dependencies = [
  "blake3",
  "branchyard",
  "branchyard-client",
+ "branchyard-support",
  "branchyard-sync",
  "httparse",
  "ring",
@@ -926,6 +948,7 @@ dependencies = [
 name = "branchyard-workspace"
 version = "0.0.1"
 dependencies = [
+ "branchyard-support",
  "rustix",
 ]
 

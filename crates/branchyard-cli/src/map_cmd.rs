@@ -4,6 +4,7 @@
 //! server operation with `--remote` ([`crate::remote::map`]). See
 //! docs/map.md.
 
+use branchyard_support::LockExt as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -274,7 +275,7 @@ fn run_local(
         let (yard, out, name, writer) = (yard.clone(), out.clone(), name.clone(), writer.clone());
         move || -> Result<(), Failure> {
             let Some(out) = &out else { return Ok(()) };
-            let _held = writer.lock().unwrap_or_else(|e| e.into_inner());
+            let _held = writer.lock_recovering("writer");
             let report = yard.map_report(&name)?;
             write_atomic(out, &results_text(out, &report))
         }

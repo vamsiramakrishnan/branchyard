@@ -25,6 +25,7 @@
 //! Times are the dispatchers' clocks ([`super::Clock`]), not the
 //! database's: keep the hosts' clocks synchronized.
 
+use branchyard_support::LockExt as _;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -324,7 +325,7 @@ impl SqliteTriggers {
         &self,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> io::Result<(T, bool)>,
     ) -> io::Result<T> {
-        let mut conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut conn = self.conn.lock_recovering("conn");
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(sql)?;
@@ -341,7 +342,7 @@ impl SqliteTriggers {
         filter: &str,
         params: &[&dyn rusqlite::ToSql],
     ) -> io::Result<Vec<StoredTrigger>> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.lock_recovering("conn");
         let mut statement = conn
             .prepare(&format!(
                 "SELECT {TRIGGER_COLUMNS} FROM triggers {filter} ORDER BY seq"
@@ -360,7 +361,7 @@ impl SqliteTriggers {
         filter: &str,
         params: &[&dyn rusqlite::ToSql],
     ) -> io::Result<Vec<TriggerRun>> {
-        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.lock_recovering("conn");
         let mut statement = conn
             .prepare(&format!("SELECT id, body FROM trigger_runs {filter}"))
             .map_err(sql)?;
@@ -1039,7 +1040,7 @@ impl PostgresTriggers {
         &self,
         f: impl FnOnce(&mut postgres::Client) -> Result<T, postgres::Error> + Send,
     ) -> io::Result<T> {
-        let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.conn.lock_recovering("conn");
         let conn: &mut Option<postgres::Client> = &mut guard;
         let url = &self.url;
         std::thread::scope(|scope| {
@@ -1077,7 +1078,7 @@ impl PostgresTriggers {
 #[cfg(feature = "postgres")]
 impl Drop for PostgresTriggers {
     fn drop(&mut self) {
-        let conn = self.conn.get_mut().unwrap_or_else(|p| p.into_inner());
+        let conn = self.conn.get_mut_recovering("conn");
         if let Some(client) = conn.take() {
             std::thread::scope(|scope| {
                 scope.spawn(move || drop(client));

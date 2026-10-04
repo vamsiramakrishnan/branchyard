@@ -11,6 +11,7 @@ description = "Agent Substrate as an unqualified Branchyard sandbox provider"
 fake = ["dep:tokio-stream", "tokio/net"]
 
 [dependencies]
+branchyard-support = { path = "../branchyard-support" }
 branchyard-bridge = { path = "../branchyard-bridge" }
 branchyard-sandbox = { path = "../branchyard-sandbox" }
 branchyard-workspace = { version = "0.0.1", path = "../branchyard-workspace" }

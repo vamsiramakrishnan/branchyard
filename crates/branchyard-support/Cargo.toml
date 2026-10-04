@@ -1,0 +1,22 @@
+[package]
+name = "branchyard-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Named best-effort steps, poison-tolerant locks and panic-reporting threads, shared by every Branchyard crate"
+
+[features]
+# `testing::capture`, a tracing subscriber that collects events, for the tests
+# of crates that must show a failure was logged.
+testing = []
+
+[dependencies]
+tracing = "0.1.44"
+
+[target."cfg(unix)".dependencies]
+rustix = { version = "1.1", default-features = false, features = ["std", "process"] }
+
+[dev-dependencies]
+# Its own `testing` feature, for the integration tests.
+branchyard-support = { path = ".", features = ["testing"] }

@@ -21,6 +21,7 @@
 //! SIGKILL two seconds later, as Orca's `killLocalPrecheckProcessTree`
 //! does.
 
+use branchyard_support::LockExt as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -110,7 +111,7 @@ fn collect(mut stream: impl Read + Send + 'static) -> Arc<Mutex<Tail>> {
                     };
                     let text = String::from_utf8_lossy(&pending[..valid]).into_owned();
                     pending.drain(..valid);
-                    sink.lock().unwrap_or_else(|p| p.into_inner()).append(&text);
+                    sink.lock_recovering("sink").append(&text);
                 }
             }
         }
@@ -205,9 +206,7 @@ pub fn run(
     {
         std::thread::sleep(Duration::from_millis(5));
     }
-    let take = |tail: &Arc<Mutex<Tail>>| {
-        std::mem::take(&mut *tail.lock().unwrap_or_else(|p| p.into_inner()))
-    };
+    let take = |tail: &Arc<Mutex<Tail>>| std::mem::take(&mut *tail.lock_recovering("tail"));
     let out = Some((take(&stdout), take(&stderr)));
     match status {
         Err(e) => result(None, timed_out, Some(e.to_string()), out),

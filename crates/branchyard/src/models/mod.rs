@@ -35,6 +35,7 @@ pub mod pricing;
 pub(crate) mod upstream;
 mod usage;
 
+use branchyard_support::LockExt as _;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, TcpListener};
@@ -474,7 +475,7 @@ impl Gateway {
         };
         let total: u64 = route.backends.iter().map(|(_, w)| u64::from(*w)).sum();
         let pick = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock_recovering("state");
             next_random(&mut state.rng) % total.max(1)
         };
         let mut first = 0;
@@ -511,7 +512,7 @@ impl Gateway {
         let Some(limit) = self.routes.get(index).and_then(|r| r.requests_per_minute) else {
             return Ok(());
         };
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock_recovering("state");
         let window = state.windows.entry(index).or_default();
         while window
             .front()
@@ -532,7 +533,7 @@ impl Gateway {
     /// Whether an alert for `period` starting at `start` is still to be
     /// recorded in this process; marks it recorded.
     fn first_alert(&self, period: &str, start: u64) -> bool {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock_recovering("state");
         let key = (period.to_owned(), start);
         match state.alerted.contains(&key) {
             true => false,

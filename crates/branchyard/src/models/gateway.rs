@@ -13,6 +13,7 @@
 //! URL's path. Every response is streamed to the harness as it arrives,
 //! with `Transfer-Encoding: chunked` and `Connection: close`.
 
+use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -99,7 +100,7 @@ impl TurnGateway {
 
     /// What this turn's calls have cost so far.
     pub fn metered(&self) -> f64 {
-        *self.state.metered.lock().unwrap_or_else(|e| e.into_inner())
+        *self.state.metered.lock_recovering("metered")
     }
 
     /// Stop taking calls, wait a little for those in flight, and return
@@ -129,16 +130,13 @@ impl TurnGateway {
         }
         let (count, idle) = &*self.in_flight;
         let deadline = Instant::now() + DRAIN;
-        let mut active = count.lock().unwrap_or_else(|e| e.into_inner());
+        let mut active = count.lock_recovering("count");
         while *active > 0 {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
             }
-            active = idle
-                .wait_timeout(active, left)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
+            active = idle.wait_timeout_recovering(active, left, "idle").0;
         }
     }
 }
@@ -162,14 +160,14 @@ fn accept(
         }
         let Ok(stream) = stream else { continue };
         let (state, in_flight) = (state.clone(), in_flight.clone());
-        *in_flight.0.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        *in_flight.0.lock_recovering("in-flight count") += 1;
         let n = THREADS.fetch_add(1, Ordering::Relaxed);
         let spawned = std::thread::Builder::new()
             .name(format!("by-models-{n}"))
             .spawn(move || {
                 handle(stream, &state);
                 let (count, idle) = &*in_flight;
-                *count.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+                *count.lock_recovering("count") -= 1;
                 idle.notify_all();
             });
         if spawned.is_err() {
@@ -820,7 +818,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
         streamed: call.streamed,
     };
     if let Some(cost) = call.cost_usd {
-        *state.metered.lock().unwrap_or_else(|e| e.into_inner()) += cost;
+        *state.metered.lock_recovering("metered") += cost;
     }
     let _ = state.yard.store().usage().put_usage(&row);
     done(&mut call, decision, status, reason);
@@ -875,7 +873,7 @@ fn write_chunk(out: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
 /// Refuse a call the branch's budget or the yard's period budgets leave
 /// no room for.
 fn within_budgets(state: &TurnState) -> Result<(), String> {
-    let metered = *state.metered.lock().unwrap_or_else(|e| e.into_inner());
+    let metered = *state.metered.lock_recovering("metered");
     if let Some(max) = state.max_usd {
         let spent = state.spent_before + metered;
         if spent >= max {

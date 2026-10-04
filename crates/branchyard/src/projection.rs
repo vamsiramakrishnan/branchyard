@@ -25,6 +25,7 @@
 //! such variables from the environment of the shell commands it runs by
 //! default (`shell_environment_policy`), and `by` must see them there.
 
+use branchyard_support::LockExt as _;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -150,8 +151,9 @@ impl fmt::Debug for Hub {
     }
 }
 
+#[track_caller]
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|e| e.into_inner())
+    mutex.lock_recovering("shared state")
 }
 
 impl Hub {

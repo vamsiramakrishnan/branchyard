@@ -19,6 +19,7 @@
 //! still invalid, or the branch not ending ready, the attempt failed, and
 //! a retry starts a new branch.
 
+use branchyard_support::LockExt as _;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::Write;
@@ -562,7 +563,7 @@ fn add_cost(total: &mut Option<f64>, cost: Option<f64>) {
 impl Run<'_> {
     /// What is left of the total budget; `None` without one.
     fn remaining(&self) -> Option<f64> {
-        let spent = *self.spent.lock().unwrap_or_else(|e| e.into_inner());
+        let spent = *self.spent.lock_recovering("spent");
         self.spec.total_usd.map(|total| total - spent)
     }
 
@@ -720,7 +721,7 @@ impl Run<'_> {
             let outcome = self.attempt(&base, &prompt, (index as u64) << 8 | attempt as u64);
             add_cost(&mut row.cost_usd, outcome.cost);
             if let Some(cost) = outcome.cost {
-                *self.spent.lock().unwrap_or_else(|e| e.into_inner()) += cost;
+                *self.spent.lock_recovering("spent") += cost;
             }
             row.branch = outcome.branches.last().cloned().or(row.branch);
             row.branches.extend(outcome.branches);
@@ -741,13 +742,13 @@ impl Run<'_> {
     /// Append `row` and tell the caller.
     fn record(&self, row: MapRow) -> Result<(), Error> {
         {
-            let mut file = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+            let mut file = self.rows.lock_recovering("rows");
             let line = serde_json::to_string(&row).map_err(|e| Error::State(e.to_string()))?;
             file.write_all(format!("{line}\n").as_bytes())?;
             file.sync_data()?;
         }
         let (done, failed) = {
-            let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+            let mut counts = self.counts.lock_recovering("counts");
             match row.status {
                 MapStatus::Ok => counts.0 += 1,
                 MapStatus::Failed => counts.1 += 1,
@@ -956,7 +957,7 @@ pub(crate) fn run(
                         if run.stopped.load(Ordering::SeqCst) {
                             return Ok(());
                         }
-                        let next = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+                        let next = queue.lock_recovering("queue").pop_front();
                         let Some((index, item)) = next else {
                             return Ok(());
                         };

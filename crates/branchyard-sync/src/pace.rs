@@ -2,6 +2,7 @@
 //! (a token bucket), and the sleeping both do, which tests replace with a
 //! clock they move by hand.
 
+use branchyard_support::LockExt as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -103,7 +104,7 @@ impl Retrier {
 
     /// The next jittered wait before retry `n`.
     pub fn backoff(&self, n: u32) -> Duration {
-        let mut rng = self.rng.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rng = self.rng.lock_recovering("rng");
         self.policy.delay(n, &mut rng)
     }
 
@@ -152,7 +153,7 @@ impl Budget {
 
     /// Take `bytes`, waiting until the bucket has them.
     pub fn take(&self, bytes: u64) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock_recovering("state");
         let capacity = self.rate as f64;
         let now = self.clock.now();
         let (tokens, last) = *state;

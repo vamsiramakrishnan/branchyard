@@ -2,6 +2,7 @@
 //! and PostgreSQL backends are checked against
 //! (`crate::conformance::effects`).
 
+use branchyard_support::LockExt as _;
 use std::sync::Mutex;
 
 use super::{
@@ -30,7 +31,7 @@ impl Inner {
 
 impl Memory {
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner.lock_recovering("inner")
     }
 }
 

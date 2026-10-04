@@ -11,6 +11,7 @@ name = "branchyard-mcp"
 path = "src/main.rs"
 
 [dependencies]
+branchyard-support = { path = "../branchyard-support" }
 branchyard = { path = "../branchyard" }
 clap = { version = "4.6", features = ["derive"] }
 # The official Rust MCP SDK: only its server role and stdio transport.

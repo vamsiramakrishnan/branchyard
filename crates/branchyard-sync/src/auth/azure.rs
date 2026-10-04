@@ -5,6 +5,7 @@
 //! metadata service). The same token flow serves Key Vault with another
 //! resource.
 
+use branchyard_support::LockExt as _;
 use std::sync::Mutex;
 
 use ring::hmac;
@@ -142,7 +143,7 @@ impl ManagedIdentity {
     }
 
     pub fn token(&self, now_ms: u64) -> Result<String> {
-        let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cached = self.cached.lock_recovering("cached");
         if let Some((token, expires)) = cached.as_ref() {
             if *expires > now_ms + 60_000 {
                 return Ok(token.clone());

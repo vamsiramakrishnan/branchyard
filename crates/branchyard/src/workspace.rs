@@ -39,6 +39,7 @@
 //! does ([`crate::TaskOptions::workspace`]), after its own trust decision.
 //! [`crate::Yard::deny_workspace_scripts`] makes a yard refuse to run any.
 
+use branchyard_support::LockExt as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
@@ -1483,10 +1484,7 @@ pub(crate) fn run_in_sandbox(
                     loop {
                         match pipe.read(&mut buffer) {
                             Ok(0) | Err(_) => break,
-                            Ok(n) => output
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .push(&buffer[..n]),
+                            Ok(n) => output.lock_recovering("output").push(&buffer[..n]),
                         }
                     }
                 })
@@ -1531,7 +1529,7 @@ pub(crate) fn run_in_sandbox(
             }
         }
     }
-    report.output = output.lock().unwrap_or_else(|e| e.into_inner()).text();
+    report.output = output.lock_recovering("output").text();
     report.duration_ms = started.elapsed().as_millis() as u64;
 }
 

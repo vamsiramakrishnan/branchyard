@@ -14,6 +14,7 @@
 //! Counters are added to the outbox's totals after each drain, so `by
 //! sync status` shows what every process did.
 
+use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -128,7 +129,7 @@ impl Replicator {
     /// every task each tenth scan. Returns the tasks queued.
     pub fn scan(&self) -> Result<Vec<String>> {
         let refresh = {
-            let mut rounds = self.rounds.lock().unwrap_or_else(|e| e.into_inner());
+            let mut rounds = self.rounds.lock_recovering("rounds");
             *rounds += 1;
             (*rounds).is_multiple_of(REFRESH_EVERY)
         };
@@ -161,26 +162,18 @@ impl Replicator {
     /// must not reach the remote while another runner holds it.
     pub fn fence(&self, task: &str, reason: &str) {
         self.fenced
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("fenced")
             .insert(task.to_owned(), reason.to_owned());
     }
 
     /// Push `task` again (its lease was taken again).
     pub fn unfence(&self, task: &str) {
-        self.fenced
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(task);
+        self.fenced.lock_recovering("fenced").remove(task);
     }
 
     /// Why `task` is fenced, when it is.
     pub fn fenced(&self, task: &str) -> Option<String> {
-        self.fenced
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(task)
-            .cloned()
+        self.fenced.lock_recovering("fenced").get(task).cloned()
     }
 
     /// Sync one task now, recording the outcome. A fenced task is refused
@@ -247,7 +240,7 @@ impl Replicator {
 
     fn backoff(&self, attempts: u32) -> u64 {
         let ceiling = (5_000u64 << attempts.min(20)).min(MAX_BACKOFF_MS);
-        let mut rng = self.rng.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rng = self.rng.lock_recovering("rng");
         1_000 + rng.below_or_at(ceiling)
     }
 
@@ -269,7 +262,7 @@ impl Replicator {
     /// Add what this process counted since the last flush to the totals.
     pub fn flush_counters(&self) -> Result<()> {
         let now = self.remote.stats().snapshot();
-        let mut flushed = self.flushed.lock().unwrap_or_else(|e| e.into_inner());
+        let mut flushed = self.flushed.lock_recovering("flushed");
         let delta = now.minus(&flushed);
         self.outbox.add_counters(&self.key(), &delta)?;
         *flushed = now;
@@ -313,7 +306,7 @@ impl Replicator {
         }
         let persisted = self.outbox.counters(&key)?;
         let unflushed = {
-            let flushed = self.flushed.lock().unwrap_or_else(|e| e.into_inner());
+            let flushed = self.flushed.lock_recovering("flushed");
             self.remote.stats().snapshot().minus(&flushed)
         };
         Ok(Status {
@@ -352,11 +345,14 @@ impl Replicator {
                         eprintln!("branchyard sync: {e}");
                     }
                     let (lock, wake) = &*signal;
-                    let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    let guard = lock.lock_recovering("replicator signal");
                     // A wake-up that came while the round ran is not lost.
-                    let (mut guard, _) = wake
-                        .wait_timeout_while(guard, interval, |s| !s.stop && !s.woken)
-                        .unwrap_or_else(|e| e.into_inner());
+                    let (mut guard, _) = wake.wait_timeout_while_recovering(
+                        guard,
+                        interval,
+                        |s| !s.stop && !s.woken,
+                        "wake",
+                    );
                     if guard.stop {
                         break;
                     }
@@ -386,18 +382,14 @@ pub struct ReplicatorHandle {
 impl ReplicatorHandle {
     /// Run a round now instead of waiting for the interval.
     pub fn wake(&self) {
-        self.signal
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .woken = true;
+        self.signal.0.lock_recovering("0").woken = true;
         self.signal.1.notify_all();
     }
 }
 
 impl Drop for ReplicatorHandle {
     fn drop(&mut self) {
-        self.signal.0.lock().unwrap_or_else(|e| e.into_inner()).stop = true;
+        self.signal.0.lock_recovering("replicator signal").stop = true;
         self.signal.1.notify_all();
         if let Some(t) = self.thread.take() {
             let _ = t.join();

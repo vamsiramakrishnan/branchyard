@@ -4,6 +4,7 @@
 //! tokens, resumable upload sessions (chunks by `Content-Range`, status
 //! queries by `bytes */N`), and a bearer token checked on every request.
 
+use branchyard_support::LockExt as _;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -82,12 +83,12 @@ impl MockGcs {
                 if let Some(fail) = faults.check(r) {
                     return fail;
                 }
-                let base = base.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let base = base.lock_recovering("gcs base url").clone();
                 handle(&state, &bucket, page.max(1), &base, r)
             })
         };
         let server = MockServer::start(handler);
-        *base.lock().unwrap_or_else(|e| e.into_inner()) = server.url.clone();
+        *base.lock_recovering("gcs base url") = server.url.clone();
         MockGcs {
             server,
             faults,
@@ -120,8 +121,7 @@ impl MockGcs {
 
     pub fn objects(&self) -> BTreeMap<String, Vec<u8>> {
         self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("state")
             .objects
             .iter()
             .map(|(k, o)| (k.clone(), o.data.clone()))
@@ -131,8 +131,7 @@ impl MockGcs {
     /// Bytes held by open (unfinished) resumable sessions.
     pub fn session_bytes(&self) -> Vec<usize> {
         self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("state")
             .sessions
             .values()
             .filter(|s| s.finished.is_none())
@@ -157,7 +156,7 @@ fn handle(
     base: &str,
     r: &MockRequest,
 ) -> MockResponse {
-    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = state.lock_recovering("state");
     let object_prefix = format!("/storage/v1/b/{bucket}/o/");
     let list_path = format!("/storage/v1/b/{bucket}/o");
     let upload_path = format!("/upload/storage/v1/b/{bucket}/o");

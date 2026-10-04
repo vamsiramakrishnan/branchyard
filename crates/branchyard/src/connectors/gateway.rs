@@ -7,6 +7,7 @@
 //! `/mcp` URL as audience, the yard's public keys as a `file:` (local) or
 //! `https:` (server) JWKS URI, an audit file and a vault key file.
 
+use branchyard_support::LockExt as _;
 use std::fs;
 use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -206,11 +207,7 @@ impl Supervisor {
 
     /// The running gateway's pid, if one is running.
     pub fn pid(&self) -> Option<u32> {
-        self.child
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(Child::id)
+        self.child.lock_recovering("child").as_ref().map(Child::id)
     }
 }
 
@@ -241,7 +238,7 @@ fn supervise(
     let mut started = Instant::now();
     while !stop.load(Ordering::SeqCst) {
         {
-            let mut held = slot.lock().unwrap_or_else(|e| e.into_inner());
+            let mut held = slot.lock_recovering("slot");
             match held.as_mut().map(Child::try_wait) {
                 None if Instant::now() >= next_start => {
                     match command.command(log).and_then(|mut c| {
@@ -276,7 +273,7 @@ fn supervise(
         tick();
         std::thread::sleep(Duration::from_millis(500));
     }
-    let child = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let child = slot.lock_recovering("slot").take();
     if let Some(mut child) = child {
         terminate(&mut child);
         note(log, "stopped the gateway");

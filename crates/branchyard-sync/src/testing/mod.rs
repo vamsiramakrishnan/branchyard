@@ -10,6 +10,7 @@ pub mod gcs;
 pub mod s3;
 pub mod server;
 
+use branchyard_support::LockExt as _;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -39,21 +40,17 @@ impl FaultyStore {
     }
 
     pub fn fail_writes_of(&self, text: Option<&str>) {
-        *self
-            .fail_writes_of
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = text.map(str::to_owned);
+        *self.fail_writes_of.lock_recovering("fail_writes_of") = text.map(str::to_owned);
     }
 
     pub fn crash_after(&self, writes: Option<usize>) {
-        *self.writes_left.lock().unwrap_or_else(|e| e.into_inner()) = writes;
+        *self.writes_left.lock_recovering("writes_left") = writes;
     }
 
     fn write(&self, key: &str) -> Result<()> {
         if let Some(text) = self
             .fail_writes_of
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .lock_recovering("fail_writes_of")
             .as_deref()
         {
             if key.contains(text) {
@@ -62,7 +59,7 @@ impl FaultyStore {
                 )));
             }
         }
-        let mut left = self.writes_left.lock().unwrap_or_else(|e| e.into_inner());
+        let mut left = self.writes_left.lock_recovering("writes_left");
         if let Some(n) = left.as_mut() {
             if *n == 0 {
                 return Err(Error::refused(format!(
