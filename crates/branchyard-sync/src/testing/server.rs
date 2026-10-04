@@ -260,10 +260,13 @@ fn serve(stream: TcpStream, handler: &Handler, log: &Mutex<Vec<String>>) {
         Err(why) => {
             let text = why.to_string();
             let mut stream = stream;
-            let _ = write!(
-                stream,
-                "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{text}",
-                text.len()
+            branchyard_support::best_effort(
+                "answer a malformed request with 400",
+                write!(
+                    stream,
+                    "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{text}",
+                    text.len()
+                ),
             );
             return;
         }

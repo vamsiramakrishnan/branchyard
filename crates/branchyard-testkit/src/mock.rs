@@ -12,7 +12,7 @@
 //! sending a single byte (a port probe).
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::io::{BufReader, ErrorKind, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,6 +24,11 @@ use branchyard_support::LockExt;
 use serde_json::Value;
 
 use crate::wait;
+
+/// Largest request head the mock accepts.
+const MAX_HEAD: usize = 64 * 1024;
+/// Largest request body the mock accepts.
+const MAX_BODY: usize = 64 * 1024 * 1024;
 
 /// One request the server received.
 #[derive(Clone, Debug)]
@@ -284,48 +289,28 @@ fn connection(
     let mut reader = BufReader::new(stream.try_clone().map_err(|e| format!("clone: {e}"))?);
     let mut stream = stream;
 
-    let mut line = String::new();
-    let n = reader
-        .read_line(&mut line)
-        .map_err(|e| format!("read the request line: {e}"))?;
-    if n == 0 {
-        return Ok(());
-    }
-    let mut parts = line.split_whitespace();
-    let method = parts.next().unwrap_or_default().to_owned();
-    let path = parts.next().unwrap_or_default().to_owned();
-    if method.is_empty() || path.is_empty() {
-        return Err(format!("malformed request line {line:?}"));
-    }
-
-    let mut headers = BTreeMap::new();
-    loop {
-        let mut header = String::new();
-        let n = reader
-            .read_line(&mut header)
-            .map_err(|e| format!("{method} {path}: read a header: {e}"))?;
-        if n == 0 {
-            return Err(format!("{method} {path}: the headers were cut off"));
-        }
-        if header.trim().is_empty() {
-            break;
-        }
-        let (name, value) = header
-            .trim_end()
-            .split_once(':')
-            .ok_or_else(|| format!("{method} {path}: malformed header {header:?}"))?;
-        headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
-    }
-
-    let length: usize = match headers.get("content-length") {
-        None => 0,
-        Some(text) => text
-            .parse()
-            .map_err(|_| format!("{method} {path}: bad content-length {text:?}"))?,
+    // The request is read with the one HTTP/1.1 codec, so a malformed or
+    // cut-off request fails the test instead of being guessed at.
+    let head = match branchyard_wire::read_request_head(&mut reader, MAX_HEAD) {
+        Ok(Some(head)) => head,
+        Ok(None) => return Ok(()),
+        Err(e) => return Err(format!("read the request head: {e}")),
     };
-    let mut body = vec![0u8; length];
-    reader.read_exact(&mut body).map_err(|e| {
-        format!("{method} {path}: the body was cut off (expected {length} bytes): {e}")
+    let method = head.method;
+    let path = head.target;
+    let framing = branchyard_wire::request_framing(&head.headers)
+        .map_err(|e| format!("{method} {path}: {e}"))?;
+    let headers: BTreeMap<String, String> = head
+        .headers
+        .into_iter()
+        .map(|(name, value)| (name.to_ascii_lowercase(), value))
+        .collect();
+    let expected = match framing {
+        branchyard_wire::Framing::Length(n) => format!(" (expected {n} bytes)"),
+        _ => String::new(),
+    };
+    let body = branchyard_wire::read_body(&mut reader, framing, MAX_BODY).map_err(|e| {
+        format!("{method} {path}: the body was cut off or malformed{expected}: {e}")
     })?;
 
     let request = Request {

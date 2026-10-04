@@ -45,7 +45,7 @@ use = "branchyard_recipe::quote (shlex::try_quote) to quote, shlex::split (branc
 [[ban]]
 id = "host-port"
 pattern = '\bfn\s+(host_port|host_port_of|parse_host_port|split_host_port|parse_authority)\b'
-use = "url::Url (host(), port_or_known_default()) or branchyard::models::BaseUrl::parse"
+use = "branchyard_wire::HttpUrl::parse (or branchyard::models::BaseUrl::parse) for an http(s) URL, url::Url for any other"
 
 [[ban]]
 id = "tar-format"

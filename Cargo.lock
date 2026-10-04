@@ -978,6 +978,7 @@ name = "branchyard-testkit"
 version = "0.0.1"
 dependencies = [
  "branchyard-support",
+ "branchyard-wire",
  "serde_json",
  "tempfile",
 ]
