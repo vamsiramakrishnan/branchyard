@@ -11,105 +11,37 @@ use std::fs;
 use branchyard::Error;
 use common::Fixture;
 
-/// A small USTAR reader/writer, independent of `branchyard`'s own
-/// (private) `tarball` module, used here only to tamper with an otherwise
-/// valid bundle for the refusal tests below. Must produce archives
-/// `branchyard::Yard::import_artifacts` can still parse, so it follows the
-/// same header layout.
+/// Read and write a bundle's tar with the `tar` crate, independent of
+/// `branchyard`'s own (private) `tarball` module, used here only to tamper
+/// with an otherwise valid bundle for the refusal tests below.
 mod tar_test_support {
-    const BLOCK: usize = 512;
-
-    fn octal_field(value: u64, width: usize) -> Vec<u8> {
-        let digits = width - 1;
-        let mut out = format!("{value:0digits$o}").into_bytes();
-        out.push(0);
-        out
-    }
-
-    fn str_field(value: &str, width: usize) -> Vec<u8> {
-        let mut out = vec![0u8; width];
-        let bytes = value.as_bytes();
-        let n = bytes.len().min(width);
-        out[..n].copy_from_slice(&bytes[..n]);
-        out
-    }
-
-    fn header(name: &str, size: u64) -> [u8; BLOCK] {
-        let mut h = [0u8; BLOCK];
-        h[0..100].copy_from_slice(&str_field(name, 100));
-        h[100..108].copy_from_slice(&octal_field(0o644, 8));
-        h[108..116].copy_from_slice(&octal_field(0, 8));
-        h[116..124].copy_from_slice(&octal_field(0, 8));
-        h[124..136].copy_from_slice(&octal_field(size, 12));
-        h[136..148].copy_from_slice(&octal_field(0, 12));
-        h[148..156].copy_from_slice(b"        ");
-        h[156] = b'0';
-        h[257..263].copy_from_slice(b"ustar\0");
-        h[263..265].copy_from_slice(b"00");
-        h[265..265 + 10].copy_from_slice(b"branchyard");
-        h[297..297 + 10].copy_from_slice(b"branchyard");
-        h[329..337].copy_from_slice(&octal_field(0, 8));
-        h[337..345].copy_from_slice(&octal_field(0, 8));
-        let checksum: u32 = h.iter().map(|b| u32::from(*b)).sum();
-        let field = format!("{checksum:06o}\0 ");
-        h[148..148 + field.len()].copy_from_slice(field.as_bytes());
-        h
-    }
-
-    fn pad_len(size: u64) -> usize {
-        let rem = (size as usize) % BLOCK;
-        if rem == 0 {
-            0
-        } else {
-            BLOCK - rem
-        }
-    }
+    use std::io::Read;
 
     pub fn write_tar(members: &[(String, Vec<u8>)]) -> Vec<u8> {
-        let mut out = Vec::new();
+        let mut builder = tar::Builder::new(Vec::new());
         for (name, bytes) in members {
-            out.extend_from_slice(&header(name, bytes.len() as u64));
-            out.extend_from_slice(bytes);
-            out.resize(out.len() + pad_len(bytes.len() as u64), 0);
+            let mut header = tar::Header::new_ustar();
+            header.set_path(name).unwrap();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append(&header, bytes.as_slice()).unwrap();
         }
-        out.resize(out.len() + 2 * BLOCK, 0);
-        out
-    }
-
-    fn parse_octal(field: &[u8]) -> u64 {
-        let text = String::from_utf8_lossy(field);
-        let text = text.trim_matches(|c: char| c == '\0' || c == ' ');
-        if text.is_empty() {
-            0
-        } else {
-            u64::from_str_radix(text, 8).unwrap()
-        }
-    }
-
-    fn parse_name(field: &[u8]) -> String {
-        let end = field.iter().position(|b| *b == 0).unwrap_or(field.len());
-        String::from_utf8_lossy(&field[..end]).into_owned()
+        builder.into_inner().unwrap()
     }
 
     pub fn read_tar(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
-        let mut members = Vec::new();
-        let mut offset = 0usize;
-        loop {
-            if offset + BLOCK > bytes.len() {
-                break;
-            }
-            let header = &bytes[offset..offset + BLOCK];
-            if header.iter().all(|b| *b == 0) {
-                break;
-            }
-            let name = parse_name(&header[0..100]);
-            let size = parse_octal(&header[124..136]);
-            let data_start = offset + BLOCK;
-            let data_end = data_start + size as usize;
-            members.push((name, bytes[data_start..data_end].to_vec()));
-            offset = data_end + pad_len(size);
-        }
-        members
+        tar::Archive::new(bytes)
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let mut entry = entry.unwrap();
+                let name = entry.path().unwrap().to_string_lossy().into_owned();
+                let mut data = Vec::new();
+                entry.read_to_end(&mut data).unwrap();
+                (name, data)
+            })
+            .collect()
     }
 }
 
