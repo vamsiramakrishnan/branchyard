@@ -2118,7 +2118,7 @@ impl PortBackend for Postgres {
                 )
                 .map_err(db("port"))?;
             if let Some(row) = held {
-                return Ok(row.get::<_, i32>(0) as u16);
+                return Ok(from_db_u16("port", i64::from(row.get::<_, i32>(0)))?);
             }
             // Ports are unique across the database, whichever repository
             // holds them: its repositories may share a host.
@@ -2126,8 +2126,8 @@ impl PortBackend for Postgres {
                 .query("SELECT port FROM by_ports", &[])
                 .map_err(db("port"))?
                 .iter()
-                .map(|r| r.get::<_, i32>(0) as u16)
-                .collect();
+                .map(|r| from_db_u16("port", i64::from(r.get::<_, i32>(0))))
+                .collect::<Result<_, _>>()?;
             let port = pick_port(start, &taken, usable)?;
             tx.execute(
                 "INSERT INTO by_ports (port, repo, branch, reserved_ms) VALUES ($1, $2, $3, $4)",
@@ -2155,7 +2155,9 @@ impl PortBackend for Postgres {
                 &[&self.repo, &branch],
             )
         })?;
-        Ok(row.map(|r| r.get::<_, i32>(0) as u16))
+        row.map(|r| from_db_u16("port", i64::from(r.get::<_, i32>(0))))
+            .transpose()
+            .map_err(Error::from)
     }
 }
 
@@ -2168,7 +2170,10 @@ fn sandbox_row(r: &Row) -> Result<SandboxRow, Error> {
         kind: SandboxKind::parse(r.get(2))?,
         provider: r.get(3),
         name: r.get(4),
-        turn: r.get::<_, Option<i64>>(5).map(|t| t as u32),
+        turn: r
+            .get::<_, Option<i64>>(5)
+            .map(|t| from_db_u32("turn", t))
+            .transpose()?,
         detail: r.get(6),
         used_ms: from_db("used_ms", r.get(7))?,
     })

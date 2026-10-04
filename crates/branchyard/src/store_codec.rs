@@ -14,6 +14,7 @@
 //! params![name, to_db("created_ms", record.created_ms)?]   // u64 -> i64
 //! created_ms: from_db("created_ms", row.get(3)?)?          // i64 -> u64
 //! pid: from_db_u32("pid", row.get(6)?)?                    // i64 -> u32
+//! until: deadline_capped(now_ms(), wait)                   // a wait that may be "forever"
 //! after: parse_text("after", &text)?                       // text -> enum
 //! ```
 //!
@@ -98,6 +99,15 @@ pub fn to_db_usize(field: &'static str, value: usize) -> Result<i64, CodecError>
     to_db(field, value as u64)
 }
 
+/// A row count the driver reports as `u64` (rows affected), as `usize`.
+pub fn to_usize(field: &'static str, value: u64) -> Result<usize, CodecError> {
+    usize::try_from(value).map_err(|_| CodecError::OutOfRange {
+        field,
+        value: i64::MAX,
+        target: "usize",
+    })
+}
+
 /// When a lease granted at `now_ms` for `ttl` runs out, in milliseconds.
 /// Saturates at `u64::MAX`, which [`to_db`] then refuses, so an absurd
 /// TTL is an error where it is stored rather than a wrapped deadline.
@@ -166,7 +176,27 @@ pub fn from_db_u32(field: &'static str, value: i64) -> Result<u32, CodecError> {
     })
 }
 
-/// A stored value as `u16` (an HTTP status); see [`from_db_u32`].
+/// A stored value as `i32` (a priority); an error naming `field` when it
+/// is outside `i32`.
+pub fn from_db_i32(field: &'static str, value: i64) -> Result<i32, CodecError> {
+    i32::try_from(value).map_err(|_| CodecError::OutOfRange {
+        field,
+        value,
+        target: "i32",
+    })
+}
+
+/// A stored `COUNT(*)` or other count as `usize`; an error naming `field`
+/// when it is negative or wider than `usize`.
+pub fn from_db_usize(field: &'static str, value: i64) -> Result<usize, CodecError> {
+    usize::try_from(value).map_err(|_| CodecError::OutOfRange {
+        field,
+        value,
+        target: "usize",
+    })
+}
+
+/// A stored value as `u16` (a port, an HTTP status); see [`from_db_u32`].
 pub fn from_db_u16(field: &'static str, value: i64) -> Result<u16, CodecError> {
     u16::try_from(value).map_err(|_| CodecError::OutOfRange {
         field,
@@ -232,6 +262,11 @@ mod tests {
         // A lease TTL is not a wait: an absurd one still fails where it is
         // stored.
         assert!(to_db("lease_until_ms", deadline(5, Duration::MAX)).is_err());
+        assert_eq!(from_db_i32("priority", -10), Ok(-10));
+        assert!(from_db_i32("priority", i64::from(i32::MAX) + 1).is_err());
+        assert_eq!(from_db_usize("count", 3), Ok(3));
+        assert!(from_db_usize("count", -1).is_err());
+        assert_eq!(to_usize("rows", 3), Ok(3));
     }
 
     #[test]
@@ -381,31 +416,50 @@ mod tests {
         );
     }
 
-    /// `as i64` / `as u64` casts left in the guarded files, per file. A
-    /// ratchet: the count may fall, never rise. When you remove a cast,
-    /// lower its number here; to add one, convert through `to_db`/`from_db`
-    /// instead.
+    /// Narrowing and sign-changing `as` casts (`as i64`, `as u64`, `as u32`,
+    /// `as u16`, `as i32`, `as usize`) left in the guarded files, per file.
+    /// A ratchet: the count may fall, never rise. When you remove a cast,
+    /// lower its number here; to add one, convert through
+    /// `to_db`/`from_db`/`from_db_u32`/`from_db_u16` instead. A stored PID,
+    /// port, turn, count or priority is never one of the casts left.
     const CAST_BUDGET: &[(&str, usize)] = &[
         ("src/sqlite.rs", 0),
         ("src/pg.rs", 0),
         ("src/services/sqlite.rs", 0),
         ("src/services/pg.rs", 0),
-        // 7 left, none from a stored value: two clock reads (`now_ms() as
-        // i64`), a `usize` rank, two saturating `f64` casts, the scheduler's
-        // `op.3 as i64` age arithmetic, and a `usize` RNG index.
-        ("../branchyard-server/src/store.rs", 7),
+        // 6 left, none from a stored value: two clock reads (`now_ms() as
+        // i64`), a `usize` rank, `(now - seen).max(0) as u64` (clamped
+        // non-negative first), a saturating `f64` cast, and the scheduler's
+        // `op.3 as i64` age arithmetic.
+        ("../branchyard-server/src/store.rs", 6),
         ("../branchyard-server/src/companion/store.rs", 0),
         ("../branchyard-server/src/triggers/store.rs", 0),
     ];
+
+    /// The target types of the casts the budget counts: the ones that wrap
+    /// a stored `i64` into a narrower or unsigned type.
+    const CAST_TYPES: &[&str] = &["i64", "u64", "u32", "u16", "i32", "usize"];
 
     fn casts(text: &str) -> usize {
         production(text)
             .iter()
             .map(|(_, line)| {
                 let code = line.split("//").next().unwrap_or("");
-                code.matches(" as i64").count() + code.matches(" as u64").count()
+                CAST_TYPES
+                    .iter()
+                    .map(|ty| code.matches(&format!(" as {ty}")).count())
+                    .sum::<usize>()
             })
             .sum()
+    }
+
+    #[test]
+    fn the_cast_count_sees_every_narrowing_type_in_code_only() {
+        let source = "let a = pid as u32;\nlet b = n as usize + t as u16 + p as i32;\n\
+                      let c = x as i64 + y as u64;\nlet d = z as u8 as char; // q as u32\n\
+                      let e = f64::from(1) as f64;\n";
+        // Six counted casts; a comment, `as u8` and `as f64` are not.
+        assert_eq!(casts(source), 6);
     }
 
     #[test]
@@ -420,7 +474,7 @@ mod tests {
             let found = casts(&read(path));
             if found > *budget {
                 problems.push(format!(
-                    "{path}: {found} `as i64`/`as u64` casts, budget {budget}: use store_codec"
+                    "{path}: {found} `as` casts to {CAST_TYPES:?}, budget {budget}: use store_codec"
                 ));
             } else if found < *budget {
                 problems.push(format!(

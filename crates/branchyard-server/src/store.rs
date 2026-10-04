@@ -41,7 +41,10 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use branchyard::store_codec::{deadline, from_db_opt, millis_saturating, to_db, to_db_opt};
+use branchyard::store_codec::{
+    deadline, from_db_i32, from_db_opt, from_db_u32, from_db_usize, millis_saturating, to_db,
+    to_db_opt,
+};
 
 use crate::config::{Principal, DEFAULT_TENANT};
 
@@ -1112,7 +1115,7 @@ fn sqlite_reap(conn: &Conn, worker: &Worker, now: i64) -> io::Result<()> {
         .collect::<Result<_, _>>()
         .map_err(sql)?;
     for (id, attempt, pid, start) in rows {
-        if branchyard::process_gone(&worker.host, pid as u32, &start) {
+        if branchyard::process_gone(&worker.host, from_db_u32("pid", pid)?, &start) {
             conn.execute(
                 "UPDATE operation_queue SET worker = NULL, lease_until = NULL \
                  WHERE id = ?1 AND attempt = ?2",
@@ -1483,7 +1486,11 @@ impl OperationStore for SqliteStore {
             )
             .optional()
             .map_err(sql)?;
-        Ok(found.map(|p| p.unwrap_or(0) as i32))
+        // No priority recorded is the default, `0`; a stored one outside
+        // `i32` is an error rather than a wrapped value.
+        Ok(found
+            .map(|p| p.map_or(Ok(0), |p| from_db_i32("priority", p)))
+            .transpose()?)
     }
 
     fn beat(
@@ -1637,7 +1644,7 @@ impl OperationStore for SqliteStore {
                 |r| r.get(0),
             )
             .map_err(sql)?;
-        Ok(count as usize)
+        Ok(from_db_usize("pending", count)?)
     }
 
     fn hold(
@@ -2301,25 +2308,33 @@ impl OperationStore for PostgresStore {
         let aging = scheduling.aging_ms();
         let window = ms(scheduling.window);
         let (tenants, weights) = scheduling.weight_arrays();
-        let claimed = self.with(move |c| {
-            // Claims whose process is gone from this host need not wait for
-            // their lease.
-            let local = c.query(
+        // Claims whose process is gone from this host need not wait for
+        // their lease. The PID is checked here, outside the connection's
+        // closure, so a stored one that is no PID is an error naming it.
+        let local: Vec<(String, i64, i64, String)> = self.with(|c| {
+            Ok(c.query(
                 "SELECT id, attempt, pid, start FROM by_operation_queue \
                  WHERE host = $1 AND worker IS NOT NULL AND worker <> $2 \
                    AND lease_until > clock_timestamp()",
                 &[&worker.host, &worker.id],
-            )?;
-            for row in &local {
-                let (id, attempt, pid, start): (String, i64, i64, String) =
-                    (row.get(0), row.get(1), row.get(2), row.get(3));
-                if branchyard::process_gone(&worker.host, pid as u32, &start) {
-                    c.execute(
-                        "UPDATE by_operation_queue SET worker = NULL, lease_until = NULL \
-                         WHERE id = $1 AND attempt = $2",
-                        &[&id, &attempt],
-                    )?;
-                }
+            )?
+            .iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+            .collect())
+        })?;
+        let mut gone = Vec::new();
+        for (id, attempt, pid, start) in local {
+            if branchyard::process_gone(&worker.host, from_db_u32("pid", pid)?, &start) {
+                gone.push((id, attempt));
+            }
+        }
+        let claimed = self.with(move |c| {
+            for (id, attempt) in &gone {
+                c.execute(
+                    "UPDATE by_operation_queue SET worker = NULL, lease_until = NULL \
+                     WHERE id = $1 AND attempt = $2",
+                    &[id, attempt],
+                )?;
             }
             let pid = i64::from(worker.pid);
             let rows = c.query(
@@ -2543,7 +2558,7 @@ impl OperationStore for PostgresStore {
             )
             .map(|row| row.get(0))
         })?;
-        Ok(count as usize)
+        Ok(from_db_usize("pending", count)?)
     }
 
     fn hold(
@@ -2887,6 +2902,17 @@ impl Rng {
     fn below(&mut self, n: u64) -> u64 {
         self.next() % n
     }
+
+    /// An index into a collection of `len` items.
+    fn index(&mut self, len: usize) -> usize {
+        let len = u64::try_from(len).expect("a length fits u64");
+        usize::try_from(self.below(len)).expect("below a usize fits it")
+    }
+
+    /// A scheduling priority from -10 to 10.
+    fn priority(&mut self) -> i32 {
+        i32::try_from(self.below(21)).expect("below 21 fits i32") - 10
+    }
 }
 
 /// What the scheduling conformance admits: an operation of `repo` for
@@ -3116,7 +3142,7 @@ pub fn check_scheduling(store: &dyn OperationStore, repo: &str) {
             repo,
             &id,
             &tenant,
-            rng.below(21) as i32 - 10,
+            rng.priority(),
             NOW - rng.below(10_000),
             &[],
         ));
@@ -3178,8 +3204,8 @@ pub fn check_scheduling(store: &dyn OperationStore, repo: &str) {
                 0 | 1 if model.ops.len() < 40 => {
                     let n = model.ops.len();
                     let id = format!("{repo}-{tag}-{n}");
-                    let tenant = tenants[rng.below(3) as usize].clone();
-                    let priority = rng.below(21) as i32 - 10;
+                    let tenant = tenants[rng.index(tenants.len())].clone();
+                    let priority = rng.priority();
                     let created = NOW - rng.below(60_000);
                     let gpu = rng.below(4) == 0;
                     admit(scheduled(
@@ -3194,7 +3220,7 @@ pub fn check_scheduling(store: &dyn OperationStore, repo: &str) {
                 }
                 // Finish something running.
                 2 if !claims.is_empty() => {
-                    let k = rng.below(claims.len() as u64) as usize;
+                    let k = rng.index(claims.len());
                     let (i, c, gpu) = claims.remove(k);
                     let w = if gpu { &gpu_worker } else { &plain_worker };
                     finish(w, &c);

@@ -148,7 +148,7 @@ fn needs_settling(run: &TriggerRun) -> bool {
     run.state == RunState::Fired && run.outcome.is_none()
 }
 
-fn pause_reason(failures: u32, last: &str) -> String {
+fn pause_reason(failures: i64, last: &str) -> String {
     format!("paused after {failures} failed runs in a row; the last: {last}")
 }
 
@@ -438,7 +438,7 @@ fn sqlite_account(
     if pause_after == 0 || enabled == 0 || failures < i64::from(pause_after) {
         return Ok(None);
     }
-    let why = pause_reason(failures as u32, reason);
+    let why = pause_reason(failures, reason);
     tx.execute(
         "UPDATE triggers SET enabled = 0, next_due_ms = NULL, paused_reason = ?2 WHERE id = ?1",
         rusqlite::params![trigger_id, why],
@@ -996,7 +996,7 @@ fn pg_account(
     if pause_after == 0 || !enabled || failures < i64::from(pause_after) {
         return Ok(None);
     }
-    let why = pause_reason(failures as u32, reason);
+    let why = pause_reason(failures, reason);
     tx.execute(
         "UPDATE by_triggers SET enabled = false, next_due_ms = NULL, paused_reason = $2 \
          WHERE id = $1",

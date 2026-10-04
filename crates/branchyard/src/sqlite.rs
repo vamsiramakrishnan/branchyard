@@ -1910,12 +1910,12 @@ impl PortBackend for Sqlite {
                 .optional()
                 .map_err(e)?;
             if let Some(port) = held {
-                return Ok(port as u16);
+                return Ok(from_db_u16("port", port)?);
             }
             let taken = {
                 let mut statement = tx.prepare("SELECT port FROM ports").map_err(e)?;
                 let rows = statement.query_map([], |r| r.get::<_, i64>(0)).map_err(e)?;
-                rows.map(|r| r.map(|p| p as u16))
+                rows.map(|r| from_db_u16("port", r?).map_err(rusqlite::Error::from))
                     .collect::<Result<std::collections::BTreeSet<u16>, _>>()
                     .map_err(e)?
             };
@@ -1937,8 +1937,10 @@ impl PortBackend for Sqlite {
                 |r| r.get::<_, i64>(0),
             )
             .optional()
-            .map(|p| p.map(|p| p as u16))
-            .map_err(|error| db("port", error))
+            .map_err(|error| db("port", error))?
+            .map(|p| from_db_u16("port", p))
+            .transpose()
+            .map_err(Error::from)
         })
     }
 }
@@ -1954,7 +1956,10 @@ fn sandbox_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(SandboxRow, String)> 
             kind: SandboxKind::Kept,
             provider: r.get(3)?,
             name: r.get(4)?,
-            turn: r.get::<_, Option<i64>>(5)?.map(|t| t as u32),
+            turn: r
+                .get::<_, Option<i64>>(5)?
+                .map(|t| from_db_u32("turn", t))
+                .transpose()?,
             detail: r.get(6)?,
             used_ms: from_db("used_ms", r.get(7)?)?,
         },

@@ -10,7 +10,7 @@ use std::io;
 use postgres::Transaction;
 
 use super::{decode, encode, Rows, Service, ServiceState};
-use crate::store_codec::{from_db, to_db};
+use crate::store_codec::{from_db, to_db, to_usize};
 
 /// The registry's objects and the statements that make them.
 pub const SCHEMA: &[(&str, &str)] = &[
@@ -157,7 +157,7 @@ impl Rows for PgRows<'_, '_> {
                 ],
             )
             .map_err(sql)?;
-        Ok(n as usize)
+        Ok(to_usize("rows", n)?)
     }
 }
 

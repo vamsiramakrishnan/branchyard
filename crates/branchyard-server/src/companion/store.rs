@@ -836,7 +836,7 @@ impl CompanionStore for PostgresCompanion {
     fn revoke(&self, name: &str, tenant: Option<&str>, now_ms: u64) -> io::Result<usize> {
         let (name, tenant) = (name.to_owned(), tenant.map(str::to_owned));
         let now_ms_db = to_db("now_ms", now_ms)?;
-        self.with(move |c| {
+        let (tokens, codes) = self.with(move |c| {
             let mut tx = c.transaction()?;
             let rows = tx.query(
                 "UPDATE by_companion_tokens SET revoked_at_ms = $3 WHERE name = $1 \
@@ -855,8 +855,9 @@ impl CompanionStore for PostgresCompanion {
                 &[&name, &tenant],
             )?;
             tx.commit()?;
-            Ok(hashes.len() + codes as usize)
-        })
+            Ok((hashes.len(), codes))
+        })?;
+        Ok(tokens + branchyard::store_codec::to_usize("revoked pairings", codes)?)
     }
 
     fn subscribe(&self, s: &Subscription) -> io::Result<()> {
