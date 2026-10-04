@@ -127,7 +127,8 @@ fn best_effort_on_ok_returns_the_value_silently() {
 
 #[test]
 fn cleanup_dir_is_quiet_for_a_missing_directory_and_removes_a_present_one() {
-    let dir = std::env::temp_dir().join(format!("by-support-cleanup-{}", std::process::id()));
+    let scratch = branchyard_testkit::Scratch::new("support-cleanup");
+    let dir = scratch.join("victim");
     std::fs::create_dir_all(dir.join("inner")).unwrap();
     let (_, events) = capture(|| {
         cleanup_dir(&dir);

@@ -7,5 +7,6 @@ publish.workspace = true
 description = "Shared test infrastructure: event-driven waits, the fake agent, a repository fixture, scratch directories and a checked mock HTTP server. A dev-dependency only."
 
 [dependencies]
+branchyard-support = { path = "../branchyard-support" }
 serde_json = "1"
 tempfile = "3.27.0"

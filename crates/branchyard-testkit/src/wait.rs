@@ -186,8 +186,7 @@ pub fn until_value<T: Debug>(
 /// returns the moment the thing happens and cannot be too short on a slow
 /// machine. `tools/check_test_hygiene.py` counts the calls to this function
 /// and fails if the count grows.
-pub fn settle(why: &str, duration: Duration) {
-    let _ = why;
+pub fn settle(_why: &str, duration: Duration) {
     std::thread::sleep(duration);
 }
 

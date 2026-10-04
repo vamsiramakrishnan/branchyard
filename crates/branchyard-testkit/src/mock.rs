@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use branchyard_support::LockExt;
+
 use serde_json::Value;
 
 use crate::wait;
@@ -208,10 +210,7 @@ impl MockHttp {
 
     /// The requests answered so far, oldest first.
     pub fn requests(&self) -> Vec<Request> {
-        self.requests
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.requests.lock_recovering("mock http requests").clone()
     }
 
     /// Wait until at least `n` requests were answered; returns them all.
@@ -337,8 +336,7 @@ fn connection(
     };
     let response = handler(&request);
     requests
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .lock_recovering("mock http requests")
         .push(request.clone());
 
     match response.reply {

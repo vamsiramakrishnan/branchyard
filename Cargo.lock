@@ -931,6 +931,7 @@ name = "branchyard-support"
 version = "0.0.1"
 dependencies = [
  "branchyard-support",
+ "branchyard-testkit",
  "getrandom 0.4.3",
  "jiff",
  "rustix",
@@ -961,6 +962,7 @@ dependencies = [
 name = "branchyard-testkit"
 version = "0.0.1"
 dependencies = [
+ "branchyard-support",
  "serde_json",
  "tempfile",
 ]

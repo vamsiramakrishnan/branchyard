@@ -706,7 +706,11 @@ fn ulids_are_the_crockford_encoding_of_time_then_random() {
         assert_eq!(ulid_from_parts(ms, random), old(ms, random), "{ms}");
     }
     let a = branchyard_support::new_ulid().unwrap();
-    std::thread::sleep(Duration::from_millis(2));
+    // `a` was made no later than this millisecond; `b` is made in a later one.
+    let made = branchyard_support::time::now_ms();
+    branchyard_testkit::wait::until("the clock to pass the first ULID's millisecond", || {
+        branchyard_support::time::now_ms() > made
+    });
     let b = branchyard_support::new_ulid().unwrap();
     assert_eq!(a.len(), 26);
     assert!(a < b, "{a} {b}");

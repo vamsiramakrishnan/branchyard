@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
+use branchyard_support::LockExt;
+
 /// The `fake-acp-agent` binary from branchyard-runtime, built once per
 /// target directory and profile.
 ///
@@ -38,7 +40,7 @@ pub fn built(package: &str, bin: &str, artifact: &Path) -> &'static Path {
     static BUILT: Mutex<BTreeMap<(PathBuf, String), &'static Path>> = Mutex::new(BTreeMap::new());
     let profile_dir = profile_dir(artifact);
     // Held across the build: concurrent tests wait for the one build.
-    let mut built = BUILT.lock().unwrap_or_else(|e| e.into_inner());
+    let mut built = BUILT.lock_recovering("testkit built binaries");
     let key = (profile_dir.clone(), format!("{package}/{bin}"));
     if let Some(path) = built.get(&key) {
         return path;
