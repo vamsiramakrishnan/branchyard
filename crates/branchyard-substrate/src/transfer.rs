@@ -1266,7 +1266,7 @@ mod tests {
 
         let pulled = pull(&exec, &pushed, &s.root).unwrap();
         assert!(pulled.changed);
-        assert_eq!(pulled.commits, [sandbox_head.clone()]);
+        assert_eq!(pulled.commits, std::slice::from_ref(&sandbox_head));
         // The host branch moved to the sandbox's commit, with its message.
         assert_eq!(git(&s.root, &["rev-parse", "HEAD"]), sandbox_head);
         assert_eq!(
