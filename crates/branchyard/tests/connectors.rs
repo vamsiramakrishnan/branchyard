@@ -3,7 +3,9 @@
 //! URL and a 0600 token signed for its turn; a branch without a grant gets
 //! none; a connector the gateway does not serve fails the turn by name; a
 //! delegated child's grant is only ever narrower than its parent's; and
-//! the gateway's audit log becomes `connector_call` events. Hermetic: no
+//! the gateway's audit log becomes `connector_call` events; two or more
+//! granted connectors also get Anvil's composite, and a composite that
+//! cannot be written is a warning, not the turn's failure. Hermetic: no
 //! gateway runs and nothing is called.
 
 #![allow(
@@ -35,6 +37,9 @@ const URL: &str = "http://127.0.0.1:9/mcp";
 struct FakePackager {
     bundles: Vec<&'static str>,
     packaged: AtomicUsize,
+    composed: AtomicUsize,
+    /// Fail `compose`, as an Anvil without `connectors compose` does.
+    cannot_compose: bool,
 }
 
 impl Packager for FakePackager {
@@ -67,6 +72,29 @@ impl Packager for FakePackager {
         }
         text.push_str(&format!("grants: {}\n", connectors_text(&grants)));
         fs::write(out, text).map_err(|e| e.to_string())
+    }
+
+    fn compose(&self, bundles: &[Bundle], packages: &Path, out: &Path) -> Result<(), String> {
+        self.composed.fetch_add(1, Ordering::SeqCst);
+        if self.cannot_compose {
+            fs::create_dir_all(out).unwrap();
+            fs::write(out.join("partial"), "").unwrap();
+            return Err("error: unknown command 'compose'".into());
+        }
+        // The packages are placed before the composite is asked for.
+        for bundle in bundles {
+            assert!(
+                packages.join(&bundle.id).join("SKILL.md").is_file(),
+                "{bundle:?}"
+            );
+        }
+        fs::create_dir_all(out).unwrap();
+        let ids: Vec<&str> = bundles.iter().map(|b| b.id.as_str()).collect();
+        fs::write(
+            out.join("SKILL.md"),
+            format!("compose: {}\n", ids.join(" ")),
+        )
+        .map_err(|e| e.to_string())
     }
 }
 
@@ -307,6 +335,85 @@ fn the_token_never_reaches_the_log_or_the_record_and_the_index_is_in_the_instruc
     for text in [&log, &record] {
         assert!(!text.contains("eyJhbGciOiJFZERTQSI"), "{text}");
     }
+}
+
+#[test]
+fn two_granted_connectors_also_get_the_composite() {
+    let f = Fixture::new();
+    let packager = gateway(&f, &["github", "linear", "slack"]);
+    let branch = f
+        .task(
+            "SH ls \"$HOME/.branchyard/connectors\" | tr '\\n' ' ' | sed 's/^/placed=/'; echo\n\
+             SH cat \"$HOME/.branchyard/connectors/_compose/SKILL.md\"",
+        )
+        .options(granted(&f, &["github:read", "linear:write"]))
+        .name("composed")
+        .run()
+        .unwrap();
+    let events = branch.events().unwrap();
+    assert_eq!(branch.info().status, BranchStatus::NoChanges, "{events:?}");
+    let said = text(&events);
+    assert_eq!(after(&said, "placed="), "INDEX.md _compose github linear");
+    // Composed over exactly the granted connectors.
+    assert!(said.contains("compose: github linear"), "{said}");
+    assert_eq!(packager.composed.load(Ordering::SeqCst), 1);
+
+    let instructed = f
+        .task("SHOW_INSTRUCTIONS")
+        .options(granted(&f, &["github", "slack"]))
+        .name("instructed")
+        .run()
+        .unwrap();
+    let said = text(&instructed.events().unwrap());
+    assert!(
+        said.contains(".branchyard/connectors/_compose/SKILL.md composes them"),
+        "{said}"
+    );
+    assert_eq!(packager.composed.load(Ordering::SeqCst), 2);
+
+    // One connector: nothing to compose, and the instructions do not offer it.
+    let single = f
+        .task("SHOW_INSTRUCTIONS")
+        .options(granted(&f, &["github"]))
+        .name("single")
+        .run()
+        .unwrap();
+    let said = text(&single.events().unwrap());
+    assert!(!said.contains("_compose"), "{said}");
+    assert_eq!(packager.composed.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_composite_anvil_cannot_write_is_a_warning_not_a_failure() {
+    let f = Fixture::new();
+    let packager = Arc::new(FakePackager {
+        bundles: vec!["github", "linear"],
+        cannot_compose: true,
+        ..FakePackager::default()
+    });
+    f.yard
+        .use_connectors(Gateway::local(&f.yard, URL, packager.clone()).expect("a local gateway"));
+    let branch = f
+        .task("SH ls \"$HOME/.branchyard/connectors\" | tr '\\n' ' ' | sed 's/^/placed=/'; echo")
+        .options(granted(&f, &["github", "linear"]))
+        .name("uncomposed")
+        .run()
+        .unwrap();
+    let events = branch.events().unwrap();
+    assert_eq!(branch.info().status, BranchStatus::NoChanges, "{events:?}");
+    let said = text(&events);
+    // The connectors are placed one by one, with nothing left of the attempt.
+    assert_eq!(after(&said, "placed="), "INDEX.md github linear");
+    assert!(!said.contains("_compose"), "{said}");
+    let warning = events
+        .iter()
+        .find_map(|e| match &e.activity {
+            Activity::Warning(text) if text.contains("composite") => Some(text.clone()),
+            _ => None,
+        })
+        .expect("a warning about the composite");
+    assert!(warning.contains("unknown command 'compose'"), "{warning}");
+    assert_eq!(packager.composed.load(Ordering::SeqCst), 1);
 }
 
 #[test]

@@ -30,11 +30,22 @@ pub trait Packager: Send + Sync + std::fmt::Debug {
     /// Write the index of `bundles` for the grant in the JSON file
     /// `grants` (a list of grant entries) to `out`.
     fn index(&self, grants: &Path, bundles: &[Bundle], out: &Path) -> Result<(), String>;
+    /// Write the composite of `bundles` into `out` (Anvil ADR-0031): one
+    /// client over the connector packages already in `packages` (one
+    /// directory per connector id), and flows, DAGs of calls across them.
+    /// Asked only when a grant names two or more connectors. A packager
+    /// that cannot compose writes nothing, and the connectors stay usable
+    /// one by one.
+    fn compose(&self, bundles: &[Bundle], packages: &Path, out: &Path) -> Result<(), String> {
+        let _ = (bundles, packages, out);
+        Ok(())
+    }
 }
 
 /// Anvil's CLI: `anvil package harness <bundle> --out <dir> --workspace <root>
-/// --connector <id>` and `anvil connectors index --grants <file> --out
-/// INDEX.md --workspace <root> <bundle...>`, over the bundles found under
+/// --connector <id>`, `anvil connectors compose --out <dir> --skills-root
+/// <dir> --workspace <root> <bundle...>`, and `anvil connectors index --grants
+/// <file> --out INDEX.md --workspace <root> <bundle...>`, over the bundles found under
 /// `root`. `--workspace` makes Anvil name each bundle by its fleet id (its
 /// folded path under `root`), so the index matches grants for nested bundles.
 #[derive(Clone, Debug)]
@@ -111,6 +122,27 @@ impl Packager for AnvilPackager {
             &grants,
             "--out",
             &out,
+            "--workspace",
+            &root,
+        ];
+        args.extend(paths.iter().map(String::as_str));
+        self.run(&args)
+    }
+
+    fn compose(&self, bundles: &[Bundle], packages: &Path, out: &Path) -> Result<(), String> {
+        let (packages, out) = (packages.display().to_string(), out.display().to_string());
+        let paths: Vec<String> = bundles
+            .iter()
+            .map(|b| b.path.display().to_string())
+            .collect();
+        let root = self.root.display().to_string();
+        let mut args = vec![
+            "connectors",
+            "compose",
+            "--out",
+            &out,
+            "--skills-root",
+            &packages,
             "--workspace",
             &root,
         ];

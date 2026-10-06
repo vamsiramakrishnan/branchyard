@@ -70,9 +70,15 @@ With `ANVIL_GATEWAY_URL` set, a generated CLI or SDK sends every call to the gat
     reference/            operations, errors, idempotency, workflows (read on demand)
     python/  typescript/  the SDKs
     bin/github            the CLI
+  _compose/               two or more granted connectors only: `anvil connectors compose` output
+    SKILL.md              when and how to span connectors with a flow
+    compose.json          the catalog: every composed operation, its effect class and declared undo
+    python/  typescript/  one client over the connector SDKs, and `Flow`, a DAG of their calls
 ```
 
-Progressive disclosure: `INDEX.md` is what the instructions point at; a harness opens a connector's `SKILL.md` only when a task needs it, `reference/*` only for detail, and `--schema` for one operation. Only granted connectors are placed, and `INDEX.md` lists only them. Anvil provides `anvil package harness <bundle> --out <dir>` and `anvil connectors index --grants <file> --out INDEX.md <bundle...>`; Branchyard caches each package by bundle hash.
+Progressive disclosure: `INDEX.md` is what the instructions point at; a harness opens a connector's `SKILL.md` only when a task needs it, `reference/*` only for detail, and `--schema` for one operation. Only granted connectors are placed, and `INDEX.md` lists only them. Anvil provides `anvil package harness <bundle> --out <dir>`, `anvil connectors compose --out <dir> --skills-root <dir> <bundle...>` and `anvil connectors index --grants <file> --out INDEX.md <bundle...>`; Branchyard caches each package by bundle hash.
+
+**Spanning connectors.** When a grant names two or more connectors, the home also gets `_compose/` (Anvil's ADR-0031), and `INDEX.md` points at it. It is one client over the placed connector SDKs. Its `Flow` states a task that spans them as a DAG of calls. The meta-methods `step`, `map` and `when` build the flow; `plan` and `validate` read it, `dry_run` previews it, and `run` executes it. A run stops at the first failure. A failed run lists the declared undo of every completed write, newest first, which `compensate` runs only when the caller asks. Every step is an ordinary call to that connector's SDK, so it goes through this turn's token, grant and [effect ledger](effects.md) like any other call. The composite adds no authority.
 
 A harness without a shell may be given the same gateway as one MCP server instead; it is a second door to the same runtime, not a second configuration.
 
@@ -129,11 +135,12 @@ Before a granted turn starts, and before its sandbox exists ([provisioning](prov
 
 1. Every granted connector must be one the gateway serves, or the turn fails naming it (`connector slack is not served by the gateway (it serves: github)`). What is served is the bundle root's bundles, found as Anvil's fleet finds them (a directory with `air.yaml` or `air.json`).
 2. Each granted bundle's package comes from `.branchyard/connectors/cache/<hash>/`, made with `anvil package harness <bundle> --out <dir> --workspace <root> --connector <id>` when missing; the hash is BLAKE3 over the bundle's files, so a recompiled bundle is packaged again.
-3. The packages and `anvil connectors index --grants <file> --out INDEX.md --workspace <root> <bundle...>`'s index (`--workspace` makes Anvil name each bundle by its fleet id, so a nested `team/github` is indexed as `team_github`, as it is granted) replace `~/.branchyard/connectors/` in the private home. Only granted connectors are there.
-4. The token is written to `~/.branchyard/gateway-token` (0600) and removed when the turn ends.
-5. The harness gets `ANVIL_GATEWAY_URL` and `ANVIL_GATEWAY_TOKEN_FILE` (its home's path as it sees it, `/branchyard/home/...` in a Microsandbox guest), and one line in its instructions: *Connectors (github) are available through Branchyard's gateway: before using one, read …/INDEX.md and follow it; never ask for or use upstream credentials.*
-6. The `provisioned` event lists the connectors, the two variable names and the files; never the token.
-7. `ANVIL_GATEWAY_URL` is the turn's **effect-ledger proxy**, on loopback, in front of the gateway: it decides each effectful call's approval and writes it to the ledger before forwarding it, with the entry's id as the idempotency key; everything else passes through as it is. The token's audience stays the gateway's URL. `[connectors] effects_proxy = false` turns it off; a sandboxed turn needs `effects_sandbox_host` (and `effects_listen`) to reach it, or calls the gateway directly and says so. See [effects](effects.md#begun-before-the-call).
+3. With two or more granted connectors, `anvil connectors compose --out <staged>/_compose --skills-root <staged> --workspace <root> <bundle...>` writes the composite beside the packages. If it fails (an Anvil without `connectors compose`, for example), nothing of it is placed, the turn records a warning, and the connectors are provided one by one.
+4. The packages and `anvil connectors index --grants <file> --out INDEX.md --workspace <root> <bundle...>`'s index (`--workspace` makes Anvil name each bundle by its fleet id, so a nested `team/github` is indexed as `team_github`, as it is granted) replace `~/.branchyard/connectors/` in the private home. Only granted connectors are there.
+5. The token is written to `~/.branchyard/gateway-token` (0600) and removed when the turn ends.
+6. The harness gets `ANVIL_GATEWAY_URL` and `ANVIL_GATEWAY_TOKEN_FILE` (its home's path as it sees it, `/branchyard/home/...` in a Microsandbox guest), and one line in its instructions: *Connectors (github) are available through Branchyard's gateway: before using one, read …/INDEX.md and follow it; never ask for or use upstream credentials.* With a composite, the line adds that `…/_compose/SKILL.md` composes them into one client and flows.
+7. The `provisioned` event lists the connectors, the two variable names and the files; never the token.
+8. `ANVIL_GATEWAY_URL` is the turn's **effect-ledger proxy**, on loopback, in front of the gateway: it decides each effectful call's approval and writes it to the ledger before forwarding it, with the entry's id as the idempotency key; everything else passes through as it is. The token's audience stays the gateway's URL. `[connectors] effects_proxy = false` turns it off; a sandboxed turn needs `effects_sandbox_host` (and `effects_listen`) to reach it, or calls the gateway directly and says so. See [effects](effects.md#begun-before-the-call).
 
 Packaging is behind the `Packager` trait ([`packager.rs`](../crates/branchyard/src/connectors/packager.rs)); `AnvilPackager` runs Anvil's command, and the tests use fakes.
 

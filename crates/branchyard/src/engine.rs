@@ -401,6 +401,9 @@ fn run(
             return Ok(driven);
         }
     };
+    for warning in connectors.iter().flat_map(|prepared| &prepared.warnings) {
+        recorder.record(Activity::Warning(warning.clone()))?;
+    }
     // The effect ledger's proxy in front of the gateway: every effectful
     // call is decided and written to the ledger before it is made. It
     // stops when this function returns, after the harness is gone.
