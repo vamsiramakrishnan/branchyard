@@ -42,12 +42,14 @@ pub trait Packager: Send + Sync + std::fmt::Debug {
     }
 }
 
-/// Anvil's CLI: `anvil package harness <bundle> --out <dir> --workspace <root>
-/// --connector <id>`, `anvil connectors compose --out <dir> --skills-root
-/// <dir> --workspace <root> <bundle...>`, and `anvil connectors index --grants
-/// <file> --out INDEX.md --workspace <root> <bundle...>`, over the bundles found under
-/// `root`. `--workspace` makes Anvil name each bundle by its fleet id (its
-/// folded path under `root`), so the index matches grants for nested bundles.
+/// Anvil's CLI, over the bundles found under `root`:
+///
+/// - `anvil package harness <bundle> --out <dir> --workspace <root> --connector <id>`
+/// - `anvil connectors compose --out <dir> --skills-root <dir> --workspace <root> <bundle...>`
+/// - `anvil connectors index --grants <file> --out INDEX.md --workspace <root> <bundle...>`
+///
+/// `--workspace` makes Anvil name each bundle by its fleet id (its folded
+/// path under `root`), so the index matches grants for nested bundles.
 #[derive(Clone, Debug)]
 pub struct AnvilPackager {
     /// The command and any leading arguments, such as `["anvil"]` or
