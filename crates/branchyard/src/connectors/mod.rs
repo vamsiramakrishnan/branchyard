@@ -46,6 +46,9 @@ pub const ENV_GATEWAY_URL: &str = "ANVIL_GATEWAY_URL";
 pub const ENV_GATEWAY_TOKEN_FILE: &str = "ANVIL_GATEWAY_TOKEN_FILE";
 /// Where packages and the index go, relative to the harness's home.
 pub const HOME_DIR: &str = ".branchyard/connectors";
+/// The composite's directory in the connectors home (Anvil's `_compose`).
+/// Not a connector id Anvil accepts, so it never collides with one.
+pub const COMPOSE_DIR: &str = "_compose";
 /// The turn's token file, relative to the harness's home.
 pub const TOKEN_FILE: &str = ".branchyard/gateway-token";
 /// The longest a token lives, whatever the turn's deadline.
@@ -378,6 +381,9 @@ pub(crate) struct Prepared {
     /// One line for the harness's instructions, pointing at `INDEX.md`.
     pub instruction: String,
     pub connectors: Vec<String>,
+    /// What the turn should know but did not fail on (a composite Anvil
+    /// could not write), recorded as warnings.
+    pub warnings: Vec<String>,
     /// Written in the home, relative to it.
     pub files: Vec<String>,
     /// The turn's token, which the model gateway takes too when the
@@ -458,11 +464,29 @@ pub(crate) fn prepare(
         ".branchyard/.connectors-{}",
         keys::random_id().map_err(|e| e.to_string())?
     ));
+    let mut warnings = Vec::new();
+    let mut composed = false;
     let placed = (|| -> Result<(), String> {
         fs::create_dir_all(&staged).map_err(|e| format!("create {}: {e}", staged.display()))?;
         for bundle in &bundles {
             let package = cached_package(gateway.packager.as_ref(), &cache, bundle)?;
             packager::copy_tree(&package, &staged.join(&bundle.id))?;
+        }
+        // Two or more connectors: the composite, one client over them and
+        // flows across them (Anvil ADR-0031). It is written before the
+        // index, which points at it. Without it every connector still works
+        // on its own, so a failure here is a warning, not the turn's.
+        if bundles.len() > 1 {
+            let out = staged.join(COMPOSE_DIR);
+            match gateway.packager.compose(&bundles, &staged, &out) {
+                Ok(()) => composed = out.join("SKILL.md").is_file(),
+                Err(reason) => {
+                    branchyard_support::cleanup_dir(&out);
+                    warnings.push(format!(
+                        "connectors are provided one by one: the composite could not be written ({reason})"
+                    ));
+                }
+            }
         }
         let grants = staged.join(".grants.json");
         let text = serde_json::to_string_pretty(&grant).map_err(|e| e.to_string())?;
@@ -522,11 +546,19 @@ pub(crate) fn prepare(
         ],
         instruction: format!(
             "Connectors ({}) are available through Branchyard's gateway: before using one, read {} \
-             and follow it; never ask for or use upstream credentials.",
+             and follow it; never ask for or use upstream credentials.{}",
             names.join(", "),
-            guest(&format!("{HOME_DIR}/INDEX.md"))
+            guest(&format!("{HOME_DIR}/INDEX.md")),
+            match composed {
+                true => format!(
+                    " For a task that spans them, {} composes them into one client and flows.",
+                    guest(&format!("{HOME_DIR}/{COMPOSE_DIR}/SKILL.md"))
+                ),
+                false => String::new(),
+            }
         ),
         connectors: names,
+        warnings,
         gateway_url: url,
         files: vec![format!("{HOME_DIR}/"), TOKEN_FILE.to_owned()],
         token,

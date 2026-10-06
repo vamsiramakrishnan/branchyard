@@ -15,6 +15,13 @@
 //! (`undo.tool`), the release is staged as Anvil's draft, and `by undo`
 //! deletes both comments and discards the draft upstream.
 //!
+//! A third grants two connectors (`github` and `tracker`, both built from
+//! the fixture) and runs a flow through Anvil's composite (ADR-0031):
+//! issues read from `github`, a comment on each written through `tracker`,
+//! then a failing read. Every call goes through the turn's ledger proxy, so
+//! the comments are ledgered like any other write, and the failed run names
+//! each comment's inverse.
+//!
 //! Needs `node`, `python3` and a built Anvil: `ANVIL_BIN` (its
 //! `bin-anvil.js`), or `/home/user/anvil/packages/cli/dist/bin-anvil.js`,
 //! with `examples/github-mini` beside it. Ignored by default (CI has no
@@ -150,6 +157,12 @@ struct Anvil {
 
 /// Set up Anvil for test `name`, or say why not and return `None`.
 fn start(name: &str) -> Option<Anvil> {
+    start_with(name, &["github"])
+}
+
+/// [`start`], with one bundle per name in `connectors`, each compiled from
+/// the fixture and connected with the person's key.
+fn start_with(name: &str, connectors: &[&str]) -> Option<Anvil> {
     let Some(anvil) = anvil_bin() else {
         eprintln!(
             "skipped: no built Anvil (set ANVIL_BIN to its packages/cli/dist/bin-anvil.js; \
@@ -206,18 +219,20 @@ fn start(name: &str) -> Option<Anvil> {
     let bundles = dir.join("workspace");
     // Anvil keeps a source cache in its working directory: the scratch
     // directory, not this crate.
-    let out = Command::new("node")
-        .current_dir(&dir)
-        .arg(&anvil)
-        .arg("compile")
-        .arg(dir.join("src/openapi.yaml"))
-        .arg("--manifest")
-        .arg(fixture.join("anvil.yaml"))
-        .arg("--out")
-        .arg(bundles.join("github"))
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "anvil compile: {}", text(&out));
+    for connector in connectors {
+        let out = Command::new("node")
+            .current_dir(&dir)
+            .arg(&anvil)
+            .arg("compile")
+            .arg(dir.join("src/openapi.yaml"))
+            .arg("--manifest")
+            .arg(fixture.join("anvil.yaml"))
+            .arg("--out")
+            .arg(bundles.join(connector))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "anvil compile: {}", text(&out));
+    }
 
     // A repository whose branchyard.toml points at Anvil and the bundles.
     git(&root, &["init", "-q", "-b", "main"]);
@@ -257,21 +272,23 @@ fn start(name: &str) -> Option<Anvil> {
     );
 
     // Connect the person's account: a personal token, so a key connection.
-    let mut connect = by(&root)
-        .args(["connect", "github", "--api-key-stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    connect
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(format!("{UPSTREAM_TOKEN}\n").as_bytes())
-        .unwrap();
-    let out = connect.wait_with_output().unwrap();
-    assert!(out.status.success(), "by connect: {}", text(&out));
+    for connector in connectors {
+        let mut connect = by(&root)
+            .args(["connect", connector, "--api-key-stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        connect
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{UPSTREAM_TOKEN}\n").as_bytes())
+            .unwrap();
+        let out = connect.wait_with_output().unwrap();
+        assert!(out.status.success(), "by connect: {}", text(&out));
+    }
     Some(Anvil {
         cleanup,
         dir,
@@ -609,5 +626,104 @@ fn the_effect_ledger_records_anvils_reports_and_undoes_through_its_gateway() {
         "effects end to end against Anvil: {} upstream requests",
         requests.len()
     );
+    drop(cleanup);
+}
+
+/// The composite harness: one flow across both granted connectors, through
+/// `_compose/`, which Branchyard places when a grant names two or more.
+const COMPOSE_HARNESS: &str = r#"import json, os, sys
+home = os.path.join(os.environ["HOME"], ".branchyard/connectors")
+sys.path.insert(0, os.path.join(home, "_compose/python"))
+from anvil_compose import Composite, item
+c = Composite()
+flow = c.flow("mirror")
+issues = flow.step("issues", "github:github.issues.list", owner="octo", repo="hello")
+flow.map("comment", "tracker:github.comments.create", over=issues,
+         args={"owner": "octo", "repo": "hello", "issue_number": item("number"), "body": "mirrored"})
+flow.step("missing", "github:github.issues.get", owner="octo", repo="hello", issue_number=999,
+          after=["comment"])
+plan = flow.plan()
+run = flow.run()
+print("RESULT " + json.dumps({
+    "connectors": plan["connectors"], "waves": plan["waves"], "findings": flow.validate(),
+    "status": run.status, "failed": run.failed_step,
+    "comments": len(run.steps["comment"].get("result") or []),
+    "undo": [e.get("undo", {}).get("operation") for e in run.compensation],
+    "index": "_compose/SKILL.md" in open(os.path.join(home, "INDEX.md")).read(),
+}))
+"#;
+
+#[test]
+#[ignore = "needs node, python3 and a built Anvil (ANVIL_BIN); run with --ignored"]
+fn a_flow_spans_two_granted_connectors_through_the_composite_and_the_ledger() {
+    let Some(Anvil {
+        cleanup,
+        dir,
+        root,
+        log,
+        ..
+    }) = start_with("compose", &["github", "tracker"])
+    else {
+        return;
+    };
+    fs::write(dir.join("compose.py"), COMPOSE_HARNESS).unwrap();
+    let agent = fake_agent!();
+    let out = by(&root)
+        .args([
+            "run",
+            &format!("SH python3 {}", dir.join("compose.py").display()),
+            "--name",
+            "mirror",
+            "--isolated",
+            "--connector",
+            "github:read",
+            "--connector",
+            "tracker:write",
+            "--harness",
+            "gemini-cli",
+            "--command",
+        ])
+        .arg(agent)
+        .arg("--yes")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "by run: {}", text(&out));
+    let (events, said) = said(&root, "mirror");
+    let result = result(&said, &log);
+    assert_eq!(
+        result["connectors"],
+        serde_json::json!(["github", "tracker"]),
+        "{said}"
+    );
+    assert_eq!(result["findings"], serde_json::json!([]), "{said}");
+    assert_eq!(result["index"], true, "{said}");
+    assert_eq!(result["status"], "failed", "{said}");
+    assert_eq!(result["failed"], "missing", "{said}");
+    let comments = result["comments"].as_u64().unwrap();
+    assert!(comments >= 2, "{said}");
+    let undo = result["undo"].as_array().unwrap();
+    assert_eq!(undo.len() as u64, comments, "{said}");
+    assert!(undo.iter().all(|u| u == "github.comments.delete"), "{said}");
+
+    // Each step was an ordinary call under the turn's grant: the reads on
+    // github, the comments on tracker, each ledgered as a reversible write.
+    let calls: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["activity"] == "connector_call")
+        .map(|e| &e["connector_call"])
+        .collect();
+    assert_eq!(calls.len() as u64, comments + 2, "{events:#?}");
+    let out = by(&root)
+        .args(["effects", "--branch", "mirror", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "by effects: {}", text(&out));
+    let ledger: Vec<Value> = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(ledger.len() as u64, comments, "{ledger:#?}");
+    for entry in &ledger {
+        assert_eq!(entry["state"], "confirmed", "{entry:#}");
+        assert_eq!(entry["class"], "reversible", "{entry:#}");
+        assert_eq!(entry["operation_id"], "github.comments.create", "{entry:#}");
+    }
     drop(cleanup);
 }
