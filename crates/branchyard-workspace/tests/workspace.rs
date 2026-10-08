@@ -539,6 +539,42 @@ fn check_timeout_kills_process_group() {
     fixture.assert_no_integration_worktrees();
 }
 
+/// A `by check` whose caller was killed kept its check running for its
+/// whole timeout. A check nobody waits for any more is killed, its
+/// process group with it, long before its timeout.
+#[test]
+fn an_abandoned_check_kills_its_process_group() {
+    let fixture = Fixture::new();
+    let main = fixture.head("main");
+    let candidate = fixture.candidate("slow", "feature.txt", "feature\n");
+    let pid = fixture.dir.join("abandoned-check.pid");
+    let check = sh(
+        &format!("sleep 30 & echo $! > '{}'; sleep 30", pid.display()),
+        Duration::from_secs(60),
+    );
+    let name: BranchName = "slow".parse().unwrap();
+    let merged = fixture
+        .repo
+        .merged_worktree(&name, &candidate.head, "main", &main)
+        .unwrap();
+    let started = Instant::now();
+    let abandoned = || pid.exists() && started.elapsed() > Duration::from_millis(200);
+    assert!(matches!(
+        merged.check_until(&check, &abandoned),
+        Err(IntegrationError::CheckAbandoned)
+    ));
+    assert!(started.elapsed() < Duration::from_secs(10));
+    // The background sleep, in the check's group, was killed too.
+    let background = fs::read_to_string(&pid).unwrap();
+    let proc = PathBuf::from("/proc").join(background.trim());
+    wait::until("the check's background sleep to be killed", || {
+        !proc.exists() || fs::read_to_string(proc.join("stat")).is_ok_and(|s| s.contains(") Z "))
+    });
+    drop(merged);
+    fs::remove_file(&pid).unwrap();
+    fixture.assert_no_integration_worktrees();
+}
+
 #[test]
 fn conflict_returns_files_and_aborts_cleanly() {
     let fixture = Fixture::new();

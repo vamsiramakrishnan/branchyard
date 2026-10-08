@@ -121,6 +121,9 @@ pub enum IntegrationError {
     },
     /// The check could not be started (empty argv, program not found, ...).
     CheckNotStarted(io::Error),
+    /// The check was killed before it ended because nobody waited for its
+    /// result any more ([`MergedWorktree::check_until`]).
+    CheckAbandoned,
     /// In a [`Repository::integrate_many`], the check at `index` in the
     /// checks given stopped the integration with `error`: an
     /// [`IntegrationError::CheckFailed`], [`IntegrationError::CheckTimedOut`]
@@ -173,6 +176,7 @@ impl fmt::Display for IntegrationError {
             Self::CheckFailed { status, .. } => write!(f, "check failed: {status}"),
             Self::CheckTimedOut { timeout, .. } => write!(f, "check timed out after {timeout:?}"),
             Self::CheckNotStarted(e) => write!(f, "check could not start: {e}"),
+            Self::CheckAbandoned => write!(f, "check abandoned: nobody waited for its result"),
             Self::CheckStopped { index, error } => write!(f, "check {}: {error}", index + 1),
             Self::DirtyTarget { worktree } => write!(
                 f,
@@ -704,6 +708,21 @@ impl MergedWorktree {
     pub fn check(&self, check: &Check) -> Result<Verified, IntegrationError> {
         verified(check, &self.scratch.path, self.commit.clone())
     }
+
+    /// [`MergedWorktree::check`], asking `abandoned` while the check runs:
+    /// once it says nobody waits for the result, the check's process group
+    /// is killed and this fails with [`IntegrationError::CheckAbandoned`].
+    pub fn check_until(
+        &self,
+        check: &Check,
+        abandoned: &dyn Fn() -> bool,
+    ) -> Result<Verified, IntegrationError> {
+        match check::run_until(check, &self.scratch.path, abandoned) {
+            Ok(None) => Err(IntegrationError::CheckAbandoned),
+            Ok(Some(ran)) => Ok(verdict(ran, self.commit.clone())),
+            Err(e) => Err(IntegrationError::CheckNotStarted(e)),
+        }
+    }
 }
 
 impl fmt::Debug for MergedWorktree {
@@ -719,18 +738,25 @@ impl fmt::Debug for MergedWorktree {
 fn verified(check: &Check, dir: &Path, commit: Commit) -> Result<Verified, IntegrationError> {
     match check::run(check, dir) {
         Err(e) => Err(IntegrationError::CheckNotStarted(e)),
-        Ok((CheckOutcome::Exited(status), output_tail)) => Ok(Verified {
+        Ok(ran) => Ok(verdict(ran, commit)),
+    }
+}
+
+/// How a check that ran on `commit` ended, as a [`Verified`].
+fn verdict((outcome, output_tail): (CheckOutcome, String), commit: Commit) -> Verified {
+    match outcome {
+        CheckOutcome::Exited(status) => Verified {
             commit,
             passed: status.success(),
             timed_out: false,
             output_tail,
-        }),
-        Ok((CheckOutcome::TimedOut, output_tail)) => Ok(Verified {
+        },
+        CheckOutcome::TimedOut => Verified {
             commit,
             passed: false,
             timed_out: true,
             output_tail,
-        }),
+        },
     }
 }
 

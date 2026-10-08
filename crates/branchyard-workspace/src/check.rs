@@ -32,8 +32,19 @@ pub(crate) enum CheckOutcome {
     TimedOut,
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
 pub(crate) fn run(check: &Check, dir: &Path) -> io::Result<(CheckOutcome, String)> {
+    run_until(check, dir, &|| false)?.ok_or_else(|| io::Error::other("the check was abandoned"))
+}
+
+/// [`run`], but asking `abandoned` as it waits: once it says so, the check's
+/// process group is killed and `None` returned, as nobody waits for the
+/// result any more.
+#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
+pub(crate) fn run_until(
+    check: &Check,
+    dir: &Path,
+    abandoned: &dyn Fn() -> bool,
+) -> io::Result<Option<(CheckOutcome, String)>> {
     let Some((program, args)) = check.argv.split_first() else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -81,17 +92,21 @@ pub(crate) fn run(check: &Check, dir: &Path) -> io::Result<(CheckOutcome, String
     let mut pause = Duration::from_millis(5);
     let outcome = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break CheckOutcome::Exited(status),
+            Ok(Some(status)) => break Some(CheckOutcome::Exited(status)),
             Ok(None) => {}
             Err(e) => {
                 kill(&mut child);
                 return Err(e);
             }
         }
+        if abandoned() {
+            kill(&mut child);
+            break None;
+        }
         let now = Instant::now();
         if now >= deadline {
             kill(&mut child);
-            break CheckOutcome::TimedOut;
+            break Some(CheckOutcome::TimedOut);
         }
         thread::sleep(pause.min(deadline - now));
         pause = (pause * 2).min(Duration::from_millis(50));
@@ -104,7 +119,8 @@ pub(crate) fn run(check: &Check, dir: &Path) -> io::Result<(CheckOutcome, String
     // A process that escaped the group may hold the pipe open; do not wait on it.
     let _ = done_rx.recv_timeout(Duration::from_secs(1));
     let bytes: Vec<u8> = tail.lock_recovering("tail").iter().copied().collect();
-    Ok((outcome, String::from_utf8_lossy(&bytes).into_owned()))
+    let tail = String::from_utf8_lossy(&bytes).into_owned();
+    Ok(outcome.map(|outcome| (outcome, tail)))
 }
 
 /// Kills the check's process group while its leader is still unreaped, then

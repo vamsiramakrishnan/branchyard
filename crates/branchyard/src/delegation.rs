@@ -55,8 +55,8 @@ use crate::seats::{Seat, Seats};
 use crate::state::{Record, Store};
 use crate::{
     git, harness, inbox, integrate, names, Activity, BranchInfo, BranchStatus, Budget,
-    CandidateInfo, CheckReport, Error, Event, Merged, MergedAll, Message, MessageKind, Policy,
-    RecordedEvent, Rule, SharedCheck, Steer, SteerState, TaskOptions, Yard,
+    CandidateInfo, CheckReport, CheckVerdict, Error, Event, Merged, MergedAll, Message,
+    MessageKind, Policy, RecordedEvent, Rule, SharedCheck, Steer, SteerState, TaskOptions, Yard,
 };
 
 /// How long `steer` waits for the input to be delivered.
@@ -1296,6 +1296,7 @@ pub(crate) fn local_by_token(yard: &Yard, token: &str) -> Result<Local, Error> {
             branch: branch.clone(),
             options: context.options.clone(),
             cost: Some(context.cost.clone()),
+            abandoned: None,
         }),
         None => Err(Error::Denied(
             "this delegation token is not valid; tokens are issued for a running turn and \
@@ -1331,6 +1332,7 @@ pub(crate) fn trusted(yard: &Yard, branch: &str, options: TaskOptions) -> Result
             branch: branch.to_owned(),
             options,
             cost: None,
+            abandoned: None,
         })),
     })
 }
@@ -1885,23 +1887,47 @@ fn sharing_check(store: &Store, record: &Record) -> Vec<Record> {
         .collect()
 }
 
-/// A failed check of an integration of `branches` that left out siblings
-/// sharing it: say who they are and the integration that runs it on all
-/// of them. Any other error is returned as it is.
-fn with_shared_check(store: &Store, error: Error, branches: &[String]) -> Error {
+/// A failed check of an integration of `branches` into `caller` that left
+/// out siblings sharing it. Integrating them together could change the
+/// result only when the failed check is theirs, some branch integrated
+/// failed it alone too (its last `by check` of the same work, onto the
+/// same parent's work), and a sibling has a candidate: then say who they
+/// are and the integration that runs it on all of them. Otherwise the
+/// check failed on the integrated branches' own work: say so, naming no
+/// sibling. Any other error is returned as it is.
+fn with_shared_check(yard: &Yard, caller: &str, error: Error, branches: &[String]) -> Error {
     let Error::CheckFailed {
         output_tail,
         checks,
         shared: None,
+        own_work,
     } = error
     else {
         return error;
     };
+    let store = yard.store();
+    let failed = checks
+        .iter()
+        .find(|c| c.outcome == CheckVerdict::Failed)
+        .map(|c| c.check.clone());
+    let parent_tree = store
+        .read(caller)
+        .ok()
+        .and_then(|r| {
+            git::local_branch(&yard.root, &r.info.git_branch)
+                .ok()
+                .flatten()
+        })
+        .and_then(|head| tree_of(yard, &head));
     let mut shared: Option<SharedCheck> = None;
+    let mut any_candidate = false;
     for record in branches.iter().filter_map(|b| store.read(b).ok()) {
-        let (Some(check), siblings) = (record.check.clone(), sharing_check(store, &record)) else {
+        let (Some(check), siblings) = (record.check.clone(), sharing_check(&store, &record)) else {
             continue;
         };
+        if failed.as_ref().is_some_and(|failed| *failed != check) {
+            continue;
+        }
         let into = shared.get_or_insert_with(|| SharedCheck {
             check,
             inherited_from: record
@@ -1912,12 +1938,17 @@ fn with_shared_check(store: &Store, error: Error, branches: &[String]) -> Error 
             siblings: Vec::new(),
             unsettled: Vec::new(),
             integrate_together: branches.to_vec(),
+            failed_alone: Vec::new(),
         });
+        if checked_alone(yard, caller, &record, parent_tree.as_deref()) == Some(false) {
+            into.failed_alone.push(record.info.name.clone());
+        }
         for sibling in siblings {
             let name = sibling.info.name;
             if branches.contains(&name) || into.siblings.contains(&name) {
                 continue;
             }
+            any_candidate |= sibling.info.candidate.is_some();
             if is_live(&sibling.info.status) {
                 into.unsettled.push(name.clone());
             }
@@ -1925,11 +1956,97 @@ fn with_shared_check(store: &Store, error: Error, branches: &[String]) -> Error 
             into.siblings.push(name);
         }
     }
+    let shared = shared.filter(|s| !s.siblings.is_empty());
+    let (shared, own_work) = match shared {
+        Some(s) if !s.failed_alone.is_empty() && any_candidate => (Some(Box::new(s)), own_work),
+        Some(_) => (None, branches.to_vec()),
+        None => (None, own_work),
+    };
     Error::CheckFailed {
         output_tail,
         checks,
-        shared: shared.filter(|s| !s.siblings.is_empty()).map(Box::new),
+        shared,
+        own_work,
     }
+}
+
+/// `commit`'s tree.
+fn tree_of(yard: &Yard, commit: &str) -> Option<String> {
+    git::run(
+        &yard.root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{commit}^{{tree}}"),
+        ],
+    )
+    .ok()
+    .map(|tree| tree.trim().to_owned())
+    .filter(|tree| !tree.is_empty())
+}
+
+/// What a `by check` found, for the checking branch's event log: how it
+/// ended, on which work, merged into which of its parent's ([`checked_on`]
+/// reads it back).
+fn check_outcome(yard: &Yard, report: &CheckReport, onto: &str) -> String {
+    let verdict = serde_json::to_value(report.outcome)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    match (tree_of(yard, &report.work), tree_of(yard, onto)) {
+        (Some(work), Some(onto)) => format!("{verdict} on work tree {work} onto tree {onto}"),
+        _ => verdict,
+    }
+}
+
+/// From a [`check_outcome`]: whether the check passed (`Some(true)`) or
+/// failed or timed out (`Some(false)`) on work tree `work` onto `onto`.
+/// `None` for another verdict or other trees.
+fn checked_on(outcome: &str, work: &str, onto: &str) -> Option<bool> {
+    let (verdict, trees) = outcome.split_once(" on work tree ")?;
+    if trees != format!("{work} onto tree {onto}") {
+        return None;
+    }
+    match verdict {
+        "passed" => Some(true),
+        "failed" | "timed_out" => Some(false),
+        _ => None,
+    }
+}
+
+/// How `record`'s check last ended alone on the work its candidate holds,
+/// merged into its parent's work with tree `parent_tree`, as a `by check`
+/// it or `caller` ran recorded it: `Some(true)` passed, `Some(false)`
+/// failed. `None` when none ran on that work, or it ended otherwise.
+fn checked_alone(
+    yard: &Yard,
+    caller: &str,
+    record: &Record,
+    parent_tree: Option<&str>,
+) -> Option<bool> {
+    let work = tree_of(yard, &record.info.candidate.as_ref()?.commit)?;
+    let onto = parent_tree?;
+    let store = yard.store();
+    let name = &record.info.name;
+    let mut last: Option<(u64, Option<bool>)> = None;
+    let events = [name.as_str(), caller]
+        .into_iter()
+        .flat_map(|log| record::read(&store, log).unwrap_or_default());
+    for event in events {
+        if let Activity::Delegation {
+            tool,
+            branch,
+            outcome,
+            refused: false,
+        } = &event.activity
+        {
+            if tool == "check" && branch == name && last.is_none_or(|(at, _)| event.at_ms >= at) {
+                last = Some((event.at_ms, checked_on(outcome, &work, onto)));
+            }
+        }
+    }
+    last.and_then(|(_, passed)| passed)
 }
 
 /// What became of an integrated branch, for its parent's event log.
@@ -1964,9 +2081,23 @@ pub(crate) struct Local {
     options: TaskOptions,
     /// The acting branch's live spend, while its turn runs.
     cost: Option<Arc<Mutex<Option<f64>>>>,
+    /// Whether the caller stopped waiting for the answer, as the broker
+    /// sees a client that disconnected: a check it ran is killed then.
+    abandoned: Option<Abandoned>,
 }
 
+/// Says whether the caller of an operation stopped waiting for its answer.
+pub(crate) type Abandoned = Arc<dyn Fn() -> bool + Send + Sync>;
+
 impl Local {
+    /// This, with `abandoned` saying when its caller stopped waiting.
+    pub(crate) fn abandoned_when(self, abandoned: Abandoned) -> Local {
+        Local {
+            abandoned: Some(abandoned),
+            ..self
+        }
+    }
+
     fn store(&self) -> Store {
         self.yard.store()
     }
@@ -3104,7 +3235,7 @@ impl Local {
             &format!("snapshot before integrating {}", branches.join(", ")),
         )?;
         let merged = integrate::merge_many(&self.yard, branches, &caller.info.git_branch)
-            .map_err(|error| with_shared_check(&store, error, branches))?;
+            .map_err(|error| with_shared_check(&self.yard, &self.branch, error, branches))?;
         // A sibling waiting for these to be integrated may start now, and
         // any other child this branch now contains is merged too.
         for branch in branches {
@@ -3117,7 +3248,14 @@ impl Local {
     fn check(&self, branch: &str) -> Result<CheckReport, Error> {
         self.require_descendant(branch, true)?;
         let record = self.store().read(branch)?;
-        integrate::check_work(&self.yard, &record)
+        let abandoned = self.abandoned.clone();
+        let result = integrate::check_work(&self.yard, &record, &move || {
+            abandoned.as_ref().is_some_and(|abandoned| abandoned())
+        });
+        self.note("check", branch, &result, |(report, onto)| {
+            check_outcome(&self.yard, report, onto)
+        });
+        result.map(|(report, _)| report)
     }
 
     fn steer(&self, branch: &str, text: &str) -> Result<Steer, Error> {
@@ -3963,11 +4101,14 @@ mod tests {
                 siblings: vec!["b".into(), "c".into()],
                 unsettled: vec!["c".into()],
                 integrate_together: vec!["a".into(), "b".into(), "c".into()],
+                failed_alone: vec!["a".into()],
             })),
+            own_work: Vec::new(),
         };
         let text = error.to_string();
         for needed in [
             "check failed:\n2 failed\n",
+            "a failed it alone too (`by check`), so it may need siblings' work",
             "Siblings b, c share the same check",
             "`by integrate a b c`, once c settles (`by wait c`)",
             "needs a check of its own (`by spawn --check`)",
@@ -3977,15 +4118,57 @@ mod tests {
         let detail = error.detail().unwrap();
         assert_eq!(detail["unsettled"], json!(["c"]));
         assert!(detail.get("inherited_from").is_none());
+        assert_eq!(detail["failed_alone"], json!(["a"]));
         let plain = Error::CheckFailed {
             output_tail: "x".into(),
             checks: Vec::new(),
             shared: None,
+            own_work: Vec::new(),
         };
         assert_eq!(
             (plain.to_string(), plain.detail()),
             ("check failed:\nx".into(), None)
         );
+    }
+
+    /// A check that failed on the integrated branches' own work says so,
+    /// and names no sibling to integrate with them.
+    #[test]
+    fn a_check_failed_on_own_work_names_no_sibling() {
+        let error = Error::CheckFailed {
+            output_tail: "1 failed".into(),
+            checks: Vec::new(),
+            shared: None,
+            own_work: vec!["a".into(), "b".into()],
+        };
+        let text = error.to_string();
+        assert!(
+            text.contains("failed on the integrated branches' own work (a, b)"),
+            "{text}"
+        );
+        assert!(!text.contains("Siblings"), "{text}");
+        let detail = error.detail().unwrap();
+        assert_eq!(detail["own_work"], json!(["a", "b"]));
+        assert!(detail.get("integrate_together").is_none(), "{detail}");
+    }
+
+    /// `by check` notes how it ended on which work and parent, and only
+    /// that work onto that parent reads back as its verdict.
+    #[test]
+    fn a_check_note_reads_back_only_on_the_same_trees() {
+        let note = "failed on work tree w1 onto tree p1";
+        assert_eq!(checked_on(note, "w1", "p1"), Some(false));
+        assert_eq!(checked_on(note, "w2", "p1"), None);
+        assert_eq!(checked_on(note, "w1", "p2"), None);
+        assert_eq!(
+            checked_on("passed on work tree w1 onto tree p1", "w1", "p1"),
+            Some(true)
+        );
+        assert_eq!(
+            checked_on("not_run on work tree w1 onto tree p1", "w1", "p1"),
+            None
+        );
+        assert_eq!(checked_on("passed", "w1", "p1"), None);
     }
 
     /// A failed check of an integration whose branches' checks differ
@@ -4007,6 +4190,7 @@ mod tests {
             output_tail: "2 failed".into(),
             checks: checks.clone(),
             shared: None,
+            own_work: Vec::new(),
         };
         assert_eq!(
             error.to_string(),
@@ -4029,7 +4213,9 @@ mod tests {
                 siblings: vec!["e".into()],
                 unsettled: Vec::new(),
                 integrate_together: vec!["b".into(), "e".into()],
+                failed_alone: Vec::new(),
             })),
+            own_work: Vec::new(),
         };
         let text = shared.to_string();
         assert!(

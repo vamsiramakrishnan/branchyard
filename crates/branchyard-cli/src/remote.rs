@@ -238,15 +238,18 @@ pub fn sdk_error(error: branchyard_client::Error) -> branchyard::Error {
                     .to_owned(),
                 code => code.to_owned(),
             };
-            // A failed check's siblings and every check of the
-            // integration, as a local `by` reports them.
+            // A failed check's siblings or the branches on whose own work
+            // it failed, and every check of the integration, as a local
+            // `by` reports them.
             let detail = error.detail.as_ref().and_then(|d| {
                 let mut local = d
                     .get("shared")
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
-                if let Some(checks) = d.get("checks") {
-                    local["checks"] = checks.clone();
+                for key in ["checks", "own_work"] {
+                    if let Some(value) = d.get(key) {
+                        local[key] = value.clone();
+                    }
                 }
                 local
                     .as_object()
@@ -1107,6 +1110,15 @@ mod tests {
         let detail = error.detail().unwrap();
         assert_eq!(detail["checks"], checks);
         assert_eq!(detail["integrate_together"], serde_json::json!(["b", "e"]));
+        let own = sdk_error(branchyard_client::Error::Api {
+            status: 422,
+            error: Box::new(branchyard_client::api::ErrorBody {
+                code: "check_failed".into(),
+                message: "check failed:\nboom".into(),
+                detail: Some(serde_json::json!({ "output_tail": "boom", "own_work": ["b"] })),
+            }),
+        });
+        assert_eq!(own.detail().unwrap()["own_work"], serde_json::json!(["b"]));
         let plain = sdk_error(branchyard_client::Error::Api {
             status: 422,
             error: Box::new(branchyard_client::api::ErrorBody {

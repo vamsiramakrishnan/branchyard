@@ -693,8 +693,9 @@ fn a_harness_is_named_by_the_id_typed_and_its_profile_everywhere() {
 /// The battery's inherited whole-suite check: each child inherits its
 /// parent's, which passes only once every sibling is in, and integrating
 /// one alone failed with nothing but the check's output. `by inspect`
-/// shows the check and who shares it, and the failure names the siblings
-/// and the command, in text, JSON and Python.
+/// shows the check and who shares it, and when its `by check` failed
+/// alone too, the failure names the siblings and the command, in text,
+/// JSON and Python.
 #[test]
 fn a_failed_shared_check_names_the_siblings_to_integrate_together() {
     let repo = Repo::new();
@@ -706,6 +707,7 @@ fn a_failed_shared_check_names_the_siblings_to_integrate_together() {
     let prompt = [
         "SH by spawn 'WRITE a.txt=a' --name a --wait --json".to_owned(),
         "SH by spawn 'WRITE b.txt=b' --name b --wait --json".to_owned(),
+        "SH by check a --json".to_owned(),
         "SH by inspect a".to_owned(),
         "SH by integrate a".to_owned(),
         "SH by integrate a --json".to_owned(),
@@ -729,8 +731,9 @@ fn a_failed_shared_check_names_the_siblings_to_integrate_together() {
     for expected in [
         "test -f a.txt -a -f b.txt (inherited from root); shared with b, so they are \
          integrated together: by integrate a b",
-        "Siblings b share root's check, which they inherited, which may pass only with all \
-         of them: integrate them together, `by integrate a b`",
+        "a failed it alone too (`by check`), so it may need siblings' work. Siblings b \
+         share root's check, which they inherited, which may pass only with all of them: if \
+         so, integrate them together, `by integrate a b`",
         "python check_failed ['a', 'b']",
         "merged a into by/root",
         ", after `test -f a.txt -a -f b.txt` (a, b) passed once on the result",
@@ -754,20 +757,77 @@ fn a_failed_shared_check_names_the_siblings_to_integrate_together() {
         .find(|l| l.starts_with("by/root moved once: "))
         .unwrap();
     assert!(moved.contains(&format!("{a_from}..{b_to}")), "{said}");
-    let (code, failed) = sh_json(&said, 4);
+    let (code, failed) = sh_json(&said, 5);
     assert_eq!(code, 1, "{said}");
     assert_eq!(failed["error"]["kind"], "check_failed");
     let detail = &failed["error"]["detail"];
     assert_eq!(detail["integrate_together"], serde_json::json!(["a", "b"]));
     assert_eq!(detail["siblings"], serde_json::json!(["b"]));
+    assert_eq!(detail["failed_alone"], serde_json::json!(["a"]));
     assert_eq!(detail["inherited_from"], "root");
-    let (_, a) = sh_json(&said, 6);
+    let (_, a) = sh_json(&said, 7);
     assert_eq!(
         a["check"],
         serde_json::json!(["test", "-f", "a.txt", "-a", "-f", "b.txt"])
     );
     assert_eq!(a["check_inherited"], true);
     assert_eq!(a["check_shared_with"], serde_json::json!(["b"]));
+}
+
+/// A dogfood integration whose check failed on a child's own code still
+/// advised integrating it with the siblings sharing its check. With no
+/// `by check` saying a branch fails alone, or one saying it passed alone
+/// on the same work, the failure is the integrated branches' own: said
+/// so, naming no sibling.
+#[test]
+fn a_check_that_fails_on_the_integrated_work_names_no_sibling() {
+    let repo = Repo::new();
+    let flag = repo.dir.join("break-the-check");
+    let prompt = [
+        "SH by spawn 'WRITE a.txt=a' --name a --wait --json".to_owned(),
+        "SH by spawn 'WRITE b.txt=b' --name b --wait --json".to_owned(),
+        "SH by check a --json".to_owned(),
+        format!("SH touch '{}'", flag.display()),
+        "SH by integrate a".to_owned(),
+        "SH by integrate a --json".to_owned(),
+        "SH by integrate b --json".to_owned(),
+    ]
+    .join("\n");
+    let check = format!("test ! -f {}", flag.display());
+    let out = repo.by_agent(&[
+        "run",
+        &prompt,
+        "--name",
+        "root",
+        "--delegate",
+        "--yes",
+        "--check",
+        &check,
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    let (code, checked) = sh_json(&said, 2);
+    assert_eq!(
+        (code, &checked["outcome"]),
+        (0, &serde_json::json!("passed"))
+    );
+    // a passed alone, on the work it would integrate.
+    assert!(
+        said.contains("failed on the integrated branches' own work (a)"),
+        "{said}"
+    );
+    assert!(!said.contains("Siblings"), "{said}");
+    let (code, failed) = sh_json(&said, 5);
+    assert_eq!(code, 1, "{said}");
+    let detail = &failed["error"]["detail"];
+    assert_eq!(detail["own_work"], serde_json::json!(["a"]), "{said}");
+    assert!(detail.get("integrate_together").is_none(), "{said}");
+    // Nothing recorded for b: nothing says it needs a sibling.
+    let (code, failed) = sh_json(&said, 6);
+    assert_eq!(code, 1, "{said}");
+    let detail = &failed["error"]["detail"];
+    assert_eq!(detail["own_work"], serde_json::json!(["b"]), "{said}");
+    assert!(detail.get("siblings").is_none(), "{said}");
 }
 
 /// Integrating branches whose checks differ ran each distinct check once
@@ -3160,6 +3220,87 @@ fn by_check_runs_a_childs_check_on_its_current_work() {
     assert!(text.contains("inherited from root"), "{text}");
     let out = repo.by(&["check"]);
     assert!(stderr(&out).contains("outside a harness, by check needs a branch"));
+}
+
+/// `by check` merged into the parent's committed head while integrating
+/// first snapshots the parent's uncommitted work: a parent whose edit
+/// broke the check saw its child pass `by check` and fail integration.
+/// Both now see the parent's work as it is.
+#[test]
+fn by_check_merges_into_the_parents_uncommitted_work_as_integrate_does() {
+    let repo = Repo::new();
+    let prompt = [
+        "SH by spawn 'WRITE kid.txt=k' --name kid --wait --json",
+        "SH by check kid --json",
+        "SH echo x > broken",
+        "SH by check kid --json",
+        "SH by integrate kid --json",
+    ]
+    .join("\n");
+    let out = repo.by_agent(&[
+        "run",
+        &prompt,
+        "--name",
+        "root",
+        "--delegate",
+        "--yes",
+        "--check",
+        "test ! -f broken",
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    let (code, before) = sh_json(&said, 1);
+    assert_eq!(
+        (code, &before["outcome"]),
+        (0, &serde_json::json!("passed")),
+        "{said}"
+    );
+    let (code, after) = sh_json(&said, 3);
+    assert_eq!(
+        (code, &after["outcome"]),
+        (1, &serde_json::json!("failed")),
+        "{said}"
+    );
+    assert_eq!(after["target"], "by/root", "{said}");
+    let (code, integrated) = sh_json(&said, 4);
+    assert_eq!(
+        (code, &integrated["error"]["kind"]),
+        (1, &serde_json::json!("check_failed")),
+        "{said}"
+    );
+}
+
+/// A harness's tool timeout killed `by check` long before a whole-suite
+/// check ended, and the check ran on in the engine for nobody. The broker
+/// notices its caller is gone and kills the check's process group.
+#[test]
+fn a_by_check_whose_caller_is_killed_stops_its_check() {
+    let repo = Repo::new();
+    let pid = repo.dir.join("check.pid");
+    let prompt = [
+        "SH timeout 3 by check".to_owned(),
+        format!(
+            "SH s=$(cat '{}'); sleep 1; if [ -d /proc/$s ] && ! grep -q ') Z ' /proc/$s/stat; \
+             then echo check-alive; else echo check-gone; fi",
+            pid.display()
+        ),
+    ]
+    .join("\n");
+    let check = format!("sh -c 'echo $$ > {}; sleep 60'", pid.display());
+    let out = repo.by_agent(&[
+        "run",
+        &prompt,
+        "--name",
+        "root",
+        "--delegate",
+        "--yes",
+        "--check",
+        &check,
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    assert!(said.contains("sh: 124\n"), "{said}");
+    assert!(said.contains("check-gone"), "{said}");
 }
 
 /// The battery's conflict3, envelope, depth2 and recovery scenarios (M3):
