@@ -5422,7 +5422,13 @@
           "additionalProperties": false,
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "Empty with `retry`.",
+              "default": ""
+            },
+            "retry": {
+              "type": "boolean",
+              "description": "Submit again the prompt of the branch's last turn that was cut off,\nlike `by send --retry`, instead of `prompt`. Refused when none was."
             },
             "budget": {
               "$ref": "#/$defs/BudgetSpec",
@@ -5498,9 +5504,6 @@
               "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
             }
           },
-          "required": [
-            "prompt"
-          ],
           "description": "`POST /v1/repos/{repo}/branches/{branch}/send`."
         },
         "BudgetSpec": {
@@ -6163,7 +6166,13 @@
           "additionalProperties": false,
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "Empty with `retry`.",
+              "default": ""
+            },
+            "retry": {
+              "type": "boolean",
+              "description": "Submit again the prompt of the branch's last turn that was cut off,\nlike `by send --retry`, instead of `prompt`. Refused when none was."
             },
             "budget": {
               "$ref": "#/$defs/BudgetSpec",
@@ -6239,9 +6248,6 @@
               "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
             }
           },
-          "required": [
-            "prompt"
-          ],
           "description": "`POST /v1/repos/{repo}/branches/{branch}/send`."
         },
         "BudgetSpec": {
@@ -11290,7 +11296,13 @@
       "additionalProperties": false,
       "properties": {
         "prompt": {
-          "type": "string"
+          "type": "string",
+          "description": "Empty with `retry`.",
+          "default": ""
+        },
+        "retry": {
+          "type": "boolean",
+          "description": "Submit again the prompt of the branch's last turn that was cut off,\nlike `by send --retry`, instead of `prompt`. Refused when none was."
         },
         "budget": {
           "$ref": "#/$defs/BudgetSpec",
@@ -11366,9 +11378,6 @@
           "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
         }
       },
-      "required": [
-        "prompt"
-      ],
       "description": "`POST /v1/repos/{repo}/branches/{branch}/send`.",
       "title": "SendRequest",
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -14277,6 +14286,13 @@
         "plan": {
           "type": "boolean",
           "description": "Plan first, like `by spawn --plan`: the child's first turn is\nread-only and its plan is escalated to its parent."
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The child's model, like [`branchyard::Spawn::model`]; unset is its\nseat's or its parent's."
         }
       },
       "required": [
@@ -14675,6 +14691,13 @@
                 "plan": {
                   "type": "boolean",
                   "description": "Plan first; its plan is escalated to the parent for approval."
+                },
+                "model": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The child's model; unset is its seat's or its parent's."
                 },
                 "kind": {
                   "type": "string",
@@ -15317,6 +15340,13 @@
             "profile": {
               "type": "string"
             },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model its harness runs, when one was chosen; omitted for the\nharness's default."
+            },
             "base": {
               "type": "string"
             },
@@ -15674,6 +15704,595 @@
       "title": "CancelResult",
       "$schema": "https://json-schema.org/draft/2020-12/schema"
     },
+    "DiscardRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Why, recorded in the branch's status; the server names the caller\nwhen it is omitted."
+        }
+      },
+      "description": "`POST /v1/repos/{repo}/branches/{branch}/discard`: set a settled\nbranch aside, like `by discard`. The answer is the branch's\n[`branchyard::Inspection`].",
+      "title": "DiscardRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "WaitRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "branches": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The branches to wait for; at least one."
+        },
+        "any": {
+          "type": "boolean",
+          "description": "Return once any one of them has settled, not all."
+        },
+        "timeout_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "Return after this many seconds even if the wait is not satisfied,\nwith `timed_out` set. The server caps it, at 30 seconds, so a\nlonger wait asks again."
+        }
+      },
+      "required": [
+        "branches"
+      ],
+      "description": "`POST /v1/repos/{repo}/wait`: block until branches settle, like\n`by wait`. The answer is a [`branchyard::Waited`].",
+      "title": "WaitRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "Waited": {
+      "type": "object",
+      "properties": {
+        "settled": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Inspection"
+          },
+          "description": "The branches waited for that have settled (not running, waiting\nfor prerequisites or waiting on children), as inspected when the\nwait returned, in the order asked."
+        },
+        "pending": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Those that have not."
+        },
+        "timed_out": {
+          "type": "boolean",
+          "description": "The timeout passed before the wait was satisfied. Omitted when\nfalse."
+        }
+      },
+      "required": [
+        "settled",
+        "pending"
+      ],
+      "description": "What a wait for several branches found ([`Delegate::wait_for`],\n`by wait`, the `wait` tool).",
+      "title": "Waited",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "Inspection": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/BranchStatus"
+            },
+            "harness": {
+              "type": "string"
+            },
+            "profile": {
+              "type": "string"
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model its harness runs, when one was chosen (`--model`), its\nown or its seat's or parent's; omitted for the harness's default."
+            },
+            "parent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "children": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "depth": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "turns": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "candidate": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CandidateInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cost_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "The branch's own cost estimate, while a turn runs too (from the\nharness's usage as it comes); `None` when its harness has reported\nnone."
+            },
+            "subtree_cost_usd": {
+              "type": "number",
+              "format": "double",
+              "description": "Its own and its descendants' reported costs, removed descendants'\nincluded. Unreported costs count as zero here."
+            },
+            "max_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "The cost limit its turns run under, when there is one."
+            },
+            "remaining_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "What is left of `max_usd` after its own spend, what its live\nchildren hold (`reserved_usd`) and what its settled and removed\nchildren spent (`settled_children_usd`): what it can still spend or\ngrant."
+            },
+            "reserved_usd": {
+              "type": "number",
+              "format": "double",
+              "description": "What its live children (running, waiting, blocked or awaiting plan\napproval) hold of its budget: each one's whole limit, or what its\nsubtree spent if that is more, since it may spend that much without\nasking. A child that settles (ready, merged, failed, ...) holds only\nwhat it spent, until it is sent something again.",
+              "default": 0.0
+            },
+            "reserving_children": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "How many live children hold `reserved_usd`.",
+              "default": 0
+            },
+            "settled_children_usd": {
+              "type": "number",
+              "format": "double",
+              "description": "What its settled and removed children's subtrees spent.",
+              "default": 0.0
+            },
+            "envelope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Envelope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "check": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "The check its merge must pass when it is integrated. Omitted when\nit has none."
+            },
+            "check_inherited": {
+              "type": "boolean",
+              "description": "`check` is its parent's, inherited because its spawn gave none.\nOmitted when false."
+            },
+            "check_shared_with": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Its siblings that share `check` and may still be integrated (ready,\nor not settled yet): a whole-suite check passes only with all of\nthem, so they are integrated together. Omitted when none."
+            },
+            "allowed_harnesses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "What its children may run, as `--harness` names it: the envelope's\n`harnesses`, or its own profile when that list is empty (which\nmeans \"its own only\", not \"none\"). Empty without an envelope."
+            },
+            "last_message": {
+              "type": "string",
+              "description": "The harness's text since the branch's last prompt, truncated from\nthe front."
+            },
+            "seat": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The rig seat the branch occupies, if it is in a rig."
+            },
+            "seats": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The seats it may spawn, if it is in a rig."
+            },
+            "stalled": {
+              "type": "boolean",
+              "description": "See [`crate::BranchInfo::stalled`].",
+              "default": false
+            },
+            "graph_revision": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "The branch's own graph revision: bumped by each graph proposal it\ncommits and each child it spawns. Omitted while 0."
+            },
+            "depends_on": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Dependency"
+              },
+              "description": "The siblings this branch waits for, or waited for."
+            },
+            "bindings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Binding"
+              },
+              "description": "The scratch areas it is bound to."
+            }
+          },
+          "required": [
+            "name",
+            "status",
+            "harness",
+            "profile",
+            "children",
+            "depth",
+            "turns",
+            "subtree_cost_usd",
+            "last_message"
+          ],
+          "description": "A branch as a delegating parent sees it."
+        },
+        "BranchStatus": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "running"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "waiting"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegated child created with prerequisites that have not all\nsettled yet: it has no worktree and has run no turn. See\n`docs/graph.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "blocked"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "A child that will not start because a prerequisite failed, was\ninterrupted, stopped at a limit, is blocked itself or was removed.\nChanging its dependencies with a graph proposal reopens it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "ready"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "The last turn completed and produced a candidate."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "awaiting_plan_approval"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "waiting_on_children"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegating branch whose turn ended while children it delegated\nwere still running or waiting: it is parked, and its next turn\nstarts on its own once they have all settled, with a summary of\nwhat they did (`docs/delegation.md`, \"Waiting on children\"). Not\nfinished: a wait for its subtree waits for that turn too."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "no_changes"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "The last turn completed without changing any file."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "interrupted"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "limit": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "budget_exceeded"
+                }
+              },
+              "required": [
+                "state",
+                "limit"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "failed"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "type": "string"
+                },
+                "commit": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "merged"
+                }
+              },
+              "required": [
+                "state",
+                "target",
+                "commit"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why, as whoever discarded it said."
+                },
+                "state": {
+                  "type": "string",
+                  "const": "discarded"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "Settled and set aside on purpose, with the reason (`by discard`):\nit runs no more turns and is never integrated, its record and cost\nare kept, and it no longer counts against its parent's\n`max_children`."
+            }
+          ],
+          "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
+        },
+        "CandidateInfo": {
+          "type": "object",
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "files_changed": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "insertions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "deletions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "commit",
+            "files_changed",
+            "insertions",
+            "deletions"
+          ]
+        },
+        "Envelope": {
+          "type": "object",
+          "properties": {
+            "max_depth": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Levels of descendants below this branch: 1 allows children but no\ngrandchildren; 0 allows no children."
+            },
+            "max_children": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Children this branch may have, counting finished ones until they\nare removed."
+            },
+            "harnesses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
+            }
+          },
+          "required": [
+            "max_depth",
+            "max_children",
+            "harnesses"
+          ],
+          "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "Dependency": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dependent": {
+              "type": "string"
+            },
+            "prerequisite": {
+              "type": "string"
+            },
+            "after": {
+              "$ref": "#/$defs/After"
+            }
+          },
+          "required": [
+            "dependent",
+            "prerequisite"
+          ],
+          "description": "`dependent` starts only after `prerequisite`; both are children of the\nsame parent."
+        },
+        "After": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "settled",
+              "description": "Its last turn ended `ready` or `no_changes`, or it was merged."
+            },
+            {
+              "type": "string",
+              "const": "integrated",
+              "description": "It was integrated into the parent (`merged` into the parent's git\nbranch), or ended `no_changes`, leaving nothing to integrate."
+            }
+          ],
+          "description": "When a prerequisite counts as done for its dependent."
+        },
+        "Binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scratch": {
+              "type": "string"
+            },
+            "access": {
+              "$ref": "#/$defs/Access"
+            }
+          },
+          "required": [
+            "scratch",
+            "access"
+          ],
+          "description": "A scratch area a branch is bound to; see `docs/graph.md`."
+        },
+        "Access": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read_only",
+              "description": "Checked readable when the child is planned and when each turn\nstarts."
+            },
+            {
+              "type": "string",
+              "const": "exclusive_write",
+              "description": "The area's writer lock is taken for each of the branch's turns and\nreleased when the turn ends; a turn that cannot take it fails."
+            }
+          ],
+          "description": "How a branch uses a scratch area it is bound to."
+        }
+      }
+    },
     "AskRequest": {
       "type": "object",
       "additionalProperties": false,
@@ -15966,6 +16585,13 @@
               ],
               "description": "The branch [`Branch::reincarnate`] started from this one's latest\ncandidate, with a fresh session and a handoff brief.",
               "default": null
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model its harness runs, as it was asked for (`--model`), when\none was; unset, the harness's own default."
             }
           },
           "required": [
@@ -16258,6 +16884,13 @@
                 }
               },
               "description": "The distinct checks of the branches merged, each run once on the\nresult, in the order they ran; empty when none has a check or\nnothing moved. Omitted when empty."
+            },
+            "check_results": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/IntegrationCheck"
+              },
+              "description": "The same checks, each with the branches whose check it is and its\noutcome (all passed). Omitted when empty."
             }
           },
           "required": [
@@ -16267,6 +16900,65 @@
             "branches"
           ],
           "description": "Several branches integrated into one target together\n([`Delegate::integrate_all`], `by integrate a b c`): merged in order in\none temporary worktree, checked once on the result, and promoted with\none compare-and-swap of the target from `previous` to `commit`."
+        },
+        "IntegrationCheck": {
+          "type": "object",
+          "properties": {
+            "check": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The check, as its argv."
+            },
+            "branches": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The branches integrated whose check it is, in the order named."
+            },
+            "outcome": {
+              "$ref": "#/$defs/CheckVerdict",
+              "description": "How it ended."
+            }
+          },
+          "required": [
+            "check",
+            "branches",
+            "outcome"
+          ],
+          "description": "One check of the branches an integration merged, run once on the\nresult ([`MergedAll::check_results`], [`Error::CheckFailed`])."
+        },
+        "CheckVerdict": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "passed",
+              "description": "The check exited successfully."
+            },
+            {
+              "type": "string",
+              "const": "failed",
+              "description": "The check exited unsuccessfully."
+            },
+            {
+              "type": "string",
+              "const": "timed_out",
+              "description": "The check ran past its timeout and was killed."
+            },
+            {
+              "type": "string",
+              "const": "not_started",
+              "description": "The check could not be started."
+            },
+            {
+              "type": "string",
+              "const": "not_run",
+              "description": "A check before it did not pass."
+            }
+          ],
+          "description": "How an [`IntegrationCheck`] ended. The checks run in order and stop at\nthe first that does not pass: those after it are `not_run`."
         },
         "Inspection": {
           "type": "object",
@@ -16282,6 +16974,13 @@
             },
             "profile": {
               "type": "string"
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model its harness runs, when one was chosen (`--model`), its\nown or its seat's or parent's; omitted for the harness's default."
             },
             "parent": {
               "type": [
@@ -17103,6 +17802,13 @@
               ],
               "description": "The branch [`Branch::reincarnate`] started from this one's latest\ncandidate, with a fresh session and a handoff brief.",
               "default": null
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model its harness runs, as it was asked for (`--model`), when\none was; unset, the harness's own default."
             }
           },
           "required": [
@@ -17395,6 +18101,13 @@
                 }
               },
               "description": "The distinct checks of the branches merged, each run once on the\nresult, in the order they ran; empty when none has a check or\nnothing moved. Omitted when empty."
+            },
+            "check_results": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/IntegrationCheck"
+              },
+              "description": "The same checks, each with the branches whose check it is and its\noutcome (all passed). Omitted when empty."
             }
           },
           "required": [
@@ -17404,6 +18117,65 @@
             "branches"
           ],
           "description": "Several branches integrated into one target together\n([`Delegate::integrate_all`], `by integrate a b c`): merged in order in\none temporary worktree, checked once on the result, and promoted with\none compare-and-swap of the target from `previous` to `commit`."
+        },
+        "IntegrationCheck": {
+          "type": "object",
+          "properties": {
+            "check": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The check, as its argv."
+            },
+            "branches": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The branches integrated whose check it is, in the order named."
+            },
+            "outcome": {
+              "$ref": "#/$defs/CheckVerdict",
+              "description": "How it ended."
+            }
+          },
+          "required": [
+            "check",
+            "branches",
+            "outcome"
+          ],
+          "description": "One check of the branches an integration merged, run once on the\nresult ([`MergedAll::check_results`], [`Error::CheckFailed`])."
+        },
+        "CheckVerdict": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "passed",
+              "description": "The check exited successfully."
+            },
+            {
+              "type": "string",
+              "const": "failed",
+              "description": "The check exited unsuccessfully."
+            },
+            {
+              "type": "string",
+              "const": "timed_out",
+              "description": "The check ran past its timeout and was killed."
+            },
+            {
+              "type": "string",
+              "const": "not_started",
+              "description": "The check could not be started."
+            },
+            {
+              "type": "string",
+              "const": "not_run",
+              "description": "A check before it did not pass."
+            }
+          ],
+          "description": "How an [`IntegrationCheck`] ended. The checks run in order and stop at\nthe first that does not pass: those after it are `not_run`."
         },
         "Inspection": {
           "type": "object",
@@ -17419,6 +18191,13 @@
             },
             "profile": {
               "type": "string"
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model its harness runs, when one was chosen (`--model`), its\nown or its seat's or parent's; omitted for the harness's default."
             },
             "parent": {
               "type": [
@@ -27455,6 +28234,13 @@
               ],
               "description": "The branch [`Branch::reincarnate`] started from this one's latest\ncandidate, with a fresh session and a handoff brief.",
               "default": null
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model its harness runs, as it was asked for (`--model`), when\none was; unset, the harness's own default."
             }
           },
           "required": [
@@ -28028,6 +28814,13 @@
               ],
               "description": "The branch [`Branch::reincarnate`] started from this one's latest\ncandidate, with a fresh session and a handoff brief.",
               "default": null
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model its harness runs, as it was asked for (`--model`), when\none was; unset, the harness's own default."
             }
           },
           "required": [
@@ -28320,6 +29113,13 @@
                 }
               },
               "description": "The distinct checks of the branches merged, each run once on the\nresult, in the order they ran; empty when none has a check or\nnothing moved. Omitted when empty."
+            },
+            "check_results": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/IntegrationCheck"
+              },
+              "description": "The same checks, each with the branches whose check it is and its\noutcome (all passed). Omitted when empty."
             }
           },
           "required": [
@@ -28329,6 +29129,65 @@
             "branches"
           ],
           "description": "Several branches integrated into one target together\n([`Delegate::integrate_all`], `by integrate a b c`): merged in order in\none temporary worktree, checked once on the result, and promoted with\none compare-and-swap of the target from `previous` to `commit`."
+        },
+        "IntegrationCheck": {
+          "type": "object",
+          "properties": {
+            "check": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The check, as its argv."
+            },
+            "branches": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The branches integrated whose check it is, in the order named."
+            },
+            "outcome": {
+              "$ref": "#/$defs/CheckVerdict",
+              "description": "How it ended."
+            }
+          },
+          "required": [
+            "check",
+            "branches",
+            "outcome"
+          ],
+          "description": "One check of the branches an integration merged, run once on the\nresult ([`MergedAll::check_results`], [`Error::CheckFailed`])."
+        },
+        "CheckVerdict": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "passed",
+              "description": "The check exited successfully."
+            },
+            {
+              "type": "string",
+              "const": "failed",
+              "description": "The check exited unsuccessfully."
+            },
+            {
+              "type": "string",
+              "const": "timed_out",
+              "description": "The check ran past its timeout and was killed."
+            },
+            {
+              "type": "string",
+              "const": "not_started",
+              "description": "The check could not be started."
+            },
+            {
+              "type": "string",
+              "const": "not_run",
+              "description": "A check before it did not pass."
+            }
+          ],
+          "description": "How an [`IntegrationCheck`] ended. The checks run in order and stop at\nthe first that does not pass: those after it are `not_run`."
         },
         "Inspection": {
           "type": "object",
@@ -28344,6 +29203,13 @@
             },
             "profile": {
               "type": "string"
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model its harness runs, when one was chosen (`--model`), its\nown or its seat's or parent's; omitted for the harness's default."
             },
             "parent": {
               "type": [
@@ -29655,6 +30521,13 @@
           ],
           "description": "The branch [`Branch::reincarnate`] started from this one's latest\ncandidate, with a fresh session and a handoff brief.",
           "default": null
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The model its harness runs, as it was asked for (`--model`), when\none was; unset, the harness's own default."
         }
       },
       "required": [
@@ -29899,6 +30772,13 @@
         },
         "profile": {
           "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The model its harness runs, when one was chosen (`--model`), its\nown or its seat's or parent's; omitted for the harness's default."
         },
         "parent": {
           "type": [
@@ -30513,6 +31393,13 @@
               ],
               "description": "The branch [`Branch::reincarnate`] started from this one's latest\ncandidate, with a fresh session and a handoff brief.",
               "default": null
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model its harness runs, as it was asked for (`--model`), when\none was; unset, the harness's own default."
             }
           },
           "required": [

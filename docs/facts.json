@@ -58,11 +58,11 @@
     }
   },
   "tests": {
-    "total": 1817,
+    "total": 1834,
     "ignored": 29,
     "by_crate": {
       "branchyard": {
-        "tests": 539,
+        "tests": 544,
         "ignored": 15
       },
       "branchyard-bridge": {
@@ -70,7 +70,7 @@
         "ignored": 0
       },
       "branchyard-cli": {
-        "tests": 354,
+        "tests": 358,
         "ignored": 3
       },
       "branchyard-client": {
@@ -82,7 +82,7 @@
         "ignored": 0
       },
       "branchyard-harness": {
-        "tests": 105,
+        "tests": 108,
         "ignored": 0
       },
       "branchyard-herdr": {
@@ -90,7 +90,7 @@
         "ignored": 0
       },
       "branchyard-mcp": {
-        "tests": 18,
+        "tests": 19,
         "ignored": 0
       },
       "branchyard-microsandbox": {
@@ -118,7 +118,7 @@
         "ignored": 0
       },
       "branchyard-server": {
-        "tests": 242,
+        "tests": 246,
         "ignored": 0
       },
       "branchyard-setup": {
@@ -152,7 +152,7 @@
     }
   },
   "http": {
-    "route_count": 85,
+    "route_count": 87,
     "routes": [
       "/.well-known/branchyard",
       "/.well-known/jwks.json",
@@ -185,6 +185,7 @@
       "/v1/repos/{repo}/branches/{branch}/cancel",
       "/v1/repos/{repo}/branches/{branch}/children",
       "/v1/repos/{repo}/branches/{branch}/diff",
+      "/v1/repos/{repo}/branches/{branch}/discard",
       "/v1/repos/{repo}/branches/{branch}/distill",
       "/v1/repos/{repo}/branches/{branch}/escalate",
       "/v1/repos/{repo}/branches/{branch}/event-page",
@@ -227,6 +228,7 @@
       "/v1/repos/{repo}/task-records",
       "/v1/repos/{repo}/task-records/{task}",
       "/v1/repos/{repo}/tasks",
+      "/v1/repos/{repo}/wait",
       "/v1/services",
       "/v1/services/gc",
       "/v1/services/{id}",
