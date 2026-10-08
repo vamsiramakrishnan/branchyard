@@ -214,7 +214,8 @@ fn by_cancel_stops_a_turn_that_another_by_runs() {
     // Settled: a second cancel changes nothing and says what to use.
     let again = stdout(&repo.by(&["cancel", "held"]));
     assert!(
-        again.starts_with("held is not running (interrupted)") && again.contains("by discard held"),
+        again.starts_with("held had already stopped (interrupted), so the cancel changed nothing")
+            && again.contains("by discard held"),
         "{again}"
     );
 }
@@ -1094,6 +1095,7 @@ fn the_same_commands_act_with_your_authority_outside_a_harness() {
     assert_eq!(events["next_cursor"], 2);
     let cancelled = repo.json(&["cancel", "kid", "--json"]);
     assert_eq!(cancelled["cancelled"], serde_json::json!([]));
+    assert_eq!(cancelled["already"], true, "{cancelled}");
     assert!(
         cancelled["note"]
             .as_str()

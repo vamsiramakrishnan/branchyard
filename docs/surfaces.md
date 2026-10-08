@@ -718,7 +718,7 @@ Every connector call that changes the world is decided, written to a ledger befo
 | `BRANCHYARD_BY`, `by` first on `PATH` | a delegating harness only | every local harness |
 | `Policy::allow_delegation_commands`, `--allow-delegation` | eight subcommands | every operation the table allows inside a harness |
 | `by discard <child> [--reason TEXT]`, `Yard::discard`, `Delegate::discard`, `branchyard.discard`, the MCP `discard` tool | none | `BranchStatus::Discarded { reason }`; record, worktree and cost kept; no longer counted in `max_children`; its reservation drops to what it spent; dependents blocked |
-| `by cancel` on a settled child | "nothing was running" | `Cancelled::note`: what it is and what to use instead (`integrate`, `send`, `discard`) |
+| `by cancel` on a settled child | "nothing was running" | a success that changes nothing, `Cancelled::already`, and `Cancelled::note`: `had already stopped (...)` and what to use instead (`integrate`, `send`, `discard`) |
 | `by rm` | a `release a lease dropped without finish: fenced` warning, its lease deleted with its record before release | no warning: the lease is spent by the delete (`Store::delete_held`) |
 | Command logs on stderr | ANSI colors always | colors only on a terminal without `NO_COLOR` (`branchyard_server::logging::ansi`) |
 | `by run --deny T,T`, `TaskOptions::deny`, `TaskRequest::deny` | none (`by spawn --deny` only) | denials stored with the branch, ahead of every turn's policy, passed on to its children |

@@ -294,6 +294,10 @@ class Waited:
 @dataclasses.dataclass
 class Cancelled:
     cancelled: List[str]
+    # The branch had already stopped, so nothing changed; `note` says what
+    # it is and what to do instead. A cancel is never refused for that.
+    already: Optional[bool] = None
+    note: Optional[str] = None
 
 
 @dataclasses.dataclass

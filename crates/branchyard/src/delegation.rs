@@ -397,11 +397,18 @@ pub struct Sent {
     pub status: BranchStatus,
 }
 
-/// The branches a cancel asked to stop.
+/// The branches a cancel asked to stop. A cancel of a branch that had
+/// already stopped is not an error, like an integration of one already
+/// merged: nothing changes, `already` says so, and `note` says what the
+/// branch is and what to do with it instead.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Cancelled {
     pub cancelled: Vec<String>,
+    /// The branch had already stopped (ready, over budget, failed, merged,
+    /// discarded, ...), so there was nothing to cancel. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub already: bool,
     /// When nothing was running: what the branch is, and the command that
     /// does what a cancel cannot (`by discard` sets a settled child aside).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -411,29 +418,42 @@ pub struct Cancelled {
 impl Cancelled {
     /// What a cancel of `branch`, now `status`, stopped.
     pub fn of(cancelled: Vec<String>, branch: &str, status: &BranchStatus) -> Cancelled {
+        let stopped = |what: &str, next: &str| {
+            Some(format!(
+                "{branch} had already stopped ({what}), so the cancel changed nothing{next}"
+            ))
+        };
+        let set_aside = format!(
+            ". Continue it with `by send {branch} \"<prompt>\"`, or set it aside with \
+             `by discard {branch} --reason TEXT`, which frees its slot"
+        );
         let note = match (cancelled.is_empty(), status) {
             (false, _) => None,
-            (true, BranchStatus::Ready) => Some(format!(
-                "{branch} is not running: it ended ready, so there is nothing to cancel. \
-                 Keep its work with `by integrate {branch}`, or set it aside with \
-                 `by discard {branch} --reason TEXT`, which frees its slot"
-            )),
-            (true, BranchStatus::Merged { target, .. }) => Some(format!(
-                "{branch} is not running: it was merged into {target}. `by rm {branch}` \
-                 removes its worktree"
-            )),
-            (true, BranchStatus::Discarded { .. }) => {
-                Some(format!("{branch} is not running: it was already discarded"))
-            }
             (true, BranchStatus::Running) => Some(format!("{branch} was already asked to stop")),
-            (true, status) => Some(format!(
-                "{branch} is not running ({}), so there is nothing to cancel. Continue it \
-                 with `by send {branch} \"<prompt>\"`, or set it aside with \
-                 `by discard {branch} --reason TEXT`, which frees its slot",
-                status_word(status)
-            )),
+            (true, BranchStatus::Ready) => stopped(
+                "ready",
+                &format!(
+                    ". Keep its work with `by integrate {branch}`, or set it aside with \
+                     `by discard {branch} --reason TEXT`, which frees its slot"
+                ),
+            ),
+            (true, BranchStatus::Merged { target, .. }) => stopped(
+                &format!("merged into {target}"),
+                &format!(". `by rm {branch}` removes its worktree"),
+            ),
+            (true, BranchStatus::Discarded { .. }) => stopped("discarded", ""),
+            (true, BranchStatus::BudgetExceeded { limit }) => stopped(
+                &format!("over budget: {}", crate::operations::limit_text(limit)),
+                &set_aside,
+            ),
+            (true, status) => stopped(&status_word(status), &set_aside),
         };
-        Cancelled { cancelled, note }
+        let already = cancelled.is_empty() && *status != BranchStatus::Running;
+        Cancelled {
+            cancelled,
+            already,
+            note,
+        }
     }
 }
 
@@ -1517,6 +1537,8 @@ pub(crate) fn cancel_tree(yard: &Yard, name: &str, by: &str) -> Result<Vec<Strin
                     .settle_if(&ended, &event, crate::wake::is_parked)?
                 {
                     store.notify();
+                    // What waits for it is looked at, as every settle does.
+                    graph::settled(yard, &info.name, None);
                     cancelled.push(info.name);
                 }
             }
@@ -3782,6 +3804,38 @@ mod tests {
         assert!(is_live(&BranchStatus::Running));
         assert!(!is_live(&BranchStatus::Discarded { reason: "x".into() }));
         assert!(!is_live(&BranchStatus::Ready));
+    }
+
+    /// A cancel of a branch that had already stopped succeeds and changes
+    /// nothing, like an integration of one already merged; it says what the
+    /// branch is and what to do instead, in the words its status uses.
+    #[test]
+    fn a_cancel_of_a_stopped_branch_is_an_idempotent_no_op() {
+        let over = Cancelled::of(
+            Vec::new(),
+            "dates",
+            &BranchStatus::BudgetExceeded {
+                limit: "max_usd".into(),
+            },
+        );
+        assert!(over.already);
+        let note = over.note.unwrap();
+        for needed in [
+            "dates had already stopped (over budget: max_usd (--budget-usd)), so the cancel \
+             changed nothing",
+            "`by send dates \"<prompt>\"`",
+            "`by discard dates --reason TEXT`",
+        ] {
+            assert!(note.contains(needed), "{needed:?} missing from {note}");
+        }
+        let ready = Cancelled::of(Vec::new(), "k", &BranchStatus::Ready);
+        assert!(ready.already && ready.note.unwrap().contains("by integrate k"));
+        let stopping = Cancelled::of(Vec::new(), "k", &BranchStatus::Running);
+        assert!(!stopping.already);
+        let stopped = Cancelled::of(vec!["k".into()], "k", &BranchStatus::Interrupted);
+        assert!(!stopped.already && stopped.note.is_none());
+        let json = serde_json::to_value(&stopped).unwrap();
+        assert!(json.get("already").is_none(), "{json}");
     }
 
     /// A failed shared check says what to wait for, and that its own check
