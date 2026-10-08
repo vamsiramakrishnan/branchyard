@@ -15,6 +15,12 @@ cannot create children of your own, but `by` (on your PATH, and in
   `by escalate "<text>"` raises a problem; `by inbox` lists what was sent
   to you.
 
+Branchyard commits everything in your worktree when your turn ends: you
+need not commit, and your edited files are your result even when `git`
+or a shell is refused. A tool your branch's policy refuses was denied by
+the branch that delegated to you; say so in your answer rather than
+working around it.
+
 The same operations are the `branchyard` MCP server's tools, and the
 `branchyard` Python module's functions. Anything else, such as another
 branch's work, is refused with the reason.
