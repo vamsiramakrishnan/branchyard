@@ -178,6 +178,9 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
         goal: None,
         deny: new.deny,
         removed: Vec::new(),
+        parked: None,
+        wakes: 0,
+        lost: None,
     })
 }
 
@@ -965,9 +968,15 @@ impl Prepared {
     /// The prompt to submit: `prompt`, after the summary a rewind left for
     /// a fresh session, if any.
     pub fn prompt(&self, prompt: &str) -> String {
+        let prompt = match &self.record.lost {
+            Some(note) if note.starts_with(crate::wake::RECOVERED_OPEN) => {
+                format!("{note}{prompt}")
+            }
+            _ => prompt.to_owned(),
+        };
         match &self.record.context {
-            Some(context) => crate::checkpoint::compose(context, prompt),
-            None => prompt.to_owned(),
+            Some(context) => crate::checkpoint::compose(context, &prompt),
+            None => prompt,
         }
     }
 }
@@ -994,6 +1003,28 @@ pub(crate) fn prepare_send_with(
     idle: bool,
     plan: bool,
 ) -> Result<Prepared, Error> {
+    prepare(yard, name, options, idle, plan, false)?.ok_or_else(|| Error::Running(name.to_owned()))
+}
+
+/// The automatic wake of a branch waiting on its children
+/// (`crate::wake`): [`prepare_send`], started only if the branch is still
+/// parked, in a compare-and-swap. `None` when it no longer is.
+pub(crate) fn prepare_wake(
+    yard: &Yard,
+    name: &str,
+    options: &TaskOptions,
+) -> Result<Option<Prepared>, Error> {
+    prepare(yard, name, options, true, false, true)
+}
+
+fn prepare(
+    yard: &Yard,
+    name: &str,
+    options: &TaskOptions,
+    idle: bool,
+    plan: bool,
+    wake: bool,
+) -> Result<Option<Prepared>, Error> {
     let store = yard.store();
     recover::stale(yard, name)?;
     let mut record = store.read(name)?;
@@ -1005,6 +1036,8 @@ pub(crate) fn prepare_send_with(
         return Err(Error::Running(name.to_owned()));
     }
     match &record.info.status {
+        BranchStatus::WaitingOnChildren => {}
+        _ if wake => return Ok(None),
         BranchStatus::Waiting => {
             return Err(Error::Denied(format!(
                 "{name} is waiting for its prerequisites and has not started; it starts when \
@@ -1178,21 +1211,46 @@ pub(crate) fn prepare_send_with(
             )),
         });
     }
+    // A turn after one its engine lost starts by saying so.
+    if let Some(reason) = record.lost.take() {
+        record.lost = Some(match reason.starts_with(crate::wake::RECOVERED_OPEN) {
+            true => reason,
+            false => crate::wake::recovered_note(&store, &record, &reason),
+        });
+    }
     record.info.status = BranchStatus::Running;
+    // A turn something other than a wake starts resets the count of
+    // automatic wakes; a wake adds one.
+    record.parked = None;
+    record.wakes = match wake {
+        true => record.wakes.saturating_add(1),
+        false => 0,
+    };
     // A cancel is bound to the turn it was asked of, so one meant for an
     // earlier turn cannot stop this one.
-    let lease = match store.acquire(&record)? {
-        Taken::Granted(lease) => lease,
-        Taken::Stale => return Err(Error::Running(name.to_owned())),
+    let lease = match wake {
+        true => match store.graph().claim_if(
+            &record,
+            store.owner(),
+            crate::state::LEASE_TTL,
+            crate::wake::is_parked,
+        )? {
+            Some(fence) => crate::state::Lease::new(store.clone(), fence),
+            None => return Ok(None),
+        },
+        false => match store.acquire(&record)? {
+            Taken::Granted(lease) => lease,
+            Taken::Stale => return Err(Error::Running(name.to_owned())),
+        },
     };
-    Ok(Prepared {
+    Ok(Some(Prepared {
         record,
         lease,
         profile,
         command,
         mode,
         note,
-    })
+    }))
 }
 
 /// A send's provisioning keeps the session on the model and reasoning

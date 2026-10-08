@@ -74,7 +74,9 @@ A person acts with their own authority, or the server's, bounded by the branch's
 | Inspect | `Delegate::inspect` | `inspect` | yes | `GET …/inspection` | `inspect` |
 | Events page from a cursor | `Delegate::events` | `events` | yes | `GET …/event-page` | `event_page` |
 | Integrate a child into its parent | `Delegate::integrate` | `integrate` | yes | `POST …/integrate` | `integrate` |
-| Set a settled child aside, freeing its slot | `Yard::discard`, `Delegate::discard` | `discard [--reason TEXT]` | no: the server has no route for it yet | none | none |
+| Set a settled child aside, never run again | `Yard::discard`, `Delegate::discard` | `discard [--reason TEXT]` | no: the server has no route for it yet | none | none |
+| Integrate several children together, checked once, all or none ([delegation](delegation.md#integrating-several-children)) | `Delegate::integrate_all` → `MergedAll` | `integrate a b c` | yes | `POST …/integrate` with `with`; the result's `merged_all` | `integrate_all` |
+| Wait for branches to settle, all or the first ([delegation](delegation.md#waiting-on-children)) | `Yard::wait_for`, `Delegate::wait_for` → `Waited` | `wait BRANCH... [--any] [--timeout S]` | no: poll `inspect` | n/a | n/a |
 | Children | `Branch::descendants`, `Delegate::children` | `children` | yes | `GET …/children` | `children` |
 | A branch's graph: children, dependencies, revision ([task graphs](graph.md)) | `Yard::graph`, `Delegate::graph` | `graph show` | yes | `GET …/graph` | `graph` |
 | Apply a graph proposal, all or nothing | `Delegate::apply_graph` | `graph apply --parent` | yes; server opt-in `--allow-delegation` for spawns | `POST …/graph`; `409 stale_revision` | `apply_graph` |
@@ -88,6 +90,8 @@ A person acts with their own authority, or the server's, bounded by the branch's
 | The branch's own inbox | `Delegate::inbox` | `inbox [--unread]` | yes | `GET …/inbox` | `inbox` |
 
 `by --remote` prints the same JSON as `by` for each, and the same `{"error": {"kind", "message"}}` for refusals; tests compare them. Outside a harness every messaging command needs `--as <branch>`, since there is no other way to say who is asking; see [delegation](delegation.md#inbox). A message to a branch with a running turn is steered into it on every surface (`SteerDelivery`, the default `DeliveryHook` of every `Yard`), and otherwise delivered at its next turn's start; `Activity::MessagesDelivered` (`messages_delivered` in `by log --json`) records which ([delegation](delegation.md#delivery)).
+
+A harness reaches the same waits and integrations: `by wait`, `branchyard.wait_any`/`wait_all`, `Delegate::wait_for` and the MCP `wait` tool; `by integrate a b`, `branchyard.integrate("a", "b")`, `Delegate::integrate_all` and the MCP `propose_integration` with `branches`. A harness whose turn ends while its children run is woken when they settle, on every surface ([delegation](delegation.md#waiting-on-children)); `by run --no-wake` and `Envelope::no_wake` opt out.
 
 A harness reaches the same graph operations: `by graph`, `branchyard.graph`/`apply_graph`, `Delegate::apply_graph` and the MCP `apply_graph` and `graph` tools, with the same `stale_revision`, `denied` and other refusals ([task graphs](graph.md#surfaces)).
 
@@ -585,7 +589,7 @@ See [wide map](map.md), which has the full surface table for the server.
 |---|---|---|
 | `.branchyard/maps/<name>/` | none | `map.json`, `results.jsonl`, `reduce.json`, `lock` |
 | `OperationKind` | through `reject_plan` | adds `map` |
-| `OperationResult` | `branches`, `merged`, `descendants`, `inspection` | adds `map` (`MapReport`) |
+| `OperationResult` | `branches`, `merged`, `descendants`, `inspection` | adds `map` (`MapReport`), and `merged_all` (`MergedAll`) for an integration with `with` |
 | `MapRequest`, `MapResumeRequest`, `MapList`, `MapReport` | none | in `schema/contract.json` |
 | `by ls` (text) | branches | then `maps`, when there are any; `--json` unchanged |
 | `by show NAME` | a branch | also a map, when no branch has the name |

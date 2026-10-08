@@ -172,7 +172,8 @@ pub(crate) fn merge(yard: &Yard, name: &str, target: &str) -> Result<Merged, Err
 /// Set a settled branch aside: it ends `discarded` with `reason`, keeps its
 /// record, worktree and cost, runs no more turns and is never merged, and
 /// what waits for it is blocked. A branch still `waiting` for its
-/// prerequisites never starts. Refused while a turn runs and once merged;
+/// prerequisites never starts. Refused while a turn runs, while it waits
+/// on its children, and once merged;
 /// discarding a discarded branch again changes nothing.
 pub(crate) fn discard(yard: &Yard, name: &str, reason: &str) -> Result<BranchInfo, Error> {
     let store = yard.store();
@@ -185,6 +186,13 @@ pub(crate) fn discard(yard: &Yard, name: &str, reason: &str) -> Result<BranchInf
             )))
         }
         BranchStatus::Discarded { .. } => return Ok(record.info),
+        // Parked, not settled: it is woken when its children settle.
+        BranchStatus::WaitingOnChildren => {
+            return Err(Error::Denied(format!(
+                "{name} is waiting on its children and is woken when they settle; \
+                 `by cancel {name}` ends it and stops them, then discard it"
+            )))
+        }
         _ => {}
     }
     record.info.status = BranchStatus::Discarded {
@@ -234,6 +242,8 @@ fn landed(
             .unwrap_or_default()
             .to_owned(),
         commit: head,
+        already: false,
+        via: None,
     }))
 }
 
@@ -291,10 +301,12 @@ fn integrate(
         target: target.to_owned(),
         previous: integrated.previous.0,
         commit: integrated.merged.0,
+        already: false,
+        via: None,
     })
 }
 
-fn integration_error(error: IntegrationError, target: &str) -> Error {
+pub(crate) fn integration_error(error: IntegrationError, target: &str) -> Error {
     match error {
         IntegrationError::TargetMoved { expected, actual } => Error::TargetMoved {
             expected: expected.0,

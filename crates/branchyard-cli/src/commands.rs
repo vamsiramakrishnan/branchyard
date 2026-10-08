@@ -264,7 +264,10 @@ impl Live {
             isolated: task.isolated,
             command: task.command.clone(),
             provider: provider(task)?,
-            delegation: task.delegate.map(Envelope::depth),
+            delegation: task.delegate.map(|depth| match task.no_wake {
+                true => Envelope::depth(depth).no_wake(),
+                false => Envelope::depth(depth),
+            }),
             delegation_cli: exe,
             delegation_server: None,
             unapproved_tools: task.unapproved_tools,
@@ -293,6 +296,8 @@ impl Live {
             }
         };
         let descendants = wait_for_descendants(&[&branch]);
+        // A branch woken when its children settled ran more turns since.
+        let branch = branch.yard().branch(&branch.info().name).unwrap_or(branch);
         self.console.finish();
         print(&format!(
             "\n{}",
@@ -316,6 +321,13 @@ pub(crate) fn wait_for_descendants(
 ) -> Result<Option<Vec<BranchInfo>>, Failure> {
     let mut all = Vec::new();
     for branch in branches {
+        if branch.info().status == BranchStatus::WaitingOnChildren {
+            eprintln!(
+                "by: {}'s turn ended while its children run; its next turn starts when they \
+                 settle",
+                branch.info().name
+            );
+        }
         let running: Vec<String> = branch
             .descendants()?
             .into_iter()
@@ -1389,10 +1401,11 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
                     format!("created {}, blocked: {reason}\n", s.name)
                 }
                 _ => format!(
-                    "spawned {} on {} from {}\n",
+                    "spawned {} on {} from {}\n{}",
                     s.name,
                     s.profile,
-                    short(&s.base)
+                    short(&s.base),
+                    check_note(s)
                 ),
             });
         }
@@ -1466,7 +1479,23 @@ pub fn events(
     })
 }
 
-pub fn integrate(target: &Target, branch: &str, json: bool) -> Outcome {
+/// Which check a spawned child must pass when it is integrated.
+fn check_note(spawned: &branchyard::Spawned) -> String {
+    match (&spawned.check, spawned.check_inherited) {
+        (Some(check), true) => format!(
+            "its check, inherited from its parent: {}; siblings that share it are integrated \
+             together (by integrate a b)\n",
+            check.join(" ")
+        ),
+        (Some(check), false) => format!("its check: {}\n", check.join(" ")),
+        (None, _) => String::new(),
+    }
+}
+
+pub fn integrate(target: &Target, branches: &[String], json: bool) -> Outcome {
+    let [branch] = branches else {
+        return integrate_all(target, branches, json);
+    };
     let result = match (harness_delegate(json)?, target) {
         (Some(delegate), _) => delegate.integrate(branch),
         (None, Target::Remote(remote)) => remote::integrate(remote, branch),
@@ -1493,15 +1522,137 @@ pub fn integrate(target: &Target, branch: &str, json: bool) -> Outcome {
             Ok(merged)
         })(),
     };
-    emit(json, result, |m| {
-        format!(
+    emit(json, result, merged_line)
+}
+
+fn merged_line(m: &branchyard::Merged) -> String {
+    match (&m.via, m.already) {
+        (Some(via), true) => format!(
+            "{} was already in {}, brought in by {via}; recorded as merged\n",
+            m.branch, m.target
+        ),
+        _ => format!(
             "merged {} into {} ({}..{})\n",
             m.branch,
             m.target,
             short(&m.previous),
             short(&m.commit)
-        )
+        ),
+    }
+}
+
+/// `by integrate a b c`: several children of one parent, merged together,
+/// checked once, all or none.
+fn integrate_all(target: &Target, branches: &[String], json: bool) -> Outcome {
+    let names: Vec<&str> = branches.iter().map(String::as_str).collect();
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => delegate.integrate_all(&names),
+        (None, Target::Remote(remote)) => remote::integrate_all(remote, &names),
+        (None, Target::Local) => (|| {
+            let yard = open_yard()?;
+            let mut parent = None;
+            for branch in &names {
+                let info = yard.branch(branch)?.info().clone();
+                let found = info
+                    .parent
+                    .filter(|p| {
+                        yard.branch(p)
+                            .is_ok_and(|p| p.info().children.iter().any(|c| c == branch))
+                    })
+                    .ok_or_else(|| {
+                        branchyard::Error::Denied(format!(
+                            "{branch} was not delegated by another branch; merge it with by merge"
+                        ))
+                    })?;
+                match &parent {
+                    Some(p) if *p != found => {
+                        return Err(branchyard::Error::Denied(format!(
+                            "{branch} was delegated by {found}, not {p}; integrate together only \
+                             children of one parent"
+                        )))
+                    }
+                    _ => parent = Some(found),
+                }
+            }
+            let parent = yard.branch(&parent.unwrap_or_default())?;
+            let merged = parent
+                .delegate(TaskOptions::default())?
+                .integrate_all(&names)?;
+            parent.wait_subtree()?;
+            Ok(merged)
+        })(),
+    };
+    emit(json, result, |all| {
+        let mut text: String = all.branches.iter().map(merged_line).collect();
+        if all.commit != all.previous {
+            text.push_str(&format!(
+                "{} moved once: {}..{}\n",
+                all.target,
+                short(&all.previous),
+                short(&all.commit)
+            ));
+        }
+        text
     })
+}
+
+/// `by wait [BRANCH...] [--any|--all] [--timeout S]`: block until
+/// delegated branches settle, on the store's notifications.
+pub fn wait(
+    env: &Env,
+    target: &Target,
+    branches: &[String],
+    any: bool,
+    timeout: Option<f64>,
+    json: bool,
+) -> Outcome {
+    let timeout = match timeout {
+        None => None,
+        Some(secs) if secs.is_finite() && secs >= 0.0 => {
+            Some(std::time::Duration::try_from_secs_f64(secs).unwrap_or(std::time::Duration::MAX))
+        }
+        Some(secs) => {
+            let error = branchyard::Error::Denied(format!(
+                "--timeout takes a number of seconds, not {secs}"
+            ));
+            return fail(json, &error);
+        }
+    };
+    let names: Vec<&str> = branches.iter().map(String::as_str).collect();
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => delegate.wait_for(&names, any, timeout),
+        (None, Target::Remote(_)) => Err(branchyard::Error::Unsupported(
+            "by --remote wait is not available yet; poll by --remote inspect".into(),
+        )),
+        (None, Target::Local) => match names.is_empty() {
+            true => Err(branchyard::Error::Denied(
+                "outside a harness, by wait needs the branches to wait for".into(),
+            )),
+            false => open_yard().and_then(|yard| yard.wait_for(&names, any, timeout)),
+        },
+    };
+    let timed_out = result.as_ref().is_ok_and(|w| w.timed_out);
+    emit(json, result, |w| {
+        let mut text = String::new();
+        for inspection in &w.settled {
+            text.push_str(&render::inspection(inspection, env.style()));
+        }
+        if !w.pending.is_empty() {
+            text.push_str(&format!(
+                "{}: {}\n",
+                match w.timed_out {
+                    true => "timed out; still running",
+                    false => "still running",
+                },
+                w.pending.join(", ")
+            ));
+        }
+        text
+    })?;
+    match timed_out {
+        true => Err(Failure::Reported),
+        false => Ok(()),
+    }
 }
 
 /// Inside a harness, cancel a descendant with the branch's authority;

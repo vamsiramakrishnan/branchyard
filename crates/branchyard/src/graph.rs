@@ -343,10 +343,41 @@ pub(crate) trait GraphBackend: Send + Sync + fmt::Debug {
     /// stored record is still `waiting` and no lease is held: the one
     /// start of a dependent, whichever engine gets there first. `None`
     /// when it is not.
-    fn claim(&self, record: &Record, owner: &Owner, ttl: Duration) -> Result<Option<Fence>, Error>;
+    fn claim(&self, record: &Record, owner: &Owner, ttl: Duration) -> Result<Option<Fence>, Error> {
+        self.claim_if(record, owner, ttl, is_waiting)
+    }
+    /// [`GraphBackend::claim`] from any stored status `from` accepts, such
+    /// as a parent waiting on its children (`crate::wake`).
+    fn claim_if(
+        &self,
+        record: &Record,
+        owner: &Owner,
+        ttl: Duration,
+        from: fn(&BranchStatus) -> bool,
+    ) -> Result<Option<Fence>, Error>;
     /// Write `record` and append `event`, only if the stored record is
     /// still `waiting` and no lease is held. False when it is not.
-    fn settle_waiting(&self, record: &Record, event: &RecordedEvent) -> Result<bool, Error>;
+    fn settle_waiting(&self, record: &Record, event: &RecordedEvent) -> Result<bool, Error> {
+        self.settle_if(record, event, is_waiting)
+    }
+    /// [`GraphBackend::settle_waiting`] from any stored status `from`
+    /// accepts, such as a `blocked` dependent reopened.
+    fn settle_if(
+        &self,
+        record: &Record,
+        event: &RecordedEvent,
+        from: fn(&BranchStatus) -> bool,
+    ) -> Result<bool, Error>;
+}
+
+/// Whether `status` is `waiting` for prerequisites.
+pub(crate) fn is_waiting(status: &BranchStatus) -> bool {
+    *status == BranchStatus::Waiting
+}
+
+/// Whether `status` is `blocked` by a prerequisite.
+pub(crate) fn is_blocked(status: &BranchStatus) -> bool {
+    matches!(status, BranchStatus::Blocked { .. })
 }
 
 /// Whether `status` is waiting for prerequisites or blocked by one:
@@ -411,7 +442,13 @@ enum Verdict {
     Blocked(String),
 }
 
-fn verdict(store: &Store, record: &Record) -> Result<Verdict, Error> {
+/// What `record`'s prerequisites say, from current facts: their recorded
+/// status, and whether the parent's git branch contains their candidate. A
+/// prerequisite whose candidate the parent contains counts as integrated
+/// (so as settled too) whatever its recorded status says, such as one that
+/// was interrupted and then integrated, or merged by hand.
+fn verdict(yard: &Yard, record: &Record) -> Result<Verdict, Error> {
+    let store = yard.store();
     let target = match &record.info.parent {
         Some(parent) => store
             .backend()
@@ -419,6 +456,10 @@ fn verdict(store: &Store, record: &Record) -> Result<Verdict, Error> {
             .map(|p| p.info.git_branch)
             .unwrap_or_default(),
         None => String::new(),
+    };
+    let head = match target.is_empty() {
+        true => None,
+        false => git::local_branch(&yard.root, &target)?,
     };
     let mut wait = false;
     for dependency in store.graph().prerequisites(&record.info.name)? {
@@ -428,17 +469,26 @@ fn verdict(store: &Store, record: &Record) -> Result<Verdict, Error> {
                 "its prerequisite {name} was removed"
             )));
         };
+        let contained = match (&prerequisite.info.candidate, &head) {
+            (Some(candidate), Some(head)) => git::test(
+                &yard.root,
+                &["merge-base", "--is-ancestor", &candidate.commit, head],
+            )?,
+            _ => false,
+        };
         let blocked = |why: String| Ok(Verdict::Blocked(format!("its prerequisite {name} {why}")));
         match (&prerequisite.info.status, dependency.after) {
-            (BranchStatus::Ready | BranchStatus::NoChanges, After::Settled)
-            | (BranchStatus::Merged { .. }, After::Settled)
-            | (BranchStatus::NoChanges, After::Integrated) => {}
-            (BranchStatus::Merged { target: into, .. }, After::Integrated) if *into == target => {}
+            (BranchStatus::Merged { target: into, .. }, _) if *into == target => {}
+            (BranchStatus::Merged { .. }, After::Settled) => {}
+            (BranchStatus::Ready | BranchStatus::NoChanges, After::Settled) => {}
+            (BranchStatus::NoChanges, After::Integrated) => {}
+            (BranchStatus::Running | BranchStatus::Waiting, _) => wait = true,
+            // Integrated, whatever was recorded since.
+            _ if contained => {}
             (BranchStatus::Ready | BranchStatus::Merged { .. }, After::Integrated) => wait = true,
-            (
-                BranchStatus::Running | BranchStatus::Waiting | BranchStatus::AwaitingPlanApproval,
-                _,
-            ) => wait = true,
+            (BranchStatus::WaitingOnChildren | BranchStatus::AwaitingPlanApproval, _) => {
+                wait = true
+            }
             (BranchStatus::Failed { reason }, _) => return blocked(format!("failed: {reason}")),
             (BranchStatus::Interrupted, _) => return blocked("was interrupted".into()),
             (BranchStatus::BudgetExceeded { limit }, _) => {
@@ -516,13 +566,27 @@ pub(crate) fn advance(
         if !seen.insert(name.clone()) {
             continue;
         }
-        let Some(record) = store.backend().read(&name)? else {
+        let Some(mut record) = store.backend().read(&name)? else {
             continue;
         };
+        if is_blocked(&record.info.status) {
+            // Blocked by a prerequisite that has since been integrated, or
+            // recovered as ready: it waits again.
+            match verdict(yard, &record)? {
+                Verdict::Blocked(_) => continue,
+                Verdict::Wait | Verdict::Start => {
+                    if !reopen(&store, &record)? {
+                        continue;
+                    }
+                    record.info.status = BranchStatus::Waiting;
+                    queue.extend(dependents_of(&store, &name));
+                }
+            }
+        }
         if record.info.status != BranchStatus::Waiting {
             continue;
         }
-        match verdict(&store, &record)? {
+        match verdict(yard, &record)? {
             Verdict::Wait => {}
             Verdict::Blocked(reason) => {
                 if settle_unstarted(&store, &record, BranchStatus::Blocked { reason })? {
@@ -547,6 +611,32 @@ pub(crate) fn advance(
     }
 }
 
+/// Reopen a `blocked` dependent whose prerequisites no longer block it:
+/// `waiting` again, in a compare-and-swap. False when it had changed.
+fn reopen(store: &Store, record: &Record) -> Result<bool, Error> {
+    let mut reopened = record.clone();
+    reopened.info.status = BranchStatus::Waiting;
+    let event = RecordedEvent {
+        at_ms: now_ms(),
+        activity: Activity::Status(BranchStatus::Waiting),
+    };
+    let done = store.graph().settle_if(&reopened, &event, is_blocked)?;
+    if done {
+        store.notify();
+        if let Ok(mut recorder) = Recorder::open(store, &record.info.name, None) {
+            best_effort(
+                "record the activity",
+                recorder.record(Activity::Warning(
+                    "its prerequisites no longer block it (one was integrated or recovered \
+                     with its work); it waits for them again"
+                        .into(),
+                )),
+            );
+        }
+    }
+    Ok(done)
+}
+
 fn dependents_of(store: &Store, name: &str) -> Vec<String> {
     store
         .graph()
@@ -566,6 +656,8 @@ pub(crate) fn settled(yard: &Yard, name: &str, options: Option<&TaskOptions>) {
             advance(yard, &dependents, options),
         );
     }
+    // A parked ancestor wakes once everything below it has settled.
+    crate::wake::settled(yard, name, options);
 }
 
 /// Start a `waiting` branch's first turn on a thread of this process, from
@@ -689,13 +781,21 @@ pub(crate) fn resume(yard: &Yard, options: &TaskOptions) -> Result<Vec<String>, 
     let waiting: Vec<String> = store
         .list()?
         .into_iter()
-        .filter(|r| r.info.status == BranchStatus::Waiting)
+        .filter(|r| {
+            matches!(
+                r.info.status,
+                BranchStatus::Waiting | BranchStatus::Blocked { .. }
+            )
+        })
         .map(|r| r.info.name)
         .collect();
-    Ok(advance(yard, &waiting, Some(options))?
+    let mut started: Vec<String> = advance(yard, &waiting, Some(options))?
         .into_iter()
         .map(|r| r.info.name)
-        .collect())
+        .collect();
+    // And every branch parked on children that have all settled.
+    started.extend(crate::wake::resume(yard, options)?);
+    Ok(started)
 }
 
 /// Check `bindings` for a new child of `parent`: each names an existing

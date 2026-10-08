@@ -54,9 +54,9 @@ use crate::run::{self, NewBranch, Prepared};
 use crate::seats::{Seat, Seats};
 use crate::state::{Record, Store};
 use crate::{
-    git, harness, inbox, names, ops, Activity, BranchInfo, BranchStatus, Budget, CandidateInfo,
-    Error, Event, Merged, Message, MessageKind, Policy, RecordedEvent, Rule, Steer, SteerState,
-    TaskOptions, Yard,
+    git, harness, inbox, integrate, names, Activity, BranchInfo, BranchStatus, Budget,
+    CandidateInfo, Error, Event, Merged, MergedAll, Message, MessageKind, Policy, RecordedEvent,
+    Rule, Steer, SteerState, TaskOptions, Yard,
 };
 
 /// How long `steer` waits for the input to be delivered.
@@ -88,15 +88,39 @@ pub struct Envelope {
     /// Harness or profile IDs children may run. Empty: only this branch's
     /// own profile.
     pub harnesses: Vec<String>,
+    /// Times the branch's next turn may start on its own after its turn
+    /// ended while children it delegated were still running, once they
+    /// have settled (`docs/delegation.md`, "Waiting on children"). 0 turns
+    /// this off (`--no-wake`): such a turn then ends as it is. A child's is
+    /// at most its parent's. Absent in a stored envelope:
+    /// [`DEFAULT_MAX_WAKES`].
+    #[serde(
+        default = "default_max_wakes",
+        skip_serializing_if = "is_default_max_wakes"
+    )]
+    pub max_wakes: u32,
+}
+
+/// The automatic wakes an envelope allows unless it says otherwise.
+pub const DEFAULT_MAX_WAKES: u32 = 8;
+
+fn default_max_wakes() -> u32 {
+    DEFAULT_MAX_WAKES
+}
+
+fn is_default_max_wakes(wakes: &u32) -> bool {
+    *wakes == DEFAULT_MAX_WAKES
 }
 
 impl Default for Envelope {
-    /// Children only, at most four, on the parent's own profile.
+    /// Children only, at most four, on the parent's own profile, woken
+    /// when they settle at most [`DEFAULT_MAX_WAKES`] times.
     fn default() -> Self {
         Envelope {
             max_depth: 1,
             max_children: 4,
             harnesses: Vec::new(),
+            max_wakes: DEFAULT_MAX_WAKES,
         }
     }
 }
@@ -108,6 +132,14 @@ impl Envelope {
             max_depth,
             ..Envelope::default()
         }
+    }
+
+    /// Never start the branch's next turn on its own when its children
+    /// settle (`max_wakes` 0): a turn that ends while they run ends as it
+    /// is, and the caller waits for them (`by wait`, [`Delegate::wait`]).
+    pub fn no_wake(mut self) -> Self {
+        self.max_wakes = 0;
+        self
     }
 
     pub fn harnesses<I, S>(mut self, harnesses: I) -> Self
@@ -159,6 +191,7 @@ impl Envelope {
                 .max_children
                 .map_or(self.max_children, |c| c.min(self.max_children)),
             harnesses,
+            max_wakes: self.max_wakes,
         })
     }
 }
@@ -333,6 +366,16 @@ pub struct Spawned {
     /// until it starts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
+    /// The check that must pass on its merge when it is integrated: the
+    /// one the spawn gave, else its parent's. Omitted when it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<Vec<String>>,
+    /// `check` is its parent's, inherited because the spawn gave none.
+    /// Siblings under a parent's whole-suite check pass it only together:
+    /// integrate them together ([`Delegate::integrate_all`]). Omitted when
+    /// false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub check_inherited: bool,
 }
 
 /// A descendant whose next turn was started.
@@ -497,6 +540,23 @@ pub struct EventPage {
     pub next_cursor: usize,
     /// Events recorded so far.
     pub total: usize,
+}
+
+/// What a wait for several branches found ([`Delegate::wait_for`],
+/// `by wait`, the `wait` tool).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Waited {
+    /// The branches waited for that have settled (not running, waiting
+    /// for prerequisites or waiting on children), as inspected when the
+    /// wait returned, in the order asked.
+    pub settled: Vec<Inspection>,
+    /// Those that have not.
+    pub pending: Vec<String>,
+    /// The timeout passed before the wait was satisfied. Omitted when
+    /// false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timed_out: bool,
 }
 
 /// Acts as one branch, on that branch and its descendants only.
@@ -692,10 +752,30 @@ impl Delegate {
     /// (`by/<name>`, never the user's branches), after the descendant's
     /// check passes on the exact merge. This branch's uncommitted work is
     /// committed first, and its worktree moves to the merge.
+    ///
+    /// A candidate this branch already contains (say, brought in by a
+    /// sibling that merged it) is not an error: the descendant is recorded
+    /// as merged through the commit that brought it in, and the result
+    /// says `already`.
     pub fn integrate(&self, branch: &str) -> Result<Merged, Error> {
         match &self.via {
             Via::Local(local) => local.integrate(branch),
             Via::Remote(_) => self.typed("propose_integration", json!({ "branch": branch })),
+        }
+    }
+
+    /// Integrate several descendants together, all or none: their
+    /// candidates are merged in the order given in one temporary worktree,
+    /// each distinct check of theirs runs once on the result, and this
+    /// branch moves once. For siblings that share one test suite, which
+    /// none passes alone. A conflict names the descendant that conflicted
+    /// and those merged before it ([`Error::ConflictBetween`]). Every
+    /// descendant is recorded as merged.
+    pub fn integrate_all(&self, branches: &[&str]) -> Result<MergedAll, Error> {
+        let names: Vec<String> = branches.iter().map(|b| (*b).to_owned()).collect();
+        match &self.via {
+            Via::Local(local) => local.integrate_all(&names),
+            Via::Remote(_) => self.typed("propose_integration", json!({ "branches": names })),
         }
     }
 
@@ -947,10 +1027,7 @@ impl Delegate {
         let deadline = Instant::now().checked_add(timeout);
         loop {
             let inspection = self.inspect(branch)?;
-            if !matches!(
-                inspection.status,
-                BranchStatus::Running | BranchStatus::Waiting
-            ) {
+            if !crate::wake::unsettled(&inspection.status) {
                 return Ok(inspection);
             }
             let now = Instant::now();
@@ -964,6 +1041,9 @@ impl Delegate {
                     if inspection.status == BranchStatus::Waiting {
                         graph::advance(&local.yard, &[branch.to_owned()], None)?;
                     }
+                    if inspection.status == BranchStatus::WaitingOnChildren {
+                        crate::wake::look(&local.yard, branch, None)?;
+                    }
                     let store = local.store();
                     let before = inspection.status.clone();
                     store.wait(left, || {
@@ -973,6 +1053,111 @@ impl Delegate {
                 Via::Remote(_) => std::thread::sleep(WAIT_POLL.min(left)),
             }
         }
+    }
+
+    /// [`Delegate::wait_for`] the first of `branches` to settle.
+    pub fn wait_any(&self, branches: &[&str], timeout: Option<Duration>) -> Result<Waited, Error> {
+        self.wait_for(branches, true, timeout)
+    }
+
+    /// [`Delegate::wait_for`] all of `branches` to settle.
+    pub fn wait_all(&self, branches: &[&str], timeout: Option<Duration>) -> Result<Waited, Error> {
+        self.wait_for(branches, false, timeout)
+    }
+
+    /// Block until `branches` (descendants, or this branch) have settled:
+    /// any one of them with `any`, else all, or until `timeout` passes
+    /// (then `timed_out` is set; it is not an error). With no branches, it
+    /// waits for this branch's children that are still running or
+    /// waiting, and returns at once, listing every child, when none is.
+    ///
+    /// The wait is the store's, as [`Delegate::wait`]'s: it wakes when a
+    /// status changes, at once in the engine's process and within 100 ms
+    /// in another. Through the broker it blocks in the engine's process.
+    pub fn wait_for(
+        &self,
+        branches: &[&str],
+        any: bool,
+        timeout: Option<Duration>,
+    ) -> Result<Waited, Error> {
+        let names: Vec<String> = branches.iter().map(|b| (*b).to_owned()).collect();
+        match &self.via {
+            Via::Local(local) => local.wait_for(names, any, timeout),
+            Via::Remote(_) => self.typed(
+                "wait",
+                json!({
+                    "branches": names,
+                    "any": any,
+                    "timeout_seconds": timeout.map(|t| t.as_secs_f64()),
+                }),
+            ),
+        }
+    }
+}
+
+/// Block until `names` have settled, any one with `any` else all, or
+/// `timeout` passes, reading their durable status from the store; each
+/// settled one is reported through `inspect`. While it waits it moves what
+/// a wait can: a turn whose engine stopped is recovered, a dependent whose
+/// prerequisites settled is started, a parked branch whose children settled
+/// is woken, each when this process can.
+pub(crate) fn wait_for(
+    yard: &Yard,
+    names: &[String],
+    any: bool,
+    timeout: Option<Duration>,
+    inspect: impl Fn(&str) -> Result<Inspection, Error>,
+) -> Result<Waited, Error> {
+    let store = yard.store();
+    let deadline = timeout.and_then(|t| Instant::now().checked_add(t));
+    let statuses = |store: &Store| -> Result<Vec<BranchStatus>, Error> {
+        names
+            .iter()
+            .map(|name| store.read(name).map(|r| r.info.status))
+            .collect()
+    };
+    loop {
+        let now = statuses(&store)?;
+        let pending: Vec<String> = names
+            .iter()
+            .zip(&now)
+            .filter(|(_, status)| crate::wake::unsettled(status))
+            .map(|(name, _)| name.clone())
+            .collect();
+        let done = match any {
+            true => pending.len() < names.len() || names.is_empty(),
+            false => pending.is_empty(),
+        };
+        let late = deadline.is_some_and(|d| Instant::now() >= d);
+        if done || late {
+            let settled = names
+                .iter()
+                .filter(|name| !pending.contains(name))
+                .map(|name| inspect(name))
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(Waited {
+                settled,
+                pending,
+                timed_out: !done,
+            });
+        }
+        for (name, status) in names.iter().zip(&now) {
+            match status {
+                BranchStatus::Running => recover::settle(yard, name)?,
+                BranchStatus::Waiting => {
+                    graph::advance(yard, std::slice::from_ref(name), None)?;
+                }
+                BranchStatus::WaitingOnChildren => {
+                    crate::wake::look(yard, name, None)?;
+                }
+                _ => {}
+            }
+        }
+        let left = deadline.map_or(SETTLE_EVERY, |d| {
+            d.saturating_duration_since(Instant::now())
+                .min(SETTLE_EVERY)
+        });
+        store.wait(left, || Ok((statuses(&store)? != now).then_some(())))?;
     }
 }
 
@@ -1080,9 +1265,11 @@ fn narrowed(policy: &Policy, deny: &[String]) -> Policy {
 /// Whether a child can run turns without its parent asking again, and so
 /// holds its whole limit: running, waiting for its prerequisites (it
 /// starts on its own when they settle), blocked (a graph proposal reopens
-/// it), or with a plan awaiting approval (approving it starts a turn).
-/// Every other status is settled for now: the child holds only what it
-/// spent until it is sent something again.
+/// it), with a plan awaiting approval (approving it starts a turn), or
+/// waiting on its own children (it is woken when they settle; see
+/// `crate::wake`). Every other status is settled: the child holds only
+/// what it spent until it is sent something again, and a discarded one
+/// never is.
 pub(crate) fn is_live(status: &BranchStatus) -> bool {
     matches!(
         status,
@@ -1090,6 +1277,7 @@ pub(crate) fn is_live(status: &BranchStatus) -> bool {
             | BranchStatus::Waiting
             | BranchStatus::Blocked { .. }
             | BranchStatus::AwaitingPlanApproval
+            | BranchStatus::WaitingOnChildren
     )
 }
 
@@ -1238,6 +1426,26 @@ pub(crate) fn cancel_tree(yard: &Yard, name: &str, by: &str) -> Result<Vec<Strin
     targets.extend(descendants(&store, name)?);
     let mut cancelled = Vec::new();
     for info in targets {
+        if info.status == BranchStatus::WaitingOnChildren {
+            // Parked: it runs no turn to stop, and is not woken.
+            if let Ok(record) = store.read(&info.name) {
+                let mut ended = record.clone();
+                ended.info.status = BranchStatus::Interrupted;
+                ended.parked = None;
+                let event = RecordedEvent {
+                    at_ms: branchyard_support::time::now_ms(),
+                    activity: Activity::Status(BranchStatus::Interrupted),
+                };
+                if store
+                    .graph()
+                    .settle_if(&ended, &event, crate::wake::is_parked)?
+                {
+                    store.notify();
+                    cancelled.push(info.name);
+                }
+            }
+            continue;
+        }
         if info.status == BranchStatus::Waiting {
             if let Ok(record) = store.read(&info.name) {
                 if graph::cancel_unstarted(&store, &record, by)? {
@@ -1301,6 +1509,18 @@ pub(crate) fn wait_subtree(yard: &Yard, name: &str) -> Result<Vec<BranchInfo>, E
         let all = descendants(&store, name)?;
         let mut watched = all.clone();
         watched.extend(dependency_closure(&store, name, &all)?);
+        // The branch itself, while it waits on its children or runs the
+        // turn that woke it here.
+        let own = store.read(name)?;
+        let woken_here = own.info.status == BranchStatus::Running
+            && store
+                .backend()
+                .leases()?
+                .iter()
+                .any(|l| l.branch == name && l.owner.as_deref() == Some(&store.owner().id));
+        if woken_here || own.info.status == BranchStatus::WaitingOnChildren {
+            watched.push(own.info.clone());
+        }
         let names: BTreeSet<String> = watched.iter().map(|info| info.name.clone()).collect();
         let handles: Vec<JoinHandle<()>> = {
             let mut running = lock(&yard.hub.running);
@@ -1339,7 +1559,18 @@ pub(crate) fn wait_subtree(yard: &Yard, name: &str) -> Result<Vec<BranchInfo>, E
             if !waiting.is_empty() && !graph::advance(yard, &waiting, None)?.is_empty() {
                 continue;
             }
-            return Ok(all);
+            // A parked branch whose children all settled: its next turn,
+            // when this process ran the turn that parked it.
+            let mut woke = false;
+            for info in watched.iter().rev() {
+                if info.status == BranchStatus::WaitingOnChildren {
+                    woke |= crate::wake::look(yard, &info.name, None)?;
+                }
+            }
+            if woke {
+                continue;
+            }
+            return descendants(&store, name);
         }
         for info in running {
             recover::settle(yard, &info.name)?;
@@ -1462,10 +1693,20 @@ impl Edit {
 struct Planned {
     /// Its `waiting` record.
     record: Record,
+    /// Its check came from its parent, not the request.
+    check_inherited: bool,
     limits: Limits,
     seat: Option<String>,
     depends_on: Vec<String>,
     after: After,
+}
+
+/// What became of an integrated branch, for its parent's event log.
+fn merged_outcome(merged: &Merged) -> String {
+    match (&merged.via, merged.already) {
+        (Some(via), true) => format!("already contained in {}, via {via}", merged.target),
+        _ => format!("merged into {} as {}", merged.target, merged.commit),
+    }
 }
 
 /// What became of a spawned child, for its parent's event log.
@@ -1890,6 +2131,8 @@ impl Local {
                     },
                     seat: child.seat,
                     depends_on: child.depends_on,
+                    check: child.record.check.clone(),
+                    check_inherited: child.check_inherited,
                 }
             })
             .collect();
@@ -1924,8 +2167,8 @@ impl Local {
         let live = live_children(&store, caller, None) + planned.len();
         if live >= grant.envelope.max_children as usize {
             return Err(Error::Denied(format!(
-                "{} already has {live} live children (running, waiting, blocked or awaiting \
-                 plan approval), its envelope's max_children; settled children do not count, \
+                "{} already has {live} live children (running, waiting, blocked, awaiting \
+                 plan approval or waiting on its children), its envelope's max_children; settled children do not count, \
                  so wait for one to settle, or `by discard` or `by rm` one, to free its slot",
                 self.branch
             )));
@@ -2124,6 +2367,7 @@ impl Local {
             }
         }
         Ok(Planned {
+            check_inherited: request.check.is_none() && record.check.is_some(),
             record,
             limits,
             seat: seated.map(|(name, _, _)| name),
@@ -2532,25 +2776,49 @@ impl Local {
     }
 
     fn integrate(&self, branch: &str) -> Result<Merged, Error> {
-        let result = self.try_integrate(branch);
-        self.note("integrate", branch, &result, |m| {
-            format!("merged into {} as {}", m.target, m.commit)
+        let result = self
+            .try_integrate(&[branch.to_owned()])
+            .and_then(|mut all| {
+                all.branches
+                    .pop()
+                    .ok_or_else(|| Error::State("the integration returned no branch".into()))
+            });
+        self.note("integrate", branch, &result, merged_outcome);
+        result
+    }
+
+    fn integrate_all(&self, branches: &[String]) -> Result<MergedAll, Error> {
+        let result = self.try_integrate(branches);
+        self.note("integrate", &branches.join(", "), &result, |all| {
+            all.branches
+                .iter()
+                .map(|m| format!("{}: {}", m.branch, merged_outcome(m)))
+                .collect::<Vec<_>>()
+                .join("; ")
         });
         result
     }
 
-    fn try_integrate(&self, branch: &str) -> Result<Merged, Error> {
-        self.require_descendant(branch, false)?;
+    fn try_integrate(&self, branches: &[String]) -> Result<MergedAll, Error> {
         let store = self.store();
-        let child = store.read(branch)?;
-        if child.info.status == BranchStatus::Running {
-            return Err(Error::Running(branch.to_owned()));
+        for branch in branches {
+            self.require_descendant(branch, false)?;
+            if store.read(branch)?.info.status == BranchStatus::Running {
+                return Err(Error::Running(branch.to_owned()));
+            }
         }
         let caller = store.read(&self.branch)?;
-        self.current_work(&caller, &format!("snapshot before integrating {branch}"))?;
-        let merged = ops::merge(&self.yard, branch, &caller.info.git_branch)?;
-        // A sibling waiting for this one to be integrated may start now.
-        graph::settled(&self.yard, branch, Some(&self.options));
+        self.current_work(
+            &caller,
+            &format!("snapshot before integrating {}", branches.join(", ")),
+        )?;
+        let merged = integrate::merge_many(&self.yard, branches, &caller.info.git_branch)?;
+        // A sibling waiting for these to be integrated may start now, and
+        // any other child this branch now contains is merged too.
+        for branch in branches {
+            graph::settled(&self.yard, branch, Some(&self.options));
+        }
+        integrate::reconcile_children(&self.yard, &self.branch);
         Ok(merged)
     }
 
@@ -2595,7 +2863,7 @@ impl Local {
                 .map(str::trim)
                 .filter(|r| !r.is_empty())
                 .map_or_else(|| format!("discarded by {}", self.branch), str::to_owned);
-            ops::discard(&self.yard, branch, &reason)?;
+            crate::ops::discard(&self.yard, branch, &reason)?;
             self.inspect(branch)
         });
         self.note("discard", branch, &result, |i| match &i.status {
@@ -2610,6 +2878,34 @@ impl Local {
             branch: self.branch.clone(),
             descendants: descendants(&self.store(), &self.branch)?,
         })
+    }
+
+    fn wait_for(
+        &self,
+        mut names: Vec<String>,
+        any: bool,
+        timeout: Option<Duration>,
+    ) -> Result<Waited, Error> {
+        let store = self.store();
+        if names.is_empty() {
+            let children = store.read(&self.branch)?.info.children;
+            names = children
+                .iter()
+                .filter(|child| {
+                    store
+                        .read(child)
+                        .is_ok_and(|r| crate::wake::unsettled(&r.info.status))
+                })
+                .cloned()
+                .collect();
+            if names.is_empty() {
+                names = children;
+            }
+        }
+        for name in &names {
+            self.require_descendant(name, true)?;
+        }
+        wait_for(&self.yard, &names, any, timeout, |name| self.inspect(name))
     }
 
     /// A relative path from a tool call, resolved against this branch's own
@@ -2950,6 +3246,21 @@ struct TargetArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WaitArgs {
+    branches: Option<Vec<String>>,
+    any: Option<bool>,
+    timeout_seconds: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IntegrateArgs {
+    branch: Option<String>,
+    branches: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EventsArgs {
     branch: Option<String>,
     cursor: Option<usize>,
@@ -3140,8 +3451,14 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
             to_json(&local.reject_plan(&args.branch, args.reason.as_deref(), args.replan)?)
         }
         "propose_integration" | "integrate" => {
-            let args: TargetArgs = parse(tool, arguments)?;
-            to_json(&local.integrate(&required(tool, args.branch)?)?)
+            let args: IntegrateArgs = parse(tool, arguments)?;
+            match (args.branch, args.branches) {
+                (Some(branch), None) => to_json(&local.integrate(&branch)?),
+                (None, Some(branches)) => to_json(&local.integrate_all(&branches)?),
+                _ => Err(Error::Denied(format!(
+                    "{tool} needs either branch or branches (an array, integrated together)"
+                ))),
+            }
         }
         "steer" => {
             let args: SteerArgs = parse(tool, arguments)?;
@@ -3158,6 +3475,25 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
         "children" => {
             let _: NoArgs = parse(tool, arguments)?;
             to_json(&local.children()?)
+        }
+        "wait" => {
+            let args: WaitArgs = parse(tool, arguments)?;
+            let timeout = match args.timeout_seconds {
+                None => None,
+                Some(secs) if secs.is_finite() && secs >= 0.0 => {
+                    Some(Duration::try_from_secs_f64(secs).unwrap_or(Duration::MAX))
+                }
+                Some(secs) => {
+                    return Err(Error::Denied(format!(
+                        "timeout_seconds must be a number of seconds, not {secs}"
+                    )))
+                }
+            };
+            to_json(&local.wait_for(
+                args.branches.unwrap_or_default(),
+                args.any.unwrap_or(false),
+                timeout,
+            )?)
         }
         "publish_artifact" => {
             let args: PublishArtifactArgs = parse(tool, arguments)?;
@@ -3244,6 +3580,16 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One rule for width and budget: a parked parent is live, and a
+    /// discarded child is settled like any other.
+    #[test]
+    fn parked_branches_are_live_and_discarded_ones_settled() {
+        assert!(is_live(&BranchStatus::WaitingOnChildren));
+        assert!(is_live(&BranchStatus::Running));
+        assert!(!is_live(&BranchStatus::Discarded { reason: "x".into() }));
+        assert!(!is_live(&BranchStatus::Ready));
+    }
     use crate::{PermissionDecision, PermissionKey, PermissionRequest};
     use std::fs;
     use std::path::PathBuf;
@@ -3310,6 +3656,9 @@ mod tests {
             checkpoint: None,
             context: None,
             workspace: None,
+            parked: None,
+            wakes: 0,
+            lost: None,
             sandbox_seed: None,
             actor: None,
             plan: None,
@@ -3606,6 +3955,7 @@ mod tests {
             max_depth: 3,
             max_children: 5,
             harnesses: vec!["gemini-cli".into(), "qwen-code-acp".into()],
+            max_wakes: 3,
         };
         assert!(parent.allows(profiles::by_id("qwen-code-acp").unwrap(), own));
         assert!(!parent.allows(profiles::by_id("goose-acp").unwrap(), own));
@@ -3624,7 +3974,8 @@ mod tests {
             Envelope {
                 max_depth: 2,
                 max_children: 1,
-                harnesses: vec!["qwen-code".into()]
+                harnesses: vec!["qwen-code".into()],
+                max_wakes: 3,
             }
         );
         let wider = Spawn {

@@ -620,6 +620,24 @@ impl Repo {
         )
     }
 
+    /// Integrate several children of one parent together, in order, all
+    /// or none, checked once on the result; like `by integrate a b c`. The
+    /// finished operation's result holds `merged_all`.
+    pub fn integrate_all(&self, branches: &[&str], key: &str) -> Result<Operation, Error> {
+        let Some((first, rest)) = branches.split_first() else {
+            return Err(Error::Config(
+                "name at least one branch to integrate".into(),
+            ));
+        };
+        self.client.post(
+            &self.branch_path(first, "/integrate"),
+            &IntegrateRequest {
+                with: rest.iter().map(|b| (*b).to_owned()).collect(),
+            },
+            key,
+        )
+    }
+
     /// A branch as a delegating parent sees it; like `by inspect`.
     pub fn inspect(&self, branch: &str) -> Result<Inspection, Error> {
         self.client.get(&self.branch_path(branch, "/inspection"))

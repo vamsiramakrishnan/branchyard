@@ -1828,7 +1828,7 @@ async fn post_integrate(
     Path((repo, branch)): Path<(String, String)>,
     Extension(caller): Extension<Caller>,
     headers: HeaderMap,
-    JsonBody(IntegrateRequest {}, canonical): JsonBody<IntegrateRequest>,
+    JsonBody(IntegrateRequest { with }, canonical): JsonBody<IntegrateRequest>,
 ) -> Result<Response, ApiError> {
     let repo = app.authorized_repo(&caller, &repo, "merge")?.clone();
     let route = format!("POST /v1/repos/{}/branches/{branch}/integrate", repo.name);
@@ -1837,18 +1837,34 @@ async fn post_integrate(
         return Ok(response);
     }
     let parent = {
-        let (yard, name) = (repo.yard.clone(), branch.clone());
-        blocking(move || work::delegator(&yard, &name))
-            .await?
-            .map_err(|e| error::sdk(&e))?
+        let (yard, name, with) = (repo.yard.clone(), branch.clone(), with.clone());
+        blocking(move || {
+            let parent = work::delegator(&yard, &name)?;
+            // Siblings integrated together share their parent.
+            for other in &with {
+                if work::delegator(&yard, other)? != parent {
+                    return Err(branchyard::Error::Denied(format!(
+                        "{other} was not delegated by {parent}, {name}'s parent; integrate \
+                         together only children of one parent"
+                    )));
+                }
+            }
+            Ok(parent)
+        })
+        .await?
+        .map_err(|e| error::sdk(&e))?
     };
     let cursor = sync_feed(&repo.feed).await?;
+    let mut branches = vec![branch.clone()];
+    branches.extend(with.iter().cloned());
+    let mut locks = branches.clone();
+    locks.push(parent.clone());
     let new = NewOperation {
         repo: repo.name.clone(),
         kind: OperationKind::Integrate,
-        branches: vec![branch.clone()],
+        branches,
         cursor,
-        locks: vec![branch.clone(), parent.clone()],
+        locks,
         idempotency: idem,
         principal: caller.0.clone(),
         creates: Vec::new(),
@@ -1857,7 +1873,16 @@ async fn post_integrate(
         priority: 0,
         trace: incoming_trace(&headers),
     };
-    admit(&app, new, Work::Integrate { branch, parent }).await
+    admit(
+        &app,
+        new,
+        Work::Integrate {
+            branch,
+            parent,
+            with,
+        },
+    )
+    .await
 }
 
 /// Act as `branch` with the server's authority, as `by inspect`, `by events`

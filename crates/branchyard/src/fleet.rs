@@ -531,7 +531,8 @@ impl BranchOutcome {
             BranchStatus::Running
             | BranchStatus::Waiting
             | BranchStatus::Blocked { .. }
-            | BranchStatus::AwaitingPlanApproval => None,
+            | BranchStatus::AwaitingPlanApproval
+            | BranchStatus::WaitingOnChildren => None,
             BranchStatus::Ready => Some(BranchOutcome::Ready),
             BranchStatus::Merged { .. } => Some(BranchOutcome::Merged),
             BranchStatus::Interrupted => Some(BranchOutcome::Interrupted),

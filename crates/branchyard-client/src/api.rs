@@ -591,12 +591,18 @@ pub struct GraphRequest {
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/integrate`: merge a delegated
-/// child into the parent that delegated it, like `by integrate`. No fields
-/// yet.
+/// child into the parent that delegated it, like `by integrate`.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct IntegrateRequest {}
+pub struct IntegrateRequest {
+    /// Siblings of the path's branch, delegated by the same parent, to
+    /// integrate together with it, in order after it: merged in one
+    /// temporary worktree, checked once on the result, all or none, like
+    /// `by integrate a b c`. The result is then `merged_all`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub with: Vec<String>,
+}
 
 /// `POST /v1/repos/{repo}/branches/{branch}/steer`: input for the branch's
 /// running turn, like `by send --steer`. The answer is the
@@ -708,6 +714,9 @@ pub struct OperationResult {
     pub branches: Vec<BranchInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged: Option<Merged>,
+    /// Several children integrated together (`IntegrateRequest::with`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_all: Option<branchyard::MergedAll>,
     /// Every branch the operation's branches delegated to, directly or
     /// below, once they finished: the operation waits for them, as
     /// `by run` does.

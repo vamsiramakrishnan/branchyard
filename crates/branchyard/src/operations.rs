@@ -266,8 +266,6 @@ impl Operation {
 
 /// The operations, in the order the MCP server lists its tools.
 ///
-/// Room is left for `by wait` and atomic multi-integrate: each is a row
-/// here, and the parity tests then name every surface still missing it.
 pub const OPERATIONS: &[Operation] = &[
     op(
         "spawn",
@@ -386,7 +384,18 @@ pub const OPERATIONS: &[Operation] = &[
         "integrate",
         "integrate",
         Capability::Delegate,
-        &[TARGET, JSON],
+        &[
+            Param::all("<BRANCHES>", "branches", "*branches"),
+            Param {
+                cli: None,
+                tool: Some("branch"),
+                python: None,
+                why: "the tool's shorthand for one branch; by integrate and Python take one or \
+                      more",
+                inside: None,
+            },
+            JSON,
+        ],
     ),
     op(
         "cancel",
@@ -422,6 +431,29 @@ pub const OPERATIONS: &[Operation] = &[
             JSON,
         ],
     ),
+    op(
+        "wait",
+        &["wait"],
+        "wait",
+        "wait_all",
+        "wait_for",
+        Capability::Own,
+        &[
+            Param::all("<BRANCHES>", "branches", "*branches"),
+            Param::all("--any", "any", "any").without_python("Python's wait_any"),
+            Param::cli(
+                "--all",
+                "the default: every surface waits for all unless told any",
+            ),
+            Param::all("--timeout", "timeout_seconds", "timeout"),
+            JSON,
+        ],
+    )
+    .contexts(Contexts {
+        inside: Context::Yes,
+        outside: Context::Yes,
+        remote: Context::No("the server has no route for it yet; poll inspect"),
+    }),
     op(
         "apply_graph",
         &["graph", "apply"],

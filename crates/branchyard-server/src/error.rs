@@ -90,7 +90,7 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
         E::Unsupported(_) => (S::UNPROCESSABLE_ENTITY, "unsupported"),
         E::NoCandidate(_) => (S::CONFLICT, "no_candidate"),
         E::TargetMoved { .. } => (S::CONFLICT, "target_moved"),
-        E::Conflict { .. } => (S::CONFLICT, "conflict"),
+        E::Conflict { .. } | E::ConflictBetween { .. } => (S::CONFLICT, "conflict"),
         E::CheckFailed { .. } => (S::UNPROCESSABLE_ENTITY, "check_failed"),
         E::CheckTimedOut { .. } => (S::UNPROCESSABLE_ENTITY, "check_timed_out"),
         E::CheckNotStarted(_) => (S::UNPROCESSABLE_ENTITY, "check_not_started"),
@@ -114,6 +114,12 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
             error_out.detail(json!({ "expected": expected, "actual": actual }))
         }
         E::Conflict { files } => error_out.detail(json!({ "files": files })),
+        E::ConflictBetween {
+            branch,
+            merged,
+            files,
+            ..
+        } => error_out.detail(json!({ "files": files, "branch": branch, "merged": merged })),
         E::StaleRevision {
             expected, actual, ..
         } => error_out.detail(json!({ "expected": expected, "actual": actual })),

@@ -282,11 +282,17 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
                 &mut recorder,
                 driven?,
             )?;
+            // A delegating turn that ended while its children still run
+            // waits on them; see `crate::wake`.
+            crate::wake::park(turn.yard, &mut record, &mut recorder, &bounds.budget)?;
         }
         Ok(())
     })();
     let result = match result {
-        Ok(()) => recorder.finish(lease, &record),
+        Ok(()) => {
+            crate::wake::remember(turn.yard, &record, turn.options);
+            recorder.finish(lease, &record)
+        }
         Err(error) => Err(error),
     };
     let result = match result {
@@ -306,8 +312,17 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
             Err(error)
         }
     };
-    // Siblings waiting for this branch may start, or be blocked, now.
+    // Children its branch now contains are merged, however they got
+    // there (a merge its harness ran, a checkpoint of an integration).
+    crate::integrate::reconcile_children(turn.yard, &fence.branch);
+    // Siblings waiting for this branch may start, or be blocked, now, and
+    // a parked ancestor may wake.
     graph::settled(turn.yard, &fence.branch, Some(turn.options));
+    // Its own children may all have settled before it parked.
+    branchyard_support::best_effort(
+        "wake a parked branch",
+        crate::wake::look(turn.yard, &fence.branch, Some(turn.options)),
+    );
     // The outcome store learns how the turn ended; best-effort, it never
     // changes what happened.
     if result.is_ok() {
@@ -351,7 +366,11 @@ fn to_value<T: Serialize>(value: &T) -> Value {
 
 /// A limit already used up before the turn starts. Cost counts what the
 /// branch's children reserved.
-fn exhausted(store: &crate::state::Store, record: &Record, budget: &Budget) -> Option<String> {
+pub(crate) fn exhausted(
+    store: &crate::state::Store,
+    record: &Record,
+    budget: &Budget,
+) -> Option<String> {
     if budget.max_turns.is_some_and(|max| record.info.turns >= max) {
         return Some("max_turns".into());
     }
@@ -1752,8 +1771,10 @@ pub(crate) fn conclude(
         };
     }
     if driven.submitted {
-        // The summary a rewind left for this turn reached the harness.
+        // The summary a rewind left for this turn reached the harness, and
+        // so did the note about a lost turn before it.
         record.context = None;
+        record.lost = None;
         match snapshot_failed {
             false => crate::checkpoint::record_turn(yard, fence, record, recorder)?,
             // The worktree is no longer at a known checkpoint.

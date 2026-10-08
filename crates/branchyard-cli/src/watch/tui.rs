@@ -1038,6 +1038,7 @@ fn status_style(status: &BranchStatus) -> (&'static str, Style) {
     match status {
         BranchStatus::Running => ("●", Style::new().fg(Color::Cyan)),
         BranchStatus::Waiting => ("◌", Style::new().fg(Color::DarkGray)),
+        BranchStatus::WaitingOnChildren => ("◐", Style::new().fg(Color::Cyan)),
         BranchStatus::Blocked { .. } => ("■", Style::new().fg(Color::Magenta)),
         BranchStatus::Ready => ("✔", Style::new().fg(Color::Green)),
         BranchStatus::NoChanges => ("○", Style::new().fg(Color::DarkGray)),

@@ -67,6 +67,10 @@ pub fn report(status: &BranchStatus, pending: Option<&str>) -> Report {
             HerdrState::Blocked,
             Some("its plan awaits approval".to_owned()),
         ),
+        BranchStatus::WaitingOnChildren => (
+            HerdrState::Idle,
+            Some("waiting on its children; woken when they settle".to_owned()),
+        ),
     };
     Report {
         state,

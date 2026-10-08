@@ -465,7 +465,14 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             limit,
             json,
         } => commands::events(env, target, branch, cursor, limit, json),
-        Command::Integrate { branch, json } => commands::integrate(target, &branch, json),
+        Command::Integrate { branches, json } => commands::integrate(target, &branches, json),
+        Command::Wait {
+            branches,
+            any,
+            all: _,
+            timeout,
+            json,
+        } => commands::wait(env, target, &branches, any, timeout, json),
         Command::Children { branch, json } => commands::children(env, target, branch, json),
         Command::Graph { json, action } => commands::graph(env, target, &action.into_args(json)),
         Command::Ask {

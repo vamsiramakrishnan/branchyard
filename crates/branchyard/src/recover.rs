@@ -216,6 +216,9 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         .filter(|deadline| *deadline <= now_ms())
         .map(|_| "; its max_duration deadline had passed")
         .unwrap_or_default();
+    // A turn whose prompt was submitted and whose end is unknown.
+    let lost = ended.is_none() && step(STEP_SUBMIT).is_some();
+    let before = record.info.candidate.as_ref().map(|c| c.commit.clone());
     let (end, submitted, reason) = match ended {
         Some((end, submitted)) => (
             end,
@@ -270,6 +273,11 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
             reason: format!("recovery could not finish the turn: {error}"),
         };
     }
+    if lost {
+        // Its next turn's prompt starts with what happened.
+        record.lost = Some(reason.clone());
+        promote(&mut record, before.as_deref(), &mut recorder)?;
+    }
     recorder.finish(lease, &record)?;
     // What waits for it is blocked now, or, if it had settled, may start.
     crate::graph::settled(yard, &row.branch, None);
@@ -279,6 +287,34 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         reason,
         killed,
     }))
+}
+
+/// A delegated child whose lost turn left work in its worktree comes back
+/// `ready` with that work as its candidate, not bare `interrupted`: its
+/// parent decides what to do with it, and what depends on it is looked at
+/// again. A warning says the turn was cut off and the work may be
+/// incomplete.
+fn promote(
+    record: &mut Record,
+    before: Option<&str>,
+    recorder: &mut Recorder,
+) -> Result<(), Error> {
+    let delegated = record.info.depth > 0 && record.info.parent.is_some();
+    let produced = record
+        .info
+        .candidate
+        .as_ref()
+        .is_some_and(|c| Some(c.commit.as_str()) != before);
+    if delegated && produced && record.info.status == BranchStatus::Interrupted {
+        recorder.record(Activity::Warning(
+            "its turn was interrupted when its engine stopped, after it had changed files; \
+             recovery committed them as its candidate and it is ready, but the work may be \
+             incomplete: review it before integrating"
+                .into(),
+        ))?;
+        record.info.status = BranchStatus::Ready;
+    }
+    Ok(())
 }
 
 /// The highest cumulative cost the harness reported since the turn's prompt,

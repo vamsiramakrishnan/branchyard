@@ -874,6 +874,7 @@ pub fn status_text(status: &BranchStatus) -> (String, Tone) {
         BranchStatus::Waiting => ("waiting".into(), Tone::Dim),
         BranchStatus::Blocked { reason } => (format!("blocked: {reason}"), Tone::Red),
         BranchStatus::AwaitingPlanApproval => ("awaiting plan approval".into(), Tone::Yellow),
+        BranchStatus::WaitingOnChildren => ("waiting on children".into(), Tone::Cyan),
     }
 }
 
@@ -1112,6 +1113,15 @@ pub fn harness_table(harnesses: &[HarnessInfo], style: Style) -> String {
     table(&columns, &rows, style)
 }
 
+/// `info`'s children, quoted, for a command line.
+fn children_words(info: &BranchInfo) -> String {
+    info.children
+        .iter()
+        .map(|child| shell_quote(child))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Commands that make sense after a branch reaches its status.
 pub fn next_commands(info: &BranchInfo) -> Vec<String> {
     let name = shell_quote(&info.name);
@@ -1122,6 +1132,10 @@ pub fn next_commands(info: &BranchInfo) -> Vec<String> {
             format!("by rm {name}"),
         ],
         BranchStatus::Running => vec![format!("by log {name}")],
+        BranchStatus::WaitingOnChildren => vec![
+            format!("by children {name}"),
+            format!("by wait --all {}", children_words(info)),
+        ],
         BranchStatus::AwaitingPlanApproval => vec![
             format!("by plan show {name}"),
             format!("by plan approve {name} [--edit]"),

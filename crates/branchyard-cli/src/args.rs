@@ -104,6 +104,9 @@ pub struct TaskArgs {
     /// `--allow-delegation`: auto-allow the harness's own `by` delegation
     /// commands.
     pub allow_delegation: bool,
+    /// `--no-wake`: the delegating branch is not woken when its children
+    /// settle after its turn ended.
+    pub no_wake: bool,
     /// `--allow-unapproved-tools`: run a profile whose tools Branchyard's
     /// policy never sees.
     pub unapproved_tools: bool,
@@ -848,7 +851,11 @@ const SPAWN_EXAMPLES: &str = "\
 Examples (inside a harness, the parent is the harness's own branch):
   by spawn \"write the tokenizer\" --harness codex --budget-usd 1 --wait
   by spawn \"write the parser\" --depends-on tokenizer --after integrated
-  by spawn \"fix it\" --parent root --yes            # outside a harness";
+  by spawn \"fix it\" --parent root --yes            # outside a harness
+
+The child's check (--check) defaults to its parent's, and the spawn says which it
+inherits. It runs on the merge when the child is integrated, so siblings that share
+one test suite are integrated together: by integrate a b (checked once).";
 
 const DISCARD_EXAMPLES: &str = "\
 Examples:
@@ -1575,10 +1582,31 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Merge a delegated child into its parent's branch after its check passes
+    /// Merge delegated children into their parent's branch after their check passes; several
+    /// are merged together, all or none, and checked once on the result
     #[command(display_order = 303)]
     Integrate {
-        branch: String,
+        #[arg(required = true, value_name = "BRANCH")]
+        branches: Vec<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Wait for delegated branches to settle: all of them, or the first with --any
+    #[command(display_order = 303)]
+    Wait {
+        /// Default, inside a harness: its children still running
+        #[arg(value_name = "BRANCH")]
+        branches: Vec<String>,
+        /// Return when the first of them settles
+        #[arg(long, conflicts_with = "all")]
+        any: bool,
+        /// Return when all of them have settled (the default)
+        #[arg(long)]
+        all: bool,
+        /// Give up after S seconds; the result says timed_out, and by exits 1
+        #[arg(long, value_name = "S")]
+        timeout: Option<f64>,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -3141,15 +3169,20 @@ pub struct Delegation {
     )]
     delegate: Option<u32>,
     /// Allow the harness's own by commands that act as its branch (spawn, inspect, send,
-    /// discard, artifact, ask, ...; see docs/delegation.md) without asking; nothing else
+    /// wait, discard, artifact, ask, ...; see docs/delegation.md) without asking; nothing else
     #[arg(long)]
     allow_delegation: bool,
+    /// Do not start the harness's next turn on its own when its turn ends while its children
+    /// run and they then settle
+    #[arg(long)]
+    no_wake: bool,
 }
 
 impl Delegation {
     fn apply(self, task: &mut TaskArgs) {
         task.delegate = self.delegate;
         task.allow_delegation = self.allow_delegation;
+        task.no_wake = self.no_wake;
     }
 }
 
@@ -4654,6 +4687,7 @@ mod tests {
                 local: false,
                 delegate: None,
                 allow_delegation: false,
+                no_wake: false,
                 unapproved_tools: false,
                 deny: Vec::new(),
                 provision: None,
@@ -5096,10 +5130,28 @@ mod tests {
         assert_eq!(
             parse_str("integrate kid --json").unwrap(),
             Command::Integrate {
-                branch: "kid".into(),
+                branches: vec!["kid".into()],
                 json: true
             }
         );
+        assert_eq!(
+            parse_str("integrate a b").unwrap(),
+            Command::Integrate {
+                branches: vec!["a".into(), "b".into()],
+                json: false
+            }
+        );
+        assert_eq!(
+            parse_str("wait a b --any --timeout 2.5 --json").unwrap(),
+            Command::Wait {
+                branches: vec!["a".into(), "b".into()],
+                any: true,
+                all: false,
+                timeout: Some(2.5),
+                json: true
+            }
+        );
+        assert!(err("wait --any --all").contains("cannot be used with"));
         assert_eq!(
             parse_str("cancel kid").unwrap(),
             Command::Cancel {

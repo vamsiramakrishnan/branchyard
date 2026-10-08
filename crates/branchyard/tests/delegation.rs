@@ -146,6 +146,7 @@ fn the_envelope_bounds_depth_width_and_harnesses() {
             max_depth: 2,
             max_children: 2,
             harnesses: Vec::new(),
+            ..Envelope::default()
         },
     );
     let root = f
@@ -843,6 +844,7 @@ fn a_rigs_branches_spawn_only_the_seats_below_their_own() {
             max_depth: 1,
             max_children: 1,
             harnesses: vec!["gemini-cli".into()],
+            ..Envelope::default()
         })
     );
 

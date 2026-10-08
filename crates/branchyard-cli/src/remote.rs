@@ -892,6 +892,25 @@ pub fn integrate(remote: &Remote, branch: &str) -> Result<Merged, branchyard::Er
         .ok_or_else(|| branchyard::Error::State("the server returned no merge".into()))
 }
 
+/// `integrate a b c` on the server: several children of one parent,
+/// together.
+pub fn integrate_all(
+    remote: &Remote,
+    branches: &[&str],
+) -> Result<branchyard::MergedAll, branchyard::Error> {
+    let op = remote
+        .repo
+        .integrate_all(branches, &new_key())
+        .map_err(sdk_error)?;
+    let done = remote
+        .client
+        .wait(&op.id, Duration::from_millis(200))
+        .map_err(sdk_error)?;
+    result(done)?
+        .merged_all
+        .ok_or_else(|| branchyard::Error::State("the server returned no merge".into()))
+}
+
 pub fn inspect(remote: &Remote, branch: &str) -> Result<Inspection, branchyard::Error> {
     remote.repo.inspect(branch).map_err(sdk_error)
 }

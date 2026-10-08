@@ -131,7 +131,9 @@ impl Tracker {
             }
             Activity::Status(status) => {
                 let (kind, text) = match status {
-                    BranchStatus::Running | BranchStatus::Waiting => {
+                    BranchStatus::Running
+                    | BranchStatus::Waiting
+                    | BranchStatus::WaitingOnChildren => {
                         self.status.remove(branch);
                         return None;
                     }
