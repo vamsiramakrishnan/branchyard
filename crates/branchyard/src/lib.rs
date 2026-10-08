@@ -123,6 +123,7 @@ mod map;
 mod map_input;
 pub mod models;
 mod names;
+pub mod operations;
 mod ops;
 #[cfg(feature = "postgres")]
 mod pg;
@@ -1317,6 +1318,13 @@ pub struct TaskOptions {
     /// fork joins its parent's). Read only when a branch is created; see
     /// [`tasks`].
     pub join_task: Option<String>,
+    /// Tools a new branch's harness is denied outright, ahead of
+    /// [`TaskOptions::policy`]'s rules; a trailing `*` matches a prefix
+    /// (`by run --deny`). Stored with the branch: they bound every later
+    /// turn, whoever sends it, and every child it delegates to, as a
+    /// parent's denials bound a spawned child (`by spawn --deny`). Read
+    /// only when a branch is created.
+    pub deny: Vec<String>,
 }
 
 /// The variable a turn's harness gets [`TaskOptions::trace_parent`] in.

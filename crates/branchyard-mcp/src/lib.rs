@@ -32,7 +32,9 @@
 //!   as your user and can read `.branchyard/`. See `docs/delegation.md`.
 //!
 //! It uses the official Rust MCP SDK (`rmcp`), server role and stdio
-//! transport only, on a current-thread Tokio runtime.
+//! transport only, on a current-thread Tokio runtime. Its tools and their
+//! arguments are checked against [`branchyard::operations`] by this
+//! crate's tests.
 #![warn(missing_docs)]
 
 use branchyard_support::LockExt as _;
@@ -193,6 +195,7 @@ pub fn tools() -> Vec<Tool> {
                 "additionalProperties": false,
             },
         },
+        "connectors": {"type": "array", "items": {"type": "string"}, "description": "Connector grants, as --connector takes them (github:read, 'github:write:issues.*'); narrowed to yours. Unset: yours, or the seat's"},
         "plan": {"type": "boolean", "description": "Plan first: the child's first turn is read-only and proposes a plan, escalated to your inbox; it changes nothing until you approve_plan"},
     });
     let mut spawn_edit = spawn_properties.clone();
@@ -319,14 +322,15 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "publish_artifact",
             "Publish a file at a path in your worktree as a new immutable artifact of your \
-             branch, content-addressed by its blake3 digest. Ancestors and descendants of your \
-             branch can read it; a sibling needs an explicit share_artifact.",
+             branch, content-addressed by its digest (the blake3 hash of its bytes, hex). \
+             Ancestors and descendants of your branch can read it; a sibling needs an explicit \
+             share_artifact.",
             schema(json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path to the file, in your worktree"},
                     "name": {"type": "string", "description": "Defaults to the file's name"},
-                    "media_type": {"type": "string"},
+                    "media_type": {"type": "string", "description": "Recorded with it, such as application/json; default application/octet-stream"},
                     "labels": {"type": "object", "additionalProperties": {"type": "string"}},
                 },
                 "required": ["path"],
@@ -474,8 +478,13 @@ pub fn tools() -> Vec<Tool> {
         {
             let mut inbox = Tool::new(
                 "inbox",
-                "Every message addressed to you, oldest first.",
-                schema(json!({"type": "object", "properties": {}, "additionalProperties": false})),
+                "Every message addressed to you, oldest first; with unread, only those not yet \
+                 delivered to a turn.",
+                schema(json!({
+                    "type": "object",
+                    "properties": {"unread": {"type": "boolean"}},
+                    "additionalProperties": false,
+                })),
             );
             inbox.annotations = Some(read_only("Read your inbox"));
             inbox
@@ -595,7 +604,7 @@ impl ServerHandler for Server {
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let tool = request.name.to_string();
-        if !TOOLS.contains(&tool.as_str()) {
+        if !tool_names().contains(&tool.as_str()) {
             return Err(ErrorData::invalid_params(
                 Cow::Owned(format!("no tool named {tool}")),
                 None,
@@ -698,4 +707,42 @@ pub fn serve_branch(root: PathBuf, branch: &str) -> Result<(), Failure> {
         .filter(|t| !t.is_empty())
         .ok_or_else(|| Failure::Usage(format!("{ENV_TOKEN} is not set")))?;
     serve_stdio(root, branch, &token).map_err(|e| Failure::Serve(format!("serving MCP: {e}")))
+}
+
+#[allow(clippy::unwrap_used, clippy::panic)] // tests: a panic is the failure report
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    /// The server lists exactly the table's tools, in its order, each with
+    /// exactly the arguments the table names; a tool or an argument added
+    /// here but not there (or there but not here) fails.
+    #[test]
+    fn the_tools_are_the_operations_table() {
+        let listed = tools();
+        let names: Vec<&str> = listed.iter().map(|t| t.name.as_ref()).collect();
+        assert_eq!(names, tool_names());
+        for tool in &listed {
+            let operation = branchyard::operations::by_tool(&tool.name).unwrap();
+            let properties = &tool.input_schema["properties"];
+            let listed: BTreeSet<String> =
+                properties.as_object().unwrap().keys().cloned().collect();
+            let expected: BTreeSet<String> = operation
+                .params
+                .iter()
+                .filter_map(|p| p.tool)
+                .map(|path| path.split('.').next().unwrap().to_owned())
+                .collect();
+            assert_eq!(listed, expected, "{}'s arguments", tool.name);
+            // A nested argument, such as budget.max_usd, is in its object.
+            for path in operation.params.iter().filter_map(|p| p.tool) {
+                if let Some((outer, inner)) = path.split_once('.') {
+                    let nested = &properties[outer]["properties"][inner];
+                    assert!(nested.is_object(), "{} has no {path}", tool.name);
+                }
+            }
+        }
+    }
 }

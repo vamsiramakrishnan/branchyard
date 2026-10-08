@@ -97,6 +97,19 @@ pub(crate) struct NewBranch<'a> {
     /// `None` for a branch that is part of another's work (a delegated
     /// child, an adopted worktree).
     pub task: Option<crate::tasks::Joining>,
+    /// Tools it is denied outright, stored with it; see [`Record::deny`].
+    pub deny: Vec<String>,
+}
+
+/// `kept`, then each of `added` not already in it.
+pub(crate) fn with_denials(kept: &[String], added: &[String]) -> Vec<String> {
+    let mut deny = kept.to_vec();
+    for pattern in added {
+        if !deny.contains(pattern) {
+            deny.push(pattern.clone());
+        }
+    }
+    deny
 }
 
 /// The journaled step that creates a branch's worktree.
@@ -163,6 +176,7 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
         actor: new.actor,
         plan: None,
         goal: None,
+        deny: new.deny,
     })
 }
 
@@ -414,6 +428,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
             provider: options.provider.clone(),
             grant,
             depth: 0,
+            deny: options.deny.clone(),
             provision: options.provision.clone(),
             workspace: options.workspace.clone(),
             seed: None,
@@ -500,6 +515,7 @@ pub(crate) fn run_on(
                 provider: options.provider.clone(),
                 grant: grant.clone(),
                 depth: 0,
+                deny: options.deny.clone(),
                 provision: options.provision.clone(),
                 workspace: options.workspace.clone(),
                 seed: None,
@@ -657,6 +673,7 @@ pub(crate) fn run_attempts(
                 provider: options.provider.clone(),
                 grant: grant.clone(),
                 depth: 0,
+                deny: options.deny.clone(),
                 provision: o.provision.clone(),
                 workspace: options.workspace.clone(),
                 seed: None,
@@ -1342,6 +1359,7 @@ pub(crate) fn fork(
             provider,
             grant,
             depth: 0,
+            deny: with_denials(&parent.deny, &options.deny),
             provision,
             workspace: options
                 .workspace
@@ -1500,6 +1518,7 @@ pub(crate) fn reincarnate_with(
             provider,
             grant,
             depth: 0,
+            deny: with_denials(&parent.deny, &options.deny),
             provision,
             workspace: options
                 .workspace

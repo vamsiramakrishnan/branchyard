@@ -51,9 +51,9 @@ The ancestor check does not need the publisher's branch record to still exist: a
 
 | Surface | Publish | List | Get | Share |
 |---|---|---|---|---|
-| `by` | `by artifact publish FILE [--name N] [--label K=V]... [--branch B]` | `by artifact list [--branch B]` | `by artifact get ID --out PATH [--branch B]` | `by artifact share ID --to BRANCH [--branch B]` |
+| `by` | `by artifact publish FILE [--name N] [--media-type TYPE] [--label K=V]... [--branch B]` | `by artifact list [--branch B]` | `by artifact get ID --out PATH [--branch B]` | `by artifact share ID --to BRANCH [--branch B]` |
 | `by --remote` | same, `--branch` required | same, `--branch` required | same, `--branch` required | same, `--branch` required |
-| Python | `branchyard.publish(path, name=, labels=)` | `branchyard.list_artifacts()` | `branchyard.get_artifact(id, out)` | `branchyard.share_artifact(id, to)` |
+| Python | `branchyard.publish(path, name=, labels=, media_type=)` | `branchyard.list_artifacts()` | `branchyard.get_artifact(id, out)` | `branchyard.share_artifact(id, to)` |
 | Rust `Delegate` | `Delegate::publish_artifact` | `Delegate::artifacts` | `Delegate::read_artifact` | `Delegate::share_artifact` |
 | MCP | `publish_artifact` | `list_artifacts` | `get_artifact` | `share_artifact` |
 | SDK | `Yard::publish_artifact`, `Branch::publish` | `Yard::artifacts`, `Branch::artifacts` | `Yard::read_artifact`, `Branch::read_artifact` | `Yard::share_artifact` |

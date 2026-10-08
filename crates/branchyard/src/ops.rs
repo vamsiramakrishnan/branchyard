@@ -11,7 +11,8 @@ use serde_json::json;
 use crate::record::Recorder;
 use crate::state::{Begun, Lease, Record, Store, Taken};
 use crate::{
-    git, names, recover, Activity, BranchStatus, Error, Merged, RecordedEvent, RemoveOptions, Yard,
+    git, names, recover, Activity, BranchInfo, BranchStatus, Error, Merged, RecordedEvent,
+    RemoveOptions, Yard,
 };
 use branchyard_support::time::now_ms;
 

@@ -278,6 +278,7 @@ impl Live {
             plan: task.plan,
             goal: crate::plan_cmd::goal(task),
             join_task: None,
+            deny: task.deny.clone(),
         })
     }
 
@@ -1340,6 +1341,8 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         },
         check: task.check.clone(),
         max_depth: args.max_depth,
+        max_children: args.max_children,
+        harnesses: args.harnesses.clone(),
         deny: args.deny.clone(),
         seat: args.seat.clone(),
         depends_on: args.depends_on.clone(),
@@ -1347,13 +1350,16 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         bindings: args.bindings.clone(),
         connectors: (!args.connectors.is_empty()).then(|| args.connectors.clone()),
         plan: args.plan,
-        ..Spawn::default()
     };
     if let Some(delegate) = harness_delegate(json)? {
-        if args.parent.is_some() || task.permissions != args::Permissions::Unset {
+        if args.parent.is_some()
+            || task.permissions != args::Permissions::Unset
+            || task.unapproved_tools
+        {
             let error = branchyard::Error::Denied(
                 "inside a harness, the parent is the harness's own branch and the child \
-                 inherits its policy; drop --parent, --yes and --ask"
+                 inherits its policy and approval routing; drop --parent, --yes, --ask, \
+                 --permissions and --allow-unapproved-tools (by spawn --help says why)"
                     .into(),
             );
             return fail(json, &error);
@@ -1836,11 +1842,12 @@ pub fn artifact(target: &Target, args: &ArtifactArgs) -> Outcome {
         "publish" => {
             let path = absolute(given(args.arg.as_deref(), "arg")?);
             let labels = args.labels.iter().cloned().collect();
-            let result = act.publish_artifact(&path, args.name.clone(), labels);
+            let result =
+                act.publish_artifact(&path, args.name.clone(), args.media_type.clone(), labels);
             emit(json, result, |a| {
                 format!(
-                    "published {} as {} ({} bytes, {})\n",
-                    a.name, a.id, a.size, a.digest
+                    "published {} as {} ({} bytes, {}, blake3 {})\n",
+                    a.name, a.id, a.size, a.media_type, a.digest
                 )
             })
         }

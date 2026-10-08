@@ -363,7 +363,7 @@ fn child_budgets_fit_in_what_the_parent_has_left() {
     let delegate = root.delegate(options.clone()).unwrap();
     denied(
         delegate.spawn(spawn("HANG", "a")),
-        "needs max_usd; $1.0000 remains",
+        "needs one too, max_usd (--budget-usd); $1.0000 remains",
     );
     let with = |usd: f64, name: &str| Spawn {
         budget: Budget::usd(usd),
@@ -384,7 +384,7 @@ fn child_budgets_fit_in_what_the_parent_has_left() {
             budget: Budget::usd(0.1).turns(4),
             ..spawn("HANG", "b")
         }),
-        "max_turns 4 exceeds root's 3",
+        "max_turns (--max-turns) 4 exceeds root's 3",
     );
     let b = delegate.spawn(with(0.4, "b")).unwrap();
     assert_eq!(b.status, BranchStatus::Running);

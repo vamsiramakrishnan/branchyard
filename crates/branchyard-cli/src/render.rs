@@ -1190,8 +1190,9 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
         ));
     }
     if let Some(envelope) = &i.envelope {
+        // Empty means the branch's own profile only: name it.
         let harnesses = match envelope.harnesses.is_empty() {
-            true => "its own".to_owned(),
+            true => format!("{} only (its own)", i.profile),
             false => envelope.harnesses.join(", "),
         };
         pairs.push((

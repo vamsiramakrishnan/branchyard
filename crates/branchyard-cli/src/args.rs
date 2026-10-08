@@ -107,6 +107,9 @@ pub struct TaskArgs {
     /// `--allow-unapproved-tools`: run a profile whose tools Branchyard's
     /// policy never sees.
     pub unapproved_tools: bool,
+    /// `by run --deny`: tools the harness is denied outright, stored with
+    /// the branch.
+    pub deny: Vec<String>,
     /// `--secret`, `--auth`, `--mcp`, `--model`, `--effort` and
     /// `--telemetry`; `None` when none was given.
     pub provision: Option<branchyard::Provisioning>,
@@ -519,6 +522,10 @@ pub struct SpawnArgs {
     pub parent: Option<String>,
     pub wait: bool,
     pub max_depth: Option<u32>,
+    /// `--max-children`: at most the parent's.
+    pub max_children: Option<u32>,
+    /// `--harnesses`: what the child may delegate to.
+    pub harnesses: Option<Vec<String>>,
     pub deny: Vec<String>,
     /// `--seat`: the rig seat the child fills.
     pub seat: Option<String>,
@@ -2237,9 +2244,10 @@ pub enum GraphAction {
         branch: Option<String>,
     },
     /// Apply a graph proposal to a branch's children, atomically
-    #[command(group(
-        clap::ArgGroup::new("proposal").required(true).args(["file", "edits"])
-    ))]
+    #[command(
+        group(clap::ArgGroup::new("proposal").required(true).args(["file", "edits"])),
+        after_help = GRAPH_APPLY_HELP
+    )]
     Apply {
         /// The proposal, {"expected_revision", "edits"}; - for stdin
         file: Option<String>,
@@ -3109,10 +3117,16 @@ pub struct Provision {
     /// auth-file, vertex-ai
     #[arg(long, value_name = "METHOD")]
     auth: Option<String>,
-    /// A stdio MCP server for the harness, COMMAND an absolute path with its arguments.
-    /// Repeatable
-    #[arg(long = "mcp", value_name = "NAME=COMMAND", value_parser = branchyard::McpServerSpec::parse)]
-    mcp_servers: Vec<branchyard::McpServerSpec>,
+    /// An MCP server for the harness: NAME=COMMAND starts a stdio server, COMMAND an absolute
+    /// path with its arguments; NAME=https://URL connects to a streamable HTTP server where the
+    /// harness can (Claude Code, ACP agents that advertise it). Repeatable
+    #[arg(long = "mcp", value_name = "NAME=COMMAND|NAME=URL", value_parser = mcp_server)]
+    mcp_servers: Vec<McpArg>,
+    /// A header for an HTTP --mcp server, its value read each turn from the variable VAR or the
+    /// file @FILE and never stored, as a --secret is (so it needs --isolated or a sandbox), such
+    /// as 'search:Authorization=@/run/search-auth'. Repeatable
+    #[arg(long = "mcp-header", value_name = "NAME:HEADER=VAR|@FILE", value_parser = mcp_header)]
+    mcp_headers: Vec<McpHeader>,
     /// Standing instructions for the harness, read from FILE
     #[arg(long, value_name = "FILE")]
     instructions: Option<String>,
@@ -3154,10 +3168,37 @@ pub struct Provision {
 }
 
 impl Provision {
-    fn apply(self, task: &mut TaskArgs) {
+    fn apply(self, task: &mut TaskArgs) -> Result<(), String> {
+        let mut secrets = self.secrets;
+        let mut mcp_servers = Vec::new();
+        let mut remote_mcp_servers = Vec::new();
+        for server in self.mcp_servers {
+            match server {
+                McpArg::Stdio(spec) => mcp_servers.push(spec),
+                McpArg::Http(spec) => remote_mcp_servers.push(spec),
+            }
+        }
+        for header in self.mcp_headers {
+            let server = remote_mcp_servers
+                .iter_mut()
+                .find(|s: &&mut branchyard::RemoteMcpSpec| s.name == header.server)
+                .ok_or_else(|| {
+                    format!(
+                        "--mcp-header names {}, which no --mcp {}=https://... gives",
+                        header.server, header.server
+                    )
+                })?;
+            server
+                .headers
+                .insert(header.header.clone(), header.secret.name.clone());
+            if !secrets.iter().any(|s| s.name == header.secret.name) {
+                secrets.push(header.secret);
+            }
+        }
         let spec = branchyard::Provisioning {
-            secrets: self.secrets,
-            mcp_servers: self.mcp_servers,
+            secrets,
+            mcp_servers,
+            remote_mcp_servers,
             auth: self.auth,
             model: self.model,
             effort: self.effort,
@@ -3171,7 +3212,73 @@ impl Provision {
         };
         task.provision = (!spec.is_empty() || self.instructions.is_some()).then_some(spec);
         task.instructions = self.instructions;
+        Ok(())
     }
+}
+
+/// One `--mcp`: a stdio server the harness starts, or an HTTP one it
+/// connects to.
+#[derive(Clone, Debug, PartialEq)]
+pub enum McpArg {
+    Stdio(branchyard::McpServerSpec),
+    Http(branchyard::RemoteMcpSpec),
+}
+
+/// `--mcp NAME=COMMAND` or `--mcp NAME=https://URL`.
+fn mcp_server(text: &str) -> Result<McpArg, String> {
+    let (name, rest) = text
+        .split_once('=')
+        .ok_or_else(|| format!("an MCP server is NAME=COMMAND or NAME=URL, not {text:?}"))?;
+    let url = rest.trim();
+    if url.starts_with("https://") || url.starts_with("http://") {
+        let spec = branchyard::RemoteMcpSpec {
+            name: name.to_owned(),
+            transport: branchyard::RemoteMcpTransport::Http,
+            url: url.to_owned(),
+            headers: Default::default(),
+        };
+        spec.check()?;
+        return Ok(McpArg::Http(spec));
+    }
+    branchyard::McpServerSpec::parse(text).map(McpArg::Stdio)
+}
+
+/// One `--mcp-header NAME:HEADER=VAR|@FILE`: the header and the secret
+/// that holds its value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpHeader {
+    server: String,
+    header: String,
+    secret: branchyard::SecretSource,
+}
+
+fn mcp_header(text: &str) -> Result<McpHeader, String> {
+    let shape = || format!("an MCP header is NAME:HEADER=VAR or NAME:HEADER=@FILE, not {text:?}");
+    let (server, rest) = text.split_once(':').ok_or_else(shape)?;
+    let (header, source) = rest.split_once('=').ok_or_else(shape)?;
+    if server.is_empty() || header.is_empty() || source.is_empty() {
+        return Err(shape());
+    }
+    // A file's value gets a secret named for the server and header; a
+    // variable's is the secret of that name, as `--secret VAR` is.
+    let secret = match source.strip_prefix('@') {
+        Some(_) => {
+            let name: String = format!("MCP_{server}_{header}")
+                .chars()
+                .map(|c| match c.is_ascii_alphanumeric() {
+                    true => c.to_ascii_uppercase(),
+                    false => '_',
+                })
+                .collect();
+            branchyard::SecretSource::parse(&format!("{name}={source}"))?
+        }
+        None => branchyard::SecretSource::parse(source)?,
+    };
+    Ok(McpHeader {
+        server: server.to_owned(),
+        header: header.to_owned(),
+        secret,
+    })
 }
 
 /// `by run`'s options.
@@ -3199,6 +3306,16 @@ pub struct RunFlags {
     limits: Limits,
     #[command(flatten)]
     perms: Perms,
+    /// Tools the harness is denied outright, before any permission answer, --yes included; a
+    /// trailing * matches a prefix. Stored with the branch: later sends and every child it
+    /// delegates to keep them, as with by spawn --deny
+    #[arg(
+        long,
+        value_name = "TOOL,TOOL,...",
+        value_parser = harness_list,
+        help_heading = "Permissions"
+    )]
+    deny: Option<List>,
     #[command(flatten)]
     launch: Launch,
     #[command(flatten)]
@@ -3228,9 +3345,10 @@ impl Flags for RunFlags {
         };
         self.limits.apply(&mut task);
         self.perms.apply(&mut task);
+        task.deny = self.deny.map(|list| list.0).unwrap_or_default();
         self.launch.apply(&mut task)?;
         self.delegation.apply(&mut task);
-        self.provision.apply(&mut task);
+        self.provision.apply(&mut task)?;
         self.plan_goal.apply(&mut task);
         Ok(task)
     }
@@ -3343,6 +3461,7 @@ impl Flags for FanFlags {
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: self.plan_goal,
+            deny: None,
         }
         .check()
     }
@@ -3595,6 +3714,7 @@ impl Flags for MapFlags {
             delegation: Delegation::default(),
             provision: self.provision,
             plan_goal: PlanGoal::default(),
+            deny: None,
         }
         .check()
     }
@@ -3641,7 +3761,7 @@ impl Flags for SendFlags {
         self.limits.apply(&mut task);
         self.perms.apply(&mut task);
         self.delegation.apply(&mut task);
-        self.provision.apply(&mut task);
+        self.provision.apply(&mut task)?;
         Ok(task)
     }
 }
@@ -3680,6 +3800,7 @@ impl Flags for ForkFlags {
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: PlanGoal::default(),
+            deny: None,
         }
         .check()
     }
@@ -3722,6 +3843,7 @@ impl Flags for ReincarnateFlags {
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: PlanGoal::default(),
+            deny: None,
         }
         .check()
     }
@@ -3771,6 +3893,13 @@ pub struct SpawnGraph {
     /// Levels the child may delegate below itself (default: one fewer than the parent)
     #[arg(long, value_name = "N")]
     max_depth: Option<u32>,
+    /// Children the child may have at once (default and most: the parent's)
+    #[arg(long, value_name = "N")]
+    max_children: Option<u32>,
+    /// Harness or profile IDs the child may delegate to, each allowed to the parent (default:
+    /// the parent's)
+    #[arg(long, value_name = "ID,ID,...", value_parser = harness_list)]
+    harnesses: Option<List>,
     /// Tools the child is denied outright; a trailing * matches a prefix
     #[arg(long, value_name = "TOOL,TOOL,...", value_parser = harness_list)]
     deny: Option<List>,
@@ -3811,6 +3940,8 @@ impl Flags for SpawnFlags {
             parent: self.parent,
             wait: self.wait,
             max_depth: self.graph.max_depth,
+            max_children: self.graph.max_children,
+            harnesses: self.graph.harnesses.map(|list| list.0),
             deny: self.graph.deny.map(|list| list.0).unwrap_or_default(),
             seat: self.seat,
             depends_on: self.graph.depends_on.map(|list| list.0).unwrap_or_default(),
@@ -3966,7 +4097,7 @@ pub fn command() -> clap::Command {
 }
 
 fn build_command() -> clap::Command {
-    let cmd = Cli::command();
+    let cmd = crate::operations::annotate(Cli::command());
     let header = *cmd.get_styles().get_header();
     let listing = command_listing(&cmd);
     cmd.help_template(format!(
@@ -4476,6 +4607,7 @@ mod tests {
                 delegate: None,
                 allow_delegation: false,
                 unapproved_tools: false,
+                deny: Vec::new(),
                 provision: None,
                 instructions: None,
                 issue: None,

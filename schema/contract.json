@@ -321,6 +321,13 @@
             }
           ],
           "description": "A goal a judge verifies, like `by run --goal`."
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tools the branch's harness is denied outright, like `by run --deny`\nand [`branchyard::TaskOptions::deny`]: stored with the branch, ahead\nof every policy its turns run under, and passed on to its children."
         }
       },
       "required": [
@@ -1749,6 +1756,13 @@
                 }
               ],
               "description": "A goal a judge verifies, like `by run --goal`."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Tools the branch's harness is denied outright, like `by run --deny`\nand [`branchyard::TaskOptions::deny`]: stored with the branch, ahead\nof every policy its turns run under, and passed on to its children."
             }
           },
           "required": [
@@ -3371,6 +3385,24 @@
                 "target",
                 "commit"
               ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why, as whoever discarded it said."
+                },
+                "state": {
+                  "type": "string",
+                  "const": "discarded"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "Settled and set aside on purpose, with the reason (`by discard`):\nit runs no more turns and is never integrated, its record and cost\nare kept, and it no longer counts against its parent's\n`max_children`."
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
@@ -3725,6 +3757,24 @@
                 "target",
                 "commit"
               ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why, as whoever discarded it said."
+                },
+                "state": {
+                  "type": "string",
+                  "const": "discarded"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "Settled and set aside on purpose, with the reason (`by discard`):\nit runs no more turns and is never integrated, its record and cost\nare kept, and it no longer counts against its parent's\n`max_children`."
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
@@ -14136,6 +14186,29 @@
             "$ref": "#/$defs/GrantEntry"
           },
           "description": "The child's connector grant, like [`branchyard::Spawn::connectors`]:\nnarrowed to its parent's; unset is its seat's or its parent's."
+        },
+        "max_children": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Children the child may have, like [`branchyard::Spawn::max_children`];\nat most its parent's."
+        },
+        "harnesses": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Harnesses the child may delegate to, like\n[`branchyard::Spawn::harnesses`]; each must be allowed to its parent."
+        },
+        "plan": {
+          "type": "boolean",
+          "description": "Plan first, like `by spawn --plan`: the child's first turn is\nread-only and its plan is escalated to its parent."
         }
       },
       "required": [
@@ -15019,6 +15092,24 @@
                 "target",
                 "commit"
               ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why, as whoever discarded it said."
+                },
+                "state": {
+                  "type": "string",
+                  "const": "discarded"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "Settled and set aside on purpose, with the reason (`by discard`):\nit runs no more turns and is never integrated, its record and cost\nare kept, and it no longer counts against its parent's\n`max_children`."
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
@@ -15332,6 +15423,24 @@
                 "target",
                 "commit"
               ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why, as whoever discarded it said."
+                },
+                "state": {
+                  "type": "string",
+                  "const": "discarded"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "Settled and set aside on purpose, with the reason (`by discard`):\nit runs no more turns and is never integrated, its record and cost\nare kept, and it no longer counts against its parent's\n`max_children`."
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
@@ -15920,6 +16029,24 @@
                 "target",
                 "commit"
               ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why, as whoever discarded it said."
+                },
+                "state": {
+                  "type": "string",
+                  "const": "discarded"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "Settled and set aside on purpose, with the reason (`by discard`):\nit runs no more turns and is never integrated, its record and cost\nare kept, and it no longer counts against its parent's\n`max_children`."
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
@@ -16909,6 +17036,24 @@
                 "target",
                 "commit"
               ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why, as whoever discarded it said."
+                },
+                "state": {
+                  "type": "string",
+                  "const": "discarded"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "Settled and set aside on purpose, with the reason (`by discard`):\nit runs no more turns and is never integrated, its record and cost\nare kept, and it no longer counts against its parent's\n`max_children`."
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
@@ -18990,6 +19135,24 @@
                 "target",
                 "commit"
               ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why, as whoever discarded it said."
+                },
+                "state": {
+                  "type": "string",
+                  "const": "discarded"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "Settled and set aside on purpose, with the reason (`by discard`):\nit runs no more turns and is never integrated, its record and cost\nare kept, and it no longer counts against its parent's\n`max_children`."
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
@@ -23499,6 +23662,24 @@
                 "target",
                 "commit"
               ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why, as whoever discarded it said."
+                },
+                "state": {
+                  "type": "string",
+                  "const": "discarded"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "Settled and set aside on purpose, with the reason (`by discard`):\nit runs no more turns and is never integrated, its record and cost\nare kept, and it no longer counts against its parent's\n`max_children`."
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
@@ -26770,6 +26951,24 @@
                 "target",
                 "commit"
               ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why, as whoever discarded it said."
+                },
+                "state": {
+                  "type": "string",
+                  "const": "discarded"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "Settled and set aside on purpose, with the reason (`by discard`):\nit runs no more turns and is never integrated, its record and cost\nare kept, and it no longer counts against its parent's\n`max_children`."
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
@@ -27301,6 +27500,24 @@
                 "target",
                 "commit"
               ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why, as whoever discarded it said."
+                },
+                "state": {
+                  "type": "string",
+                  "const": "discarded"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "Settled and set aside on purpose, with the reason (`by discard`):\nit runs no more turns and is never integrated, its record and cost\nare kept, and it no longer counts against its parent's\n`max_children`."
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
@@ -28781,6 +28998,24 @@
                 "target",
                 "commit"
               ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why, as whoever discarded it said."
+                },
+                "state": {
+                  "type": "string",
+                  "const": "discarded"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "Settled and set aside on purpose, with the reason (`by discard`):\nit runs no more turns and is never integrated, its record and cost\nare kept, and it no longer counts against its parent's\n`max_children`."
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
@@ -29078,6 +29313,24 @@
                 "target",
                 "commit"
               ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why, as whoever discarded it said."
+                },
+                "state": {
+                  "type": "string",
+                  "const": "discarded"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "Settled and set aside on purpose, with the reason (`by discard`):\nit runs no more turns and is never integrated, its record and cost\nare kept, and it no longer counts against its parent's\n`max_children`."
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
@@ -29522,6 +29775,24 @@
                 "target",
                 "commit"
               ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why, as whoever discarded it said."
+                },
+                "state": {
+                  "type": "string",
+                  "const": "discarded"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "Settled and set aside on purpose, with the reason (`by discard`):\nit runs no more turns and is never integrated, its record and cost\nare kept, and it no longer counts against its parent's\n`max_children`."
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
@@ -31084,6 +31355,24 @@
                 "target",
                 "commit"
               ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why, as whoever discarded it said."
+                },
+                "state": {
+                  "type": "string",
+                  "const": "discarded"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "Settled and set aside on purpose, with the reason (`by discard`):\nit runs no more turns and is never integrated, its record and cost\nare kept, and it no longer counts against its parent's\n`max_children`."
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
@@ -35385,6 +35674,13 @@
                 }
               ],
               "description": "A goal a judge verifies, like `by run --goal`."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Tools the branch's harness is denied outright, like `by run --deny`\nand [`branchyard::TaskOptions::deny`]: stored with the branch, ahead\nof every policy its turns run under, and passed on to its children."
             }
           },
           "required": [
@@ -37040,6 +37336,13 @@
                 }
               ],
               "description": "A goal a judge verifies, like `by run --goal`."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Tools the branch's harness is denied outright, like `by run --deny`\nand [`branchyard::TaskOptions::deny`]: stored with the branch, ahead\nof every policy its turns run under, and passed on to its children."
             }
           },
           "required": [
@@ -38714,6 +39017,13 @@
                 }
               ],
               "description": "A goal a judge verifies, like `by run --goal`."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Tools the branch's harness is denied outright, like `by run --deny`\nand [`branchyard::TaskOptions::deny`]: stored with the branch, ahead\nof every policy its turns run under, and passed on to its children."
             }
           },
           "required": [
@@ -40384,6 +40694,13 @@
                 }
               ],
               "description": "A goal a judge verifies, like `by run --goal`."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Tools the branch's harness is denied outright, like `by run --deny`\nand [`branchyard::TaskOptions::deny`]: stored with the branch, ahead\nof every policy its turns run under, and passed on to its children."
             }
           },
           "required": [
@@ -42419,6 +42736,13 @@
                 }
               ],
               "description": "A goal a judge verifies, like `by run --goal`."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Tools the branch's harness is denied outright, like `by run --deny`\nand [`branchyard::TaskOptions::deny`]: stored with the branch, ahead\nof every policy its turns run under, and passed on to its children."
             }
           },
           "required": [

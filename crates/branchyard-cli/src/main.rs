@@ -30,6 +30,7 @@ mod map_cmd;
 mod models_cmd;
 mod notify;
 mod open;
+mod operations;
 mod plan_cmd;
 mod ports;
 mod pr;

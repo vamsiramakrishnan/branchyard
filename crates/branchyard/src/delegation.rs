@@ -703,17 +703,22 @@ impl Delegate {
 
     /// Publish `path` as a new immutable artifact of this branch; see
     /// `docs/storage.md`.
+    ///
+    /// `media_type` is recorded with it (default
+    /// `application/octet-stream`); its `digest` is the blake3 hash of its
+    /// bytes, in lower-case hex.
     pub fn publish_artifact(
         &self,
         path: &Path,
         name: Option<String>,
+        media_type: Option<String>,
         labels: std::collections::BTreeMap<String, String>,
     ) -> Result<crate::ArtifactRef, Error> {
         match &self.via {
-            Via::Local(local) => local.publish_artifact(path, name, None, labels),
+            Via::Local(local) => local.publish_artifact(path, name, media_type, labels),
             Via::Remote(_) => self.typed(
                 "publish_artifact",
-                json!({"path": path, "name": name, "labels": labels}),
+                json!({"path": path, "name": name, "media_type": media_type, "labels": labels}),
             ),
         }
     }
@@ -856,6 +861,11 @@ impl Delegate {
         self.typed("inbox", json!({}))
     }
 
+    /// The messages addressed to this branch not yet delivered to a turn.
+    pub fn unread(&self) -> Result<Inbox, Error> {
+        self.typed("inbox", json!({"unread": true}))
+    }
+
     /// Inspect `branch` until it is not running a turn, for up to
     /// `timeout`. Fails with [`Error::Running`] if it still is.
     ///
@@ -972,11 +982,14 @@ pub(crate) fn effective_budget(record: &Record, budget: &Budget) -> Budget {
     }
 }
 
-/// The caller's policy with the denials a parent imposed put first.
+/// The caller's policy with the denials a parent imposed, and those the
+/// branch was started with, put first.
 pub(crate) fn effective_policy(record: &Record, policy: &Policy) -> Policy {
-    match record.grant.as_ref().map(|g| &g.deny) {
-        Some(deny) if !deny.is_empty() => narrowed(policy, deny),
-        _ => policy.clone(),
+    let given = record.grant.as_ref().map_or(&[][..], |g| g.deny.as_slice());
+    let deny = run::with_denials(given, &record.deny);
+    match deny.is_empty() {
+        true => policy.clone(),
+        false => narrowed(policy, &deny),
     }
 }
 
@@ -1725,12 +1738,8 @@ impl Local {
         let envelope = grant.envelope.child(request, own)?;
         let planned_usd: f64 = planned.iter().filter_map(|p| p.limits.max_usd).sum();
         let limits = self.child_limits(caller, &request.budget, planned_usd)?;
-        let mut deny = grant.deny.clone();
-        for pattern in &request.deny {
-            if !deny.contains(pattern) {
-                deny.push(pattern.clone());
-            }
-        }
+        // The parent's own denials, those it was given, then the request's.
+        let deny = run::with_denials(&run::with_denials(&grant.deny, &caller.deny), &request.deny);
         let child_grant = Grant {
             envelope,
             deny,
@@ -1865,6 +1874,8 @@ impl Local {
                 provider: caller.provider.clone(),
                 grant: Some(child_grant),
                 depth: caller.info.depth + 1,
+                // Its denials are in its grant.
+                deny: Vec::new(),
                 provision,
                 workspace: caller.workspace.as_ref().map(|w| w.spec.clone()),
                 // Resolved when it starts, from its parent as it is then
@@ -1982,21 +1993,24 @@ impl Local {
         let max_usd = match (bounds.max_usd, asked.max_usd) {
             (_, Some(ask)) if !(ask.is_finite() && ask > 0.0) => {
                 return Err(Error::Denied(format!(
-                    "a child's max_usd must be a positive number, not {ask}"
+                    "a child's {} must be a positive number, not {ask}",
+                    crate::operations::limit_text("max_usd")
                 )))
             }
             (Some(_), None) => {
                 let remaining = (self.remaining(caller).unwrap_or(0.0) - planned_usd).max(0.0);
                 return Err(Error::Denied(format!(
-                    "{} has a cost limit, so a child needs max_usd; ${remaining:.4} remains",
-                    self.branch
+                    "{} has a cost limit, so a child needs one too, {}; ${remaining:.4} remains",
+                    self.branch,
+                    crate::operations::limit_text("max_usd")
                 )));
             }
             (Some(_), Some(ask)) => {
                 let remaining = self.remaining(caller).unwrap_or(0.0) - planned_usd;
                 if ask > remaining + EPSILON_USD {
                     return Err(Error::Denied(format!(
-                        "max_usd {ask} exceeds what {} has left, ${:.4}",
+                        "{} {ask} exceeds what {} has left, ${:.4}",
+                        crate::operations::limit_text("max_usd"),
                         self.branch,
                         remaining.max(0.0)
                     )));
@@ -2008,7 +2022,8 @@ impl Local {
         let max_turns = match (bounds.max_turns, asked.max_turns) {
             (Some(limit), Some(ask)) if ask > limit => {
                 return Err(Error::Denied(format!(
-                    "max_turns {ask} exceeds {}'s {limit}",
+                    "{} {ask} exceeds {}'s {limit}",
+                    crate::operations::limit_text("max_turns"),
                     self.branch
                 )))
             }
@@ -2753,6 +2768,9 @@ fn to_json<T: Serialize>(value: &T) -> Result<Value, Error> {
 /// One operation with its tool's JSON arguments. Every surface ends here or
 /// in the typed methods it calls.
 pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Value, Error> {
+    let operation = crate::operations::by_tool(tool)
+        .ok_or_else(|| Error::Denied(format!("no delegation tool named {tool}")))?;
+    local.require(operation.capability, operation.name)?;
     match tool {
         "spawn" => {
             let spec: SpawnSpec = parse(tool, arguments)?;
@@ -2879,8 +2897,12 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
             to_json(&local.answer(args.message_id, &args.text)?)
         }
         "inbox" => {
-            let _: NoArgs = parse(tool, arguments)?;
-            to_json(&local.inbox()?)
+            let args: InboxArgs = parse(tool, arguments)?;
+            let mut inbox = local.inbox()?;
+            if args.unread {
+                inbox.messages.retain(|m| !m.delivered);
+            }
+            to_json(&inbox)
         }
         other => Err(Error::Denied(format!("no delegation tool named {other}"))),
     }
@@ -2960,6 +2982,7 @@ mod tests {
             actor: None,
             plan: None,
             goal: None,
+            deny: Vec::new(),
         }
     }
 

@@ -91,7 +91,17 @@ by graph show           # your children, what each waits for, and the revision
 
 `by graph apply --edits '[...]' --expected-revision N` creates several
 children and dependencies at once, all or nothing; if it says
-`stale_revision`, run `by graph show` and propose again.
+`stale_revision`, run `by graph show` and propose again. Each edit is an
+object tagged by `kind`:
+
+```sh
+by graph apply --expected-revision 3 --edits '[
+  {"kind": "spawn", "name": "schema", "prompt": "Add the migration"},
+  {"kind": "spawn", "name": "api", "prompt": "Use the column", "depends_on": ["schema"]},
+  {"kind": "add_dependency", "dependent": "docs", "prerequisite": "api"}]'
+```
+
+`by graph apply --help` lists every field.
 
 ## In a rig
 
@@ -106,6 +116,25 @@ by spawn --seat reviewer "Review the tokenizer candidate on by/parser-implemente
 The seat sets the child's harness, budget, check and instructions; you
 may pass a smaller budget, never a larger one. In Python, pass `seat=`;
 the MCP `spawn` tool takes `seat`.
+
+## Sharing results and asking your parent
+
+Every child, even one that cannot delegate further, can publish files and
+message you, and you can do the same with your own parent:
+
+```sh
+by artifact publish results.json --name results --media-type application/json
+by artifact list
+by artifact get 3 --out data/results.json
+by ask "Should the parser accept tabs?" --wait 300
+by report "Tokenizer done; formatter next"
+by inbox --unread
+by answer 12 "Yes, accept tabs"
+```
+
+Artifacts you publish are readable by your ancestors and descendants; a
+sibling needs `by artifact share ID --to BRANCH`. An artifact's `digest`
+is the blake3 hash of its bytes.
 
 ## With Python
 

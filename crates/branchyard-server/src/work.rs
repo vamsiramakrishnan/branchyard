@@ -691,6 +691,7 @@ pub(crate) fn task_options(
         workspace: app.workspace(repo)?,
         plan: request.plan,
         goal: goal(app, request)?,
+        deny: request.deny.clone(),
         ..app.options(
             repo,
             budget,
@@ -947,7 +948,9 @@ pub(crate) fn spawn_parts(
         after: request.after,
         bindings: request.bindings.clone(),
         connectors: request.connectors.clone(),
-        ..Spawn::default()
+        max_children: request.max_children,
+        harnesses: request.harnesses.clone(),
+        plan: request.plan,
     };
     Ok((options, spawn))
 }

@@ -58,7 +58,10 @@ fn a_harness_spawns_a_child_and_integrates_it_into_its_own_branch() {
         .unwrap();
     let said = reply(&f, "root");
     assert!(
-        said.contains(&format!("mcp tools: {}", branchyard_mcp::TOOLS.join(","))),
+        said.contains(&format!(
+            "mcp tools: {}",
+            branchyard_mcp::tool_names().join(",")
+        )),
         "{said}"
     );
     let spawned = result(&said, "spawn");

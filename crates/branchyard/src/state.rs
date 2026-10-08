@@ -127,6 +127,11 @@ pub(crate) struct Record {
     /// The goal a judge verifies when a turn ends ready. See `crate::goal`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<crate::goal::GoalState>,
+    /// Tools the branch was started denying (`by run --deny`), ahead of
+    /// every policy its turns run under, and passed on to its children.
+    /// A delegated child's own come from its parent, in its grant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
 }
 
 /// The right to write a branch's state for one turn: the branch's current
