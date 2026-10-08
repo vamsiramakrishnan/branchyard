@@ -295,6 +295,8 @@ Children run on threads of the process that runs their parent's turn, whether th
 | `pending` | Still queued in Branchyard; the engine running the turn has not written it yet. |
 | `refused` | Never reached the model (an error, `steer_refused`): the harness refused it, an interrupt cancelled it, or the turn ended first. |
 
+`by send --steer`'s text starts with the state, in these words, then says what it means, with the boundary in plain words: `accepted: it joined units's running turn, and the model reads it before its next model call (steer 1)`, `written: sent to units's harness for its running turn; the harness has not confirmed it yet (steer 1)`, or `pending: ...`. `--json` gives the `Steer` with `boundary` as the profile names it (`claude_next_model_call`).
+
 Steered input is never queued for a later turn: input the running turn does not take is refused, and `send` without `--steer` starts the next turn. When the harness takes the input depends on its protocol ([harness integration](harness-integration.md#steering-a-running-turn)): Claude Code, Pi and Codex before their next model call, claude-agent-acp at once, interrupting the response in progress but not the turn. A child whose harness cannot take input mid-turn (Amp, Antigravity, an ACP agent without the steering extension) is refused with the reason, never interrupted in its place; a child with no running turn is `not_running`, and `send` continues it instead. The child's budget and permissions do not change.
 
 A child's own spend counts against every ancestor through the reservations. `inspect` reports `subtree_cost_usd`, the reported spend of a branch and its descendants.

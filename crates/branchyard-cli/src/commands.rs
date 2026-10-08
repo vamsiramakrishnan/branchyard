@@ -735,22 +735,21 @@ pub fn steer(target: &Target, branch: &str, prompt: &str, task: &TaskArgs, json:
             Err(Failure::Reported)
         }
         _ if json => print(&format!("{}\n", to_json(&steer))),
+        // The state first, in the words the delegate skill and the JSON
+        // use, then what it means; the boundary in plain words.
         branchyard::SteerState::Pending => print(&format!(
-            "queued for {branch}'s running turn; its engine has not delivered it yet \
+            "pending: queued for {branch}'s running turn; its engine has not delivered it yet \
              (steer {})\n",
             steer.id
         )),
         branchyard::SteerState::Written => print(&format!(
-            "written to {branch}'s harness for its running turn; the harness has not confirmed \
-             it yet (steer {})\n",
+            "written: sent to {branch}'s harness for its running turn; the harness has not \
+             confirmed it yet (steer {})\n",
             steer.id
         )),
         branchyard::SteerState::Accepted => print(&format!(
-            "joined {branch}'s running turn; the model reads it at {} (steer {})\n",
-            steer
-                .boundary
-                .as_deref()
-                .unwrap_or("the harness's next boundary"),
+            "accepted: it joined {branch}'s running turn, and the model reads it {} (steer {})\n",
+            branchyard_harness::steer_boundary_text(steer.boundary.as_deref().unwrap_or("")),
             steer.id
         )),
     }

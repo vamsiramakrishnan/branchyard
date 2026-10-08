@@ -44,9 +44,10 @@ session, and merging overlapping edits produces conflicts.
    `by inspect <child>` shows status, diffstat, cost and its last message;
    `by events <child>` shows its activity. To correct a child that is still
    running, `by send <child> --steer "<text>"` adds to its running turn
-   without stopping it. It answers `accepted` once the running turn took it
-   (the child reads it at its next step, never in a later turn), or
-   `written` if the harness has not confirmed it yet. Some harnesses cannot
+   without stopping it. Its answer starts with `accepted:` once the running
+   turn took it, and says when the child reads it (for Claude Code, before
+   its next model call; never in a later turn), or with `written:` if the
+   harness has not confirmed it yet. Some harnesses cannot
    take it, and the refusal says so.
    A child whose turn was cut off because the engine running it stopped
    says so in its status; `by send <child> --retry` submits that turn's

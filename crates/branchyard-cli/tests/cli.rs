@@ -898,7 +898,7 @@ fn send_steer_reaches_a_turn_another_process_runs() {
     assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
     assert!(
         stdout(&out)
-            .starts_with("joined live's running turn; the model reads it at acp_session_steering"),
+            .starts_with("accepted: it joined live's running turn, and the model reads it at once"),
         "{}",
         stdout(&out)
     );

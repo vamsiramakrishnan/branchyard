@@ -914,9 +914,36 @@ impl Turns {
     }
 }
 
+/// When the model reads input steered at `boundary` ([`Driver::steer_boundary`]),
+/// in plain words, for a person: Claude Code, Codex and Pi before their
+/// next model call, claude-agent-acp at once.
+pub fn steer_boundary_text(boundary: &str) -> &'static str {
+    match boundary {
+        "claude_next_model_call" | "codex_turn_steer" | "pi_steer" => "before its next model call",
+        "acp_session_steering" => "at once, interrupting the response in progress but not the turn",
+        _ => "at its harness's next step",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_steer_boundary_reads_in_plain_words() {
+        for (boundary, text) in [
+            ("claude_next_model_call", "before its next model call"),
+            ("codex_turn_steer", "before its next model call"),
+            ("pi_steer", "before its next model call"),
+            ("acp_session_steering", "at once, interrupting"),
+            ("turn_start", "at its harness's next step"),
+        ] {
+            assert!(
+                steer_boundary_text(boundary).starts_with(text),
+                "{boundary}"
+            );
+        }
+    }
 
     #[test]
     fn native_sessions_refuse_flag_and_control_shapes() {
