@@ -173,7 +173,10 @@ fn refusals_reach_the_harness_as_tool_errors() {
     let me = result(&said, "inspect");
     assert_eq!(me["name"], "root");
     assert_eq!(me["max_usd"], 1.0);
-    assert_eq!(me["remaining_usd"], 0.5);
+    // kid has settled: it holds what it spent (nothing), not its $0.50.
+    assert_eq!(me["remaining_usd"], 1.0);
+    assert_eq!(me["reserved_usd"], 0.0);
+    assert_eq!(me["reserving_children"], 0);
     // The other branch was never touched.
     assert!(f.yard.branch("other").unwrap().info().children.is_empty());
 }
@@ -202,10 +205,7 @@ fn steer_adds_to_a_running_childs_turn() {
     assert_eq!(steered["branch"], "kid");
     assert_eq!(steered["by"], "root");
     assert!(
-        matches!(
-            steered["state"]["state"].as_str(),
-            Some("delivered" | "accepted")
-        ),
+        matches!(steered["state"]["state"].as_str(), Some("accepted")),
         "{said}"
     );
     assert!(

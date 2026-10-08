@@ -389,6 +389,7 @@ fn put(tx: &Transaction<'_>, record: &Record) -> Result<(), Error> {
     let mut record = record.clone();
     if let Some(current) = stored_record(tx, name)? {
         record.info.children = current.info.children;
+        record.removed = current.removed;
     }
     let text = encode(name, &record)?;
     let updated = tx
@@ -1081,6 +1082,22 @@ impl Backend for Sqlite {
             let Some(incarnation) = incarnation(tx, name)? else {
                 return Ok(());
             };
+            // Its spend stays in its parent's ledger.
+            if let Some(removed) = stored_record(tx, name)? {
+                let parent = removed.info.parent.as_deref();
+                if let Some(mut owner) = parent.map(|p| stored_record(tx, p)).transpose()?.flatten()
+                {
+                    let mut read = |n: &str| stored_record(tx, n).ok().flatten();
+                    if crate::state::note_removed(&mut owner, &removed, &mut read) {
+                        let owner_name = owner.info.name.clone();
+                        tx.execute(
+                            "UPDATE branches SET record = ?2 WHERE name = ?1",
+                            params![owner_name, encode(&owner_name, &owner)?],
+                        )
+                        .map_err(|e| db("delete", e))?;
+                    }
+                }
+            }
             tx.execute("DELETE FROM reservations WHERE name = ?1", params![name])
                 .map_err(|e| db("delete", e))?;
             for sql in [
@@ -1580,7 +1597,7 @@ impl Backend for Sqlite {
             }
             match state {
                 SteerState::Pending => Ok(None),
-                SteerState::Delivered | SteerState::Accepted => tx
+                SteerState::Written | SteerState::Accepted => tx
                     .query_row(
                         "UPDATE messages SET delivered_ms = ?2, delivered_steer = ?1 \
                          WHERE steer_id = ?1 AND delivered_ms IS NULL RETURNING id",

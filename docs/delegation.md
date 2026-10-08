@@ -66,7 +66,7 @@ Inside a delegating harness, each command acts as the harness's branch, on its d
 | `by inspect [<branch>]` | This branch, or a descendant | Any branch |
 | `by events [<branch>] [--cursor N] [--limit N]` | Same | Any branch |
 | `by send <branch> "<prompt>"` | Starts a descendant's next turn and returns | Runs the turn in the foreground, as before |
-| `by send <branch> --steer "<text>"` | Adds the text to a descendant's running turn without interrupting it, and waits up to 10 s for delivery | Any branch's running turn, in any process |
+| `by send <branch> --steer "<text>"` | Adds the text to a descendant's running turn without interrupting it, and waits up to 10 s for the turn to take it | Any branch's running turn, in any process |
 | `by integrate <branch>` | Merges a descendant into this branch | Merges a delegated child into its parent |
 | `by cancel <branch>` | Stops a descendant's turn and every turn below it | Any branch and its subtree |
 | `by children [<branch>]` | This branch's descendants | Any branch's |
@@ -81,10 +81,10 @@ These are the Rust types' serde forms, identical across `by --json`, the Python 
 | Command | Result |
 |---|---|
 | `spawn` | `Spawned`: `{name, git_branch, harness, profile, base, depth, status, budget: {max_usd, max_turns, max_minutes}}`, and `seat` for a child spawned by seat. With `--wait`, or outside a harness: `Inspection` |
-| `inspect` | `Inspection`: `{name, status, harness, profile, parent, children, depth, turns, candidate, cost_usd, subtree_cost_usd, max_usd, remaining_usd, envelope, last_message}`, and for a branch in a rig its `seat` and the `seats` it may spawn |
+| `inspect` | `Inspection`: `{name, status, harness, profile, parent, children, depth, turns, candidate, cost_usd, subtree_cost_usd, max_usd, remaining_usd, reserved_usd, reserving_children, settled_children_usd, envelope, last_message}`, and for a branch in a rig its `seat` and the `seats` it may spawn. `last_message` is the harness's final message of its last turn (its text after its last tool call), not every text of the turn run together; one longer than 4000 characters keeps its beginning and its end |
 | `events` | `EventPage`: `{branch, events: [{at_ms, activity}], next_cursor, total}` |
 | `send` | `Sent`: `{name, status}` |
-| `send --steer` / `steer` | `Steer`: `{id, branch, by, text, requested_at_ms, state}`, `state` `{"state": "delivered" \| "accepted" \| "pending"}`; a refusal is the error `steer_refused`, carrying the `Steer` |
+| `send --steer` / `steer` | `Steer`: `{id, branch, by, text, requested_at_ms, state, boundary}`, `state` `{"state": "accepted" \| "written" \| "pending"}`; a refusal is the error `steer_refused`, carrying the `Steer`. See [steering](#steering-a-child) |
 | `integrate` | `Merged`: `{branch, target, previous, commit}` |
 | `cancel` | `Cancelled`: `{cancelled: [branch]}` |
 | `children` | `Children`: `{branch, descendants: [BranchInfo]}` |
@@ -178,14 +178,28 @@ A message sits *pending* until it is acknowledged. Acknowledging it (marking it 
 | Limit | Rule |
 |---|---|
 | Depth | `max_depth` counts levels below a branch. A child's is at most one less than its parent's; at 0, the harness gets no tools. |
-| Width | `max_children` per branch, counting children until they are removed. A child's is at most its parent's. |
+| Width | `max_children` per branch, counting its live children: running, waiting, blocked or awaiting plan approval. A settled child (ready, no changes, interrupted, over budget, failed, merged) does not count, and neither does a removed one; sending a settled child more work is refused while the live ones fill the envelope. A child's is at most its parent's. |
 | Harnesses | Harness or profile IDs children may run; empty means the parent's own profile only. A child may be allowed only what its parent is. |
-| Cost | A child's `max_usd` must fit in what its parent has left: the parent's limit minus its own spend minus every other child's reservation. A child reserves its whole limit, or what its subtree has spent if that is more. A parent with a cost limit must give each child one. The parent's own turns stop once its spend plus its children's reservations reach its limit. |
+| Cost | A child's `max_usd` must fit in what its parent has left: the parent's limit minus its own spend minus what its children hold ([budgets](#budgets)). A parent with a cost limit must give each child one. The parent's own turns stop once its spend plus what its children hold reach its limit. |
 | Turns and duration | A child's are at most its parent's, and default to them. |
 | Permissions | A child runs under its parent's policy with the parent's added denials first (`--deny`). Nothing a child asks for widens it. |
 | Connectors | A child's grant is its parent's, its seat's or its own ask, intersected with its parent's ([below](#connectors)). |
 
 A child's limits and denials are stored with it and bound every later turn, whoever sends it.
+
+### Budgets
+
+A child holds part of its parent's budget, and how much depends on whether it can still spend without asking:
+
+- **Live** (running, waiting for prerequisites, blocked, or with a plan awaiting approval): its whole `max_usd`, or what its subtree has spent if that is more. It may spend up to its limit without its parent's say, so that much is set aside.
+- **Settled** (ready, no changes, interrupted, over budget, failed, merged): only what its subtree spent. The rest of its limit is its parent's again at once, to spend or to give another child.
+- **Removed**: what its subtree spent when it was removed. The store writes that figure into the parent's record as it deletes the child (the record's `removed` ledger, kept by every later write of the parent), so neither `subtree_cost_usd` nor what the parent has left forgets money that was spent.
+
+A **ready** child the parent may still send to is settled: it holds what it spent until it is sent something. A `send` (or a delegated `send` through `by`, Python or MCP) to a settled child makes it live again, so its limit must fit again: it must fit in the parent's `max_children`, and if the part of its limit it has not spent is more than its parent has left, its limit is narrowed to what is left (`max_usd` becomes its spend so far plus what the parent had left) and its log records a warning saying so. A parent with nothing left refuses the send. A person's own `by send` to a delegated child bypasses this, as it bypasses the parent's other choices; the child's own limit still holds.
+
+`inspect` shows the split: `reserved_usd` is what its `reserving_children` live children hold, `settled_children_usd` what its settled and removed children spent, and `remaining_usd` its `max_usd` less its own spend and both. `by inspect` prints it as `budget $R of $M left ($X reserved by N live children, $Y spent by settled ones)`.
+
+A running branch's own cost is known while its turn runs. Each model call's usage, as the harness reports it during the turn (Claude Code's `assistant` frames carry their call's tokens and model), is priced from the catalog (`catalog/pricing.toml`) or taken from the harness's own per-call figure, added to what the branch had spent, written to its record, and checked against its limit; the harness's cumulative figure replaces the estimate whenever it reports one (Claude Code's at each `result`). A parent therefore sees its running children's spend, and a branch inspecting itself sees its own instead of `cost unknown`. The estimate runs low by the output still streaming when a call's last block arrived.
 
 Branchyard also ships an opt-in permission rule, `Policy::allow_delegation_commands(by_path)` or `--allow-delegation`. It allows exactly the harness's shell commands that run `by` (by name, or the exposed path) with one of the eight delegation subcommands (`spawn`, `inspect`, `events`, `send`, `integrate`, `cancel`, `children`, `graph`), as a single simple command: plain or quoted words, no variables, substitutions, globs, redirections, pipes or command lists. It looks through one `sh -c` or `bash -lc` wrapper, which is how Codex reports commands. Like any rule it is ordered, so an earlier deny, such as one a parent imposed, still wins. The subcommands act within the envelope, so the rule grants nothing beyond it. It trusts `PATH` to resolve `by` to the one the engine put first; a harness that can rewrite its `PATH` can already run anything.
 
@@ -234,7 +248,18 @@ Children run on threads of the process that runs their parent's turn, whether th
 
 `by cancel` records a durable cancel request for the running turn (see [durability](durability.md#cancellation-and-deadlines)), which the engine running it checks every 100 ms, in whichever process that is; the turn is interrupted like a budget stop, and ends `interrupted`. A request is bound to the turn it was asked of and never stops a later one. A branch none of whose turns submitted a prompt, such as a child cancelled before its harness opened a session, has no conversation to continue: a later `send` starts a fresh session with only the prompt it sends, and records a warning that says so. A branch that ran a prompt and has no session is still refused.
 
-`by send --steer`, `branchyard.steer(branch, text)`, `Delegate::steer` and the MCP `steer` tool add input to a descendant's running turn instead of waiting for it to end: queued durably and bound to that turn like a cancel, written to its harness by the engine running it, and recorded in the child's log as `steered` by the parent, and in the parent's as a `steer` delegation. They wait up to 10 seconds for delivery and return the `Steer`. When the harness takes the input depends on its protocol ([harness integration](harness-integration.md#steering-a-running-turn)): Claude Code, Pi and Codex before their next model call, claude-agent-acp at once, interrupting the response in progress but not the turn. A child whose harness cannot take input mid-turn (Amp, Antigravity, an ACP agent without the steering extension) is refused with the reason, never interrupted in its place; a child with no running turn is `not_running`, and `send` continues it instead. The child's budget and permissions do not change.
+### Steering a child
+
+`by send --steer`, `branchyard.steer(branch, text)`, `Delegate::steer` and the MCP `steer` tool add input to a descendant's running turn instead of waiting for it to end: queued durably and bound to that turn like a cancel, written to its harness by the engine running it, and recorded in the child's log as `steered` by the parent, and in the parent's as a `steer` delegation. They wait up to 10 seconds for the turn to take it and return the `Steer`, whose `state` says where it is:
+
+| `state` | Meaning |
+|---|---|
+| `accepted` | It joined the running turn: the harness queued it into the turn in flight, and the model reads it at `boundary` (for Claude Code `claude_next_model_call`: before its next model call, still in this turn). |
+| `written` | Written to the harness's input; the harness has not confirmed it within the wait. It was `delivered` before 8 October 2026, and stored rows of that name still read as `written`. |
+| `pending` | Still queued in Branchyard; the engine running the turn has not written it yet. |
+| `refused` | Never reached the model (an error, `steer_refused`): the harness refused it, an interrupt cancelled it, or the turn ended first. |
+
+Steered input is never queued for a later turn: input the running turn does not take is refused, and `send` without `--steer` starts the next turn. When the harness takes the input depends on its protocol ([harness integration](harness-integration.md#steering-a-running-turn)): Claude Code, Pi and Codex before their next model call, claude-agent-acp at once, interrupting the response in progress but not the turn. A child whose harness cannot take input mid-turn (Amp, Antigravity, an ACP agent without the steering extension) is refused with the reason, never interrupted in its place; a child with no running turn is `not_running`, and `send` continues it instead. The child's budget and permissions do not change.
 
 A child's own spend counts against every ancestor through the reservations. `inspect` reports `subtree_cost_usd`, the reported spend of a branch and its descendants.
 

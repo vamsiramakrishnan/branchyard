@@ -223,6 +223,32 @@ pub fn event_line(event: &Event, style: Style) -> Option<String> {
         Event::ProtocolViolation { detail } => {
             style.paint(Tone::Red, &format!("protocol violation: {detail}"))
         }
+        Event::Progress { .. } => dim("working".into()),
+        Event::HarnessTaskStarted {
+            task,
+            background: true,
+        } => dim(format!(
+            "background task {} started: {}",
+            task.task_id, task.description
+        )),
+        Event::HarnessTaskStarted { task, .. } => dim(format!(
+            "task {} started: {}",
+            task.task_id, task.description
+        )),
+        Event::HarnessTaskEnded {
+            task_id, status, ..
+        } => dim(format!("task {task_id} {status}")),
+        Event::BackgroundTasks { running } if running.is_empty() => {
+            dim("no background tasks running".into())
+        }
+        Event::BackgroundTasks { running } => dim(format!(
+            "background tasks running: {}",
+            running
+                .iter()
+                .map(|t| t.task_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
         Event::Unrecognized { kind } => dim(format!("unrecognized {kind}")),
         Event::SessionClosed => dim("session closed".into()),
     })
@@ -643,8 +669,13 @@ impl Renderer {
     pub fn event(&mut self, branch: &str, event: &Event) -> String {
         match event {
             Event::MessageDelta { text, .. } => return self.text(branch, text),
-            // Kept in the record for `by log`; noise in live output.
-            Event::Unrecognized { .. } => return String::new(),
+            // Kept in the record for `by log`; noise in live output: a
+            // message the driver does not know, liveness, and each model
+            // call's tokens (the turn's total comes at its end).
+            Event::Unrecognized { .. } | Event::Progress { .. } => return String::new(),
+            Event::UsageObserved { usage, .. } if !usage.cumulative && usage.cost_usd.is_none() => {
+                return String::new()
+            }
             _ => {}
         }
         match event_line(event, self.style) {
@@ -1158,6 +1189,30 @@ pub fn summary(info: &BranchInfo, style: Style) -> String {
     key_values(&pairs, style)
 }
 
+/// What a branch's children hold of its budget, as the budget line's
+/// parenthesis: `($0.60 reserved by 1 live child, $0.25 spent by settled
+/// ones)`. Empty for a branch whose children hold nothing.
+fn held_text(i: &branchyard::Inspection) -> String {
+    let mut parts = Vec::new();
+    if i.reserving_children > 0 {
+        let children = match i.reserving_children {
+            1 => "1 live child".to_owned(),
+            n => format!("{n} live children"),
+        };
+        parts.push(format!("{} reserved by {children}", usd(i.reserved_usd)));
+    }
+    if i.settled_children_usd > 0.0 {
+        parts.push(format!(
+            "{} spent by settled ones",
+            usd(i.settled_children_usd)
+        ));
+    }
+    match parts.is_empty() {
+        true => String::new(),
+        false => format!(" ({})", parts.join(", ")),
+    }
+}
+
 /// `by inspect`.
 pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     let (status, tone) = status_text(&i.status);
@@ -1186,7 +1241,12 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     if let Some(max) = i.max_usd {
         pairs.push((
             "budget",
-            format!("{} of {} left", money(i.remaining_usd), usd(max)),
+            format!(
+                "{} of {} left{}",
+                money(i.remaining_usd),
+                usd(max),
+                held_text(i)
+            ),
         ));
     }
     if let Some(envelope) = &i.envelope {
@@ -1555,6 +1615,7 @@ mod tests {
                         output_tokens: Some(678),
                         cached_input_tokens: Some(2_000_000),
                         cost_usd: Some(0.0421),
+                        ..Usage::default()
                     },
                 },
                 "usage $0.04 · 12.3k in · 678 out · 2.0M cached (session)",
@@ -1792,6 +1853,30 @@ mod tests {
              x-claude-code │ harness ready\n\
              x-codex       │ left\n"
         );
+    }
+
+    /// The budget line says what holds the part of it that is not left.
+    #[test]
+    fn inspect_explains_what_children_hold_of_the_budget() {
+        let mut i: branchyard::Inspection = serde_json::from_value(serde_json::json!({
+            "name": "meta", "status": {"state": "running"}, "harness": "claude-code",
+            "profile": "claude-code-stream-json", "parent": null, "children": ["a", "b", "c"],
+            "depth": 0, "turns": 1, "candidate": null, "cost_usd": 0.1,
+            "subtree_cost_usd": 0.35, "max_usd": 1.5, "remaining_usd": 0.2,
+            "reserved_usd": 0.95, "reserving_children": 2, "settled_children_usd": 0.25,
+            "envelope": null, "last_message": "",
+        }))
+        .unwrap();
+        let text = inspection(&i, Style::PLAIN);
+        assert!(
+            text.contains(
+                "$0.20 of $1.50 left ($0.95 reserved by 2 live children, $0.25 spent by settled ones)"
+            ),
+            "{text}"
+        );
+        (i.reserving_children, i.reserved_usd, i.settled_children_usd) = (0, 0.0, 0.0);
+        let text = inspection(&i, Style::PLAIN);
+        assert!(text.contains("$0.20 of $1.50 left") && !text.contains("reserved by"));
     }
 
     #[test]

@@ -163,6 +163,7 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
         actor: new.actor,
         plan: None,
         goal: None,
+        removed: Vec::new(),
     })
 }
 

@@ -654,10 +654,7 @@ fn a_harness_steers_its_running_children_with_by_and_python() {
     assert_eq!(steered["branch"], "kid");
     assert_eq!(steered["by"], "root");
     assert!(
-        matches!(
-            steered["state"]["state"].as_str(),
-            Some("delivered" | "accepted")
-        ),
+        matches!(steered["state"]["state"].as_str(), Some("accepted")),
         "{said}"
     );
     for expected in ["steered root", "finished no_changes", "refused not_running"] {
@@ -703,7 +700,8 @@ fn send_steer_reaches_a_turn_another_process_runs() {
     let out = repo.by(&["send", "live", "--steer", "try the other file"]);
     assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
     assert!(
-        stdout(&out).starts_with("delivered into live's running turn"),
+        stdout(&out)
+            .starts_with("joined live's running turn; the model reads it at acp_session_steering"),
         "{}",
         stdout(&out)
     );
@@ -1247,12 +1245,13 @@ fn a_rig_runs_its_root_which_fills_seats_with_by_and_python() {
     ]);
     assert_eq!(third.status.code(), Some(1));
     let third: Value = serde_json::from_slice(&third.stdout).unwrap();
-    // The envelope still bounds everything: three seats' worth of children.
+    // The seat still bounds its workers. (The envelope's max_children
+    // would not: it counts live children, and these have settled.)
     assert!(
         third["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("already has 3 children, its envelope's max_children"),
+            .contains("already has 2 children in seat worker, the seat's instances"),
         "{third}"
     );
 }
