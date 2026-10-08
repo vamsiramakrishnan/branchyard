@@ -247,12 +247,17 @@ impl Driver for Amp {
             turn_acknowledgment: true,
             usage: true,
             steer: false,
+            model: false,
         }
     }
 
     fn capability_reasons(&self) -> &'static [crate::CapabilityReason] {
         &[
             ("fork", "Amp cannot fork a thread"),
+            (
+                "model",
+                "Amp selects models through agent modes, not a model name",
+            ),
             (
                 "cancellation",
                 "Amp's streaming input has no cancellation message",

@@ -340,6 +340,7 @@ mod tests {
             created_at: 0,
             stalled: false,
             superseded_by: None,
+            model: None,
         };
         let mut attempts = vec![
             attempt(&info("a"), &[], vec!["x".into(), "y".into()]),

@@ -179,6 +179,7 @@ pub fn tools() -> Vec<Tool> {
         },
         "connectors": {"type": "array", "items": {"type": "string"}, "description": "Connector grants, as --connector takes them (github:read, 'github:write:issues.*'); narrowed to yours. Unset: yours, or the seat's"},
         "plan": {"type": "boolean", "description": "Plan first: the child's first turn is read-only and proposes a plan, escalated to your inbox; it changes nothing until you approve_plan"},
+        "model": {"type": "string", "description": "The model the child's harness runs, or a size alias (small, medium, large, extra-large) where it defines one; a cheaper one suits mechanical work. Unset: the seat's, or yours. Refused for a harness that cannot choose one"},
     });
     let mut spawn_edit = spawn_properties.clone();
     spawn_edit["kind"] = json!({"const": "spawn"});

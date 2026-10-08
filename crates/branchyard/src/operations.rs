@@ -293,6 +293,7 @@ pub const OPERATIONS: &[Operation] = &[
             Param::all("--bind", "bindings", "bindings"),
             Param::all("--connector", "connectors", "connectors"),
             Param::all("--plan", "plan", "plan"),
+            Param::all("--model", "model", "model"),
             Param::cli(
                 "--prompt-file",
                 "a tool call and a Python string carry a prompt of any length; only a shell \
@@ -828,6 +829,7 @@ pub const SHARED_TASK_FLAGS: &[&str] = &[
     "--deny",
     "--plan",
     "--connector",
+    "--model",
 ];
 
 #[cfg(test)]

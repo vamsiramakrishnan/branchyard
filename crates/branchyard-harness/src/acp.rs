@@ -419,6 +419,7 @@ impl Driver for Acp {
             usage: false,
             // Enforced again against the agent's `_meta.steering`.
             steer: true,
+            model: false,
         }
     }
 
@@ -433,6 +434,10 @@ impl Driver for Acp {
                 "ACP session/fork is an unstable method; a driver that cannot fork must say so rather than start a fresh session",
             ),
             ("turn_acknowledgment", "not verified"),
+            (
+                "model",
+                "ACP v1 has no model parameter; selection belongs to the agent's own configuration",
+            ),
             ("usage", "not verified"),
         ]
     }

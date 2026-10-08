@@ -362,6 +362,7 @@ mod tests {
             created_at: 7,
             stalled: false,
             superseded_by: None,
+            model: None,
         };
         let value = branch(&info);
         assert_eq!(value["status"], json!({ "state": "failed", "reason": "r" }));

@@ -2026,6 +2026,7 @@ mod tests {
             created_at: 0,
             stalled: false,
             superseded_by: None,
+            model: None,
         }
     }
 

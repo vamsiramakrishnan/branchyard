@@ -1424,6 +1424,7 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         bindings: args.bindings.clone(),
         connectors: (!args.connectors.is_empty()).then(|| args.connectors.clone()),
         plan: args.plan,
+        model: args.model.clone(),
     };
     if let Some(delegate) = harness_delegate(json)? {
         if args.parent.is_some()
@@ -1443,23 +1444,30 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
             Err(error) => return fail(json, &error),
         };
         if !args.wait {
-            return emit(json, Ok(spawned), |s| match &s.status {
-                branchyard::BranchStatus::Waiting => format!(
-                    "created {} on {}, waiting for {}\n",
-                    s.name,
-                    render::harness_label(&s.harness, &s.profile),
-                    s.depends_on.join(", ")
-                ),
-                branchyard::BranchStatus::Blocked { reason } => {
-                    format!("created {}, blocked: {reason}\n", s.name)
+            return emit(json, Ok(spawned), |s| {
+                let on = match &s.model {
+                    Some(model) => format!(
+                        "{} with model {model}",
+                        render::harness_label(&s.harness, &s.profile)
+                    ),
+                    None => render::harness_label(&s.harness, &s.profile),
+                };
+                match &s.status {
+                    branchyard::BranchStatus::Waiting => format!(
+                        "created {} on {on}, waiting for {}\n",
+                        s.name,
+                        s.depends_on.join(", ")
+                    ),
+                    branchyard::BranchStatus::Blocked { reason } => {
+                        format!("created {}, blocked: {reason}\n", s.name)
+                    }
+                    _ => format!(
+                        "spawned {} on {on} from {}\n{}",
+                        s.name,
+                        short(&s.base),
+                        check_note(s)
+                    ),
                 }
-                _ => format!(
-                    "spawned {} on {} from {}\n{}",
-                    s.name,
-                    render::harness_label(&s.harness, &s.profile),
-                    short(&s.base),
-                    check_note(s)
-                ),
             });
         }
         let done = delegate.wait(&spawned.name, std::time::Duration::MAX);

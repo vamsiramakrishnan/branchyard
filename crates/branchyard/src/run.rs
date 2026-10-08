@@ -156,6 +156,7 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
             created_at: created_ms / 1000,
             stalled: false,
             superseded_by: None,
+            model: new.provision.as_ref().and_then(|p| p.model.clone()),
         },
         created_ms,
         check: new.check,
@@ -1215,6 +1216,7 @@ fn prepare(
         }
         record.provision = Some(spec);
     }
+    record.info.model = record.provision.as_ref().and_then(|p| p.model.clone());
     crate::provisioning::check(record.provision.as_ref(), record.home.is_some())?;
     crate::egress::check(record.provision.as_ref(), record.provider.as_ref())?;
     // A delegated child keeps the envelope and seats its parent gave it.

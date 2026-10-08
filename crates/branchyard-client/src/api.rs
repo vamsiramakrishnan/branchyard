@@ -565,6 +565,10 @@ pub struct SpawnRequest {
     /// read-only and its plan is escalated to its parent.
     #[serde(default, skip_serializing_if = "is_false")]
     pub plan: bool,
+    /// The child's model, like [`branchyard::Spawn::model`]; unset is its
+    /// seat's or its parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 fn is_settled(after: &After) -> bool {

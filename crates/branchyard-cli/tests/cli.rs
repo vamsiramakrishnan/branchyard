@@ -2981,3 +2981,87 @@ fn the_python_module_waits_for_children_and_integrates_them_together() {
         assert!(said.contains(expected), "{expected:?} missing from\n{said}");
     }
 }
+
+/// `by spawn --model` gives the child its model: Claude Code's stream-json
+/// driver launches it with `--model`, and `by inspect` and `by ls --json`
+/// show it. A harness whose driver cannot choose a model refuses it.
+#[test]
+fn spawn_gives_a_child_its_model() {
+    let repo = Repo::new();
+    let record = repo.dir.join("launch.json");
+    let agent = fake_agent!().display().to_string();
+    let command = format!("{agent} --record-launch {}", record.display());
+    let root = repo.by(&[
+        "run",
+        "say hi",
+        "--name",
+        "root",
+        "--harness",
+        "claude-code-stream-json",
+        "--command",
+        &command,
+        "--delegate=2",
+        "--yes",
+    ]);
+    assert!(record.is_file(), "{}\n{}", stdout(&root), stderr(&root));
+    let launched = || -> Vec<String> {
+        let launched: Value = serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+        serde_json::from_value(launched["cmdline"].clone()).unwrap()
+    };
+    assert!(!launched().contains(&"--model".to_owned()));
+    fs::remove_file(&record).unwrap();
+    let spawned = repo.by(&[
+        "spawn", "go", "--parent", "root", "--name", "kid", "--model", "haiku", "--yes", "--json",
+    ]);
+    assert!(
+        record.is_file(),
+        "{}\n{}",
+        stdout(&spawned),
+        stderr(&spawned)
+    );
+    let cmdline = launched();
+    let at = cmdline
+        .iter()
+        .position(|a| a == "--model")
+        .expect("--model");
+    assert_eq!(cmdline[at + 1], "haiku", "{cmdline:?}");
+    assert_eq!(repo.json(&["inspect", "kid", "--json"])["model"], "haiku");
+    let text = stdout(&repo.by(&["inspect", "kid"]));
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("model") && l.ends_with("haiku")),
+        "{text}"
+    );
+    let listed = repo.json(&["ls", "--json"]);
+    let kid = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["name"] == "kid")
+        .unwrap();
+    assert_eq!(kid["model"], "haiku", "{listed}");
+    let root = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["name"] == "root")
+        .unwrap();
+    assert!(root.get("model").is_none(), "{listed}");
+
+    // An ACP harness cannot be given one.
+    let out = repo.by_agent(&["run", "say hi", "--name", "acp", "--delegate=2", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let refused = repo.by(&[
+        "spawn", "go", "--parent", "acp", "--model", "haiku", "--yes", "--json",
+    ]);
+    assert_eq!(refused.status.code(), Some(1));
+    let refused: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refused["error"]["kind"], "unsupported", "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("ACP v1 has no model parameter"),
+        "{refused}"
+    );
+}

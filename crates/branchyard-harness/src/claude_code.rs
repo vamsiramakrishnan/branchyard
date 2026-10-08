@@ -692,6 +692,7 @@ impl Driver for ClaudeCode {
             turn_acknowledgment: true,
             usage: true,
             steer: true,
+            model: true,
         }
     }
 

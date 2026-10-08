@@ -418,6 +418,7 @@ impl Driver for Codex {
             turn_acknowledgment: true,
             usage: true,
             steer: true,
+            model: true,
         }
     }
 

@@ -195,6 +195,8 @@ fn claude_api_key_model_and_telemetry_keep_the_users_claude_json() {
     context.telemetry = telemetry("http://127.0.0.1:14317");
     let plan = provision(&temp, &context);
     golden("claude-api-key", &temp, &plan);
+    // The stream-json driver is given the model too, as `--model`.
+    assert_eq!(plan.session.model.as_deref(), Some("claude-opus-5-5"));
     // The key is in a 0600 file that `apiKeyHelper` prints, not in the
     // environment the harness's tools inherit, and no longer approved by
     // fingerprint in `.claude.json`.

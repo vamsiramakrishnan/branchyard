@@ -83,6 +83,21 @@ pub(crate) fn check_approvals(profile: &Profile, allowed: bool) -> Result<(), Er
     )))
 }
 
+/// Refuse a model for a profile whose driver cannot choose one, with the
+/// reason the driver records.
+pub(crate) fn check_model(profile: &Profile) -> Result<(), Error> {
+    let driver = profile.driver();
+    if driver.capabilities().model {
+        return Ok(());
+    }
+    let reasons = branchyard_harness::reasons_for(&["model"], driver.capability_reasons());
+    let reason = reasons.first().map_or("not verified", |(_, why)| why);
+    Err(Error::Unsupported(format!(
+        "{} cannot be given a model: {reason}; drop the model or choose another harness",
+        profile.id
+    )))
+}
+
 /// Fail with [`Error::HarnessUnavailable`] unless `command[0]` is an
 /// executable file, by path or on `PATH`.
 pub(crate) fn check_available(harness: &str, command: &[String]) -> Result<(), Error> {

@@ -689,6 +689,8 @@ pub struct Capabilities {
     pub usage: bool,
     /// Input delivered into a running turn ([`Driver::steer`]).
     pub steer: bool,
+    /// A model chosen per session ([`Open::model`]).
+    pub model: bool,
 }
 
 /// What a task needs from its harness. Unset fields are not required.
@@ -701,6 +703,8 @@ pub struct Requirements {
     pub turn_acknowledgment: bool,
     pub usage: bool,
     pub steer: bool,
+    /// A model chosen per session ([`Capabilities::model`]).
+    pub model: bool,
 }
 
 /// A capability name (as [`admit`] and [`Driver::capabilities`] name it,
@@ -751,6 +755,7 @@ pub fn admit(required: &Requirements, offered: &Capabilities) -> Result<(), Vec<
         ),
         ("usage", required.usage, offered.usage),
         ("steer", required.steer, offered.steer),
+        ("model", required.model, offered.model),
     ]
     .into_iter()
     .filter(|(_, needed, available)| *needed && !available)

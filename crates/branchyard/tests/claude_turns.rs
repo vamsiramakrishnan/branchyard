@@ -197,3 +197,50 @@ fn every_branch_has_its_own_temporary_directory() {
     f.yard.remove("tmp").unwrap();
     assert!(!dir.exists());
 }
+
+/// A child spawned with a model runs it: the engine opens its session with
+/// it and the stream-json driver passes it as `--model`. Its record and
+/// its inspection say which; its parent, spawned without one, runs the
+/// harness's default.
+#[test]
+fn a_child_spawned_with_a_model_runs_it() {
+    let f = Fixture::new();
+    let turn = format!("printf '%s\\n' \"$@\" > args.txt\n{}", result(0.01));
+    let options = TaskOptions {
+        delegation: Some(branchyard::Envelope::default()),
+        delegation_server: Some(vec![common::fake_agent().display().to_string()]),
+        ..stand_in(&f, &turn)
+    };
+    let root = f
+        .yard
+        .task("go")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let args = |name: &str| {
+        let worktree = f.yard.branch(name).unwrap().info().worktree.clone();
+        std::fs::read_to_string(worktree.join("args.txt")).unwrap()
+    };
+    assert!(!args("root").contains("--model"), "{}", args("root"));
+    let delegate = root.delegate(options).unwrap();
+    let kid = delegate
+        .spawn(branchyard::Spawn {
+            name: Some("kid".into()),
+            model: Some("claude-haiku-5-5".into()),
+            ..branchyard::Spawn::new("go")
+        })
+        .unwrap();
+    assert_eq!(kid.model.as_deref(), Some("claude-haiku-5-5"));
+    root.wait_subtree().unwrap();
+    assert!(
+        args("kid").contains("--model\nclaude-haiku-5-5\n"),
+        "{}",
+        args("kid")
+    );
+    let info = f.yard.branch("kid").unwrap().info().clone();
+    assert_eq!(info.model.as_deref(), Some("claude-haiku-5-5"));
+    let inspected = delegate.inspect("kid").unwrap();
+    assert_eq!(inspected.model.as_deref(), Some("claude-haiku-5-5"));
+    assert_eq!(f.yard.branch("root").unwrap().info().model, None);
+}

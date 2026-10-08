@@ -850,6 +850,7 @@ pub fn spawn(
         max_children: args.max_children,
         harnesses: args.harnesses.clone(),
         plan: args.plan,
+        model: args.model.clone(),
     };
     let op = remote
         .repo

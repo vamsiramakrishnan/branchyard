@@ -543,6 +543,8 @@ pub struct SpawnArgs {
     pub connectors: Vec<branchyard::connectors::GrantEntry>,
     /// `--plan`: the child plans first, read-only.
     pub plan: bool,
+    /// `--model`: the child's model. Unset: its seat's or its parent's.
+    pub model: Option<String>,
     pub json: bool,
 }
 
@@ -877,7 +879,7 @@ array alone. Each edit is an object tagged by \"kind\":
       max_turns, max_minutes}, check [argv], max_depth, max_children,
       harnesses [ids], deny [tools], seat, depends_on [names], after
       (settled or integrated), bindings [{scratch, access}], connectors
-      [grants], plan
+      [grants], plan, model
   {\"kind\": \"add_dependency\", \"dependent\": \"B\", \"prerequisite\": \"A\",
    \"after\": \"settled\"}   B waits for A; B must not have started
   {\"kind\": \"remove_dependency\", \"dependent\": \"B\", \"prerequisite\": \"A\"}
@@ -3959,6 +3961,11 @@ pub struct SpawnFlags {
     /// profile); shown as both, `claude-code (claude-code-stream-json)`
     #[arg(long, value_name = "ID")]
     harness: Option<String>,
+    /// The child's model, or a size alias (small, medium, large, extra-large) where its harness
+    /// defines one; a cheaper one suits mechanical work (default: its seat's, else the parent's).
+    /// Refused for a harness whose driver cannot choose one
+    #[arg(long, value_name = "NAME", value_parser = non_blank)]
+    model: Option<String>,
     /// Take the task from this issue: GitHub's (URL, #N or N, through gh), linear:KEY, jira:KEY,
     /// gitlab:GROUP/PROJECT#N, or a Linear, Jira or GitLab URL; a prompt, if given, is added
     #[arg(long, value_name = "REF", value_parser = non_blank)]
@@ -4046,6 +4053,7 @@ impl Flags for SpawnFlags {
             bindings: self.graph.bindings,
             connectors: self.graph.connectors,
             plan: self.graph.plan,
+            model: self.model,
             json: self.json,
         })
     }
@@ -5101,6 +5109,13 @@ mod tests {
         assert_eq!(spawn.after, branchyard::After::Integrated);
         assert_eq!(spawn.bindings.len(), 2);
         assert!(spawn.connectors.is_empty());
+        assert_eq!(spawn.model, None);
+        let Command::Spawn { spawn: cheap, .. } = parse_str("spawn go --model haiku").unwrap()
+        else {
+            panic!("not spawn")
+        };
+        assert_eq!(cheap.model.as_deref(), Some("haiku"));
+        assert!(err("spawn go --model ' '").contains("--model"));
         let Command::Spawn { spawn: granted, .. } =
             parse_str("spawn go --connector github:read --connector 'linear@work:write:issues.*'")
                 .unwrap()

@@ -301,6 +301,11 @@ pub struct Spawn {
     /// until this branch (or a person) approves it. See
     /// `docs/plans-and-goals.md`.
     pub plan: bool,
+    /// The model the child's harness runs, or a size alias (`small`,
+    /// `medium`, `large`, `extra-large`) where its harness defines one.
+    /// Unset: its seat's, else its parent's. A harness whose driver cannot
+    /// choose a model refuses it.
+    pub model: Option<String>,
 }
 
 impl Spawn {
@@ -365,6 +370,10 @@ pub struct Spawned {
     pub git_branch: String,
     pub harness: String,
     pub profile: String,
+    /// The model its harness runs, when one was chosen; omitted for the
+    /// harness's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub base: String,
     pub depth: u32,
     pub status: BranchStatus,
@@ -528,6 +537,10 @@ pub struct Inspection {
     pub status: BranchStatus,
     pub harness: String,
     pub profile: String,
+    /// The model its harness runs, when one was chosen (`--model`), its
+    /// own or its seat's or parent's; omitted for the harness's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub parent: Option<String>,
     pub children: Vec<String>,
     pub depth: u32,
@@ -1911,10 +1924,13 @@ fn spawn_outcome(spawned: &Spawned) -> String {
     match &spawned.status {
         BranchStatus::Waiting => format!("waiting for {}", spawned.depends_on.join(", ")),
         BranchStatus::Blocked { reason } => format!("blocked: {reason}"),
-        _ => format!(
-            "started on {}",
-            profiles::label(&spawned.harness, &spawned.profile)
-        ),
+        _ => {
+            let on = profiles::label(&spawned.harness, &spawned.profile);
+            match &spawned.model {
+                Some(model) => format!("started on {on} with model {model}"),
+                None => format!("started on {on}"),
+            }
+        }
     }
 }
 
@@ -2321,6 +2337,7 @@ impl Local {
                     git_branch: info.git_branch,
                     harness: info.harness,
                     profile: info.profile,
+                    model: info.model,
                     base: info.base,
                     depth: info.depth,
                     status: info.status,
@@ -2484,6 +2501,16 @@ impl Local {
                     ..Default::default()
                 })
             }
+        }
+        // Its model: what the request asks for, else its seat's (or what it
+        // inherited), where its harness's driver can choose one.
+        if let Some(model) = &request.model {
+            let model = model.trim();
+            if model.is_empty() {
+                return Err(Error::Denied("a child's model may not be blank".into()));
+            }
+            harness::check_model(profile)?;
+            provision.get_or_insert_with(Default::default).model = Some(model.to_owned());
         }
         // Its approvals: its seat's (or what it inherited), within the
         // parent's; only ever stricter (docs/effects.md).
@@ -2809,6 +2836,7 @@ impl Local {
             status: info.status,
             harness: info.harness,
             profile: info.profile,
+            model: record.provision.as_ref().and_then(|p| p.model.clone()),
             parent: info.parent,
             children: info.children,
             depth: info.depth,
@@ -3407,6 +3435,7 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
         bindings,
         connectors: request.connectors.clone(),
         plan: request.plan,
+        model: request.model.clone(),
     })
 }
 
@@ -3947,6 +3976,7 @@ mod tests {
                 created_at: 0,
                 stalled: false,
                 superseded_by: None,
+                model: None,
             },
             created_ms: 0,
             check: None,

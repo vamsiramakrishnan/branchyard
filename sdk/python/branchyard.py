@@ -209,6 +209,8 @@ class Spawned:
     # together, integrate(a, b).
     check: Optional[List[str]] = None
     check_inherited: Optional[bool] = None
+    # The model its harness runs; None for the harness's default.
+    model: Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -251,6 +253,8 @@ class Inspection:
     check: Optional[List[str]] = None
     check_inherited: Optional[bool] = None
     check_shared_with: Optional[List[str]] = None
+    # The model its harness runs; None for the harness's default.
+    model: Optional[str] = None
 
     @property
     def state(self) -> Optional[str]:
@@ -502,6 +506,7 @@ def spawn(
     bindings: Optional[Dict[str, str]] = None,
     connectors: Optional[List[str]] = None,
     plan: bool = False,
+    model: Optional[str] = None,
 ) -> Spawned:
     """Create a child branch and start it; returns once it has started.
 
@@ -522,6 +527,11 @@ def spawn(
     `max_children` and `harnesses` narrow what the child may delegate;
     `plan=True` has it plan first, read-only, and escalate its plan to you
     (approve_plan or reject_plan).
+
+    `model` is the model the child's harness runs, or a size alias
+    ("small", "medium", "large", "extra-large") where it defines one: a
+    cheaper one suits mechanical work. Unset, it is the seat's or yours. A
+    harness whose driver cannot choose a model refuses it.
     """
     options = {
         "--seat": seat,
@@ -538,6 +548,7 @@ def spawn(
         "--deny": ",".join(deny) if deny else None,
         "--depends-on": ",".join(depends_on) if depends_on else None,
         "--after": after,
+        "--model": model,
     }
     flags: List[str] = []
     for flag, value in options.items():

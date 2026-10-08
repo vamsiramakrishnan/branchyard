@@ -187,6 +187,9 @@ pub struct SpawnSpec {
     /// Plan first; its plan is escalated to the parent for approval.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub plan: bool,
+    /// The child's model; unset is its seat's or its parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl SpawnSpec {
@@ -208,6 +211,7 @@ impl SpawnSpec {
             bindings: self.bindings.clone(),
             connectors: self.connectors.clone(),
             plan: self.plan,
+            model: self.model.clone(),
         })
     }
 
@@ -230,6 +234,7 @@ impl SpawnSpec {
             bindings: spawn.bindings.clone(),
             connectors: spawn.connectors.clone(),
             plan: spawn.plan,
+            model: spawn.model.clone(),
         }
     }
 }

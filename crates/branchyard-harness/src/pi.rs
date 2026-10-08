@@ -443,6 +443,7 @@ impl Driver for Pi {
             turn_acknowledgment: true,
             usage: true,
             steer: true,
+            model: true,
         }
     }
 

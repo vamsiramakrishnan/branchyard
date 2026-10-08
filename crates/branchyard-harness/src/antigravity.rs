@@ -226,6 +226,7 @@ impl Driver for Antigravity {
             turn_acknowledgment: true,
             usage: true,
             steer: false,
+            model: true,
         }
     }
 

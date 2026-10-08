@@ -971,3 +971,41 @@ fn a_parent_woken_max_wakes_times_settles_without_another_wake() {
     assert!(log.iter().any(|e| matches!(&e.activity,
         Activity::Warning(w) if w.contains("woken 1 times in a row, its envelope's max_wakes"))));
 }
+
+/// A harness whose driver cannot choose a model refuses a child's, with
+/// the driver's reason, before anything is created; a blank one is
+/// refused too.
+#[test]
+fn a_model_its_harness_cannot_choose_is_refused() {
+    let f = Fixture::new();
+    let options = delegating(&f, Envelope::default());
+    let root = f
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options).unwrap();
+    let asked = Spawn {
+        model: Some("small".into()),
+        ..spawn("WRITE kid.txt=k", "kid")
+    };
+    match delegate.spawn(asked) {
+        Err(Error::Unsupported(why)) => {
+            assert!(
+                why.contains("gemini-cli-acp cannot be given a model"),
+                "{why}"
+            );
+            assert!(why.contains("ACP v1 has no model parameter"), "{why}");
+        }
+        other => panic!("expected the model refused, got {other:?}"),
+    }
+    let blank = Spawn {
+        model: Some(" ".into()),
+        ..spawn("WRITE kid.txt=k", "kid")
+    };
+    denied(delegate.spawn(blank), "may not be blank");
+    assert!(f.yard.branch("root").unwrap().info().children.is_empty());
+    assert!(f.yard.branch("kid").is_err());
+}

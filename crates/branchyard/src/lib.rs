@@ -1987,6 +1987,10 @@ pub struct BranchInfo {
     /// candidate, with a fresh session and a handoff brief.
     #[serde(default)]
     pub superseded_by: Option<String>,
+    /// The model its harness runs, as it was asked for (`--model`), when
+    /// one was; unset, the harness's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

@@ -40,7 +40,7 @@ A proposal is a list of edits and the revision of the parent's graph it was made
 
 | Edit | Fields |
 |---|---|
-| `spawn` | Every field of the `spawn` tool (`prompt`, `name`, `harness`, `base`, `budget`, `check`, `max_depth`, `max_children`, `harnesses`, `deny`, `seat`), and `depends_on`, `after`, `bindings` |
+| `spawn` | Every field of the `spawn` tool (`prompt`, `name`, `harness`, `base`, `budget`, `check`, `max_depth`, `max_children`, `harnesses`, `deny`, `seat`, `connectors`, `plan`, `model`), and `depends_on`, `after`, `bindings` |
 | `add_dependency` | `dependent`, `prerequisite`, optional `after`. The dependent must be `waiting` or `blocked`, or spawned in the same proposal |
 | `remove_dependency` | `dependent`, `prerequisite`. The same condition |
 

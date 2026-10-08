@@ -973,6 +973,7 @@ pub(crate) fn spawn_parts(
         max_children: request.max_children,
         harnesses: request.harnesses.clone(),
         plan: request.plan,
+        model: request.model.clone(),
     };
     Ok((options, spawn))
 }

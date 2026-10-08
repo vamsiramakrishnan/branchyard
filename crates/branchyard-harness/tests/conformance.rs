@@ -331,3 +331,41 @@ fn drivers_without_a_verified_projection_refuse_servers_and_instructions() {
     }
     assert_eq!(checked, 3);
 }
+
+/// A driver's `model` capability says what its open does with a model: it
+/// takes one it offers to choose, and refuses one it does not, giving the
+/// reason it records.
+#[test]
+fn the_model_capability_matches_what_open_does_with_a_model() {
+    for profile in PROFILES {
+        let driver = profile.driver();
+        let offered = driver.capabilities().model;
+        let open = Open {
+            model: Some("small-model".into()),
+            ..fresh()
+        };
+        let opened = profile.driver().open(open);
+        match offered {
+            true => {
+                opened.unwrap_or_else(|e| {
+                    panic!("{} offers a model but refused one: {e}", profile.id)
+                });
+            }
+            false => {
+                assert!(
+                    matches!(opened, Err(branchyard_harness::Rejected::Unsupported(_))),
+                    "{} must refuse a model it cannot choose: {opened:?}",
+                    profile.id
+                );
+                assert!(
+                    driver
+                        .capability_reasons()
+                        .iter()
+                        .any(|(c, _)| *c == "model"),
+                    "{} gives no reason it cannot choose a model",
+                    profile.id
+                );
+            }
+        }
+    }
+}

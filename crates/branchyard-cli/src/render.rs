@@ -1251,6 +1251,12 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
         ("branch", i.name.clone()),
         ("status", style.paint(tone, &status)),
         ("harness", harness_label(&i.harness, &i.profile)),
+        (
+            "model",
+            i.model
+                .clone()
+                .unwrap_or_else(|| "the harness's default".into()),
+        ),
         ("parent", i.parent.clone().unwrap_or_else(|| "none".into())),
         (
             "children",
@@ -1609,6 +1615,7 @@ mod tests {
             created_at: 10_000,
             stalled: false,
             superseded_by: None,
+            model: None,
         }
     }
 
@@ -1948,6 +1955,31 @@ mod tests {
         (i.reserving_children, i.reserved_usd, i.settled_children_usd) = (0, 0.0, 0.0);
         let text = inspection(&i, Style::PLAIN);
         assert!(text.contains("$0.20 of $1.50 left") && !text.contains("reserved by"));
+    }
+
+    /// The model line names the model a branch was given, or says it runs
+    /// its harness's default.
+    #[test]
+    fn inspect_names_the_model() {
+        let mut i: branchyard::Inspection = serde_json::from_value(serde_json::json!({
+            "name": "kid", "status": {"state": "ready"}, "harness": "claude-code",
+            "profile": "claude-code-stream-json", "parent": "root", "children": [],
+            "depth": 1, "turns": 1, "candidate": null, "cost_usd": null,
+            "subtree_cost_usd": 0.0, "max_usd": null, "remaining_usd": null,
+            "envelope": null, "last_message": "", "model": "haiku",
+        }))
+        .unwrap();
+        let line = |text: String| {
+            text.lines()
+                .find(|l| l.starts_with("model"))
+                .map(|l| l.split_whitespace().skip(1).collect::<Vec<_>>().join(" "))
+        };
+        assert_eq!(line(inspection(&i, Style::PLAIN)).as_deref(), Some("haiku"));
+        i.model = None;
+        assert_eq!(
+            line(inspection(&i, Style::PLAIN)).as_deref(),
+            Some("the harness's default")
+        );
     }
 
     #[test]

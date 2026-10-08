@@ -732,3 +732,11 @@ Every connector call that changes the world is decided, written to a ledger befo
 | `by graph apply --help` | no edit format | the edit JSON with an example |
 | `by <command> --help` of a delegation command | | each flag a harness may not pass marked with the reason; `by inspect`, `events`, `children` and `graph show` keep `[BRANCH]` optional in an error's usage |
 
+## Added with a model per child
+
+| Surface | Before | Now |
+|---|---|---|
+| `by spawn --model M`, `Spawn::model`, `SpawnSpec::model` (the MCP `spawn` tool and graph proposals' `model`), `SpawnRequest::model`, Python `spawn(model=)` | none: a child ran its seat's or parent's model | every surface; stored in the child's provisioning, like `by run --model` |
+| `branchyard_harness::Capabilities::model`, `Requirements::model` | none | whether a driver passes `Open::model`; a spawn naming a model for a driver without it (ACP, Amp) is refused `unsupported` with the driver's reason |
+| `BranchInfo::model`, `Inspection::model`, `Spawned::model` | none | the model a branch runs, omitted for its harness's default; a `model` line in `by inspect`, `model` in `by ls --json` |
+| Claude Code stream-json provisioning of a model | `ANTHROPIC_MODEL` only | `ANTHROPIC_MODEL` and `--model` (`Plan::session.model`) |

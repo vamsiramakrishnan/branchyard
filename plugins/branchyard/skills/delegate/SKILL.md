@@ -31,6 +31,13 @@ session, and merging overlapping edits produces conflicts.
    have left (`by inspect` shows `remaining_usd`). A child starts from your
    current work: your uncommitted changes are committed to your branch
    first.
+   Pick a model too when the work is mechanical: a rename across files, a
+   format or lint fix, a mechanical port with a test to check it, or
+   gathering facts for you to judge. `by spawn --model small` (or a model
+   name) gives such a child a cheaper, faster model, so the same budget
+   goes further; keep your own model, the default, for design, debugging
+   and anything you would have to redo. A harness that cannot choose a model
+   refuses the spawn and says why; `by inspect <child>` shows its model.
 3. Wait. Either way works:
    - **End your turn.** You do not have to stay awake: when every child
      you delegated has settled, Branchyard starts your next turn by itself
@@ -111,6 +118,8 @@ by inspect                      # your own branch: budget left, children
 by spawn "Make tests/parser_test.rs deterministic; run cargo test -p parser" \
   --name parser-flake --harness codex --budget-usd 0.50 --max-turns 3
 by spawn "Document the retry policy in docs/retries.md" --name retry-docs --budget-usd 0.20
+by spawn "Rename parse_opts to parse_options everywhere; run cargo test" \
+  --name rename --model small --budget-usd 0.10   # mechanical: a cheaper model
 by spawn --prompt-file "$TMPDIR/port-task.md" --name port --budget-usd 0.50   # a long task
 by children
 by inspect parser-flake
