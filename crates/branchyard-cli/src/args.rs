@@ -1159,11 +1159,20 @@ pub enum Command {
     Send {
         branch: String,
         /// The next prompt; quote it
+        #[arg(
+            required_unless_present = "retry",
+            default_value = "",
+            hide_default_value = true
+        )]
         prompt: String,
         /// Add the prompt to the branch's running turn without interrupting it, instead of
         /// starting a new turn; refused when no turn runs or the harness cannot take it
         #[arg(long)]
         steer: bool,
+        /// Submit again the prompt of the branch's last turn that was cut off when the engine
+        /// running it stopped (the recovery note names it), instead of a new prompt
+        #[arg(long, conflicts_with_all = ["steer", "prompt"])]
+        retry: bool,
         /// Wait for the turn to end and show it (outside a harness, send always waits)
         #[arg(long)]
         wait: bool,
@@ -5292,6 +5301,7 @@ mod tests {
             prompt,
             task,
             steer,
+            retry,
             wait,
             json,
         } = parse_str("send flaky 'now add a test' --yes").unwrap()
@@ -5309,7 +5319,15 @@ mod tests {
                 ..TaskArgs::default()
             }
         );
-        assert!(!steer && !wait && !json);
+        assert!(!steer && !retry && !wait && !json);
+        // --retry takes the cut-off turn's prompt, so none is given with it.
+        let Command::Send { retry, prompt, .. } = parse_str("send flaky --retry").unwrap() else {
+            panic!("not send")
+        };
+        assert!(retry && prompt.is_empty());
+        assert!(parse_str("send flaky").is_err());
+        assert!(parse_str("send flaky go --retry").is_err());
+        assert!(parse_str("send flaky --retry --steer").is_err());
         let Command::Fork {
             branch,
             prompt,

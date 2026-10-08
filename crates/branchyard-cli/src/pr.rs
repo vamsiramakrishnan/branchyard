@@ -1954,7 +1954,15 @@ fn deliver(
         via: "send".into(),
         summary,
     })?;
-    match commands::send(env, target, name, &text, task, false, false) {
+    match commands::send(
+        env,
+        target,
+        name,
+        commands::Prompt::Text(&text),
+        task,
+        false,
+        false,
+    ) {
         Ok(()) => Ok(()),
         // The turn ran and failed; the feedback reached it.
         Err(Failure::Reported) => Err(Failure::Message(format!(

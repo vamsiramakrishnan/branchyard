@@ -48,6 +48,9 @@ session, and merging overlapping edits produces conflicts.
    (the child reads it at its next step, never in a later turn), or
    `written` if the harness has not confirmed it yet. Some harnesses cannot
    take it, and the refusal says so.
+   A child whose turn was cut off because the engine running it stopped
+   says so in its status; `by send <child> --retry` submits that turn's
+   prompt again.
 4. Integrate. When children are `ready`, `by integrate <child>` merges one
    into your branch after its check passes; `by integrate a b c` merges
    several together, in order, runs the check once on the result and moves

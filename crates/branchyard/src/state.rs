@@ -70,6 +70,19 @@ pub(crate) struct Record {
     /// Siblings that inherited one whole-suite check pass it only together.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub check_inherited: bool,
+    /// The limits its turns were last given (`--budget-usd`,
+    /// `--max-turns`, `--max-minutes`), kept for a later turn that gives
+    /// none: the `by send` that continues it after its engine stopped runs
+    /// under the same limits, and `by inspect` still shows its budget. A
+    /// turn that gives one replaces it. A parent's limits on a delegated
+    /// child are in its grant and narrow these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<crate::delegation::Limits>,
+    /// The prompt of its last turn that recovery found cut off (submitted
+    /// with an unknown outcome, or never run), until a turn submits a
+    /// prompt again: `by send <branch> --retry` submits it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<String>,
     /// Command override, reused by sends and forks.
     pub command: Option<Vec<String>>,
     /// Private `HOME` when the branch runs isolated.

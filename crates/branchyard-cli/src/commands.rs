@@ -571,11 +571,19 @@ pub fn fan_summary(env: &Env, infos: &[&BranchInfo]) -> Outcome {
     Ok(())
 }
 
+/// What `by send` submits.
+#[derive(Clone, Copy)]
+pub enum Prompt<'a> {
+    Text(&'a str),
+    /// `--retry`: the prompt of the branch's last turn that was cut off.
+    Retry,
+}
+
 pub fn send(
     env: &Env,
     target: &Target,
     branch: &str,
-    prompt: &str,
+    prompt: Prompt<'_>,
     task: &TaskArgs,
     wait: bool,
     json: bool,
@@ -591,17 +599,36 @@ pub fn send(
                 ),
             );
         }
+        let sent = match prompt {
+            Prompt::Text(prompt) => delegate.send(branch, prompt),
+            Prompt::Retry => delegate.retry(branch),
+        };
         if wait {
-            return emit(
-                json,
-                delegate.send_and_wait(branch, prompt, std::time::Duration::MAX),
-                |i| render::inspection(i, env.style()),
-            );
+            let done = sent.and_then(|_| delegate.wait(branch, std::time::Duration::MAX));
+            return emit(json, done, |i| render::inspection(i, env.style()));
         }
-        return emit(json, delegate.send(branch, prompt), |sent| {
+        return emit(json, sent, |sent| {
             format!("sent to {}; its turn is running\n", sent.name)
         });
     }
+    let retried: String;
+    let prompt = match prompt {
+        Prompt::Text(prompt) => prompt,
+        Prompt::Retry if matches!(target, Target::Remote(_)) => {
+            let error = branchyard::Error::Unsupported(
+                "by send --retry is not available through a server yet; send the prompt again"
+                    .into(),
+            );
+            return fail(json, &error);
+        }
+        Prompt::Retry => {
+            retried = match open_yard().and_then(|yard| yard.branch(branch)?.retry_prompt()) {
+                Ok(prompt) => prompt,
+                Err(error) => return fail(json, &error),
+            };
+            &retried
+        }
+    };
     if let Target::Remote(remote) = target {
         if json {
             let sent = remote::send_json(env, remote, branch, prompt, task);

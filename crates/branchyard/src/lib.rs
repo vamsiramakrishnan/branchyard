@@ -1749,6 +1749,13 @@ impl Branch {
         run::send(&self.yard, &self.info.name, prompt, &options)
     }
 
+    /// The prompt `by send --retry` submits again: that of this branch's
+    /// last turn that recovery found cut off, kept until a prompt reaches
+    /// its harness. Refused, with what to do instead, when there is none.
+    pub fn retry_prompt(&self) -> Result<String, Error> {
+        run::retry_prompt(&self.yard.store().read(&self.info.name)?)
+    }
+
     /// [`Branch::send`], named for parity with [`Delegate::send_and_wait`]:
     /// outside a harness a send already runs the turn and returns once it
     /// settles, so this does exactly what `send` does.

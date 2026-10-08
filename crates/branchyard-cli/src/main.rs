@@ -289,15 +289,23 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             steer: true,
             wait: _,
             json,
+            ..
         } => commands::steer(target, &branch, &prompt, &task, json),
         Command::Send {
             branch,
             prompt,
             task,
             steer: false,
+            retry,
             wait,
             json,
-        } => commands::send(env, target, &branch, &prompt, &task, wait, json),
+        } => {
+            let prompt = match retry {
+                true => commands::Prompt::Retry,
+                false => commands::Prompt::Text(&prompt),
+            };
+            commands::send(env, target, &branch, prompt, &task, wait, json)
+        }
         Command::Fork {
             branch,
             prompt,

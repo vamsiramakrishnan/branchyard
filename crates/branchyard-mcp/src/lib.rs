@@ -218,14 +218,16 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "send",
             "Send a follow-up prompt to a descendant that is not running a turn. Returns once \
-             its turn has started.",
+             its turn has started. With retry and no prompt, submit again the prompt of its \
+             last turn that was cut off when the engine running it stopped.",
             schema(json!({
                 "type": "object",
                 "properties": {
                     "branch": branch_property("A descendant"),
                     "prompt": {"type": "string"},
+                    "retry": {"type": "boolean"},
                 },
-                "required": ["branch", "prompt"],
+                "required": ["branch"],
                 "additionalProperties": false,
             })),
         ),

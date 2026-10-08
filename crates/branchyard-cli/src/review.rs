@@ -384,7 +384,15 @@ pub fn main(env: &Env, target: &Target, args: &ReviewArgs) -> Outcome {
     if args.detach {
         detach(target, branch, &text, args.task, &path)?;
     } else {
-        commands::send(env, target, branch, &text, args.task, false, false)?;
+        commands::send(
+            env,
+            target,
+            branch,
+            commands::Prompt::Text(&text),
+            args.task,
+            false,
+            false,
+        )?;
     }
     if args.file.is_none() {
         branchyard_support::cleanup_file(&path);

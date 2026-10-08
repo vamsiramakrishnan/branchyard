@@ -534,8 +534,20 @@ def events(branch: Optional[str] = None, cursor: Optional[int] = None,
     return _make(EventPage, _run(args))
 
 
-def send(branch: str, prompt: str) -> Sent:
-    """Start a descendant's next turn with `prompt`."""
+def send(branch: str, prompt: Optional[str] = None, retry: bool = False) -> Sent:
+    """Start a descendant's next turn with `prompt`.
+
+    With `retry=True` and no prompt, submit again the prompt of its last
+    turn that was cut off when the engine running it stopped (its recovery
+    note says so); a child whose harness never recorded a session starts a
+    fresh one that begins with every prompt it was given.
+    """
+    if retry:
+        if prompt is not None:
+            raise DeniedError("denied", "retry submits the cut-off turn's own prompt; give no prompt")
+        return _make(Sent, _run(["send", branch, "--retry"]))
+    if prompt is None:
+        raise DeniedError("denied", "send needs a prompt, or retry=True")
     return _make(Sent, _run(["send", branch, "--", prompt]))
 
 

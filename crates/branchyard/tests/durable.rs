@@ -163,7 +163,10 @@ fn a_killed_engine_is_recovered_its_harness_killed_and_nothing_resubmitted() {
     let (reason, killed) = &found[0];
     assert!(reason.contains("is no longer running"), "{reason}");
     assert!(reason.contains("the prompt had been submitted"), "{reason}");
-    assert!(reason.contains("It was not submitted again"), "{reason}");
+    assert!(
+        reason.contains("It was not submitted again: `by send crashy --retry` submits it again"),
+        "{reason}"
+    );
     assert!(
         killed.contains(&agent) && killed.contains(&sleeper),
         "{killed:?}"
@@ -196,9 +199,13 @@ fn a_killed_engine_is_recovered_its_harness_killed_and_nothing_resubmitted() {
     )));
 
     // A second recovery finds nothing, and the branch continues its
-    // session with a new turn.
+    // session with a new turn, after which there is nothing to retry.
     assert!(yard.recover().unwrap().is_empty());
+    assert!(branch.retry_prompt().unwrap().ends_with("ORPHAN"));
     let sent = branch.send("WHOAMI", f.options()).unwrap();
+    assert!(
+        matches!(sent.retry_prompt(), Err(Error::Denied(why)) if why.contains("no cut-off turn"))
+    );
     assert_eq!(sent.info().status, BranchStatus::NoChanges);
     assert!(text(&sent.events().unwrap()).contains("session fake-session-1 resumed=true"));
     assert_eq!(
@@ -229,18 +236,69 @@ fn a_crash_before_the_prompt_was_submitted_says_the_turn_never_ran() {
     let found = recovered(&log);
     assert_eq!(found.len(), 1);
     assert!(
-        found[0]
-            .0
-            .ends_with("before the prompt was submitted; the turn never ran"),
+        found[0].0.ends_with(
+            "before the prompt was submitted; the turn never ran: `by send crashy --retry` \
+             runs its prompt"
+        ),
         "{}",
         found[0].0
     );
+    assert_eq!(branch.retry_prompt().unwrap(), "WRITE never.txt=1");
     assert_eq!(prompts(&log), 0);
     assert!(!branch.info().worktree.join("never.txt").exists());
     assert!(
         !delivered(&f, report),
         "a turn that never ran delivers nothing"
     );
+}
+
+/// The battery's crash scenario: a child cut off before its harness
+/// recorded a session could not be continued (`has no harness session to
+/// resume`), and nothing replayed its prompt. `retry_prompt` (`by send
+/// --retry`) gives the cut-off prompt back, and a send to a branch with no
+/// session starts a fresh one that begins with every earlier prompt.
+#[test]
+fn a_cut_off_turn_is_retried_and_a_lost_session_starts_fresh_with_its_prompts() {
+    let f = Fixture::new();
+    let go = f.dir.join("go");
+    let prompt = format!(
+        "SH until [ -f {} ]; do sleep 0.05; done; echo done > retried.txt",
+        go.display()
+    );
+    let mut child = start_child(&f, &prompt, &[]);
+    wait::until("the prompt", || prompts(&events(&f.yard, "crashy")) == 1);
+    child.kill().unwrap();
+    child.wait().unwrap();
+
+    let yard = Yard::open(&f.root).unwrap();
+    let branch = yard.branch("crashy").unwrap();
+    assert_eq!(branch.retry_prompt().unwrap(), prompt);
+    // As Claude Code leaves a branch whose engine stopped before the
+    // harness named its session.
+    edit_record(&f.root, "crashy", |record| {
+        record["info"]["session"] = serde_json::Value::Null;
+    });
+    fs::write(&go, "").unwrap();
+    let sent = branch
+        .send(&branch.retry_prompt().unwrap(), f.options())
+        .unwrap();
+    assert!(sent.info().worktree.join("retried.txt").is_file());
+    let log = sent.events().unwrap();
+    assert!(log.iter().any(|e| matches!(&e.activity,
+        Activity::Warning(w) if w.contains("has no harness session to resume")
+            && w.contains("starts a fresh session"))));
+    let last = log
+        .iter()
+        .filter_map(|e| match &e.activity {
+            Activity::Prompt(p) => Some(p.clone()),
+            _ => None,
+        })
+        .next_back()
+        .unwrap();
+    assert!(last.contains("Its harness session was lost"), "{last}");
+    assert!(last.contains(&format!("### Prompt 1\n{prompt}")), "{last}");
+    assert!(last.contains("<branchyard-recovered>"), "{last}");
+    assert!(sent.retry_prompt().is_err(), "a prompt reached the harness");
 }
 
 #[test]

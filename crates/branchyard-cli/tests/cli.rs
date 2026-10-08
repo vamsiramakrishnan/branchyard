@@ -641,11 +641,20 @@ fn a_harness_delegates_with_by_in_its_shell() {
 #[test]
 fn a_harness_is_named_by_the_id_typed_and_its_profile_everywhere() {
     let repo = Repo::new();
+    let retry = repo.dir.join("retry.py");
+    fs::write(
+        &retry,
+        "import branchyard as b\ntry:\n    b.send('kid', retry=True)\n\
+         except b.DeniedError as e:\n    print('python', e.kind)\n",
+    )
+    .unwrap();
     let prompt = [
-        "SH by spawn 'WRITE kid.txt=k' --name kid --harness gemini-cli",
-        "SH by inspect",
-        "SH by inspect --json",
-        "SH by spawn x --name other --harness qwen-code",
+        "SH by spawn 'WRITE kid.txt=k' --name kid --harness gemini-cli".to_owned(),
+        "SH by inspect".to_owned(),
+        "SH by inspect --json".to_owned(),
+        "SH by spawn x --name other --harness qwen-code".to_owned(),
+        "SH by send kid --retry".to_owned(),
+        format!("SH python3 {}", retry.display()),
     ]
     .join("\n");
     let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
@@ -656,6 +665,9 @@ fn a_harness_is_named_by_the_id_typed_and_its_profile_everywhere() {
         "harnesses: gemini-cli (gemini-cli-acp) only (its own)",
         "root may not delegate to qwen-code (qwen-code-acp); allowed: gemini-cli \
          (gemini-cli-acp) only (its own)",
+        // Nothing of kid's was cut off, so there is nothing to retry.
+        "kid has no cut-off turn to retry",
+        "python denied",
     ] {
         assert!(said.contains(expected), "{expected:?} missing from\n{said}");
     }
@@ -755,6 +767,40 @@ fn a_failed_shared_check_names_the_siblings_to_integrate_together() {
     );
     assert_eq!(a["check_inherited"], true);
     assert_eq!(a["check_shared_with"], serde_json::json!(["b"]));
+}
+
+/// The battery's crash scenario: after its engine stopped, the meta was
+/// continued with `by send` and no budget, and its own `by inspect` had
+/// no budget line: a root's limits lived only in the turn that was given
+/// them. A turn that gives none now keeps the ones given before.
+#[test]
+fn a_send_without_limits_keeps_the_ones_given_before() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&[
+        "run",
+        "WRITE r.txt=r",
+        "--name",
+        "root",
+        "--delegate",
+        "--yes",
+        "--budget-usd",
+        "5",
+        "--max-turns",
+        "9",
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let out = repo.by_agent(&["send", "root", "SH by inspect --json\nSH by inspect"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    let (_, me) = sh_json(&said, 0);
+    assert_eq!(me["max_usd"], 5.0, "{said}");
+    assert!(said.contains(" of $5.00 left"), "{said}");
+    // A send that gives a limit replaces it.
+    let out = repo.by_agent(&["send", "root", "SH by inspect --json", "--budget-usd", "7"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    // The log holds every turn's replies: this is the third command.
+    let (_, me) = sh_json(&reply(&repo, "root"), 2);
+    assert_eq!(me["max_usd"], 7.0);
 }
 
 #[test]

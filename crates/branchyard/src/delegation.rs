@@ -712,6 +712,20 @@ impl Delegate {
         }
     }
 
+    /// Submit again the prompt of `branch`'s last turn that recovery found
+    /// cut off (its engine stopped while it ran, or before it ran), as
+    /// [`Delegate::send`] would; `by send <branch> --retry`. The turn starts
+    /// with a note of what happened, and in a fresh session that begins
+    /// with every earlier prompt when its harness never recorded one.
+    /// Refused when no turn of it was cut off since a prompt last reached
+    /// its harness.
+    pub fn retry(&self, branch: &str) -> Result<Sent, Error> {
+        match &self.via {
+            Via::Local(local) => local.retry(branch),
+            Via::Remote(_) => self.typed("send", json!({"branch": branch, "retry": true})),
+        }
+    }
+
     /// [`Delegate::send`], then wait for the turn it started to settle, for
     /// up to `timeout`. Race-free: a branch's lease admits one turn at a
     /// time, so once this send's turn is running, nothing but its own end
@@ -1241,8 +1255,41 @@ pub(crate) fn trusted(yard: &Yard, branch: &str, options: TaskOptions) -> Result
     })
 }
 
-/// The caller's budget, narrowed by limits a parent imposed.
+/// Keep the limits `budget` gives in `record`, each replacing the one it
+/// had; a limit it does not give keeps the remembered one. True when the
+/// record changed.
+pub(crate) fn remember_limits(record: &mut Record, budget: &Budget) -> bool {
+    let earlier = record.limits.clone().unwrap_or_default();
+    let limits = Limits {
+        max_usd: budget.max_usd.or(earlier.max_usd),
+        max_turns: budget.max_turns.or(earlier.max_turns),
+        max_duration_ms: budget
+            .max_duration
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+            .or(earlier.max_duration_ms),
+    };
+    let limits = (limits != Limits::default()).then_some(limits);
+    let changed = limits != record.limits;
+    record.limits = limits;
+    changed
+}
+
+/// The caller's budget, with the limits the branch's turns were last given
+/// ([`remember_limits`]) where it gives none, narrowed by limits a parent
+/// imposed.
 pub(crate) fn effective_budget(record: &Record, budget: &Budget) -> Budget {
+    let budget = match &record.limits {
+        None => budget.clone(),
+        Some(kept) => Budget {
+            max_usd: budget.max_usd.or(kept.max_usd),
+            max_turns: budget.max_turns.or(kept.max_turns),
+            max_duration: budget
+                .max_duration
+                .or(kept.max_duration_ms.map(Duration::from_millis)),
+            ..budget.clone()
+        },
+    };
+    let budget = &budget;
     let Some(limits) = record.grant.as_ref().and_then(|g| g.limits.as_ref()) else {
         return budget.clone();
     };
@@ -2764,6 +2811,20 @@ impl Local {
         result
     }
 
+    fn retry(&self, branch: &str) -> Result<Sent, Error> {
+        let prompt = self
+            .require_descendant(branch, false)
+            .and_then(|()| run::retry_prompt(&self.store().read(branch)?));
+        match prompt {
+            Ok(prompt) => self.send(branch, &prompt),
+            Err(error) => {
+                let refused: Result<Sent, Error> = Err(error);
+                self.note("send", branch, &refused, |_| String::new());
+                refused
+            }
+        }
+    }
+
     fn try_send(&self, branch: &str, prompt: &str) -> Result<Sent, Error> {
         self.require_descendant(branch, false)?;
         let _spawning = lock(&self.yard.hub.spawning);
@@ -3389,7 +3450,11 @@ struct EventsArgs {
 #[serde(deny_unknown_fields)]
 struct SendArgs {
     branch: String,
+    #[serde(default)]
     prompt: String,
+    /// Submit the cut-off turn's prompt again instead.
+    #[serde(default)]
+    retry: bool,
 }
 
 #[derive(Deserialize)]
@@ -3554,7 +3619,17 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
         }
         "send" => {
             let args: SendArgs = parse(tool, arguments)?;
-            to_json(&local.send(&args.branch, &args.prompt)?)
+            match (args.retry, args.prompt.trim().is_empty()) {
+                (true, true) => to_json(&local.retry(&args.branch)?),
+                (false, false) => to_json(&local.send(&args.branch, &args.prompt)?),
+                (true, false) => Err(Error::Denied(
+                    "retry submits the cut-off turn's own prompt again; give no prompt with it"
+                        .into(),
+                )),
+                (false, true) => Err(Error::Denied(
+                    "send needs a prompt, or retry to submit a cut-off turn's prompt again".into(),
+                )),
+            }
         }
         "approve_plan" => {
             let args: ApprovePlanArgs = parse(tool, arguments)?;
@@ -3792,6 +3867,8 @@ mod tests {
             created_ms: 0,
             check: None,
             check_inherited: false,
+            limits: None,
+            retry: None,
             command: None,
             home: None,
             cost_baseline: None,

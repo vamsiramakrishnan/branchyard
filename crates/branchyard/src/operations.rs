@@ -356,6 +356,7 @@ pub const OPERATIONS: &[Operation] = &[
         &[
             TARGET,
             Param::all("<PROMPT>", "prompt", "prompt"),
+            Param::all("--retry", "retry", "retry"),
             Param::cli(
                 "--wait",
                 "a tool call should not block on a child's turn: poll inspect, or Python's wait",

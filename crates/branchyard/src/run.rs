@@ -160,6 +160,8 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
         created_ms,
         check: new.check,
         check_inherited: false,
+        limits: None,
+        retry: None,
         command: new.command,
         home: new
             .home
@@ -335,6 +337,11 @@ pub(crate) fn begin_new(
     profile: &'static Profile,
     options: &TaskOptions,
 ) -> Result<(), Error> {
+    // Written before the turn runs, so an engine that stops in it leaves
+    // them for the turn that continues it.
+    if crate::delegation::remember_limits(record, &options.budget) {
+        yard.store().write_fenced(record, lease.fence())?;
+    }
     if options.plan {
         crate::plan::begin(yard, record, lease.fence(), profile)?;
     }
@@ -982,6 +989,19 @@ impl Prepared {
     }
 }
 
+/// The prompt `by send --retry` submits again: that of `record`'s last turn
+/// recovery found cut off, kept until a prompt reaches its harness.
+pub(crate) fn retry_prompt(record: &Record) -> Result<String, Error> {
+    record.retry.clone().ok_or_else(|| {
+        let name = &record.info.name;
+        Error::Denied(format!(
+            "{name} has no cut-off turn to retry: --retry submits again the prompt of a turn \
+             its engine stopped in, until a prompt reaches its harness. Send it a prompt \
+             instead, `by send {name} \"<prompt>\"`"
+        ))
+    })
+}
+
 /// Check that `name` can continue its session, and mark it running under
 /// a new lease. Refused while an engine runs a turn on it; a turn left by
 /// an engine that stopped is recovered first. `idle` also refuses a branch
@@ -1112,10 +1132,20 @@ fn prepare(
                  prompt; this turn starts a fresh session with only this prompt"
             )),
         ),
+        // Its turns ran, but its harness never recorded a session before
+        // its engine stopped: start a fresh one that begins with every
+        // prompt it was given, so the task is not lost with the session.
         None => {
-            return Err(Error::Unsupported(format!(
-                "{name} has no harness session to resume"
-            )))
+            let events = record::read(&store, name)?;
+            record.context = Some(crate::checkpoint::lost_session_summary(name, &events));
+            (
+                SessionMode::Fresh,
+                Some(format!(
+                    "{name} has no harness session to resume: its harness never recorded \
+                     one before its turn was cut off. This turn starts a fresh session whose \
+                     prompt begins with every prompt it was given before"
+                )),
+            )
         }
     };
     if options.command.is_some() {
@@ -1221,6 +1251,8 @@ fn prepare(
         });
     }
     record.info.status = BranchStatus::Running;
+    // Written with the lease below.
+    crate::delegation::remember_limits(&mut record, &options.budget);
     // A turn something other than a wake starts resets the count of
     // automatic wakes; a wake adds one.
     record.parked = None;

@@ -211,6 +211,7 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
     let prompt = step(STEP_SUBMIT)
         .and_then(|s| s.intent.get("prompt")?.as_str().map(str::to_owned))
         .unwrap_or_else(|| record.info.prompt.clone());
+    let cut_off = ended.is_none();
     let late = row
         .deadline_ms
         .filter(|deadline| *deadline <= now_ms())
@@ -228,7 +229,8 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         None if step(STEP_SUBMIT).is_some() => {
             let reason = format!(
                 "{why}; the prompt had been submitted and the turn's outcome is unknown. \
-                 It was not submitted again{late}{sandbox}"
+                 It was not submitted again: `by send {} --retry` submits it again{late}{sandbox}",
+                row.branch
             );
             (
                 End::Lost {
@@ -243,7 +245,11 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
                 Some(_) => "the prompt was submitted",
                 None => "the harness was started",
             };
-            let reason = format!("{why} before {started}; the turn never ran{setup}{sandbox}");
+            let reason = format!(
+                "{why} before {started}; the turn never ran: `by send {} --retry` runs its \
+                 prompt{setup}{sandbox}",
+                row.branch
+            );
             (
                 End::Lost {
                     reason: reason.clone(),
@@ -272,6 +278,10 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         record.info.status = BranchStatus::Failed {
             reason: format!("recovery could not finish the turn: {error}"),
         };
+    }
+    // The cut-off turn's prompt, for `by send --retry`.
+    if cut_off {
+        record.retry = Some(crate::checkpoint::asked_text(&prompt).to_owned());
     }
     if lost {
         // Its next turn's prompt starts with what happened.

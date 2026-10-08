@@ -1775,6 +1775,8 @@ pub(crate) fn conclude(
         // so did the note about a lost turn before it.
         record.context = None;
         record.lost = None;
+        // A prompt was submitted: a lost one is no longer the next retry.
+        record.retry = None;
         match snapshot_failed {
             false => crate::checkpoint::record_turn(yard, fence, record, recorder)?,
             // The worktree is no longer at a known checkpoint.
