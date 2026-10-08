@@ -85,6 +85,9 @@ pub fn event(event: &Event) -> Value {
             "output_tokens": usage.output_tokens,
             "cached_input_tokens": usage.cached_input_tokens,
             "cost_usd": usage.cost_usd,
+            "cache_write_tokens": usage.cache_write_tokens,
+            "cache_write_1h_tokens": usage.cache_write_1h_tokens,
+            "model": usage.model,
         }),
         Event::InterruptAcknowledged { turn } => {
             json!({ "type": "interrupt_acknowledged", "turn": turn })
@@ -110,9 +113,33 @@ pub fn event(event: &Event) -> Value {
         Event::ProtocolViolation { detail } => {
             json!({ "type": "protocol_violation", "detail": detail })
         }
+        Event::Progress { turn } => json!({ "type": "progress", "turn": turn }),
+        Event::HarnessTaskStarted { task, background } => json!({
+            "type": "harness_task_started",
+            "task": task_json(task),
+            "background": background,
+        }),
+        Event::HarnessTaskEnded {
+            task_id,
+            status,
+            summary,
+        } => json!({
+            "type": "harness_task_ended",
+            "task_id": task_id,
+            "status": status,
+            "summary": summary,
+        }),
+        Event::BackgroundTasks { running } => json!({
+            "type": "background_tasks",
+            "running": running.iter().map(task_json).collect::<Vec<_>>(),
+        }),
         Event::Unrecognized { kind } => json!({ "type": "unrecognized", "kind": kind }),
         Event::SessionClosed => json!({ "type": "session_closed" }),
     }
+}
+
+fn task_json(task: &branchyard::HarnessTask) -> Value {
+    json!({ "task_id": task.task_id, "kind": task.kind, "description": task.description })
 }
 
 fn source(source: &DecisionSource) -> Value {
@@ -335,6 +362,7 @@ mod tests {
             created_at: 7,
             stalled: false,
             superseded_by: None,
+            model: None,
         };
         let value = branch(&info);
         assert_eq!(value["status"], json!({ "state": "failed", "reason": "r" }));

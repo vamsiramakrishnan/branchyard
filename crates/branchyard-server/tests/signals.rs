@@ -21,27 +21,28 @@ use common::{fake_agent, started, task, Fixture, TOKEN};
 fn spawn(f: &Fixture, grace: &str) -> (Child, String) {
     let token = f.dir.join("token");
     std::fs::write(&token, format!("{TOKEN}\n")).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_branchyard-server"))
-        .args([
-            "--listen",
-            "127.0.0.1:0",
-            "--quiet",
-            "--shutdown-grace",
-            grace,
-        ])
-        .arg("--repo")
-        .arg(format!("app={}", f.root.display()))
-        .arg("--data-dir")
-        .arg(&f.data)
-        .arg("--token-file")
-        .arg(&token)
-        .arg("--harness-command")
-        .arg(format!("gemini-cli={}", fake_agent().display()))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child =
+        branchyard_testkit::hermetic(&mut Command::new(env!("CARGO_BIN_EXE_branchyard-server")))
+            .args([
+                "--listen",
+                "127.0.0.1:0",
+                "--quiet",
+                "--shutdown-grace",
+                grace,
+            ])
+            .arg("--repo")
+            .arg(format!("app={}", f.root.display()))
+            .arg("--data-dir")
+            .arg(&f.data)
+            .arg("--token-file")
+            .arg(&token)
+            .arg("--harness-command")
+            .arg(format!("gemini-cli={}", fake_agent().display()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
     let mut line = String::new();
     BufReader::new(child.stdout.take().unwrap())
         .read_line(&mut line)

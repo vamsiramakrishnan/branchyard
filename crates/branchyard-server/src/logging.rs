@@ -8,8 +8,25 @@
 //! `branchyard_server=debug,warn`), checked in that order; `--quiet`
 //! selects `warn` as the default when neither is set, matching its old
 //! meaning of "warn and above". The format is `--log-format`'s, else
-//! `BRANCHYARD_LOG_FORMAT`'s (`json` or `pretty`), else `pretty`.
+//! `BRANCHYARD_LOG_FORMAT`'s (`json` or `pretty`), else `pretty`. Colors
+//! only when stderr is a terminal and `NO_COLOR` is unset: a log read from
+//! a pipe or a file carries no escape codes.
+use std::io::IsTerminal as _;
+
 use tracing_subscriber::EnvFilter;
+
+/// Whether log lines on stderr may carry ANSI colors: only on a terminal,
+/// and never with `NO_COLOR` set to anything but the empty string.
+pub fn ansi(stderr_is_terminal: bool, no_color: Option<&std::ffi::OsStr>) -> bool {
+    stderr_is_terminal && no_color.is_none_or(|value| value.is_empty())
+}
+
+fn ansi_here() -> bool {
+    ansi(
+        std::io::stderr().is_terminal(),
+        std::env::var_os("NO_COLOR").as_deref(),
+    )
+}
 
 /// How log lines are written.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -48,6 +65,7 @@ pub fn init(quiet: bool, format: Option<LogFormat>) {
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
+        .with_ansi(ansi_here())
         .with_writer(std::io::stderr);
     // `.json()` changes the builder's type, so the two formats each finish
     // their own call to `try_init`; either way a second call anywhere in
@@ -77,6 +95,7 @@ pub fn init_for_commands() {
         .with_env_filter(filter)
         .with_target(false)
         .without_time()
+        .with_ansi(ansi_here())
         .with_writer(std::io::stderr)
         .try_init();
 }
@@ -84,6 +103,17 @@ pub fn init_for_commands() {
 #[cfg(test)]
 mod tests {
     use super::LogFormat;
+
+    /// The best-effort warning `by rm` once printed into a pipe carried
+    /// `\x1b[33m`: colors are for a terminal only.
+    #[test]
+    fn colors_only_on_a_terminal_without_no_color() {
+        use std::ffi::OsStr;
+        assert!(super::ansi(true, None));
+        assert!(super::ansi(true, Some(OsStr::new(""))));
+        assert!(!super::ansi(false, None));
+        assert!(!super::ansi(true, Some(OsStr::new("1"))));
+    }
 
     #[test]
     fn the_flag_wins_over_the_variable() {

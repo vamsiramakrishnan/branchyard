@@ -211,11 +211,15 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
     let prompt = step(STEP_SUBMIT)
         .and_then(|s| s.intent.get("prompt")?.as_str().map(str::to_owned))
         .unwrap_or_else(|| record.info.prompt.clone());
+    let cut_off = ended.is_none();
     let late = row
         .deadline_ms
         .filter(|deadline| *deadline <= now_ms())
         .map(|_| "; its max_duration deadline had passed")
         .unwrap_or_default();
+    // A turn whose prompt was submitted and whose end is unknown.
+    let lost = ended.is_none() && step(STEP_SUBMIT).is_some();
+    let before = record.info.candidate.as_ref().map(|c| c.commit.clone());
     let (end, submitted, reason) = match ended {
         Some((end, submitted)) => (
             end,
@@ -225,7 +229,8 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         None if step(STEP_SUBMIT).is_some() => {
             let reason = format!(
                 "{why}; the prompt had been submitted and the turn's outcome is unknown. \
-                 It was not submitted again{late}{sandbox}"
+                 It was not submitted again: `by send {} --retry` submits it again{late}{sandbox}",
+                row.branch
             );
             (
                 End::Lost {
@@ -240,7 +245,11 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
                 Some(_) => "the prompt was submitted",
                 None => "the harness was started",
             };
-            let reason = format!("{why} before {started}; the turn never ran{setup}{sandbox}");
+            let reason = format!(
+                "{why} before {started}; the turn never ran: `by send {} --retry` runs its \
+                 prompt{setup}{sandbox}",
+                row.branch
+            );
             (
                 End::Lost {
                     reason: reason.clone(),
@@ -261,12 +270,23 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         session: last_session(yard, &row.branch),
         cost: turn_cost(yard, &row.branch),
         metered: metered_turn(yard, &row.branch),
+        // What the turn spent as it ran is in the record it wrote.
+        live_cost: None,
     };
     if let Err(error) = engine::conclude(yard, &prompt, &fence, &mut record, &mut recorder, driven)
     {
         record.info.status = BranchStatus::Failed {
             reason: format!("recovery could not finish the turn: {error}"),
         };
+    }
+    // The cut-off turn's prompt, for `by send --retry`.
+    if cut_off {
+        record.retry = Some(crate::checkpoint::asked_text(&prompt).to_owned());
+    }
+    if lost {
+        // Its next turn's prompt starts with what happened.
+        record.lost = Some(reason.clone());
+        promote(&mut record, before.as_deref(), &mut recorder)?;
     }
     recorder.finish(lease, &record)?;
     // What waits for it is blocked now, or, if it had settled, may start.
@@ -277,6 +297,34 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         reason,
         killed,
     }))
+}
+
+/// A delegated child whose lost turn left work in its worktree comes back
+/// `ready` with that work as its candidate, not bare `interrupted`: its
+/// parent decides what to do with it, and what depends on it is looked at
+/// again. A warning says the turn was cut off and the work may be
+/// incomplete.
+fn promote(
+    record: &mut Record,
+    before: Option<&str>,
+    recorder: &mut Recorder,
+) -> Result<(), Error> {
+    let delegated = record.info.depth > 0 && record.info.parent.is_some();
+    let produced = record
+        .info
+        .candidate
+        .as_ref()
+        .is_some_and(|c| Some(c.commit.as_str()) != before);
+    if delegated && produced && record.info.status == BranchStatus::Interrupted {
+        recorder.record(Activity::Warning(
+            "its turn was interrupted when its engine stopped, after it had changed files; \
+             recovery committed them as its candidate and it is ready, but the work may be \
+             incomplete: review it before integrating"
+                .into(),
+        ))?;
+        record.info.status = BranchStatus::Ready;
+    }
+    Ok(())
 }
 
 /// The highest cumulative cost the harness reported since the turn's prompt,

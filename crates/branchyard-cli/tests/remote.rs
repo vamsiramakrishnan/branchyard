@@ -69,7 +69,7 @@ impl Drop for Dir {
 
 fn command(program: &str, dir: &Path) -> Command {
     let mut command = Command::new(program);
-    command
+    branchyard_testkit::hermetic(&mut command)
         .current_dir(dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -80,9 +80,6 @@ fn command(program: &str, dir: &Path) -> Command {
             "/nonexistent/branchyard-config.toml",
         )
         .env("PAGER", "cat")
-        .env_remove("BRANCHYARD_REMOTE")
-        .env_remove("BRANCHYARD_TOKEN_FILE")
-        .env_remove("BRANCHYARD_REPO")
         .stdin(Stdio::null());
     command
 }
@@ -434,6 +431,18 @@ fn remote_commands_print_what_local_ones_do() {
         same_json(args);
     }
 
+    // Waits, discards and retries go through the server's routes.
+    same(&["wait", "p", "exits"]);
+    same(&["wait", "slow", "hello", "--any", "--timeout", "5"]);
+    same_json(&["wait", "p", "--json"]);
+    let (_, r) = same(&["discard", "exits", "--reason", "superseded"]);
+    assert!(
+        text(&r.stdout).starts_with("discarded exits: superseded;"),
+        "{}",
+        text(&r.stdout)
+    );
+    same_json(&["show", "exits", "--json"]);
+
     let (_, r) = same(&["merge", "hello"]);
     assert!(text(&r.stdout).starts_with("merged hello into main"));
     assert_eq!(fs::read_to_string(there.join("hello.txt")).unwrap(), "hi\n");
@@ -449,6 +458,9 @@ fn remote_commands_print_what_local_ones_do() {
         &["run", "x", "--harness", "nope"],
         &["rm", "nope"],
         &["cancel", "nope"],
+        &["wait", "nope"],
+        &["discard", "nope"],
+        &["send", "p", "--retry"],
     ] {
         let (l, r) = same(args);
         assert_eq!(l.status.code(), Some(1), "{args:?}");
@@ -501,9 +513,15 @@ fn by_cancel_stops_a_turn_on_the_server() {
         text(&ran.stdout)
     );
     let json_cancel = server.by(&dir.0, &["cancel", "held", "--json"]);
-    assert_eq!(
-        serde_json::from_slice::<Value>(&json_cancel.stdout).unwrap(),
-        serde_json::json!({"cancelled": []})
+    // Nothing runs any more; the note says so, through the server too.
+    let json_cancel: Value = serde_json::from_slice(&json_cancel.stdout).unwrap();
+    assert_eq!(json_cancel["cancelled"], serde_json::json!([]));
+    assert!(
+        json_cancel["note"]
+            .as_str()
+            .unwrap()
+            .contains("by discard held"),
+        "{json_cancel}"
     );
 }
 
@@ -542,10 +560,7 @@ fn by_send_steer_reaches_a_turn_on_the_server() {
         "{steered}"
     );
     assert!(
-        matches!(
-            steered["state"]["state"].as_str(),
-            Some("delivered" | "accepted")
-        ),
+        matches!(steered["state"]["state"].as_str(), Some("accepted")),
         "{steered}"
     );
     let ran = runner.join().unwrap();

@@ -218,11 +218,9 @@ fn a_prerequisite_that_fails_blocks_its_dependents_until_the_graph_changes() {
     assert_eq!(applied.revision, revision + 1);
     root.wait_subtree().unwrap();
     assert_eq!(status(&f.yard, "next"), BranchStatus::Ready);
-    // last stays blocked: its prerequisite blocked it before it recovered.
-    assert!(matches!(
-        status(&f.yard, "last"),
-        BranchStatus::Blocked { .. }
-    ));
+    // last was blocked only because next was; dependencies are judged from
+    // current facts, so once next settled, last waited again and ran.
+    assert_eq!(status(&f.yard, "last"), BranchStatus::Ready);
     // Cancelling a child still waiting ends it without a turn, and blocks
     // what waits for it.
     let revision = delegate.graph("root").unwrap().revision;
@@ -262,6 +260,7 @@ fn an_invalid_proposal_changes_nothing() {
                 max_depth: 2,
                 max_children: 4,
                 harnesses: Vec::new(),
+                ..Envelope::default()
             },
         )
     };
@@ -351,7 +350,8 @@ fn an_invalid_proposal_changes_nothing() {
             "already started",
         ),
         (
-            vec![budgeted("p", 0.5, &[]), budgeted("q", 0.4, &["p"])],
+            // `kid` has settled, so all of root's $1.00 is left.
+            vec![budgeted("p", 0.6, &[]), budgeted("q", 0.5, &["p"])],
             1,
             "exceeds what root has left",
         ),
@@ -361,6 +361,7 @@ fn an_invalid_proposal_changes_nothing() {
                 budgeted("q", 0.1, &[]),
                 budgeted("r", 0.1, &[]),
                 budgeted("s", 0.1, &[]),
+                budgeted("t", 0.1, &[]),
             ],
             1,
             "max_children",
@@ -415,7 +416,7 @@ fn an_invalid_proposal_changes_nothing() {
         assert_eq!(now.children, before.children, "{needle}");
         assert_eq!(now.remaining_usd, before.remaining_usd, "{needle}");
         assert!(f.yard.graph("root").unwrap().dependencies.is_empty());
-        for name in ["p", "q", "r", "s"] {
+        for name in ["p", "q", "r", "s", "t"] {
             assert!(f.yard.branch(name).is_err(), "{needle}: {name} exists");
             assert!(
                 f.yard
@@ -866,4 +867,168 @@ fn a_prerequisite_whose_engine_was_killed_blocks_its_dependent_on_recovery() {
         .resume_graph(&TaskOptions::default())
         .unwrap()
         .is_empty());
+}
+
+/// The battery's crash and graph scenarios (M3): a dependent blocked
+/// because its prerequisite was interrupted stayed `blocked: its
+/// prerequisite X was interrupted` even after X was continued and
+/// integrated; only a hand-written graph edit freed it. Dependencies are
+/// now judged from current facts.
+#[test]
+fn a_dependent_blocked_by_an_interrupted_prerequisite_starts_once_it_is_integrated() {
+    let f = Fixture::new();
+    let options = delegating(&f, Envelope::default());
+    let root = root(&f, &options);
+    let delegate = root.delegate(options).unwrap();
+    delegate
+        .apply_graph(
+            vec![
+                spawn("lexer", "HANG", &[]),
+                GraphEdit::Spawn(SpawnSpec {
+                    prompt: "WRITE parser.txt=1".into(),
+                    name: Some("parser".into()),
+                    depends_on: vec!["lexer".into()],
+                    after: After::Integrated,
+                    ..SpawnSpec::default()
+                }),
+            ],
+            0,
+        )
+        .unwrap();
+    wait::until("lexer to run", || {
+        f.yard.branch("lexer").is_ok_and(|b| {
+            b.events()
+                .unwrap_or_default()
+                .iter()
+                .any(|e| matches!(e.activity, branchyard::Activity::Prompt(_)))
+        })
+    });
+    delegate.cancel("lexer").unwrap();
+    root.wait_subtree().unwrap();
+    match status(&f.yard, "parser") {
+        BranchStatus::Blocked { reason } => assert!(reason.contains("lexer was interrupted")),
+        other => panic!("{other:?}"),
+    }
+    // The parent continues lexer and integrates it: parser is no longer
+    // blocked by it, and starts from the merge.
+    delegate.send("lexer", "WRITE lexer.txt=1").unwrap();
+    root.wait_subtree().unwrap();
+    assert_eq!(status(&f.yard, "parser"), BranchStatus::Waiting);
+    delegate.integrate("lexer").unwrap();
+    root.wait_subtree().unwrap();
+    assert_eq!(status(&f.yard, "parser"), BranchStatus::Ready);
+    let parser = f.yard.branch("parser").unwrap();
+    assert!(parser.info().worktree.join("lexer.txt").is_file());
+    assert_eq!(parser.info().turns, 1);
+}
+
+/// The child process of the recovery test: applies a graph whose
+/// prerequisite writes a file and then hangs, then waits, until killed.
+#[test]
+#[ignore = "the child process of a graph recovery test"]
+fn graph_crash_work_child() {
+    let (Some(root), Some(agent)) = (
+        std::env::var_os("BY_GRAPH_ROOT"),
+        std::env::var("BY_GRAPH_AGENT").ok(),
+    ) else {
+        return;
+    };
+    let yard = Yard::open(root).unwrap();
+    let options = TaskOptions {
+        harness: Some("gemini-cli".into()),
+        command: Some(vec![agent.clone()]),
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![agent]),
+        policy: Policy::allow_all(),
+        ..TaskOptions::default()
+    };
+    let root = yard
+        .task("say hi")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    root.delegate(options)
+        .unwrap()
+        .apply_graph(
+            vec![
+                // Writes orphan.log in its worktree, then hangs.
+                spawn("lexer", "ORPHAN", &[]),
+                spawn("parser", "WRITE p.txt=1", &["lexer"]),
+            ],
+            0,
+        )
+        .unwrap();
+    root.wait_subtree().unwrap();
+}
+
+/// The battery's crash scenario (M8): after the engine was killed, a child
+/// whose last turn had written its work came back bare `interrupted`, and
+/// what depended on it was blocked. It now comes back `ready`, its work
+/// its candidate, with a warning that it was interrupted; its dependent
+/// waits instead of being blocked and starts on the next resume. Its next
+/// turn's prompt says what happened.
+#[test]
+fn a_child_whose_engine_died_after_it_wrote_its_work_recovers_ready() {
+    let f = Fixture::new();
+    let mut child = Killed(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "graph_crash_work_child",
+                "--exact",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("BY_GRAPH_ROOT", &f.root)
+            .env("BY_GRAPH_AGENT", fake_agent())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    wait::until("the prerequisite to write its work", || {
+        let yard = Yard::open(&f.root).unwrap();
+        yard.branch("lexer")
+            .is_ok_and(|b| b.info().worktree.join("orphan.log").is_file())
+            && yard
+                .branch("parser")
+                .is_ok_and(|b| b.info().status == BranchStatus::Waiting)
+    });
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let yard = Yard::open(&f.root).unwrap();
+    assert_eq!(status(&yard, "lexer"), BranchStatus::Ready);
+    let lexer = yard.branch("lexer").unwrap();
+    assert_eq!(lexer.info().candidate.as_ref().unwrap().files_changed, 1);
+    assert!(lexer.events().unwrap().iter().any(|e| matches!(&e.activity,
+        branchyard::Activity::Warning(w) if w.contains("interrupted when its engine stopped"))));
+    assert_eq!(status(&yard, "parser"), BranchStatus::Waiting);
+    let options = TaskOptions {
+        harness: Some("gemini-cli".into()),
+        command: Some(vec![fake_agent().display().to_string()]),
+        policy: Policy::allow_all(),
+        ..TaskOptions::default()
+    };
+    assert_eq!(yard.resume_graph(&options).unwrap(), ["parser"]);
+    yard.branch("root").unwrap().wait_subtree().unwrap();
+    assert_eq!(status(&yard, "parser"), BranchStatus::Ready);
+    // Its next turn starts by saying its last one was cut off.
+    let next = yard
+        .branch("lexer")
+        .unwrap()
+        .send("say more", options)
+        .unwrap();
+    let prompt = next
+        .events()
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find_map(|e| match e.activity {
+            branchyard::Activity::Prompt(p) => Some(p),
+            _ => None,
+        })
+        .unwrap();
+    assert!(prompt.starts_with("<branchyard-recovered>"), "{prompt}");
+    assert!(prompt.contains("AbortError: Stream closed"), "{prompt}");
+    assert!(prompt.ends_with("say more"), "{prompt}");
 }

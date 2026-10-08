@@ -22,6 +22,7 @@ mod fleet_cmd;
 mod gateway_cmd;
 mod gh;
 mod harness_cmd;
+mod inherited;
 mod init;
 mod json;
 mod knowledge_cmd;
@@ -30,6 +31,7 @@ mod map_cmd;
 mod models_cmd;
 mod notify;
 mod open;
+mod operations;
 mod plan_cmd;
 mod ports;
 mod pr;
@@ -288,15 +290,23 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             steer: true,
             wait: _,
             json,
+            ..
         } => commands::steer(target, &branch, &prompt, &task, json),
         Command::Send {
             branch,
             prompt,
             task,
             steer: false,
+            retry,
             wait,
             json,
-        } => commands::send(env, target, &branch, &prompt, &task, wait, json),
+        } => {
+            let prompt = match retry {
+                true => commands::Prompt::Retry,
+                false => commands::Prompt::Text(&prompt),
+            };
+            commands::send(env, target, &branch, prompt, &task, wait, json)
+        }
         Command::Fork {
             branch,
             prompt,
@@ -451,7 +461,22 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             },
         ),
         Command::Cancel { branch, json } => commands::cancel(target, &branch, json),
-        Command::Spawn { prompt, spawn } => commands::spawn(env, target, &prompt, &spawn),
+        Command::Discard {
+            branch,
+            reason,
+            json,
+        } => commands::discard(target, &branch, reason.as_deref(), json),
+        Command::Spawn {
+            prompt,
+            prompt_file,
+            spawn,
+        } => {
+            let prompt = match prompt_file {
+                Some(path) => commands::read_prompt_file(&path)?,
+                None => prompt,
+            };
+            commands::spawn(env, target, &prompt, &spawn)
+        }
         Command::Inspect { branch, json } => commands::inspect(env, target, branch, json),
         Command::Events {
             branch,
@@ -459,7 +484,15 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             limit,
             json,
         } => commands::events(env, target, branch, cursor, limit, json),
-        Command::Integrate { branch, json } => commands::integrate(target, &branch, json),
+        Command::Integrate { branches, json } => commands::integrate(target, &branches, json),
+        Command::Check { branch, json } => commands::check(env, target, branch, json),
+        Command::Wait {
+            branches,
+            any,
+            all: _,
+            timeout,
+            json,
+        } => commands::wait(env, target, &branches, any, timeout, json),
         Command::Children { branch, json } => commands::children(env, target, branch, json),
         Command::Graph { json, action } => commands::graph(env, target, &action.into_args(json)),
         Command::Ask {

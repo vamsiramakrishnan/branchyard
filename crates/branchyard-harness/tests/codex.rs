@@ -20,6 +20,7 @@ fn fresh() -> Open {
         mode: SessionMode::Fresh,
         cwd: "/workspace".into(),
         model: None,
+        max_budget_usd: None,
         mcp_servers: Vec::new(),
         instructions: None,
         mcp_config_file: None,

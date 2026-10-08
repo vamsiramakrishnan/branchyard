@@ -1,25 +1,32 @@
-//! What a delegating turn gives its harness, and what the engine keeps
+//! What a delegated turn gives its harness, and what the engine keeps
 //! while the turn runs.
 //!
-//! When a branch may create children, its turn gets:
+//! A branch that was given delegation (a root started with an envelope,
+//! and every child it delegated to, at any depth) gets, for each turn:
 //!
 //! - A token, issued when the turn starts and revoked when it ends, in
 //!   [`ENV_TOKEN`] and in `.branchyard/delegation/<branch>.json` (mode
 //!   0600) with the broker's socket, so `by`, the Python module and the MCP
-//!   server can reach the engine that runs the turn.
-//! - [`ENV_BY`] when `by` was found, with `by`'s directory first on `PATH`,
-//!   and the Python module's directory first on `PYTHONPATH`.
+//!   server can reach the engine that runs the turn. The token acts only as
+//!   its branch. What it may do is the branch's capabilities
+//!   ([`crate::operations::Capability`]): every token reaches the branch
+//!   itself, its storage and its parent's inbox; only a branch whose
+//!   envelope allows children (`max_depth` above 0) may spawn and act on
+//!   descendants.
+//! - The Python module's directory first on `PYTHONPATH`.
 //! - Branchyard's MCP server (`by mcp`, or `branchyard-mcp`).
-//! - The delegation skill as standing instructions (see
+//! - Standing instructions: the delegation skill for a branch that may
+//!   spawn, a short note on what a leaf may do for one that may not (see
 //!   [`branchyard_harness::Instructions`]).
 //!
 //! The Python module and the skill are written under `.branchyard/`, which
 //! git ignores through `info/exclude`, never into the branch's worktree, so
 //! they never reach a candidate.
 //!
-//! Every harness the engine starts, delegating or not, gets [`ENV_ROOT`] and
-//! [`ENV_BRANCH`], so `by` run inside one knows it is not a person and
-//! refuses to act without a token.
+//! Every local harness the engine starts, delegated or not, gets
+//! [`ENV_ROOT`] and [`ENV_BRANCH`], so `by` run inside one knows it is not
+//! a person and refuses to act without a token, and [`ENV_BY`] with `by`'s
+//! directory first on `PATH` when `by` was found ([`by_path`]).
 //!
 //! Every variable name avoids `KEY`, `SECRET` and `TOKEN`: Codex drops
 //! such variables from the environment of the shell commands it runs by
@@ -39,7 +46,6 @@ use branchyard_harness::{Instructions, McpServer};
 use serde::{Deserialize, Serialize};
 
 use crate::broker::Broker;
-use crate::delegation::Grant;
 use crate::state::Record;
 use crate::{harness, Budget, Error, Policy, TaskOptions, Yard};
 
@@ -64,6 +70,8 @@ const PYTHON_MODULE: &str = include_str!("../../../sdk/python/branchyard.py");
 const PLUGIN_MANIFEST: &str =
     include_str!("../../../plugins/branchyard/.claude-plugin/plugin.json");
 const SKILL: &str = include_str!("../../../plugins/branchyard/skills/delegate/SKILL.md");
+/// What a leaf (a delegated branch that may not spawn) is told it may do.
+pub(crate) const LEAF: &str = include_str!("../../../plugins/branchyard/leaf.md");
 
 /// The skill without its frontmatter, for harnesses that take instructions
 /// as text.
@@ -98,6 +106,10 @@ pub(crate) struct Hub {
     /// this process gave its children, by parent: a dependent started
     /// here later runs under them (see `crate::graph`).
     pub graph_options: Mutex<HashMap<String, crate::TaskOptions>>,
+    /// The turn options of each branch whose turn parked in this process
+    /// waiting on its children, by branch: its automatic wake runs under
+    /// them (see `crate::wake`).
+    pub wake_options: Mutex<HashMap<String, crate::TaskOptions>>,
     /// Set by [`crate::Yard::deny_workspace_scripts`]: workspace setup and
     /// teardown commands never run on this yard.
     scripts_denied: std::sync::atomic::AtomicBool,
@@ -130,6 +142,7 @@ impl Default for Hub {
             spawning: Default::default(),
             delivery_hook: Mutex::new(Some(Arc::new(crate::inbox::SteerDelivery::default()))),
             graph_options: Default::default(),
+            wake_options: Default::default(),
             scripts_denied: Default::default(),
             sandbox_provider: Default::default(),
             connectors: Default::default(),
@@ -230,18 +243,49 @@ pub(crate) struct Tools {
     pub server: Vec<String>,
 }
 
+fn beside(name: &str) -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(name)))
+        .filter(|path| harness::executable(path))
+}
+
+/// The `by` every local harness gets in [`ENV_BY`] and first on `PATH`:
+/// [`TaskOptions::delegation_cli`] when it is an executable, else the
+/// running executable when it is `by`, else `by` beside it, else on
+/// `PATH`.
+pub(crate) fn by_path(options: &TaskOptions) -> Option<PathBuf> {
+    match &options.delegation_cli {
+        Some(path) => std::path::absolute(path)
+            .ok()
+            .filter(|path| harness::executable(path)),
+        None => found_by(),
+    }
+}
+
+fn found_by() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .filter(|exe| exe.file_name().is_some_and(|n| n == "by"))
+        .or_else(|| beside("by"))
+        .or_else(|| harness::find_on_path("by"))
+}
+
+/// [`ENV_BY`] and `PATH` for a harness, when `by` was found.
+pub(crate) fn by_env(by: &Path) -> Vec<(String, String)> {
+    let mut env = vec![(ENV_BY.to_owned(), by.display().to_string())];
+    if let Some(dir) = by.parent() {
+        env.push(("PATH".to_owned(), prepend(dir, std::env::var_os("PATH"))));
+    }
+    env
+}
+
 /// Find `by` and the MCP server for `options`.
 pub(crate) fn tools(options: &TaskOptions) -> Result<Tools, Error> {
     let unavailable = |reason: String| {
         Error::Unsupported(format!(
             "delegation needs Branchyard's `by` or MCP server, and {reason}"
         ))
-    };
-    let beside = |name: &str| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|dir| dir.join(name)))
-            .filter(|path| harness::executable(path))
     };
     let by = match &options.delegation_cli {
         Some(path) => {
@@ -255,11 +299,7 @@ pub(crate) fn tools(options: &TaskOptions) -> Result<Tools, Error> {
             }
             Some(path)
         }
-        None => std::env::current_exe()
-            .ok()
-            .filter(|exe| exe.file_name().is_some_and(|n| n == "by"))
-            .or_else(|| beside("by"))
-            .or_else(|| harness::find_on_path("by")),
+        None => found_by(),
     };
     let mut server = match (&options.delegation_server, &by) {
         (Some(argv), _) => argv.clone(),
@@ -329,8 +369,10 @@ impl Drop for Projection {
     }
 }
 
-/// Offer delegation to `record`'s turn if it may create children: issue a
-/// token, register the turn, and describe what the harness gets.
+/// Offer delegation to `record`'s turn if it was given any: issue a token
+/// scoped to the branch, register the turn, and describe what the harness
+/// gets. A leaf (a branch that may not spawn) gets the same token, tools
+/// and module, with a note on what it may do instead of the skill.
 #[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard
 pub(crate) fn project(
     yard: &Yard,
@@ -339,9 +381,10 @@ pub(crate) fn project(
     budget: Budget,
     policy: Policy,
 ) -> Result<Option<Projection>, Error> {
-    if !record.grant.as_ref().is_some_and(Grant::can_spawn) {
+    let Some(grant) = record.grant.as_ref() else {
         return Ok(None);
-    }
+    };
+    let spawns = grant.can_spawn();
     let name = record.info.name.clone();
     let tools = tools(options)?;
     let store = yard.store();
@@ -349,14 +392,16 @@ pub(crate) fn project(
     let python = dir.join("sdk").join("python");
     let plugin = dir.join("plugin");
     install(&python.join("branchyard.py"), PYTHON_MODULE)?;
-    install(
-        &plugin.join(".claude-plugin").join("plugin.json"),
-        PLUGIN_MANIFEST,
-    )?;
-    install(
-        &plugin.join("skills").join("delegate").join("SKILL.md"),
-        SKILL,
-    )?;
+    if spawns {
+        install(
+            &plugin.join(".claude-plugin").join("plugin.json"),
+            PLUGIN_MANIFEST,
+        )?;
+        install(
+            &plugin.join("skills").join("delegate").join("SKILL.md"),
+            SKILL,
+        )?;
+    }
 
     let token = new_token()?;
     let cost = Arc::new(Mutex::new(record.info.cost_usd));
@@ -381,10 +426,7 @@ pub(crate) fn project(
         ),
     ];
     if let Some(by) = &tools.by {
-        env.push((ENV_BY.to_owned(), by.display().to_string()));
-        if let Some(dir) = by.parent() {
-            env.push(("PATH".to_owned(), prepend(dir, std::env::var_os("PATH"))));
-        }
+        env.extend(by_env(by));
     }
     let projection = Projection {
         yard: yard.clone(),
@@ -401,9 +443,15 @@ pub(crate) fn project(
             env: vec![(ENV_TOKEN.into(), token.clone())],
         },
         env,
-        instructions: Instructions {
-            text: skill_text().to_owned(),
-            plugin_dir: Some(plugin.display().to_string()),
+        instructions: match spawns {
+            true => Instructions {
+                text: skill_text().to_owned(),
+                plugin_dir: Some(plugin.display().to_string()),
+            },
+            false => Instructions {
+                text: LEAF.trim().to_owned(),
+                plugin_dir: None,
+            },
         },
         cost,
     };

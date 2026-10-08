@@ -97,6 +97,19 @@ pub(crate) struct NewBranch<'a> {
     /// `None` for a branch that is part of another's work (a delegated
     /// child, an adopted worktree).
     pub task: Option<crate::tasks::Joining>,
+    /// Tools it is denied outright, stored with it; see [`Record::deny`].
+    pub deny: Vec<String>,
+}
+
+/// `kept`, then each of `added` not already in it.
+pub(crate) fn with_denials(kept: &[String], added: &[String]) -> Vec<String> {
+    let mut deny = kept.to_vec();
+    for pattern in added {
+        if !deny.contains(pattern) {
+            deny.push(pattern.clone());
+        }
+    }
+    deny
 }
 
 /// The journaled step that creates a branch's worktree.
@@ -143,9 +156,13 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
             created_at: created_ms / 1000,
             stalled: false,
             superseded_by: None,
+            model: new.provision.as_ref().and_then(|p| p.model.clone()),
         },
         created_ms,
         check: new.check,
+        check_inherited: false,
+        limits: None,
+        retry: None,
         command: new.command,
         home: new
             .home
@@ -163,6 +180,11 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
         actor: new.actor,
         plan: None,
         goal: None,
+        deny: new.deny,
+        removed: Vec::new(),
+        parked: None,
+        wakes: 0,
+        lost: None,
     })
 }
 
@@ -316,6 +338,11 @@ pub(crate) fn begin_new(
     profile: &'static Profile,
     options: &TaskOptions,
 ) -> Result<(), Error> {
+    // Written before the turn runs, so an engine that stops in it leaves
+    // them for the turn that continues it.
+    if crate::delegation::remember_limits(record, &options.budget) {
+        yard.store().write_fenced(record, lease.fence())?;
+    }
     if options.plan {
         crate::plan::begin(yard, record, lease.fence(), profile)?;
     }
@@ -414,6 +441,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
             provider: options.provider.clone(),
             grant,
             depth: 0,
+            deny: options.deny.clone(),
             provision: options.provision.clone(),
             workspace: options.workspace.clone(),
             seed: None,
@@ -500,6 +528,7 @@ pub(crate) fn run_on(
                 provider: options.provider.clone(),
                 grant: grant.clone(),
                 depth: 0,
+                deny: options.deny.clone(),
                 provision: options.provision.clone(),
                 workspace: options.workspace.clone(),
                 seed: None,
@@ -657,6 +686,7 @@ pub(crate) fn run_attempts(
                 provider: options.provider.clone(),
                 grant: grant.clone(),
                 depth: 0,
+                deny: options.deny.clone(),
                 provision: o.provision.clone(),
                 workspace: options.workspace.clone(),
                 seed: None,
@@ -947,11 +977,30 @@ impl Prepared {
     /// The prompt to submit: `prompt`, after the summary a rewind left for
     /// a fresh session, if any.
     pub fn prompt(&self, prompt: &str) -> String {
+        let prompt = match &self.record.lost {
+            Some(note) if note.starts_with(crate::wake::RECOVERED_OPEN) => {
+                format!("{note}{prompt}")
+            }
+            _ => prompt.to_owned(),
+        };
         match &self.record.context {
-            Some(context) => crate::checkpoint::compose(context, prompt),
-            None => prompt.to_owned(),
+            Some(context) => crate::checkpoint::compose(context, &prompt),
+            None => prompt,
         }
     }
+}
+
+/// The prompt `by send --retry` submits again: that of `record`'s last turn
+/// recovery found cut off, kept until a prompt reaches its harness.
+pub(crate) fn retry_prompt(record: &Record) -> Result<String, Error> {
+    record.retry.clone().ok_or_else(|| {
+        let name = &record.info.name;
+        Error::Denied(format!(
+            "{name} has no cut-off turn to retry: --retry submits again the prompt of a turn \
+             its engine stopped in, until a prompt reaches its harness. Send it a prompt \
+             instead, `by send {name} \"<prompt>\"`"
+        ))
+    })
 }
 
 /// Check that `name` can continue its session, and mark it running under
@@ -976,6 +1025,28 @@ pub(crate) fn prepare_send_with(
     idle: bool,
     plan: bool,
 ) -> Result<Prepared, Error> {
+    prepare(yard, name, options, idle, plan, false)?.ok_or_else(|| Error::Running(name.to_owned()))
+}
+
+/// The automatic wake of a branch waiting on its children
+/// (`crate::wake`): [`prepare_send`], started only if the branch is still
+/// parked, in a compare-and-swap. `None` when it no longer is.
+pub(crate) fn prepare_wake(
+    yard: &Yard,
+    name: &str,
+    options: &TaskOptions,
+) -> Result<Option<Prepared>, Error> {
+    prepare(yard, name, options, true, false, true)
+}
+
+fn prepare(
+    yard: &Yard,
+    name: &str,
+    options: &TaskOptions,
+    idle: bool,
+    plan: bool,
+    wake: bool,
+) -> Result<Option<Prepared>, Error> {
     let store = yard.store();
     recover::stale(yard, name)?;
     let mut record = store.read(name)?;
@@ -987,6 +1058,8 @@ pub(crate) fn prepare_send_with(
         return Err(Error::Running(name.to_owned()));
     }
     match &record.info.status {
+        BranchStatus::WaitingOnChildren => {}
+        _ if wake => return Ok(None),
         BranchStatus::Waiting => {
             return Err(Error::Denied(format!(
                 "{name} is waiting for its prerequisites and has not started; it starts when \
@@ -997,6 +1070,14 @@ pub(crate) fn prepare_send_with(
             return Err(Error::Denied(format!(
                 "{name} never started and is blocked: {reason}; remove or replace the \
                  dependency with a graph proposal to start it"
+            )))
+        }
+        // Settled for good: it holds no slot and only what it spent of its
+        // parent's budget because it never runs again.
+        BranchStatus::Discarded { reason } => {
+            return Err(Error::Denied(format!(
+                "{name} was discarded ({reason}) and runs no more turns; `by rm {name}` \
+                 removes it"
             )))
         }
         BranchStatus::AwaitingPlanApproval if !plan => {
@@ -1052,10 +1133,20 @@ pub(crate) fn prepare_send_with(
                  prompt; this turn starts a fresh session with only this prompt"
             )),
         ),
+        // Its turns ran, but its harness never recorded a session before
+        // its engine stopped: start a fresh one that begins with every
+        // prompt it was given, so the task is not lost with the session.
         None => {
-            return Err(Error::Unsupported(format!(
-                "{name} has no harness session to resume"
-            )))
+            let events = record::read(&store, name)?;
+            record.context = Some(crate::checkpoint::lost_session_summary(name, &events));
+            (
+                SessionMode::Fresh,
+                Some(format!(
+                    "{name} has no harness session to resume: its harness never recorded \
+                     one before its turn was cut off. This turn starts a fresh session whose \
+                     prompt begins with every prompt it was given before"
+                )),
+            )
         }
     };
     if options.command.is_some() {
@@ -1082,6 +1173,7 @@ pub(crate) fn prepare_send_with(
     }
     if options.check.is_some() {
         record.check = options.check.clone();
+        record.check_inherited = false;
     }
     if let Some(asked) = &options.provision {
         let mut spec = same_model(name, &record, asked.clone())?;
@@ -1124,6 +1216,7 @@ pub(crate) fn prepare_send_with(
         }
         record.provision = Some(spec);
     }
+    record.info.model = record.provision.as_ref().and_then(|p| p.model.clone());
     crate::provisioning::check(record.provision.as_ref(), record.home.is_some())?;
     crate::egress::check(record.provision.as_ref(), record.provider.as_ref())?;
     // A delegated child keeps the envelope and seats its parent gave it.
@@ -1152,21 +1245,48 @@ pub(crate) fn prepare_send_with(
             )),
         });
     }
+    // A turn after one its engine lost starts by saying so.
+    if let Some(reason) = record.lost.take() {
+        record.lost = Some(match reason.starts_with(crate::wake::RECOVERED_OPEN) {
+            true => reason,
+            false => crate::wake::recovered_note(&store, &record, &reason),
+        });
+    }
     record.info.status = BranchStatus::Running;
+    // Written with the lease below.
+    crate::delegation::remember_limits(&mut record, &options.budget);
+    // A turn something other than a wake starts resets the count of
+    // automatic wakes; a wake adds one.
+    record.parked = None;
+    record.wakes = match wake {
+        true => record.wakes.saturating_add(1),
+        false => 0,
+    };
     // A cancel is bound to the turn it was asked of, so one meant for an
     // earlier turn cannot stop this one.
-    let lease = match store.acquire(&record)? {
-        Taken::Granted(lease) => lease,
-        Taken::Stale => return Err(Error::Running(name.to_owned())),
+    let lease = match wake {
+        true => match store.graph().claim_if(
+            &record,
+            store.owner(),
+            crate::state::LEASE_TTL,
+            crate::wake::is_parked,
+        )? {
+            Some(fence) => crate::state::Lease::new(store.clone(), fence),
+            None => return Ok(None),
+        },
+        false => match store.acquire(&record)? {
+            Taken::Granted(lease) => lease,
+            Taken::Stale => return Err(Error::Running(name.to_owned())),
+        },
     };
-    Ok(Prepared {
+    Ok(Some(Prepared {
         record,
         lease,
         profile,
         command,
         mode,
         note,
-    })
+    }))
 }
 
 /// A send's provisioning keeps the session on the model and reasoning
@@ -1342,6 +1462,7 @@ pub(crate) fn fork(
             provider,
             grant,
             depth: 0,
+            deny: with_denials(&parent.deny, &options.deny),
             provision,
             workspace: options
                 .workspace
@@ -1500,6 +1621,7 @@ pub(crate) fn reincarnate_with(
             provider,
             grant,
             depth: 0,
+            deny: with_denials(&parent.deny, &options.deny),
             provision,
             workspace: options
                 .workspace

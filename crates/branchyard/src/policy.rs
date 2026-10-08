@@ -206,18 +206,6 @@ impl fmt::Display for PolicyPreset {
     }
 }
 
-/// `by` subcommands that act as the calling branch.
-pub(crate) const DELEGATION_SUBCOMMANDS: [&str; 8] = [
-    "spawn",
-    "inspect",
-    "events",
-    "send",
-    "integrate",
-    "cancel",
-    "children",
-    "graph",
-];
-
 /// Whether `input["command"]` runs `by` with a delegation subcommand and
 /// nothing else.
 fn is_delegation_command(input: &Value, by: &Path) -> bool {
@@ -247,9 +235,11 @@ fn is_delegation_command(input: &Value, by: &Path) -> bool {
     let program_ok = argv
         .first()
         .is_some_and(|program| program == "by" || Path::new(program) == by);
+    // The operations a harness may run on its own branch, from the one
+    // table every surface is checked against.
     let subcommand_ok = argv
-        .get(1)
-        .is_some_and(|sub| DELEGATION_SUBCOMMANDS.contains(&sub.as_str()));
+        .get(1..)
+        .is_some_and(crate::operations::is_harness_command);
     program_ok && subcommand_ok
 }
 
@@ -441,6 +431,10 @@ mod tests {
             "by cancel parser",
             "by children --json",
             "/bin/bash -lc 'by spawn \"do it\" --wait'",
+            "by discard parser --reason lost",
+            "by artifact publish out.json --media-type application/json",
+            "by ask 'which file?' --wait 30",
+            "by inbox --unread --json",
         ] {
             assert!(allowed(command), "{command}");
         }
@@ -448,6 +442,9 @@ mod tests {
             "by run 'escape the envelope'",
             "by merge parser",
             "by rm parser",
+            "by artifact export 1 --out x.tar",
+            "by plan show parser",
+            "by approvals ls",
             "by",
             "/tmp/by spawn x",
             "./by spawn x",

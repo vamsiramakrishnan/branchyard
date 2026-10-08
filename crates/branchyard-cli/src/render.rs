@@ -223,6 +223,32 @@ pub fn event_line(event: &Event, style: Style) -> Option<String> {
         Event::ProtocolViolation { detail } => {
             style.paint(Tone::Red, &format!("protocol violation: {detail}"))
         }
+        Event::Progress { .. } => dim("working".into()),
+        Event::HarnessTaskStarted {
+            task,
+            background: true,
+        } => dim(format!(
+            "background task {} started: {}",
+            task.task_id, task.description
+        )),
+        Event::HarnessTaskStarted { task, .. } => dim(format!(
+            "task {} started: {}",
+            task.task_id, task.description
+        )),
+        Event::HarnessTaskEnded {
+            task_id, status, ..
+        } => dim(format!("task {task_id} {status}")),
+        Event::BackgroundTasks { running } if running.is_empty() => {
+            dim("no background tasks running".into())
+        }
+        Event::BackgroundTasks { running } => dim(format!(
+            "background tasks running: {}",
+            running
+                .iter()
+                .map(|t| t.task_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
         Event::Unrecognized { kind } => dim(format!("unrecognized {kind}")),
         Event::SessionClosed => dim("session closed".into()),
     })
@@ -643,8 +669,13 @@ impl Renderer {
     pub fn event(&mut self, branch: &str, event: &Event) -> String {
         match event {
             Event::MessageDelta { text, .. } => return self.text(branch, text),
-            // Kept in the record for `by log`; noise in live output.
-            Event::Unrecognized { .. } => return String::new(),
+            // Kept in the record for `by log`; noise in live output: a
+            // message the driver does not know, liveness, and each model
+            // call's tokens (the turn's total comes at its end).
+            Event::Unrecognized { .. } | Event::Progress { .. } => return String::new(),
+            Event::UsageObserved { usage, .. } if !usage.cumulative && usage.cost_usd.is_none() => {
+                return String::new()
+            }
             _ => {}
         }
         match event_line(event, self.style) {
@@ -833,12 +864,17 @@ pub fn status_text(status: &BranchStatus) -> (String, Tone) {
         BranchStatus::Ready => ("ready".into(), Tone::Green),
         BranchStatus::NoChanges => ("no changes".into(), Tone::Dim),
         BranchStatus::Interrupted => ("interrupted".into(), Tone::Yellow),
-        BranchStatus::BudgetExceeded { limit } => (format!("over budget: {limit}"), Tone::Yellow),
+        BranchStatus::BudgetExceeded { limit } => (
+            format!("over budget: {}", branchyard::operations::limit_text(limit)),
+            Tone::Yellow,
+        ),
+        BranchStatus::Discarded { reason } => (format!("discarded: {reason}"), Tone::Dim),
         BranchStatus::Failed { reason } => (format!("failed: {reason}"), Tone::Red),
         BranchStatus::Merged { target, .. } => (format!("merged into {target}"), Tone::Blue),
         BranchStatus::Waiting => ("waiting".into(), Tone::Dim),
         BranchStatus::Blocked { reason } => (format!("blocked: {reason}"), Tone::Red),
         BranchStatus::AwaitingPlanApproval => ("awaiting plan approval".into(), Tone::Yellow),
+        BranchStatus::WaitingOnChildren => ("waiting on children".into(), Tone::Cyan),
     }
 }
 
@@ -1077,6 +1113,15 @@ pub fn harness_table(harnesses: &[HarnessInfo], style: Style) -> String {
     table(&columns, &rows, style)
 }
 
+/// `info`'s children, quoted, for a command line.
+fn children_words(info: &BranchInfo) -> String {
+    info.children
+        .iter()
+        .map(|child| shell_quote(child))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Commands that make sense after a branch reaches its status.
 pub fn next_commands(info: &BranchInfo) -> Vec<String> {
     let name = shell_quote(&info.name);
@@ -1087,12 +1132,18 @@ pub fn next_commands(info: &BranchInfo) -> Vec<String> {
             format!("by rm {name}"),
         ],
         BranchStatus::Running => vec![format!("by log {name}")],
+        BranchStatus::WaitingOnChildren => vec![
+            format!("by children {name}"),
+            format!("by wait --all {}", children_words(info)),
+        ],
         BranchStatus::AwaitingPlanApproval => vec![
             format!("by plan show {name}"),
             format!("by plan approve {name} [--edit]"),
             format!("by plan reject {name} --reason \"...\" [--replan]"),
         ],
-        BranchStatus::Merged { .. } => vec![format!("by rm {name}")],
+        BranchStatus::Merged { .. } | BranchStatus::Discarded { .. } => {
+            vec![format!("by rm {name}")]
+        }
         BranchStatus::Waiting | BranchStatus::Blocked { .. } => {
             let parent = info.parent.as_deref().map(shell_quote).unwrap_or_default();
             vec![format!("by graph show {parent}"), format!("by rm {name}")]
@@ -1158,6 +1209,36 @@ pub fn summary(info: &BranchInfo, style: Style) -> String {
     key_values(&pairs, style)
 }
 
+/// What a branch's children hold of its budget, as the budget line's
+/// parenthesis: `($0.60 reserved by 1 live child, $0.25 spent by settled
+/// ones)`. Empty for a branch whose children hold nothing.
+fn held_text(i: &branchyard::Inspection) -> String {
+    let mut parts = Vec::new();
+    if i.reserving_children > 0 {
+        let children = match i.reserving_children {
+            1 => "1 live child".to_owned(),
+            n => format!("{n} live children"),
+        };
+        parts.push(format!("{} reserved by {children}", usd(i.reserved_usd)));
+    }
+    if i.settled_children_usd > 0.0 {
+        parts.push(format!(
+            "{} spent by settled ones",
+            usd(i.settled_children_usd)
+        ));
+    }
+    match parts.is_empty() {
+        true => String::new(),
+        false => format!(" ({})", parts.join(", ")),
+    }
+}
+
+/// A branch's harness as every command names it to a person: the harness
+/// ID typed (`--harness claude-code`) and the profile it resolved to.
+pub fn harness_label(harness: &str, profile: &str) -> String {
+    branchyard_harness::profiles::label(harness, profile)
+}
+
 /// `by inspect`.
 pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     let (status, tone) = status_text(&i.status);
@@ -1169,7 +1250,13 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     let mut pairs = vec![
         ("branch", i.name.clone()),
         ("status", style.paint(tone, &status)),
-        ("harness", format!("{} ({})", i.harness, i.profile)),
+        ("harness", harness_label(&i.harness, &i.profile)),
+        (
+            "model",
+            i.model
+                .clone()
+                .unwrap_or_else(|| "the harness's default".into()),
+        ),
         ("parent", i.parent.clone().unwrap_or_else(|| "none".into())),
         (
             "children",
@@ -1186,12 +1273,19 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     if let Some(max) = i.max_usd {
         pairs.push((
             "budget",
-            format!("{} of {} left", money(i.remaining_usd), usd(max)),
+            format!(
+                "{} of {} left{}",
+                money(i.remaining_usd),
+                usd(max),
+                held_text(i)
+            ),
         ));
     }
+    pairs.push(("check", check_text(i)));
     if let Some(envelope) = &i.envelope {
+        // Empty means the branch's own profile only: name it.
         let harnesses = match envelope.harnesses.is_empty() {
-            true => "its own".to_owned(),
+            true => format!("{} only (its own)", harness_label(&i.harness, &i.profile)),
             false => envelope.harnesses.join(", "),
         };
         pairs.push((
@@ -1222,6 +1316,74 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
         pairs.push(("last message", i.last_message.trim_end().to_owned()));
     }
     key_values(&pairs, style)
+}
+
+/// `by check`: how the branch's check ended on its current work, and its
+/// output's tail when it did not pass.
+pub fn check_report(r: &branchyard::CheckReport, style: Style) -> String {
+    use branchyard::CheckVerdict;
+    let (outcome, tone) = match (&r.check, r.outcome) {
+        (_, _) if !r.conflicts.is_empty() => (
+            format!(
+                "conflicts with {} in {}; the check did not run",
+                r.target.as_deref().unwrap_or("its target"),
+                r.conflicts.join(", ")
+            ),
+            Tone::Red,
+        ),
+        (None, _) => (
+            "no check: integrating it runs none".to_owned(),
+            Tone::Yellow,
+        ),
+        (Some(_), CheckVerdict::Passed) => ("passed".to_owned(), Tone::Green),
+        (Some(_), CheckVerdict::Failed) => ("failed".to_owned(), Tone::Red),
+        (Some(_), CheckVerdict::TimedOut) => ("timed out".to_owned(), Tone::Red),
+        (Some(_), CheckVerdict::NotStarted) => ("could not start".to_owned(), Tone::Red),
+        (Some(_), CheckVerdict::NotRun) => ("did not run".to_owned(), Tone::Red),
+    };
+    let mut pairs = vec![("branch", r.branch.clone())];
+    if let Some(check) = &r.check {
+        let source = match &r.inherited_from {
+            Some(parent) => format!("inherited from {parent}"),
+            None => "its own".into(),
+        };
+        pairs.push(("check", format!("{} ({source})", check.join(" "))));
+    }
+    let work = match &r.target {
+        Some(target) => format!("{} merged into {target}", short_commit(&r.work)),
+        None => short_commit(&r.work).to_owned(),
+    };
+    pairs.push(("work", work));
+    pairs.push(("outcome", style.paint(tone, &outcome)));
+    let mut text = key_values(&pairs, style);
+    if !r.passed() && !r.output_tail.trim().is_empty() {
+        text.push_str(r.output_tail.trim_end());
+        text.push('\n');
+    }
+    text
+}
+
+/// The check a branch's merge must pass, where it came from, and the
+/// siblings that share it, which are integrated together.
+fn check_text(i: &branchyard::Inspection) -> String {
+    let Some(check) = &i.check else {
+        return "none".into();
+    };
+    let command = check.join(" ");
+    let source = match (i.check_inherited, &i.parent) {
+        (true, Some(parent)) => format!("inherited from {parent}"),
+        _ => "its own".into(),
+    };
+    match i.check_shared_with.is_empty() {
+        true => format!("{command} ({source})"),
+        false => format!(
+            "{command} ({source}); shared with {}, so they are integrated together: by \
+             integrate {} {}",
+            i.check_shared_with.join(", "),
+            i.name,
+            i.check_shared_with.join(" ")
+        ),
+    }
 }
 
 fn dependencies_text(dependencies: &[branchyard::Dependency]) -> String {
@@ -1266,7 +1428,27 @@ pub fn graph(g: &branchyard::Graph, style: Style) -> String {
             width = width
         );
         if !waits.is_empty() {
-            line.push_str(&format!("  after {}", dependencies_text(&waits)));
+            // Waiting (or blocked) it is still after them; otherwise the
+            // dependency is history, and a discarded prerequisite says so.
+            let after = match child.status {
+                BranchStatus::Waiting | BranchStatus::Blocked { .. } => "after",
+                _ => "was after",
+            };
+            let named: Vec<String> = waits
+                .iter()
+                .map(|d| {
+                    let discarded = g.children.iter().any(|c| {
+                        c.name == d.prerequisite
+                            && matches!(c.status, BranchStatus::Discarded { .. })
+                    });
+                    let mut text = dependencies_text(std::slice::from_ref(d));
+                    if discarded {
+                        text.push_str(", now discarded");
+                    }
+                    text
+                })
+                .collect();
+            line.push_str(&format!("  {after} {}", named.join(", ")));
         }
         if !child.bindings.is_empty() {
             line.push_str(&format!("  binds {}", bindings_text(&child.bindings)));
@@ -1309,7 +1491,7 @@ pub fn details(info: &BranchInfo, now: u64, style: Style, extra: Vec<(&str, Stri
     let mut pairs = vec![
         ("branch", info.name.clone()),
         ("git branch", info.git_branch.clone()),
-        ("harness", format!("{} ({})", info.harness, info.profile)),
+        ("harness", harness_label(&info.harness, &info.profile)),
         ("status", style.paint(tone, &status)),
         ("prompt", info.prompt.clone()),
     ];
@@ -1478,6 +1660,7 @@ mod tests {
             created_at: 10_000,
             stalled: false,
             superseded_by: None,
+            model: None,
         }
     }
 
@@ -1555,6 +1738,7 @@ mod tests {
                         output_tokens: Some(678),
                         cached_input_tokens: Some(2_000_000),
                         cost_usd: Some(0.0421),
+                        ..Usage::default()
                     },
                 },
                 "usage $0.04 · 12.3k in · 678 out · 2.0M cached (session)",
@@ -1794,6 +1978,55 @@ mod tests {
         );
     }
 
+    /// The budget line says what holds the part of it that is not left.
+    #[test]
+    fn inspect_explains_what_children_hold_of_the_budget() {
+        let mut i: branchyard::Inspection = serde_json::from_value(serde_json::json!({
+            "name": "meta", "status": {"state": "running"}, "harness": "claude-code",
+            "profile": "claude-code-stream-json", "parent": null, "children": ["a", "b", "c"],
+            "depth": 0, "turns": 1, "candidate": null, "cost_usd": 0.1,
+            "subtree_cost_usd": 0.35, "max_usd": 1.5, "remaining_usd": 0.2,
+            "reserved_usd": 0.95, "reserving_children": 2, "settled_children_usd": 0.25,
+            "envelope": null, "last_message": "",
+        }))
+        .unwrap();
+        let text = inspection(&i, Style::PLAIN);
+        assert!(
+            text.contains(
+                "$0.20 of $1.50 left ($0.95 reserved by 2 live children, $0.25 spent by settled ones)"
+            ),
+            "{text}"
+        );
+        (i.reserving_children, i.reserved_usd, i.settled_children_usd) = (0, 0.0, 0.0);
+        let text = inspection(&i, Style::PLAIN);
+        assert!(text.contains("$0.20 of $1.50 left") && !text.contains("reserved by"));
+    }
+
+    /// The model line names the model a branch was given, or says it runs
+    /// its harness's default.
+    #[test]
+    fn inspect_names_the_model() {
+        let mut i: branchyard::Inspection = serde_json::from_value(serde_json::json!({
+            "name": "kid", "status": {"state": "ready"}, "harness": "claude-code",
+            "profile": "claude-code-stream-json", "parent": "root", "children": [],
+            "depth": 1, "turns": 1, "candidate": null, "cost_usd": null,
+            "subtree_cost_usd": 0.0, "max_usd": null, "remaining_usd": null,
+            "envelope": null, "last_message": "", "model": "haiku",
+        }))
+        .unwrap();
+        let line = |text: String| {
+            text.lines()
+                .find(|l| l.starts_with("model"))
+                .map(|l| l.split_whitespace().skip(1).collect::<Vec<_>>().join(" "))
+        };
+        assert_eq!(line(inspection(&i, Style::PLAIN)).as_deref(), Some("haiku"));
+        i.model = None;
+        assert_eq!(
+            line(inspection(&i, Style::PLAIN)).as_deref(),
+            Some("the harness's default")
+        );
+    }
+
     #[test]
     fn reserved_branches_line_up_from_the_first_line() {
         let mut r = Renderer::new(PLAIN, true);
@@ -1942,6 +2175,48 @@ mod tests {
         assert_eq!(
             [5, 42, 600, 7_200, 200_000].map(age_text),
             ["now", "42s", "10m", "2h", "2d"]
+        );
+    }
+
+    /// The battery's graph scenario: after every child was discarded,
+    /// `by graph show` still read `after models (integrated)` as if they
+    /// waited. A dependency of a child that no longer waits is history, and
+    /// a discarded prerequisite says so.
+    #[test]
+    fn a_graph_shows_dependencies_that_no_longer_wait_as_history() {
+        let node = |name: &str, status: BranchStatus| branchyard::GraphNode {
+            name: name.into(),
+            status,
+            depends_on: Vec::new(),
+            bindings: Vec::new(),
+            seat: None,
+        };
+        let discarded = || BranchStatus::Discarded {
+            reason: "redo".into(),
+        };
+        let after = |dependent: &str| branchyard::Dependency {
+            dependent: dependent.into(),
+            prerequisite: "models".into(),
+            after: branchyard::After::Integrated,
+        };
+        let graph = branchyard::Graph {
+            branch: "meta".into(),
+            revision: 3,
+            children: vec![
+                node("models", discarded()),
+                node("store", discarded()),
+                node("api", BranchStatus::Waiting),
+            ],
+            dependencies: vec![after("store"), after("api")],
+        };
+        let text = super::graph(&graph, PLAIN);
+        assert!(
+            text.contains("was after models (integrated), now discarded"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  after models (integrated), now discarded"),
+            "{text}"
         );
     }
 

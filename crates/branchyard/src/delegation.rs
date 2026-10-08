@@ -46,6 +46,7 @@ use crate::graph::{
     self, After, Binding, Dependency, DependencyRef, Graph, GraphApplied, GraphCommit, GraphEdit,
     SpawnSpec, MAX_EDITS,
 };
+use crate::operations::Capability;
 use crate::projection::{lock, same_token, ENV_BRANCH, ENV_ROOT, ENV_TOKEN};
 use crate::record::{self, Recorder};
 use crate::recover;
@@ -53,9 +54,9 @@ use crate::run::{self, NewBranch, Prepared};
 use crate::seats::{Seat, Seats};
 use crate::state::{Record, Store};
 use crate::{
-    git, harness, inbox, names, ops, Activity, BranchInfo, BranchStatus, Budget, CandidateInfo,
-    Error, Event, Merged, Message, MessageKind, Policy, RecordedEvent, Rule, Steer, SteerState,
-    TaskOptions, Yard,
+    git, harness, inbox, integrate, names, Activity, BranchInfo, BranchStatus, Budget,
+    CandidateInfo, CheckReport, Error, Event, Merged, MergedAll, Message, MessageKind, Policy,
+    RecordedEvent, Rule, SharedCheck, Steer, SteerState, TaskOptions, Yard,
 };
 
 /// How long `steer` waits for the input to be delivered.
@@ -87,15 +88,39 @@ pub struct Envelope {
     /// Harness or profile IDs children may run. Empty: only this branch's
     /// own profile.
     pub harnesses: Vec<String>,
+    /// Times the branch's next turn may start on its own after its turn
+    /// ended while children it delegated were still running, once they
+    /// have settled (`docs/delegation.md`, "Waiting on children"). 0 turns
+    /// this off (`--no-wake`): such a turn then ends as it is. A child's is
+    /// at most its parent's. Absent in a stored envelope:
+    /// [`DEFAULT_MAX_WAKES`].
+    #[serde(
+        default = "default_max_wakes",
+        skip_serializing_if = "is_default_max_wakes"
+    )]
+    pub max_wakes: u32,
+}
+
+/// The automatic wakes an envelope allows unless it says otherwise.
+pub const DEFAULT_MAX_WAKES: u32 = 8;
+
+fn default_max_wakes() -> u32 {
+    DEFAULT_MAX_WAKES
+}
+
+fn is_default_max_wakes(wakes: &u32) -> bool {
+    *wakes == DEFAULT_MAX_WAKES
 }
 
 impl Default for Envelope {
-    /// Children only, at most four, on the parent's own profile.
+    /// Children only, at most four, on the parent's own profile, woken
+    /// when they settle at most [`DEFAULT_MAX_WAKES`] times.
     fn default() -> Self {
         Envelope {
             max_depth: 1,
             max_children: 4,
             harnesses: Vec::new(),
+            max_wakes: DEFAULT_MAX_WAKES,
         }
     }
 }
@@ -107,6 +132,14 @@ impl Envelope {
             max_depth,
             ..Envelope::default()
         }
+    }
+
+    /// Never start the branch's next turn on its own when its children
+    /// settle (`max_wakes` 0): a turn that ends while they run ends as it
+    /// is, and the caller waits for them (`by wait`, [`Delegate::wait`]).
+    pub fn no_wake(mut self) -> Self {
+        self.max_wakes = 0;
+        self
     }
 
     pub fn harnesses<I, S>(mut self, harnesses: I) -> Self
@@ -127,10 +160,21 @@ impl Envelope {
             .any(|h| h == profile.id || h == profile.harness)
     }
 
+    /// The harnesses or profiles children may run, as a refusal names
+    /// them: the list, or the branch's own profile by its label.
     fn allowed_text(&self, own: &Profile) -> String {
         match self.harnesses.is_empty() {
-            true => own.id.to_owned(),
+            true => format!("{} only (its own)", own.label()),
             false => self.harnesses.join(", "),
+        }
+    }
+
+    /// What `--harness` its children may name: the list as given, or,
+    /// when it is empty, the branch's own `profile` alone.
+    pub fn allowed(&self, profile: &str) -> Vec<String> {
+        match self.harnesses.is_empty() {
+            true => vec![profile.to_owned()],
+            false => self.harnesses.clone(),
         }
     }
 
@@ -158,6 +202,7 @@ impl Envelope {
                 .max_children
                 .map_or(self.max_children, |c| c.min(self.max_children)),
             harnesses,
+            max_wakes: self.max_wakes,
         })
     }
 }
@@ -256,6 +301,11 @@ pub struct Spawn {
     /// until this branch (or a person) approves it. See
     /// `docs/plans-and-goals.md`.
     pub plan: bool,
+    /// The model the child's harness runs, or a size alias (`small`,
+    /// `medium`, `large`, `extra-large`) where its harness defines one.
+    /// Unset: its seat's, else its parent's. A harness whose driver cannot
+    /// choose a model refuses it.
+    pub model: Option<String>,
 }
 
 impl Spawn {
@@ -320,6 +370,10 @@ pub struct Spawned {
     pub git_branch: String,
     pub harness: String,
     pub profile: String,
+    /// The model its harness runs, when one was chosen; omitted for the
+    /// harness's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub base: String,
     pub depth: u32,
     pub status: BranchStatus,
@@ -332,6 +386,16 @@ pub struct Spawned {
     /// until it starts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
+    /// The check that must pass on its merge when it is integrated: the
+    /// one the spawn gave, else its parent's. Omitted when it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<Vec<String>>,
+    /// `check` is its parent's, inherited because the spawn gave none.
+    /// Siblings under a parent's whole-suite check pass it only together:
+    /// integrate them together ([`Delegate::integrate_all`]). Omitted when
+    /// false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub check_inherited: bool,
 }
 
 /// A descendant whose next turn was started.
@@ -342,11 +406,72 @@ pub struct Sent {
     pub status: BranchStatus,
 }
 
-/// The branches a cancel asked to stop.
+/// The branches a cancel asked to stop. A cancel of a branch that had
+/// already stopped is not an error, like an integration of one already
+/// merged: nothing changes, `already` says so, and `note` says what the
+/// branch is and what to do with it instead.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Cancelled {
     pub cancelled: Vec<String>,
+    /// The branch had already stopped (ready, over budget, failed, merged,
+    /// discarded, ...), so there was nothing to cancel. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub already: bool,
+    /// When nothing was running: what the branch is, and the command that
+    /// does what a cancel cannot (`by discard` sets a settled child aside).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Cancelled {
+    /// What a cancel of `branch`, now `status`, stopped.
+    pub fn of(cancelled: Vec<String>, branch: &str, status: &BranchStatus) -> Cancelled {
+        let stopped = |what: &str, next: &str| {
+            Some(format!(
+                "{branch} had already stopped ({what}), so the cancel changed nothing{next}"
+            ))
+        };
+        let set_aside = format!(
+            ". Continue it with `by send {branch} \"<prompt>\"`, or set it aside with \
+             `by discard {branch} --reason TEXT`, which frees its slot"
+        );
+        let note = match (cancelled.is_empty(), status) {
+            (false, _) => None,
+            (true, BranchStatus::Running) => Some(format!("{branch} was already asked to stop")),
+            (true, BranchStatus::Ready) => stopped(
+                "ready",
+                &format!(
+                    ". Keep its work with `by integrate {branch}`, or set it aside with \
+                     `by discard {branch} --reason TEXT`, which frees its slot"
+                ),
+            ),
+            (true, BranchStatus::Merged { target, .. }) => stopped(
+                &format!("merged into {target}"),
+                &format!(". `by rm {branch}` removes its worktree"),
+            ),
+            (true, BranchStatus::Discarded { .. }) => stopped("discarded", ""),
+            (true, BranchStatus::BudgetExceeded { limit }) => stopped(
+                &format!("over budget: {}", crate::operations::limit_text(limit)),
+                &set_aside,
+            ),
+            (true, status) => stopped(&status_word(status), &set_aside),
+        };
+        let already = cancelled.is_empty() && *status != BranchStatus::Running;
+        Cancelled {
+            cancelled,
+            already,
+            note,
+        }
+    }
+}
+
+/// A status's `state`, as JSON names it.
+fn status_word(status: &BranchStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|v| v["state"].as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 /// A branch's subtree.
@@ -364,6 +489,34 @@ pub struct Children {
 pub struct Inbox {
     pub branch: String,
     pub messages: Vec<Message>,
+    /// Messages delivered by steering into the branch's running turn, by
+    /// id. They count delivered once written to the harness, which takes
+    /// them only at its next step (such as after the call reading this),
+    /// so the turn has not read them yet: with the messages not delivered,
+    /// they are what `inbox --unread` lists ([`Inbox::is_unread`]).
+    /// Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steered_this_turn: Vec<u64>,
+}
+
+impl Inbox {
+    /// Whether the branch's turns have not read `message` yet: it is not
+    /// delivered, or it was steered into the running turn.
+    pub fn is_unread(&self, message: &Message) -> bool {
+        !message.delivered || self.steered_this_turn.contains(&message.id)
+    }
+
+    /// Only the messages not read yet ([`Inbox::is_unread`]).
+    pub fn unread_only(mut self) -> Inbox {
+        let unread: Vec<Message> = self
+            .messages
+            .iter()
+            .filter(|m| self.is_unread(m))
+            .cloned()
+            .collect();
+        self.messages = unread;
+        self
+    }
 }
 
 /// A question sent, and its answer if one arrived within the wait.
@@ -384,22 +537,61 @@ pub struct Inspection {
     pub status: BranchStatus,
     pub harness: String,
     pub profile: String,
+    /// The model its harness runs, when one was chosen (`--model`), its
+    /// own or its seat's or parent's; omitted for the harness's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub parent: Option<String>,
     pub children: Vec<String>,
     pub depth: u32,
     pub turns: u32,
     pub candidate: Option<CandidateInfo>,
-    /// The branch's own cost estimate; `None` when its harness reports none.
+    /// The branch's own cost estimate, while a turn runs too (from the
+    /// harness's usage as it comes); `None` when its harness has reported
+    /// none.
     pub cost_usd: Option<f64>,
-    /// Its own and its descendants' reported costs. Unreported costs count
-    /// as zero here.
+    /// Its own and its descendants' reported costs, removed descendants'
+    /// included. Unreported costs count as zero here.
     pub subtree_cost_usd: f64,
     /// The cost limit its turns run under, when there is one.
     pub max_usd: Option<f64>,
-    /// What is left of `max_usd` after its own spend and its children's
-    /// reservations: what it can still spend or grant.
+    /// What is left of `max_usd` after its own spend, what its live
+    /// children hold (`reserved_usd`) and what its settled and removed
+    /// children spent (`settled_children_usd`): what it can still spend or
+    /// grant.
     pub remaining_usd: Option<f64>,
+    /// What its live children (running, waiting, blocked or awaiting plan
+    /// approval) hold of its budget: each one's whole limit, or what its
+    /// subtree spent if that is more, since it may spend that much without
+    /// asking. A child that settles (ready, merged, failed, ...) holds only
+    /// what it spent, until it is sent something again.
+    #[serde(default)]
+    pub reserved_usd: f64,
+    /// How many live children hold `reserved_usd`.
+    #[serde(default)]
+    pub reserving_children: u32,
+    /// What its settled and removed children's subtrees spent.
+    #[serde(default)]
+    pub settled_children_usd: f64,
     pub envelope: Option<Envelope>,
+    /// The check its merge must pass when it is integrated. Omitted when
+    /// it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<Vec<String>>,
+    /// `check` is its parent's, inherited because its spawn gave none.
+    /// Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub check_inherited: bool,
+    /// Its siblings that share `check` and may still be integrated (ready,
+    /// or not settled yet): a whole-suite check passes only with all of
+    /// them, so they are integrated together. Omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_shared_with: Vec<String>,
+    /// What its children may run, as `--harness` names it: the envelope's
+    /// `harnesses`, or its own profile when that list is empty (which
+    /// means "its own only", not "none"). Empty without an envelope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_harnesses: Vec<String>,
     /// The harness's text since the branch's last prompt, truncated from
     /// the front.
     pub last_message: String,
@@ -438,6 +630,23 @@ pub struct EventPage {
     pub next_cursor: usize,
     /// Events recorded so far.
     pub total: usize,
+}
+
+/// What a wait for several branches found ([`Delegate::wait_for`],
+/// `by wait`, the `wait` tool).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Waited {
+    /// The branches waited for that have settled (not running, waiting
+    /// for prerequisites or waiting on children), as inspected when the
+    /// wait returned, in the order asked.
+    pub settled: Vec<Inspection>,
+    /// Those that have not.
+    pub pending: Vec<String>,
+    /// The timeout passed before the wait was satisfied. Omitted when
+    /// false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timed_out: bool,
 }
 
 /// Acts as one branch, on that branch and its descendants only.
@@ -564,6 +773,20 @@ impl Delegate {
         }
     }
 
+    /// Submit again the prompt of `branch`'s last turn that recovery found
+    /// cut off (its engine stopped while it ran, or before it ran), as
+    /// [`Delegate::send`] would; `by send <branch> --retry`. The turn starts
+    /// with a note of what happened, and in a fresh session that begins
+    /// with every earlier prompt when its harness never recorded one.
+    /// Refused when no turn of it was cut off since a prompt last reached
+    /// its harness.
+    pub fn retry(&self, branch: &str) -> Result<Sent, Error> {
+        match &self.via {
+            Via::Local(local) => local.retry(branch),
+            Via::Remote(_) => self.typed("send", json!({"branch": branch, "retry": true})),
+        }
+    }
+
     /// [`Delegate::send`], then wait for the turn it started to settle, for
     /// up to `timeout`. Race-free: a branch's lease admits one turn at a
     /// time, so once this send's turn is running, nothing but its own end
@@ -633,10 +856,44 @@ impl Delegate {
     /// (`by/<name>`, never the user's branches), after the descendant's
     /// check passes on the exact merge. This branch's uncommitted work is
     /// committed first, and its worktree moves to the merge.
+    ///
+    /// A candidate this branch already contains (say, brought in by a
+    /// sibling that merged it) is not an error: the descendant is recorded
+    /// as merged through the commit that brought it in, and the result
+    /// says `already`.
     pub fn integrate(&self, branch: &str) -> Result<Merged, Error> {
         match &self.via {
             Via::Local(local) => local.integrate(branch),
             Via::Remote(_) => self.typed("propose_integration", json!({ "branch": branch })),
+        }
+    }
+
+    /// Integrate several descendants together, all or none: their
+    /// candidates are merged in the order given in one temporary worktree,
+    /// each distinct check of theirs runs once on the result, and this
+    /// branch moves once. For siblings that share one test suite, which
+    /// none passes alone. A conflict names the descendant that conflicted
+    /// and those merged before it ([`Error::ConflictBetween`]). Every
+    /// descendant is recorded as merged.
+    pub fn integrate_all(&self, branches: &[&str]) -> Result<MergedAll, Error> {
+        let names: Vec<String> = branches.iter().map(|b| (*b).to_owned()).collect();
+        match &self.via {
+            Via::Local(local) => local.integrate_all(&names),
+            Via::Remote(_) => self.typed("propose_integration", json!({ "branches": names })),
+        }
+    }
+
+    /// Run a branch's check (its own, or the one it inherited) on its
+    /// current work, the way integrating it would, and integrate nothing:
+    /// its worktree's files as they are, committed nowhere, merged into its
+    /// parent's git branch in a private temporary worktree. For this
+    /// branch, to learn before it finishes whether its work would pass, or
+    /// a descendant. A conflict with the parent's branch is reported in
+    /// [`CheckReport::conflicts`], and the check does not run.
+    pub fn check(&self, branch: &str) -> Result<CheckReport, Error> {
+        match &self.via {
+            Via::Local(local) => local.check(branch),
+            Via::Remote(_) => self.typed("check", json!({ "branch": branch })),
         }
     }
 
@@ -660,6 +917,18 @@ impl Delegate {
         match &self.via {
             Via::Local(local) => local.cancel(branch),
             Via::Remote(_) => self.typed("cancel", json!({ "branch": branch })),
+        }
+    }
+
+    /// Set a settled descendant aside: it ends `discarded` with `reason`,
+    /// runs no more turns, is never integrated, keeps its record and cost,
+    /// and frees its slot in this branch's `max_children`. Refused while it
+    /// runs (cancel it first) and once it was merged. Returns it as
+    /// [`Delegate::inspect`] shows it.
+    pub fn discard(&self, branch: &str, reason: Option<&str>) -> Result<Inspection, Error> {
+        match &self.via {
+            Via::Local(local) => local.discard(branch, reason),
+            Via::Remote(_) => self.typed("discard", json!({"branch": branch, "reason": reason})),
         }
     }
 
@@ -703,17 +972,22 @@ impl Delegate {
 
     /// Publish `path` as a new immutable artifact of this branch; see
     /// `docs/storage.md`.
+    ///
+    /// `media_type` is recorded with it (default
+    /// `application/octet-stream`); its `digest` is the blake3 hash of its
+    /// bytes, in lower-case hex.
     pub fn publish_artifact(
         &self,
         path: &Path,
         name: Option<String>,
+        media_type: Option<String>,
         labels: std::collections::BTreeMap<String, String>,
     ) -> Result<crate::ArtifactRef, Error> {
         match &self.via {
-            Via::Local(local) => local.publish_artifact(path, name, None, labels),
+            Via::Local(local) => local.publish_artifact(path, name, media_type, labels),
             Via::Remote(_) => self.typed(
                 "publish_artifact",
-                json!({"path": path, "name": name, "labels": labels}),
+                json!({"path": path, "name": name, "media_type": media_type, "labels": labels}),
             ),
         }
     }
@@ -856,6 +1130,11 @@ impl Delegate {
         self.typed("inbox", json!({}))
     }
 
+    /// The messages addressed to this branch not yet delivered to a turn.
+    pub fn unread(&self) -> Result<Inbox, Error> {
+        self.typed("inbox", json!({"unread": true}))
+    }
+
     /// Inspect `branch` until it is not running a turn, for up to
     /// `timeout`. Fails with [`Error::Running`] if it still is.
     ///
@@ -866,10 +1145,7 @@ impl Delegate {
         let deadline = Instant::now().checked_add(timeout);
         loop {
             let inspection = self.inspect(branch)?;
-            if !matches!(
-                inspection.status,
-                BranchStatus::Running | BranchStatus::Waiting
-            ) {
+            if !crate::wake::unsettled(&inspection.status) {
                 return Ok(inspection);
             }
             let now = Instant::now();
@@ -883,6 +1159,9 @@ impl Delegate {
                     if inspection.status == BranchStatus::Waiting {
                         graph::advance(&local.yard, &[branch.to_owned()], None)?;
                     }
+                    if inspection.status == BranchStatus::WaitingOnChildren {
+                        crate::wake::look(&local.yard, branch, None)?;
+                    }
                     let store = local.store();
                     let before = inspection.status.clone();
                     store.wait(left, || {
@@ -892,6 +1171,116 @@ impl Delegate {
                 Via::Remote(_) => std::thread::sleep(WAIT_POLL.min(left)),
             }
         }
+    }
+
+    /// [`Delegate::wait_for`] the first of `branches` to settle.
+    pub fn wait_any(&self, branches: &[&str], timeout: Option<Duration>) -> Result<Waited, Error> {
+        self.wait_for(branches, true, timeout)
+    }
+
+    /// [`Delegate::wait_for`] all of `branches` to settle.
+    pub fn wait_all(&self, branches: &[&str], timeout: Option<Duration>) -> Result<Waited, Error> {
+        self.wait_for(branches, false, timeout)
+    }
+
+    /// Block until `branches` (descendants, or this branch) have settled:
+    /// any one of them with `any`, else all, or until `timeout` passes
+    /// (then `timed_out` is set; it is not an error). With no branches, it
+    /// waits for this branch's children that are still running or
+    /// waiting, and returns at once, listing every child, when none is.
+    ///
+    /// The wait is the store's, as [`Delegate::wait`]'s: it wakes when a
+    /// status changes, at once in the engine's process and within 100 ms
+    /// in another. Through the broker it blocks in the engine's process.
+    pub fn wait_for(
+        &self,
+        branches: &[&str],
+        any: bool,
+        timeout: Option<Duration>,
+    ) -> Result<Waited, Error> {
+        let names: Vec<String> = branches.iter().map(|b| (*b).to_owned()).collect();
+        match &self.via {
+            Via::Local(local) => local.wait_for(names, any, timeout),
+            Via::Remote(_) => self.typed(
+                "wait",
+                json!({
+                    "branches": names,
+                    "any": any,
+                    "timeout_seconds": timeout.map(|t| t.as_secs_f64()),
+                }),
+            ),
+        }
+    }
+}
+
+/// Block until `names` have settled, any one with `any` else all, or
+/// `timeout` passes, reading their durable status from the store; each
+/// settled one is reported through `inspect`. While it waits it moves what
+/// a wait can: a turn whose engine stopped is recovered, a dependent whose
+/// prerequisites settled is started, a parked branch whose children settled
+/// is woken, each when this process can.
+///
+/// `queued` says whether a branch has a turn asked for that has not
+/// started yet, such as a server's admitted send: such a branch is waited
+/// for though its status is still the last turn's.
+pub(crate) fn wait_for(
+    yard: &Yard,
+    names: &[String],
+    any: bool,
+    timeout: Option<Duration>,
+    inspect: impl Fn(&str) -> Result<Inspection, Error>,
+    queued: impl Fn(&str) -> Result<bool, Error>,
+) -> Result<Waited, Error> {
+    let store = yard.store();
+    let deadline = timeout.and_then(|t| Instant::now().checked_add(t));
+    let statuses = |store: &Store| -> Result<Vec<(BranchStatus, bool)>, Error> {
+        names
+            .iter()
+            .map(|name| Ok((store.read(name)?.info.status, queued(name)?)))
+            .collect()
+    };
+    loop {
+        let now = statuses(&store)?;
+        let pending: Vec<String> = names
+            .iter()
+            .zip(&now)
+            .filter(|(_, (status, queued))| *queued || crate::wake::unsettled(status))
+            .map(|(name, _)| name.clone())
+            .collect();
+        let done = match any {
+            true => pending.len() < names.len() || names.is_empty(),
+            false => pending.is_empty(),
+        };
+        let late = deadline.is_some_and(|d| Instant::now() >= d);
+        if done || late {
+            let settled = names
+                .iter()
+                .filter(|name| !pending.contains(name))
+                .map(|name| inspect(name))
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(Waited {
+                settled,
+                pending,
+                timed_out: !done,
+            });
+        }
+        for (name, (status, _)) in names.iter().zip(&now) {
+            match status {
+                BranchStatus::Running => recover::settle(yard, name)?,
+                BranchStatus::Waiting => {
+                    graph::advance(yard, std::slice::from_ref(name), None)?;
+                }
+                BranchStatus::WaitingOnChildren => {
+                    crate::wake::look(yard, name, None)?;
+                }
+                _ => {}
+            }
+        }
+        let left = deadline.map_or(SETTLE_EVERY, |d| {
+            d.saturating_duration_since(Instant::now())
+                .min(SETTLE_EVERY)
+        });
+        store.wait(left, || Ok((statuses(&store)? != now).then_some(())))?;
     }
 }
 
@@ -946,8 +1335,41 @@ pub(crate) fn trusted(yard: &Yard, branch: &str, options: TaskOptions) -> Result
     })
 }
 
-/// The caller's budget, narrowed by limits a parent imposed.
+/// Keep the limits `budget` gives in `record`, each replacing the one it
+/// had; a limit it does not give keeps the remembered one. True when the
+/// record changed.
+pub(crate) fn remember_limits(record: &mut Record, budget: &Budget) -> bool {
+    let earlier = record.limits.clone().unwrap_or_default();
+    let limits = Limits {
+        max_usd: budget.max_usd.or(earlier.max_usd),
+        max_turns: budget.max_turns.or(earlier.max_turns),
+        max_duration_ms: budget
+            .max_duration
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+            .or(earlier.max_duration_ms),
+    };
+    let limits = (limits != Limits::default()).then_some(limits);
+    let changed = limits != record.limits;
+    record.limits = limits;
+    changed
+}
+
+/// The caller's budget, with the limits the branch's turns were last given
+/// ([`remember_limits`]) where it gives none, narrowed by limits a parent
+/// imposed.
 pub(crate) fn effective_budget(record: &Record, budget: &Budget) -> Budget {
+    let budget = match &record.limits {
+        None => budget.clone(),
+        Some(kept) => Budget {
+            max_usd: budget.max_usd.or(kept.max_usd),
+            max_turns: budget.max_turns.or(kept.max_turns),
+            max_duration: budget
+                .max_duration
+                .or(kept.max_duration_ms.map(Duration::from_millis)),
+            ..budget.clone()
+        },
+    };
+    let budget = &budget;
     let Some(limits) = record.grant.as_ref().and_then(|g| g.limits.as_ref()) else {
         return budget.clone();
     };
@@ -972,11 +1394,14 @@ pub(crate) fn effective_budget(record: &Record, budget: &Budget) -> Budget {
     }
 }
 
-/// The caller's policy with the denials a parent imposed put first.
+/// The caller's policy with the denials a parent imposed, and those the
+/// branch was started with, put first.
 pub(crate) fn effective_policy(record: &Record, policy: &Policy) -> Policy {
-    match record.grant.as_ref().map(|g| &g.deny) {
-        Some(deny) if !deny.is_empty() => narrowed(policy, deny),
-        _ => policy.clone(),
+    let given = record.grant.as_ref().map_or(&[][..], |g| g.deny.as_slice());
+    let deny = run::with_denials(given, &record.deny);
+    match deny.is_empty() {
+        true => policy.clone(),
+        false => narrowed(policy, &deny),
     }
 }
 
@@ -993,39 +1418,109 @@ fn narrowed(policy: &Policy, deny: &[String]) -> Policy {
     }
 }
 
-/// What `record`'s children hold of its budget: each child's limit, or its
-/// subtree's spend if that is more.
-pub(crate) fn reserved(store: &Store, record: &Record) -> f64 {
+/// Whether a child can run turns without its parent asking again, and so
+/// holds its whole limit: running, waiting for its prerequisites (it
+/// starts on its own when they settle), blocked (a graph proposal reopens
+/// it), with a plan awaiting approval (approving it starts a turn), or
+/// waiting on its own children (it is woken when they settle; see
+/// `crate::wake`). Every other status is settled: the child holds only
+/// what it spent until it is sent something again, and a discarded one
+/// never is.
+pub(crate) fn is_live(status: &BranchStatus) -> bool {
+    matches!(
+        status,
+        BranchStatus::Running
+            | BranchStatus::Waiting
+            | BranchStatus::Blocked { .. }
+            | BranchStatus::AwaitingPlanApproval
+            | BranchStatus::WaitingOnChildren
+    )
+}
+
+/// How many of `record`'s children are live ([`is_live`]), not counting
+/// `except`: what its envelope's `max_children` bounds.
+fn live_children(store: &Store, record: &Record, except: Option<&str>) -> usize {
     record
         .info
         .children
         .iter()
+        .filter(|child| Some(child.as_str()) != except)
         .filter_map(|child| store.read(child).ok())
-        .map(|child| {
-            let limit = child
-                .grant
-                .as_ref()
-                .and_then(|g| g.limits.as_ref())
-                .and_then(|l| l.max_usd);
-            let spent = subtree_spent(store, &child, &mut BTreeSet::new());
-            limit.map_or(spent, |limit| limit.max(spent))
-        })
-        .sum()
+        .filter(|child| is_live(&child.info.status))
+        .count()
 }
 
-/// Reported costs of `record` and its descendants; unreported counts as 0.
-fn subtree_spent(store: &Store, record: &Record, seen: &mut BTreeSet<String>) -> f64 {
-    if !seen.insert(record.info.name.clone()) {
-        return 0.0;
+/// What `record`'s children hold of its budget; see [`Held`].
+pub(crate) fn reserved(store: &Store, record: &Record) -> f64 {
+    held(store, record).total()
+}
+
+/// What a branch's children hold of its budget, by kind.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Held {
+    /// Held by live children ([`is_live`]): each one's limit, or what its
+    /// subtree spent if that is more.
+    pub live_usd: f64,
+    /// How many live children hold it.
+    pub live: u32,
+    /// Spent by settled children's subtrees (what a live grandchild of
+    /// one holds included), and by removed children's, from the ledger.
+    pub settled_usd: f64,
+}
+
+impl Held {
+    pub fn total(&self) -> f64 {
+        self.live_usd + self.settled_usd
     }
-    record.info.cost_usd.unwrap_or(0.0)
-        + record
-            .info
-            .children
-            .iter()
-            .filter_map(|child| store.read(child).ok())
-            .map(|child| subtree_spent(store, &child, seen))
-            .sum::<f64>()
+}
+
+pub(crate) fn held(store: &Store, record: &Record) -> Held {
+    let mut held = Held {
+        settled_usd: record.removed_spent(),
+        ..Held::default()
+    };
+    for child in record
+        .info
+        .children
+        .iter()
+        .filter_map(|child| store.read(child).ok())
+    {
+        match is_live(&child.info.status) {
+            true => {
+                held.live += 1;
+                held.live_usd += holds(store, &child);
+            }
+            false => held.settled_usd += holds(store, &child),
+        }
+    }
+    held
+}
+
+/// What one child holds of its parent's budget. A live child holds its
+/// limit, or its subtree's spend if that is more, since it may spend up to
+/// its limit without asking. A settled one holds what it spent, and what
+/// its own children hold.
+fn holds(store: &Store, child: &Record) -> f64 {
+    let spent = subtree_spent(store, child);
+    match is_live(&child.info.status) {
+        true => limit_usd(child).map_or(spent, |limit| limit.max(spent)),
+        false => (child.info.cost_usd.unwrap_or(0.0) + reserved(store, child)).max(spent),
+    }
+}
+
+/// The cost limit a delegated child's turns run under.
+fn limit_usd(record: &Record) -> Option<f64> {
+    record
+        .grant
+        .as_ref()
+        .and_then(|g| g.limits.as_ref())
+        .and_then(|l| l.max_usd)
+}
+
+/// Reported costs of `record` and its descendants, removed ones included
+/// (from each parent's ledger); unreported counts as 0.
+fn subtree_spent(store: &Store, record: &Record) -> f64 {
+    record.subtree_spent(&mut |name| store.read(name).ok())
 }
 
 /// Whether any direct child of `name` is currently running a turn. Read
@@ -1087,6 +1582,28 @@ pub(crate) fn cancel_tree(yard: &Yard, name: &str, by: &str) -> Result<Vec<Strin
     targets.extend(descendants(&store, name)?);
     let mut cancelled = Vec::new();
     for info in targets {
+        if info.status == BranchStatus::WaitingOnChildren {
+            // Parked: it runs no turn to stop, and is not woken.
+            if let Ok(record) = store.read(&info.name) {
+                let mut ended = record.clone();
+                ended.info.status = BranchStatus::Interrupted;
+                ended.parked = None;
+                let event = RecordedEvent {
+                    at_ms: branchyard_support::time::now_ms(),
+                    activity: Activity::Status(BranchStatus::Interrupted),
+                };
+                if store
+                    .graph()
+                    .settle_if(&ended, &event, crate::wake::is_parked)?
+                {
+                    store.notify();
+                    // What waits for it is looked at, as every settle does.
+                    graph::settled(yard, &info.name, None);
+                    cancelled.push(info.name);
+                }
+            }
+            continue;
+        }
         if info.status == BranchStatus::Waiting {
             if let Ok(record) = store.read(&info.name) {
                 if graph::cancel_unstarted(&store, &record, by)? {
@@ -1150,6 +1667,18 @@ pub(crate) fn wait_subtree(yard: &Yard, name: &str) -> Result<Vec<BranchInfo>, E
         let all = descendants(&store, name)?;
         let mut watched = all.clone();
         watched.extend(dependency_closure(&store, name, &all)?);
+        // The branch itself, while it waits on its children or runs the
+        // turn that woke it here.
+        let own = store.read(name)?;
+        let woken_here = own.info.status == BranchStatus::Running
+            && store
+                .backend()
+                .leases()?
+                .iter()
+                .any(|l| l.branch == name && l.owner.as_deref() == Some(&store.owner().id));
+        if woken_here || own.info.status == BranchStatus::WaitingOnChildren {
+            watched.push(own.info.clone());
+        }
         let names: BTreeSet<String> = watched.iter().map(|info| info.name.clone()).collect();
         let handles: Vec<JoinHandle<()>> = {
             let mut running = lock(&yard.hub.running);
@@ -1188,7 +1717,18 @@ pub(crate) fn wait_subtree(yard: &Yard, name: &str) -> Result<Vec<BranchInfo>, E
             if !waiting.is_empty() && !graph::advance(yard, &waiting, None)?.is_empty() {
                 continue;
             }
-            return Ok(all);
+            // A parked branch whose children all settled: its next turn,
+            // when this process ran the turn that parked it.
+            let mut woke = false;
+            for info in watched.iter().rev() {
+                if info.status == BranchStatus::WaitingOnChildren {
+                    woke |= crate::wake::look(yard, &info.name, None)?;
+                }
+            }
+            if woke {
+                continue;
+            }
+            return descendants(&store, name);
         }
         for info in running {
             recover::settle(yard, &info.name)?;
@@ -1311,10 +1851,93 @@ impl Edit {
 struct Planned {
     /// Its `waiting` record.
     record: Record,
+    /// Its check came from its parent, not the request.
+    check_inherited: bool,
     limits: Limits,
     seat: Option<String>,
     depends_on: Vec<String>,
     after: After,
+}
+
+/// `record`'s siblings that share its check and may still be integrated:
+/// ready, not settled yet, or stopped with a candidate. Oldest first.
+fn sharing_check(store: &Store, record: &Record) -> Vec<Record> {
+    let (Some(check), Some(parent)) = (&record.check, &record.info.parent) else {
+        return Vec::new();
+    };
+    let Ok(parent) = store.read(parent) else {
+        return Vec::new();
+    };
+    parent
+        .info
+        .children
+        .iter()
+        .filter(|child| **child != record.info.name)
+        .filter_map(|child| store.read(child).ok())
+        .filter(|sibling| sibling.check.as_ref() == Some(check))
+        .filter(|sibling| match &sibling.info.status {
+            BranchStatus::Ready => true,
+            BranchStatus::Interrupted | BranchStatus::BudgetExceeded { .. } => {
+                sibling.info.candidate.is_some()
+            }
+            status => is_live(status),
+        })
+        .collect()
+}
+
+/// A failed check of an integration of `branches` that left out siblings
+/// sharing it: say who they are and the integration that runs it on all
+/// of them. Any other error is returned as it is.
+fn with_shared_check(store: &Store, error: Error, branches: &[String]) -> Error {
+    let Error::CheckFailed {
+        output_tail,
+        checks,
+        shared: None,
+    } = error
+    else {
+        return error;
+    };
+    let mut shared: Option<SharedCheck> = None;
+    for record in branches.iter().filter_map(|b| store.read(b).ok()) {
+        let (Some(check), siblings) = (record.check.clone(), sharing_check(store, &record)) else {
+            continue;
+        };
+        let into = shared.get_or_insert_with(|| SharedCheck {
+            check,
+            inherited_from: record
+                .info
+                .parent
+                .clone()
+                .filter(|_| record.check_inherited),
+            siblings: Vec::new(),
+            unsettled: Vec::new(),
+            integrate_together: branches.to_vec(),
+        });
+        for sibling in siblings {
+            let name = sibling.info.name;
+            if branches.contains(&name) || into.siblings.contains(&name) {
+                continue;
+            }
+            if is_live(&sibling.info.status) {
+                into.unsettled.push(name.clone());
+            }
+            into.integrate_together.push(name.clone());
+            into.siblings.push(name);
+        }
+    }
+    Error::CheckFailed {
+        output_tail,
+        checks,
+        shared: shared.filter(|s| !s.siblings.is_empty()).map(Box::new),
+    }
+}
+
+/// What became of an integrated branch, for its parent's event log.
+fn merged_outcome(merged: &Merged) -> String {
+    match (&merged.via, merged.already) {
+        (Some(via), true) => format!("already contained in {}, via {via}", merged.target),
+        _ => format!("merged into {} as {}", merged.target, merged.commit),
+    }
 }
 
 /// What became of a spawned child, for its parent's event log.
@@ -1322,7 +1945,13 @@ fn spawn_outcome(spawned: &Spawned) -> String {
     match &spawned.status {
         BranchStatus::Waiting => format!("waiting for {}", spawned.depends_on.join(", ")),
         BranchStatus::Blocked { reason } => format!("blocked: {reason}"),
-        _ => format!("started on {}", spawned.profile),
+        _ => {
+            let on = profiles::label(&spawned.harness, &spawned.profile);
+            match &spawned.model {
+                Some(model) => format!("started on {on} with model {model}"),
+                None => format!("started on {on}"),
+            }
+        }
     }
 }
 
@@ -1342,6 +1971,28 @@ impl Local {
         self.yard.store()
     }
 
+    /// Fail unless this branch holds `capability`: every branch reaches
+    /// itself, its storage and its parent's inbox; only one whose envelope
+    /// allows children acts on descendants. See [`crate::operations`].
+    fn require(&self, capability: Capability, what: &str) -> Result<(), Error> {
+        if capability != Capability::Delegate {
+            return Ok(());
+        }
+        let grant = self.store().read(&self.branch)?.grant;
+        match grant.as_ref().is_some_and(Grant::can_spawn) {
+            true => Ok(()),
+            false => Err(Error::Denied(format!(
+                "{} may not {what}: {}; it acts only on itself, the artifacts and scratch \
+                 areas it may reach, and its parent's inbox",
+                self.branch,
+                match grant {
+                    Some(_) => "its envelope's max_depth is 0, so it has no children",
+                    None => "it was not given delegation",
+                }
+            ))),
+        }
+    }
+
     /// Fail unless `target` is a descendant, or this branch itself when
     /// `or_self`.
     fn require_descendant(&self, target: &str, or_self: bool) -> Result<(), Error> {
@@ -1353,6 +2004,7 @@ impl Local {
                 ))),
             };
         }
+        self.require(Capability::Delegate, &format!("act on {target}"))?;
         let found = descendants(&self.store(), &self.branch)?
             .iter()
             .any(|info| info.name == target);
@@ -1367,8 +2019,71 @@ impl Local {
 
     /// This branch's own spend: the record's, or the running turn's if more.
     fn own_spent(&self, record: &Record) -> f64 {
-        let live = self.cost.as_ref().and_then(|cost| *lock(cost));
-        record.info.cost_usd.unwrap_or(0.0).max(live.unwrap_or(0.0))
+        record
+            .info
+            .cost_usd
+            .unwrap_or(0.0)
+            .max(self.live_cost().unwrap_or(0.0))
+    }
+
+    /// The running turn's spend as the engine last observed it.
+    fn live_cost(&self) -> Option<f64> {
+        self.cost.as_ref().and_then(|cost| *lock(cost))
+    }
+
+    /// Before settled child `name` runs again: it is about to hold its
+    /// whole limit again ([`is_live`]), so it must fit in its parent's
+    /// `max_children` and in what its parent has left. A limit that does
+    /// not fit is narrowed to what is left: `Some((from, to, parent))`. A
+    /// parent with nothing left, or no room for another live child,
+    /// refuses the send.
+    fn reserve_again(&self, name: &str) -> Result<Option<(f64, f64, String)>, Error> {
+        let store = self.store();
+        let child = store.read(name)?;
+        if is_live(&child.info.status) {
+            // Running already, or started by its parent's graph; the send
+            // is refused or needs no new reservation.
+            return Ok(None);
+        }
+        let Some(parent_name) = child.info.parent.clone() else {
+            return Ok(None);
+        };
+        let parent = store.read(&parent_name)?;
+        if let Some(grant) = &parent.grant {
+            let live = live_children(&store, &parent, Some(name));
+            if live >= grant.envelope.max_children as usize {
+                return Err(Error::Denied(format!(
+                    "{parent_name} already has {live} live children, its envelope's \
+                     max_children; {name} can run again once one of them settles"
+                )));
+            }
+        }
+        let (Some(limit), Some(parent_limit)) = (
+            limit_usd(&child),
+            match parent_name == self.branch {
+                true => self.options.budget.max_usd,
+                false => limit_usd(&parent),
+            },
+        ) else {
+            return Ok(None);
+        };
+        let parent_spent = match parent_name == self.branch {
+            true => self.own_spent(&parent),
+            false => parent.info.cost_usd.unwrap_or(0.0),
+        };
+        // `child` counts as settled in `reserved` now.
+        let left = parent_limit - parent_spent - reserved(&store, &parent);
+        let settled = holds(&store, &child);
+        let live = limit.max(subtree_spent(&store, &child));
+        if live - settled <= left + EPSILON_USD {
+            return Ok(None);
+        }
+        if left <= EPSILON_USD {
+            return Err(Error::Denied(format!(
+                "{parent_name} has nothing left of its ${parent_limit:.4} for {name} to spend"
+            )));
+        }
+        Ok(Some((limit, settled + left, parent_name)))
     }
 
     fn remaining(&self, record: &Record) -> Option<f64> {
@@ -1643,6 +2358,7 @@ impl Local {
                     git_branch: info.git_branch,
                     harness: info.harness,
                     profile: info.profile,
+                    model: info.model,
                     base: info.base,
                     depth: info.depth,
                     status: info.status,
@@ -1653,6 +2369,8 @@ impl Local {
                     },
                     seat: child.seat,
                     depends_on: child.depends_on,
+                    check: child.record.check.clone(),
+                    check_inherited: child.check_inherited,
                 }
             })
             .collect();
@@ -1683,16 +2401,13 @@ impl Local {
         taken: &BTreeSet<String>,
     ) -> Result<Planned, Error> {
         let store = self.store();
-        let live = caller
-            .info
-            .children
-            .iter()
-            .filter(|child| store.read(child).is_ok())
-            .count()
-            + planned.len();
+        // A removed, discarded or otherwise settled child holds no slot.
+        let live = live_children(&store, caller, None) + planned.len();
         if live >= grant.envelope.max_children as usize {
             return Err(Error::Denied(format!(
-                "{} already has {live} children, its envelope's max_children",
+                "{} already has {live} live children (running, waiting, blocked, awaiting \
+                 plan approval or waiting on its children), its envelope's max_children; settled children do not count, \
+                 so wait for one to settle, or `by discard` or `by rm` one, to free its slot",
                 self.branch
             )));
         }
@@ -1718,19 +2433,15 @@ impl Local {
             return Err(Error::Denied(format!(
                 "{} may not delegate to {}; allowed: {}",
                 self.branch,
-                profile.id,
+                profile.label(),
                 grant.envelope.allowed_text(own)
             )));
         }
         let envelope = grant.envelope.child(request, own)?;
         let planned_usd: f64 = planned.iter().filter_map(|p| p.limits.max_usd).sum();
         let limits = self.child_limits(caller, &request.budget, planned_usd)?;
-        let mut deny = grant.deny.clone();
-        for pattern in &request.deny {
-            if !deny.contains(pattern) {
-                deny.push(pattern.clone());
-            }
-        }
+        // The parent's own denials, those it was given, then the request's.
+        let deny = run::with_denials(&run::with_denials(&grant.deny, &caller.deny), &request.deny);
         let child_grant = Grant {
             envelope,
             deny,
@@ -1755,6 +2466,14 @@ impl Local {
             Some(own) => Some(own),
             None => caller.provision.clone(),
         };
+        // A seat's provisioning replaces its parent's, but a seat without a
+        // model on its parent's harness keeps its parent's model; another
+        // harness's model would mean nothing to it.
+        if let (Some(spec), Some(_)) = (&mut provision, seat) {
+            if spec.model.is_none() && profile.harness == own.harness {
+                spec.model = caller.provision.as_ref().and_then(|p| p.model.clone());
+            }
+        }
         // Connectors: what the request asks for, else its seat's, else the
         // parent's; always within the parent's grant.
         let parent_grant = caller
@@ -1812,6 +2531,22 @@ impl Local {
                 })
             }
         }
+        // Its model: what the request asks for, else its seat's (or what it
+        // inherited), where its profile can deliver one.
+        if let Some(model) = &request.model {
+            let model = model.trim();
+            if model.is_empty() {
+                return Err(Error::Denied("a child's model may not be blank".into()));
+            }
+            provision.get_or_insert_with(Default::default).model = Some(model.to_owned());
+        }
+        if let Some(model) = provision.as_ref().and_then(|p| p.model.as_deref()) {
+            harness::check_model(
+                profile,
+                model,
+                isolated || crate::placement::sandboxed(caller.provider.as_ref()),
+            )?;
+        }
         // Its approvals: its seat's (or what it inherited), within the
         // parent's; only ever stricter (docs/effects.md).
         let approvals = branchyard_provision::approvals::narrow(
@@ -1865,6 +2600,8 @@ impl Local {
                 provider: caller.provider.clone(),
                 grant: Some(child_grant),
                 depth: caller.info.depth + 1,
+                // Its denials are in its grant.
+                deny: Vec::new(),
                 provision,
                 workspace: caller.workspace.as_ref().map(|w| w.spec.clone()),
                 // Resolved when it starts, from its parent as it is then
@@ -1875,6 +2612,7 @@ impl Local {
             },
         )?;
         record.info.status = BranchStatus::Waiting;
+        record.check_inherited = request.check.is_none() && record.check.is_some();
         record.bindings = request.bindings.clone();
         record.start_base = base;
         if request.plan {
@@ -1892,6 +2630,7 @@ impl Local {
             }
         }
         Ok(Planned {
+            check_inherited: record.check_inherited,
             record,
             limits,
             seat: seated.map(|(name, _, _)| name),
@@ -1982,21 +2721,24 @@ impl Local {
         let max_usd = match (bounds.max_usd, asked.max_usd) {
             (_, Some(ask)) if !(ask.is_finite() && ask > 0.0) => {
                 return Err(Error::Denied(format!(
-                    "a child's max_usd must be a positive number, not {ask}"
+                    "a child's {} must be a positive number, not {ask}",
+                    crate::operations::limit_text("max_usd")
                 )))
             }
             (Some(_), None) => {
                 let remaining = (self.remaining(caller).unwrap_or(0.0) - planned_usd).max(0.0);
                 return Err(Error::Denied(format!(
-                    "{} has a cost limit, so a child needs max_usd; ${remaining:.4} remains",
-                    self.branch
+                    "{} has a cost limit, so a child needs one too, {}; ${remaining:.4} remains",
+                    self.branch,
+                    crate::operations::limit_text("max_usd")
                 )));
             }
             (Some(_), Some(ask)) => {
                 let remaining = self.remaining(caller).unwrap_or(0.0) - planned_usd;
                 if ask > remaining + EPSILON_USD {
                     return Err(Error::Denied(format!(
-                        "max_usd {ask} exceeds what {} has left, ${:.4}",
+                        "{} {ask} exceeds what {} has left, ${:.4}",
+                        crate::operations::limit_text("max_usd"),
                         self.branch,
                         remaining.max(0.0)
                     )));
@@ -2008,7 +2750,8 @@ impl Local {
         let max_turns = match (bounds.max_turns, asked.max_turns) {
             (Some(limit), Some(ask)) if ask > limit => {
                 return Err(Error::Denied(format!(
-                    "max_turns {ask} exceeds {}'s {limit}",
+                    "{} {ask} exceeds {}'s {limit}",
+                    crate::operations::limit_text("max_turns"),
                     self.branch
                 )))
             }
@@ -2085,11 +2828,22 @@ impl Local {
                 .and_then(|g| g.limits.as_ref())
                 .and_then(|l| l.max_usd),
         };
+        let held = held(&store, &record);
         let remaining_usd = match own {
             true => self.remaining(&record),
-            false => max_usd.map(|limit| {
-                limit - record.info.cost_usd.unwrap_or(0.0) - reserved(&store, &record)
-            }),
+            false => {
+                max_usd.map(|limit| limit - record.info.cost_usd.unwrap_or(0.0) - held.total())
+            }
+        };
+        let cost_usd = match own {
+            // Its running turn's spend, which the engine may not have
+            // written yet.
+            true => record
+                .info
+                .cost_usd
+                .or(self.live_cost())
+                .map(|_| self.own_spent(&record)),
+            false => record.info.cost_usd,
         };
         let events = record::read(&store, branch)?;
         let info = record.info.clone();
@@ -2098,20 +2852,41 @@ impl Local {
             Some(seats) => (Some(seats.seat.clone()), seats.delegates_to.clone()),
             None => (None, Vec::new()),
         };
+        let check_shared_with = sharing_check(&store, &record)
+            .into_iter()
+            .map(|r| r.info.name)
+            .collect();
+        let allowed_harnesses = record
+            .grant
+            .as_ref()
+            .map(|g| g.envelope.allowed(&info.profile))
+            .unwrap_or_default();
         Ok(Inspection {
-            subtree_cost_usd: subtree_spent(&store, &record, &mut BTreeSet::new()),
+            subtree_cost_usd: subtree_spent(&store, &record).max(if own {
+                self.own_spent(&record) + held.settled_usd
+            } else {
+                0.0
+            }),
             name: info.name,
             status: info.status,
             harness: info.harness,
             profile: info.profile,
+            model: record.provision.as_ref().and_then(|p| p.model.clone()),
             parent: info.parent,
             children: info.children,
             depth: info.depth,
             turns: info.turns,
             candidate: info.candidate,
-            cost_usd: info.cost_usd,
+            cost_usd,
             max_usd,
             remaining_usd: remaining_usd.map(|r| r.max(0.0)),
+            reserved_usd: held.live_usd,
+            reserving_children: held.live,
+            settled_children_usd: held.settled_usd,
+            allowed_harnesses,
+            check: record.check.clone(),
+            check_inherited: record.check_inherited,
+            check_shared_with,
             envelope: record.grant.map(|g| g.envelope),
             last_message: last_message(&events),
             seat,
@@ -2149,10 +2924,45 @@ impl Local {
         result
     }
 
+    fn retry(&self, branch: &str) -> Result<Sent, Error> {
+        let prompt = self
+            .require_descendant(branch, false)
+            .and_then(|()| run::retry_prompt(&self.store().read(branch)?));
+        match prompt {
+            Ok(prompt) => self.send(branch, &prompt),
+            Err(error) => {
+                let refused: Result<Sent, Error> = Err(error);
+                self.note("send", branch, &refused, |_| String::new());
+                refused
+            }
+        }
+    }
+
     fn try_send(&self, branch: &str, prompt: &str) -> Result<Sent, Error> {
         self.require_descendant(branch, false)?;
         let _spawning = lock(&self.yard.hub.spawning);
-        let prepared = run::prepare_send(&self.yard, branch, &self.child_options(), true)?;
+        let narrowed = self.reserve_again(branch)?;
+        let mut prepared = run::prepare_send(&self.yard, branch, &self.child_options(), true)?;
+        if let Some((from, to, parent)) = narrowed {
+            if let Some(limits) = prepared
+                .record
+                .grant
+                .as_mut()
+                .and_then(|g| g.limits.as_mut())
+            {
+                limits.max_usd = Some(to);
+            }
+            self.store()
+                .write_fenced(&prepared.record, prepared.lease.fence())?;
+            let note = format!(
+                "its cost limit was narrowed from ${from:.4} to ${to:.4}, what {parent} had left \
+                 for it"
+            );
+            prepared.note = Some(match prepared.note.take() {
+                Some(earlier) => format!("{earlier}; {note}"),
+                None => note,
+            });
+        }
         let info = prepared.record.info.clone();
         self.start(prepared, prompt.to_owned())?;
         Ok(Sent {
@@ -2257,26 +3067,57 @@ impl Local {
     }
 
     fn integrate(&self, branch: &str) -> Result<Merged, Error> {
-        let result = self.try_integrate(branch);
-        self.note("integrate", branch, &result, |m| {
-            format!("merged into {} as {}", m.target, m.commit)
+        let result = self
+            .try_integrate(&[branch.to_owned()])
+            .and_then(|mut all| {
+                all.branches
+                    .pop()
+                    .ok_or_else(|| Error::State("the integration returned no branch".into()))
+            });
+        self.note("integrate", branch, &result, merged_outcome);
+        result
+    }
+
+    fn integrate_all(&self, branches: &[String]) -> Result<MergedAll, Error> {
+        let result = self.try_integrate(branches);
+        self.note("integrate", &branches.join(", "), &result, |all| {
+            all.branches
+                .iter()
+                .map(|m| format!("{}: {}", m.branch, merged_outcome(m)))
+                .collect::<Vec<_>>()
+                .join("; ")
         });
         result
     }
 
-    fn try_integrate(&self, branch: &str) -> Result<Merged, Error> {
-        self.require_descendant(branch, false)?;
+    fn try_integrate(&self, branches: &[String]) -> Result<MergedAll, Error> {
         let store = self.store();
-        let child = store.read(branch)?;
-        if child.info.status == BranchStatus::Running {
-            return Err(Error::Running(branch.to_owned()));
+        for branch in branches {
+            self.require_descendant(branch, false)?;
+            if store.read(branch)?.info.status == BranchStatus::Running {
+                return Err(Error::Running(branch.to_owned()));
+            }
         }
         let caller = store.read(&self.branch)?;
-        self.current_work(&caller, &format!("snapshot before integrating {branch}"))?;
-        let merged = ops::merge(&self.yard, branch, &caller.info.git_branch)?;
-        // A sibling waiting for this one to be integrated may start now.
-        graph::settled(&self.yard, branch, Some(&self.options));
+        self.current_work(
+            &caller,
+            &format!("snapshot before integrating {}", branches.join(", ")),
+        )?;
+        let merged = integrate::merge_many(&self.yard, branches, &caller.info.git_branch)
+            .map_err(|error| with_shared_check(&store, error, branches))?;
+        // A sibling waiting for these to be integrated may start now, and
+        // any other child this branch now contains is merged too.
+        for branch in branches {
+            graph::settled(&self.yard, branch, Some(&self.options));
+        }
+        integrate::reconcile_children(&self.yard, &self.branch);
         Ok(merged)
+    }
+
+    fn check(&self, branch: &str) -> Result<CheckReport, Error> {
+        self.require_descendant(branch, true)?;
+        let record = self.store().read(branch)?;
+        integrate::check_work(&self.yard, &record)
     }
 
     fn steer(&self, branch: &str, text: &str) -> Result<Steer, Error> {
@@ -2287,9 +3128,11 @@ impl Local {
         self.note("steer", branch, &result, |s| match &s.state {
             SteerState::Refused { reason } => format!("steered input {} refused: {reason}", s.id),
             SteerState::Pending => format!("steered input {} queued", s.id),
-            SteerState::Delivered | SteerState::Accepted => {
-                format!("steered input {} delivered", s.id)
-            }
+            SteerState::Written => format!(
+                "steered input {} written to the harness, not confirmed yet",
+                s.id
+            ),
+            SteerState::Accepted => format!("steered input {} joined the running turn", s.id),
         });
         result
     }
@@ -2298,12 +3141,32 @@ impl Local {
         let result = self
             .require_descendant(branch, false)
             .and_then(|()| cancel_tree(&self.yard, branch, &self.branch))
-            .map(|cancelled| Cancelled { cancelled });
+            .and_then(|cancelled| {
+                let status = self.store().read(branch)?.info.status;
+                Ok(Cancelled::of(cancelled, branch, &status))
+            });
         self.note("cancel", branch, &result, |c| {
-            match c.cancelled.is_empty() {
-                true => "nothing was running".into(),
-                false => format!("asked {} to stop", c.cancelled.join(", ")),
+            match (&c.note, c.cancelled.is_empty()) {
+                (Some(note), _) => note.clone(),
+                (None, true) => "nothing was running".into(),
+                (None, false) => format!("asked {} to stop", c.cancelled.join(", ")),
             }
+        });
+        result
+    }
+
+    fn discard(&self, branch: &str, reason: Option<&str>) -> Result<Inspection, Error> {
+        let result = self.require_descendant(branch, false).and_then(|()| {
+            let reason = reason
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .map_or_else(|| format!("discarded by {}", self.branch), str::to_owned);
+            crate::ops::discard(&self.yard, branch, &reason)?;
+            self.inspect(branch)
+        });
+        self.note("discard", branch, &result, |i| match &i.status {
+            BranchStatus::Discarded { reason } => format!("discarded: {reason}"),
+            _ => "discarded".into(),
         });
         result
     }
@@ -2313,6 +3176,41 @@ impl Local {
             branch: self.branch.clone(),
             descendants: descendants(&self.store(), &self.branch)?,
         })
+    }
+
+    fn wait_for(
+        &self,
+        mut names: Vec<String>,
+        any: bool,
+        timeout: Option<Duration>,
+    ) -> Result<Waited, Error> {
+        let store = self.store();
+        if names.is_empty() {
+            let children = store.read(&self.branch)?.info.children;
+            names = children
+                .iter()
+                .filter(|child| {
+                    store
+                        .read(child)
+                        .is_ok_and(|r| crate::wake::unsettled(&r.info.status))
+                })
+                .cloned()
+                .collect();
+            if names.is_empty() {
+                names = children;
+            }
+        }
+        for name in &names {
+            self.require_descendant(name, true)?;
+        }
+        wait_for(
+            &self.yard,
+            &names,
+            any,
+            timeout,
+            |name| self.inspect(name),
+            |_| Ok(false),
+        )
     }
 
     /// A relative path from a tool call, resolved against this branch's own
@@ -2398,6 +3296,7 @@ impl Local {
     }
 
     fn answer(&self, message_id: u64, text: &str) -> Result<Message, Error> {
+        self.require(Capability::Delegate, "answer a descendant")?;
         let question = self
             .store()
             .backend()
@@ -2473,9 +3372,11 @@ impl Local {
     }
 
     fn inbox(&self) -> Result<Inbox, Error> {
+        let store = self.store();
         Ok(Inbox {
             branch: self.branch.clone(),
-            messages: self.store().backend().inbox(&self.branch)?,
+            messages: store.backend().inbox(&self.branch)?,
+            steered_this_turn: inbox::steered_this_turn(&store, &self.branch)?,
         })
     }
 }
@@ -2582,29 +3483,60 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
         bindings,
         connectors: request.connectors.clone(),
         plan: request.plan,
+        model: request.model.clone(),
     })
 }
 
-/// The text of the last turn, at most [`LAST_MESSAGE_MAX`] characters.
-/// The harness's text since the branch's last prompt, truncated from the
-/// front. Also used to build a reincarnation's handoff brief.
+/// The harness's last message since the branch's last prompt: its text
+/// after its last tool call, permission request or steered input, or the
+/// last text before one when nothing came after. Text the harness wrote
+/// earlier in the turn is not run together with it; Claude Code's
+/// separate text blocks of one message come apart by a blank line, as its
+/// driver writes them. Longer than [`LAST_MESSAGE_MAX`] characters, it
+/// keeps its beginning and its end, with the cut marked between. Also
+/// used to build a reincarnation's handoff brief.
 pub(crate) fn last_message(events: &[RecordedEvent]) -> String {
     let start = events
         .iter()
         .rposition(|e| matches!(e.activity, Activity::Prompt(_)))
         .map_or(0, |i| i + 1);
-    let text: String = events[start..]
-        .iter()
-        .filter_map(|e| match &e.activity {
-            Activity::Harness(Event::MessageDelta { text, .. }) => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
-    let count = text.chars().count();
-    match count > LAST_MESSAGE_MAX {
-        true => text.chars().skip(count - LAST_MESSAGE_MAX).collect(),
-        false => text,
+    let mut messages = vec![String::new()];
+    for event in &events[start..] {
+        match &event.activity {
+            Activity::Harness(Event::MessageDelta { text, .. }) => {
+                if let Some(last) = messages.last_mut() {
+                    last.push_str(text);
+                }
+            }
+            Activity::Harness(Event::ToolStarted { .. } | Event::PermissionRequested { .. })
+            | Activity::Steered { .. } => {
+                if messages.last().is_some_and(|m| !m.trim().is_empty()) {
+                    messages.push(String::new());
+                }
+            }
+            _ => {}
+        }
     }
+    let last = messages
+        .iter()
+        .rev()
+        .find(|m| !m.trim().is_empty())
+        .map_or("", |m| m.trim());
+    elide(last, LAST_MESSAGE_MAX)
+}
+
+/// `text` in at most `max` characters: whole when it fits, else its start
+/// and its end with an ellipsis line between.
+fn elide(text: &str, max: usize) -> String {
+    const CUT: &str = "\n…\n";
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_owned();
+    }
+    let keep = max.saturating_sub(CUT.chars().count());
+    let head: String = text.chars().take(keep / 2).collect();
+    let tail: String = text.chars().skip(count - (keep - keep / 2)).collect();
+    format!("{head}{CUT}{tail}")
 }
 
 #[derive(Deserialize)]
@@ -2622,6 +3554,21 @@ struct TargetArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WaitArgs {
+    branches: Option<Vec<String>>,
+    any: Option<bool>,
+    timeout_seconds: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IntegrateArgs {
+    branch: Option<String>,
+    branches: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EventsArgs {
     branch: Option<String>,
     cursor: Option<usize>,
@@ -2632,7 +3579,11 @@ struct EventsArgs {
 #[serde(deny_unknown_fields)]
 struct SendArgs {
     branch: String,
+    #[serde(default)]
     prompt: String,
+    /// Submit the cut-off turn's prompt again instead.
+    #[serde(default)]
+    retry: bool,
 }
 
 #[derive(Deserialize)]
@@ -2672,6 +3623,21 @@ struct SteerArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NoArgs {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiscardArgs {
+    branch: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InboxArgs {
+    #[serde(default)]
+    unread: bool,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2753,6 +3719,9 @@ fn to_json<T: Serialize>(value: &T) -> Result<Value, Error> {
 /// One operation with its tool's JSON arguments. Every surface ends here or
 /// in the typed methods it calls.
 pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Value, Error> {
+    let operation = crate::operations::by_tool(tool)
+        .ok_or_else(|| Error::Denied(format!("no delegation tool named {tool}")))?;
+    local.require(operation.capability, operation.name)?;
     match tool {
         "spawn" => {
             let spec: SpawnSpec = parse(tool, arguments)?;
@@ -2779,7 +3748,17 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
         }
         "send" => {
             let args: SendArgs = parse(tool, arguments)?;
-            to_json(&local.send(&args.branch, &args.prompt)?)
+            match (args.retry, args.prompt.trim().is_empty()) {
+                (true, true) => to_json(&local.retry(&args.branch)?),
+                (false, false) => to_json(&local.send(&args.branch, &args.prompt)?),
+                (true, false) => Err(Error::Denied(
+                    "retry submits the cut-off turn's own prompt again; give no prompt with it"
+                        .into(),
+                )),
+                (false, true) => Err(Error::Denied(
+                    "send needs a prompt, or retry to submit a cut-off turn's prompt again".into(),
+                )),
+            }
         }
         "approve_plan" => {
             let args: ApprovePlanArgs = parse(tool, arguments)?;
@@ -2794,8 +3773,19 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
             to_json(&local.reject_plan(&args.branch, args.reason.as_deref(), args.replan)?)
         }
         "propose_integration" | "integrate" => {
+            let args: IntegrateArgs = parse(tool, arguments)?;
+            match (args.branch, args.branches) {
+                (Some(branch), None) => to_json(&local.integrate(&branch)?),
+                (None, Some(branches)) => to_json(&local.integrate_all(&branches)?),
+                _ => Err(Error::Denied(format!(
+                    "{tool} needs either branch or branches (an array, integrated together)"
+                ))),
+            }
+        }
+        "check" => {
             let args: TargetArgs = parse(tool, arguments)?;
-            to_json(&local.integrate(&required(tool, args.branch)?)?)
+            let branch = args.branch.unwrap_or_else(|| local.branch.clone());
+            to_json(&local.check(&branch)?)
         }
         "steer" => {
             let args: SteerArgs = parse(tool, arguments)?;
@@ -2805,9 +3795,32 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
             let args: TargetArgs = parse(tool, arguments)?;
             to_json(&local.cancel(&required(tool, args.branch)?)?)
         }
+        "discard" => {
+            let args: DiscardArgs = parse(tool, arguments)?;
+            to_json(&local.discard(&args.branch, args.reason.as_deref())?)
+        }
         "children" => {
             let _: NoArgs = parse(tool, arguments)?;
             to_json(&local.children()?)
+        }
+        "wait" => {
+            let args: WaitArgs = parse(tool, arguments)?;
+            let timeout = match args.timeout_seconds {
+                None => None,
+                Some(secs) if secs.is_finite() && secs >= 0.0 => {
+                    Some(Duration::try_from_secs_f64(secs).unwrap_or(Duration::MAX))
+                }
+                Some(secs) => {
+                    return Err(Error::Denied(format!(
+                        "timeout_seconds must be a number of seconds, not {secs}"
+                    )))
+                }
+            };
+            to_json(&local.wait_for(
+                args.branches.unwrap_or_default(),
+                args.any.unwrap_or(false),
+                timeout,
+            )?)
         }
         "publish_artifact" => {
             let args: PublishArtifactArgs = parse(tool, arguments)?;
@@ -2879,8 +3892,12 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
             to_json(&local.answer(args.message_id, &args.text)?)
         }
         "inbox" => {
-            let _: NoArgs = parse(tool, arguments)?;
-            to_json(&local.inbox()?)
+            let args: InboxArgs = parse(tool, arguments)?;
+            let inbox = local.inbox()?;
+            match args.unread {
+                true => to_json(&inbox.unread_only()),
+                false => to_json(&inbox),
+            }
         }
         other => Err(Error::Denied(format!("no delegation tool named {other}"))),
     }
@@ -2890,7 +3907,182 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PermissionDecision, PermissionKey, PermissionRequest};
+
+    /// One rule for width and budget: a parked parent is live, and a
+    /// discarded child is settled like any other.
+    #[test]
+    fn parked_branches_are_live_and_discarded_ones_settled() {
+        assert!(is_live(&BranchStatus::WaitingOnChildren));
+        assert!(is_live(&BranchStatus::Running));
+        assert!(!is_live(&BranchStatus::Discarded { reason: "x".into() }));
+        assert!(!is_live(&BranchStatus::Ready));
+    }
+
+    /// A cancel of a branch that had already stopped succeeds and changes
+    /// nothing, like an integration of one already merged; it says what the
+    /// branch is and what to do instead, in the words its status uses.
+    #[test]
+    fn a_cancel_of_a_stopped_branch_is_an_idempotent_no_op() {
+        let over = Cancelled::of(
+            Vec::new(),
+            "dates",
+            &BranchStatus::BudgetExceeded {
+                limit: "max_usd".into(),
+            },
+        );
+        assert!(over.already);
+        let note = over.note.unwrap();
+        for needed in [
+            "dates had already stopped (over budget: max_usd (--budget-usd)), so the cancel \
+             changed nothing",
+            "`by send dates \"<prompt>\"`",
+            "`by discard dates --reason TEXT`",
+        ] {
+            assert!(note.contains(needed), "{needed:?} missing from {note}");
+        }
+        let ready = Cancelled::of(Vec::new(), "k", &BranchStatus::Ready);
+        assert!(ready.already && ready.note.unwrap().contains("by integrate k"));
+        let stopping = Cancelled::of(Vec::new(), "k", &BranchStatus::Running);
+        assert!(!stopping.already);
+        let stopped = Cancelled::of(vec!["k".into()], "k", &BranchStatus::Interrupted);
+        assert!(!stopped.already && stopped.note.is_none());
+        let json = serde_json::to_value(&stopped).unwrap();
+        assert!(json.get("already").is_none(), "{json}");
+    }
+
+    /// A failed shared check says what to wait for, and that its own check
+    /// lets a child land alone; the detail carries the same.
+    #[test]
+    fn a_shared_check_names_the_siblings_still_running() {
+        let error = Error::CheckFailed {
+            output_tail: "2 failed".into(),
+            checks: Vec::new(),
+            shared: Some(Box::new(SharedCheck {
+                check: vec!["make".into(), "test".into()],
+                inherited_from: None,
+                siblings: vec!["b".into(), "c".into()],
+                unsettled: vec!["c".into()],
+                integrate_together: vec!["a".into(), "b".into(), "c".into()],
+            })),
+        };
+        let text = error.to_string();
+        for needed in [
+            "check failed:\n2 failed\n",
+            "Siblings b, c share the same check",
+            "`by integrate a b c`, once c settles (`by wait c`)",
+            "needs a check of its own (`by spawn --check`)",
+        ] {
+            assert!(text.contains(needed), "{needed:?} missing from {text}");
+        }
+        let detail = error.detail().unwrap();
+        assert_eq!(detail["unsettled"], json!(["c"]));
+        assert!(detail.get("inherited_from").is_none());
+        let plain = Error::CheckFailed {
+            output_tail: "x".into(),
+            checks: Vec::new(),
+            shared: None,
+        };
+        assert_eq!(
+            (plain.to_string(), plain.detail()),
+            ("check failed:\nx".into(), None)
+        );
+    }
+
+    /// A failed check of an integration whose branches' checks differ
+    /// names every check, its branches and how it ended, in the text and
+    /// in the detail, beside a shared check's fields.
+    #[test]
+    fn a_failed_check_names_every_check_its_branches_and_outcome() {
+        let check = |argv: &str, branches: &[&str], outcome| IntegrationCheck {
+            check: argv.split(' ').map(str::to_owned).collect(),
+            branches: branches.iter().map(|b| (*b).to_owned()).collect(),
+            outcome,
+        };
+        let checks = vec![
+            check("make lint", &["a", "c"], CheckVerdict::Passed),
+            check("make test", &["b"], CheckVerdict::Failed),
+            check("make docs", &["d"], CheckVerdict::NotRun),
+        ];
+        let error = Error::CheckFailed {
+            output_tail: "2 failed".into(),
+            checks: checks.clone(),
+            shared: None,
+        };
+        assert_eq!(
+            error.to_string(),
+            "check failed:\n2 failed\nChecks on the merged result: `make lint` (a, c) passed; \
+             `make test` (b) failed; `make docs` (d) did not run"
+        );
+        let detail = error.detail().unwrap();
+        assert_eq!(detail["checks"][1]["check"], json!(["make", "test"]));
+        assert_eq!(detail["checks"][1]["branches"], json!(["b"]));
+        assert_eq!(detail["checks"][1]["outcome"], "failed");
+        assert_eq!(detail["checks"][2]["outcome"], "not_run");
+        assert!(detail.get("integrate_together").is_none(), "{detail}");
+
+        let shared = Error::CheckFailed {
+            output_tail: "2 failed".into(),
+            checks,
+            shared: Some(Box::new(SharedCheck {
+                check: vec!["make".into(), "test".into()],
+                inherited_from: None,
+                siblings: vec!["e".into()],
+                unsettled: Vec::new(),
+                integrate_together: vec!["b".into(), "e".into()],
+            })),
+        };
+        let text = shared.to_string();
+        assert!(
+            text.contains("(d) did not run\nNothing was integrated. Siblings e"),
+            "{text}"
+        );
+        let detail = shared.detail().unwrap();
+        assert_eq!(detail["integrate_together"], json!(["b", "e"]));
+        assert_eq!(detail["checks"].as_array().unwrap().len(), 3);
+
+        let timed_out = Error::CheckTimedOut {
+            timeout: Duration::from_secs(2),
+            output_tail: String::new(),
+            checks: vec![check("make test", &["b"], CheckVerdict::TimedOut)],
+        };
+        assert!(timed_out
+            .to_string()
+            .ends_with("Checks on the merged result: `make test` (b) timed out"));
+        assert_eq!(
+            timed_out.detail().unwrap()["checks"][0]["outcome"],
+            "timed_out"
+        );
+
+        let not_started = Error::CheckNotStarted {
+            reason: "no such program".into(),
+            checks: vec![
+                check("make lint", &["a"], CheckVerdict::Passed),
+                check("nope", &["b"], CheckVerdict::NotStarted),
+                check("make docs", &["d"], CheckVerdict::NotRun),
+            ],
+        };
+        assert_eq!(
+            not_started.to_string(),
+            "check could not start: no such program
+Checks on the merged result: \
+             `make lint` (a) passed; `nope` (b) could not start; `make docs` (d) did not run"
+        );
+        let detail = not_started.detail().unwrap();
+        assert_eq!(detail["checks"][1]["branches"], json!(["b"]));
+        assert_eq!(detail["checks"][1]["outcome"], "not_started");
+        assert_eq!(detail["checks"][2]["outcome"], "not_run");
+        let plain = Error::CheckNotStarted {
+            reason: "no such program".into(),
+            checks: Vec::new(),
+        };
+        assert_eq!(
+            (plain.to_string(), plain.detail()),
+            ("check could not start: no such program".into(), None)
+        );
+    }
+    use crate::{
+        CheckVerdict, IntegrationCheck, PermissionDecision, PermissionKey, PermissionRequest,
+    };
     use std::fs;
     use std::path::PathBuf;
 
@@ -2934,9 +4126,13 @@ mod tests {
                 created_at: 0,
                 stalled: false,
                 superseded_by: None,
+                model: None,
             },
             created_ms: 0,
             check: None,
+            check_inherited: false,
+            limits: None,
+            retry: None,
             command: None,
             home: None,
             cost_baseline: None,
@@ -2956,10 +4152,15 @@ mod tests {
             checkpoint: None,
             context: None,
             workspace: None,
+            parked: None,
+            wakes: 0,
+            lost: None,
             sandbox_seed: None,
             actor: None,
             plan: None,
             goal: None,
+            deny: Vec::new(),
+            removed: Vec::new(),
         }
     }
 
@@ -2975,6 +4176,53 @@ mod tests {
             table: std::collections::BTreeMap::new(),
         });
         r
+    }
+
+    /// The last message is the harness's final one, not every text of
+    /// the turn run together; a long one keeps its start and its end.
+    #[test]
+    fn the_last_message_is_the_final_one_and_long_ones_keep_both_ends() {
+        let at = |activity: Activity| RecordedEvent { at_ms: 0, activity };
+        let text = |text: &str| {
+            at(Activity::Harness(Event::MessageDelta {
+                turn: 1,
+                text: text.into(),
+            }))
+        };
+        let tool = at(Activity::Harness(Event::ToolStarted {
+            turn: 1,
+            call_id: "t".into(),
+            name: "Bash".into(),
+        }));
+        let events = vec![
+            at(Activity::Prompt("earlier".into())),
+            text("Old turn."),
+            at(Activity::Prompt("do it".into())),
+            text("Let me look."),
+            tool.clone(),
+            text("Found it"),
+            text(", fixing."),
+            tool,
+            text("Done: all four modules pass."),
+            text("\n\nNothing else changed."),
+            at(Activity::Harness(Event::TurnEnded {
+                turn: 1,
+                outcome: crate::TurnOutcome::Completed,
+            })),
+        ];
+        assert_eq!(
+            last_message(&events),
+            "Done: all four modules pass.\n\nNothing else changed."
+        );
+        // A turn that ends on a tool call keeps the text before it.
+        assert_eq!(last_message(&events[..7]), "Found it, fixing.");
+        assert_eq!(last_message(&events[..3]), "");
+
+        let long = format!("BEGIN{}END", "x".repeat(2 * LAST_MESSAGE_MAX));
+        let cut = last_message(&[text(&long)]);
+        assert_eq!(cut.chars().count(), LAST_MESSAGE_MAX);
+        assert!(cut.starts_with("BEGIN") && cut.ends_with("END"), "{cut}");
+        assert!(cut.contains("\n…\n"));
     }
 
     #[test]
@@ -3019,32 +4267,88 @@ mod tests {
     }
 
     #[test]
-    fn a_childs_reservation_is_its_limit_or_its_subtrees_spend() {
+    fn a_live_child_holds_its_limit_and_a_settled_one_what_it_spent() {
         let (_temp, store) = temp_store();
-        // root -> a (limit 0.5, spent 0.1) -> g (spent 0.3)
-        //      -> b (limit 0.2, spent 0.1) -> h (spent 0.4, over b's limit)
-        //      -> c (no limit, spent 0.05)
+        // root -> a (running, limit 0.5, spent 0.1) -> g (spent 0.3)
+        //      -> b (ready, limit 0.2, spent 0.1) -> h (running, limit
+        //           0.6, spent 0.4)
+        //      -> c (ready, no limit, spent 0.05)
+        //      -> d (merged, limit 0.9, spent 0.25)
+        let with = |mut r: Record, status: BranchStatus, parent: &str| {
+            r.info.status = status;
+            r.info.parent = Some(parent.to_owned());
+            r
+        };
+        let merged = BranchStatus::Merged {
+            target: "by/root".into(),
+            commit: "c".into(),
+        };
         for r in [
-            record("root", &["a", "b", "c", "gone"], Some(0.2), None),
-            record("a", &["g"], Some(0.1), Some(0.5)),
-            record("g", &[], Some(0.3), None),
-            record("b", &["h"], Some(0.1), Some(0.2)),
-            record("h", &[], Some(0.4), None),
-            record("c", &[], Some(0.05), None),
+            record("root", &["a", "b", "c", "d", "gone"], Some(0.2), None),
+            with(
+                record("a", &["g"], Some(0.1), Some(0.5)),
+                BranchStatus::Running,
+                "root",
+            ),
+            with(record("g", &[], Some(0.3), None), BranchStatus::Ready, "a"),
+            with(
+                record("b", &["h"], Some(0.1), Some(0.2)),
+                BranchStatus::Ready,
+                "root",
+            ),
+            with(
+                record("h", &[], Some(0.4), Some(0.6)),
+                BranchStatus::Running,
+                "b",
+            ),
+            with(
+                record("c", &[], Some(0.05), None),
+                BranchStatus::Ready,
+                "root",
+            ),
+            with(record("d", &[], Some(0.25), Some(0.9)), merged, "root"),
         ] {
             store.write(&r).unwrap();
         }
         let root = store.read("root").unwrap();
-        // a reserves 0.5; b's subtree spent 0.5 > its 0.2; c its 0.05.
-        assert!((reserved(&store, &root) - 1.05).abs() < 1e-9);
-        let spent = subtree_spent(&store, &root, &mut BTreeSet::new());
-        assert!((spent - 1.15).abs() < 1e-9, "{spent}");
+        // a holds its whole limit, 0.5. b is settled but its child h runs:
+        // b's own 0.1 and h's limit 0.6. c and d hold what they spent.
+        let held = held(&store, &root);
+        assert_eq!(held.live, 1);
+        assert!((held.live_usd - 0.5).abs() < 1e-9, "{held:?}");
+        assert!(
+            (held.settled_usd - (0.7 + 0.05 + 0.25)).abs() < 1e-9,
+            "{held:?}"
+        );
+        assert!((reserved(&store, &root) - 1.5).abs() < 1e-9);
+        let spent = subtree_spent(&store, &root);
+        assert!((spent - 1.4).abs() < 1e-9, "{spent}");
         let names: Vec<String> = descendants(&store, "root")
             .unwrap()
             .into_iter()
             .map(|i| i.name)
             .collect();
-        assert_eq!(names, ["a", "b", "c", "g", "h"]);
+        assert_eq!(names, ["a", "b", "c", "d", "g", "h"]);
+
+        // Removing a child keeps its spend in its parent's ledger: the
+        // subtree cost and what root has left do not change.
+        store.delete("d").unwrap();
+        let root = store.read("root").unwrap();
+        assert_eq!(root.removed.len(), 1);
+        assert_eq!(root.removed[0].name, "d");
+        assert!((subtree_spent(&store, &root) - 1.4).abs() < 1e-9);
+        assert!((reserved(&store, &root) - 1.5).abs() < 1e-9);
+        // A stale write of root keeps the ledger, as it keeps children.
+        store.write(&record("root", &[], Some(0.2), None)).unwrap();
+        assert_eq!(store.read("root").unwrap().removed.len(), 1);
+        // Removing a subtree's root keeps all it spent: b and its h.
+        store.delete("b").unwrap();
+        let root = store.read("root").unwrap();
+        assert!(
+            (root.removed[1].spent_usd - 0.5).abs() < 1e-9,
+            "{:?}",
+            root.removed
+        );
     }
 
     #[test]
@@ -3147,6 +4451,7 @@ mod tests {
             max_depth: 3,
             max_children: 5,
             harnesses: vec!["gemini-cli".into(), "qwen-code-acp".into()],
+            max_wakes: 3,
         };
         assert!(parent.allows(profiles::by_id("qwen-code-acp").unwrap(), own));
         assert!(!parent.allows(profiles::by_id("goose-acp").unwrap(), own));
@@ -3165,7 +4470,8 @@ mod tests {
             Envelope {
                 max_depth: 2,
                 max_children: 1,
-                harnesses: vec!["qwen-code".into()]
+                harnesses: vec!["qwen-code".into()],
+                max_wakes: 3,
             }
         );
         let wider = Spawn {

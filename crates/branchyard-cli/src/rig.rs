@@ -2332,6 +2332,7 @@ delegates_to = ["worker"]
                 max_depth: 1,
                 max_children: 1,
                 harnesses: vec!["gemini-cli".into()],
+                ..Envelope::default()
             })
         );
         let worker = seats.table["worker"].provision.as_ref().unwrap();

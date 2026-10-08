@@ -11,7 +11,8 @@ use serde_json::json;
 use crate::record::Recorder;
 use crate::state::{Begun, Lease, Record, Store, Taken};
 use crate::{
-    git, names, recover, Activity, BranchStatus, Error, Merged, RecordedEvent, RemoveOptions, Yard,
+    git, names, recover, Activity, BranchInfo, BranchStatus, Error, Merged, RecordedEvent,
+    RemoveOptions, Yard,
 };
 use branchyard_support::time::now_ms;
 
@@ -168,6 +169,54 @@ pub(crate) fn merge(yard: &Yard, name: &str, target: &str) -> Result<Merged, Err
     Ok(merged)
 }
 
+/// Set a settled branch aside: it ends `discarded` with `reason`, keeps its
+/// record, worktree and cost, runs no more turns and is never merged, and
+/// what waits for it is blocked. A branch still `waiting` for its
+/// prerequisites never starts. Refused while a turn runs, while it waits
+/// on its children, and once merged;
+/// discarding a discarded branch again changes nothing.
+pub(crate) fn discard(yard: &Yard, name: &str, reason: &str) -> Result<BranchInfo, Error> {
+    let store = yard.store();
+    let (mut record, lease) = hold(yard, name)?;
+    match &record.info.status {
+        BranchStatus::Running => return Err(Error::Running(name.to_owned())),
+        BranchStatus::Merged { target, .. } => {
+            return Err(Error::Denied(format!(
+                "{name} was merged into {target}; there is nothing to discard (by rm removes it)"
+            )))
+        }
+        BranchStatus::Discarded { .. } => return Ok(record.info),
+        // Parked, not settled: it is woken when its children settle.
+        BranchStatus::WaitingOnChildren => {
+            return Err(Error::Denied(format!(
+                "{name} is waiting on its children and is woken when they settle; \
+                 `by cancel {name}` ends it and stops them, then discard it"
+            )))
+        }
+        _ => {}
+    }
+    record.info.status = BranchStatus::Discarded {
+        reason: reason.to_owned(),
+    };
+    // A discarded branch runs no more turns: its kept sandbox goes, as a
+    // merged one's does.
+    let discarded = crate::snapshots::discard_kept(yard, &record, "the branch was discarded");
+    if !discarded.is_empty() {
+        let mut recorder = Recorder::fenced(&store, lease.fence(), None);
+        for activity in discarded {
+            recorder.record(activity)?;
+        }
+    }
+    let event = RecordedEvent {
+        at_ms: now_ms(),
+        activity: Activity::Status(record.info.status.clone()),
+    };
+    lease.finish(Some(&record), Some(&event))?;
+    // What waited for it can never start now.
+    crate::graph::settled(yard, name, None);
+    Ok(record.info)
+}
+
 /// For a merge whose engine stopped after recording its intent: the
 /// merge, if the candidate is already in the target.
 fn landed(
@@ -193,6 +242,8 @@ fn landed(
             .unwrap_or_default()
             .to_owned(),
         commit: head,
+        already: false,
+        via: None,
     }))
 }
 
@@ -250,25 +301,36 @@ fn integrate(
         target: target.to_owned(),
         previous: integrated.previous.0,
         commit: integrated.merged.0,
+        already: false,
+        via: None,
     })
 }
 
-fn integration_error(error: IntegrationError, target: &str) -> Error {
+pub(crate) fn integration_error(error: IntegrationError, target: &str) -> Error {
     match error {
         IntegrationError::TargetMoved { expected, actual } => Error::TargetMoved {
             expected: expected.0,
             actual: actual.map(|c| c.0),
         },
         IntegrationError::Conflict { files } => Error::Conflict { files },
-        IntegrationError::CheckFailed { output_tail, .. } => Error::CheckFailed { output_tail },
+        IntegrationError::CheckFailed { output_tail, .. } => Error::CheckFailed {
+            output_tail,
+            checks: Vec::new(),
+            shared: None,
+        },
         IntegrationError::CheckTimedOut {
             timeout,
             output_tail,
         } => Error::CheckTimedOut {
             timeout,
             output_tail,
+            checks: Vec::new(),
         },
-        IntegrationError::CheckNotStarted(e) => Error::CheckNotStarted(e.to_string()),
+        IntegrationError::CheckStopped { error, .. } => integration_error(*error, target),
+        IntegrationError::CheckNotStarted(e) => Error::CheckNotStarted {
+            reason: e.to_string(),
+            checks: Vec::new(),
+        },
         IntegrationError::DirtyTarget { worktree } => Error::DirtyTarget(worktree),
         IntegrationError::AlreadyIntegrated => Error::AlreadyMerged {
             target: target.to_owned(),
@@ -323,7 +385,7 @@ pub(crate) fn remove(
         }
     }
     crate::checkpoint::remove_refs(&yard.root, name)?;
-    store.delete(name)?;
+    store.delete_held(lease)?;
     // Its task lists it as removed, and the name is free for another.
     crate::tasks::forget(&yard.root, name);
     // What waited for it can never start now.
@@ -333,6 +395,8 @@ pub(crate) fn remove(
         remove_credentials(&store, &record)?;
     }
     remove_home(&store, &record)?;
+    // Its private temporary directory, which nothing else uses.
+    branchyard_support::cleanup_dir(store.tmp(name));
     Ok(teardown)
 }
 

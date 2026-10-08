@@ -10,7 +10,6 @@ use std::path::PathBuf;
 use std::process::Output;
 
 use branchyard_testkit::fake_agent;
-use branchyard_testkit::wait;
 use serde_json::Value;
 
 /// The kit's repository, plus what this file adds.
@@ -257,16 +256,12 @@ fn detach_sends_in_the_background() {
     let error = stderr(&out);
     assert!(out.status.success(), "{error}");
     assert!(error.contains("sending in the background"), "{error}");
-    wait::until("the background send to run", || {
-        repo.prompts("feat").len() >= 2
-    });
+    // It returns once the turn started, so a wait after it waits for that
+    // turn, not the one before.
+    let waited: Value =
+        serde_json::from_str(&repo.ok(repo.by(None, &["wait", "feat", "--json"]))).unwrap();
+    assert_eq!(waited["settled"][0]["turns"], 2, "{waited}");
     assert!(repo.prompts("feat")[1].contains(EXPECTED));
-    // Let the background turn end before the repository is removed.
-    wait::until("the background turn to end", || {
-        let show: Value =
-            serde_json::from_str(&repo.ok(repo.by(None, &["show", "feat", "--json"]))).unwrap();
-        show["status"] != "running"
-    });
     // Other send options cannot be carried to the background.
     let out = repo.by(
         Some(&commenting),

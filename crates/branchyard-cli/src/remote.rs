@@ -25,7 +25,7 @@ use branchyard_client::api::{
 use branchyard_client::{new_key, Client, Repo};
 
 use crate::args::{Globals, Permissions, RigArgs, SpawnArgs, TaskArgs};
-use crate::commands::{self, branch_outcome, print, Env, Failure, Outcome};
+use crate::commands::{self, branch_outcome, print, Env, Failure, Outcome, Prompt};
 use crate::console::Console;
 use crate::render::{self, Renderer};
 use crate::rig::{Fallback, RigPlan};
@@ -238,14 +238,31 @@ pub fn sdk_error(error: branchyard_client::Error) -> branchyard::Error {
                     .to_owned(),
                 code => code.to_owned(),
             };
+            // A failed check's siblings and every check of the
+            // integration, as a local `by` reports them.
+            let detail = error.detail.as_ref().and_then(|d| {
+                let mut local = d
+                    .get("shared")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if let Some(checks) = d.get("checks") {
+                    local["checks"] = checks.clone();
+                }
+                local
+                    .as_object()
+                    .is_some_and(|l| !l.is_empty())
+                    .then(|| Box::new(local))
+            });
             branchyard::Error::Remote {
                 kind,
                 message: error.message,
+                detail,
             }
         }
         other => branchyard::Error::Remote {
             kind: "unavailable".into(),
             message: other.to_string(),
+            detail: None,
         },
     }
 }
@@ -258,6 +275,7 @@ impl From<Failure> for branchyard::Error {
             other => branchyard::Error::Remote {
                 kind: "unavailable".into(),
                 message: other.to_string(),
+                detail: None,
             },
         }
     }
@@ -405,6 +423,7 @@ pub fn run(env: &Env, remote: &Remote, prompt: &str, task: &TaskArgs) -> Outcome
         priority: task.priority,
         plan: task.plan,
         goal: goal_request(task),
+        deny: task.deny.clone(),
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -433,7 +452,7 @@ pub fn plan_approve(
     task: &TaskArgs,
     json: bool,
 ) -> Outcome {
-    let (send, notice) = send_request(task, "plan approval")?;
+    let (send, notice) = send_request(task, Prompt::Text("plan approval"))?;
     let request = branchyard_client::knowledge_api::PlanApproveRequest {
         edited: edited.map(str::to_owned),
         send,
@@ -453,7 +472,7 @@ pub fn plan_reject(
     task: &TaskArgs,
     json: bool,
 ) -> Outcome {
-    let (send, notice) = send_request(task, "plan rejection")?;
+    let (send, notice) = send_request(task, Prompt::Text("plan rejection"))?;
     let request = branchyard_client::knowledge_api::PlanRejectRequest {
         reason: reason.map(str::to_owned),
         replan,
@@ -536,6 +555,7 @@ pub fn fan(
         priority: task.priority,
         plan: task.plan,
         goal: goal_request(task),
+        deny: task.deny.clone(),
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -597,6 +617,7 @@ pub fn map(env: &Env, remote: &Remote, args: &crate::args::MapArgs, json: bool) 
             priority: task.priority,
             plan: false,
             goal: None,
+            deny: Vec::new(),
         },
     };
     let name = request
@@ -679,12 +700,16 @@ fn map_finish(
 
 fn send_request(
     task: &TaskArgs,
-    prompt: &str,
+    prompt: Prompt<'_>,
 ) -> Result<(SendRequest, Option<&'static str>), Failure> {
     let (policy, notice) = permissions(task)?;
     Ok((
         SendRequest {
-            prompt: prompt.to_owned(),
+            prompt: match prompt {
+                Prompt::Text(text) => text.to_owned(),
+                Prompt::Retry => String::new(),
+            },
+            retry: matches!(prompt, Prompt::Retry),
             budget: budget(task),
             policy,
             check: task.check.clone(),
@@ -700,7 +725,15 @@ fn send_request(
     ))
 }
 
-pub fn send(env: &Env, remote: &Remote, branch: &str, prompt: &str, task: &TaskArgs) -> Outcome {
+/// `by --remote send`: `prompt`, or with `--retry` the cut-off turn's,
+/// which the server reads.
+pub fn send(
+    env: &Env,
+    remote: &Remote,
+    branch: &str,
+    prompt: Prompt<'_>,
+    task: &TaskArgs,
+) -> Outcome {
     let (request, notice) = send_request(task, prompt)?;
     let op = remote.repo.send(branch, &request, &new_key())?;
     announce(remote, notice, None);
@@ -714,7 +747,7 @@ pub fn send_json(
     env: &Env,
     remote: &Remote,
     branch: &str,
-    prompt: &str,
+    prompt: Prompt<'_>,
     task: &TaskArgs,
 ) -> Result<Sent, branchyard::Error> {
     let (request, notice) = send_request(task, prompt)?;
@@ -834,6 +867,10 @@ pub fn spawn(
         require_labels: task.require_labels.clone(),
         priority: task.priority,
         connectors: (!args.connectors.is_empty()).then(|| args.connectors.clone()),
+        max_children: args.max_children,
+        harnesses: args.harnesses.clone(),
+        plan: args.plan,
+        model: args.model.clone(),
     };
     let op = remote
         .repo
@@ -883,6 +920,25 @@ pub fn integrate(remote: &Remote, branch: &str) -> Result<Merged, branchyard::Er
         .map_err(sdk_error)?;
     result(done)?
         .merged
+        .ok_or_else(|| branchyard::Error::State("the server returned no merge".into()))
+}
+
+/// `integrate a b c` on the server: several children of one parent,
+/// together.
+pub fn integrate_all(
+    remote: &Remote,
+    branches: &[&str],
+) -> Result<branchyard::MergedAll, branchyard::Error> {
+    let op = remote
+        .repo
+        .integrate_all(branches, &new_key())
+        .map_err(sdk_error)?;
+    let done = remote
+        .client
+        .wait(&op.id, Duration::from_millis(200))
+        .map_err(sdk_error)?;
+    result(done)?
+        .merged_all
         .ok_or_else(|| branchyard::Error::State("the server returned no merge".into()))
 }
 
@@ -990,6 +1046,7 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
         priority: None,
         plan: false,
         goal: None,
+        deny: Vec::new(),
     };
     let op = match remote.repo.submit_task(&request, &new_key()) {
         Ok(op) => op,
@@ -1020,4 +1077,54 @@ fn rig_failed(json: bool, error: branchyard::Error) -> Outcome {
         return Err(Failure::Reported);
     }
     Err(Failure::Sdk(error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A server's failed integration check reads as a local one: the
+    /// shared check's fields and every check of the integration, at the
+    /// top of the detail.
+    #[test]
+    fn a_remote_check_failure_keeps_its_checks_and_siblings() {
+        let checks = serde_json::json!([
+            {"check": ["make", "test"], "branches": ["b"], "outcome": "failed"}
+        ]);
+        let error = sdk_error(branchyard_client::Error::Api {
+            status: 422,
+            error: Box::new(branchyard_client::api::ErrorBody {
+                code: "check_failed".into(),
+                message: "check failed:\nboom".into(),
+                detail: Some(serde_json::json!({
+                    "output_tail": "boom",
+                    "checks": checks,
+                    "shared": {"integrate_together": ["b", "e"]},
+                })),
+            }),
+        });
+        assert_eq!(error.kind(), "check_failed");
+        let detail = error.detail().unwrap();
+        assert_eq!(detail["checks"], checks);
+        assert_eq!(detail["integrate_together"], serde_json::json!(["b", "e"]));
+        let plain = sdk_error(branchyard_client::Error::Api {
+            status: 422,
+            error: Box::new(branchyard_client::api::ErrorBody {
+                code: "check_failed".into(),
+                message: "check failed:\nboom".into(),
+                detail: Some(serde_json::json!({ "output_tail": "boom" })),
+            }),
+        });
+        assert_eq!(plain.detail(), None);
+        let not_started = sdk_error(branchyard_client::Error::Api {
+            status: 422,
+            error: Box::new(branchyard_client::api::ErrorBody {
+                code: "check_not_started".into(),
+                message: "check could not start: no such program".into(),
+                detail: Some(serde_json::json!({ "checks": checks })),
+            }),
+        });
+        assert_eq!(not_started.kind(), "check_not_started");
+        assert_eq!(not_started.detail().unwrap()["checks"], checks);
+    }
 }

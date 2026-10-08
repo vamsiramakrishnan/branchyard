@@ -114,6 +114,7 @@ mod goal;
 mod graph;
 mod harness;
 mod inbox;
+mod integrate;
 pub mod inventory;
 mod json_schema;
 mod judge;
@@ -123,6 +124,7 @@ mod map;
 mod map_input;
 pub mod models;
 mod names;
+pub mod operations;
 mod ops;
 #[cfg(feature = "postgres")]
 mod pg;
@@ -152,6 +154,7 @@ mod storage;
 pub mod store_codec;
 mod tarball;
 pub mod tasks;
+mod wake;
 mod workspace;
 
 use branchyard_support::best_effort;
@@ -168,7 +171,8 @@ pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
 pub use access::{AccessActivity, Ceiling, DelegationScope, NetworkScope};
 pub use adopt::{AdoptSpec, Adoption};
 pub use branchyard_harness::{
-    Event, NativeSession, PermissionDecision, PermissionKey, PermissionRequest, TurnOutcome, Usage,
+    Event, HarnessTask, NativeSession, PermissionDecision, PermissionKey, PermissionRequest,
+    TurnOutcome, Usage,
 };
 pub use branchyard_provision::network::{
     narrow as network_narrow, Enforce as NetworkEnforce, HostRule as NetworkRule, Network,
@@ -186,7 +190,7 @@ pub use checkpoint::{
 pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, AttemptCheck};
 pub use delegation::{
     Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inbox, Inspection,
-    Sent, Spawn, Spawned,
+    Sent, Spawn, Spawned, Waited, DEFAULT_MAX_WAKES,
 };
 pub use egress::{EgressActivity, Enforcement as EgressEnforcement};
 pub use environments::{
@@ -347,6 +351,42 @@ impl Yard {
         graph::resume(self, options)
     }
 
+    /// Block until `branches` have settled, any one of them with `any`,
+    /// else all, or until `timeout` passes, whichever process runs them:
+    /// the wait reads their durable status and wakes when it changes
+    /// ([`Delegate::wait_for`] is the same wait acting as a branch). With
+    /// your authority: any branch may be waited for.
+    pub fn wait_for(
+        &self,
+        branches: &[&str],
+        any: bool,
+        timeout: Option<Duration>,
+    ) -> Result<Waited, Error> {
+        self.wait_for_queued(branches, any, timeout, |_| Ok(false))
+    }
+
+    /// [`Yard::wait_for`], also waiting for a branch while `queued` says a
+    /// turn was asked of it that has not started yet, such as a server's
+    /// admitted send: its status is still the last turn's, and a wait
+    /// called after the send waits for the turn the send asked for.
+    pub fn wait_for_queued(
+        &self,
+        branches: &[&str],
+        any: bool,
+        timeout: Option<Duration>,
+        queued: impl Fn(&str) -> Result<bool, Error>,
+    ) -> Result<Waited, Error> {
+        let names: Vec<String> = branches.iter().map(|b| (*b).to_owned()).collect();
+        delegation::wait_for(
+            self,
+            &names,
+            any,
+            timeout,
+            |name| delegation::trusted(self, name, TaskOptions::default())?.inspect(name),
+            queued,
+        )
+    }
+
     /// `branch`'s graph: its children, the dependencies among them, and its
     /// graph revision.
     pub fn graph(&self, branch: &str) -> Result<Graph, Error> {
@@ -365,6 +405,16 @@ impl Yard {
     /// event log names.
     pub fn cancel_as(&self, branch: &str, by: &str) -> Result<Vec<String>, Error> {
         delegation::cancel_tree(self, branch, by)
+    }
+
+    /// Set a settled branch aside with your authority (`by discard`): it
+    /// ends [`BranchStatus::Discarded`] with `reason`, keeps its record,
+    /// worktree and cost, runs no more turns, is never merged, and no
+    /// longer counts against its parent's `max_children`. What waits for
+    /// it is blocked. Refused while a turn runs ([`Error::Running`]: cancel
+    /// it first), while it waits on its children, and once merged; a discarded branch stays as it is.
+    pub fn discard(&self, branch: &str, reason: &str) -> Result<BranchInfo, Error> {
+        ops::discard(self, branch, reason)
     }
 
     /// Deliver `text` into `branch`'s running turn as input from `by`,
@@ -1317,6 +1367,13 @@ pub struct TaskOptions {
     /// fork joins its parent's). Read only when a branch is created; see
     /// [`tasks`].
     pub join_task: Option<String>,
+    /// Tools a new branch's harness is denied outright, ahead of
+    /// [`TaskOptions::policy`]'s rules; a trailing `*` matches a prefix
+    /// (`by run --deny`). Stored with the branch: they bound every later
+    /// turn, whoever sends it, and every child it delegates to, as a
+    /// parent's denials bound a spawned child (`by spawn --deny`). Read
+    /// only when a branch is created.
+    pub deny: Vec<String>,
 }
 
 /// The variable a turn's harness gets [`TaskOptions::trace_parent`] in.
@@ -1711,6 +1768,13 @@ impl Branch {
         run::send(&self.yard, &self.info.name, prompt, &options)
     }
 
+    /// The prompt `by send --retry` submits again: that of this branch's
+    /// last turn that recovery found cut off, kept until a prompt reaches
+    /// its harness. Refused, with what to do instead, when there is none.
+    pub fn retry_prompt(&self) -> Result<String, Error> {
+        run::retry_prompt(&self.yard.store().read(&self.info.name)?)
+    }
+
     /// [`Branch::send`], named for parity with [`Delegate::send_and_wait`]:
     /// outside a harness a send already runs the turn and returns once it
     /// settles, so this does exactly what `send` does.
@@ -1942,6 +2006,10 @@ pub struct BranchInfo {
     /// candidate, with a fresh session and a handoff brief.
     #[serde(default)]
     pub superseded_by: Option<String>,
+    /// The model its harness runs, as it was asked for (`--model`), when
+    /// one was; unset, the harness's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1976,6 +2044,12 @@ pub enum BranchStatus {
     /// approved, edited or rejected before anything changes; see
     /// [`Yard::approve_plan`].
     AwaitingPlanApproval,
+    /// A delegating branch whose turn ended while children it delegated
+    /// were still running or waiting: it is parked, and its next turn
+    /// starts on its own once they have all settled, with a summary of
+    /// what they did (`docs/delegation.md`, "Waiting on children"). Not
+    /// finished: a wait for its subtree waits for that turn too.
+    WaitingOnChildren,
     /// The last turn completed without changing any file.
     NoChanges,
     Interrupted,
@@ -1988,6 +2062,14 @@ pub enum BranchStatus {
     Merged {
         target: String,
         commit: String,
+    },
+    /// Settled and set aside on purpose, with the reason (`by discard`):
+    /// it runs no more turns and is never integrated, its record and cost
+    /// are kept, and it no longer counts against its parent's
+    /// `max_children`.
+    Discarded {
+        /// Why, as whoever discarded it said.
+        reason: String,
     },
 }
 
@@ -2176,9 +2258,11 @@ impl Policy {
         self
     }
 
-    /// Allow exactly the harness's shell commands that run `by` with a
-    /// delegation subcommand (`spawn`, `inspect`, `events`, `send`,
-    /// `integrate`, `cancel`, `children`), and nothing else. The command
+    /// Allow exactly the harness's shell commands that run `by` with an
+    /// operation a harness may run on its own branch (every row of
+    /// [`operations::OPERATIONS`] allowed inside a harness: `spawn`,
+    /// `inspect`, `send`, `discard`, `artifact publish`, `ask`, ...),
+    /// and nothing else. The command
     /// must be a single simple command: plain or quoted words, no
     /// variables, substitutions, globs, redirections, pipes or command
     /// lists. Its program must be `by_path` itself or `by` by name, which
@@ -2546,6 +2630,12 @@ pub struct Steer {
     /// Milliseconds since the Unix epoch.
     pub requested_at_ms: u64,
     pub state: SteerState,
+    /// Where the harness delivers steered input within the running turn,
+    /// as `docs/harness-integration.md` "Steering a running turn" names
+    /// each profile's boundary (`claude_next_model_call`,
+    /// `codex_turn_steer`, ...). Set once the input is written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<String>,
 }
 
 /// Where a [`Steer`] is. Serialized as an object tagged by `state`, such as
@@ -2556,12 +2646,20 @@ pub struct Steer {
 #[derive(strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum SteerState {
-    /// Queued for the running turn; the engine running it writes it to the
-    /// harness within about 100 ms, in whichever process it runs.
+    /// Queued in Branchyard for the running turn; the engine running it
+    /// writes it to the harness within about 100 ms, in whichever process
+    /// it runs.
     Pending,
-    /// Written to the harness, which has not yet confirmed it.
-    Delivered,
-    /// The harness took it into the running turn.
+    /// Written to the harness's input; the harness has not confirmed it
+    /// yet. Stored as `delivered` before it had this name, which still
+    /// reads as this state.
+    #[serde(alias = "delivered")]
+    Written,
+    /// Joined the running turn: the harness queued it into the turn in
+    /// flight, and the model reads it at the [`Steer::boundary`] the
+    /// harness delivers steered input at (for Claude Code, before its next
+    /// model call, still within this turn). Steered input never waits for
+    /// a later turn: one the turn does not take is refused.
     Accepted,
     /// Never reached the model: the harness refused or dropped it, an
     /// interrupt cancelled it, or the turn ended first.
@@ -2702,7 +2800,47 @@ pub struct Merged {
     pub branch: String,
     pub target: String,
     pub previous: String,
+    /// The merge commit that brought the branch's candidate into the
+    /// target.
     pub commit: String,
+    /// The target already contained the candidate, so nothing was merged:
+    /// the branch was recorded as merged through `via`. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub already: bool,
+    /// For a candidate that was already contained: the commit that brought
+    /// it in, with its subject (such as a sibling's merge). Omitted
+    /// otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+}
+
+/// Several branches integrated into one target together
+/// ([`Delegate::integrate_all`], `by integrate a b c`): merged in order in
+/// one temporary worktree, checked once on the result, and promoted with
+/// one compare-and-swap of the target from `previous` to `commit`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MergedAll {
+    /// The parent's git branch the children were merged into.
+    pub target: String,
+    /// The target before the call.
+    pub previous: String,
+    /// The target after the call; `previous` when every branch was already
+    /// contained.
+    pub commit: String,
+    /// One per branch, in the order given. Merges stack: each one's
+    /// `previous` is the merge before it (the target's `previous` for the
+    /// first), so `previous..commit` is that merge's own range.
+    pub branches: Vec<Merged>,
+    /// The distinct checks of the branches merged, each run once on the
+    /// result, in the order they ran; empty when none has a check or
+    /// nothing moved. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<Vec<String>>,
+    /// The same checks, each with the branches whose check it is and its
+    /// outcome (all passed). Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_results: Vec<IntegrationCheck>,
 }
 
 /// Known harness profiles, whether their executable is on `PATH`, and
@@ -2762,15 +2900,47 @@ pub enum Error {
     Conflict {
         files: Vec<String>,
     },
+    /// Integrating several branches together: `branch` conflicted, in
+    /// `files`, with the target plus the branches in `merged`, merged
+    /// before it in the same call. Nothing was integrated. Its kind is
+    /// `conflict`, like [`Error::Conflict`].
+    ConflictBetween {
+        /// The branch whose merge conflicted.
+        branch: String,
+        /// The git branch merged into.
+        target: String,
+        /// The branches merged before it in the same call.
+        merged: Vec<String>,
+        /// The conflicting paths.
+        files: Vec<String>,
+    },
     CheckFailed {
+        /// The output of the check that failed.
         output_tail: String,
+        /// Integrating branches: every check of the branches merged, in
+        /// order, each with its branches and outcome, the failed one among
+        /// them. Empty for a merge of no delegated branch (`by merge`).
+        checks: Vec<IntegrationCheck>,
+        /// When the branches integrated left out siblings that share their
+        /// check: who they are, and the integration that runs it on all of
+        /// them. A child under its parent's whole-suite check passes it
+        /// only together with its siblings.
+        shared: Option<Box<SharedCheck>>,
     },
     CheckTimedOut {
         timeout: Duration,
         output_tail: String,
+        /// As [`Error::CheckFailed`]'s `checks`.
+        checks: Vec<IntegrationCheck>,
     },
     /// The check command could not be started.
-    CheckNotStarted(String),
+    CheckNotStarted {
+        /// Why it could not start.
+        reason: String,
+        /// As [`Error::CheckFailed`]'s `checks`, the one that could not
+        /// start among them.
+        checks: Vec<IntegrationCheck>,
+    },
     /// A worktree with the target checked out has uncommitted changes.
     DirtyTarget(PathBuf),
     /// The candidate is already contained in the target.
@@ -2797,10 +2967,13 @@ pub enum Error {
         actual: u64,
     },
     /// An error the engine running a delegating turn returned through its
-    /// broker, with the [`Error::kind`] it had there.
+    /// broker, with the [`Error::kind`] and [`Error::detail`] it had there.
     Remote {
         kind: String,
         message: String,
+        /// What the error carried beyond its message, as
+        /// [`Error::detail`] gave it there.
+        detail: Option<Box<serde_json::Value>>,
     },
     Git(String),
     Harness(String),
@@ -2815,7 +2988,12 @@ impl fmt::Display for Error {
                 write!(f, "{} is not inside a git work tree", path.display())
             }
             Error::UnknownBranch(name) => write!(f, "no branch named {name}"),
-            Error::BranchExists(name) => write!(f, "branch {name} already exists"),
+            Error::BranchExists(name) => write!(
+                f,
+                "branch {name} already exists; a branch that was discarded or merged keeps its \
+                 name until it is removed: `by rm {name}` frees it (a removed child's spend \
+                 still counts in its parent's budget), or choose another name"
+            ),
             Error::UnknownMessage(id) => write!(f, "no message #{id} in this inbox"),
             Error::UnknownKnowledge(id) => write!(f, "no knowledge entry #{id}"),
             Error::NoPlan(why) => write!(f, "no plan: {why}"),
@@ -2840,12 +3018,48 @@ impl fmt::Display for Error {
                 actual: None,
             } => write!(f, "target at {expected} no longer exists"),
             Error::Conflict { files } => write!(f, "merge conflicts in {}", files.join(", ")),
-            Error::CheckFailed { output_tail } => write!(f, "check failed:\n{output_tail}"),
+            Error::ConflictBetween {
+                branch,
+                target,
+                merged,
+                files,
+            } => match merged.is_empty() {
+                true => write!(
+                    f,
+                    "{branch} conflicts with {target} in {}; nothing was integrated",
+                    files.join(", ")
+                ),
+                false => write!(
+                    f,
+                    "{branch} conflicts with {target} plus {} in {}; nothing was integrated",
+                    merged.join(", "),
+                    files.join(", ")
+                ),
+            },
+            Error::CheckFailed {
+                output_tail,
+                checks,
+                shared,
+            } => {
+                write!(f, "check failed:\n{output_tail}")?;
+                write_checks(f, checks)?;
+                match shared {
+                    Some(shared) => write!(f, "\n{shared}"),
+                    None => Ok(()),
+                }
+            }
             Error::CheckTimedOut {
                 timeout,
                 output_tail,
-            } => write!(f, "check timed out after {timeout:?}:\n{output_tail}"),
-            Error::CheckNotStarted(reason) => write!(f, "check could not start: {reason}"),
+                checks,
+            } => {
+                write!(f, "check timed out after {timeout:?}:\n{output_tail}")?;
+                write_checks(f, checks)
+            }
+            Error::CheckNotStarted { reason, checks } => {
+                write!(f, "check could not start: {reason}")?;
+                write_checks(f, checks)
+            }
             Error::DirtyTarget(worktree) => write!(
                 f,
                 "the target is checked out with uncommitted changes in {}",
@@ -2895,10 +3109,10 @@ impl Error {
             Error::Unsupported(_) => "unsupported",
             Error::NoCandidate(_) => "no_candidate",
             Error::TargetMoved { .. } => "target_moved",
-            Error::Conflict { .. } => "conflict",
+            Error::Conflict { .. } | Error::ConflictBetween { .. } => "conflict",
             Error::CheckFailed { .. } => "check_failed",
             Error::CheckTimedOut { .. } => "check_timed_out",
-            Error::CheckNotStarted(_) => "check_not_started",
+            Error::CheckNotStarted { .. } => "check_not_started",
             Error::DirtyTarget(_) => "dirty_target",
             Error::AlreadyMerged { .. } => "already_merged",
             Error::InvalidCandidate(_) => "invalid_candidate",
@@ -2913,6 +3127,198 @@ impl Error {
             Error::Io(_) => "io",
             Error::State(_) => "state",
         }
+    }
+}
+
+impl Error {
+    /// What the error carries beyond its message, as JSON: `by --json`
+    /// prints it as the error's `detail`, the broker passes it on, the MCP
+    /// tools return it as the error's structured content, and the Python
+    /// module raises it as `BranchyardError.detail`. A check of an
+    /// integration that failed, timed out or could not start has its
+    /// `checks` ([`IntegrationCheck`]) and, when a failed one left out
+    /// siblings sharing it, the [`SharedCheck`]'s fields. `None` for an
+    /// error with nothing more to say.
+    pub fn detail(&self) -> Option<serde_json::Value> {
+        match self {
+            Error::CheckFailed { checks, shared, .. } => {
+                let mut detail = shared
+                    .as_ref()
+                    .and_then(|shared| serde_json::to_value(shared).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if !checks.is_empty() {
+                    detail["checks"] = serde_json::to_value(checks).ok()?;
+                }
+                detail
+                    .as_object()
+                    .is_some_and(|d| !d.is_empty())
+                    .then_some(detail)
+            }
+            Error::CheckTimedOut { checks, .. } | Error::CheckNotStarted { checks, .. }
+                if !checks.is_empty() =>
+            {
+                Some(serde_json::json!({ "checks": checks }))
+            }
+            Error::Remote { detail, .. } => detail.as_deref().cloned(),
+            _ => None,
+        }
+    }
+}
+
+/// After a failed check's output, which of an integration's checks ran,
+/// on which branches, and how each ended.
+fn write_checks(f: &mut fmt::Formatter<'_>, checks: &[IntegrationCheck]) -> fmt::Result {
+    if checks.is_empty() {
+        return Ok(());
+    }
+    let said: Vec<String> = checks.iter().map(ToString::to_string).collect();
+    write!(f, "\nChecks on the merged result: {}", said.join("; "))
+}
+
+/// One check of the branches an integration merged, run once on the
+/// result ([`MergedAll::check_results`], [`Error::CheckFailed`]).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrationCheck {
+    /// The check, as its argv.
+    pub check: Vec<String>,
+    /// The branches integrated whose check it is, in the order named.
+    pub branches: Vec<String>,
+    /// How it ended.
+    pub outcome: CheckVerdict,
+}
+
+impl fmt::Display for IntegrationCheck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let outcome = match self.outcome {
+            CheckVerdict::Passed => "passed",
+            CheckVerdict::Failed => "failed",
+            CheckVerdict::TimedOut => "timed out",
+            CheckVerdict::NotStarted => "could not start",
+            CheckVerdict::NotRun => "did not run",
+        };
+        write!(
+            f,
+            "`{}` ({}) {outcome}",
+            self.check.join(" "),
+            self.branches.join(", ")
+        )
+    }
+}
+
+/// How an [`IntegrationCheck`] ended. The checks run in order and stop at
+/// the first that does not pass: those after it are `not_run`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckVerdict {
+    /// The check exited successfully.
+    Passed,
+    /// The check exited unsuccessfully.
+    Failed,
+    /// The check ran past its timeout and was killed.
+    TimedOut,
+    /// The check could not be started.
+    NotStarted,
+    /// A check before it did not pass.
+    NotRun,
+}
+
+/// A branch's check run on its current work, as integrating the branch
+/// would run it, with nothing integrated; see [`Delegate::check`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckReport {
+    /// The branch checked.
+    pub branch: String,
+    /// Its check, as its argv: its own, or the one it inherited. `None`
+    /// when it has none: nothing ran, and integrating it runs none.
+    pub check: Option<Vec<String>>,
+    /// The parent whose check it is, when the branch inherited it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_from: Option<String>,
+    /// Its current work as a commit: its worktree's files as they are,
+    /// committed nowhere, or its git branch's head when it has no worktree.
+    pub work: String,
+    /// The git branch the work was merged into first, as integrating it
+    /// would: its parent's. `None` for a branch without a parent, whose
+    /// work was checked alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// The commit the check ran on: the merge of `work` into `target`'s
+    /// head, or `work` itself. `None` when the check did not run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked: Option<String>,
+    /// How it ended; `not_run` when there is no check or the merge
+    /// conflicted.
+    pub outcome: CheckVerdict,
+    /// Files where the work conflicts with `target`: integrating it would
+    /// fail before its check.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
+    /// The last [`branchyard_workspace::OUTPUT_TAIL_BYTES`] bytes of its
+    /// output, or why it could not start.
+    #[serde(default)]
+    pub output_tail: String,
+}
+
+impl CheckReport {
+    /// Whether integrating the work as it is would get past its check:
+    /// the check passed, or there is none and nothing conflicted.
+    pub fn passed(&self) -> bool {
+        match self.check {
+            Some(_) => self.outcome == CheckVerdict::Passed,
+            None => self.conflicts.is_empty(),
+        }
+    }
+}
+
+/// Siblings that share a check an integration failed, and the integration
+/// that runs it on all of them ([`Error::CheckFailed`]).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SharedCheck {
+    /// The check, as its argv.
+    pub check: Vec<String>,
+    /// The parent whose check it is, when the branches inherited it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_from: Option<String>,
+    /// Siblings left out of the integration that share it and may still
+    /// be integrated (ready, or not settled yet), oldest first.
+    pub siblings: Vec<String>,
+    /// Those of `siblings` that have not settled yet: wait for them first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsettled: Vec<String>,
+    /// The branches to integrate together: those named, then `siblings`.
+    pub integrate_together: Vec<String>,
+}
+
+impl fmt::Display for SharedCheck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let whose = match &self.inherited_from {
+            Some(parent) => format!("{parent}'s check, which they inherited"),
+            None => "the same check".to_owned(),
+        };
+        write!(
+            f,
+            "Nothing was integrated. Siblings {} share {whose}, which may pass only with all \
+             of them: integrate them together, `by integrate {}`",
+            self.siblings.join(", "),
+            self.integrate_together.join(" ")
+        )?;
+        if !self.unsettled.is_empty() {
+            write!(
+                f,
+                ", once {} settle{} (`by wait {}`)",
+                self.unsettled.join(", "),
+                if self.unsettled.len() == 1 { "s" } else { "" },
+                self.unsettled.join(" ")
+            )?;
+        }
+        write!(
+            f,
+            ". A child that should land alone needs a check of its own (`by spawn --check`)"
+        )
     }
 }
 

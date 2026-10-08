@@ -104,9 +104,15 @@ pub struct TaskArgs {
     /// `--allow-delegation`: auto-allow the harness's own `by` delegation
     /// commands.
     pub allow_delegation: bool,
+    /// `--no-wake`: the delegating branch is not woken when its children
+    /// settle after its turn ended.
+    pub no_wake: bool,
     /// `--allow-unapproved-tools`: run a profile whose tools Branchyard's
     /// policy never sees.
     pub unapproved_tools: bool,
+    /// `by run --deny`: tools the harness is denied outright, stored with
+    /// the branch.
+    pub deny: Vec<String>,
     /// `--secret`, `--auth`, `--mcp`, `--model`, `--effort` and
     /// `--telemetry`; `None` when none was given.
     pub provision: Option<branchyard::Provisioning>,
@@ -519,6 +525,10 @@ pub struct SpawnArgs {
     pub parent: Option<String>,
     pub wait: bool,
     pub max_depth: Option<u32>,
+    /// `--max-children`: at most the parent's.
+    pub max_children: Option<u32>,
+    /// `--harnesses`: what the child may delegate to.
+    pub harnesses: Option<Vec<String>>,
     pub deny: Vec<String>,
     /// `--seat`: the rig seat the child fills.
     pub seat: Option<String>,
@@ -533,6 +543,8 @@ pub struct SpawnArgs {
     pub connectors: Vec<branchyard::connectors::GrantEntry>,
     /// `--plan`: the child plans first, read-only.
     pub plan: bool,
+    /// `--model`: the child's model. Unset: its seat's or its parent's.
+    pub model: Option<String>,
     pub json: bool,
 }
 
@@ -841,7 +853,47 @@ const SPAWN_EXAMPLES: &str = "\
 Examples (inside a harness, the parent is the harness's own branch):
   by spawn \"write the tokenizer\" --harness codex --budget-usd 1 --wait
   by spawn \"write the parser\" --depends-on tokenizer --after integrated
-  by spawn \"fix it\" --parent root --yes            # outside a harness";
+  by spawn \"fix it\" --parent root --yes            # outside a harness
+  by spawn --prompt-file task.md --name parser       # a long task, from a file (- for stdin)
+
+The child's check (--check) defaults to its parent's, and the spawn says which it
+inherits. It runs on the merge when the child is integrated, so siblings that share
+one test suite are integrated together: by integrate a b (checked once).";
+
+const DISCARD_EXAMPLES: &str = "\
+Examples:
+  by discard lru-linkedlist --reason \"the ordered-dict version won\"
+  by discard flaky-fix --json
+
+A running child is refused: by cancel it first. by cancel stops a turn; by
+discard settles what a stopped or finished child is. Its worktree stays until
+by rm.";
+
+/// The edit format of `by graph apply`, from `branchyard::GraphEdit`.
+pub(crate) const GRAPH_APPLY_HELP: &str = "\
+A proposal is {\"expected_revision\": N, \"edits\": [EDIT, ...]}; --edits takes the
+array alone. Each edit is an object tagged by \"kind\":
+
+  {\"kind\": \"spawn\", \"prompt\": \"...\", ...}   a new child; it takes what by spawn
+      does, by the MCP tool's names: name, harness, base, budget {max_usd,
+      max_turns, max_minutes}, check [argv], max_depth, max_children,
+      harnesses [ids], deny [tools], seat, depends_on [names], after
+      (settled or integrated), bindings [{scratch, access}], connectors
+      [grants], plan, model
+  {\"kind\": \"add_dependency\", \"dependent\": \"B\", \"prerequisite\": \"A\",
+   \"after\": \"settled\"}   B waits for A; B must not have started
+  {\"kind\": \"remove_dependency\", \"dependent\": \"B\", \"prerequisite\": \"A\"}
+
+Examples:
+  by graph show --json          # the revision to propose against
+  by graph apply --expected-revision 3 --edits '[
+    {\"kind\": \"spawn\", \"name\": \"schema\", \"prompt\": \"Add the migration\"},
+    {\"kind\": \"spawn\", \"name\": \"api\", \"prompt\": \"Use the column\",
+     \"depends_on\": [\"schema\"], \"after\": \"integrated\"}]'
+  by graph apply proposal.json --parent root --yes      # outside a harness
+
+All or nothing: a stale revision is the error stale_revision; run by graph
+show and propose again. See docs/graph.md.";
 
 const MERGE_EXAMPLES: &str = "\
 Examples:
@@ -1110,11 +1162,20 @@ pub enum Command {
     Send {
         branch: String,
         /// The next prompt; quote it
+        #[arg(
+            required_unless_present = "retry",
+            default_value = "",
+            hide_default_value = true
+        )]
         prompt: String,
         /// Add the prompt to the branch's running turn without interrupting it, instead of
         /// starting a new turn; refused when no turn runs or the harness cannot take it
         #[arg(long)]
         steer: bool,
+        /// Submit again the prompt of the branch's last turn that was cut off when the engine
+        /// running it stopped (the recovery note names it), instead of a new prompt
+        #[arg(long, conflicts_with_all = ["steer", "prompt"])]
+        retry: bool,
         /// Wait for the turn to end and show it (outside a harness, send always waits)
         #[arg(long)]
         wait: bool,
@@ -1214,7 +1275,8 @@ pub enum Command {
         #[command(subcommand)]
         action: crate::recipe_cmd::RecipeAction,
     },
-    /// Remove a branch's worktree and record
+    /// Remove a branch's worktree and record, which frees its name. A removed child leaves its
+    /// parent's children, and what its subtree spent still counts in the parent's budget
     #[command(display_order = 106)]
     Rm {
         branch: String,
@@ -1501,11 +1563,15 @@ pub enum Command {
     Spawn {
         /// The child's task; quote it (with --issue, added to the issue's text)
         #[arg(
-            required_unless_present = "issue",
+            required_unless_present_any = ["issue", "prompt_file"],
             default_value = "",
             hide_default_value = true
         )]
         prompt: String,
+        /// Read the child's task from this file instead, `-` for standard input: for a long
+        /// prompt, or one a shell would mangle
+        #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
+        prompt_file: Option<String>,
         #[command(flatten)]
         spawn: Checked<SpawnFlags>,
     },
@@ -1533,18 +1599,62 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Merge a delegated child into its parent's branch after its check passes
+    /// Merge delegated children into their parent's branch after their check passes; several
+    /// are merged together, all or none, and checked once on the result
     #[command(display_order = 303)]
     Integrate {
+        #[arg(required = true, value_name = "BRANCH")]
+        branches: Vec<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a branch's check on its current work, merged into its parent's branch as integrate
+    /// would, without integrating it; run it on yourself before you finish
+    #[command(display_order = 303)]
+    Check {
+        /// Default: this harness's own branch
+        branch: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Wait for delegated branches to settle: all of them, or the first with --any
+    #[command(display_order = 303)]
+    Wait {
+        /// Default, inside a harness: its children still running
+        #[arg(value_name = "BRANCH")]
+        branches: Vec<String>,
+        /// Return when the first of them settles
+        #[arg(long, conflicts_with = "all")]
+        any: bool,
+        /// Return when all of them have settled (the default)
+        #[arg(long)]
+        all: bool,
+        /// Give up after S seconds; the result says timed_out, and by exits 1
+        #[arg(long, value_name = "S")]
+        timeout: Option<f64>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop a branch's running turn and every turn delegated below it (a settled child: by
+    /// discard)
+    #[command(display_order = 304)]
+    Cancel {
         branch: String,
         /// Print JSON
         #[arg(long)]
         json: bool,
     },
-    /// Stop a branch's running turn and every turn delegated below it
-    #[command(display_order = 304)]
-    Cancel {
+    /// Set a settled child aside: it ends discarded with your reason, keeps its record and cost,
+    /// is never integrated, and frees its slot in its parent's max_children
+    #[command(display_order = 304, after_help = DISCARD_EXAMPLES)]
+    Discard {
         branch: String,
+        /// Why, recorded with it (default: who discarded it)
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
+        reason: Option<String>,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -2237,9 +2347,10 @@ pub enum GraphAction {
         branch: Option<String>,
     },
     /// Apply a graph proposal to a branch's children, atomically
-    #[command(group(
-        clap::ArgGroup::new("proposal").required(true).args(["file", "edits"])
-    ))]
+    #[command(
+        group(clap::ArgGroup::new("proposal").required(true).args(["file", "edits"])),
+        after_help = GRAPH_APPLY_HELP
+    )]
     Apply {
         /// The proposal, {"expected_revision", "edits"}; - for stdin
         file: Option<String>,
@@ -3084,16 +3195,21 @@ pub struct Delegation {
         value_parser = delegate_depth
     )]
     delegate: Option<u32>,
-    /// Allow the harness's own `by spawn|inspect|events|send|integrate|cancel|children`
-    /// commands without asking; nothing else
+    /// Allow the harness's own by commands that act as its branch (spawn, inspect, send,
+    /// wait, discard, artifact, ask, ...; see docs/delegation.md) without asking; nothing else
     #[arg(long)]
     allow_delegation: bool,
+    /// Do not start the harness's next turn on its own when its turn ends while its children
+    /// run and they then settle
+    #[arg(long)]
+    no_wake: bool,
 }
 
 impl Delegation {
     fn apply(self, task: &mut TaskArgs) {
         task.delegate = self.delegate;
         task.allow_delegation = self.allow_delegation;
+        task.no_wake = self.no_wake;
     }
 }
 
@@ -3109,10 +3225,16 @@ pub struct Provision {
     /// auth-file, vertex-ai
     #[arg(long, value_name = "METHOD")]
     auth: Option<String>,
-    /// A stdio MCP server for the harness, COMMAND an absolute path with its arguments.
-    /// Repeatable
-    #[arg(long = "mcp", value_name = "NAME=COMMAND", value_parser = branchyard::McpServerSpec::parse)]
-    mcp_servers: Vec<branchyard::McpServerSpec>,
+    /// An MCP server for the harness: NAME=COMMAND starts a stdio server, COMMAND an absolute
+    /// path with its arguments; NAME=https://URL connects to a streamable HTTP server where the
+    /// harness can (Claude Code, ACP agents that advertise it). Repeatable
+    #[arg(long = "mcp", value_name = "NAME=COMMAND|NAME=URL", value_parser = mcp_server)]
+    mcp_servers: Vec<McpArg>,
+    /// A header for an HTTP --mcp server, its value read each turn from the variable VAR or the
+    /// file @FILE and never stored, as a --secret is (so it needs --isolated or a sandbox), such
+    /// as 'search:Authorization=@/run/search-auth'. Repeatable
+    #[arg(long = "mcp-header", value_name = "NAME:HEADER=VAR|@FILE", value_parser = mcp_header)]
+    mcp_headers: Vec<McpHeader>,
     /// Standing instructions for the harness, read from FILE
     #[arg(long, value_name = "FILE")]
     instructions: Option<String>,
@@ -3154,10 +3276,37 @@ pub struct Provision {
 }
 
 impl Provision {
-    fn apply(self, task: &mut TaskArgs) {
+    fn apply(self, task: &mut TaskArgs) -> Result<(), String> {
+        let mut secrets = self.secrets;
+        let mut mcp_servers = Vec::new();
+        let mut remote_mcp_servers = Vec::new();
+        for server in self.mcp_servers {
+            match server {
+                McpArg::Stdio(spec) => mcp_servers.push(spec),
+                McpArg::Http(spec) => remote_mcp_servers.push(spec),
+            }
+        }
+        for header in self.mcp_headers {
+            let server = remote_mcp_servers
+                .iter_mut()
+                .find(|s: &&mut branchyard::RemoteMcpSpec| s.name == header.server)
+                .ok_or_else(|| {
+                    format!(
+                        "--mcp-header names {}, which no --mcp {}=https://... gives",
+                        header.server, header.server
+                    )
+                })?;
+            server
+                .headers
+                .insert(header.header.clone(), header.secret.name.clone());
+            if !secrets.iter().any(|s| s.name == header.secret.name) {
+                secrets.push(header.secret);
+            }
+        }
         let spec = branchyard::Provisioning {
-            secrets: self.secrets,
-            mcp_servers: self.mcp_servers,
+            secrets,
+            mcp_servers,
+            remote_mcp_servers,
             auth: self.auth,
             model: self.model,
             effort: self.effort,
@@ -3171,7 +3320,73 @@ impl Provision {
         };
         task.provision = (!spec.is_empty() || self.instructions.is_some()).then_some(spec);
         task.instructions = self.instructions;
+        Ok(())
     }
+}
+
+/// One `--mcp`: a stdio server the harness starts, or an HTTP one it
+/// connects to.
+#[derive(Clone, Debug, PartialEq)]
+pub enum McpArg {
+    Stdio(branchyard::McpServerSpec),
+    Http(branchyard::RemoteMcpSpec),
+}
+
+/// `--mcp NAME=COMMAND` or `--mcp NAME=https://URL`.
+fn mcp_server(text: &str) -> Result<McpArg, String> {
+    let (name, rest) = text
+        .split_once('=')
+        .ok_or_else(|| format!("an MCP server is NAME=COMMAND or NAME=URL, not {text:?}"))?;
+    let url = rest.trim();
+    if url.starts_with("https://") || url.starts_with("http://") {
+        let spec = branchyard::RemoteMcpSpec {
+            name: name.to_owned(),
+            transport: branchyard::RemoteMcpTransport::Http,
+            url: url.to_owned(),
+            headers: Default::default(),
+        };
+        spec.check()?;
+        return Ok(McpArg::Http(spec));
+    }
+    branchyard::McpServerSpec::parse(text).map(McpArg::Stdio)
+}
+
+/// One `--mcp-header NAME:HEADER=VAR|@FILE`: the header and the secret
+/// that holds its value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpHeader {
+    server: String,
+    header: String,
+    secret: branchyard::SecretSource,
+}
+
+fn mcp_header(text: &str) -> Result<McpHeader, String> {
+    let shape = || format!("an MCP header is NAME:HEADER=VAR or NAME:HEADER=@FILE, not {text:?}");
+    let (server, rest) = text.split_once(':').ok_or_else(shape)?;
+    let (header, source) = rest.split_once('=').ok_or_else(shape)?;
+    if server.is_empty() || header.is_empty() || source.is_empty() {
+        return Err(shape());
+    }
+    // A file's value gets a secret named for the server and header; a
+    // variable's is the secret of that name, as `--secret VAR` is.
+    let secret = match source.strip_prefix('@') {
+        Some(_) => {
+            let name: String = format!("MCP_{server}_{header}")
+                .chars()
+                .map(|c| match c.is_ascii_alphanumeric() {
+                    true => c.to_ascii_uppercase(),
+                    false => '_',
+                })
+                .collect();
+            branchyard::SecretSource::parse(&format!("{name}={source}"))?
+        }
+        None => branchyard::SecretSource::parse(source)?,
+    };
+    Ok(McpHeader {
+        server: server.to_owned(),
+        header: header.to_owned(),
+        secret,
+    })
 }
 
 /// `by run`'s options.
@@ -3199,6 +3414,16 @@ pub struct RunFlags {
     limits: Limits,
     #[command(flatten)]
     perms: Perms,
+    /// Tools the harness is denied outright, before any permission answer, --yes included; a
+    /// trailing * matches a prefix. Stored with the branch: later sends and every child it
+    /// delegates to keep them, as with by spawn --deny
+    #[arg(
+        long,
+        value_name = "TOOL,TOOL,...",
+        value_parser = harness_list,
+        help_heading = "Permissions"
+    )]
+    deny: Option<List>,
     #[command(flatten)]
     launch: Launch,
     #[command(flatten)]
@@ -3228,9 +3453,10 @@ impl Flags for RunFlags {
         };
         self.limits.apply(&mut task);
         self.perms.apply(&mut task);
+        task.deny = self.deny.map(|list| list.0).unwrap_or_default();
         self.launch.apply(&mut task)?;
         self.delegation.apply(&mut task);
-        self.provision.apply(&mut task);
+        self.provision.apply(&mut task)?;
         self.plan_goal.apply(&mut task);
         Ok(task)
     }
@@ -3343,6 +3569,7 @@ impl Flags for FanFlags {
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: self.plan_goal,
+            deny: None,
         }
         .check()
     }
@@ -3595,6 +3822,7 @@ impl Flags for MapFlags {
             delegation: Delegation::default(),
             provision: self.provision,
             plan_goal: PlanGoal::default(),
+            deny: None,
         }
         .check()
     }
@@ -3641,7 +3869,7 @@ impl Flags for SendFlags {
         self.limits.apply(&mut task);
         self.perms.apply(&mut task);
         self.delegation.apply(&mut task);
-        self.provision.apply(&mut task);
+        self.provision.apply(&mut task)?;
         Ok(task)
     }
 }
@@ -3680,6 +3908,7 @@ impl Flags for ForkFlags {
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: PlanGoal::default(),
+            deny: None,
         }
         .check()
     }
@@ -3722,6 +3951,7 @@ impl Flags for ReincarnateFlags {
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: PlanGoal::default(),
+            deny: None,
         }
         .check()
     }
@@ -3737,9 +3967,15 @@ pub struct SpawnFlags {
     /// instructions
     #[arg(long, value_name = "NAME")]
     seat: Option<String>,
-    /// Harness or profile ID (default: claude-code)
+    /// Harness or profile ID, such as claude-code or claude-code-acp (default: the parent's own
+    /// profile); shown as both, `claude-code (claude-code-stream-json)`
     #[arg(long, value_name = "ID")]
     harness: Option<String>,
+    /// The child's model, or a size alias (small, medium, large, extra-large) where its harness
+    /// defines one; a cheaper one suits mechanical work (default: its seat's, else the parent's).
+    /// Refused for a harness whose driver cannot choose one
+    #[arg(long, value_name = "NAME", value_parser = non_blank)]
+    model: Option<String>,
     /// Take the task from this issue: GitHub's (URL, #N or N, through gh), linear:KEY, jira:KEY,
     /// gitlab:GROUP/PROJECT#N, or a Linear, Jira or GitLab URL; a prompt, if given, is added
     #[arg(long, value_name = "REF", value_parser = non_blank)]
@@ -3771,6 +4007,13 @@ pub struct SpawnGraph {
     /// Levels the child may delegate below itself (default: one fewer than the parent)
     #[arg(long, value_name = "N")]
     max_depth: Option<u32>,
+    /// Children the child may have at once (default and most: the parent's)
+    #[arg(long, value_name = "N")]
+    max_children: Option<u32>,
+    /// Harness or profile IDs the child may delegate to, each allowed to the parent (default:
+    /// the parent's)
+    #[arg(long, value_name = "ID,ID,...", value_parser = harness_list)]
+    harnesses: Option<List>,
     /// Tools the child is denied outright; a trailing * matches a prefix
     #[arg(long, value_name = "TOOL,TOOL,...", value_parser = harness_list)]
     deny: Option<List>,
@@ -3811,6 +4054,8 @@ impl Flags for SpawnFlags {
             parent: self.parent,
             wait: self.wait,
             max_depth: self.graph.max_depth,
+            max_children: self.graph.max_children,
+            harnesses: self.graph.harnesses.map(|list| list.0),
             deny: self.graph.deny.map(|list| list.0).unwrap_or_default(),
             seat: self.seat,
             depends_on: self.graph.depends_on.map(|list| list.0).unwrap_or_default(),
@@ -3818,6 +4063,7 @@ impl Flags for SpawnFlags {
             bindings: self.graph.bindings,
             connectors: self.graph.connectors,
             plan: self.graph.plan,
+            model: self.model,
             json: self.json,
         })
     }
@@ -3966,7 +4212,7 @@ pub fn command() -> clap::Command {
 }
 
 fn build_command() -> clap::Command {
-    let cmd = Cli::command();
+    let cmd = crate::operations::annotate(Cli::command());
     let header = *cmd.get_styles().get_header();
     let listing = command_listing(&cmd);
     cmd.help_template(format!(
@@ -4475,7 +4721,9 @@ mod tests {
                 local: false,
                 delegate: None,
                 allow_delegation: false,
+                no_wake: false,
                 unapproved_tools: false,
+                deny: Vec::new(),
                 provision: None,
                 instructions: None,
                 issue: None,
@@ -4844,7 +5092,7 @@ mod tests {
 
     #[test]
     fn delegation_commands_parse_with_optional_branches() {
-        let Command::Spawn { prompt, spawn } = parse_str(
+        let Command::Spawn { prompt, spawn, .. } = parse_str(
             "spawn 'fix it' --parent root --harness codex --name fix --budget-usd 0.5 \
              --max-depth 0 --deny Bash,mcp__* --wait --json --yes",
         )
@@ -4871,6 +5119,13 @@ mod tests {
         assert_eq!(spawn.after, branchyard::After::Integrated);
         assert_eq!(spawn.bindings.len(), 2);
         assert!(spawn.connectors.is_empty());
+        assert_eq!(spawn.model, None);
+        let Command::Spawn { spawn: cheap, .. } = parse_str("spawn go --model haiku").unwrap()
+        else {
+            panic!("not spawn")
+        };
+        assert_eq!(cheap.model.as_deref(), Some("haiku"));
+        assert!(err("spawn go --model ' '").contains("--model"));
         let Command::Spawn { spawn: granted, .. } =
             parse_str("spawn go --connector github:read --connector 'linear@work:write:issues.*'")
                 .unwrap()
@@ -4914,12 +5169,44 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_str("integrate kid --json").unwrap(),
-            Command::Integrate {
-                branch: "kid".into(),
+            parse_str("check").unwrap(),
+            Command::Check {
+                branch: None,
+                json: false
+            }
+        );
+        assert_eq!(
+            parse_str("check kid --json").unwrap(),
+            Command::Check {
+                branch: Some("kid".into()),
                 json: true
             }
         );
+        assert_eq!(
+            parse_str("integrate kid --json").unwrap(),
+            Command::Integrate {
+                branches: vec!["kid".into()],
+                json: true
+            }
+        );
+        assert_eq!(
+            parse_str("integrate a b").unwrap(),
+            Command::Integrate {
+                branches: vec!["a".into(), "b".into()],
+                json: false
+            }
+        );
+        assert_eq!(
+            parse_str("wait a b --any --timeout 2.5 --json").unwrap(),
+            Command::Wait {
+                branches: vec!["a".into(), "b".into()],
+                any: true,
+                all: false,
+                timeout: Some(2.5),
+                json: true
+            }
+        );
+        assert!(err("wait --any --all").contains("cannot be used with"));
         assert_eq!(
             parse_str("cancel kid").unwrap(),
             Command::Cancel {
@@ -5059,6 +5346,7 @@ mod tests {
             prompt,
             task,
             steer,
+            retry,
             wait,
             json,
         } = parse_str("send flaky 'now add a test' --yes").unwrap()
@@ -5076,7 +5364,15 @@ mod tests {
                 ..TaskArgs::default()
             }
         );
-        assert!(!steer && !wait && !json);
+        assert!(!steer && !retry && !wait && !json);
+        // --retry takes the cut-off turn's prompt, so none is given with it.
+        let Command::Send { retry, prompt, .. } = parse_str("send flaky --retry").unwrap() else {
+            panic!("not send")
+        };
+        assert!(retry && prompt.is_empty());
+        assert!(parse_str("send flaky").is_err());
+        assert!(parse_str("send flaky go --retry").is_err());
+        assert!(parse_str("send flaky --retry --steer").is_err());
         let Command::Fork {
             branch,
             prompt,

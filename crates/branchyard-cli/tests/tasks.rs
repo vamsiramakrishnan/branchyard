@@ -51,7 +51,7 @@ impl Fixture {
 
     fn command(&self, program: impl AsRef<std::ffi::OsStr>, cwd: &Path) -> Command {
         let mut command = Command::new(program);
-        command
+        branchyard_testkit::hermetic(&mut command)
             .current_dir(cwd)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -62,15 +62,6 @@ impl Fixture {
                 "/nonexistent/branchyard-config.toml",
             )
             .env("PAGER", "cat");
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-            "BRANCHYARD_REMOTE",
-        ] {
-            command.env_remove(var);
-        }
         command
     }
 

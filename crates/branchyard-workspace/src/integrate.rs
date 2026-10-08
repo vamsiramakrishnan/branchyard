@@ -11,7 +11,7 @@ use std::time::Duration;
 use crate::check::{self, Check, CheckOutcome};
 use crate::git::{self, identity_args, is_object_id, Git, GitError};
 use crate::repo::{resolve_in, unique_suffix};
-use crate::{Candidate, Commit, Repository};
+use crate::{BranchName, Candidate, Commit, DiffStat, Repository};
 
 /// A completed promotion: `target` moved from `previous` to `merged`, a merge
 /// commit whose first parent is `previous` and second parent the candidate
@@ -29,6 +29,43 @@ pub struct Integrated {
     /// Their index and files still match `previous`; running
     /// `git read-tree -m -u <previous> <merged>` there completes the update.
     /// Empty in the normal case.
+    pub stale_checkouts: Vec<PathBuf>,
+}
+
+/// One candidate of a [`Repository::integrate_many`], in the order merged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedCandidate {
+    /// Its git branch, `by/<name>`.
+    pub branch: String,
+    /// The candidate's head commit.
+    pub head: Commit,
+    /// What it was merged onto: the target as it was for the first
+    /// candidate, then the merge before it. Merges stack, so each one's
+    /// range is `onto..merge`, not `previous..merge`.
+    pub onto: Commit,
+    /// The merge commit made for it, or `None` when the target, or a
+    /// candidate merged before it in the same call, already contained it.
+    pub merge: Option<Commit>,
+}
+
+/// A completed [`Repository::integrate_many`]: `target` moved from
+/// `previous` to `merged` in one compare-and-swap, through one merge commit
+/// per candidate that was not already contained. When every candidate was
+/// already contained, nothing moved and `merged` equals `previous`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegratedMany {
+    /// The target branch, such as `by/parent`.
+    pub target: String,
+    /// The target before the call: the `expected` it was given.
+    pub previous: Commit,
+    /// The target after the call: the last merge, or `previous`.
+    pub merged: Commit,
+    /// Every candidate, in the order given.
+    pub candidates: Vec<MergedCandidate>,
+    /// The last [`OUTPUT_TAIL_BYTES`](crate::OUTPUT_TAIL_BYTES) bytes of
+    /// each check's output, in the order the checks ran.
+    pub check_output_tails: Vec<String>,
+    /// As [`Integrated::stale_checkouts`].
     pub stale_checkouts: Vec<PathBuf>,
 }
 
@@ -60,6 +97,18 @@ pub enum IntegrationError {
     Conflict {
         files: Vec<String>,
     },
+    /// In a [`Repository::integrate_many`], merging `candidate` (a git
+    /// branch) conflicted, in `files`, with the target as it was plus the
+    /// candidates in `merged`, which were merged before it in the same
+    /// call (empty when it conflicts with the target alone).
+    ConflictWith {
+        /// The candidate's git branch.
+        candidate: String,
+        /// The git branches merged before it.
+        merged: Vec<String>,
+        /// The conflicting paths.
+        files: Vec<String>,
+    },
     /// The check exited unsuccessfully.
     CheckFailed {
         status: ExitStatus,
@@ -72,6 +121,17 @@ pub enum IntegrationError {
     },
     /// The check could not be started (empty argv, program not found, ...).
     CheckNotStarted(io::Error),
+    /// In a [`Repository::integrate_many`], the check at `index` in the
+    /// checks given stopped the integration with `error`: an
+    /// [`IntegrationError::CheckFailed`], [`IntegrationError::CheckTimedOut`]
+    /// or [`IntegrationError::CheckNotStarted`]. The checks before it
+    /// passed, and those after it did not run.
+    CheckStopped {
+        /// The check's place in the checks given, from 0.
+        index: usize,
+        /// How it stopped the integration.
+        error: Box<IntegrationError>,
+    },
     /// A worktree with the target checked out has uncommitted changes to
     /// tracked files, or files where the merge would add new ones.
     DirtyTarget {
@@ -93,9 +153,27 @@ impl fmt::Display for IntegrationError {
                 None => write!(f, "target at {expected} no longer exists"),
             },
             Self::Conflict { files } => write!(f, "merge conflicts in {}", files.join(", ")),
+            Self::ConflictWith {
+                candidate,
+                merged,
+                files,
+            } => match merged.is_empty() {
+                true => write!(
+                    f,
+                    "{candidate} conflicts with the target in {}",
+                    files.join(", ")
+                ),
+                false => write!(
+                    f,
+                    "{candidate} conflicts with the target after merging {} in {}",
+                    merged.join(", "),
+                    files.join(", ")
+                ),
+            },
             Self::CheckFailed { status, .. } => write!(f, "check failed: {status}"),
             Self::CheckTimedOut { timeout, .. } => write!(f, "check timed out after {timeout:?}"),
             Self::CheckNotStarted(e) => write!(f, "check could not start: {e}"),
+            Self::CheckStopped { index, error } => write!(f, "check {}: {error}", index + 1),
             Self::DirtyTarget { worktree } => write!(
                 f,
                 "target is checked out with uncommitted changes in {}",
@@ -112,6 +190,7 @@ impl std::error::Error for IntegrationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::CheckNotStarted(e) => Some(e),
+            Self::CheckStopped { error, .. } => Some(error.as_ref()),
             Self::Git(e) => Some(e),
             _ => None,
         }
@@ -210,6 +289,48 @@ impl Repository {
             },
         };
 
+        let reason = format!("branchyard: integrate {}", candidate.branch.branch());
+        let stale_checkouts = self.promote(&target_ref, expected, &merged, &reason)?;
+        drop(scratch);
+        Ok(Integrated {
+            target: target.to_owned(),
+            previous: expected.clone(),
+            merged,
+            check_output_tail,
+            stale_checkouts,
+        })
+    }
+
+    /// Promotes every candidate in `candidates`, merged into `target` in
+    /// order, provided `target` is still at `expected`: all of them, or
+    /// none.
+    ///
+    /// The same steps and crash safety as [`Repository::integrate`], with
+    /// one temporary worktree for the whole call: each candidate is merged
+    /// with `git merge --no-ff` on top of the ones before it, every check
+    /// in `checks` runs once, on the final merge, and the target moves with
+    /// one compare-and-swap from `expected` to that merge. A candidate the
+    /// target already contains, or one a candidate merged before it brought
+    /// in, gets no merge commit ([`MergedCandidate::merge`] is `None`); it
+    /// is not an error. When none needs a merge, nothing runs and the
+    /// target does not move.
+    ///
+    /// A conflict is [`IntegrationError::ConflictWith`], naming the
+    /// candidate that conflicted, the ones merged before it and the files.
+    /// A check that does not pass is [`IntegrationError::CheckStopped`],
+    /// naming which of `checks` it was; the ones after it do not run.
+    /// Any error leaves the target where it was.
+    pub fn integrate_many(
+        &self,
+        candidates: &[Candidate],
+        target: &str,
+        expected: &Commit,
+        checks: &[Check],
+    ) -> Result<IntegratedMany, IntegrationError> {
+        let target_ref = self.target_ref(target)?;
+        if !is_object_id(expected.as_str()) {
+            return Err(GitError::InvalidRevision(expected.0.clone()).into());
+        }
         let actual = self.read_ref(&target_ref)?;
         if actual.as_ref() != Some(expected) {
             return Err(IntegrationError::TargetMoved {
@@ -217,22 +338,159 @@ impl Repository {
                 actual,
             });
         }
-        let checkouts = self.checkouts_of(&target_ref)?;
+        let mut pending = Vec::new();
+        let mut results = Vec::new();
+        for candidate in candidates {
+            match self.validate_candidate(candidate, expected) {
+                Ok(()) => pending.push(candidate),
+                Err(IntegrationError::AlreadyIntegrated) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if pending.is_empty() {
+            return Ok(IntegratedMany {
+                target: target.to_owned(),
+                previous: expected.clone(),
+                merged: expected.clone(),
+                candidates: candidates
+                    .iter()
+                    .map(|c| MergedCandidate {
+                        branch: c.branch.branch(),
+                        head: c.head.clone(),
+                        onto: expected.clone(),
+                        merge: None,
+                    })
+                    .collect(),
+                check_output_tails: Vec::new(),
+                stale_checkouts: Vec::new(),
+            });
+        }
+        for worktree in self.checkouts_of(&target_ref)? {
+            if blocks_update(&worktree, expected, None)? {
+                return Err(IntegrationError::DirtyTarget { worktree });
+            }
+        }
+
+        let scratch = TempWorktree::create(self, expected)?;
+        let mut head = expected.clone();
+        let mut merged_names: Vec<String> = Vec::new();
+        for candidate in candidates {
+            let name = candidate.branch.branch();
+            if !pending.iter().any(|p| std::ptr::eq(*p, candidate)) {
+                results.push(MergedCandidate {
+                    branch: name,
+                    head: candidate.head.clone(),
+                    onto: head.clone(),
+                    merge: None,
+                });
+                continue;
+            }
+            let merge_commit = match merge(&scratch.path, candidate, target, &head) {
+                Ok(commit) => Some(commit),
+                // Brought in by a candidate merged before it.
+                Err(IntegrationError::AlreadyIntegrated) => None,
+                Err(IntegrationError::Conflict { files }) => {
+                    return Err(IntegrationError::ConflictWith {
+                        candidate: name,
+                        merged: merged_names,
+                        files,
+                    })
+                }
+                Err(error) => return Err(error),
+            };
+            let onto = head.clone();
+            if let Some(commit) = &merge_commit {
+                head = commit.clone();
+                merged_names.push(name.clone());
+            }
+            results.push(MergedCandidate {
+                branch: name,
+                head: candidate.head.clone(),
+                onto,
+                merge: merge_commit,
+            });
+        }
+        let merged = head;
+        if &merged == expected {
+            drop(scratch);
+            return Ok(IntegratedMany {
+                target: target.to_owned(),
+                previous: expected.clone(),
+                merged,
+                candidates: results,
+                check_output_tails: Vec::new(),
+                stale_checkouts: Vec::new(),
+            });
+        }
+
+        let mut check_output_tails = Vec::new();
+        for (index, check) in checks.iter().enumerate() {
+            let error = match check::run(check, &scratch.path) {
+                Err(e) => IntegrationError::CheckNotStarted(e),
+                Ok((CheckOutcome::Exited(status), tail)) if status.success() => {
+                    check_output_tails.push(tail);
+                    continue;
+                }
+                Ok((CheckOutcome::Exited(status), output_tail)) => IntegrationError::CheckFailed {
+                    status,
+                    output_tail,
+                },
+                Ok((CheckOutcome::TimedOut, output_tail)) => IntegrationError::CheckTimedOut {
+                    timeout: check.timeout,
+                    output_tail,
+                },
+            };
+            return Err(IntegrationError::CheckStopped {
+                index,
+                error: Box::new(error),
+            });
+        }
+
+        let names: Vec<String> = candidates.iter().map(|c| c.branch.branch()).collect();
+        let reason = format!("branchyard: integrate {}", names.join(", "));
+        let stale_checkouts = self.promote(&target_ref, expected, &merged, &reason)?;
+        drop(scratch);
+        Ok(IntegratedMany {
+            target: target.to_owned(),
+            previous: expected.clone(),
+            merged,
+            candidates: results,
+            check_output_tails,
+            stale_checkouts,
+        })
+    }
+
+    /// Steps 4 and 5 of [`Repository::integrate`]: the compare-and-swap of
+    /// `target_ref` from `expected` to `merged`, then the checkouts moved.
+    /// Returns the checkouts that could not be moved.
+    fn promote(
+        &self,
+        target_ref: &str,
+        expected: &Commit,
+        merged: &Commit,
+        reason: &str,
+    ) -> Result<Vec<PathBuf>, IntegrationError> {
+        let actual = self.read_ref(target_ref)?;
+        if actual.as_ref() != Some(expected) {
+            return Err(IntegrationError::TargetMoved {
+                expected: expected.clone(),
+                actual,
+            });
+        }
+        let checkouts = self.checkouts_of(target_ref)?;
         for worktree in &checkouts {
-            if blocks_update(worktree, expected, Some(&merged))? {
+            if blocks_update(worktree, expected, Some(merged))? {
                 return Err(IntegrationError::DirtyTarget {
                     worktree: worktree.clone(),
                 });
             }
         }
-
-        let reason = format!("branchyard: integrate {}", candidate.branch.branch());
         let (out, args) = Git::new(&self.root)
-            .args(["update-ref", "-m", &reason, &target_ref])
+            .args(["update-ref", "-m", reason, target_ref])
             .args([merged.as_str(), expected.as_str()])
             .output()?;
         if !out.status.success() {
-            let actual = self.read_ref(&target_ref)?;
+            let actual = self.read_ref(target_ref)?;
             if actual.as_ref() != Some(expected) {
                 return Err(IntegrationError::TargetMoved {
                     expected: expected.clone(),
@@ -241,7 +499,6 @@ impl Repository {
             }
             return Err(git::failed(args, &out).into());
         }
-
         let mut stale_checkouts = Vec::new();
         for worktree in checkouts {
             best_effort(
@@ -258,14 +515,48 @@ impl Repository {
                 stale_checkouts.push(worktree);
             }
         }
-        drop(scratch);
-        Ok(Integrated {
-            target: target.to_owned(),
-            previous: expected.clone(),
-            merged,
-            check_output_tail,
-            stale_checkouts,
-        })
+        Ok(stale_checkouts)
+    }
+
+    /// The first commit on `target`'s first-parent line, oldest first,
+    /// that contains `commit`: the merge (or commit) that brought it in.
+    /// `None` when `target` does not contain it.
+    pub fn brought_in_by(&self, commit: &Commit, target: &str) -> Result<Option<Commit>, GitError> {
+        let target_ref = self.target_ref(target)?;
+        if !self.is_ancestor(commit, &Commit(target_ref.clone()))? {
+            return Ok(None);
+        }
+        let range = format!("{}..{target_ref}", commit.as_str());
+        let listed = Git::new(&self.root)
+            .args(["rev-list", "--first-parent", "--reverse"])
+            .arg(&range)
+            .run()?;
+        let lines: Vec<&str> = listed.lines().filter(|l| !l.is_empty()).collect();
+        // An empty range: the commit is the target's head. When the oldest
+        // commit of the first-parent walk is a child of `commit`'s by its
+        // first parent, `commit` is on the target's line itself (the target
+        // fast-forwarded to it and moved on): it brought itself in, and the
+        // commits after it on the line did not.
+        if let Some(oldest) = lines.first() {
+            let parent = Git::new(&self.root)
+                .args(["rev-parse", "--verify", "--quiet"])
+                .arg(format!("{}^1^{{commit}}", oldest.trim()))
+                .run()
+                // A root commit has no first parent: then it is not on the line.
+                .ok();
+            if parent.as_deref().map(str::trim) == Some(commit.as_str()) {
+                return Ok(Some(commit.clone()));
+            }
+        }
+        let mut first = None;
+        for line in lines {
+            let candidate = Commit(line.trim().to_owned());
+            if self.is_ancestor(commit, &candidate)? {
+                first = Some(candidate);
+                break;
+            }
+        }
+        Ok(Some(first.unwrap_or_else(|| commit.clone())))
     }
 
     /// Runs `check` on exactly `commit`, checked out detached in a new
@@ -277,23 +568,60 @@ impl Repository {
     pub fn verify(&self, commit: &Commit, check: &Check) -> Result<Verified, IntegrationError> {
         let commit = self.resolve(commit.as_str())?;
         let scratch = TempWorktree::create(self, &commit)?;
-        let verified = match check::run(check, &scratch.path) {
-            Err(e) => return Err(IntegrationError::CheckNotStarted(e)),
-            Ok((CheckOutcome::Exited(status), output_tail)) => Verified {
-                commit,
-                passed: status.success(),
-                timed_out: false,
-                output_tail,
-            },
-            Ok((CheckOutcome::TimedOut, output_tail)) => Verified {
-                commit,
-                passed: false,
-                timed_out: true,
-                output_tail,
-            },
-        };
+        let verified = verified(check, &scratch.path, commit);
         drop(scratch);
-        Ok(verified)
+        verified
+    }
+
+    /// Runs `check` on `head` merged into `onto` (a commit of `target`, a
+    /// local branch name) as [`Repository::integrate`] merges a candidate:
+    /// `git merge --no-ff` in a new temporary worktree, hooks and rerere
+    /// off, removed on every return path. No ref moves: this is what
+    /// integrating `head` would check, without integrating it. When `onto`
+    /// already contains `head`, the check runs on `onto` itself.
+    ///
+    /// [`Verified::commit`] is the commit checked. A merge conflict is
+    /// [`IntegrationError::Conflict`]; a check that exits unsuccessfully or
+    /// times out is a [`Verified`] with `passed` false; one that cannot
+    /// start is [`IntegrationError::CheckNotStarted`].
+    pub fn check_merged(
+        &self,
+        branch: &BranchName,
+        head: &Commit,
+        target: &str,
+        onto: &Commit,
+        check: &Check,
+    ) -> Result<Verified, IntegrationError> {
+        self.merged_worktree(branch, head, target, onto)?
+            .check(check)
+    }
+
+    /// The first half of [`Repository::check_merged`]: `head` merged into
+    /// `onto` in a new temporary worktree, removed when the result is
+    /// dropped. A caller that serializes worktree creation and removal
+    /// holds its lock for this and the drop, not for the check.
+    pub fn merged_worktree(
+        &self,
+        branch: &BranchName,
+        head: &Commit,
+        target: &str,
+        onto: &Commit,
+    ) -> Result<MergedWorktree, IntegrationError> {
+        let head = self.resolve(head.as_str())?;
+        let onto = self.resolve(onto.as_str())?;
+        let scratch = TempWorktree::create(self, &onto)?;
+        let candidate = Candidate {
+            branch: branch.clone(),
+            base: onto.clone(),
+            head,
+            stat: DiffStat::default(),
+        };
+        let commit = match merge(&scratch.path, &candidate, target, &onto) {
+            Ok(merged) => merged,
+            Err(IntegrationError::AlreadyIntegrated) => onto,
+            Err(error) => return Err(error),
+        };
+        Ok(MergedWorktree { scratch, commit })
     }
 
     fn target_ref(&self, target: &str) -> Result<String, GitError> {
@@ -355,6 +683,54 @@ impl Repository {
             .filter(|w| !w.bare && !w.prunable && w.branch.as_deref() == Some(full_ref))
             .map(|w| w.path)
             .collect())
+    }
+}
+
+/// A merge in a temporary worktree, from [`Repository::merged_worktree`];
+/// the worktree is removed when this is dropped.
+pub struct MergedWorktree {
+    scratch: TempWorktree,
+    commit: Commit,
+}
+
+impl MergedWorktree {
+    /// The commit checked out: the merge, or the target's commit when it
+    /// already contained the head.
+    pub fn commit(&self) -> &Commit {
+        &self.commit
+    }
+
+    /// Runs `check` there, as [`Repository::check_merged`] does.
+    pub fn check(&self, check: &Check) -> Result<Verified, IntegrationError> {
+        verified(check, &self.scratch.path, self.commit.clone())
+    }
+}
+
+impl fmt::Debug for MergedWorktree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MergedWorktree")
+            .field("path", &self.scratch.path)
+            .field("commit", &self.commit)
+            .finish()
+    }
+}
+
+/// `check` run in `dir`, where `commit` is checked out, as a [`Verified`].
+fn verified(check: &Check, dir: &Path, commit: Commit) -> Result<Verified, IntegrationError> {
+    match check::run(check, dir) {
+        Err(e) => Err(IntegrationError::CheckNotStarted(e)),
+        Ok((CheckOutcome::Exited(status), output_tail)) => Ok(Verified {
+            commit,
+            passed: status.success(),
+            timed_out: false,
+            output_tail,
+        }),
+        Ok((CheckOutcome::TimedOut, output_tail)) => Ok(Verified {
+            commit,
+            passed: false,
+            timed_out: true,
+            output_tail,
+        }),
     }
 }
 

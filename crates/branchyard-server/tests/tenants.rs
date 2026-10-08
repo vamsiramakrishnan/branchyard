@@ -96,6 +96,19 @@ fn scopes_are_enforced_per_endpoint() {
     let denied = runner.repo("app").remove("r2").unwrap_err();
     assert_eq!(denied.code(), Some("scope_required"));
 
+    // A wait reads; a discard acts on the branch, so it needs `run`.
+    let waited = reader.repo("app").wait_for(&["r2"], false, None).unwrap();
+    assert_eq!(waited.settled[0].name, "r2");
+    let denied = reader.repo("app").discard("r2", None).unwrap_err();
+    assert_eq!(denied.code(), Some("scope_required"));
+    let discarded = runner.repo("app").discard("r2", None).unwrap();
+    assert_eq!(
+        discarded.status,
+        branchyard::BranchStatus::Discarded {
+            reason: "discarded by runner through the server".into()
+        }
+    );
+
     // The detail names the missing scope.
     let (status, _, body) = raw(
         server.addr,
@@ -206,6 +219,15 @@ fn cross_tenant_isolation() {
     assert_eq!(hidden.code(), Some("unknown_operation"));
     // Its own tenant can still read it.
     assert_eq!(acme.operation(&op.id).unwrap().id, op.id);
+
+    // So are a wait and a discard on its branch.
+    let denied = globex
+        .repo("app")
+        .wait_for(&["acme-branch"], false, None)
+        .unwrap_err();
+    assert_eq!(denied.code(), Some("repo_not_allowed"));
+    let denied = globex.repo("app").discard("acme-branch", None).unwrap_err();
+    assert_eq!(denied.code(), Some("repo_not_allowed"));
 }
 
 /// `max_running`, reserved atomically at admission (so two requests racing

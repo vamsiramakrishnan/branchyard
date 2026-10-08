@@ -72,10 +72,10 @@ use serde::Serialize;
 
 use api::{
     AnswerRequest, AskRequest, BranchEvents, BranchList, CancelRequest, CancelResult, Diff,
-    ErrorBody, ErrorResponse, FeedEntry, ForkRequest, GraphRequest, HarnessList, IntegrateRequest,
-    InventoryReport, MapList, MapRequest, MapResumeRequest, MergeRequest, Operation,
-    ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest, SteerRequest,
-    TaskList, TaskRequest, TextRequest,
+    DiscardRequest, ErrorBody, ErrorResponse, FeedEntry, ForkRequest, GraphRequest, HarnessList,
+    IntegrateRequest, InventoryReport, MapList, MapRequest, MapResumeRequest, MergeRequest,
+    Operation, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest,
+    SteerRequest, TaskList, TaskRequest, TextRequest, WaitRequest,
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
@@ -84,6 +84,9 @@ use storage_api::{
     DIGEST_HEADER,
 };
 
+/// The longest one wait request asks the server for: its own cap, which
+/// [`Repo::wait_for`] asks again past.
+const WAIT_CAP: Duration = Duration::from_secs(30);
 /// Largest response body read into memory.
 const MAX_BODY: usize = 256 * 1024 * 1024;
 /// A downloaded artifact's response headers and raw bytes.
@@ -620,6 +623,24 @@ impl Repo {
         )
     }
 
+    /// Integrate several children of one parent together, in order, all
+    /// or none, checked once on the result; like `by integrate a b c`. The
+    /// finished operation's result holds `merged_all`.
+    pub fn integrate_all(&self, branches: &[&str], key: &str) -> Result<Operation, Error> {
+        let Some((first, rest)) = branches.split_first() else {
+            return Err(Error::Config(
+                "name at least one branch to integrate".into(),
+            ));
+        };
+        self.client.post(
+            &self.branch_path(first, "/integrate"),
+            &IntegrateRequest {
+                with: rest.iter().map(|b| (*b).to_owned()).collect(),
+            },
+            key,
+        )
+    }
+
     /// A branch as a delegating parent sees it; like `by inspect`.
     pub fn inspect(&self, branch: &str) -> Result<Inspection, Error> {
         self.client.get(&self.branch_path(branch, "/inspection"))
@@ -746,6 +767,49 @@ impl Repo {
             },
             &new_key(),
         )
+    }
+
+    /// Set a settled branch aside, like `by discard`: it ends `discarded`
+    /// with `reason`, runs no more turns and is never merged. Refused while
+    /// a turn runs (cancel it first) and once it was merged. Returns the
+    /// branch as [`Repo::inspect`] shows it.
+    pub fn discard(&self, branch: &str, reason: Option<&str>) -> Result<Inspection, Error> {
+        self.client.post(
+            &self.branch_path(branch, "/discard"),
+            &DiscardRequest {
+                reason: reason.map(str::to_owned),
+            },
+            &new_key(),
+        )
+    }
+
+    /// Block until `branches` have settled, any one of them with `any`,
+    /// else all, or until `timeout` passes (then `timed_out` is set; it is
+    /// not an error); like `by wait`. The server answers within its own cap,
+    /// so a longer wait, or one with no timeout, asks again until it is
+    /// satisfied or `timeout` passes.
+    pub fn wait_for(
+        &self,
+        branches: &[&str],
+        any: bool,
+        timeout: Option<Duration>,
+    ) -> Result<branchyard::Waited, Error> {
+        let deadline = timeout.and_then(|t| std::time::Instant::now().checked_add(t));
+        loop {
+            let left = deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()));
+            let waited: branchyard::Waited = self.client.post(
+                &self.path("/wait"),
+                &WaitRequest {
+                    branches: branches.iter().map(|b| (*b).to_owned()).collect(),
+                    any,
+                    timeout_seconds: Some(left.map_or(WAIT_CAP, |l| l.min(WAIT_CAP)).as_secs_f64()),
+                },
+                &new_key(),
+            )?;
+            if !waited.timed_out || left.is_some_and(|l| l <= WAIT_CAP) {
+                return Ok(waited);
+            }
+        }
     }
 
     pub fn branches(&self) -> Result<Vec<BranchInfo>, Error> {

@@ -1935,7 +1935,7 @@ fn deliver(
         if let Ok(steer) = steer {
             if matches!(
                 steer.state,
-                branchyard::SteerState::Delivered | branchyard::SteerState::Accepted
+                branchyard::SteerState::Written | branchyard::SteerState::Accepted
             ) {
                 branch.record_pull_request(PullRequestActivity::FeedbackDelivered {
                     keys,
@@ -1954,7 +1954,15 @@ fn deliver(
         via: "send".into(),
         summary,
     })?;
-    match commands::send(env, target, name, &text, task, false, false) {
+    match commands::send(
+        env,
+        target,
+        name,
+        commands::Prompt::Text(&text),
+        task,
+        false,
+        false,
+    ) {
         Ok(()) => Ok(()),
         // The turn ran and failed; the feedback reached it.
         Err(Failure::Reported) => Err(Failure::Message(format!(
@@ -2018,6 +2026,7 @@ mod tests {
             created_at: 0,
             stalled: false,
             superseded_by: None,
+            model: None,
         }
     }
 

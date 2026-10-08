@@ -26,6 +26,7 @@ pub fn open(dir: &Path, mode: SessionMode) -> Open {
         mode,
         cwd: dir.display().to_string(),
         model: None,
+        max_budget_usd: None,
         mcp_servers: Vec::new(),
         instructions: None,
         mcp_config_file: None,

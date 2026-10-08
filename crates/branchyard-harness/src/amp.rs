@@ -190,6 +190,7 @@ impl Amp {
                     output_tokens: usage["output_tokens"].as_u64(),
                     cached_input_tokens: usage["cache_read_input_tokens"].as_u64(),
                     cost_usd: None,
+                    ..Usage::default()
                 },
             });
         }
@@ -246,12 +247,19 @@ impl Driver for Amp {
             turn_acknowledgment: true,
             usage: true,
             steer: false,
+            model: false,
+            budget: false,
         }
     }
 
     fn capability_reasons(&self) -> &'static [crate::CapabilityReason] {
         &[
             ("fork", "Amp cannot fork a thread"),
+            (
+                "model",
+                "Amp selects models through agent modes, not a model name",
+            ),
+            ("budget", "Amp's CLI has no spending limit flag"),
             (
                 "cancellation",
                 "Amp's streaming input has no cancellation message",
@@ -279,6 +287,7 @@ impl Driver for Amp {
                 "Amp selects models through agent modes, not a model name".into(),
             ));
         }
+        crate::refuse_budget(&open, "Amp's CLI has no spending limit flag")?;
         let mut argv = self.command.clone();
         if let SessionMode::Resume(thread) = &open.mode {
             argv.extend(["threads".into(), "continue".into(), thread.to_string()]);

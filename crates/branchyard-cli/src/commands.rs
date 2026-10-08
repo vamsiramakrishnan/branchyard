@@ -129,12 +129,14 @@ pub fn print(text: &str) -> Outcome {
 
 /// The yard: the harness's repository when `by` runs inside a harness,
 /// whose working directory is its branch's worktree, else the current one.
+/// An inherited `BRANCHYARD_ROOT` that is neither is refused; see
+/// [`crate::inherited`].
 pub fn open() -> Result<Yard, Failure> {
     Ok(open_yard()?)
 }
 
 fn open_yard() -> Result<Yard, branchyard::Error> {
-    let yard = match std::env::var_os(branchyard::ENV_ROOT).filter(|v| !v.is_empty()) {
+    let yard = match crate::inherited::root()? {
         Some(root) => Yard::open(root),
         None => Yard::open("."),
     }?;
@@ -264,7 +266,10 @@ impl Live {
             isolated: task.isolated,
             command: task.command.clone(),
             provider: provider(task)?,
-            delegation: task.delegate.map(Envelope::depth),
+            delegation: task.delegate.map(|depth| match task.no_wake {
+                true => Envelope::depth(depth).no_wake(),
+                false => Envelope::depth(depth),
+            }),
             delegation_cli: exe,
             delegation_server: None,
             unapproved_tools: task.unapproved_tools,
@@ -278,6 +283,7 @@ impl Live {
             plan: task.plan,
             goal: crate::plan_cmd::goal(task),
             join_task: None,
+            deny: task.deny.clone(),
         })
     }
 
@@ -292,6 +298,8 @@ impl Live {
             }
         };
         let descendants = wait_for_descendants(&[&branch]);
+        // A branch woken when its children settled ran more turns since.
+        let branch = branch.yard().branch(&branch.info().name).unwrap_or(branch);
         self.console.finish();
         print(&format!(
             "\n{}",
@@ -315,6 +323,13 @@ pub(crate) fn wait_for_descendants(
 ) -> Result<Option<Vec<BranchInfo>>, Failure> {
     let mut all = Vec::new();
     for branch in branches {
+        if branch.info().status == BranchStatus::WaitingOnChildren {
+            eprintln!(
+                "by: {}'s turn ended while its children run; its next turn starts when they \
+                 settle",
+                branch.info().name
+            );
+        }
         let running: Vec<String> = branch
             .descendants()?
             .into_iter()
@@ -558,11 +573,19 @@ pub fn fan_summary(env: &Env, infos: &[&BranchInfo]) -> Outcome {
     Ok(())
 }
 
+/// What `by send` submits.
+#[derive(Clone, Copy)]
+pub enum Prompt<'a> {
+    Text(&'a str),
+    /// `--retry`: the prompt of the branch's last turn that was cut off.
+    Retry,
+}
+
 pub fn send(
     env: &Env,
     target: &Target,
     branch: &str,
-    prompt: &str,
+    prompt: Prompt<'_>,
     task: &TaskArgs,
     wait: bool,
     json: bool,
@@ -578,14 +601,15 @@ pub fn send(
                 ),
             );
         }
+        let sent = match prompt {
+            Prompt::Text(prompt) => delegate.send(branch, prompt),
+            Prompt::Retry => delegate.retry(branch),
+        };
         if wait {
-            return emit(
-                json,
-                delegate.send_and_wait(branch, prompt, std::time::Duration::MAX),
-                |i| render::inspection(i, env.style()),
-            );
+            let done = sent.and_then(|_| delegate.wait(branch, std::time::Duration::MAX));
+            return emit(json, done, |i| render::inspection(i, env.style()));
         }
-        return emit(json, delegate.send(branch, prompt), |sent| {
+        return emit(json, sent, |sent| {
             format!("sent to {}; its turn is running\n", sent.name)
         });
     }
@@ -596,6 +620,17 @@ pub fn send(
         }
         return remote::send(env, remote, branch, prompt, task);
     }
+    let retried: String;
+    let prompt = match prompt {
+        Prompt::Text(prompt) => prompt,
+        Prompt::Retry => {
+            retried = match open_yard().and_then(|yard| yard.branch(branch)?.retry_prompt()) {
+                Ok(prompt) => prompt,
+                Err(error) => return fail(json, &error),
+            };
+            &retried
+        }
+    };
     let branch = open()?.branch(branch)?;
     if json {
         let live = Live::start_to(env, task, true, true, branch.provider()?);
@@ -668,6 +703,7 @@ pub fn steer(target: &Target, branch: &str, prompt: &str, task: &TaskArgs, json:
                 .map_err(|e| branchyard::Error::Remote {
                     kind: e.code().unwrap_or("remote").to_owned(),
                     message: e.to_string(),
+                    detail: None,
                 })
         }
         (None, Target::Local) => open_yard().and_then(|yard| {
@@ -694,13 +730,21 @@ pub fn steer(target: &Target, branch: &str, prompt: &str, task: &TaskArgs, json:
             Err(Failure::Reported)
         }
         _ if json => print(&format!("{}\n", to_json(&steer))),
+        // The state first, in the words the delegate skill and the JSON
+        // use, then what it means; the boundary in plain words.
         branchyard::SteerState::Pending => print(&format!(
-            "queued for {branch}'s running turn; its engine has not delivered it yet \
+            "pending: queued for {branch}'s running turn; its engine has not delivered it yet \
              (steer {})\n",
             steer.id
         )),
-        branchyard::SteerState::Delivered | branchyard::SteerState::Accepted => print(&format!(
-            "delivered into {branch}'s running turn (steer {})\n",
+        branchyard::SteerState::Written => print(&format!(
+            "written: sent to {branch}'s harness for its running turn; the harness has not \
+             confirmed it yet (steer {})\n",
+            steer.id
+        )),
+        branchyard::SteerState::Accepted => print(&format!(
+            "accepted: it joined {branch}'s running turn, and the model reads it {} (steer {})\n",
+            branchyard_harness::steer_boundary_text(steer.boundary.as_deref().unwrap_or("")),
             steer.id
         )),
     }
@@ -1259,6 +1303,9 @@ pub fn mcp(root: &str, branch: &str) -> Outcome {
 pub(crate) fn harness_delegate(json: bool) -> Result<Option<Delegate>, Failure> {
     let set = |name: &str| std::env::var_os(name).is_some_and(|v| !v.is_empty());
     if set(ENV_TOKEN) {
+        if let Err(error) = crate::inherited::root() {
+            return fail(json, &error).map(|()| None);
+        }
         return match Delegate::from_env() {
             Ok(delegate) => Ok(Some(delegate)),
             Err(error) => fail(json, &error).map(|()| None),
@@ -1283,8 +1330,11 @@ pub(crate) fn to_json<T: Serialize>(value: &T) -> String {
 /// `--json`, else on stderr; exit 1 either way.
 pub(crate) fn fail(json: bool, error: &branchyard::Error) -> Outcome {
     if json {
-        let value =
+        let mut value =
             serde_json::json!({"error": {"kind": error.kind(), "message": error.to_string()}});
+        if let Some(detail) = error.detail() {
+            value["error"]["detail"] = detail;
+        }
         print(&format!("{}\n", to_json(&value)))?;
         return Err(Failure::Reported);
     }
@@ -1316,6 +1366,29 @@ fn required_outside(branch: Option<String>, command: &str) -> Result<String, bra
     })
 }
 
+/// `--prompt-file PATH`: the prompt a file holds, `-` for standard input,
+/// without its trailing newlines. An empty one is refused, as an empty
+/// prompt is.
+pub fn read_prompt_file(path: &str) -> Result<String, Failure> {
+    let text = match path {
+        "-" => {
+            let mut text = String::new();
+            io::Read::read_to_string(&mut io::stdin(), &mut text)
+                .map_err(|e| Failure::Message(format!("--prompt-file -: {e}")))?;
+            text
+        }
+        path => std::fs::read_to_string(path)
+            .map_err(|e| Failure::Message(format!("--prompt-file {path}: {e}")))?,
+    };
+    let text = text.trim_end_matches(['\n', '\r']).to_owned();
+    match text.trim().is_empty() {
+        true => Err(Failure::Message(format!(
+            "--prompt-file {path} holds no prompt"
+        ))),
+        false => Ok(text),
+    }
+}
+
 pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outcome {
     let json = args.json;
     // A child's issue link lives in its prompt's header: a harness has no
@@ -1340,6 +1413,8 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         },
         check: task.check.clone(),
         max_depth: args.max_depth,
+        max_children: args.max_children,
+        harnesses: args.harnesses.clone(),
         deny: args.deny.clone(),
         seat: args.seat.clone(),
         depends_on: args.depends_on.clone(),
@@ -1347,13 +1422,17 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         bindings: args.bindings.clone(),
         connectors: (!args.connectors.is_empty()).then(|| args.connectors.clone()),
         plan: args.plan,
-        ..Spawn::default()
+        model: args.model.clone(),
     };
     if let Some(delegate) = harness_delegate(json)? {
-        if args.parent.is_some() || task.permissions != args::Permissions::Unset {
+        if args.parent.is_some()
+            || task.permissions != args::Permissions::Unset
+            || task.unapproved_tools
+        {
             let error = branchyard::Error::Denied(
                 "inside a harness, the parent is the harness's own branch and the child \
-                 inherits its policy; drop --parent, --yes and --ask"
+                 inherits its policy and approval routing; drop --parent, --yes, --ask, \
+                 --permissions and --allow-unapproved-tools (by spawn --help says why)"
                     .into(),
             );
             return fail(json, &error);
@@ -1363,22 +1442,30 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
             Err(error) => return fail(json, &error),
         };
         if !args.wait {
-            return emit(json, Ok(spawned), |s| match &s.status {
-                branchyard::BranchStatus::Waiting => format!(
-                    "created {} on {}, waiting for {}\n",
-                    s.name,
-                    s.profile,
-                    s.depends_on.join(", ")
-                ),
-                branchyard::BranchStatus::Blocked { reason } => {
-                    format!("created {}, blocked: {reason}\n", s.name)
+            return emit(json, Ok(spawned), |s| {
+                let on = match &s.model {
+                    Some(model) => format!(
+                        "{} with model {model}",
+                        render::harness_label(&s.harness, &s.profile)
+                    ),
+                    None => render::harness_label(&s.harness, &s.profile),
+                };
+                match &s.status {
+                    branchyard::BranchStatus::Waiting => format!(
+                        "created {} on {on}, waiting for {}\n",
+                        s.name,
+                        s.depends_on.join(", ")
+                    ),
+                    branchyard::BranchStatus::Blocked { reason } => {
+                        format!("created {}, blocked: {reason}\n", s.name)
+                    }
+                    _ => format!(
+                        "spawned {} on {on} from {}\n{}",
+                        s.name,
+                        short(&s.base),
+                        check_note(s)
+                    ),
                 }
-                _ => format!(
-                    "spawned {} on {} from {}\n",
-                    s.name,
-                    s.profile,
-                    short(&s.base)
-                ),
             });
         }
         let done = delegate.wait(&spawned.name, std::time::Duration::MAX);
@@ -1451,7 +1538,47 @@ pub fn events(
     })
 }
 
-pub fn integrate(target: &Target, branch: &str, json: bool) -> Outcome {
+/// Run a branch's check on its current work as integrating it would:
+/// inside a harness, on itself or a descendant; otherwise on any branch,
+/// with yours. Exits 1 when the work would not get past its check.
+pub fn check(env: &Env, target: &Target, branch: Option<String>, json: bool) -> Outcome {
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => {
+            let branch = branch.unwrap_or_else(|| delegate.branch().to_owned());
+            delegate.check(&branch)
+        }
+        (None, Target::Remote(_)) => Err(branchyard::Error::Unsupported(
+            "the server has no check route; run by check on the repository's host".into(),
+        )),
+        (None, Target::Local) => required_outside(branch, "check")
+            .and_then(|b| as_user(&b, TaskOptions::default())?.check(&b)),
+    };
+    let passed = result.as_ref().is_ok_and(branchyard::CheckReport::passed);
+    emit(json, result, |r| render::check_report(r, env.style()))?;
+    match passed {
+        true => Ok(()),
+        false => Err(Failure::Reported),
+    }
+}
+
+/// Which check a spawned child must pass when it is integrated.
+fn check_note(spawned: &branchyard::Spawned) -> String {
+    match (&spawned.check, spawned.check_inherited) {
+        (Some(check), true) => format!(
+            "its check, inherited from its parent: {}; siblings that share it are integrated \
+             together (by integrate a b), and a child that should land alone needs its own \
+             (--check)\n",
+            check.join(" ")
+        ),
+        (Some(check), false) => format!("its check: {}\n", check.join(" ")),
+        (None, _) => String::new(),
+    }
+}
+
+pub fn integrate(target: &Target, branches: &[String], json: bool) -> Outcome {
+    let [branch] = branches else {
+        return integrate_all(target, branches, json);
+    };
     let result = match (harness_delegate(json)?, target) {
         (Some(delegate), _) => delegate.integrate(branch),
         (None, Target::Remote(remote)) => remote::integrate(remote, branch),
@@ -1478,15 +1605,147 @@ pub fn integrate(target: &Target, branch: &str, json: bool) -> Outcome {
             Ok(merged)
         })(),
     };
-    emit(json, result, |m| {
-        format!(
+    emit(json, result, merged_line)
+}
+
+fn merged_line(m: &branchyard::Merged) -> String {
+    match (&m.via, m.already) {
+        (Some(via), true) => format!(
+            "{} was already in {}, brought in by {via}; recorded as merged\n",
+            m.branch, m.target
+        ),
+        _ => format!(
             "merged {} into {} ({}..{})\n",
             m.branch,
             m.target,
             short(&m.previous),
             short(&m.commit)
-        )
+        ),
+    }
+}
+
+/// `by integrate a b c`: several children of one parent, merged together,
+/// checked once, all or none.
+fn integrate_all(target: &Target, branches: &[String], json: bool) -> Outcome {
+    let names: Vec<&str> = branches.iter().map(String::as_str).collect();
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => delegate.integrate_all(&names),
+        (None, Target::Remote(remote)) => remote::integrate_all(remote, &names),
+        (None, Target::Local) => (|| {
+            let yard = open_yard()?;
+            let mut parent = None;
+            for branch in &names {
+                let info = yard.branch(branch)?.info().clone();
+                let found = info
+                    .parent
+                    .filter(|p| {
+                        yard.branch(p)
+                            .is_ok_and(|p| p.info().children.iter().any(|c| c == branch))
+                    })
+                    .ok_or_else(|| {
+                        branchyard::Error::Denied(format!(
+                            "{branch} was not delegated by another branch; merge it with by merge"
+                        ))
+                    })?;
+                match &parent {
+                    Some(p) if *p != found => {
+                        return Err(branchyard::Error::Denied(format!(
+                            "{branch} was delegated by {found}, not {p}; integrate together only \
+                             children of one parent"
+                        )))
+                    }
+                    _ => parent = Some(found),
+                }
+            }
+            let parent = yard.branch(&parent.unwrap_or_default())?;
+            let merged = parent
+                .delegate(TaskOptions::default())?
+                .integrate_all(&names)?;
+            parent.wait_subtree()?;
+            Ok(merged)
+        })(),
+    };
+    emit(json, result, |all| {
+        let mut text: String = all.branches.iter().map(merged_line).collect();
+        if all.commit != all.previous {
+            let checked = match all.check_results.is_empty() {
+                true => "with no check: none of them has one".to_owned(),
+                false => format!(
+                    "after {} passed once on the result",
+                    all.check_results
+                        .iter()
+                        .map(|c| format!("`{}` ({})", c.check.join(" "), c.branches.join(", ")))
+                        .collect::<Vec<_>>()
+                        .join(" and ")
+                ),
+            };
+            text.push_str(&format!(
+                "{} moved once: {}..{}, {checked}\n",
+                all.target,
+                short(&all.previous),
+                short(&all.commit)
+            ));
+        }
+        text
     })
+}
+
+/// `by wait [BRANCH...] [--any|--all] [--timeout S]`: block until
+/// delegated branches settle, on the store's notifications.
+pub fn wait(
+    env: &Env,
+    target: &Target,
+    branches: &[String],
+    any: bool,
+    timeout: Option<f64>,
+    json: bool,
+) -> Outcome {
+    let timeout = match timeout {
+        None => None,
+        Some(secs) if secs.is_finite() && secs >= 0.0 => {
+            Some(std::time::Duration::try_from_secs_f64(secs).unwrap_or(std::time::Duration::MAX))
+        }
+        Some(secs) => {
+            let error = branchyard::Error::Denied(format!(
+                "--timeout takes a number of seconds, not {secs}"
+            ));
+            return fail(json, &error);
+        }
+    };
+    let names: Vec<&str> = branches.iter().map(String::as_str).collect();
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => delegate.wait_for(&names, any, timeout),
+        (None, _) if names.is_empty() => Err(branchyard::Error::Denied(
+            "outside a harness, by wait needs the branches to wait for".into(),
+        )),
+        (None, Target::Remote(remote)) => remote
+            .repo
+            .wait_for(&names, any, timeout)
+            .map_err(remote::sdk_error),
+        (None, Target::Local) => open_yard().and_then(|yard| yard.wait_for(&names, any, timeout)),
+    };
+    let timed_out = result.as_ref().is_ok_and(|w| w.timed_out);
+    emit(json, result, |w| {
+        let mut text = String::new();
+        for inspection in &w.settled {
+            text.push_str(&render::inspection(inspection, env.style()));
+        }
+        if !w.pending.is_empty() {
+            text.push_str(&format!(
+                "{}: {}\n",
+                match w.timed_out {
+                    true => "timed out; still running",
+                    false => "still running",
+                },
+                w.pending.join(", ")
+            ));
+        }
+        text
+    })?;
+    match timed_out {
+        true => Err(Failure::Reported),
+        false => Ok(()),
+    }
 }
 
 /// Inside a harness, cancel a descendant with the branch's authority;
@@ -1497,16 +1756,69 @@ pub fn cancel(target: &Target, branch: &str, json: bool) -> Outcome {
         (Some(delegate), _) => delegate.cancel(branch),
         (None, Target::Remote(remote)) => {
             let cancelled = remote.repo.cancel(branch)?;
-            Ok(branchyard::Cancelled { cancelled })
+            let status = remote.repo.branch(branch)?.status;
+            Ok(branchyard::Cancelled::of(cancelled, branch, &status))
         }
-        (None, Target::Local) => open_yard()
-            .and_then(|yard| yard.cancel_as(branch, "by cancel"))
-            .map(|cancelled| branchyard::Cancelled { cancelled }),
+        (None, Target::Local) => open_yard().and_then(|yard| {
+            let cancelled = yard.cancel_as(branch, "by cancel")?;
+            let status = yard.branch(branch)?.info().status.clone();
+            Ok(branchyard::Cancelled::of(cancelled, branch, &status))
+        }),
     };
-    emit(json, result, |c| match c.cancelled.is_empty() {
-        true => "nothing was running\n".into(),
-        false => format!("asked {} to stop\n", c.cancelled.join(", ")),
+    emit(json, result, |c| match (&c.note, c.cancelled.is_empty()) {
+        (Some(note), _) => format!("{note}\n"),
+        (None, true) => "nothing was running\n".into(),
+        (None, false) => format!("asked {} to stop\n", c.cancelled.join(", ")),
     })
+}
+
+/// Set a settled child aside: inside a harness, a descendant, with the
+/// branch's authority; otherwise any branch, with yours.
+pub fn discard(target: &Target, branch: &str, reason: Option<&str>, json: bool) -> Outcome {
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => delegate.discard(branch, reason),
+        (None, Target::Remote(remote)) => remote
+            .repo
+            .discard(branch, reason)
+            .map_err(remote::sdk_error),
+        (None, Target::Local) => (|| {
+            let reason = reason
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .unwrap_or("discarded with by discard");
+            open_yard()?.discard(branch, reason)?;
+            as_user(branch, TaskOptions::default())?.inspect(branch)
+        })(),
+    };
+    // One line: a meta discards several children in a row, and `by
+    // inspect` shows the rest.
+    emit(json, result, |i| {
+        let reason = match &i.status {
+            branchyard::BranchStatus::Discarded { reason } => format!(": {reason}"),
+            _ => String::new(),
+        };
+        format!(
+            "discarded {}{reason}; its record, worktree and cost stay until `by rm {}`\n",
+            i.name, i.name
+        )
+    })
+}
+
+/// Inside a harness, a command acts as the harness's own branch only: a
+/// `--branch` or `--as` naming another is refused, not ignored.
+fn as_itself(
+    delegate: &Delegate,
+    named: Option<&str>,
+    flag: &str,
+) -> Result<(), branchyard::Error> {
+    match named {
+        Some(other) if other != delegate.branch() => Err(branchyard::Error::Denied(format!(
+            "inside a harness, by acts only as {}, the harness's own branch; {flag} {other} \
+             names another",
+            delegate.branch()
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// The acting branch outside a harness: `--as`, required, since these
@@ -1531,7 +1843,8 @@ pub fn ask(
 ) -> Outcome {
     let wait = wait_seconds.map(std::time::Duration::from_secs_f64);
     let result = match (harness_delegate(json)?, target) {
-        (Some(delegate), _) => delegate.ask(text, wait),
+        (Some(delegate), _) => as_itself(&delegate, as_branch.as_deref(), "--as")
+            .and_then(|()| delegate.ask(text, wait)),
         (None, Target::Remote(remote)) => as_branch_required(as_branch, "ask").and_then(|b| {
             remote
                 .repo
@@ -1555,7 +1868,9 @@ pub fn ask(
 
 pub fn report(target: &Target, as_branch: Option<String>, text: &str, json: bool) -> Outcome {
     let result = match (harness_delegate(json)?, target) {
-        (Some(delegate), _) => delegate.report(text),
+        (Some(delegate), _) => {
+            as_itself(&delegate, as_branch.as_deref(), "--as").and_then(|()| delegate.report(text))
+        }
         (None, Target::Remote(remote)) => as_branch_required(as_branch, "report")
             .and_then(|b| remote.repo.report(&b, text).map_err(remote::sdk_error)),
         (None, Target::Local) => as_branch_required(as_branch, "report")
@@ -1568,7 +1883,8 @@ pub fn report(target: &Target, as_branch: Option<String>, text: &str, json: bool
 
 pub fn escalate(target: &Target, as_branch: Option<String>, text: &str, json: bool) -> Outcome {
     let result = match (harness_delegate(json)?, target) {
-        (Some(delegate), _) => delegate.escalate(text),
+        (Some(delegate), _) => as_itself(&delegate, as_branch.as_deref(), "--as")
+            .and_then(|()| delegate.escalate(text)),
         (None, Target::Remote(remote)) => as_branch_required(as_branch, "escalate")
             .and_then(|b| remote.repo.escalate(&b, text).map_err(remote::sdk_error)),
         (None, Target::Local) => as_branch_required(as_branch, "escalate")
@@ -1587,7 +1903,8 @@ pub fn answer(
     json: bool,
 ) -> Outcome {
     let result = match (harness_delegate(json)?, target) {
-        (Some(delegate), _) => delegate.answer(message_id, text),
+        (Some(delegate), _) => as_itself(&delegate, as_branch.as_deref(), "--as")
+            .and_then(|()| delegate.answer(message_id, text)),
         (None, Target::Remote(remote)) => as_branch_required(as_branch, "answer").and_then(|b| {
             remote
                 .repo
@@ -1604,18 +1921,21 @@ pub fn answer(
 
 pub fn inbox(target: &Target, as_branch: Option<String>, unread: bool, json: bool) -> Outcome {
     let result = match (harness_delegate(json)?, target) {
-        (Some(delegate), _) => delegate.inbox(),
+        (Some(delegate), _) => {
+            as_itself(&delegate, as_branch.as_deref(), "--as").and_then(|()| delegate.inbox())
+        }
         (None, Target::Remote(remote)) => as_branch_required(as_branch, "inbox")
             .and_then(|b| remote.repo.inbox(&b).map_err(remote::sdk_error)),
         (None, Target::Local) => as_branch_required(as_branch, "inbox")
             .and_then(|b| as_user(&b, TaskOptions::default())?.inbox()),
     };
+    // --unread holds for the JSON too, which the Python module reads.
+    let result = result.map(|inbox| match unread {
+        true => inbox.unread_only(),
+        false => inbox,
+    });
     emit(json, result, |inbox| {
-        let messages: Vec<&branchyard::Message> = inbox
-            .messages
-            .iter()
-            .filter(|m| !unread || !m.delivered)
-            .collect();
+        let messages: Vec<&branchyard::Message> = inbox.messages.iter().collect();
         if messages.is_empty() {
             return "empty\n".to_owned();
         }
@@ -1626,7 +1946,7 @@ pub fn inbox(target: &Target, as_branch: Option<String>, unread: bool, json: boo
                     Some(id) => format!(" (re #{id})"),
                     None => String::new(),
                 };
-                let read = if m.delivered { "" } else { " [unread]" };
+                let read = if inbox.is_unread(m) { " [unread]" } else { "" };
                 format!(
                     "#{} {} from {}{reply}{read}: {}\n",
                     m.id, m.kind, m.from, m.text
@@ -1807,7 +2127,10 @@ fn acting_branch(
     command: &str,
 ) -> Result<String, branchyard::Error> {
     match (delegate, branch) {
-        (Some(delegate), _) => Ok(delegate.branch().to_owned()),
+        (Some(delegate), named) => {
+            as_itself(delegate, named.as_deref(), "--branch")?;
+            Ok(delegate.branch().to_owned())
+        }
         (None, Some(branch)) => Ok(branch.clone()),
         (None, None) => Err(branchyard::Error::Denied(format!(
             "outside a harness, by {command} needs --branch"
@@ -1836,11 +2159,12 @@ pub fn artifact(target: &Target, args: &ArtifactArgs) -> Outcome {
         "publish" => {
             let path = absolute(given(args.arg.as_deref(), "arg")?);
             let labels = args.labels.iter().cloned().collect();
-            let result = act.publish_artifact(&path, args.name.clone(), labels);
+            let result =
+                act.publish_artifact(&path, args.name.clone(), args.media_type.clone(), labels);
             emit(json, result, |a| {
                 format!(
-                    "published {} as {} ({} bytes, {})\n",
-                    a.name, a.id, a.size, a.digest
+                    "published {} as {} ({} bytes, {}, blake3 {})\n",
+                    a.name, a.id, a.size, a.media_type, a.digest
                 )
             })
         }

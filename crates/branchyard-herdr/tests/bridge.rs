@@ -189,7 +189,7 @@ impl Dir {
 
 fn command(program: impl AsRef<std::ffi::OsStr>, dir: &Path) -> Command {
     let mut command = Command::new(program);
-    command
+    branchyard_testkit::hermetic(&mut command)
         .current_dir(dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -201,11 +201,6 @@ fn command(program: impl AsRef<std::ffi::OsStr>, dir: &Path) -> Command {
         )
         .env("PAGER", "cat");
     for name in [
-        "BRANCHYARD_REMOTE",
-        "BRANCHYARD_TOKEN_FILE",
-        "BRANCHYARD_REPO",
-        "BRANCHYARD_CA_FILE",
-        "BRANCHYARD_BY",
         "HERDR_BIN_PATH",
         "HERDR_PLUGIN_CONFIG_DIR",
         "HERDR_PLUGIN_CONTEXT_JSON",

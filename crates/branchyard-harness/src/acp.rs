@@ -419,6 +419,8 @@ impl Driver for Acp {
             usage: false,
             // Enforced again against the agent's `_meta.steering`.
             steer: true,
+            model: false,
+            budget: false,
         }
     }
 
@@ -433,6 +435,11 @@ impl Driver for Acp {
                 "ACP session/fork is an unstable method; a driver that cannot fork must say so rather than start a fresh session",
             ),
             ("turn_acknowledgment", "not verified"),
+            (
+                "model",
+                "ACP v1 has no model parameter; selection belongs to the agent's own configuration",
+            ),
+            ("budget", "ACP v1 has no spending limit; a prompt runs until the agent ends it"),
             ("usage", "not verified"),
         ]
     }
@@ -453,6 +460,10 @@ impl Driver for Acp {
             // ACP v1 has no model parameter; selection belongs to the profile.
             return Err(Rejected::Unsupported("model selection over ACP".into()));
         }
+        crate::refuse_budget(
+            &open,
+            "ACP v1 has no spending limit; a prompt runs until the agent ends it",
+        )?;
         crate::check_all_mcp_servers(&open)?;
         self.preamble = open.instructions.as_ref().map(|i| i.text.clone());
         let launch = LaunchSpec {

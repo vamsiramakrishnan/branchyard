@@ -11,7 +11,7 @@ Surfaces:
 - **client**: `branchyard-client`, the typed Rust client of that API.
 - **delegation**: a harness acting as its branch through `by` in its shell, the Python module, `Delegate` in Rust, or the MCP tools (`by mcp`). The four reach one set of operations and give the same answers ([delegation](delegation.md)); they work in local mode and on a server that allows delegation.
 
-The server registers <!-- fact:http.route_count -->85<!-- /fact --> routes; each is documented in [the server reference](server.md) or on this page, and `tools/docs_facts.py --check` fails when one is not.
+The server registers <!-- fact:http.route_count -->87<!-- /fact --> routes; each is documented in [the server reference](server.md) or on this page, and `tools/docs_facts.py --check` fails when one is not.
 
 **yes** means supported; **no** gives the reason; a server opt-in is named where the server's operator must allow something first.
 
@@ -23,7 +23,7 @@ The server registers <!-- fact:http.route_count -->85<!-- /fact --> routes; each
 | Fan out to several harnesses | `run_on` | `fan` | yes | `harnesses` in the task | yes | no: a child has one harness; spawn one per harness |
 | Check a [rig](rigs.md) and print its plan | no: the planner is the CLI's (`rig::plan`); build `Seats` yourself | `rig check` | the same, locally: nothing is sent | n/a | n/a | n/a |
 | Run a rig's root seat | `TaskOptions::seats` with `delegation` | `rig run` | server opt-in `--allow-delegation` | `seats` in the task | yes | no: a child's seats come from its parent's rig |
-| Continue a branch | `Branch::send` | `send` | yes | `POST …/send` | `send` | `send`, to a descendant, returning once its turn started |
+| Continue a branch | `Branch::send` | `send` | yes, `--retry` too | `POST …/send`, `retry` for `--retry` | `send` | `send`, to a descendant, returning once its turn started |
 | `send --json` (`Sent`) | the SDK returns the `Branch` | yes | yes | the operation's `branches` | yes | yes |
 | Fork | `Branch::fork` | `fork` | yes | `POST …/fork` | `fork` | no: children start from a revision, not a session |
 | Reincarnate ([lifecycle](lifecycle.md#reincarnation)) | `Branch::reincarnate` | `reincarnate` | yes | `POST …/reincarnate` | `reincarnate` | no: not a delegation operation; act as the branch's owner instead |
@@ -74,6 +74,10 @@ A person acts with their own authority, or the server's, bounded by the branch's
 | Inspect | `Delegate::inspect` | `inspect` | yes | `GET …/inspection` | `inspect` |
 | Events page from a cursor | `Delegate::events` | `events` | yes | `GET …/event-page` | `event_page` |
 | Integrate a child into its parent | `Delegate::integrate` | `integrate` | yes | `POST …/integrate` | `integrate` |
+| Run a branch's check on its current work, as integrating it would, integrating nothing ([delegation](delegation.md#the-cli)) | `Delegate::check` → `CheckReport` | `check BRANCH` | no: a check runs on the repository's host | none | none |
+| Set a settled child aside, never run again | `Yard::discard`, `Delegate::discard` | `discard [--reason TEXT]` | yes, with the server's authority | `POST …/discard` | `discard` |
+| Integrate several children together, checked once, all or none ([delegation](delegation.md#integrating-several-children)) | `Delegate::integrate_all` → `MergedAll` | `integrate a b c` | yes | `POST …/integrate` with `with`; the result's `merged_all` | `integrate_all` |
+| Wait for branches to settle, all or the first ([delegation](delegation.md#waiting-on-children)) | `Yard::wait_for`, `Delegate::wait_for` → `Waited` | `wait BRANCH... [--any] [--timeout S]` | yes; each request capped at 30s, asked again past it | `POST /v1/repos/{repo}/wait` | `wait_for` |
 | Children | `Branch::descendants`, `Delegate::children` | `children` | yes | `GET …/children` | `children` |
 | A branch's graph: children, dependencies, revision ([task graphs](graph.md)) | `Yard::graph`, `Delegate::graph` | `graph show` | yes | `GET …/graph` | `graph` |
 | Apply a graph proposal, all or nothing | `Delegate::apply_graph` | `graph apply --parent` | yes; server opt-in `--allow-delegation` for spawns | `POST …/graph`; `409 stale_revision` | `apply_graph` |
@@ -87,6 +91,8 @@ A person acts with their own authority, or the server's, bounded by the branch's
 | The branch's own inbox | `Delegate::inbox` | `inbox [--unread]` | yes | `GET …/inbox` | `inbox` |
 
 `by --remote` prints the same JSON as `by` for each, and the same `{"error": {"kind", "message"}}` for refusals; tests compare them. Outside a harness every messaging command needs `--as <branch>`, since there is no other way to say who is asking; see [delegation](delegation.md#inbox). A message to a branch with a running turn is steered into it on every surface (`SteerDelivery`, the default `DeliveryHook` of every `Yard`), and otherwise delivered at its next turn's start; `Activity::MessagesDelivered` (`messages_delivered` in `by log --json`) records which ([delegation](delegation.md#delivery)).
+
+A harness reaches the same waits and integrations: `by wait`, `branchyard.wait_any`/`wait_all`, `Delegate::wait_for` and the MCP `wait` tool; `by integrate a b`, `branchyard.integrate("a", "b")`, `Delegate::integrate_all` and the MCP `propose_integration` with `branches`. A harness whose turn ends while its children run is woken when they settle, on every surface ([delegation](delegation.md#waiting-on-children)); `by run --no-wake` and `Envelope::no_wake` opt out.
 
 A harness reaches the same graph operations: `by graph`, `branchyard.graph`/`apply_graph`, `Delegate::apply_graph` and the MCP `apply_graph` and `graph` tools, with the same `stale_revision`, `denied` and other refusals ([task graphs](graph.md#surfaces)).
 
@@ -584,7 +590,7 @@ See [wide map](map.md), which has the full surface table for the server.
 |---|---|---|
 | `.branchyard/maps/<name>/` | none | `map.json`, `results.jsonl`, `reduce.json`, `lock` |
 | `OperationKind` | through `reject_plan` | adds `map` |
-| `OperationResult` | `branches`, `merged`, `descendants`, `inspection` | adds `map` (`MapReport`) |
+| `OperationResult` | `branches`, `merged`, `descendants`, `inspection` | adds `map` (`MapReport`), and `merged_all` (`MergedAll`) for an integration with `with` |
 | `MapRequest`, `MapResumeRequest`, `MapList`, `MapReport` | none | in `schema/contract.json` |
 | `by ls` (text) | branches | then `maps`, when there are any; `--json` unchanged |
 | `by show NAME` | a branch | also a map, when no branch has the name |
@@ -703,3 +709,43 @@ Every connector call that changes the world is decided, written to a ledger befo
 | `/metrics` | | adds `branchyard_effects{repo,class,state}` and `branchyard_approvals_pending{repo}` |
 | The companion page | Branches, Inbox, Triggers, Queue, Settings | adds Approvals (asks and the ledger) and the `approval` notice; push kind `approval` |
 | Store | | `effects`, `effect_events`, `approval_asks` (SQLite); `by_effects`, `by_effect_events`, `by_approval_asks` (PostgreSQL, each made on its own when missing) |
+
+## Added with the operations table, leaf capabilities and discard
+
+| Surface | Before | Now |
+|---|---|---|
+| `branchyard::operations` | none | `OPERATIONS` (each delegation operation's `by` subcommand and flags, MCP tool and arguments, Python function and keyword arguments, `Delegate` method, `Capability`, where it may run, and which flags a harness may not pass and why), `Operation`, `Param`, `Capability`, `Context`, `Contexts`, `tools`, `by_tool`, `by_name`, `is_harness_command`, `limit_text`, `LIMIT_FLAGS`, `SHARED_TASK_FLAGS`; parity tests in `branchyard`, `branchyard-mcp` and `branchyard-cli` check every surface, the skill and `docs/delegation.md` against it |
+| A delegated branch whose envelope allows no children (a leaf) | no token, no tools: `by` refused it, so it could not publish, read artifacts, ask, report or read its inbox | a token for its turns scoped to its own branch: itself, its storage and its parent's inbox; spawning and acting on descendants refused `denied` (the engine checks each call's `Capability`); the MCP server; the Python module; a short note ([`plugins/branchyard/leaf.md`](../plugins/branchyard/leaf.md)) instead of the skill |
+| `BRANCHYARD_BY`, `by` first on `PATH` | a delegating harness only | every local harness |
+| `Policy::allow_delegation_commands`, `--allow-delegation` | eight subcommands | every operation the table allows inside a harness |
+| `by discard <child> [--reason TEXT]`, `Yard::discard`, `Delegate::discard`, `branchyard.discard`, the MCP `discard` tool | none | `BranchStatus::Discarded { reason }`; record, worktree and cost kept; no longer counted in `max_children`; its reservation drops to what it spent; dependents blocked |
+| `by cancel` on a settled child | "nothing was running" | a success that changes nothing, `Cancelled::already`, and `Cancelled::note`: `had already stopped (...)` and what to use instead (`integrate`, `send`, `discard`) |
+| `by rm` | a `release a lease dropped without finish: fenced` warning, its lease deleted with its record before release | no warning: the lease is spent by the delete (`Store::delete_held`) |
+| Command logs on stderr | ANSI colors always | colors only on a terminal without `NO_COLOR` (`branchyard_server::logging::ansi`) |
+| `by run --deny T,T`, `TaskOptions::deny`, `TaskRequest::deny` | none (`by spawn --deny` only) | denials stored with the branch, ahead of every turn's policy, passed on to its children |
+| `by run --mcp NAME=https://URL`, `--mcp-header NAME:HEADER=VAR\|@FILE` | stdio only (`--mcp NAME=COMMAND`) | an HTTP MCP server, its headers secrets read each turn (needs a private home) |
+| `by spawn --max-children`, `--harnesses`; `SpawnRequest::max_children`, `harnesses`, `plan`; Python `spawn(max_children=, harnesses=, plan=)` | SDK and MCP only | every surface |
+| MCP `spawn`'s `connectors`, `inbox`'s `unread` | not in the schema; `by inbox --unread --json` returned every message | in the schema; `--unread` filters the JSON too |
+| `by artifact publish --media-type`, `Delegate::publish_artifact(path, name, media_type, labels)`, Python `publish(media_type=)` | ignored on the CLI (always `application/octet-stream`) | recorded; the printed line names the media type and that the digest is blake3 |
+| `by inspect` text | `harnesses: its own` | the harness and profile, as `harnesses: <harness> (<profile>) only (its own)`; `Inspection::allowed_harnesses` lists the same in JSON, where the envelope's empty `harnesses` would read as "none" |
+| A harness's name in `by spawn`, `by inspect`, `by show`, a spawn's event and an envelope refusal | the profile alone (`spawned x on claude-code-stream-json`), though the person typed `--harness claude-code` | one label everywhere, `branchyard_harness::profiles::label`: `claude-code (claude-code-stream-json)`, the harness typed and the profile it resolved to |
+| A cost refusal, `over budget:` | `max_usd` | `max_usd (--budget-usd)` |
+| `by graph apply --help` | no edit format | the edit JSON with an example |
+| `by <command> --help` of a delegation command | | each flag a harness may not pass marked with the reason; `by inspect`, `events`, `children` and `graph show` keep `[BRANCH]` optional in an error's usage |
+
+## Added with a model per child
+
+| Surface | Before | Now |
+|---|---|---|
+| `by spawn --model M`, `Spawn::model`, `SpawnSpec::model` (the MCP `spawn` tool and graph proposals' `model`), `SpawnRequest::model`, Python `spawn(model=)` | none: a child ran its seat's or parent's model | every surface; stored in the child's provisioning, like `by run --model` |
+| `branchyard_harness::Capabilities::model`, `Requirements::model` | none | whether a driver passes `Open::model`; a spawn naming a model for a driver without it (ACP, Amp) is refused `unsupported` with the driver's reason |
+| `BranchInfo::model`, `Inspection::model`, `Spawned::model` | none | the model a branch runs, omitted for its harness's default; a `model` line in `by inspect`, `model` in `by ls --json` |
+| Claude Code stream-json provisioning of a model | `ANTHROPIC_MODEL` only | `ANTHROPIC_MODEL` and `--model` (`Plan::session.model`) |
+
+## Added with by check
+
+| Surface | Before | Now |
+|---|---|---|
+| `by check [BRANCH]`, `Delegate::check` → `CheckReport`, Python `check(branch=None)`, the MCP `check` tool | none: a child learned whether its work passed its check only when its parent integrated it | the branch's check (its own or inherited) run on its current work, uncommitted files included, merged into its parent's branch in a private temporary worktree; nothing is committed or integrated; a leaf may run it on itself; exits 1 when the work would not get past its check |
+| `branchyard_workspace::Workspace::working_commit`, `Repository::check_merged`, `Repository::merged_worktree` (`MergedWorktree`) | none | a worktree's files as a commit reachable from nothing; a check on a head merged into a target as integrating it would, moving no ref |
+| The delegate skill and the leaf note | | tell a child to run `by check` before it finishes |

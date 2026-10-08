@@ -4,7 +4,7 @@
 //! delegate (`TaskOptions::delegation`), passing `--root <repository>
 //! --branch <name>` and the turn's token in `BRANCHYARD_DELEGATION`. The
 //! server offers `spawn`, `inspect`, `events`, `send`, `steer`,
-//! `propose_integration`, `cancel`, `children`, `apply_graph` and `graph`
+//! `propose_integration`, `cancel`, `discard`, `children`, `wait`, `apply_graph` and `graph`
 //! (dependencies between children; see `docs/graph.md`), and the artifact and
 //! scratch-area tools (`publish_artifact`, `list_artifacts`,
 //! `get_artifact`, `share_artifact`, `create_scratch`, `list_scratch`,
@@ -23,7 +23,10 @@
 //!   call leaves this process, and the engine checks it again.
 //! - Refusals (envelope, budget, authority) are tool results with
 //!   `isError: true` and a reason, so the model can adjust; malformed calls
-//!   are JSON-RPC errors.
+//!   are JSON-RPC errors. An error that carries more than its message,
+//!   such as a failed check naming every check of an integration, also has
+//!   it as structured content, `{"error": {kind, message, detail}}`, as
+//!   `by --json` prints it.
 //!
 //! Not guaranteed:
 //!
@@ -32,7 +35,9 @@
 //!   as your user and can read `.branchyard/`. See `docs/delegation.md`.
 //!
 //! It uses the official Rust MCP SDK (`rmcp`), server role and stdio
-//! transport only, on a current-thread Tokio runtime.
+//! transport only, on a current-thread Tokio runtime. Its tools and their
+//! arguments are checked against [`branchyard::operations`] by this
+//! crate's tests.
 #![warn(missing_docs)]
 
 use branchyard_support::LockExt as _;
@@ -42,55 +47,38 @@ use std::sync::{Arc, Mutex};
 
 use branchyard::{Delegate, ENV_TOKEN};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
-    ToolAnnotations,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
+    Tool, ToolAnnotations,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 
-/// Tool names, in the order they are listed.
-pub const TOOLS: [&str; 27] = [
-    "spawn",
-    "inspect",
-    "events",
-    "send",
-    "steer",
-    "propose_integration",
-    "cancel",
-    "children",
-    "apply_graph",
-    "graph",
-    "publish_artifact",
-    "list_artifacts",
-    "get_artifact",
-    "share_artifact",
-    "create_scratch",
-    "list_scratch",
-    "share_scratch",
-    "lock_scratch",
-    "unlock_scratch",
-    "ask",
-    "report",
-    "escalate",
-    "answer",
-    "inbox",
-    "approve_plan",
-    "reject_plan",
-    "answer_approval",
-];
+/// Tool names, in the order they are listed: the MCP tools of
+/// [`branchyard::operations::OPERATIONS`].
+pub fn tool_names() -> Vec<&'static str> {
+    branchyard::operations::tools()
+        .filter_map(|operation| operation.tool)
+        .collect()
+}
 
 const INSTRUCTIONS: &str = "Branchyard runs you on a git branch. These tools let you \
 delegate: spawn child branches with their own harness and budget, watch them with inspect \
 and events, continue them with send, add to a child's running turn with steer, merge a \
 finished child into your own branch with \
-propose_integration (its check must pass), stop them with cancel, and list them with \
-children. Children run in parallel; spawn returns once a child has started. A child may \
+propose_integration (its check must pass; give several in branches to merge them together and \
+check the result once), run a branch's check on its current work with check (run it on \
+yourself before you finish), stop them with cancel, set a settled one aside with discard (it is never \
+run again), and list them with children. Children run in parallel; spawn returns once a child has \
+started. To wait for them, call wait, or end your turn: when every child has settled, Branchyard \
+starts your next turn with a summary of what each did. A child may \
 depend on its siblings (depends_on): it waits, and starts once they have settled; apply_graph \
 creates several children and dependencies at once, all or nothing, against the revision graph \
 shows. You act only as your own branch and only \
-on your descendants. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
+on your descendants. A branch that may not delegate (its envelope's max_depth is 0) still has \
+inspect, check, the artifact and scratch tools, and ask, report, escalate and inbox; the other tools \
+refuse it. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
 may spawn. You can also message: ask your parent a question (optionally waiting for its \
 answer), report to it, escalate to it or, if your rig seat allows, further up; answer a \
 descendant's message; and read your own inbox. A child spawned with plan: true writes a plan read-only and escalates it to you: approve_plan runs it (as proposed or edited), reject_plan ends it or, with replan, has it plan again. When a descendant's tool or connector call needs approval, the ask is escalated to you: answer_approval allows or denies it.";
@@ -159,6 +147,21 @@ pub fn tools() -> Vec<Tool> {
         })),
     );
     graph.annotations = Some(read_only("Show a branch's graph"));
+    let mut check = Tool::new(
+        "check",
+        "Run a branch's check (its own, or the one it inherited) on its current work the way \
+         propose_integration would, and integrate nothing: its files as they are, uncommitted \
+         ones included, merged into its parent's branch in a private worktree. Omit branch to \
+         check your own work before you finish: what fails here fails your integration. \
+         Returns the outcome (passed, failed, timed_out, not_started; not_run when there is no \
+         check or the merge conflicts, with conflicts naming the files) and the output's tail.",
+        schema(json!({
+            "type": "object",
+            "properties": {"branch": branch_property("Your own branch or a descendant; defaults to your own")},
+            "additionalProperties": false,
+        })),
+    );
+    check.annotations = Some(read_only("Run a branch's check"));
     let spawn_properties = json!({
         "prompt": {"type": "string", "description": "The child's task"},
         "harness": {"type": "string", "description": "Harness or profile ID, such as codex; defaults to yours and must be allowed by your envelope"},
@@ -193,7 +196,9 @@ pub fn tools() -> Vec<Tool> {
                 "additionalProperties": false,
             },
         },
+        "connectors": {"type": "array", "items": {"type": "string"}, "description": "Connector grants, as --connector takes them (github:read, 'github:write:issues.*'); narrowed to yours. Unset: yours, or the seat's"},
         "plan": {"type": "boolean", "description": "Plan first: the child's first turn is read-only and proposes a plan, escalated to your inbox; it changes nothing until you approve_plan"},
+        "model": {"type": "string", "description": "The model the child's harness runs, or a size alias (small, medium, large, extra-large) where it defines one; a cheaper one suits mechanical work. Unset: the seat's, or yours. Refused for a harness that cannot choose one"},
     });
     let mut spawn_edit = spawn_properties.clone();
     spawn_edit["kind"] = json!({"const": "spawn"});
@@ -233,14 +238,16 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "send",
             "Send a follow-up prompt to a descendant that is not running a turn. Returns once \
-             its turn has started.",
+             its turn has started. With retry and no prompt, submit again the prompt of its \
+             last turn that was cut off when the engine running it stopped.",
             schema(json!({
                 "type": "object",
                 "properties": {
                     "branch": branch_property("A descendant"),
                     "prompt": {"type": "string"},
+                    "retry": {"type": "boolean"},
                 },
-                "required": ["branch", "prompt"],
+                "required": ["branch"],
                 "additionalProperties": false,
             })),
         ),
@@ -263,15 +270,30 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "propose_integration",
             "Merge a finished descendant's candidate into your own branch, after its check \
-             passes on the exact merge. Your uncommitted changes are committed first, and your \
-             working tree moves to the merge. Never touches the user's branches.",
+             passes on the exact merge. With branches, merge several together, in order, all or \
+             none, and run their check once on the result: for children that share a test \
+             suite none passes alone. Your uncommitted changes are committed first, and your \
+             working tree moves to the merge. A candidate your branch already contains is \
+             recorded as merged (already: true), not refused. Never touches the user's branches.",
             schema(json!({
                 "type": "object",
-                "properties": {"branch": branch_property("A descendant that is not running")},
-                "required": ["branch"],
+                "properties": {
+                    "branch": branch_property("A descendant that is not running"),
+                    "branches": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": "Instead of branch (give exactly one of the two): several descendants, integrated together",
+                    },
+                },
+                // Exactly one of the two, checked when called: a tool's
+                // input schema may not have oneOf, anyOf or allOf at its top
+                // level, and Claude Code drops every tool of a server that
+                // lists one.
                 "additionalProperties": false,
             })),
         ),
+        check,
         Tool::new(
             "cancel",
             "Stop a descendant's running turn and every turn running below it. Each ends \
@@ -283,7 +305,44 @@ pub fn tools() -> Vec<Tool> {
                 "additionalProperties": false,
             })),
         ),
+        Tool::new(
+            "discard",
+            "Set a settled descendant aside: it ends discarded with your reason, runs no more \
+             turns, is never integrated, keeps its record and cost, and no longer counts \
+             against your max_children. Refused while it runs (cancel it first). Returns it as \
+             inspect shows it.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "branch": branch_property("A descendant that is not running"),
+                    "reason": {"type": "string", "description": "Why, recorded with it"},
+                },
+                "required": ["branch"],
+                "additionalProperties": false,
+            })),
+        ),
         children,
+        {
+            let mut t = Tool::new(
+                "wait",
+                "Block until descendants settle (stop running, or waiting for prerequisites or \
+                 on their own children): all of them, or with any the first. Without branches, \
+                 your children that are still running. Returns each settled one's inspection and \
+                 those still pending; timed_out is true when timeout_seconds passed first. You \
+                 may instead end your turn: you are woken when every child has settled.",
+                schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "branches": {"type": "array", "items": {"type": "string"}, "description": "Descendants to wait for; defaults to your children still running"},
+                        "any": {"type": "boolean", "description": "Return when the first of them settles"},
+                        "timeout_seconds": {"type": "number", "minimum": 0},
+                    },
+                    "additionalProperties": false,
+                })),
+            );
+            t.annotations = Some(read_only("Wait for descendants"));
+            t
+        },
         Tool::new(
             "apply_graph",
             "Change your children's graph in one step, all or nothing: spawn children (each may \
@@ -319,14 +378,15 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "publish_artifact",
             "Publish a file at a path in your worktree as a new immutable artifact of your \
-             branch, content-addressed by its blake3 digest. Ancestors and descendants of your \
-             branch can read it; a sibling needs an explicit share_artifact.",
+             branch, content-addressed by its digest (the blake3 hash of its bytes, hex). \
+             Ancestors and descendants of your branch can read it; a sibling needs an explicit \
+             share_artifact.",
             schema(json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path to the file, in your worktree"},
                     "name": {"type": "string", "description": "Defaults to the file's name"},
-                    "media_type": {"type": "string"},
+                    "media_type": {"type": "string", "description": "Recorded with it, such as application/json; default application/octet-stream"},
                     "labels": {"type": "object", "additionalProperties": {"type": "string"}},
                 },
                 "required": ["path"],
@@ -474,8 +534,13 @@ pub fn tools() -> Vec<Tool> {
         {
             let mut inbox = Tool::new(
                 "inbox",
-                "Every message addressed to you, oldest first.",
-                schema(json!({"type": "object", "properties": {}, "additionalProperties": false})),
+                "Every message addressed to you, oldest first; with unread, only those not yet \
+                 delivered to a turn.",
+                schema(json!({
+                    "type": "object",
+                    "properties": {"unread": {"type": "boolean"}},
+                    "additionalProperties": false,
+                })),
             );
             inbox.annotations = Some(read_only("Read your inbox"));
             inbox
@@ -586,7 +651,13 @@ impl ServerHandler for Server {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        Ok(ListToolsResult::with_all_items(tools()))
+        // Protocol 2026-07-28 requires the cache hints on a list, and
+        // Claude Code 2.1.293 negotiates it and refuses a list without
+        // them: the server shows as connected, with no tools. The tools
+        // are this branch's alone and may change with the binary.
+        Ok(ListToolsResult::with_all_items(tools())
+            .with_ttl_ms(0)
+            .with_cache_scope(CacheScope::Private))
     }
 
     async fn call_tool(
@@ -595,7 +666,7 @@ impl ServerHandler for Server {
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let tool = request.name.to_string();
-        if !TOOLS.contains(&tool.as_str()) {
+        if !tool_names().contains(&tool.as_str()) {
             return Err(ErrorData::invalid_params(
                 Cow::Owned(format!("no tool named {tool}")),
                 None,
@@ -617,10 +688,22 @@ impl ServerHandler for Server {
                 }
                 result
             }
-            Err(error) => CallToolResult::error(vec![ContentBlock::text(error.to_string())]),
+            Err(error) => tool_error(&error),
         }
         .into())
     }
+}
+
+/// A failed call as the model reads it: the error's message, and its
+/// detail, when it has one, as structured content.
+fn tool_error(error: &branchyard::Error) -> CallToolResult {
+    let mut result = CallToolResult::error(vec![ContentBlock::text(error.to_string())]);
+    if let Some(detail) = error.detail() {
+        result.structured_content = Some(json!({
+            "error": {"kind": error.kind(), "message": error.to_string(), "detail": detail}
+        }));
+    }
+    result
 }
 
 /// Serve `branch`'s tools on stdin and stdout until the client closes them.
@@ -698,4 +781,103 @@ pub fn serve_branch(root: PathBuf, branch: &str) -> Result<(), Failure> {
         .filter(|t| !t.is_empty())
         .ok_or_else(|| Failure::Usage(format!("{ENV_TOKEN} is not set")))?;
     serve_stdio(root, branch, &token).map_err(|e| Failure::Serve(format!("serving MCP: {e}")))
+}
+
+#[allow(clippy::unwrap_used, clippy::panic)] // tests: a panic is the failure report
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    /// An error with a detail, as the broker returns a failed integration
+    /// check, gives it as structured content beside its text; one without
+    /// gives text alone.
+    #[test]
+    fn an_error_with_a_detail_has_it_as_structured_content() {
+        let detail = json!({"checks": [
+            {"check": ["make", "test"], "branches": ["b"], "outcome": "failed"}
+        ]});
+        let failed = tool_error(&branchyard::Error::Remote {
+            kind: "check_failed".into(),
+            message: "check failed:\nboom".into(),
+            detail: Some(Box::new(detail.clone())),
+        });
+        assert_eq!(failed.is_error, Some(true));
+        let structured = failed.structured_content.unwrap();
+        assert_eq!(structured["error"]["kind"], "check_failed");
+        assert_eq!(structured["error"]["message"], "check failed:\nboom");
+        assert_eq!(structured["error"]["detail"], detail);
+        let plain = tool_error(&branchyard::Error::Denied("no".into()));
+        assert_eq!(plain.is_error, Some(true));
+        assert!(plain.structured_content.is_none());
+    }
+
+    /// A check of an integration that could not start, run in this
+    /// process, gives its checks as structured content too.
+    #[test]
+    fn a_check_that_could_not_start_has_its_checks_as_structured_content() {
+        let not_started = tool_error(&branchyard::Error::CheckNotStarted {
+            reason: "no such program".into(),
+            checks: vec![branchyard::IntegrationCheck {
+                check: vec!["nope".into()],
+                branches: vec!["b".into()],
+                outcome: branchyard::CheckVerdict::NotStarted,
+            }],
+        });
+        let structured = not_started.structured_content.unwrap();
+        assert_eq!(structured["error"]["kind"], "check_not_started");
+        assert_eq!(
+            structured["error"]["detail"]["checks"],
+            json!([{"check": ["nope"], "branches": ["b"], "outcome": "not_started"}])
+        );
+    }
+
+    /// The server lists exactly the table's tools, in its order, each with
+    /// exactly the arguments the table names; a tool or an argument added
+    /// here but not there (or there but not here) fails.
+    /// Model APIs refuse a tool whose input schema combines alternatives
+    /// at its top level, and Claude Code then lists none of this server's
+    /// tools, silently. Every schema is a plain object.
+    #[test]
+    fn no_schema_has_top_level_alternatives() {
+        for tool in tools() {
+            let schema = tool.input_schema.as_ref();
+            assert_eq!(schema.get("type"), Some(&json!("object")), "{}", tool.name);
+            for key in ["oneOf", "anyOf", "allOf", "not", "enum", "if"] {
+                assert!(
+                    !schema.contains_key(key),
+                    "{} has top-level {key}",
+                    tool.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_tools_are_the_operations_table() {
+        let listed = tools();
+        let names: Vec<&str> = listed.iter().map(|t| t.name.as_ref()).collect();
+        assert_eq!(names, tool_names());
+        for tool in &listed {
+            let operation = branchyard::operations::by_tool(&tool.name).unwrap();
+            let properties = &tool.input_schema["properties"];
+            let listed: BTreeSet<String> =
+                properties.as_object().unwrap().keys().cloned().collect();
+            let expected: BTreeSet<String> = operation
+                .params
+                .iter()
+                .filter_map(|p| p.tool)
+                .map(|path| path.split('.').next().unwrap().to_owned())
+                .collect();
+            assert_eq!(listed, expected, "{}'s arguments", tool.name);
+            // A nested argument, such as budget.max_usd, is in its object.
+            for path in operation.params.iter().filter_map(|p| p.tool) {
+                if let Some((outer, inner)) = path.split_once('.') {
+                    let nested = &properties[outer]["properties"][inner];
+                    assert!(nested.is_object(), "{} has no {path}", tool.name);
+                }
+            }
+        }
+    }
 }

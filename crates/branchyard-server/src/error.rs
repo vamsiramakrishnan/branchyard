@@ -90,10 +90,10 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
         E::Unsupported(_) => (S::UNPROCESSABLE_ENTITY, "unsupported"),
         E::NoCandidate(_) => (S::CONFLICT, "no_candidate"),
         E::TargetMoved { .. } => (S::CONFLICT, "target_moved"),
-        E::Conflict { .. } => (S::CONFLICT, "conflict"),
+        E::Conflict { .. } | E::ConflictBetween { .. } => (S::CONFLICT, "conflict"),
         E::CheckFailed { .. } => (S::UNPROCESSABLE_ENTITY, "check_failed"),
         E::CheckTimedOut { .. } => (S::UNPROCESSABLE_ENTITY, "check_timed_out"),
-        E::CheckNotStarted(_) => (S::UNPROCESSABLE_ENTITY, "check_not_started"),
+        E::CheckNotStarted { .. } => (S::UNPROCESSABLE_ENTITY, "check_not_started"),
         E::DirtyTarget(_) => (S::CONFLICT, "dirty_target"),
         E::AlreadyMerged { .. } => (S::CONFLICT, "already_merged"),
         E::InvalidCandidate(_) => (S::UNPROCESSABLE_ENTITY, "invalid_candidate"),
@@ -114,18 +114,47 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
             error_out.detail(json!({ "expected": expected, "actual": actual }))
         }
         E::Conflict { files } => error_out.detail(json!({ "files": files })),
+        E::ConflictBetween {
+            branch,
+            merged,
+            files,
+            ..
+        } => error_out.detail(json!({ "files": files, "branch": branch, "merged": merged })),
         E::StaleRevision {
             expected, actual, ..
         } => error_out.detail(json!({ "expected": expected, "actual": actual })),
         E::Remote { kind, .. } => error_out.detail(json!({ "kind": kind })),
-        E::CheckFailed { output_tail } => error_out.detail(json!({ "output_tail": output_tail })),
+        E::CheckFailed {
+            output_tail,
+            checks,
+            shared,
+        } => {
+            let mut detail = json!({ "output_tail": output_tail });
+            if !checks.is_empty() {
+                detail["checks"] = json!(checks);
+            }
+            if let Some(shared) = shared.as_ref().and_then(|s| serde_json::to_value(s).ok()) {
+                detail["shared"] = shared;
+            }
+            error_out.detail(detail)
+        }
         E::CheckTimedOut {
             timeout,
             output_tail,
-        } => error_out.detail(json!({
-            "timeout_seconds": timeout.as_secs_f64(),
-            "output_tail": output_tail,
-        })),
+            checks,
+        } => {
+            let mut detail = json!({
+                "timeout_seconds": timeout.as_secs_f64(),
+                "output_tail": output_tail,
+            });
+            if !checks.is_empty() {
+                detail["checks"] = json!(checks);
+            }
+            error_out.detail(detail)
+        }
+        E::CheckNotStarted { checks, .. } if !checks.is_empty() => {
+            error_out.detail(json!({ "checks": checks }))
+        }
         _ => error_out,
     }
 }
@@ -145,5 +174,77 @@ mod tests {
             files: vec!["a.txt".into()],
         });
         assert_eq!(e.body.detail, Some(json!({ "files": ["a.txt"] })));
+    }
+
+    /// A failed integration check names every check, its branches and its
+    /// outcome in the detail, beside the failed one's output.
+    #[test]
+    fn a_failed_check_names_every_check_in_its_detail() {
+        let e = sdk(&branchyard::Error::CheckFailed {
+            output_tail: "boom".into(),
+            checks: vec![
+                branchyard::IntegrationCheck {
+                    check: vec!["make".into(), "lint".into()],
+                    branches: vec!["a".into()],
+                    outcome: branchyard::CheckVerdict::Passed,
+                },
+                branchyard::IntegrationCheck {
+                    check: vec!["make".into(), "test".into()],
+                    branches: vec!["b".into(), "c".into()],
+                    outcome: branchyard::CheckVerdict::Failed,
+                },
+            ],
+            shared: None,
+        });
+        assert_eq!(
+            (e.status, e.body.code.as_str()),
+            (StatusCode::UNPROCESSABLE_ENTITY, "check_failed")
+        );
+        let detail = e.body.detail.unwrap();
+        assert_eq!(detail["output_tail"], "boom");
+        assert_eq!(
+            detail["checks"][1],
+            json!({ "check": ["make", "test"], "branches": ["b", "c"], "outcome": "failed" })
+        );
+        assert_eq!(detail["checks"][0]["outcome"], "passed");
+        assert!(e.body.message.contains("`make test` (b, c) failed"));
+    }
+
+    /// A check of an integration that could not start names every check
+    /// in its detail, as a failed one does; one of a single branch's merge
+    /// has none.
+    #[test]
+    fn a_check_that_could_not_start_names_every_check_in_its_detail() {
+        let e = sdk(&branchyard::Error::CheckNotStarted {
+            reason: "no such program".into(),
+            checks: vec![
+                branchyard::IntegrationCheck {
+                    check: vec!["nope".into()],
+                    branches: vec!["a".into()],
+                    outcome: branchyard::CheckVerdict::NotStarted,
+                },
+                branchyard::IntegrationCheck {
+                    check: vec!["true".into()],
+                    branches: vec!["b".into()],
+                    outcome: branchyard::CheckVerdict::NotRun,
+                },
+            ],
+        });
+        assert_eq!(
+            (e.status, e.body.code.as_str()),
+            (StatusCode::UNPROCESSABLE_ENTITY, "check_not_started")
+        );
+        let detail = e.body.detail.unwrap();
+        assert_eq!(
+            detail["checks"][0],
+            json!({ "check": ["nope"], "branches": ["a"], "outcome": "not_started" })
+        );
+        assert_eq!(detail["checks"][1]["outcome"], "not_run");
+        assert!(e.body.message.contains("`nope` (a) could not start"));
+        let plain = sdk(&branchyard::Error::CheckNotStarted {
+            reason: "no such program".into(),
+            checks: Vec::new(),
+        });
+        assert_eq!(plain.body.detail, None);
     }
 }

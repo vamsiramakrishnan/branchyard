@@ -5,19 +5,7 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
-use crate::{fake_agent, Scratch};
-
-/// Variables that would make the built binary act as a delegated child or
-/// talk to a remote, inherited from whoever runs the tests.
-const SCRUBBED: [&str; 7] = [
-    "BRANCHYARD_DELEGATION",
-    "BRANCHYARD_BRANCH",
-    "BRANCHYARD_ROOT",
-    "BRANCHYARD_BY",
-    "BRANCHYARD_REMOTE",
-    "BRANCHYARD_TOKEN_FILE",
-    "BRANCHYARD_REPO",
-];
+use crate::{fake_agent, hermetic, Scratch};
 
 /// A throwaway git repository on branch `main`, with one commit, driven
 /// through the built `by` binary. Hermetic: no global or system git
@@ -97,7 +85,7 @@ impl Repo {
     /// `program` in the repository, with the hermetic environment.
     pub fn command(&self, program: impl AsRef<OsStr>) -> Command {
         let mut command = Command::new(program);
-        command
+        hermetic(&mut command)
             .current_dir(&self.root)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -105,9 +93,6 @@ impl Repo {
             // Never a person's own ~/.config/branchyard/config.toml.
             .env("BRANCHYARD_USER_CONFIG", self.dir.join("user/config.toml"))
             .env("PAGER", "cat");
-        for var in SCRUBBED {
-            command.env_remove(var);
-        }
         for (key, value) in &self.envs {
             match value {
                 Some(value) => command.env(key, value),

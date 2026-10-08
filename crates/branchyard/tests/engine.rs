@@ -441,7 +441,7 @@ fn a_failing_check_blocks_the_merge() {
         .unwrap();
     let before = f.git(&["rev-parse", "main"]);
     match f.yard.merge("checked", "main") {
-        Err(Error::CheckFailed { output_tail }) => assert!(output_tail.contains("nope")),
+        Err(Error::CheckFailed { output_tail, .. }) => assert!(output_tail.contains("nope")),
         other => panic!("expected CheckFailed, got {other:?}"),
     }
     assert_eq!(f.git(&["rev-parse", "main"]), before);
@@ -1089,12 +1089,22 @@ fn a_branch_cancelled_before_its_harness_opened_a_session_starts_a_fresh_one_on_
     let again = sent.send("WHOAMI", f.options()).unwrap();
     assert!(text(&again.events().unwrap()).contains("resumed=true"));
 
-    // A branch that ran a prompt but has no session is still refused.
+    // A branch that ran prompts but has no session (its engine stopped
+    // before the harness named one) starts a fresh session too, whose
+    // prompt begins with every prompt it was given, so its task is kept.
     edit_record(&f.root, "unopened", |record| {
         record["info"]["session"] = serde_json::Value::Null;
     });
-    assert!(matches!(
-        again.send("WHOAMI", f.options()),
-        Err(Error::Unsupported(why)) if why.contains("no harness session to resume")
-    ));
+    let fresh = again.send("WHOAMI", f.options()).unwrap();
+    let log = fresh.events().unwrap();
+    assert!(
+        log.iter()
+            .any(|e| matches!(&e.activity, Activity::Warning(w)
+            if w.contains("has no harness session to resume: its harness never recorded one"))),
+        "{log:?}"
+    );
+    let said = text(&log);
+    assert!(said.contains("resumed=false"), "{said}");
+    assert!(log.iter().any(|e| matches!(&e.activity, Activity::Prompt(p)
+        if p.contains("### Prompt 1\nWRITE fresh.txt=1") && p.ends_with("WHOAMI"))));
 }

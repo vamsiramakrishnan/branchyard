@@ -90,6 +90,9 @@ pub fn contract() -> Value {
     entry::<api::SteerRequest>("SteerRequest", &mut types);
     entry::<api::CancelRequest>("CancelRequest", &mut types);
     entry::<api::CancelResult>("CancelResult", &mut types);
+    entry::<api::DiscardRequest>("DiscardRequest", &mut types);
+    entry::<api::WaitRequest>("WaitRequest", &mut types);
+    entry::<branchyard::Waited>("Waited", &mut types);
     entry::<api::AskRequest>("AskRequest", &mut types);
     entry::<api::TextRequest>("TextRequest", &mut types);
     entry::<api::AnswerRequest>("AnswerRequest", &mut types);

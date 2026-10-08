@@ -107,7 +107,7 @@ pub struct Client {
 
 impl Client {
     pub fn start(root: &Path, branch: &str, token: &str) -> Client {
-        let mut child = Command::new(SERVER)
+        let mut child = branchyard_testkit::hermetic(&mut Command::new(SERVER))
             .args(["--root", &root.display().to_string(), "--branch", branch])
             .env("BRANCHYARD_DELEGATION", token)
             .stdin(Stdio::piped())

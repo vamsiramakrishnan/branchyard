@@ -416,6 +416,7 @@ enum Input {
     Prompt(String),
     Steer(String),
     Interrupt,
+    Close,
 }
 
 /// Replays a [`Transcript`] through a driver.
@@ -423,7 +424,8 @@ enum Input {
 /// Recorded `in` frames are fed to [`Driver::receive`]. Each recorded `out`
 /// frame is compared with the next frame the driver wrote; when the driver
 /// has written nothing pending, the next queued [`prompt`](Self::prompt),
-/// [`steer`](Self::steer) or [`interrupt`](Self::interrupt) is carried out
+/// [`steer`](Self::steer), [`interrupt`](Self::interrupt) or
+/// [`close`](Self::close) is carried out
 /// first, because those are the frames a driver writes on its own
 /// initiative rather than in response to output.
 ///
@@ -493,6 +495,12 @@ impl<'t> Replay<'t> {
         self
     }
 
+    /// Queue a [`Driver::close`], in order with the other inputs.
+    pub fn close(mut self) -> Self {
+        self.inputs.push_back(Input::Close);
+        self
+    }
+
     /// A field, by JSON pointer into outgoing frames, whose value the driver
     /// chooses per run, such as a request ID or a random UUID. When the
     /// driver's value differs from the recorded one, the pair is learned and
@@ -552,6 +560,7 @@ impl<'t> Replay<'t> {
                                 });
                                 written.extend(decode_all(&frames));
                             }
+                            Some(Input::Close) => written.extend(decode_all(&driver.close())),
                             None => {}
                         }
                     }

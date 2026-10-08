@@ -40,6 +40,7 @@ use crate::placement;
 use crate::projection::{Projection, SERVER_NAME};
 use crate::state::Record;
 use crate::{Activity, Error};
+use branchyard_harness::profiles::Protocol;
 
 /// What provisioning gives the harness.
 pub(crate) struct Provisioned {
@@ -252,14 +253,27 @@ fn instructions(own: Option<&str>, delegation: Option<&Instructions>) -> Option<
     }
 }
 
+/// What every harness should know about the branch it runs on: the
+/// commits it finds there that it did not make, and where its scratch
+/// files go. The delegation skill says the same to a branch that has it.
+pub(crate) const WORKSPACE_NOTE: &str = "Branchyard runs you on your own git branch and \
+     worktree. At the end of each turn it commits everything in the worktree for you, as a \
+     commit named `by/<branch>: turn <n>`: you need not commit, and commits by that name are \
+     Branchyard's, not someone else's. Put scratch files in $TMPDIR, a directory private to \
+     this branch, not in /tmp, which other branches share.";
+
 /// The task's own instructions, then the repository knowledge given this
-/// turn, then the connectors' line.
+/// turn, then the connectors' line, then [`WORKSPACE_NOTE`]. The note
+/// alone is given only where a harness takes instructions apart from the
+/// prompt (`note_alone`): an ACP harness gets them prepended to its first
+/// prompt, which a note on its own should not change.
 fn own_instructions(
     own: Option<&str>,
     knowledge: Option<&str>,
     connectors: Option<&crate::connectors::Prepared>,
+    note_alone: bool,
 ) -> Option<String> {
-    let parts: Vec<&str> = [
+    let mut parts: Vec<&str> = [
         own.filter(|t| !t.trim().is_empty()),
         knowledge.filter(|t| !t.trim().is_empty()),
         connectors.map(|c| c.instruction.as_str()),
@@ -267,6 +281,9 @@ fn own_instructions(
     .into_iter()
     .flatten()
     .collect();
+    if note_alone || !parts.is_empty() {
+        parts.push(WORKSPACE_NOTE);
+    }
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
@@ -316,6 +333,12 @@ pub(crate) fn prepare(
                 spec.instructions.as_deref(),
                 knowledge.and_then(|k| k.text.as_deref()),
                 connectors,
+                // A delegating branch has it in its skill.
+                projection.is_none()
+                    && matches!(
+                        profile.protocol,
+                        Protocol::ClaudeStreamJson | Protocol::CodexAppServer
+                    ),
             )
             .as_deref(),
             projection.map(|p| &p.instructions),

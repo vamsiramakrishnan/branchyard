@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Delegate parts of a coding task to child branches with Branchyard. Use when you run on a Branchyard branch (BRANCHYARD_BRANCH is set) and the work splits into independent pieces, needs a second harness, or should be tried more than one way. Covers `by spawn` (including children that wait for siblings), `by graph`, `by inspect`, `by integrate`, the Python module and the MCP tools.
+description: Delegate parts of a coding task to child branches with Branchyard. Use when you run on a Branchyard branch (BRANCHYARD_BRANCH is set) and the work splits into independent pieces, needs a second harness, or should be tried more than one way. Covers `by spawn` (including children that wait for siblings), `by graph`, `by inspect`, `by wait`, `by integrate` (several children at once), `by check` (run your check before you finish), `by discard`, ending your turn while children run, artifacts, messaging your parent, the Python module and the MCP tools.
 ---
 
 # Delegating with Branchyard
@@ -31,37 +31,123 @@ session, and merging overlapping edits produces conflicts.
    have left (`by inspect` shows `remaining_usd`). A child starts from your
    current work: your uncommitted changes are committed to your branch
    first.
-3. Watch. `by inspect <child>` shows status, diffstat, cost and its last
-   message; `by events <child>` shows its activity. Wait with `--wait` or
-   by polling; do not busy-loop faster than every few seconds. To correct
-   a child that is still running, `by send <child> --steer "<text>"` adds
-   to its running turn without stopping it; the child reads it at its next
-   step. Some harnesses cannot take it, and the refusal says so.
-4. Integrate. When a child is `ready`, `by integrate <child>` merges it
-   into your branch after its check passes. Your working tree moves to the
-   merge. A conflict or failed check is an error: send the child a fix with
-   `by send <child> "<prompt>"`, or do it yourself.
-5. Clean up. `by cancel <child>` stops a child and everything below it.
+   Pick a model too when the work is mechanical: a rename across files, a
+   format or lint fix, a mechanical port with a test to check it, or
+   gathering facts for you to judge. `by spawn --model small` (or a model
+   name) gives such a child a cheaper, faster model, so the same budget
+   goes further; keep your own model, the default, for design, debugging
+   and anything you would have to redo. A harness that cannot choose a model
+   refuses the spawn and says why; `by inspect <child>` shows its model.
+3. Wait. Either way works:
+   - **End your turn.** You do not have to stay awake: when every child
+     you delegated has settled, Branchyard starts your next turn by itself
+     with a summary of each child (status, diffstat, cost, last message,
+     why it failed) and what you can do next. Do not leave a background
+     task or monitor polling for them; it is stopped when your turn ends.
+   - **Wait in this turn.** `by wait` blocks until your running children
+     have settled (`by wait a b`, `--any` for the first, `--timeout S`);
+     it is woken by Branchyard, not a poll. `by spawn ... --wait` waits
+     for one child.
+   `by inspect <child>` shows status, diffstat, cost and its last message;
+   `by events <child>` shows its activity. To correct a child that is still
+   running, `by send <child> --steer "<text>"` adds to its running turn
+   without stopping it. Its answer starts with `accepted:` once the running
+   turn took it, and says when the child reads it (for Claude Code, before
+   its next model call; never in a later turn), or with `written:` if the
+   harness has not confirmed it yet. Some harnesses cannot
+   take it, and the refusal says so.
+   A child whose turn was cut off because the engine running it stopped
+   says so in its status; `by send <child> --retry` submits that turn's
+   prompt again.
+4. Integrate. When children are `ready`, `by integrate <child>` merges one
+   into your branch after its check passes; `by integrate a b c` merges
+   several together, in order, runs the check once on the result and moves
+   your branch once, all or none. Children that share your check integrate
+   together: a child inherits your check unless you give it one (the spawn
+   and `by inspect <child>` say which, and which siblings share it), and a
+   whole-suite check passes only with all of them, so integrate them
+   together rather than merging them into each other. Give a child its own
+   check with `by spawn --check` when it should land alone. If you integrate one that shares
+   its check and the check fails, the error names the siblings and the
+   command (`by integrate a b c`). Never `git merge` children yourself: that
+   bypasses the check, and Branchyard records them as merged only after the
+   fact. A child your branch already contains is recorded as merged, not
+   refused. A conflict names the child and the files, and a failed check
+   shows its output and names every check that ran, the children it
+   belongs to and whether it passed, so you know whose to fix: send the child a fix with `by send <child>
+   "<prompt>"`, or do it yourself. `by check <child>` runs a child's check
+   on its current work, as integrating it would, without integrating it.
+5. Clean up. `by cancel <child>` stops a running child and everything
+   below it. A child that already finished is not running, so cancel
+   changes nothing; set a finished child you will not use aside with
+   `by discard <child> --reason "<why>"`. It keeps its record and cost,
+   is never integrated or sent more work, and so never holds a slot or
+   your budget again, and never keeps you waiting. It keeps its name, its
+   worktree and its git branch until `by rm <child>` removes them; what it
+   spent still counts in your budget.
 
 Statuses: `running`, `ready` (a candidate to merge), `no_changes`,
-`interrupted`, `budget_exceeded`, `failed`, `merged`.
+`interrupted`, `budget_exceeded`, `failed`, `merged`, `discarded`,
+`waiting` and `blocked` (prerequisites), `waiting_on_children` (its turn
+ended while its children run; it is woken when they settle).
+
+Inside a harness, `by spawn` refuses `--parent`, `--yes`, `--ask` and
+`--permissions`: your children run under your policy. `by spawn --help`
+marks every flag you may not pass.
+
+Budget: `--budget-usd` sets a child's cost limit, which refusals and statuses
+call `max_usd`. A child that is running, waiting, blocked, awaiting plan
+approval or waiting on its own children holds its whole budget of yours. Once it settles (any other status,
+`discarded` included) it holds only what it spent, and the rest is yours again;
+a removed child's spend still counts. `by inspect` shows what live children
+hold (`reserved_usd`, by `reserving_children`) and what settled ones spent (`settled_children_usd`).
+Sending a settled child more work holds its budget again, narrowed to what you
+have left. Your envelope's `max_children` counts only live children.
+
+## Commits and scratch files
+
+Branchyard commits everything in your worktree at the end of each of your
+turns, and in each child's, as commits named `by/<branch>: turn <n>`: you need
+not commit, and those commits are Branchyard's. Ending your turn to wait for
+your children commits your work the same way. Write scratch files under
+`$TMPDIR`, a directory private to your branch, not in `/tmp`, which other
+branches share.
+
+## Before you finish
+
+Run `by check` before you end your turn. It runs your branch's check (your
+own, or the one you inherited) on your work as it is, uncommitted files
+included, merged into your parent's branch, the way your parent's
+integration will; nothing is committed or integrated. What fails here
+fails your integration: a repository rule you never saw is in its output.
+Fix it and run `by check` again until it passes. It exits 1 when the check
+fails, times out or your work conflicts with your parent's branch, and
+says so when you have no check to run.
 
 ## With `by`
 
 ```sh
 by inspect                      # your own branch: budget left, children
+by check                        # your work, checked as your integration will be
 by spawn "Make tests/parser_test.rs deterministic; run cargo test -p parser" \
   --name parser-flake --harness codex --budget-usd 0.50 --max-turns 3
 by spawn "Document the retry policy in docs/retries.md" --name retry-docs --budget-usd 0.20
+by spawn "Rename parse_opts to parse_options everywhere; run cargo test" \
+  --name rename --model small --budget-usd 0.10   # mechanical: a cheaper model
+by spawn --prompt-file "$TMPDIR/port-task.md" --name port --budget-usd 0.50   # a long task
 by children
 by inspect parser-flake
 by events parser-flake --cursor 0
 by spawn "Add a regression test for issue 42" --name issue-42 --budget-usd 0.30 --wait
 by send parser-flake --steer "Use the fixture in tests/data, not a new one."
+by wait parser-flake retry-docs --timeout 600
 by send parser-flake "The seed must come from the test name, not the clock."
-by integrate parser-flake
+by integrate parser-flake retry-docs
 by cancel retry-docs
+by discard retry-docs --reason "superseded by parser-flake"
 ```
+
+`by inspect` does not wait; wait with `by wait`, or end your turn.
 
 Every command takes `--json` for a stable machine-readable result, and
 exits non-zero with `{"error": {"kind", "message"}}` on refusal. Run `by`
@@ -91,7 +177,17 @@ by graph show           # your children, what each waits for, and the revision
 
 `by graph apply --edits '[...]' --expected-revision N` creates several
 children and dependencies at once, all or nothing; if it says
-`stale_revision`, run `by graph show` and propose again.
+`stale_revision`, run `by graph show` and propose again. Each edit is an
+object tagged by `kind`:
+
+```sh
+by graph apply --expected-revision 3 --edits '[
+  {"kind": "spawn", "name": "schema", "prompt": "Add the migration"},
+  {"kind": "spawn", "name": "api", "prompt": "Use the column", "depends_on": ["schema"]},
+  {"kind": "add_dependency", "dependent": "docs", "prerequisite": "api"}]'
+```
+
+`by graph apply --help` lists every field.
 
 ## In a rig
 
@@ -106,6 +202,25 @@ by spawn --seat reviewer "Review the tokenizer candidate on by/parser-implemente
 The seat sets the child's harness, budget, check and instructions; you
 may pass a smaller budget, never a larger one. In Python, pass `seat=`;
 the MCP `spawn` tool takes `seat`.
+
+## Sharing results and asking your parent
+
+Every child, even one that cannot delegate further, can publish files and
+message you, and you can do the same with your own parent:
+
+```sh
+by artifact publish results.json --name results --media-type application/json
+by artifact list
+by artifact get 3 --out data/results.json
+by ask "Should the parser accept tabs?" --wait 300
+by report "Tokenizer done; formatter next"
+by inbox --unread
+by answer 12 "Yes, accept tabs"
+```
+
+Artifacts you publish are readable by your ancestors and descendants; a
+sibling needs `by artifact share ID --to BRANCH`. An artifact's `digest`
+is the blake3 hash of its bytes.
 
 ## With Python
 
@@ -122,20 +237,23 @@ parts = [
     branchyard.spawn("Port the formatter to the new API; run its tests",
                      name="formatter", budget_usd=share),
 ]
-for child in parts:
-    done = branchyard.wait(child.name, timeout=1800)
-    if done.status["state"] == "ready":
-        try:
-            branchyard.integrate(child.name)
-        except branchyard.BranchyardError as error:
-            print(child.name, error.kind, error.message)
+done = branchyard.wait_all(*(child.name for child in parts), timeout=1800)
+ready = [i.name for i in done.settled if i.status.state == "ready"]
+try:
+    branchyard.integrate(*ready)        # together, checked once
+except branchyard.BranchyardError as error:
+    print(error.kind, error.message)
 ```
 
-Errors are `DeniedError` (envelope, budget or authority), `RunningError`,
-`NotFoundError`, or `BranchyardError` with a `kind`.
+`branchyard.wait_any(...)` returns when the first settles. Errors are
+`DeniedError` (envelope, budget or authority), `RunningError` (also a wait
+that timed out), `NotFoundError`, or `BranchyardError` with a `kind`.
 
 ## Without a shell
 
 If you cannot run commands, the same operations are MCP tools on the
 `branchyard` server: `spawn` (with `depends_on`), `inspect`, `events`, `send`,
-`propose_integration`, `cancel`, `children`, `graph` and `apply_graph`.
+`steer`, `propose_integration` (`branch`, or `branches` to integrate several
+together), `check` (your own work before you finish, or a child's), `wait` (`branches`, `any`, `timeout_seconds`), `cancel`, `discard`,
+`children`, `graph`, `apply_graph`, the artifact and scratch tools, and `ask`,
+`report`, `escalate`, `answer` and `inbox`.

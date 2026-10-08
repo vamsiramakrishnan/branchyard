@@ -337,6 +337,7 @@ impl Codex {
                         output_tokens: total["outputTokens"].as_u64(),
                         cached_input_tokens: total["cachedInputTokens"].as_u64(),
                         cost_usd: None,
+                        ..Usage::default()
                     },
                 })
             }
@@ -407,6 +408,10 @@ fn warning(params: &Value) -> Output {
     })
 }
 
+/// Why Codex is given no spending limit.
+const BUDGET: &str =
+    "Codex app-server has no spending limit: no thread or turn parameter caps cost, and its usage carries tokens, not dollars";
+
 impl Driver for Codex {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
@@ -417,7 +422,13 @@ impl Driver for Codex {
             turn_acknowledgment: true,
             usage: true,
             steer: true,
+            model: true,
+            budget: false,
         }
+    }
+
+    fn capability_reasons(&self) -> &'static [crate::CapabilityReason] {
+        &[("budget", BUDGET)]
     }
 
     fn open(&mut self, open: Open) -> Result<Opened, Rejected> {
@@ -427,6 +438,7 @@ impl Driver for Codex {
         if self.open.is_some() {
             return Err(Rejected::InvalidOpen("the session is already open".into()));
         }
+        crate::refuse_budget(&open, BUDGET)?;
         crate::check_mcp_servers(&open.mcp_servers)?;
         // Codex has `url` servers in `config.toml`, but their thread
         // override has not been checked against codex-cli.

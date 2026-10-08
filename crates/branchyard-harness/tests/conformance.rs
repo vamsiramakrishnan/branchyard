@@ -3,7 +3,8 @@
 #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use branchyard_harness::claude_code::ClaudeCode;
 use branchyard_harness::conformance::{
-    assert_contract_greeted, assert_steer_contract, check_frame, Direction, Replay, Transcript,
+    assert_contract_greeted, assert_steer_contract, check_frame, handshake, line, Direction,
+    Replay, Transcript,
 };
 use branchyard_harness::profiles::{Protocol, PROFILES};
 use branchyard_harness::{Driver, Event, Open, PermissionDecision, SessionMode, TurnOutcome};
@@ -14,6 +15,7 @@ fn fresh() -> Open {
         mode: SessionMode::Fresh,
         cwd: "/workspace".into(),
         model: None,
+        max_budget_usd: None,
         mcp_servers: Vec::new(),
         instructions: None,
         mcp_config_file: None,
@@ -330,4 +332,115 @@ fn drivers_without_a_verified_projection_refuse_servers_and_instructions() {
         checked += 1;
     }
     assert_eq!(checked, 3);
+}
+
+/// A driver's `model` capability says what its open does with a model: it
+/// passes on one it offers to choose, in its launch argv or a frame it
+/// writes before it is ready, and refuses one it does not, giving the
+/// reason it records.
+#[test]
+fn the_model_capability_matches_what_open_does_with_a_model() {
+    for profile in PROFILES {
+        let driver = profile.driver();
+        let offered = driver.capabilities().model;
+        let open = Open {
+            model: Some("small-model".into()),
+            ..fresh()
+        };
+        let mut chosen = profile.driver();
+        let opened = chosen.open(open);
+        match offered {
+            true => {
+                let opened = opened.unwrap_or_else(|e| {
+                    panic!("{} offers a model but refused one: {e}", profile.id)
+                });
+                let mut frames = opened.frames.clone();
+                let mut events = Vec::new();
+                for message in greeting(profile.protocol) {
+                    let output = chosen.receive(&line(&message));
+                    events.extend(output.events);
+                    frames.extend(output.frames);
+                }
+                let answer = answer(profile.protocol);
+                let mut written = Vec::new();
+                events.extend(handshake(chosen.as_mut(), &frames, |frame| {
+                    written.push(frame.clone());
+                    answer(frame)
+                }));
+                assert!(events.contains(&Event::Ready), "{}: {events:?}", profile.id);
+                let in_argv = opened.launch.argv.iter().any(|a| a == "small-model");
+                let in_frame = written
+                    .iter()
+                    .any(|f| f.to_string().contains(r#""small-model""#));
+                assert!(
+                    in_argv || in_frame,
+                    "{} offers a model but does not pass it on: {:?} {written:?}",
+                    profile.id,
+                    opened.launch.argv
+                );
+            }
+            false => {
+                assert!(
+                    matches!(opened, Err(branchyard_harness::Rejected::Unsupported(_))),
+                    "{} must refuse a model it cannot choose: {opened:?}",
+                    profile.id
+                );
+                assert!(
+                    driver
+                        .capability_reasons()
+                        .iter()
+                        .any(|(c, _)| *c == "model"),
+                    "{} gives no reason it cannot choose a model",
+                    profile.id
+                );
+            }
+        }
+    }
+}
+
+/// A driver's `budget` capability says what its open does with a spending
+/// limit: it passes on one its harness enforces, and refuses one it
+/// cannot, giving the reason it records.
+#[test]
+fn the_budget_capability_matches_what_open_does_with_a_limit() {
+    for profile in PROFILES {
+        let driver = profile.driver();
+        let offered = driver.capabilities().budget;
+        let open = Open {
+            max_budget_usd: Some(0.25),
+            ..fresh()
+        };
+        let opened = profile.driver().open(open);
+        match offered {
+            true => {
+                let opened = opened.unwrap_or_else(|e| {
+                    panic!(
+                        "{} offers a spending limit but refused one: {e}",
+                        profile.id
+                    )
+                });
+                let unlimited = profile.driver().open(fresh()).unwrap();
+                assert_ne!(
+                    opened.launch, unlimited.launch,
+                    "{} offers a spending limit but does not pass it on",
+                    profile.id
+                );
+            }
+            false => {
+                assert!(
+                    matches!(opened, Err(branchyard_harness::Rejected::Unsupported(_))),
+                    "{} must refuse a spending limit it cannot enforce: {opened:?}",
+                    profile.id
+                );
+                assert!(
+                    driver
+                        .capability_reasons()
+                        .iter()
+                        .any(|(c, _)| *c == "budget"),
+                    "{} gives no reason it cannot enforce a spending limit",
+                    profile.id
+                );
+            }
+        }
+    }
 }

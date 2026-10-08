@@ -348,6 +348,34 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
         error.message.contains("may not delegate to codex"),
         "{error:?}"
     );
+    // A spawn's model reaches the engine, which refuses it where the
+    // profile cannot deliver one: Gemini CLI's ACP profile writes it into
+    // its home, and this child would have none of its own.
+    let op = await_operation(
+        &client,
+        &repo
+            .spawn(
+                "root",
+                &SpawnRequest {
+                    prompt: "x".into(),
+                    model: Some("small".into()),
+                    ..SpawnRequest::default()
+                },
+                &new_key(),
+            )
+            .unwrap()
+            .id,
+    );
+    assert_eq!(op.state, OperationState::Failed);
+    let error = op.error.unwrap();
+    assert_eq!(error.code, "unsupported", "{error:?}");
+    assert!(
+        error
+            .message
+            .contains("gemini-cli-acp cannot be given a model")
+            && error.message.contains("--isolated"),
+        "{error:?}"
+    );
     drop(server);
 
     // A branch that was given delegation is not sent to by a server that

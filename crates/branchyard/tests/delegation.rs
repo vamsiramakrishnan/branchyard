@@ -9,8 +9,8 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 use branchyard::{
-    Activity, BranchStatus, Budget, ChildBudget, Delegate, Envelope, Error, Policy, Provisioning,
-    Seat, Seats, SecretSource, Spawn, SteerState, TaskOptions, Yard,
+    Activity, BranchStatus, Budget, CheckVerdict, ChildBudget, Delegate, Envelope, Error, Policy,
+    Provisioning, Seat, Seats, SecretSource, Spawn, SteerState, TaskOptions, Yard,
 };
 use branchyard_testkit::wait;
 use common::{edit_record, fake_agent, Fixture};
@@ -137,6 +137,97 @@ fn a_parent_integrates_a_child_into_its_own_branch_only() {
     );
 }
 
+/// A child runs the check it inherited on its work as it is, merged into
+/// its parent's branch as integrating it would, and nothing is committed,
+/// moved or integrated.
+#[test]
+fn a_child_checks_its_current_work_before_it_finishes() {
+    let f = Fixture::new();
+    let options = TaskOptions {
+        check: Some(vec![
+            "sh".into(),
+            "-c".into(),
+            "test -f child.txt && test -f extra.txt && test -f root.txt && echo all-there".into(),
+        ]),
+        ..delegating(&f, Envelope::default())
+    };
+    let root = f
+        .yard
+        .task("WRITE root.txt=r")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options.clone()).unwrap();
+    delegate
+        .spawn(spawn("WRITE child.txt=from-kid", "kid"))
+        .unwrap();
+    root.wait_subtree().unwrap();
+    let kid = f
+        .yard
+        .branch("kid")
+        .unwrap()
+        .delegate(options.clone())
+        .unwrap();
+
+    // Its work lacks extra.txt: the inherited check fails, and says why.
+    let failed = kid.check("kid").unwrap();
+    assert_eq!(failed.outcome, CheckVerdict::Failed, "{failed:?}");
+    assert!(!failed.passed());
+    assert_eq!(failed.inherited_from.as_deref(), Some("root"));
+    assert_eq!(failed.target.as_deref(), Some("by/root"));
+    assert!(failed.checked.is_some());
+
+    // Uncommitted work counts, and stays uncommitted.
+    let worktree = f.yard.branch("kid").unwrap().info().worktree.clone();
+    let head = f.git(&["rev-parse", "by/kid"]);
+    let parent_head = f.git(&["rev-parse", "by/root"]);
+    fs::write(worktree.join("extra.txt"), "x\n").unwrap();
+    let passed = kid.check("kid").unwrap();
+    assert_eq!(passed.outcome, CheckVerdict::Passed, "{passed:?}");
+    assert!(passed.passed());
+    assert!(passed.output_tail.contains("all-there"));
+    assert_eq!(f.git(&["rev-parse", "by/kid"]), head);
+    assert_eq!(f.git(&["rev-parse", "by/root"]), parent_head);
+    let status = common::git(&worktree, &["status", "--porcelain"]);
+    assert!(status.contains("?? extra.txt"), "{status}");
+    // The parent sees the same on its child; nothing was integrated.
+    assert_eq!(delegate.check("kid").unwrap().outcome, CheckVerdict::Passed);
+    assert_eq!(
+        f.yard.branch("kid").unwrap().info().status,
+        BranchStatus::Ready
+    );
+    // The same through the tool, with the branch omitted.
+    let called = kid.call("check", serde_json::json!({})).unwrap();
+    assert_eq!(called["outcome"], "passed");
+    assert_eq!(called["branch"], "kid");
+
+    // A branch without a parent is checked alone; a leaf checks only
+    // itself.
+    let alone = delegate.check("root").unwrap();
+    assert_eq!(alone.target, None);
+    assert_eq!(alone.outcome, CheckVerdict::Failed);
+    denied(kid.check("root"), "it acts only on itself");
+}
+
+/// A branch with no check runs none, and integrating it would run none.
+#[test]
+fn a_branch_without_a_check_reports_that_none_ran() {
+    let f = Fixture::new();
+    let root = f
+        .yard
+        .task("WRITE root.txt=r")
+        .options(f.options())
+        .name("root")
+        .run()
+        .unwrap();
+    let report = root.delegate(f.options()).unwrap().check("root").unwrap();
+    assert_eq!(report.check, None);
+    assert_eq!(report.outcome, CheckVerdict::NotRun);
+    assert!(report.passed());
+    assert!(report.conflicts.is_empty());
+}
+
 #[test]
 fn the_envelope_bounds_depth_width_and_harnesses() {
     let f = Fixture::new();
@@ -146,6 +237,7 @@ fn the_envelope_bounds_depth_width_and_harnesses() {
             max_depth: 2,
             max_children: 2,
             harnesses: Vec::new(),
+            ..Envelope::default()
         },
     );
     let root = f
@@ -162,7 +254,7 @@ fn the_envelope_bounds_depth_width_and_harnesses() {
             harness: Some("qwen-code".into()),
             ..spawn("x", "q")
         }),
-        "may not delegate to qwen-code-acp",
+        "may not delegate to qwen-code (qwen-code-acp)",
     );
     // A child cannot be allowed what its parent is not.
     denied(
@@ -172,14 +264,23 @@ fn the_envelope_bounds_depth_width_and_harnesses() {
         }),
         "may not be allowed codex",
     );
-    delegate.spawn(spawn("say a", "a")).unwrap();
+    // `max_children` bounds the children running at once.
+    delegate.spawn(spawn("AWAIT_STEER", "a")).unwrap();
     delegate
         .spawn(Spawn {
             max_depth: Some(0),
-            ..spawn("say b", "b")
+            ..spawn("AWAIT_STEER", "b")
         })
         .unwrap();
     denied(delegate.spawn(spawn("say c", "c")), "max_children");
+    for kid in ["a", "b"] {
+        wait::until("the child to wait for steering", || {
+            delegate
+                .inspect(kid)
+                .is_ok_and(|i| i.last_message.contains("waiting for steering"))
+        });
+        delegate.steer(kid, "that is all").unwrap();
+    }
     root.wait_subtree().unwrap();
 
     // `a` is one level down and may create one more level; `b` gave that up.
@@ -252,7 +353,7 @@ fn a_parent_steers_its_running_child() {
         .unwrap();
     let state: SteerState = serde_json::from_value(steered["state"].clone()).unwrap();
     assert!(
-        matches!(state, SteerState::Delivered | SteerState::Accepted),
+        matches!(state, SteerState::Written | SteerState::Accepted),
         "{steered}"
     );
     assert_eq!(steered["by"], "root");
@@ -363,7 +464,7 @@ fn child_budgets_fit_in_what_the_parent_has_left() {
     let delegate = root.delegate(options.clone()).unwrap();
     denied(
         delegate.spawn(spawn("HANG", "a")),
-        "needs max_usd; $1.0000 remains",
+        "needs one too, max_usd (--budget-usd); $1.0000 remains",
     );
     let with = |usd: f64, name: &str| Spawn {
         budget: Budget::usd(usd),
@@ -384,7 +485,7 @@ fn child_budgets_fit_in_what_the_parent_has_left() {
             budget: Budget::usd(0.1).turns(4),
             ..spawn("HANG", "b")
         }),
-        "max_turns 4 exceeds root's 3",
+        "max_turns (--max-turns) 4 exceeds root's 3",
     );
     let b = delegate.spawn(with(0.4, "b")).unwrap();
     assert_eq!(b.status, BranchStatus::Running);
@@ -395,17 +496,20 @@ fn child_budgets_fit_in_what_the_parent_has_left() {
     assert_eq!((a.max_usd, a.remaining_usd), (Some(0.6), Some(0.6)));
 
     // Reserving the whole budget leaves the parent no room for its own
-    // turns: children's reservations count against it.
-    delegate.cancel("a").unwrap();
-    delegate.cancel("b").unwrap();
-    root.wait_subtree().unwrap();
-    let root = root.send("say more", options).unwrap();
+    // turns: running children's reservations count against it.
+    let exceeded = root.send("say more", options.clone()).unwrap();
     assert_eq!(
-        root.info().status,
+        exceeded.info().status,
         BranchStatus::BudgetExceeded {
             limit: "max_usd".into()
         }
     );
+    // Cancelled, they hold only what they spent, and the parent runs.
+    delegate.cancel("a").unwrap();
+    delegate.cancel("b").unwrap();
+    root.wait_subtree().unwrap();
+    let root = root.send("say more", options).unwrap();
+    assert_eq!(root.info().status, BranchStatus::NoChanges);
     // A child's limits bound its turns whoever sends them.
     let a = f.yard.branch("a").unwrap();
     let a = a.send("say", f.options()).unwrap();
@@ -415,6 +519,96 @@ fn child_budgets_fit_in_what_the_parent_has_left() {
             limit: "max_turns".into()
         }
     );
+}
+
+/// A child holds its whole limit only while it can run turns without
+/// asking: settled, merged or removed, it holds what it spent, and
+/// `max_children` counts only live children. Sending a settled child more
+/// work holds its limit again, narrowed to what is left.
+#[test]
+fn settled_children_give_back_what_they_did_not_spend() {
+    let f = Fixture::new();
+    let options = TaskOptions {
+        budget: Budget::usd(1.5),
+        ..delegating(
+            &f,
+            Envelope {
+                max_children: 2,
+                ..Envelope::default()
+            },
+        )
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options.clone()).unwrap();
+    let with = |usd: f64, prompt: &str, name: &str| Spawn {
+        budget: Budget::usd(usd),
+        ..spawn(prompt, name)
+    };
+    delegate.spawn(with(0.6, "WRITE a.txt=a", "a")).unwrap();
+    delegate.spawn(with(0.6, "say b", "b")).unwrap();
+    root.wait_subtree().unwrap();
+    // The children spent $0.25 and nothing; they are settled.
+    edit_record(&f.root, "a", |r| r["info"]["cost_usd"] = 0.25.into());
+    let me = delegate.inspect("root").unwrap();
+    assert!((me.remaining_usd.unwrap() - 1.25).abs() < 1e-9, "{me:?}");
+    assert_eq!((me.reserved_usd, me.reserving_children), (0.0, 0));
+    assert!((me.settled_children_usd - 0.25).abs() < 1e-9, "{me:?}");
+    assert!((me.subtree_cost_usd - 0.25).abs() < 1e-9, "{me:?}");
+
+    // Two children exist, but neither is live: there is room for two more.
+    delegate.spawn(with(0.6, "AWAIT_STEER", "c")).unwrap();
+    delegate.spawn(with(0.6, "HANG", "d")).unwrap();
+    denied(delegate.spawn(with(0.01, "say e", "e")), "2 live children");
+    let me = delegate.inspect("root").unwrap();
+    assert_eq!(me.reserving_children, 2, "{me:?}");
+    assert!((me.reserved_usd - 1.2).abs() < 1e-9, "{me:?}");
+    wait::until("c to wait for steering", || {
+        delegate
+            .inspect("c")
+            .is_ok_and(|i| i.last_message.contains("waiting for steering"))
+    });
+    delegate.steer("c", "finish").unwrap();
+
+    // Merged, then removed, a child still counts what it spent.
+    delegate.integrate("a").unwrap();
+    f.yard.remove("a").unwrap();
+    f.yard.remove("b").unwrap();
+    let me = delegate.inspect("root").unwrap();
+    assert!((me.subtree_cost_usd - 0.25).abs() < 1e-9, "{me:?}");
+    assert!((me.remaining_usd.unwrap() - (1.5 - 0.25 - 0.6)).abs() < 1e-9);
+
+    // c, settled, is sent more work while d holds $0.60: its $0.60 limit
+    // no longer fits in the $0.65 left once it runs beside a $0.60 child,
+    // so it is narrowed.
+    wait::until("c to settle", || {
+        delegate
+            .inspect("c")
+            .is_ok_and(|c| c.status == BranchStatus::NoChanges)
+    });
+    edit_record(&f.root, "root", |r| r["info"]["cost_usd"] = 0.5.into());
+    // Left: 1.5 - 0.5 (root) - 0.25 (a) - 0.6 (d) = 0.15.
+    delegate.send("c", "say again").unwrap();
+    let c = wait::until("c to settle again", || {
+        delegate
+            .inspect("c")
+            .ok()
+            .filter(|c| c.turns == 2 && c.status != BranchStatus::Running)
+    });
+    assert!((c.max_usd.unwrap() - 0.15).abs() < 1e-9, "{c:?}");
+    let log = f.yard.branch("c").unwrap().events().unwrap();
+    assert!(log.iter().any(|e| matches!(&e.activity,
+        Activity::Warning(w) if w.contains("narrowed from $0.6000 to $0.1500"))));
+    delegate.cancel("d").unwrap();
+    root.wait_subtree().unwrap();
+    // With nothing left, a settled child is not sent more.
+    edit_record(&f.root, "root", |r| r["info"]["cost_usd"] = 1.25.into());
+    denied(delegate.send("c", "and again"), "nothing left");
 }
 
 #[test]
@@ -549,6 +743,47 @@ fn recovered(f: &Fixture, name: &str) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// The battery's wait-since scenario: a wait after a send waits for the
+/// turn the send started, not the settled one before it, through the
+/// engine's process and another's.
+#[test]
+fn a_wait_after_a_send_waits_for_the_sent_turn() {
+    let f = Fixture::new();
+    let options = delegating(&f, Envelope::default());
+    let root = f
+        .yard
+        .task("WRITE root.txt=r")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options.clone()).unwrap();
+    delegate.spawn(spawn("WRITE first.txt=1", "kid")).unwrap();
+    let first = delegate.wait("kid", Duration::from_secs(30)).unwrap();
+    assert_eq!((first.status, first.turns), (BranchStatus::Ready, 1));
+    let go = f.root.join("go");
+    let held = format!(
+        "SH until [ -f {} ]; do sleep 0.05; done; echo k > kid.txt",
+        go.display()
+    );
+    delegate.send("kid", &held).unwrap();
+    let short = Duration::from_millis(300);
+    let waited = delegate.wait_for(&["kid"], false, Some(short)).unwrap();
+    assert!(waited.timed_out, "{waited:?}");
+    assert_eq!(waited.pending, ["kid"]);
+    assert!(matches!(
+        delegate.wait("kid", short),
+        Err(Error::Running(_))
+    ));
+    let other = Yard::open(&f.root).unwrap();
+    let waited = other.wait_for(&["kid"], false, Some(short)).unwrap();
+    assert_eq!(waited.pending, ["kid"], "{waited:?}");
+    fs::write(&go, "").unwrap();
+    let done = delegate.wait("kid", Duration::from_secs(30)).unwrap();
+    assert_eq!((done.status, done.turns), (BranchStatus::Ready, 2));
+    root.wait_subtree().unwrap();
 }
 
 #[test]
@@ -741,6 +976,7 @@ fn a_rigs_branches_spawn_only_the_seats_below_their_own() {
             max_depth: 1,
             max_children: 1,
             harnesses: vec!["gemini-cli".into()],
+            ..Envelope::default()
         })
     );
 
@@ -823,4 +1059,161 @@ fn seats_are_checked_before_anything_is_created() {
         .run()
         .unwrap();
     assert_eq!(root.info().status, BranchStatus::NoChanges);
+}
+
+/// The envelope's `max_wakes` caps consecutive automatic wakes: a parent
+/// parked after as many wakes as it allows is not woken again when its
+/// children settle; it settles as its turn ended, and its log says why.
+#[test]
+fn a_parent_woken_max_wakes_times_settles_without_another_wake() {
+    let f = Fixture::new();
+    let envelope = Envelope {
+        max_wakes: 1,
+        ..Envelope::default()
+    };
+    let options = delegating(&f, envelope);
+    let root = f
+        .yard
+        .task("WRITE root.txt=r")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options).unwrap();
+    delegate.spawn(spawn("HANG", "kid")).unwrap();
+    // As the engine leaves a parent whose turn ended while kid ran, after
+    // the one wake its envelope allows.
+    edit_record(&f.root, "root", |record| {
+        record["info"]["status"] = serde_json::json!({"state": "waiting_on_children"});
+        record["parked"] = serde_json::json!({
+            "since_ms": 0,
+            "ended": {"state": "ready"},
+            "on": ["kid"],
+            "budget": {},
+        });
+        record["wakes"] = serde_json::json!(1);
+    });
+    delegate.cancel("kid").unwrap();
+    wait::until("root to settle", || {
+        f.yard.branch("root").unwrap().info().status == BranchStatus::Ready
+    });
+    let root_info = f.yard.branch("root").unwrap().info().clone();
+    assert_eq!(root_info.turns, 1, "not woken");
+    let log = f.yard.branch("root").unwrap().events().unwrap();
+    assert!(log.iter().any(|e| matches!(&e.activity,
+        Activity::Warning(w) if w.contains("woken 1 times in a row, its envelope's max_wakes"))));
+}
+
+/// A child's model is refused where its profile cannot deliver it, with
+/// the reason, before anything is created: Gemini CLI's ACP profile takes
+/// one only in its `settings.json`, so only with a private home. A blank
+/// one is refused too.
+#[test]
+fn a_model_its_profile_cannot_deliver_is_refused() {
+    let f = Fixture::new();
+    let options = delegating(&f, Envelope::default());
+    let root = f
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options).unwrap();
+    let asked = Spawn {
+        model: Some("small".into()),
+        ..spawn("WRITE kid.txt=k", "kid")
+    };
+    match delegate.spawn(asked) {
+        Err(Error::Unsupported(why)) => {
+            assert!(
+                why.contains("gemini-cli-acp cannot be given a model"),
+                "{why}"
+            );
+            assert!(why.contains("Gemini CLI's settings.json"), "{why}");
+            assert!(why.contains("--isolated"), "{why}");
+        }
+        other => panic!("expected the model refused, got {other:?}"),
+    }
+    let blank = Spawn {
+        model: Some(" ".into()),
+        ..spawn("WRITE kid.txt=k", "kid")
+    };
+    denied(delegate.spawn(blank), "may not be blank");
+    assert!(f.yard.branch("root").unwrap().info().children.is_empty());
+    assert!(f.yard.branch("kid").is_err());
+}
+
+/// An ACP profile whose provisioner sets the model itself takes a child's:
+/// isolated, Gemini CLI's is written to its `settings.json`.
+#[test]
+fn a_model_its_provisioner_delivers_is_given_over_acp() {
+    let f = Fixture::new();
+    let options = TaskOptions {
+        isolated: true,
+        ..delegating(&f, Envelope::default())
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options).unwrap();
+    let kid = delegate
+        .spawn(Spawn {
+            model: Some("gemini-2.5-flash".into()),
+            ..spawn("WRITE kid.txt=k", "kid")
+        })
+        .unwrap();
+    assert_eq!(kid.profile, "gemini-cli-acp");
+    assert_eq!(kid.model.as_deref(), Some("gemini-2.5-flash"));
+    wait::until("kid to finish", || {
+        f.yard.branch("kid").unwrap().info().status == BranchStatus::Ready
+    });
+    assert_eq!(
+        f.yard.branch("kid").unwrap().info().model.as_deref(),
+        Some("gemini-2.5-flash")
+    );
+}
+
+/// A seat's provisioning replaces its parent's, but on its parent's
+/// harness a seat without a model keeps its parent's; a seat's own model
+/// wins.
+#[test]
+fn a_seat_without_a_model_keeps_its_parents_on_the_same_harness() {
+    let f = Fixture::new();
+    let mut seats = team();
+    seats.table.get_mut("planner").unwrap().provision = Some(Provisioning {
+        model: Some("gemini-2.5-pro".into()),
+        ..Provisioning::default()
+    });
+    let options = TaskOptions {
+        isolated: true,
+        provision: Some(Provisioning {
+            model: Some("gemini-2.5-flash".into()),
+            ..Provisioning::default()
+        }),
+        seats: Some(seats.clone()),
+        ..delegating(&f, seats.envelope())
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let lead = root.delegate(options).unwrap();
+    let worker = lead.spawn(by_seat("worker", "say work")).unwrap();
+    assert_eq!(worker.model.as_deref(), Some("gemini-2.5-flash"));
+    let planner = lead.spawn(by_seat("planner", "say plan")).unwrap();
+    assert_eq!(planner.model.as_deref(), Some("gemini-2.5-pro"));
+    // The worker's own provisioning is kept with it.
+    edit_record(&f.root, &worker.name, |record| {
+        let provision = &record["provision"];
+        assert_eq!(provision["instructions"], "You are the worker.", "{record}");
+        assert_eq!(provision["model"], "gemini-2.5-flash", "{record}");
+    });
 }

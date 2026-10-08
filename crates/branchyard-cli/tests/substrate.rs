@@ -42,7 +42,7 @@ fn built(package: &str, bin: &str) -> PathBuf {
 
 fn run(dir: &Path, program: &str, args: &[&str]) -> Output {
     let mut command = Command::new(program);
-    command
+    branchyard_testkit::hermetic(&mut command)
         .args(args)
         .current_dir(dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -54,15 +54,6 @@ fn run(dir: &Path, program: &str, args: &[&str]) -> Output {
             "/nonexistent/branchyard-config.toml",
         )
         .env("PAGER", "cat");
-    for var in [
-        "BRANCHYARD_DELEGATION",
-        "BRANCHYARD_BRANCH",
-        "BRANCHYARD_ROOT",
-        "BRANCHYARD_BY",
-        "BRANCHYARD_REMOTE",
-    ] {
-        command.env_remove(var);
-    }
     command.output().unwrap()
 }
 
@@ -227,14 +218,13 @@ impl Served {
     fn start(dir: &Path, name: &str, root: &Path, extra: &[&str]) -> Served {
         use std::io::BufRead;
         let data = dir.join(name);
-        let mut child = Command::new(BY)
+        let mut child = branchyard_testkit::hermetic(&mut Command::new(BY))
             .current_dir(dir)
             .args(["serve", "--listen", "127.0.0.1:0", "--quiet", "--repo"])
             .arg(format!("app={}", root.display()))
             .arg("--data-dir")
             .arg(&data)
             .args(extra)
-            .env_remove("BRANCHYARD_REMOTE")
             .env(
                 "BRANCHYARD_USER_CONFIG",
                 "/nonexistent/branchyard-config.toml",

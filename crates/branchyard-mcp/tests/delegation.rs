@@ -58,7 +58,10 @@ fn a_harness_spawns_a_child_and_integrates_it_into_its_own_branch() {
         .unwrap();
     let said = reply(&f, "root");
     assert!(
-        said.contains(&format!("mcp tools: {}", branchyard_mcp::TOOLS.join(","))),
+        said.contains(&format!(
+            "mcp tools: {}",
+            branchyard_mcp::tool_names().join(",")
+        )),
         "{said}"
     );
     let spawned = result(&said, "spawn");
@@ -158,22 +161,29 @@ fn refusals_reach_the_harness_as_tool_errors() {
     );
     assert!(errors[1].contains("only on its descendants"), "{said}");
     assert!(
-        errors[2].contains("may not delegate to qwen-code-acp"),
+        errors[2].contains("may not delegate to qwen-code (qwen-code-acp)"),
         "{said}"
     );
     assert!(
-        errors[3].contains("needs max_usd; $1.0000 remains"),
+        errors[3].contains("needs one too, max_usd (--budget-usd); $1.0000 remains"),
         "{said}"
     );
     assert!(errors[4].contains("exceeds what root has left"), "{said}");
     assert!(errors[5].contains("unknown field `bogus`"), "{said}");
-    // The child was one level down with no envelope left: its harness got
-    // no MCP server at all.
-    assert_eq!(reply(&f, "kid"), "mcp: no server\n");
+    // The child was one level down with no envelope left: a leaf, whose
+    // server refuses to spawn (it keeps its own branch, storage and inbox).
+    let kid = reply(&f, "kid");
+    assert!(
+        kid.contains("mcp spawn error: denied: kid may not spawn: its envelope's max_depth is 0"),
+        "{kid}"
+    );
     let me = result(&said, "inspect");
     assert_eq!(me["name"], "root");
     assert_eq!(me["max_usd"], 1.0);
-    assert_eq!(me["remaining_usd"], 0.5);
+    // kid has settled: it holds what it spent (nothing), not its $0.50.
+    assert_eq!(me["remaining_usd"], 1.0);
+    assert_eq!(me["reserved_usd"], 0.0);
+    assert_eq!(me["reserving_children"], 0);
     // The other branch was never touched.
     assert!(f.yard.branch("other").unwrap().info().children.is_empty());
 }
@@ -202,10 +212,7 @@ fn steer_adds_to_a_running_childs_turn() {
     assert_eq!(steered["branch"], "kid");
     assert_eq!(steered["by"], "root");
     assert!(
-        matches!(
-            steered["state"]["state"].as_str(),
-            Some("delivered" | "accepted")
-        ),
+        matches!(steered["state"]["state"].as_str(), Some("accepted")),
         "{said}"
     );
     assert!(
@@ -477,4 +484,234 @@ fn a_harness_builds_a_three_level_graph_at_runtime() {
     assert_eq!(depths, [1, 1, 2, 2]);
     // The grandchildren's graph is the child's, not the root's.
     assert_eq!(f.yard.graph("root").unwrap().dependencies.len(), 1);
+}
+
+/// A child's prompt that runs until `go` exists, then writes `file`: a
+/// child still running when its parent's turn ends, released by the test.
+fn held_child(go: &std::path::Path, file: &str) -> String {
+    format!(
+        "SH until [ -f {} ]; do sleep 0.05; done; echo done > {file}",
+        go.display()
+    )
+}
+
+/// The prompts `branch` was given, in order.
+fn prompts(f: &Fixture, branch: &str) -> Vec<String> {
+    f.yard
+        .branch(branch)
+        .unwrap()
+        .events()
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.activity {
+            Activity::Prompt(p) => Some(p),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `nth` (from 0) JSON result of `tool` in a reply.
+fn nth_result(reply: &str, tool: &str, nth: usize) -> Value {
+    let rest = reply
+        .split(&format!("mcp {tool}: "))
+        .nth(nth + 1)
+        .unwrap_or_else(|| panic!("no result {nth} of {tool} in {reply}"));
+    let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
+    stream.next().unwrap().unwrap()
+}
+
+/// The battery's depth2 and pysdk scenarios (M1): Claude Code moved its
+/// wait into a background task and ended its turn ("I'll get a
+/// notification when they finish"). Branchyard took the turn's end for the
+/// task's: the parent ended `no changes` and its children were never
+/// integrated. Now the parent waits on its children, and its next turn
+/// starts by itself when they settle, saying what each did.
+#[test]
+fn a_parent_whose_turn_ends_while_its_child_runs_is_woken_when_it_settles() {
+    let f = Fixture::new();
+    let go = f.dir.join("go");
+    let spawn = json!({"prompt": held_child(&go, "kid.txt"), "name": "kid"});
+    let root = f
+        .yard
+        .task(format!("MCP spawn {spawn}"))
+        .options(f.delegating(Envelope::default()))
+        .name("root")
+        .run()
+        .unwrap();
+    // Its turn ended while kid still ran: it waits on kid, not finished.
+    assert_eq!(root.info().status, BranchStatus::WaitingOnChildren);
+    assert_eq!(root.info().turns, 1);
+    let log = root.events().unwrap();
+    assert!(log.iter().any(|e| matches!(&e.activity,
+        Activity::Delegation { tool, outcome, .. }
+            if tool == "wait" && outcome.contains("kid still run"))));
+    // Parked is not settled: it cannot be discarded.
+    let refused = f.yard.discard("root", "not needed").unwrap_err();
+    assert!(
+        refused.to_string().contains("waiting on its children"),
+        "{refused}"
+    );
+    fs::write(&go, "").unwrap();
+    root.wait_subtree().unwrap();
+    let root = f.yard.branch("root").unwrap();
+    assert_eq!(root.info().turns, 2, "woken once, when kid settled");
+    assert_eq!(
+        f.yard.branch("kid").unwrap().info().status,
+        BranchStatus::Ready
+    );
+    assert!(!matches!(
+        root.info().status,
+        BranchStatus::WaitingOnChildren | BranchStatus::Running
+    ));
+    let wake = prompts(&f, "root").pop().unwrap();
+    for needed in [
+        "<branchyard-wake>",
+        "automatic wake 1 of at most 8",
+        "- kid: ready; candidate 1 file +1 -0",
+        "by integrate a b",
+        "propose_integration",
+    ] {
+        assert!(wake.contains(needed), "{needed:?} missing from {wake}");
+    }
+}
+
+/// `--no-wake`: a turn that ends while children run ends as it is.
+#[test]
+fn a_parent_that_opts_out_of_waking_ends_with_its_turn() {
+    let f = Fixture::new();
+    let go = f.dir.join("go");
+    let spawn = json!({"prompt": held_child(&go, "kid.txt"), "name": "kid"});
+    let root = f
+        .yard
+        .task(format!("MCP spawn {spawn}"))
+        .options(f.delegating(Envelope::default().no_wake()))
+        .name("root")
+        .run()
+        .unwrap();
+    assert_eq!(root.info().status, BranchStatus::NoChanges);
+    fs::write(&go, "").unwrap();
+    root.wait_subtree().unwrap();
+    assert_eq!(f.yard.branch("root").unwrap().info().turns, 1);
+}
+
+/// A wake is bounded by the parent's own limits: with no turn left, its
+/// children's settling does not start one, and it ends as its turn did.
+#[test]
+fn a_parent_whose_limits_are_spent_is_not_woken() {
+    let f = Fixture::new();
+    let go = f.dir.join("go");
+    let spawn = json!({"prompt": held_child(&go, "kid.txt"), "name": "kid"});
+    let options = TaskOptions {
+        budget: Budget::default().turns(1),
+        ..f.delegating(Envelope::default())
+    };
+    let root = f
+        .yard
+        .task(format!("MCP spawn {spawn}"))
+        .options(options)
+        .name("root")
+        .run()
+        .unwrap();
+    assert_eq!(root.info().status, BranchStatus::WaitingOnChildren);
+    fs::write(&go, "").unwrap();
+    root.wait_subtree().unwrap();
+    let root = f.yard.branch("root").unwrap();
+    assert_eq!(root.info().turns, 1);
+    assert_eq!(root.info().status, BranchStatus::NoChanges);
+    assert!(root.events().unwrap().iter().any(|e| matches!(&e.activity,
+        Activity::Warning(w) if w.contains("its max_turns is spent; it was not woken"))));
+}
+
+/// The battery's wait-since scenario: a `wait` after a `send` waits for
+/// the turn the send started, not the settled one before it.
+#[test]
+fn a_wait_after_a_send_waits_for_the_sent_turn() {
+    let f = Fixture::new();
+    let go = f.dir.join("go");
+    let send = json!({"branch": "kid", "prompt": held_child(&go, "kid.txt")});
+    let prompt = [
+        r#"MCP spawn {"prompt": "WRITE first.txt=1", "name": "kid"}"#.to_owned(),
+        r#"MCP wait {"branches": ["kid"]}"#.to_owned(),
+        format!("MCP send {send}"),
+        r#"MCP wait {"branches": ["kid"], "timeout_seconds": 0.3}"#.to_owned(),
+    ]
+    .join("\n");
+    let root = f
+        .yard
+        .task(prompt)
+        .options(f.delegating(Envelope::default()))
+        .name("root")
+        .run()
+        .unwrap();
+    let said = reply(&f, "root");
+    let first = nth_result(&said, "wait", 0);
+    assert_eq!(first["settled"][0]["turns"], 1, "{said}");
+    let after = nth_result(&said, "wait", 1);
+    assert_eq!(after["timed_out"], true, "{said}");
+    assert_eq!(after["pending"], json!(["kid"]), "{said}");
+    fs::write(&go, "").unwrap();
+    root.wait_subtree().unwrap();
+    assert_eq!(f.yard.branch("kid").unwrap().info().turns, 2);
+}
+
+/// The `wait` tool blocks in the engine until descendants settle, and
+/// `propose_integration` takes several branches, integrated together and
+/// checked once (M1, M2).
+#[test]
+fn a_harness_waits_for_its_children_and_integrates_them_together() {
+    let f = Fixture::new();
+    let options = TaskOptions {
+        check: Some(vec![
+            "sh".into(),
+            "-c".into(),
+            "test -f a.part && test -f b.part".into(),
+        ]),
+        ..f.delegating(Envelope::default())
+    };
+    let prompt = [
+        r#"MCP spawn {"prompt": "WRITE a.part=a", "name": "a"}"#,
+        r#"MCP spawn {"prompt": "WRITE b.part=b", "name": "b"}"#,
+        r#"MCP wait {"any": true}"#,
+        r#"MCP wait {"branches": ["a", "b"]}"#,
+        r#"MCP propose_integration {"branch": "a"}"#,
+        r#"MCP propose_integration {"branches": ["a", "b"]}"#,
+        r#"MCP propose_integration {"branches": ["a"]}"#,
+    ]
+    .join("\n");
+    let root = f
+        .yard
+        .task(prompt)
+        .options(options)
+        .name("root")
+        .run()
+        .unwrap();
+    let said = reply(&f, "root");
+    let first = nth_result(&said, "wait", 0);
+    assert!(!first["settled"].as_array().unwrap().is_empty(), "{said}");
+    let both = nth_result(&said, "wait", 1);
+    assert_eq!(both["pending"], json!([]), "{said}");
+    assert_eq!(both["settled"].as_array().unwrap().len(), 2);
+    assert!(
+        said.contains("mcp propose_integration error: check failed"),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "Checks on the merged result: `sh -c test -f a.part && test -f b.part` (a) failed"
+        ),
+        "{said}"
+    );
+    let together = nth_result(&said, "propose_integration", 0);
+    assert_eq!(together["target"], "by/root");
+    assert_eq!(together["branches"][0]["branch"], "a");
+    assert_eq!(together["branches"][1]["branch"], "b");
+    let again = nth_result(&said, "propose_integration", 1);
+    assert_eq!(again["branches"][0]["already"], true, "{said}");
+    for name in ["a", "b"] {
+        assert!(matches!(
+            &f.yard.branch(name).unwrap().info().status,
+            BranchStatus::Merged { target, .. } if target == "by/root"
+        ));
+    }
+    assert_eq!(root.info().status, BranchStatus::Ready);
 }

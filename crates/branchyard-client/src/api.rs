@@ -243,6 +243,11 @@ pub struct TaskRequest {
     /// A goal a judge verifies, like `by run --goal`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<GoalRequest>,
+    /// Tools the branch's harness is denied outright, like `by run --deny`
+    /// and [`branchyard::TaskOptions::deny`]: stored with the branch, ahead
+    /// of every policy its turns run under, and passed on to its children.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
 }
 
 /// A task's goal: its text, the follow-up turns it may get, and the judge
@@ -330,7 +335,13 @@ pub struct TaskList {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SendRequest {
+    /// Empty with `retry`.
+    #[serde(default)]
     pub prompt: String,
+    /// Submit again the prompt of the branch's last turn that was cut off,
+    /// like `by send --retry`, instead of `prompt`. Refused when none was.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub retry: bool,
     #[serde(default)]
     pub budget: BudgetSpec,
     #[serde(default)]
@@ -548,6 +559,22 @@ pub struct SpawnRequest {
     /// narrowed to its parent's; unset is its seat's or its parent's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connectors: Option<Vec<branchyard::connectors::GrantEntry>>,
+    /// Children the child may have, like [`branchyard::Spawn::max_children`];
+    /// at most its parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_children: Option<u32>,
+    /// Harnesses the child may delegate to, like
+    /// [`branchyard::Spawn::harnesses`]; each must be allowed to its parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harnesses: Option<Vec<String>>,
+    /// Plan first, like `by spawn --plan`: the child's first turn is
+    /// read-only and its plan is escalated to its parent.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub plan: bool,
+    /// The child's model, like [`branchyard::Spawn::model`]; unset is its
+    /// seat's or its parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 fn is_settled(after: &After) -> bool {
@@ -574,12 +601,18 @@ pub struct GraphRequest {
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/integrate`: merge a delegated
-/// child into the parent that delegated it, like `by integrate`. No fields
-/// yet.
+/// child into the parent that delegated it, like `by integrate`.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct IntegrateRequest {}
+pub struct IntegrateRequest {
+    /// Siblings of the path's branch, delegated by the same parent, to
+    /// integrate together with it, in order after it: merged in one
+    /// temporary worktree, checked once on the result, all or none, like
+    /// `by integrate a b c`. The result is then `merged_all`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub with: Vec<String>,
+}
 
 /// `POST /v1/repos/{repo}/branches/{branch}/steer`: input for the branch's
 /// running turn, like `by send --steer`. The answer is the
@@ -603,6 +636,37 @@ pub struct CancelRequest {}
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelResult {
     pub cancelled: Vec<String>,
+}
+
+/// `POST /v1/repos/{repo}/branches/{branch}/discard`: set a settled
+/// branch aside, like `by discard`. The answer is the branch's
+/// [`branchyard::Inspection`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscardRequest {
+    /// Why, recorded in the branch's status; the server names the caller
+    /// when it is omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `POST /v1/repos/{repo}/wait`: block until branches settle, like
+/// `by wait`. The answer is a [`branchyard::Waited`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaitRequest {
+    /// The branches to wait for; at least one.
+    pub branches: Vec<String>,
+    /// Return once any one of them has settled, not all.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub any: bool,
+    /// Return after this many seconds even if the wait is not satisfied,
+    /// with `timed_out` set. The server caps it, at 30 seconds, so a
+    /// longer wait asks again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<f64>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/ask`: a question to the
@@ -691,6 +755,9 @@ pub struct OperationResult {
     pub branches: Vec<BranchInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged: Option<Merged>,
+    /// Several children integrated together (`IntegrateRequest::with`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_all: Option<branchyard::MergedAll>,
     /// Every branch the operation's branches delegated to, directly or
     /// below, once they finished: the operation waits for them, as
     /// `by run` does.

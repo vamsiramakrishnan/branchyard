@@ -170,10 +170,12 @@ pub fn render() -> String {
          \n\
          Capabilities are what the driver offers before negotiation. ACP resume is used only when the agent advertises `session/resume` or `session/load`; a session that cannot resume fails to open rather than starting fresh. \"Checked against\" names the harness version whose transcript or generated schema the driver's frames were compared with. \"Reasons\" names why each `no` capability (and any `yes`/`if advertised` with a real caveat) is that way, quoted from the driver's own refusal message or documentation; `not verified` marks a gap with no such evidence yet, never a guess.\n\
          \n\
-         \"Perm. answered\" and \"Steer\" are the two gates Branchyard can intercept mid-turn: a tool permission request it answers, and input it delivers into a running turn without ending it. Each is `—` when the driver does not offer it at all (nothing to intercept); otherwise `live-tested` (checked against a real installed binary — a qualification report's Policy area for permissions, or `docs/harness-integration.md` \"Steering a running turn\"'s recorded evidence for steer), `contract-only` (only the conformance kit's own mocked protocol test, run for every profile regardless of qualification), or `not verified` (offered, but neither) — never overstated.\n\
+         \"Perm. answered\" and \"Steer\" are the two gates Branchyard can intercept mid-turn: a tool permission request it answers, and input it delivers into a running turn without ending it. Each is `—` when the driver does not offer it at all (nothing to intercept); otherwise `live-tested` (checked against a real installed binary — a qualification report's Policy area for permissions, or `docs/harness-integration.md` \"Steering a running turn\"'s recorded evidence for steer), `contract-only` (only the conformance kit's own mocked protocol test, run for every profile regardless of qualification), or `not verified` (offered, but neither) — never overstated.\\n\
          \n\
-         | Harness | Profile | Protocol | Role | Resume | Fork | Cancel | Approvals | Perm. answered | Steer | Usage | Checked against | Live qualification | Reasons |\n\
-         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
+         \"Budget\" is whether the harness enforces a spending limit itself: Branchyard gives such a harness what is left of the branch's `max_usd` for each turn, so it stops before it goes over; for every harness, Branchyard still stops a turn once the cost the harness reports crosses the limit ([budgets](delegation.md#budgets)).\n\
+         \n\
+         | Harness | Profile | Protocol | Role | Resume | Fork | Cancel | Approvals | Perm. answered | Steer | Usage | Budget | Checked against | Live qualification | Reasons |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     // Integration targets, then any other registered harness with a profile.
     let rows = HARNESSES
@@ -194,7 +196,7 @@ pub fn render() -> String {
                     |(_, reason)| *reason,
                 );
             out += &format!(
-                "| {name} | — | — | — | — | — | — | — | — | — | — | — | not implemented: {} | — |\n",
+                "| {name} | — | — | — | — | — | — | — | — | — | — | — | — | not implemented: {} | — |\n",
                 reason.replace('|', "\\|")
             );
             continue;
@@ -228,7 +230,7 @@ pub fn render() -> String {
             let steer_evidence = steer_evidence(profile.id, capabilities.steer);
             out += &format!(
                 "| {name} | `{}` | {} | {} | {resume} | {} | {} | {} | {permission_evidence} | \
-                 {steer_evidence} | {} | {} | {live} | {reason_notes} |\n",
+                 {steer_evidence} | {} | {} | {} | {live} | {reason_notes} |\n",
                 profile.id,
                 protocol(profile.protocol),
                 if index == 0 { "default" } else { "alternate" },
@@ -236,6 +238,7 @@ pub fn render() -> String {
                 yes(capabilities.cancellation),
                 yes(capabilities.tool_approvals),
                 yes(capabilities.usage),
+                yes(capabilities.budget),
                 profile.checked_against.unwrap_or("—"),
             );
         }

@@ -1038,6 +1038,7 @@ fn status_style(status: &BranchStatus) -> (&'static str, Style) {
     match status {
         BranchStatus::Running => ("●", Style::new().fg(Color::Cyan)),
         BranchStatus::Waiting => ("◌", Style::new().fg(Color::DarkGray)),
+        BranchStatus::WaitingOnChildren => ("◐", Style::new().fg(Color::Cyan)),
         BranchStatus::Blocked { .. } => ("■", Style::new().fg(Color::Magenta)),
         BranchStatus::Ready => ("✔", Style::new().fg(Color::Green)),
         BranchStatus::NoChanges => ("○", Style::new().fg(Color::DarkGray)),
@@ -1054,6 +1055,7 @@ fn status_style(status: &BranchStatus) -> (&'static str, Style) {
             Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         BranchStatus::Merged { .. } => ("◆", Style::new().fg(Color::Blue)),
+        BranchStatus::Discarded { .. } => ("⊘", Style::new().fg(Color::DarkGray)),
         BranchStatus::AwaitingPlanApproval => (
             "?",
             Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
@@ -2097,6 +2099,7 @@ mod tests {
             created_at: 1_000,
             stalled: false,
             superseded_by: None,
+            model: None,
         }
     }
 
@@ -2339,6 +2342,7 @@ mod tests {
                     output_tokens: Some(output),
                     cached_input_tokens: None,
                     cost_usd: None,
+                    ..Usage::default()
                 },
             })
         };

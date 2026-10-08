@@ -460,6 +460,53 @@ pub(crate) fn summary(
     Some(out)
 }
 
+/// The summary a fresh session starts with when a branch's harness
+/// session was lost before the harness recorded it (its engine stopped
+/// early in a turn): every prompt it was given, in full and in order, with
+/// what the harness replied to each. The task is in those prompts, so the
+/// fresh session does not start without it.
+pub(crate) fn lost_session_summary(name: &str, events: &[RecordedEvent]) -> String {
+    let mut asked: Vec<(String, String)> = Vec::new();
+    for event in events {
+        match &event.activity {
+            Activity::Prompt(text) => asked.push((asked_text(text).to_owned(), String::new())),
+            Activity::Harness(Event::MessageDelta { text, .. }) => {
+                if let Some((_, reply)) = asked.last_mut() {
+                    reply.push_str(text);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = format!(
+        "This continues the work of branch {name}. Its harness session was lost before the \
+         harness recorded it (the engine running its turn stopped early in the turn), so this \
+         is a fresh session. The working tree is as that turn left it; check it (`git status`, \
+         `git log`) before going on. What it was asked before, in order:\n"
+    );
+    if asked.is_empty() {
+        out.push_str("\n(No earlier prompts were recorded.)\n");
+    }
+    for (n, (prompt, reply)) in asked.iter().enumerate() {
+        out.push_str(&format!("\n### Prompt {}\n{}\n", n + 1, prompt.trim()));
+        if !reply.trim().is_empty() {
+            out.push_str(&format!("Replied: {}\n", quote(reply)));
+        }
+    }
+    out
+}
+
+/// What a person or parent asked in a submitted prompt: without the
+/// summary a fresh session began with or the note about a lost turn.
+pub(crate) fn asked_text(prompt: &str) -> &str {
+    const CLOSE: &str = "</branchyard-recovered>";
+    let own = own_prompt(prompt);
+    match own.find(CLOSE) {
+        Some(at) => own[at + CLOSE.len()..].trim_start(),
+        None => own,
+    }
+}
+
 /// A turn's prompt after a summary.
 pub(crate) fn compose(context: &str, prompt: &str) -> String {
     format!("{}{TASK_HEADING}{prompt}", context.trim_end())

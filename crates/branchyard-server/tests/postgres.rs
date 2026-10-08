@@ -919,6 +919,7 @@ fn a_spawn_that_waits_is_queued_run_by_a_worker_and_started_later() {
         Work::Integrate {
             branch: "lib".into(),
             parent: "root".into(),
+            with: Vec::new(),
         },
         &["lib"],
         &["lib", "root"],

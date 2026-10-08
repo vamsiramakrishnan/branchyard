@@ -263,6 +263,11 @@ impl Provisioner for Claude {
         }
         if let Some(model) = &context.model {
             let model = resolve_model_alias(model, MODEL_ALIASES);
+            // The stream-json driver passes it as `--model` too, which
+            // its own settings cannot override.
+            if context.protocol == Protocol::ClaudeStreamJson {
+                plan.session.model = Some(model.clone());
+            }
             plan.set_env(EnvVar::plain("ANTHROPIC_MODEL", model));
         }
         Ok(plan)

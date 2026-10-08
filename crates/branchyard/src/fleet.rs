@@ -531,13 +531,16 @@ impl BranchOutcome {
             BranchStatus::Running
             | BranchStatus::Waiting
             | BranchStatus::Blocked { .. }
-            | BranchStatus::AwaitingPlanApproval => None,
+            | BranchStatus::AwaitingPlanApproval
+            | BranchStatus::WaitingOnChildren => None,
             BranchStatus::Ready => Some(BranchOutcome::Ready),
             BranchStatus::Merged { .. } => Some(BranchOutcome::Merged),
             BranchStatus::Interrupted => Some(BranchOutcome::Interrupted),
+            // A discarded branch was set aside: its work was not used.
             BranchStatus::NoChanges
             | BranchStatus::BudgetExceeded { .. }
-            | BranchStatus::Failed { .. } => Some(BranchOutcome::Failed),
+            | BranchStatus::Failed { .. }
+            | BranchStatus::Discarded { .. } => Some(BranchOutcome::Failed),
         }
     }
 }

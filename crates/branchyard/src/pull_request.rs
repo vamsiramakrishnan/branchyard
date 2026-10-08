@@ -220,9 +220,10 @@ impl Branch {
                 .verify(&branchyard_workspace::Commit(candidate.commit), &check)
         };
         let verified = verified.map_err(|error| match error {
-            branchyard_workspace::IntegrationError::CheckNotStarted(e) => {
-                Error::CheckNotStarted(e.to_string())
-            }
+            branchyard_workspace::IntegrationError::CheckNotStarted(e) => Error::CheckNotStarted {
+                reason: e.to_string(),
+                checks: Vec::new(),
+            },
             branchyard_workspace::IntegrationError::Git(e) => git::error(e),
             other => Error::Git(other.to_string()),
         })?;

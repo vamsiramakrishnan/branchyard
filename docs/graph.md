@@ -13,7 +13,11 @@ A child created with `depends_on` names other children of the same parent, its s
 | `settled` (default) | `ready`, `no_changes` or `merged` |
 | `integrated` | `merged` into the parent's own branch (`by integrate`), or `no_changes`, which leaves nothing to integrate |
 
-A prerequisite that ends `failed`, `interrupted` (cancelled, or recovered after its engine stopped), `budget_exceeded` or `blocked`, or that is removed, marks the dependent **`blocked`**, with the reason: `{"state": "blocked", "reason": "its prerequisite lint failed: ..."}`. What depends on a blocked branch is blocked in turn. A blocked branch never ran; it stays blocked until its graph changes: a proposal that adds or removes one of its dependencies reopens it to `waiting`, and it starts once what remains has settled. A prerequisite that is `ready` but not yet integrated keeps an `after: integrated` dependent waiting for as long as it takes.
+Either way, a prerequisite whose candidate the parent's git branch contains counts as integrated, whatever its recorded status says: one that was interrupted and then integrated, or that the parent merged by hand.
+
+A prerequisite that ends `failed`, `interrupted` (cancelled, or recovered after its engine stopped with nothing written), `budget_exceeded` or `blocked`, or that is removed, marks the dependent **`blocked`**, with the reason: `{"state": "blocked", "reason": "its prerequisite lint failed: ..."}`. What depends on a blocked branch is blocked in turn. A blocked branch never ran.
+
+The verdict is taken from current facts, not from the event that blocked it: whenever a prerequisite's state changes (its turn ends, it is integrated, it is recovered), each dependent blocked by it is judged again, and one whose prerequisites no longer block it is reopened to `waiting`, in a compare-and-swap, with a warning on its log, and starts once they have settled. So a dependent blocked because its prerequisite was interrupted starts once that prerequisite is continued, or integrated. A proposal that adds or removes one of a blocked branch's dependencies reopens it too. A prerequisite that is `ready` but not yet integrated keeps an `after: integrated` dependent waiting for as long as it takes.
 
 `waiting` and `blocked` are two new `BranchStatus` states. Existing records and JSON read as before; a client written against the earlier set of states sees two it does not know.
 
@@ -36,7 +40,7 @@ A proposal is a list of edits and the revision of the parent's graph it was made
 
 | Edit | Fields |
 |---|---|
-| `spawn` | Every field of the `spawn` tool (`prompt`, `name`, `harness`, `base`, `budget`, `check`, `max_depth`, `max_children`, `harnesses`, `deny`, `seat`), and `depends_on`, `after`, `bindings` |
+| `spawn` | Every field of the `spawn` tool (`prompt`, `name`, `harness`, `base`, `budget`, `check`, `max_depth`, `max_children`, `harnesses`, `deny`, `seat`, `connectors`, `plan`, `model`), and `depends_on`, `after`, `bindings` |
 | `add_dependency` | `dependent`, `prerequisite`, optional `after`. The dependent must be `waiting` or `blocked`, or spawned in the same proposal |
 | `remove_dependency` | `dependent`, `prerequisite`. The same condition |
 
@@ -79,9 +83,10 @@ Dependencies are rows in the store, beside the branch records, in SQLite and Pos
 Who starts it:
 
 - **The engine that settles a prerequisite, in any process.** When a turn ends, its engine looks at what depends on that branch; when a child is integrated, so does the integrating engine. A dependent whose prerequisites have all settled is claimed and started on a thread of that process; one with a failed prerequisite is blocked. So a prerequisite continued by `by send` in one process, or integrated by `by integrate` in another, starts its dependent there, and that command waits for it before it exits.
-- **Recovery.** A prerequisite recovered after its engine stopped ends `interrupted` (or with its journaled result), and recovery blocks its dependents (or, if it had settled, leaves them to the next point below).
+- **Recovery.** A prerequisite recovered after its engine stopped ends `interrupted` (or with its journaled result, or `ready` when its lost turn had written its work; [durability](durability.md#recovery)), and recovery blocks its dependents (or, if it had settled, leaves them to the next point below).
+- **Integration.** Integrating a prerequisite, or the parent's branch coming to contain its candidate however it got there, settles its `after: integrated` dependents and reopens those it had blocked.
 - **Waits.** `wait_subtree` (and so `by run`, `by spawn`, `by graph apply` and every server operation that waits for a subtree) and `Delegate::wait` start a waiting dependent whose prerequisites have settled, when this process applied its proposal. A crash between a prerequisite settling and its dependent starting is picked up there.
-- **`Yard::resume_graph(options)`** (`by graph resume [--yes]` locally) starts every such dependent in the repository under the given options. Every server process, and every `by worker`, does this for each repository it serves on its recovery interval (`recover_interval`, every 30 seconds), right after recovering branches whose engine stopped; see [below](#with-the-servers-queue).
+- **`Yard::resume_graph(options)`** (`by graph resume [--yes]` locally) starts every such dependent in the repository under the given options, reopens a blocked one whose prerequisites no longer block it, and wakes a parent [waiting on its children](delegation.md#waiting-on-children) whose children have all settled. Every server process, and every `by worker`, does this for each repository it serves on its recovery interval (`recover_interval`, every 30 seconds), right after recovering branches whose engine stopped; see [below](#with-the-servers-queue).
 
 A wait for a subtree covers what the subtree's turns start: a branch that depends on one in the subtree, and its descendants, so `by send child` waits for the sibling that `child`'s turn started.
 
@@ -114,7 +119,6 @@ Branchyard's first graph design (an unmerged server protocol) carried task and g
 
 - **A dependent's policy after a restart.** One started by `resume_graph`, or by an engine that neither applied its proposal nor ran a sibling's turn, runs under that caller's options: on a server after it restarts, the default policy, deny.
 - **A dependent that waits forever.** `after: integrated` waits for as long as the prerequisite is not integrated; nothing times it out. A wait for the subtree returns once nothing runs, leaving it `waiting`.
-- **Blocking reversed by recovery of the prerequisite.** A blocked dependent stays blocked when its prerequisite later succeeds (say, after a `send`); a graph edit reopens it.
 - **Filesystem enforcement of bindings**, as above.
 - **Real harnesses.** Tested against the fake ACP agent only.
 
@@ -126,7 +130,7 @@ Branchyard's first graph design (an unmerged server protocol) carried task and g
 | [`delegation.rs`](../crates/branchyard/src/delegation.rs) | `Delegate::apply_graph`, `graph`; validating a whole proposal (`plan_child` for each spawn, counting the ones before it) and committing it; spawn as a one-edit proposal; waits that cover dependents; cancelling a waiting child |
 | [`sqlite.rs`](../crates/branchyard/src/sqlite.rs), [`pg.rs`](../crates/branchyard/src/pg.rs) | `GraphBackend` for both stores: `commit_graph` in one transaction, `claim` and `settle_waiting` as compare-and-swaps |
 | [`conformance.rs`](../crates/branchyard/src/conformance.rs) | The `graph` check on both stores: a stale revision, a taken name, a duplicate or missing edge and an edit on a started branch each change nothing; a claim wins once; a blocked branch reopened by an edit; removal |
-| [`tests/graph.rs`](../crates/branchyard/tests/graph.rs) | A dependent starting only after its prerequisite settles, from the parent's head; blocked dependents (failed, cancelled, transitively) and reopening; fifteen invalid proposals each leaving state, names, budget and revision unchanged; a three-level graph built at runtime; `after: integrated` starting from the merge; a dependent started by the process that integrates its prerequisite; a prerequisite whose engine was killed blocking its dependent on recovery; `resume_graph` starting a dependent no engine started; bindings; the tool and the typed call agreeing |
+| [`tests/graph.rs`](../crates/branchyard/tests/graph.rs) | A dependent starting only after its prerequisite settles, from the parent's head; blocked dependents (failed, cancelled, transitively) and reopening, by a graph edit or when a blocking prerequisite settles; a dependent blocked by an interrupted prerequisite starting once it is continued and integrated; a prerequisite whose engine died after it wrote its work recovering `ready`, its dependent waiting and then started by `resume_graph`; fifteen invalid proposals each leaving state, names, budget and revision unchanged; a three-level graph built at runtime; `after: integrated` starting from the merge; a dependent started by the process that integrates its prerequisite; a prerequisite whose engine was killed blocking its dependent on recovery; `resume_graph` starting a dependent no engine started; bindings; the tool and the typed call agreeing |
 | [`branchyard-mcp` `tests/delegation.rs`](../crates/branchyard-mcp/tests/delegation.rs) | The M5 gate over the real MCP server: a root harness applies a graph whose child's harness applies its own, grandchildren waiting on each other; a stale proposal refused |
 | [`branchyard-cli` `tests/cli.rs`](../crates/branchyard-cli/tests/cli.rs), [`remote.rs`](../crates/branchyard-cli/tests/remote.rs) | `by graph` and the Python module inside a harness; `by graph apply` from a file and `by spawn --depends-on` outside one; `by --remote graph` printing the same JSON as local mode, refusals included |
 | [`branchyard-server` `tests/parity.rs`](../crates/branchyard-server/tests/parity.rs) | `POST …/graph` and `GET …/graph`: `409 stale_revision`, `403 delegation_not_allowed`, the graph the SDK reads; `POST …/spawn` with `depends_on` through the queue: the operation finishes with the child `waiting`, and integrating its prerequisite (another queued operation) starts it from the merge |

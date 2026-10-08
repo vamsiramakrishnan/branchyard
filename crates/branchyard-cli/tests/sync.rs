@@ -44,7 +44,7 @@ impl World {
 
     fn command(&self, root: &Path, program: impl AsRef<std::ffi::OsStr>) -> Command {
         let mut command = Command::new(program);
-        command
+        branchyard_testkit::hermetic(&mut command)
             .current_dir(root)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -52,16 +52,6 @@ impl World {
             .env("BRANCHYARD_USER_CONFIG", &self.config)
             .env("BRANCHYARD_HOME", self.dir.join("home"))
             .env("PAGER", "cat");
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-            "BRANCHYARD_REMOTE",
-            "BRANCHYARD_SYNC_PASSPHRASE",
-        ] {
-            command.env_remove(var);
-        }
         command
     }
 

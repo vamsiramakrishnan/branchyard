@@ -6,7 +6,9 @@
 //! commit. [`Repository::integrate`] merges that commit in a private
 //! temporary worktree, runs a trusted [`Check`] on the exact merge result,
 //! and promotes it with a compare-and-swap of the target ref against the
-//! commit the caller expected.
+//! commit the caller expected. [`Repository::integrate_many`] does the same
+//! for several candidates at once: merged in order in one worktree, checked
+//! once on the result, promoted with one compare-and-swap.
 //!
 //! Guarantees:
 //! - The target ref changes only through that compare-and-swap, and only to
@@ -40,5 +42,8 @@ mod repo;
 pub use branch::{BranchName, InvalidBranchName, BRANCH_PREFIX};
 pub use check::{Check, OUTPUT_TAIL_BYTES};
 pub use git::{Git, GitError};
-pub use integrate::{CheckResult, Integrated, IntegrationError, Verified};
+pub use integrate::{
+    CheckResult, Integrated, IntegratedMany, IntegrationError, MergedCandidate, MergedWorktree,
+    Verified,
+};
 pub use repo::{Candidate, Commit, DiffStat, Repository, Workspace};

@@ -131,11 +131,14 @@ impl Tracker {
             }
             Activity::Status(status) => {
                 let (kind, text) = match status {
-                    BranchStatus::Running | BranchStatus::Waiting => {
+                    BranchStatus::Running
+                    | BranchStatus::Waiting
+                    | BranchStatus::WaitingOnChildren => {
                         self.status.remove(branch);
                         return None;
                     }
-                    BranchStatus::Merged { .. } => return None,
+                    // Someone set it aside on purpose: nothing to tell them.
+                    BranchStatus::Merged { .. } | BranchStatus::Discarded { .. } => return None,
                     BranchStatus::Ready => (Kind::Finished, format!("{branch} is ready to merge")),
                     BranchStatus::NoChanges => {
                         (Kind::Finished, format!("{branch} finished with no changes"))

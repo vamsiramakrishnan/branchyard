@@ -161,7 +161,7 @@ impl Repo {
 
     fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
         let mut command = Command::new(program);
-        command
+        branchyard_testkit::hermetic(&mut command)
             .current_dir(&self.root)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -171,18 +171,6 @@ impl Repo {
                 "BRANCHYARD_USER_CONFIG",
                 "/nonexistent/branchyard-config.toml",
             );
-        for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-            "BRANCHYARD_REGISTRY",
-            "BRANCHYARD_REMOTE",
-            "BRANCHYARD_MCP_REGISTRY",
-            "BRANCHYARD_NPM_REGISTRY",
-        ] {
-            command.env_remove(var);
-        }
         command
     }
 

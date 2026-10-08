@@ -109,13 +109,19 @@ pub enum SessionMode {
 }
 
 /// Parameters for opening a session.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Open {
     pub mode: SessionMode,
     /// Working directory inside the sandbox.
     pub cwd: String,
     /// Harness-specific model name, when the task pins one.
     pub model: Option<String>,
+    /// The most, in US dollars, the harness may spend from its start, for a
+    /// driver that can stop its harness at such a limit
+    /// ([`Capabilities::budget`]); a driver that cannot refuses it. The
+    /// caller's own limit still holds: the harness's figure is its
+    /// estimate.
+    pub max_budget_usd: Option<f64>,
     /// MCP servers the harness starts for this session, in its native
     /// configuration shape. Resumes and forks pass them again: harnesses do
     /// not keep them with the session.
@@ -143,6 +149,7 @@ impl Open {
             mode,
             cwd: cwd.into(),
             model: None,
+            max_budget_usd: None,
             mcp_servers: Vec::new(),
             instructions: None,
             mcp_config_file: None,
@@ -257,6 +264,20 @@ pub(crate) fn refuse_projection(open: &Open, harness: &str) -> Result<(), Reject
         )));
     }
     Ok(())
+}
+
+/// The limit [`TurnOutcome::LimitReached`] names when the harness stopped
+/// itself at [`Open::max_budget_usd`].
+pub const BUDGET_LIMIT: &str = "max_budget_usd";
+
+/// Refuse a spending limit for a driver whose harness cannot enforce one
+/// ([`Capabilities::budget`]), giving `reason`, the driver's recorded
+/// reason, rather than dropping it silently.
+pub(crate) fn refuse_budget(open: &Open, reason: &str) -> Result<(), Rejected> {
+    match open.max_budget_usd {
+        Some(_) => Err(Rejected::Unsupported(format!("a spending limit: {reason}"))),
+        None => Ok(()),
+    }
 }
 
 /// Refuse HTTP and SSE MCP servers for a driver that cannot pass them.
@@ -460,6 +481,17 @@ pub struct Usage {
     pub cached_input_tokens: Option<u64>,
     /// The harness's own cost estimate in USD, not a billing statement.
     pub cost_usd: Option<f64>,
+    /// Input written to a prompt cache that lives five minutes (or the
+    /// provider's only cache), when the protocol says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    /// Input written to Anthropic's one-hour prompt cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_tokens: Option<u64>,
+    /// The model the tokens were spent on, when the protocol names it, so
+    /// a consumer can price a per-call observation that carries no cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -570,12 +602,61 @@ pub enum Event {
     ProtocolViolation {
         detail: String,
     },
+    /// The harness is working without anything else to report: a tool is
+    /// still running, or the model is still thinking. A liveness signal
+    /// for stall detection; the engine does not record it.
+    Progress {
+        /// The turn in flight, if any.
+        turn: Option<u64>,
+    },
+    /// The harness started a task of its own: a shell command, a subagent
+    /// or a monitor. `background` is true when it runs on after the call
+    /// that started it returned, possibly after the turn ends.
+    HarnessTaskStarted {
+        /// The task.
+        task: HarnessTask,
+        /// Whether it runs on after the call that started it returned.
+        background: bool,
+    },
+    /// A task of the harness's own ended. `status` is the harness's word
+    /// for how (`completed`, `failed`, `stopped`, ...).
+    HarnessTaskEnded {
+        /// The harness's identifier for the task.
+        task_id: String,
+        /// How it ended, in the harness's words.
+        status: String,
+        /// The harness's one-line summary of it, when it gives one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
+    /// The complete set of the harness's background tasks now running,
+    /// each time it changes. Non-empty at a turn's end, it means the
+    /// harness is still working on something the turn started.
+    BackgroundTasks {
+        /// Every background task running now.
+        running: Vec<HarnessTask>,
+    },
     /// A well-formed message this driver does not interpret. Callers keep the
     /// raw line when they need it.
     Unrecognized {
         kind: String,
     },
     SessionClosed,
+}
+
+/// A task a harness runs of its own, as [`Event::HarnessTaskStarted`] and
+/// [`Event::BackgroundTasks`] report it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessTask {
+    /// The harness's own identifier for the task.
+    pub task_id: String,
+    /// What kind of task, in the harness's words (`local_bash`,
+    /// `local_agent`, ...), when it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// What the task does, in the harness's words.
+    pub description: String,
 }
 
 /// A local request the driver cannot carry out.
@@ -629,6 +710,11 @@ pub struct Capabilities {
     pub usage: bool,
     /// Input delivered into a running turn ([`Driver::steer`]).
     pub steer: bool,
+    /// A model chosen per session ([`Open::model`]).
+    pub model: bool,
+    /// A spending limit the harness enforces itself, stopping before it
+    /// goes over ([`Open::max_budget_usd`]).
+    pub budget: bool,
 }
 
 /// What a task needs from its harness. Unset fields are not required.
@@ -641,6 +727,11 @@ pub struct Requirements {
     pub turn_acknowledgment: bool,
     pub usage: bool,
     pub steer: bool,
+    /// A model chosen per session ([`Capabilities::model`]).
+    pub model: bool,
+    /// A spending limit the harness enforces itself
+    /// ([`Capabilities::budget`]).
+    pub budget: bool,
 }
 
 /// A capability name (as [`admit`] and [`Driver::capabilities`] name it,
@@ -691,6 +782,8 @@ pub fn admit(required: &Requirements, offered: &Capabilities) -> Result<(), Vec<
         ),
         ("usage", required.usage, offered.usage),
         ("steer", required.steer, offered.steer),
+        ("model", required.model, offered.model),
+        ("budget", required.budget, offered.budget),
     ]
     .into_iter()
     .filter(|(_, needed, available)| *needed && !available)
@@ -774,6 +867,15 @@ pub trait Driver {
 
     /// The harness's stdout closed or the process exited.
     fn transport_closed(&mut self) -> Vec<Event>;
+
+    /// Frames that ask the harness to end its session, written just before
+    /// its input is closed, for a protocol that has such a request. A
+    /// harness may otherwise outlive the end of its input, waiting on work
+    /// of its own (Claude Code waits for its background tasks). The
+    /// default writes nothing: closing the input is the whole protocol.
+    fn close(&mut self) -> Vec<Frame> {
+        Vec::new()
+    }
 }
 
 /// Serialize one frame as a single line.
@@ -845,9 +947,36 @@ impl Turns {
     }
 }
 
+/// When the model reads input steered at `boundary` ([`Driver::steer_boundary`]),
+/// in plain words, for a person: Claude Code, Codex and Pi before their
+/// next model call, claude-agent-acp at once.
+pub fn steer_boundary_text(boundary: &str) -> &'static str {
+    match boundary {
+        "claude_next_model_call" | "codex_turn_steer" | "pi_steer" => "before its next model call",
+        "acp_session_steering" => "at once, interrupting the response in progress but not the turn",
+        _ => "at its harness's next step",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_steer_boundary_reads_in_plain_words() {
+        for (boundary, text) in [
+            ("claude_next_model_call", "before its next model call"),
+            ("codex_turn_steer", "before its next model call"),
+            ("pi_steer", "before its next model call"),
+            ("acp_session_steering", "at once, interrupting"),
+            ("turn_start", "at its harness's next step"),
+        ] {
+            assert!(
+                steer_boundary_text(boundary).starts_with(text),
+                "{boundary}"
+            );
+        }
+    }
 
     #[test]
     fn native_sessions_refuse_flag_and_control_shapes() {

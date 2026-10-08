@@ -51,9 +51,9 @@ The ancestor check does not need the publisher's branch record to still exist: a
 
 | Surface | Publish | List | Get | Share |
 |---|---|---|---|---|
-| `by` | `by artifact publish FILE [--name N] [--label K=V]... [--branch B]` | `by artifact list [--branch B]` | `by artifact get ID --out PATH [--branch B]` | `by artifact share ID --to BRANCH [--branch B]` |
+| `by` | `by artifact publish FILE [--name N] [--media-type TYPE] [--label K=V]... [--branch B]` | `by artifact list [--branch B]` | `by artifact get ID --out PATH [--branch B]` | `by artifact share ID --to BRANCH [--branch B]` |
 | `by --remote` | same, `--branch` required | same, `--branch` required | same, `--branch` required | same, `--branch` required |
-| Python | `branchyard.publish(path, name=, labels=)` | `branchyard.list_artifacts()` | `branchyard.get_artifact(id, out)` | `branchyard.share_artifact(id, to)` |
+| Python | `branchyard.publish(path, name=, labels=, media_type=)` | `branchyard.list_artifacts()` | `branchyard.get_artifact(id, out)` | `branchyard.share_artifact(id, to)` |
 | Rust `Delegate` | `Delegate::publish_artifact` | `Delegate::artifacts` | `Delegate::read_artifact` | `Delegate::share_artifact` |
 | MCP | `publish_artifact` | `list_artifacts` | `get_artifact` | `share_artifact` |
 | SDK | `Yard::publish_artifact`, `Branch::publish` | `Yard::artifacts`, `Branch::artifacts` | `Yard::read_artifact`, `Branch::read_artifact` | `Yard::share_artifact` |
@@ -62,7 +62,13 @@ The ancestor check does not need the publisher's branch record to still exist: a
 
 Export and import (portable bundles, below) are local-only, so they are not in this table: `by artifact export ID... --out FILE.tar` / `by artifact import FILE`, `Yard`/`Branch::export_artifacts`/`import_artifacts`, `Delegate::export_artifacts`/`import_artifacts`.
 
-`--branch` names the acting branch outside a harness (as `spawn --parent` does); inside a harness it is the harness's own and `--branch` is refused if it names anyone else. A path a delegation surface gives (`by artifact publish`, the Python module, `Delegate`, MCP) is resolved against the acting branch's own worktree when relative, so a harness can `by artifact publish output.txt` from its own working directory; the SDK's `Yard::publish_artifact` takes any path directly, since it is not run from inside a worktree. `by --remote artifact`/`by --remote scratch` always act as a person (there is no harness to delegate as inside `by --remote`, unlike local mode inside a harness), so `--branch` is required rather than defaulting to the harness's own.
+`--branch` names the acting branch outside a harness (as `spawn --parent` does); inside a harness it is the harness's own and `--branch` is refused if it names anyone else.
+
+`media_type` (`--media-type`, the MCP tool's and Python's `media_type`, `Delegate::publish_artifact`'s argument) is recorded with the artifact, `application/octet-stream` when not given, and the HTTP route serves it as `Content-Type`. `digest` is not a sha256: it is the blake3 hash of the bytes, in lower-case hex (`b3sum FILE` prints the same), and `by artifact publish` says so.
+
+### Who may use storage
+
+Storage is a capability of every delegated branch, not of its depth ([delegation](delegation.md#what-a-delegated-harness-gets)): a leaf child, whose envelope allows no children of its own, gets a token for its turns like any delegated branch, and with it publishes, lists, reads and shares the artifacts it may read, and creates, lists, locks and shares the scratch areas it may reach, as itself. The grants above are unchanged: a leaf reads its ancestors' artifacts and what was shared to it, and a sibling's only after a share. Its token acts as nothing else; `--branch` naming another branch, and a read of an artifact it may not read, are refused (`denied`), which `crates/branchyard-cli/tests/cli.rs` tests through a leaf's own `by`. A path a delegation surface gives (`by artifact publish`, the Python module, `Delegate`, MCP) is resolved against the acting branch's own worktree when relative, so a harness can `by artifact publish output.txt` from its own working directory; the SDK's `Yard::publish_artifact` takes any path directly, since it is not run from inside a worktree. `by --remote artifact`/`by --remote scratch` always act as a person (there is no harness to delegate as inside `by --remote`, unlike local mode inside a harness), so `--branch` is required rather than defaulting to the harness's own.
 
 ### Portable bundles
 

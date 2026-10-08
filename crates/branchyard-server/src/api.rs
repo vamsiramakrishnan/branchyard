@@ -20,10 +20,10 @@ use branchyard::{
     Yard,
 };
 use branchyard_client::api::{
-    BranchEvents, BranchList, CancelRequest, CancelResult, Diff, FeedEntry, ForkRequest,
-    GraphRequest, HarnessList, IntegrateRequest, InventoryReport, MergeRequest, Operation,
-    OperationKind, PolicySpec, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest,
-    SpawnRequest, SteerRequest, TaskRequest, WorkerInventory,
+    BranchEvents, BranchList, CancelRequest, CancelResult, Diff, DiscardRequest, FeedEntry,
+    ForkRequest, GraphRequest, HarnessList, IntegrateRequest, InventoryReport, MergeRequest,
+    Operation, OperationKind, PolicySpec, ReincarnateRequest, Removed, RepoEntry, RepoList,
+    SendRequest, SpawnRequest, SteerRequest, TaskRequest, WaitRequest, WorkerInventory,
 };
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::de::DeserializeOwned;
@@ -693,6 +693,7 @@ pub fn router(app: Shared) -> Router {
         .route("/v1/repos/{repo}/tasks", axum::routing::post(post_task))
         .route("/v1/repos/{repo}/branches", get(branches))
         .route("/v1/repos/{repo}/operations", get(repo_operations))
+        .route("/v1/repos/{repo}/wait", axum::routing::post(post_wait))
         .route(
             "/v1/repos/{repo}/branches/{branch}",
             get(branch).delete(delete_branch),
@@ -716,6 +717,10 @@ pub fn router(app: Shared) -> Router {
         .route(
             "/v1/repos/{repo}/branches/{branch}/cancel",
             axum::routing::post(post_cancel),
+        )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/discard",
+            axum::routing::post(post_discard),
         )
         .route(
             "/v1/repos/{repo}/branches/{branch}/steer",
@@ -1527,7 +1532,12 @@ async fn post_send(
     let target = existing(&repo.yard, &branch).await?;
     {
         let (app, branch, request) = (app.clone(), branch.clone(), request.clone());
-        blocking(move || work::send_allowed(&app, &target, &branch, &request)).await??;
+        blocking(move || {
+            work::send_allowed(&app, &target, &branch, &request)?;
+            // Refused now, not once queued, when no turn was cut off.
+            work::sent_prompt(&target, &request).map(drop)
+        })
+        .await??;
     }
     let cursor = sync_feed(&repo.feed).await?;
     let new = NewOperation {
@@ -1706,6 +1716,87 @@ async fn post_cancel(
     Ok(Json(CancelResult { cancelled }))
 }
 
+/// Set a settled branch aside with the caller's authority, like
+/// `by discard`; the answer is its inspection. Like a removal, held in the
+/// operation store, so no operation on any server sharing it starts a turn
+/// of the branch meanwhile. Refused with 409 `running` while a turn runs.
+async fn post_discard(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
+    JsonBody(DiscardRequest { reason }, _): JsonBody<DiscardRequest>,
+) -> Result<Json<branchyard::Inspection>, ApiError> {
+    let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
+    let reason = reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map_or_else(
+            || format!("discarded by {} through the server", caller.name()),
+            str::to_owned,
+        );
+    let registry = app.registry.clone();
+    blocking(move || {
+        let hold = registry.hold(&repo.name, &branch, "a discard")?;
+        let discarded = repo
+            .yard
+            .discard(&branch, &reason)
+            .and_then(|_| repo.yard.branch(&branch)?.delegate(TaskOptions::default()))
+            .and_then(|d| d.inspect(&branch))
+            .map_err(|e| error::sdk(&e));
+        drop(hold);
+        discarded
+    })
+    .await?
+    .map(Json)
+}
+
+/// The longest one wait request blocks a server worker: a caller that
+/// wants longer asks again, as `by --remote wait` does.
+const MAX_WAIT: Duration = Duration::from_secs(30);
+
+/// Block until branches settle, like `by wait`, with the caller's authority
+/// to read them, for up to [`MAX_WAIT`]. Reading their durable status, it
+/// sees turns that run in any process; while it waits it does what the
+/// server's recovery interval does for them, sooner. A branch an operation
+/// queued before the wait will run a turn of is waited for until that turn
+/// has run, not reported with the turn before it.
+async fn post_wait(
+    State(app): State<Shared>,
+    Path(repo): Path<String>,
+    Extension(caller): Extension<Caller>,
+    JsonBody(request, _): JsonBody<WaitRequest>,
+) -> Result<Json<branchyard::Waited>, ApiError> {
+    let state = app.authorized_repo(&caller, &repo, "read")?;
+    let (yard, repo) = (state.yard.clone(), state.name.clone());
+    let registry = app.registry.clone();
+    if request.branches.is_empty() {
+        return Err(ApiError::bad_request("give the branches to wait for"));
+    }
+    let timeout = match request.timeout_seconds {
+        None => MAX_WAIT,
+        Some(s) if s.is_finite() && s >= 0.0 => Duration::from_secs_f64(s.min(1e9)).min(MAX_WAIT),
+        Some(s) => {
+            return Err(ApiError::bad_request(format!(
+                "timeout_seconds takes a number of seconds, not {s}"
+            )))
+        }
+    };
+    blocking(move || {
+        let names: Vec<&str> = request.branches.iter().map(String::as_str).collect();
+        // A send admitted before this wait has not started its turn until
+        // a worker claims it; the wait is for that turn.
+        yard.wait_for_queued(&names, request.any, Some(timeout), |branch| {
+            registry
+                .turn_queued(&repo, branch)
+                .map_err(|e| branchyard::Error::State(e.body.message))
+        })
+    })
+    .await?
+    .map(Json)
+    .map_err(|e| error::sdk(&e))
+}
+
 /// How long a steer request waits for the engine running the turn to
 /// deliver the input.
 const STEER_WAIT: Duration = Duration::from_secs(10);
@@ -1828,7 +1919,7 @@ async fn post_integrate(
     Path((repo, branch)): Path<(String, String)>,
     Extension(caller): Extension<Caller>,
     headers: HeaderMap,
-    JsonBody(IntegrateRequest {}, canonical): JsonBody<IntegrateRequest>,
+    JsonBody(IntegrateRequest { with }, canonical): JsonBody<IntegrateRequest>,
 ) -> Result<Response, ApiError> {
     let repo = app.authorized_repo(&caller, &repo, "merge")?.clone();
     let route = format!("POST /v1/repos/{}/branches/{branch}/integrate", repo.name);
@@ -1837,18 +1928,34 @@ async fn post_integrate(
         return Ok(response);
     }
     let parent = {
-        let (yard, name) = (repo.yard.clone(), branch.clone());
-        blocking(move || work::delegator(&yard, &name))
-            .await?
-            .map_err(|e| error::sdk(&e))?
+        let (yard, name, with) = (repo.yard.clone(), branch.clone(), with.clone());
+        blocking(move || {
+            let parent = work::delegator(&yard, &name)?;
+            // Siblings integrated together share their parent.
+            for other in &with {
+                if work::delegator(&yard, other)? != parent {
+                    return Err(branchyard::Error::Denied(format!(
+                        "{other} was not delegated by {parent}, {name}'s parent; integrate \
+                         together only children of one parent"
+                    )));
+                }
+            }
+            Ok(parent)
+        })
+        .await?
+        .map_err(|e| error::sdk(&e))?
     };
     let cursor = sync_feed(&repo.feed).await?;
+    let mut branches = vec![branch.clone()];
+    branches.extend(with.iter().cloned());
+    let mut locks = branches.clone();
+    locks.push(parent.clone());
     let new = NewOperation {
         repo: repo.name.clone(),
         kind: OperationKind::Integrate,
-        branches: vec![branch.clone()],
+        branches,
         cursor,
-        locks: vec![branch.clone(), parent.clone()],
+        locks,
         idempotency: idem,
         principal: caller.0.clone(),
         creates: Vec::new(),
@@ -1857,7 +1964,16 @@ async fn post_integrate(
         priority: 0,
         trace: incoming_trace(&headers),
     };
-    admit(&app, new, Work::Integrate { branch, parent }).await
+    admit(
+        &app,
+        new,
+        Work::Integrate {
+            branch,
+            parent,
+            with,
+        },
+    )
+    .await
 }
 
 /// Act as `branch` with the server's authority, as `by inspect`, `by events`

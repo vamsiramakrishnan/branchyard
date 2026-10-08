@@ -55,7 +55,7 @@ Scion's nine provisioners map onto Branchyard's harness IDs through [`branchyard
 
 Every other harness (Pi, Amp, Goose, Cursor, Qwen Code, Kimi CLI, Oh My Pi, DeepSeek Harness) has no provisioner: MCP servers, instructions and a model pass to its driver, which accepts or refuses them; secrets are reported unused; effort and telemetry are refused.
 
-**Model.** Branchyard had no per-task model option. `Provisioning::model` (`--model`) is one, set where each harness takes it, as the table says. An ACP profile without a native setting refuses it, because ACP v1 has no model parameter.
+**Model.** Branchyard had no per-task model option. `Provisioning::model` (`--model`) is one, set where each harness takes it, as the table says. An ACP profile without a native setting refuses it, because ACP v1 has no model parameter. A child's model (`by spawn --model`) is checked the same way before the child is created ([delegation](delegation.md#models)): where the provisioner sets it, the profile takes it, whatever its driver can do; a setting written into the home (Codex's `config.toml`, Gemini CLI's `settings.json`) needs a private one.
 
 ### Secrets and the harness's tools
 
@@ -146,15 +146,24 @@ let options = TaskOptions {
 };
 ```
 
-`McpServerSpec::env` is stored with the branch like the rest of the request; put secrets in `secret_env`. Remote MCP servers are taken by Claude Code's stream-json driver and by ACP agents that advertise `mcpCapabilities` (claude-agent-acp 0.81.2 does); Codex, Antigravity, Pi and Amp refuse them. They have no `by` flag yet: use the SDK or the HTTP API (`"remote_mcp_servers": [{"name", "url", "transport": "http" | "sse", "headers": {"Header": "SECRET"}}]`).
+`McpServerSpec::env` is stored with the branch like the rest of the request; put secrets in `secret_env`. Remote MCP servers are taken by Claude Code's stream-json driver and by ACP agents that advertise `mcpCapabilities` (claude-agent-acp 0.81.2 does); Codex, Antigravity, Pi and Amp refuse them. `by` takes an HTTP one as `--mcp NAME=https://URL` (below); an SSE one through the SDK or the HTTP API (`"remote_mcp_servers": [{"name", "url", "transport": "http" | "sse", "headers": {"Header": "SECRET"}}]`).
 
-`by run`, `fan`, `send` and `fork` take `--connector GRANT` (repeatable; [connectors](connectors.md#grants)), `--secret NAME[=VAR|=@FILE]` (repeatable), `--auth METHOD`, `--mcp NAME=COMMAND` (repeatable; an absolute executable and its arguments), `--instructions FILE`, `--model NAME`, `--effort low|medium|high|xhigh|0-100` and `--telemetry URL|off`:
+`by run`, `fan`, `send` and `fork` take `--connector GRANT` (repeatable; [connectors](connectors.md#grants)), `--secret NAME[=VAR|=@FILE]` (repeatable), `--auth METHOD`, `--mcp NAME=COMMAND` (repeatable; an absolute executable and its arguments) or `--mcp NAME=https://URL` (a streamable HTTP server the harness connects to), `--mcp-header NAME:HEADER=VAR|@FILE` (repeatable; a header for that HTTP server), `--instructions FILE`, `--model NAME`, `--effort low|medium|high|xhigh|0-100` and `--telemetry URL|off`:
 
 ```sh
 by run "Fix the flaky parser test" --harness codex --isolated \
   --secret OPENAI_API_KEY --effort high --telemetry http://127.0.0.1:4317 --yes
 by run "Same, in a microVM" --provider microsandbox --image ghcr.io/you/codex:0.157 \
   --secret CODEX_AUTH=@$HOME/.codex/auth.json --yes
+```
+
+An HTTP server's header is a secret like any other: `--mcp-header search:Authorization=SEARCH_AUTH` reads the value from the variable `SEARCH_AUTH` each turn (the secret `SEARCH_AUTH`, as `--secret SEARCH_AUTH` would), and `--mcp-header search:Authorization=@/run/search-auth` from the file (the secret `MCP_SEARCH_AUTHORIZATION`). Neither value is stored, and the header reaches only the harness's MCP configuration (a 0600 file for Claude Code), so it needs a private home, as `--secret` does. With no header, an HTTP server needs nothing more:
+
+```sh
+by run "Summarize the open incidents" --harness claude-code-stream-json \
+  --mcp world=https://mcp.example.com/mcp --yes
+by run "Same, authenticated" --isolated --mcp world=https://mcp.example.com/mcp \
+  --mcp-header world:Authorization=@/run/world-auth --yes
 ```
 
 `--secret` needs `--isolated` or a sandbox provider. `--pass-env` still copies variables into a sandbox by name; `--secret` is the one to use for credentials, because it also writes the harness's native credential files and records which method it chose.

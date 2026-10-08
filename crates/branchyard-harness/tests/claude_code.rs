@@ -22,6 +22,7 @@ fn open_with(mode: SessionMode) -> (ClaudeCode, Opened) {
             mode,
             cwd: "/workspace".into(),
             model: None,
+            max_budget_usd: None,
             mcp_servers: Vec::new(),
             instructions: None,
             mcp_config_file: None,
@@ -134,11 +135,10 @@ fn replays_a_recorded_claude_code_turn() {
     let usage = events
         .iter()
         .find_map(|e| match e {
-            Event::UsageObserved { usage, .. } => Some(usage.clone()),
+            Event::UsageObserved { usage, .. } if usage.cumulative => Some(usage.clone()),
             _ => None,
         })
         .unwrap();
-    assert!(usage.cumulative);
     assert_eq!(usage.cost_usd, Some(0.0404016));
     assert!(usage.output_tokens.unwrap() > 0);
     assert_eq!(
@@ -267,6 +267,49 @@ fn interrupts_are_acknowledged_then_end_the_turn() {
     );
 }
 
+/// A spending limit is passed as `--max-budget-usd`, and the turn Claude
+/// Code stops at it ends at that limit; a limit that is not a positive
+/// number is refused before launch.
+#[test]
+fn a_spending_limit_is_passed_and_stopping_at_it_is_a_limit() {
+    let mut driver = ClaudeCode::new(vec!["claude".into()]);
+    let opened = driver
+        .open(Open {
+            max_budget_usd: Some(0.0125),
+            ..Open::new(SessionMode::Fresh, "/workspace")
+        })
+        .unwrap();
+    let argv = opened.launch.argv;
+    let at = argv.iter().position(|a| a == "--max-budget-usd").unwrap();
+    assert_eq!(argv[at + 1], "0.0125");
+    for usd in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let refused = ClaudeCode::new(vec!["claude".into()]).open(Open {
+            max_budget_usd: Some(usd),
+            ..Open::new(SessionMode::Fresh, "/workspace")
+        });
+        assert!(
+            matches!(refused, Err(Rejected::InvalidOpen(_))),
+            "{usd}: {refused:?}"
+        );
+    }
+    let (_, argv, _) = open(SessionMode::Fresh);
+    assert!(!argv.contains(&"--max-budget-usd".to_owned()));
+
+    let mut driver = ready(SessionMode::Fresh);
+    let turn = driver.submit("go").unwrap().turn;
+    let result = json!({"type": "result", "subtype": "error_max_budget_usd", "is_error": true, "total_cost_usd": 0.013});
+    let (events, _) = feed(&mut driver, &result);
+    assert_eq!(
+        events.last(),
+        Some(&Event::TurnEnded {
+            turn,
+            outcome: TurnOutcome::LimitReached {
+                limit: "max_budget_usd".into()
+            }
+        })
+    );
+}
+
 #[test]
 fn limits_and_errors_are_distinct_outcomes() {
     let mut driver = ready(SessionMode::Fresh);
@@ -347,15 +390,27 @@ fn submitting_requires_a_handshake_and_one_turn_at_a_time() {
     assert_eq!(driver.submit("two"), Err(Rejected::TurnInProgress));
 }
 
+/// A result answering another message, or none, is a turn the CLI ran of
+/// its own: recorded with its cost, while the turn in flight goes on.
 #[test]
-fn a_result_for_another_turn_is_rejected() {
+fn a_result_for_another_message_does_not_end_the_turn() {
     let mut driver = ready(SessionMode::Fresh);
     driver.submit("mine").unwrap();
-    let (events, _) = feed(
-        &mut driver,
-        &json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuid": "not-ours"}),
-    );
-    assert!(matches!(&events[0], Event::ProtocolViolation { .. }));
+    for result in [
+        json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuid": "not-ours", "total_cost_usd": 0.5}),
+        json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": [], "total_cost_usd": 0.5}),
+    ] {
+        let (events, _) = feed(&mut driver, &result);
+        assert!(
+            matches!(&events[..], [
+                Event::UsageObserved { turn: Some(1), usage },
+                Event::Warning { message },
+            ] if usage.cumulative
+                && usage.cost_usd == Some(0.5)
+                && message.contains("a turn of its own")),
+            "{events:?}"
+        );
+    }
     let closed = driver.transport_closed();
     assert!(matches!(
         closed[..],
@@ -659,7 +714,7 @@ fn a_steered_follow_up_keeps_the_turn_open_until_it_is_answered() {
     let events = replayed.events;
     let usage = events
         .iter()
-        .filter(|e| matches!(e, Event::UsageObserved { turn: Some(1), .. }))
+        .filter(|e| matches!(e, Event::UsageObserved { turn: Some(1), usage } if usage.cumulative))
         .count();
     assert_eq!(usage, 2, "one per result");
     assert_eq!(turn_ends(&events), [&TurnOutcome::Completed]);
@@ -727,4 +782,259 @@ fn steering_needs_a_handshake_and_a_turn_in_flight() {
     assert_eq!(steered["type"], "user");
     assert_eq!(steered["message"]["content"][0]["text"], "more");
     assert_ne!(steered["uuid"], Value::Null);
+}
+
+fn fixture_2_1_293(name: &str) -> Transcript {
+    Transcript::load(format!(
+        "{}/tests/fixtures/claude-code-2.1.293-{name}.jsonl",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+}
+
+/// Replay a recorded 2.1.293 session, answering permissions, and closing
+/// it where the recording does.
+fn replay_2_1_293(name: &str, prompt: &str) -> Vec<Event> {
+    let recorded = fixture_2_1_293(name);
+    let (mut driver, opened) = open_with(SessionMode::Fresh);
+    let mut replay = Replay::new(&recorded)
+        .alias("/request_id")
+        .alias("/uuid")
+        .answer_permissions(PermissionDecision::Allow)
+        .prompt(prompt);
+    if name == "background-task" {
+        replay = replay.close();
+    }
+    let replayed = replay.run(&mut driver, &opened);
+    assert!(replayed.unsent.is_empty(), "{:?}", replayed.unsent);
+    replayed.events
+}
+
+const BACKGROUND_PROMPT: &str = "Use the Bash tool with run_in_background set to true to run: \
+     sleep 40; echo done. Do not wait for it or check on it. Immediately reply with the single \
+     word started and end your turn.";
+const PROGRESS_PROMPT: &str = "Use the Bash tool in the foreground (not in the background, \
+     timeout 60000) to run exactly: timeout 34 tail -f /dev/null; echo finished. Then reply with \
+     the word finished.";
+const THINKING_PROMPT: &str = "Think step by step briefly about what 17*23 is. Then use the Bash \
+     tool in the foreground (not in the background) to run: sleep 33; echo 391. Then reply with \
+     the number.";
+
+/// Real Claude Code 2.1.293 output: rate limits, session settings, task
+/// lifecycles, tool progress, thinking tokens and turn summaries are each
+/// mapped to an event or ignored on purpose, never "unrecognized".
+#[test]
+fn every_frame_claude_code_2_1_293_printed_is_mapped_or_ignored_on_purpose() {
+    for (name, prompt) in [
+        ("background-task", BACKGROUND_PROMPT),
+        ("tool-progress", PROGRESS_PROMPT),
+        ("thinking", THINKING_PROMPT),
+    ] {
+        let events = replay_2_1_293(name, prompt);
+        let odd: Vec<&Event> = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Event::Unrecognized { .. }
+                        | Event::ProtocolViolation { .. }
+                        | Event::Warning { .. }
+                )
+            })
+            .collect();
+        assert!(odd.is_empty(), "{name}: {odd:?}");
+        assert_eq!(turn_ends(&events), [&TurnOutcome::Completed], "{name}");
+    }
+}
+
+/// A background task is reported as it starts, in the set of running
+/// tasks at the turn's end, and as it ends; `end_session` is what stops
+/// it, and its answer is no event.
+#[test]
+fn background_tasks_are_reported_and_end_session_stops_them() {
+    let events = replay_2_1_293("background-task", BACKGROUND_PROMPT);
+    let (task, background) = events
+        .iter()
+        .find_map(|e| match e {
+            Event::HarnessTaskStarted { task, background } => Some((task.clone(), *background)),
+            _ => None,
+        })
+        .unwrap();
+    assert!(background, "run_in_background is a background task");
+    assert_eq!(task.kind.as_deref(), Some("local_bash"));
+    let ended = events
+        .iter()
+        .position(|e| matches!(e, Event::TurnEnded { .. }))
+        .unwrap();
+    let running_at_end = events[..ended]
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            Event::BackgroundTasks { running } => Some(running.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(running_at_end, std::slice::from_ref(&task));
+    assert!(events[ended..].iter().any(|e| matches!(e,
+        Event::HarnessTaskEnded { task_id, status, .. }
+            if *task_id == task.task_id && status == "stopped")));
+    assert_eq!(
+        events.last(),
+        Some(&Event::BackgroundTasks {
+            running: Vec::new()
+        })
+    );
+}
+
+/// On `--resume`, Claude Code 2.1.293 first runs the earlier session's
+/// queued `<task-notification>` as a turn with its own result. That result
+/// answers the notification, not the prompt: it is recorded with its cost,
+/// its text is not the turn's, and the turn ends at its own result.
+#[test]
+fn a_resumed_sessions_queued_notification_does_not_end_the_turn() {
+    let recorded = fixture_2_1_293("resume-notification");
+    let (mut driver, opened) = open_with(SessionMode::Resume(session(
+        "bab15dd6-ad26-579e-9b3f-4bd2173db7e3",
+    )));
+    let replayed = Replay::new(&recorded)
+        .alias("/request_id")
+        .alias("/uuid")
+        .prompt("Reply with the single word resumed and end your turn.")
+        .run(&mut driver, &opened);
+    assert_eq!(replayed.sent, 2, "initialize and the prompt");
+    assert!(replayed.unsent.is_empty(), "{:?}", replayed.unsent);
+    let events = replayed.events;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::ProtocolViolation { .. })),
+        "{events:?}"
+    );
+    assert_eq!(turn_ends(&events), [&TurnOutcome::Completed]);
+    let ended = events
+        .iter()
+        .position(|e| matches!(e, Event::TurnEnded { .. }))
+        .unwrap();
+    let internal = events
+        .iter()
+        .position(
+            |e| matches!(e, Event::Warning { message } if message.contains("a turn of its own")),
+        )
+        .unwrap();
+    assert!(internal < ended);
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageDelta { turn: 1, text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        ["resumed"],
+        "the notification's answer is not the turn's"
+    );
+    let costs: Vec<f64> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::UsageObserved {
+                turn: Some(1),
+                usage,
+            } if usage.cumulative => usage.cost_usd,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(costs, [0.00061, 0.00079], "both results' costs count");
+    assert_eq!(driver.submit("next").map(|s| s.turn), Ok(2));
+}
+
+#[test]
+fn closing_asks_claude_code_to_end_its_session() {
+    let (mut driver, _) = open_with(SessionMode::Fresh);
+    assert!(
+        driver.close().is_empty(),
+        "nothing to end before the handshake"
+    );
+    let mut driver = ready(SessionMode::Fresh);
+    let frames = driver.close();
+    assert_eq!(frames.len(), 1);
+    let frame = decode(&frames[0]);
+    assert_eq!(frame["type"], "control_request");
+    assert_eq!(frame["request"], json!({"subtype": "end_session"}));
+    let refused = json!({"type": "control_response", "response": {"subtype": "error", "request_id": frame["request_id"], "error": "no"}});
+    let (events, _) = feed(&mut driver, &refused);
+    assert!(matches!(&events[..], [Event::Warning { message }] if message.ends_with("no")));
+}
+
+/// A foreground command is a task too, not a background one; its
+/// progress and the model's thinking are liveness, nothing more.
+#[test]
+fn tool_progress_and_thinking_are_progress() {
+    let events = replay_2_1_293("tool-progress", PROGRESS_PROMPT);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::HarnessTaskStarted {
+            background: false,
+            ..
+        }
+    )));
+    let progress = |events: &[Event]| {
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::Progress { turn: Some(1) }))
+            .count()
+    };
+    assert_eq!(progress(&events), 3, "one per tool_progress");
+    let events = replay_2_1_293("thinking", THINKING_PROMPT);
+    assert_eq!(progress(&events), 2, "one per thinking_tokens");
+}
+
+/// Each model call's usage is reported once as it grows, with its model,
+/// so the turn can be priced before its result.
+#[test]
+fn each_model_calls_usage_is_reported_during_the_turn() {
+    let events = replay_2_1_293("thinking", THINKING_PROMPT);
+    let ended = events
+        .iter()
+        .position(|e| matches!(e, Event::TurnEnded { .. }))
+        .unwrap();
+    let calls: Vec<&branchyard_harness::Usage> = events[..ended]
+        .iter()
+        .filter_map(|e| match e {
+            Event::UsageObserved { usage, .. } if !usage.cumulative => Some(usage),
+            _ => None,
+        })
+        .collect();
+    assert!(calls.len() >= 2, "{calls:?}");
+    assert!(calls
+        .iter()
+        .all(|u| u.model.as_deref() == Some("claude-sonnet-5-5") && u.cost_usd.is_none()));
+    let written: u64 = calls
+        .iter()
+        .map(|u| u.cache_write_tokens.unwrap_or(0) + u.cache_write_1h_tokens.unwrap_or(0))
+        .sum();
+    assert_eq!(written, 35146, "the result's cache writes, call by call");
+}
+
+/// Claude Code prints whole text blocks, not fragments: a block that
+/// follows another with no tool call between starts a new paragraph.
+#[test]
+fn text_blocks_in_a_row_are_paragraphs() {
+    let mut driver = ready(SessionMode::Fresh);
+    driver.submit("go").unwrap();
+    let text = |id: &str, text: &str| json!({"type": "assistant", "message": {"id": id, "content": [{"type": "text", "text": text}]}});
+    let tool = json!({"type": "assistant", "message": {"id": "m2", "content": [{"type": "tool_use", "id": "t", "name": "Bash"}]}});
+    let mut said = Vec::new();
+    for message in [
+        text("m1", "First."),
+        text("m1", "Second."),
+        tool,
+        text("m3", "Third."),
+    ] {
+        let (events, _) = feed(&mut driver, &message);
+        said.extend(events.into_iter().filter_map(|e| match e {
+            Event::MessageDelta { text, .. } => Some(text),
+            _ => None,
+        }));
+    }
+    assert_eq!(said, ["First.", "\n\nSecond.", "Third."]);
 }

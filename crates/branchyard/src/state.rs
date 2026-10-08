@@ -66,6 +66,23 @@ pub(crate) struct Record {
     /// Milliseconds since the Unix epoch, for ordering.
     pub created_ms: u64,
     pub check: Option<Vec<String>>,
+    /// `check` is its parent's, inherited because its spawn gave none.
+    /// Siblings that inherited one whole-suite check pass it only together.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub check_inherited: bool,
+    /// The limits its turns were last given (`--budget-usd`,
+    /// `--max-turns`, `--max-minutes`), kept for a later turn that gives
+    /// none: the `by send` that continues it after its engine stopped runs
+    /// under the same limits, and `by inspect` still shows its budget. A
+    /// turn that gives one replaces it. A parent's limits on a delegated
+    /// child are in its grant and narrow these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<crate::delegation::Limits>,
+    /// The prompt of its last turn that recovery found cut off (submitted
+    /// with an unknown outcome, or never run), until a turn submits a
+    /// prompt again: `by send <branch> --retry` submits it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<String>,
     /// Command override, reused by sends and forks.
     pub command: Option<Vec<String>>,
     /// Private `HOME` when the branch runs isolated.
@@ -127,6 +144,96 @@ pub(crate) struct Record {
     /// The goal a judge verifies when a turn ends ready. See `crate::goal`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<crate::goal::GoalState>,
+    /// While the branch is [`crate::BranchStatus::WaitingOnChildren`]: what
+    /// its parked turn ended with and what wakes it. See `crate::wake`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked: Option<crate::wake::Parked>,
+    /// Automatic wakes since the last turn something else started; bounded
+    /// by the envelope's `max_wakes`.
+    #[serde(default, skip_serializing_if = "crate::wake::is_zero")]
+    pub wakes: u32,
+    /// Why its last turn was lost when its engine stopped, until a turn
+    /// tells its harness: recovery sets it, and the next turn's prompt
+    /// starts with what happened. See `crate::wake::recovered_note`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lost: Option<String>,
+    /// Tools the branch was started denying (`by run --deny`), ahead of
+    /// every policy its turns run under, and passed on to its children.
+    /// A delegated child's own come from its parent, in its grant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
+    /// Delegated children that were removed, with what each one's subtree
+    /// had spent: the ledger that keeps a removed child's spend in this
+    /// branch's subtree cost and budget. Appended by the store as it
+    /// deletes the child, and kept by every later write of this record, as
+    /// its children are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<RemovedChild>,
+}
+
+/// A delegated child that was removed, as its parent's record remembers it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct RemovedChild {
+    pub name: String,
+    /// What it and its descendants had spent when it was removed;
+    /// unreported costs count as zero.
+    pub spent_usd: f64,
+    /// Milliseconds since the Unix epoch.
+    pub removed_ms: u64,
+}
+
+impl Record {
+    /// What this branch and its descendants have spent: its own reported
+    /// cost, its removed children's, and its children's, read with
+    /// `read`. Unreported costs count as zero.
+    pub(crate) fn subtree_spent(&self, read: &mut dyn FnMut(&str) -> Option<Record>) -> f64 {
+        fn walk(
+            record: &Record,
+            read: &mut dyn FnMut(&str) -> Option<Record>,
+            seen: &mut std::collections::BTreeSet<String>,
+        ) -> f64 {
+            if !seen.insert(record.info.name.clone()) {
+                return 0.0;
+            }
+            let mut children = 0.0;
+            for name in &record.info.children {
+                if let Some(child) = read(name) {
+                    children += walk(&child, read, seen);
+                }
+            }
+            record.info.cost_usd.unwrap_or(0.0) + record.removed_spent() + children
+        }
+        walk(self, read, &mut std::collections::BTreeSet::new())
+    }
+
+    /// What its removed children's subtrees had spent.
+    pub(crate) fn removed_spent(&self) -> f64 {
+        self.removed.iter().map(|r| r.spent_usd).sum()
+    }
+}
+
+/// Record in `parent`'s ledger that its child `removed` is being deleted,
+/// with what its subtree spent (its descendants read with `read`), and
+/// take it off `parent`'s children: one list of children, which `inspect`,
+/// `children` and the envelope all read. False, and nothing changed, when
+/// `removed` is not one of `parent`'s delegated children (a fork names the
+/// branch it came from as its parent too).
+pub(crate) fn note_removed(
+    parent: &mut Record,
+    removed: &Record,
+    read: &mut dyn FnMut(&str) -> Option<Record>,
+) -> bool {
+    let name = &removed.info.name;
+    if !parent.info.children.contains(name) {
+        return false;
+    }
+    parent.removed.push(RemovedChild {
+        name: name.clone(),
+        spent_usd: removed.subtree_spent(read),
+        removed_ms: now_ms(),
+    });
+    parent.info.children.retain(|child| child != name);
+    true
 }
 
 /// The right to write a branch's state for one turn: the branch's current
@@ -321,7 +428,8 @@ impl SteerState {
     ) -> Result<SteerState, crate::store_codec::CodecError> {
         match state {
             "pending" => Ok(SteerState::Pending),
-            "delivered" => Ok(SteerState::Delivered),
+            // `delivered` is what `written` was stored as before.
+            "written" | "delivered" => Ok(SteerState::Written),
             "accepted" => Ok(SteerState::Accepted),
             "refused" => Ok(SteerState::Refused {
                 reason: reason.unwrap_or_default(),
@@ -472,7 +580,7 @@ pub(crate) trait Backend: Send + Sync + fmt::Debug {
     fn pending_steers(&self, fence: &Fence) -> Result<Vec<SteerRow>, Error>;
     /// Record what became of the fenced turn's steered input `id`. When it
     /// carries an inbox message, the message's delivery moves in the same
-    /// transaction: [`SteerState::Delivered`] or [`SteerState::Accepted`]
+    /// transaction: [`SteerState::Written`] or [`SteerState::Accepted`]
     /// marks it delivered, and returns its id if this call did so;
     /// [`SteerState::Refused`] returns a message this input had delivered
     /// to pending, unlinked, for the recipient's next turn start.
@@ -902,6 +1010,12 @@ impl Store {
         self.dir.join("homes").join(name)
     }
 
+    /// `name`'s private temporary directory, the `TMPDIR` its local
+    /// harness runs with; see `docs/egress.md`.
+    pub fn tmp(&self, name: &str) -> PathBuf {
+        self.dir.join("tmp").join(name)
+    }
+
     /// Where the engine running `name` writes its delegation token and the
     /// address of its broker, while a turn runs.
     pub fn token_path(&self, name: &str) -> PathBuf {
@@ -955,9 +1069,24 @@ impl Store {
         self.backend.list()
     }
 
-    /// Delete a branch's record and what the engine kept for its turns.
+    /// Delete a branch's record and what the engine kept for its turns,
+    /// whoever holds its lease; [`Store::delete_held`] outside tests.
+    #[cfg(test)]
     pub fn delete(&self, name: &str) -> Result<(), Error> {
         self.backend.delete(name)
+    }
+
+    /// Delete a branch whose lease `lease` holds: its lease goes with its
+    /// record, so the lease is spent, not released (releasing it after
+    /// would find no lease and warn that another engine took it). On an
+    /// error nothing was deleted, and the lease is released as usual.
+    pub fn delete_held(&self, lease: Lease) -> Result<(), Error> {
+        let mut lease = lease;
+        // Stopped first, so no renewal races the delete.
+        lease.heartbeat.take();
+        self.backend.delete(&lease.fence.branch)?;
+        lease.done = true;
+        Ok(())
     }
 
     /// Write `record` and take its branch's lease for a new turn. Refused
