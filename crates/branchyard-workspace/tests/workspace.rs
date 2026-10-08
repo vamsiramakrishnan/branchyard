@@ -563,6 +563,124 @@ fn conflict_returns_files_and_aborts_cleanly() {
     fixture.assert_no_integration_worktrees();
 }
 
+/// The battery's calc4 and recovery scenarios: siblings that share one
+/// test suite cannot pass it one at a time, so each `integrate` alone is
+/// refused; `integrate_many` merges them all in one worktree, checks the
+/// result once and moves the target once.
+#[test]
+fn integrate_many_checks_the_combined_merge_once() {
+    let fixture = Fixture::new();
+    git(&fixture.root(), &["branch", "parent"]);
+    let expected = fixture.head("parent");
+    let a = fixture.candidate("a", "a-part.txt", "a\n");
+    let b = fixture.candidate("b", "b-part.txt", "b\n");
+    let counter = fixture.dir.join("checks-run");
+    let suite = sh(
+        &format!(
+            "echo run >> '{}'; test -f a-part.txt && test -f b-part.txt && echo suite-ok",
+            counter.display()
+        ),
+        Duration::from_secs(30),
+    );
+    for alone in [&a, &b] {
+        assert!(matches!(
+            fixture
+                .repo
+                .integrate(alone, "parent", &expected, Some(&suite)),
+            Err(IntegrationError::CheckFailed { .. })
+        ));
+    }
+    assert_eq!(fixture.head("parent"), expected);
+    fs::remove_file(&counter).unwrap();
+
+    let done = fixture
+        .repo
+        .integrate_many(&[a.clone(), b.clone()], "parent", &expected, &[suite])
+        .unwrap();
+    assert_eq!(done.previous, expected);
+    assert_eq!(fixture.head("parent"), done.merged);
+    assert_eq!(fs::read_to_string(&counter).unwrap(), "run\n", "one check");
+    assert!(done.check_output_tails[0].contains("suite-ok"));
+    // One merge commit per candidate, in order, on the target's line.
+    assert_eq!(fixture.head("parent^1^1"), expected);
+    assert_eq!(fixture.head("parent^1^2"), a.head);
+    assert_eq!(fixture.head("parent^2"), b.head);
+    let branches: Vec<&str> = done.candidates.iter().map(|c| c.branch.as_str()).collect();
+    assert_eq!(branches, ["by/a", "by/b"]);
+    assert!(done.candidates.iter().all(|c| c.merge.is_some()));
+    // The merge that brought each in.
+    assert_eq!(
+        fixture.repo.brought_in_by(&a.head, "parent").unwrap(),
+        Some(fixture.head("parent^1"))
+    );
+    assert_eq!(
+        fixture.repo.brought_in_by(&b.head, "parent").unwrap(),
+        Some(done.merged.clone())
+    );
+    assert_eq!(fixture.repo.brought_in_by(&b.head, "main").unwrap(), None);
+    fixture.assert_no_integration_worktrees();
+
+    // Again: everything is contained, nothing moves, and it is not an error.
+    let again = fixture
+        .repo
+        .integrate_many(&[a, b], "parent", &done.merged, &[])
+        .unwrap();
+    assert_eq!(again.merged, done.merged);
+    assert!(again.candidates.iter().all(|c| c.merge.is_none()));
+    fixture.assert_no_integration_worktrees();
+}
+
+#[test]
+fn integrate_many_names_the_candidate_that_conflicts_and_moves_nothing() {
+    let fixture = Fixture::new();
+    let expected = fixture.head("main");
+    let first = fixture.candidate("first", "first.txt", "1\n");
+    let left = fixture.candidate("left", "a.txt", "one\nleft\nthree\n");
+    let right = fixture.candidate("right", "a.txt", "one\nright\nthree\n");
+    match fixture
+        .repo
+        .integrate_many(&[first, left, right], "main", &expected, &[])
+    {
+        Err(IntegrationError::ConflictWith {
+            candidate,
+            merged,
+            files,
+        }) => {
+            assert_eq!(candidate, "by/right");
+            assert_eq!(merged, ["by/first", "by/left"]);
+            assert_eq!(files, ["a.txt"]);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(fixture.head("main"), expected);
+    assert_eq!(git(&fixture.root(), &["status", "--porcelain"]), "");
+    fixture.assert_no_integration_worktrees();
+}
+
+/// The conflict3 and depth2 scenarios: a child that merged its sibling's
+/// branch already carries it; the sibling is then contained, not refused.
+#[test]
+fn integrate_many_skips_a_candidate_an_earlier_one_brought_in() {
+    let fixture = Fixture::new();
+    let expected = fixture.head("main");
+    let bounds = fixture.candidate("bounds", "bounds.txt", "b\n");
+    let words = fixture.workspace("words");
+    git(&words.path, &["merge", "-q", "--no-edit", "by/bounds"]);
+    fs::write(words.path.join("words.txt"), "w\n").unwrap();
+    let words = words.snapshot("words").unwrap().unwrap();
+    let done = fixture
+        .repo
+        .integrate_many(&[words.clone(), bounds.clone()], "main", &expected, &[])
+        .unwrap();
+    assert!(done.candidates[0].merge.is_some());
+    assert_eq!(done.candidates[1].merge, None, "brought in by words");
+    assert_eq!(fixture.head("main^2"), words.head);
+    assert_eq!(
+        fixture.repo.brought_in_by(&bounds.head, "main").unwrap(),
+        Some(done.merged)
+    );
+}
+
 #[test]
 fn stale_candidate_after_target_moved() {
     let fixture = Fixture::new();
