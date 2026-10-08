@@ -165,14 +165,18 @@ fn refusals_reach_the_harness_as_tool_errors() {
         "{said}"
     );
     assert!(
-        errors[3].contains("needs max_usd; $1.0000 remains"),
+        errors[3].contains("needs one too, max_usd (--budget-usd); $1.0000 remains"),
         "{said}"
     );
     assert!(errors[4].contains("exceeds what root has left"), "{said}");
     assert!(errors[5].contains("unknown field `bogus`"), "{said}");
-    // The child was one level down with no envelope left: its harness got
-    // no MCP server at all.
-    assert_eq!(reply(&f, "kid"), "mcp: no server\n");
+    // The child was one level down with no envelope left: a leaf, whose
+    // server refuses to spawn (it keeps its own branch, storage and inbox).
+    let kid = reply(&f, "kid");
+    assert!(
+        kid.contains("mcp spawn error: denied: kid may not spawn: its envelope's max_depth is 0"),
+        "{kid}"
+    );
     let me = result(&said, "inspect");
     assert_eq!(me["name"], "root");
     assert_eq!(me["max_usd"], 1.0);

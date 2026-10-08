@@ -24,9 +24,9 @@ by run "Split the parser rewrite into tokenizer and formatter work, delegate bot
 
 `by run` waits until every branch it delegated has finished, whichever process runs it, says which are still running while it waits, and prints a table of them. A delegated branch whose engine stopped is recovered and ends `interrupted` rather than being waited for. `by ls` shows the tree.
 
-## What a delegating harness gets
+## What a delegated harness gets
 
-Only a turn whose envelope allows children gets these, and only for the duration of that turn:
+Every turn of a branch that was given delegation gets these, for the duration of that turn: a root started with `--delegate`, and every child it delegated to at any depth, including a leaf whose envelope allows no children of its own (`max_depth` 0).
 
 | What | Where |
 |---|---|
@@ -145,7 +145,7 @@ Authority follows the delegation tree, checked the same way spawning is:
 | `escalation` | The sender's parent, always; further up an ancestor only if the sender is in a [rig](rigs.md) and its seat's `escalates_to` names that ancestor's seat |
 | `answer` | From a branch to any of its own descendants, not only a direct child |
 
-A leaf branch (`max_depth` 0, such as a leaf rig seat) gets no delegation tools at all, spawning or messaging, the same as today; give it depth 1 (it need not use it to spawn) if it should be able to message its parent.
+A leaf branch (`max_depth` 0, such as a leaf rig seat) asks, reports, escalates and reads its inbox like any other: messaging is a capability of every delegated branch, not of depth. It cannot `answer` (it has no descendants) or spawn. A parent answers a leaf's question with `by answer`, and the leaf's `by ask --wait SECS` returns with the answer.
 
 Every surface reaches the same five operations, with the same authority and the same JSON:
 

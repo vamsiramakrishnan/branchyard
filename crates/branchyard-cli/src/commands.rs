@@ -1537,7 +1537,8 @@ pub fn ask(
 ) -> Outcome {
     let wait = wait_seconds.map(std::time::Duration::from_secs_f64);
     let result = match (harness_delegate(json)?, target) {
-        (Some(delegate), _) => delegate.ask(text, wait),
+        (Some(delegate), _) => as_itself(&delegate, as_branch.as_deref(), "--as")
+            .and_then(|()| delegate.ask(text, wait)),
         (None, Target::Remote(remote)) => as_branch_required(as_branch, "ask").and_then(|b| {
             remote
                 .repo
@@ -1561,7 +1562,9 @@ pub fn ask(
 
 pub fn report(target: &Target, as_branch: Option<String>, text: &str, json: bool) -> Outcome {
     let result = match (harness_delegate(json)?, target) {
-        (Some(delegate), _) => delegate.report(text),
+        (Some(delegate), _) => {
+            as_itself(&delegate, as_branch.as_deref(), "--as").and_then(|()| delegate.report(text))
+        }
         (None, Target::Remote(remote)) => as_branch_required(as_branch, "report")
             .and_then(|b| remote.repo.report(&b, text).map_err(remote::sdk_error)),
         (None, Target::Local) => as_branch_required(as_branch, "report")
@@ -1574,7 +1577,8 @@ pub fn report(target: &Target, as_branch: Option<String>, text: &str, json: bool
 
 pub fn escalate(target: &Target, as_branch: Option<String>, text: &str, json: bool) -> Outcome {
     let result = match (harness_delegate(json)?, target) {
-        (Some(delegate), _) => delegate.escalate(text),
+        (Some(delegate), _) => as_itself(&delegate, as_branch.as_deref(), "--as")
+            .and_then(|()| delegate.escalate(text)),
         (None, Target::Remote(remote)) => as_branch_required(as_branch, "escalate")
             .and_then(|b| remote.repo.escalate(&b, text).map_err(remote::sdk_error)),
         (None, Target::Local) => as_branch_required(as_branch, "escalate")
@@ -1593,7 +1597,8 @@ pub fn answer(
     json: bool,
 ) -> Outcome {
     let result = match (harness_delegate(json)?, target) {
-        (Some(delegate), _) => delegate.answer(message_id, text),
+        (Some(delegate), _) => as_itself(&delegate, as_branch.as_deref(), "--as")
+            .and_then(|()| delegate.answer(message_id, text)),
         (None, Target::Remote(remote)) => as_branch_required(as_branch, "answer").and_then(|b| {
             remote
                 .repo
@@ -1610,12 +1615,21 @@ pub fn answer(
 
 pub fn inbox(target: &Target, as_branch: Option<String>, unread: bool, json: bool) -> Outcome {
     let result = match (harness_delegate(json)?, target) {
-        (Some(delegate), _) => delegate.inbox(),
+        (Some(delegate), _) => {
+            as_itself(&delegate, as_branch.as_deref(), "--as").and_then(|()| delegate.inbox())
+        }
         (None, Target::Remote(remote)) => as_branch_required(as_branch, "inbox")
             .and_then(|b| remote.repo.inbox(&b).map_err(remote::sdk_error)),
         (None, Target::Local) => as_branch_required(as_branch, "inbox")
             .and_then(|b| as_user(&b, TaskOptions::default())?.inbox()),
     };
+    // --unread holds for the JSON too, which the Python module reads.
+    let result = result.map(|mut inbox| {
+        if unread {
+            inbox.messages.retain(|m| !m.delivered);
+        }
+        inbox
+    });
     emit(json, result, |inbox| {
         let messages: Vec<&branchyard::Message> = inbox
             .messages
@@ -1813,7 +1827,10 @@ fn acting_branch(
     command: &str,
 ) -> Result<String, branchyard::Error> {
     match (delegate, branch) {
-        (Some(delegate), _) => Ok(delegate.branch().to_owned()),
+        (Some(delegate), named) => {
+            as_itself(delegate, named.as_deref(), "--branch")?;
+            Ok(delegate.branch().to_owned())
+        }
         (None, Some(branch)) => Ok(branch.clone()),
         (None, None) => Err(branchyard::Error::Denied(format!(
             "outside a harness, by {command} needs --branch"

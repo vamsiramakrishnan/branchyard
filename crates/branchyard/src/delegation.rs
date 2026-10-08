@@ -46,6 +46,7 @@ use crate::graph::{
     self, After, Binding, Dependency, DependencyRef, Graph, GraphApplied, GraphCommit, GraphEdit,
     SpawnSpec, MAX_EDITS,
 };
+use crate::operations::Capability;
 use crate::projection::{lock, same_token, ENV_BRANCH, ENV_ROOT, ENV_TOKEN};
 use crate::record::{self, Recorder};
 use crate::recover;
@@ -1355,6 +1356,28 @@ impl Local {
         self.yard.store()
     }
 
+    /// Fail unless this branch holds `capability`: every branch reaches
+    /// itself, its storage and its parent's inbox; only one whose envelope
+    /// allows children acts on descendants. See [`crate::operations`].
+    fn require(&self, capability: Capability, what: &str) -> Result<(), Error> {
+        if capability != Capability::Delegate {
+            return Ok(());
+        }
+        let grant = self.store().read(&self.branch)?.grant;
+        match grant.as_ref().is_some_and(Grant::can_spawn) {
+            true => Ok(()),
+            false => Err(Error::Denied(format!(
+                "{} may not {what}: {}; it acts only on itself, the artifacts and scratch \
+                 areas it may reach, and its parent's inbox",
+                self.branch,
+                match grant {
+                    Some(_) => "its envelope's max_depth is 0, so it has no children",
+                    None => "it was not given delegation",
+                }
+            ))),
+        }
+    }
+
     /// Fail unless `target` is a descendant, or this branch itself when
     /// `or_self`.
     fn require_descendant(&self, target: &str, or_self: bool) -> Result<(), Error> {
@@ -1366,6 +1389,7 @@ impl Local {
                 ))),
             };
         }
+        self.require(Capability::Delegate, &format!("act on {target}"))?;
         let found = descendants(&self.store(), &self.branch)?
             .iter()
             .any(|info| info.name == target);
@@ -2413,6 +2437,7 @@ impl Local {
     }
 
     fn answer(&self, message_id: u64, text: &str) -> Result<Message, Error> {
+        self.require(Capability::Delegate, "answer a descendant")?;
         let question = self
             .store()
             .backend()
