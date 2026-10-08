@@ -460,6 +460,17 @@ pub struct Usage {
     pub cached_input_tokens: Option<u64>,
     /// The harness's own cost estimate in USD, not a billing statement.
     pub cost_usd: Option<f64>,
+    /// Input written to a prompt cache that lives five minutes (or the
+    /// provider's only cache), when the protocol says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    /// Input written to Anthropic's one-hour prompt cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_tokens: Option<u64>,
+    /// The model the tokens were spent on, when the protocol names it, so
+    /// a consumer can price a per-call observation that carries no cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -570,12 +581,61 @@ pub enum Event {
     ProtocolViolation {
         detail: String,
     },
+    /// The harness is working without anything else to report: a tool is
+    /// still running, or the model is still thinking. A liveness signal
+    /// for stall detection; the engine does not record it.
+    Progress {
+        /// The turn in flight, if any.
+        turn: Option<u64>,
+    },
+    /// The harness started a task of its own: a shell command, a subagent
+    /// or a monitor. `background` is true when it runs on after the call
+    /// that started it returned, possibly after the turn ends.
+    HarnessTaskStarted {
+        /// The task.
+        task: HarnessTask,
+        /// Whether it runs on after the call that started it returned.
+        background: bool,
+    },
+    /// A task of the harness's own ended. `status` is the harness's word
+    /// for how (`completed`, `failed`, `stopped`, ...).
+    HarnessTaskEnded {
+        /// The harness's identifier for the task.
+        task_id: String,
+        /// How it ended, in the harness's words.
+        status: String,
+        /// The harness's one-line summary of it, when it gives one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
+    /// The complete set of the harness's background tasks now running,
+    /// each time it changes. Non-empty at a turn's end, it means the
+    /// harness is still working on something the turn started.
+    BackgroundTasks {
+        /// Every background task running now.
+        running: Vec<HarnessTask>,
+    },
     /// A well-formed message this driver does not interpret. Callers keep the
     /// raw line when they need it.
     Unrecognized {
         kind: String,
     },
     SessionClosed,
+}
+
+/// A task a harness runs of its own, as [`Event::HarnessTaskStarted`] and
+/// [`Event::BackgroundTasks`] report it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessTask {
+    /// The harness's own identifier for the task.
+    pub task_id: String,
+    /// What kind of task, in the harness's words (`local_bash`,
+    /// `local_agent`, ...), when it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// What the task does, in the harness's words.
+    pub description: String,
 }
 
 /// A local request the driver cannot carry out.
@@ -774,6 +834,15 @@ pub trait Driver {
 
     /// The harness's stdout closed or the process exited.
     fn transport_closed(&mut self) -> Vec<Event>;
+
+    /// Frames that ask the harness to end its session, written just before
+    /// its input is closed, for a protocol that has such a request. A
+    /// harness may otherwise outlive the end of its input, waiting on work
+    /// of its own (Claude Code waits for its background tasks). The
+    /// default writes nothing: closing the input is the whole protocol.
+    fn close(&mut self) -> Vec<Frame> {
+        Vec::new()
+    }
 }
 
 /// Serialize one frame as a single line.

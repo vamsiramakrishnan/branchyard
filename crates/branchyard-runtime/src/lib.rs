@@ -624,15 +624,30 @@ impl Session {
         String::from_utf8_lossy(&bytes[start..]).trim().to_owned()
     }
 
-    /// Close stdin and wait up to `grace` for the harness to exit, killing it
-    /// if it does not. Then tear down what remains of its process group (or
-    /// the provider's equivalent), naming it, and let the driver see the
+    /// End the session: write the driver's request to end it
+    /// ([`Driver::close`], when its protocol has one), close stdin, and
+    /// wait up to `grace` for the harness to exit, killing it if it does
+    /// not. Then tear down what remains of its process group (or the
+    /// provider's equivalent), naming it, and let the driver see the
     /// transport close.
     ///
     /// The wait ends when the harness process exits, not when stdout closes,
     /// so a descendant holding the pipe open does not stall it.
     pub fn close(mut self, grace: Duration) -> Result<Closed, RuntimeError> {
         let start = self.events.len();
+        let goodbye = self.driver.close();
+        if let Err(error) = self.write(&goodbye) {
+            // A harness already gone cannot be asked; closing its input is
+            // all there is left to do.
+            let gone = matches!(&error, RuntimeError::Io { source, .. }
+                if source.kind() == io::ErrorKind::BrokenPipe);
+            if !gone {
+                branchyard_support::best_effort::<(), _>(
+                    "ask the harness to end its session",
+                    Err(error),
+                );
+            }
+        }
         self.stdin.take();
         let deadline = Deadline::after(grace);
         let mut forced = false;

@@ -776,6 +776,7 @@ impl Postgres {
         let mut record = record.clone();
         if let Some(current) = self.stored_record(tx, name)? {
             record.info.children = current.info.children;
+            record.removed = current.removed;
         }
         let text = encode(name, &record)?;
         let created = to_db("created_ms", record.created_ms)?;
@@ -1147,6 +1148,25 @@ impl Backend for Postgres {
             let Some(incarnation) = self.incarnation(tx, name)? else {
                 return Ok(());
             };
+            // Its spend stays in its parent's ledger.
+            if let Some(removed) = self.stored_record(tx, name)? {
+                let owner = match removed.info.parent.as_deref() {
+                    Some(parent) => self.stored_record(tx, parent)?,
+                    None => None,
+                };
+                if let Some(mut owner) = owner {
+                    let mut read = |n: &str| self.stored_record(tx, n).ok().flatten();
+                    if crate::state::note_removed(&mut owner, &removed, &mut read) {
+                        let owner_name = owner.info.name.clone();
+                        let text = encode(&owner_name, &owner)?;
+                        tx.execute(
+                            "UPDATE by_branches SET record = $3 WHERE repo = $1 AND name = $2",
+                            &[&self.repo, &owner_name, &text],
+                        )
+                        .map_err(db("delete"))?;
+                    }
+                }
+            }
             tx.execute(
                 "DELETE FROM by_reservations WHERE repo = $1 AND name = $2",
                 &[&self.repo, &name],
@@ -1647,7 +1667,7 @@ impl Backend for Postgres {
             }
             match state {
                 SteerState::Pending => Ok(None),
-                SteerState::Delivered | SteerState::Accepted => Ok(tx
+                SteerState::Written | SteerState::Accepted => Ok(tx
                     .query_opt(
                         "UPDATE by_messages SET delivered_ms = $2, delivered_steer = $1 \
                          WHERE steer_id = $1 AND delivered_ms IS NULL RETURNING id",

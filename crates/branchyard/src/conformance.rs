@@ -477,7 +477,7 @@ pub(crate) fn steers(s: Opened) {
         .iter()
         .all(|r| r.branch == "b" && r.requested_ms > 0));
     store
-        .settle_steer(&fence, first, &SteerState::Delivered)
+        .settle_steer(&fence, first, &SteerState::Written)
         .unwrap();
     store
         .settle_steer(&fence, first, &SteerState::Accepted)
@@ -505,7 +505,7 @@ pub(crate) fn steers(s: Opened) {
     let row = store.leases().unwrap().remove(0);
     let taken = store.take_over(&row, &owner("b"), TTL).unwrap().unwrap();
     assert!(matches!(
-        store.settle_steer(&fence, third, &SteerState::Delivered),
+        store.settle_steer(&fence, third, &SteerState::Written),
         Err(Error::Fenced(_))
     ));
     // The takeover keeps the turn, so its input is still that turn's.
@@ -632,7 +632,7 @@ pub(crate) fn messages(s: Opened) {
     assert_eq!(store.pending_steers(&fence).unwrap().len(), 1);
     assert_eq!(
         store
-            .settle_steer(&fence, first, &SteerState::Delivered)
+            .settle_steer(&fence, first, &SteerState::Written)
             .unwrap(),
         Some(one.id)
     );
@@ -745,6 +745,44 @@ pub(crate) fn records(s: Opened) {
         .map(|f| (f.branch, f.event.at_ms))
         .collect();
     assert_eq!(feed, [("a".into(), 1), ("z".into(), 2), ("a".into(), 3)]);
+}
+
+/// Deleting a delegated child writes what its subtree spent into its
+/// parent's ledger in the same transaction, and later writes of the
+/// parent keep it, as they keep its children. A fork, which names the
+/// branch it came from as its parent but is not its child, leaves no entry.
+pub(crate) fn removed_children(s: Opened) {
+    let store = &s.backend;
+    let spent = |name: &str, parent: Option<&str>, cost: f64| {
+        let mut r = record_with_parent(name, parent);
+        r.info.cost_usd = Some(cost);
+        r
+    };
+    store.write(&spent("root", None, 0.5), None).unwrap();
+    store
+        .write(&spent("kid", Some("root"), 0.25), None)
+        .unwrap();
+    store
+        .write(&spent("grandkid", Some("kid"), 0.125), None)
+        .unwrap();
+    store
+        .write(&spent("fork", Some("root"), 1.0), None)
+        .unwrap();
+    store.add_child("root", "kid").unwrap();
+    store.add_child("kid", "grandkid").unwrap();
+
+    store.delete("grandkid").unwrap();
+    store.delete("kid").unwrap();
+    store.delete("fork").unwrap();
+    let root = store.read("root").unwrap().unwrap();
+    assert_eq!(root.removed.len(), 1, "{:?}", root.removed);
+    assert_eq!(root.removed[0].name, "kid");
+    assert!((root.removed[0].spent_usd - 0.375).abs() < 1e-9);
+    assert!((root.subtree_spent(&mut |_| None) - 0.875).abs() < 1e-9);
+
+    // A stale write of the parent keeps the ledger.
+    store.write(&spent("root", None, 0.5), None).unwrap();
+    assert_eq!(store.read("root").unwrap().unwrap().removed.len(), 1);
 }
 
 pub(crate) fn reservations(s: Opened) {
@@ -2403,7 +2441,8 @@ pub(crate) fn corrupt(s: Opened) {
 /// Generate one `#[test]` per conformance check for a backend.
 macro_rules! suite {
     ($open:expr) => {
-        suite!($open; fencing, expiry, steps, cancels, steers, records, reservations, events,
+        suite!($open; fencing, expiry, steps, cancels, steers, records, removed_children,
+            reservations, events,
             concurrent_appends, races, storage, messages, delivery, graph, ports, sandboxes,
             outcomes, knowledge, pools, usage, effects, limits, corrupt);
     };

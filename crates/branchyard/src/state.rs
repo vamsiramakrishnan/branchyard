@@ -132,6 +132,75 @@ pub(crate) struct Record {
     /// A delegated child's own come from its parent, in its grant.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
+    /// Delegated children that were removed, with what each one's subtree
+    /// had spent: the ledger that keeps a removed child's spend in this
+    /// branch's subtree cost and budget. Appended by the store as it
+    /// deletes the child, and kept by every later write of this record, as
+    /// its children are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<RemovedChild>,
+}
+
+/// A delegated child that was removed, as its parent's record remembers it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct RemovedChild {
+    pub name: String,
+    /// What it and its descendants had spent when it was removed;
+    /// unreported costs count as zero.
+    pub spent_usd: f64,
+    /// Milliseconds since the Unix epoch.
+    pub removed_ms: u64,
+}
+
+impl Record {
+    /// What this branch and its descendants have spent: its own reported
+    /// cost, its removed children's, and its children's, read with
+    /// `read`. Unreported costs count as zero.
+    pub(crate) fn subtree_spent(&self, read: &mut dyn FnMut(&str) -> Option<Record>) -> f64 {
+        fn walk(
+            record: &Record,
+            read: &mut dyn FnMut(&str) -> Option<Record>,
+            seen: &mut std::collections::BTreeSet<String>,
+        ) -> f64 {
+            if !seen.insert(record.info.name.clone()) {
+                return 0.0;
+            }
+            let mut children = 0.0;
+            for name in &record.info.children {
+                if let Some(child) = read(name) {
+                    children += walk(&child, read, seen);
+                }
+            }
+            record.info.cost_usd.unwrap_or(0.0) + record.removed_spent() + children
+        }
+        walk(self, read, &mut std::collections::BTreeSet::new())
+    }
+
+    /// What its removed children's subtrees had spent.
+    pub(crate) fn removed_spent(&self) -> f64 {
+        self.removed.iter().map(|r| r.spent_usd).sum()
+    }
+}
+
+/// Record in `parent`'s ledger that its child `removed` is being deleted,
+/// with what its subtree spent (its descendants read with `read`). False,
+/// and nothing changed, when `removed` is not one of `parent`'s delegated
+/// children (a fork names the branch it came from as its parent too).
+pub(crate) fn note_removed(
+    parent: &mut Record,
+    removed: &Record,
+    read: &mut dyn FnMut(&str) -> Option<Record>,
+) -> bool {
+    let name = &removed.info.name;
+    if !parent.info.children.contains(name) {
+        return false;
+    }
+    parent.removed.push(RemovedChild {
+        name: name.clone(),
+        spent_usd: removed.subtree_spent(read),
+        removed_ms: now_ms(),
+    });
+    true
 }
 
 /// The right to write a branch's state for one turn: the branch's current
@@ -326,7 +395,8 @@ impl SteerState {
     ) -> Result<SteerState, crate::store_codec::CodecError> {
         match state {
             "pending" => Ok(SteerState::Pending),
-            "delivered" => Ok(SteerState::Delivered),
+            // `delivered` is what `written` was stored as before.
+            "written" | "delivered" => Ok(SteerState::Written),
             "accepted" => Ok(SteerState::Accepted),
             "refused" => Ok(SteerState::Refused {
                 reason: reason.unwrap_or_default(),
@@ -477,7 +547,7 @@ pub(crate) trait Backend: Send + Sync + fmt::Debug {
     fn pending_steers(&self, fence: &Fence) -> Result<Vec<SteerRow>, Error>;
     /// Record what became of the fenced turn's steered input `id`. When it
     /// carries an inbox message, the message's delivery moves in the same
-    /// transaction: [`SteerState::Delivered`] or [`SteerState::Accepted`]
+    /// transaction: [`SteerState::Written`] or [`SteerState::Accepted`]
     /// marks it delivered, and returns its id if this call did so;
     /// [`SteerState::Refused`] returns a message this input had delivered
     /// to pending, unlinked, for the recipient's next turn start.
@@ -905,6 +975,12 @@ impl Store {
 
     pub fn home(&self, name: &str) -> PathBuf {
         self.dir.join("homes").join(name)
+    }
+
+    /// `name`'s private temporary directory, the `TMPDIR` its local
+    /// harness runs with; see `docs/egress.md`.
+    pub fn tmp(&self, name: &str) -> PathBuf {
+        self.dir.join("tmp").join(name)
     }
 
     /// Where the engine running `name` writes its delegation token and the

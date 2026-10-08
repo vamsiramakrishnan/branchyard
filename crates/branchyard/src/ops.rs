@@ -374,6 +374,8 @@ pub(crate) fn remove(
         remove_credentials(&store, &record)?;
     }
     remove_home(&store, &record)?;
+    // Its private temporary directory, which nothing else uses.
+    branchyard_support::cleanup_dir(store.tmp(name));
     Ok(teardown)
 }
 

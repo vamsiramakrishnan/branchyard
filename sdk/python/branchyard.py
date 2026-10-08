@@ -168,6 +168,12 @@ class Inspection:
     depends_on: Optional[List[Dict[str, Any]]] = None
     bindings: Optional[List[Dict[str, Any]]] = None
     stalled: Optional[bool] = None
+    # What its live children (running, waiting, blocked, awaiting plan
+    # approval) hold of its budget, how many they are, and what its settled
+    # and removed children spent; see docs/delegation.md "Budgets".
+    reserved_usd: Optional[float] = None
+    reserving_children: Optional[int] = None
+    settled_children_usd: Optional[float] = None
 
     @property
     def running(self) -> bool:
@@ -200,8 +206,11 @@ class Steer:
     by: str
     text: str
     requested_at_ms: int
-    # {"state": "pending" | "delivered" | "accepted"}; refusals raise.
+    # {"state": "pending" | "written" | "accepted"}; refusals raise.
+    # "accepted": it joined the running turn, which delivers it at
+    # `boundary`; "written": the harness has not confirmed it yet.
     state: Dict[str, Any]
+    boundary: Optional[str] = None
 
 
 @dataclasses.dataclass

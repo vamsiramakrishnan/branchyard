@@ -172,14 +172,23 @@ fn the_envelope_bounds_depth_width_and_harnesses() {
         }),
         "may not be allowed codex",
     );
-    delegate.spawn(spawn("say a", "a")).unwrap();
+    // `max_children` bounds the children running at once.
+    delegate.spawn(spawn("AWAIT_STEER", "a")).unwrap();
     delegate
         .spawn(Spawn {
             max_depth: Some(0),
-            ..spawn("say b", "b")
+            ..spawn("AWAIT_STEER", "b")
         })
         .unwrap();
     denied(delegate.spawn(spawn("say c", "c")), "max_children");
+    for kid in ["a", "b"] {
+        wait::until("the child to wait for steering", || {
+            delegate
+                .inspect(kid)
+                .is_ok_and(|i| i.last_message.contains("waiting for steering"))
+        });
+        delegate.steer(kid, "that is all").unwrap();
+    }
     root.wait_subtree().unwrap();
 
     // `a` is one level down and may create one more level; `b` gave that up.
@@ -252,7 +261,7 @@ fn a_parent_steers_its_running_child() {
         .unwrap();
     let state: SteerState = serde_json::from_value(steered["state"].clone()).unwrap();
     assert!(
-        matches!(state, SteerState::Delivered | SteerState::Accepted),
+        matches!(state, SteerState::Written | SteerState::Accepted),
         "{steered}"
     );
     assert_eq!(steered["by"], "root");
@@ -395,17 +404,20 @@ fn child_budgets_fit_in_what_the_parent_has_left() {
     assert_eq!((a.max_usd, a.remaining_usd), (Some(0.6), Some(0.6)));
 
     // Reserving the whole budget leaves the parent no room for its own
-    // turns: children's reservations count against it.
-    delegate.cancel("a").unwrap();
-    delegate.cancel("b").unwrap();
-    root.wait_subtree().unwrap();
-    let root = root.send("say more", options).unwrap();
+    // turns: running children's reservations count against it.
+    let exceeded = root.send("say more", options.clone()).unwrap();
     assert_eq!(
-        root.info().status,
+        exceeded.info().status,
         BranchStatus::BudgetExceeded {
             limit: "max_usd".into()
         }
     );
+    // Cancelled, they hold only what they spent, and the parent runs.
+    delegate.cancel("a").unwrap();
+    delegate.cancel("b").unwrap();
+    root.wait_subtree().unwrap();
+    let root = root.send("say more", options).unwrap();
+    assert_eq!(root.info().status, BranchStatus::NoChanges);
     // A child's limits bound its turns whoever sends them.
     let a = f.yard.branch("a").unwrap();
     let a = a.send("say", f.options()).unwrap();
@@ -415,6 +427,96 @@ fn child_budgets_fit_in_what_the_parent_has_left() {
             limit: "max_turns".into()
         }
     );
+}
+
+/// A child holds its whole limit only while it can run turns without
+/// asking: settled, merged or removed, it holds what it spent, and
+/// `max_children` counts only live children. Sending a settled child more
+/// work holds its limit again, narrowed to what is left.
+#[test]
+fn settled_children_give_back_what_they_did_not_spend() {
+    let f = Fixture::new();
+    let options = TaskOptions {
+        budget: Budget::usd(1.5),
+        ..delegating(
+            &f,
+            Envelope {
+                max_children: 2,
+                ..Envelope::default()
+            },
+        )
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options.clone()).unwrap();
+    let with = |usd: f64, prompt: &str, name: &str| Spawn {
+        budget: Budget::usd(usd),
+        ..spawn(prompt, name)
+    };
+    delegate.spawn(with(0.6, "WRITE a.txt=a", "a")).unwrap();
+    delegate.spawn(with(0.6, "say b", "b")).unwrap();
+    root.wait_subtree().unwrap();
+    // The children spent $0.25 and nothing; they are settled.
+    edit_record(&f.root, "a", |r| r["info"]["cost_usd"] = 0.25.into());
+    let me = delegate.inspect("root").unwrap();
+    assert!((me.remaining_usd.unwrap() - 1.25).abs() < 1e-9, "{me:?}");
+    assert_eq!((me.reserved_usd, me.reserving_children), (0.0, 0));
+    assert!((me.settled_children_usd - 0.25).abs() < 1e-9, "{me:?}");
+    assert!((me.subtree_cost_usd - 0.25).abs() < 1e-9, "{me:?}");
+
+    // Two children exist, but neither is live: there is room for two more.
+    delegate.spawn(with(0.6, "AWAIT_STEER", "c")).unwrap();
+    delegate.spawn(with(0.6, "HANG", "d")).unwrap();
+    denied(delegate.spawn(with(0.01, "say e", "e")), "2 live children");
+    let me = delegate.inspect("root").unwrap();
+    assert_eq!(me.reserving_children, 2, "{me:?}");
+    assert!((me.reserved_usd - 1.2).abs() < 1e-9, "{me:?}");
+    wait::until("c to wait for steering", || {
+        delegate
+            .inspect("c")
+            .is_ok_and(|i| i.last_message.contains("waiting for steering"))
+    });
+    delegate.steer("c", "finish").unwrap();
+
+    // Merged, then removed, a child still counts what it spent.
+    delegate.integrate("a").unwrap();
+    f.yard.remove("a").unwrap();
+    f.yard.remove("b").unwrap();
+    let me = delegate.inspect("root").unwrap();
+    assert!((me.subtree_cost_usd - 0.25).abs() < 1e-9, "{me:?}");
+    assert!((me.remaining_usd.unwrap() - (1.5 - 0.25 - 0.6)).abs() < 1e-9);
+
+    // c, settled, is sent more work while d holds $0.60: its $0.60 limit
+    // no longer fits in the $0.65 left once it runs beside a $0.60 child,
+    // so it is narrowed.
+    wait::until("c to settle", || {
+        delegate
+            .inspect("c")
+            .is_ok_and(|c| c.status == BranchStatus::NoChanges)
+    });
+    edit_record(&f.root, "root", |r| r["info"]["cost_usd"] = 0.5.into());
+    // Left: 1.5 - 0.5 (root) - 0.25 (a) - 0.6 (d) = 0.15.
+    delegate.send("c", "say again").unwrap();
+    let c = wait::until("c to settle again", || {
+        delegate
+            .inspect("c")
+            .ok()
+            .filter(|c| c.turns == 2 && c.status != BranchStatus::Running)
+    });
+    assert!((c.max_usd.unwrap() - 0.15).abs() < 1e-9, "{c:?}");
+    let log = f.yard.branch("c").unwrap().events().unwrap();
+    assert!(log.iter().any(|e| matches!(&e.activity,
+        Activity::Warning(w) if w.contains("narrowed from $0.6000 to $0.1500"))));
+    delegate.cancel("d").unwrap();
+    root.wait_subtree().unwrap();
+    // With nothing left, a settled child is not sent more.
+    edit_record(&f.root, "root", |r| r["info"]["cost_usd"] = 1.25.into());
+    denied(delegate.send("c", "and again"), "nothing left");
 }
 
 #[test]

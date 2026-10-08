@@ -190,6 +190,7 @@ impl Amp {
                     output_tokens: usage["output_tokens"].as_u64(),
                     cached_input_tokens: usage["cache_read_input_tokens"].as_u64(),
                     cost_usd: None,
+                    ..Usage::default()
                 },
             });
         }

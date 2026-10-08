@@ -55,9 +55,28 @@ Branchyard should store the last observed native turn and its outcome before all
 
 ### Claude Code
 
-The default profile drives print mode directly: `claude -p` with stream-json input and output and `--permission-prompt-tool stdio`, the launch the Agent SDK itself uses. The Agent SDK publishes this stdout protocol as typed frames (`StdoutMessage`, with `control_request`/`control_response` for the handshake, interrupts and `can_use_tool` permission prompts), so the Rust driver follows those types rather than an undocumented stream. It pins the pair it was checked against, Claude Code 2.1.283 with Agent SDK 0.3.283, and must be rechecked on upgrade. The maintained ACP adapter remains an alternate profile. A helper built on the official SDK is still the route for SDK-only features such as hook callbacks and in-process MCP servers, which the stream-json profile refuses. [Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview)
+The default profile drives print mode directly: `claude -p` with stream-json input and output and `--permission-prompt-tool stdio`, the launch the Agent SDK itself uses. The Agent SDK publishes this stdout protocol as typed frames (`StdoutMessage`, with `control_request`/`control_response` for the handshake, interrupts and `can_use_tool` permission prompts), so the Rust driver follows those types rather than an undocumented stream. It pins the pair it was checked against, Claude Code 2.1.283 with Agent SDK 0.3.283, and must be rechecked on upgrade; its message mapping and close were rechecked against Claude Code 2.1.293 (below). The maintained ACP adapter remains an alternate profile. A helper built on the official SDK is still the route for SDK-only features such as hook callbacks and in-process MCP servers, which the stream-json profile refuses. [Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview)
 
 Structured print mode remains useful for bounded batch runs, but its existence does not establish a complete bidirectional control contract. Choose the driver according to required capabilities. Do not accidentally disable required hooks or Branchyard tools when selecting a reduced-discovery launch mode. [Headless operation](https://code.claude.com/docs/en/headless)
+
+Checked against Claude Code 2.1.293 on 7 October 2026, with real model turns recorded as [fixtures](../crates/branchyard-harness/tests/fixtures) (`claude-code-2.1.293-*`): a background command, a long foreground command, and extended thinking. Every message type it printed is mapped or ignored on purpose, with the reason in the driver:
+
+| Claude Code prints | The driver reports |
+|---|---|
+| `system/task_started` | `harness_task_started` with the task (`task_id`, `kind`, `description`) and whether it runs in the `background` (a `Bash` command with `run_in_background`, a monitor, a background subagent); a foreground command is a task too |
+| `system/task_notification` | `harness_task_ended` with the task's `status` (`completed`, `failed`, `stopped`) |
+| `system/background_tasks_changed` | `background_tasks` with the whole set running. Non-empty at a turn's end, it says the harness is still working on something the turn started |
+| `tool_progress`, `system/thinking_tokens`, hook and status messages | `progress`: liveness for stall detection, not recorded in the branch's log |
+| `rate_limit_event` | Nothing while `allowed`; a warning naming the status otherwise |
+| `system/model_fallback` and its kin, `system/api_error` | A warning |
+| `active_goal`, `autocompact_state`, `system/task_updated`, `task_progress`, `task_summary`, `post_turn_summary`, `vcs_state_changed`, compaction boundaries, and the interactive session's UI state | Nothing, on purpose: session settings, steps of a task whose start and end are reported, the CLI's own summaries, and state Branchyard reads for itself |
+| A type 2.1.293 did not print | `unrecognized`, with its type |
+
+Each `assistant` frame also carries the usage of the model call it came from; the driver reports each call's tokens once as they grow (`usage_observed` with `cumulative: false`, the model, cache writes and no cost), which the engine prices for a [running branch's cost](delegation.md#budgets). Text blocks printed one after another with no tool call between come apart by a blank line.
+
+**Closing a session.** Claude Code does not exit when its input closes while a background task of its own runs: it waits for the task, then runs another model turn on the task's notification, and only then exits. Started with `sleep 40` in the background, it exited 42 seconds after its input closed, after a turn nobody asked for; under Branchyard's 10-second grace it was killed instead, with "the harness did not exit within 10s of closing its input and was killed", and the background `by` it was running reported as a process that outlived it. The close protocol is therefore explicit: the engine first writes the driver's request to end the session (`Driver::close`; for Claude Code the `end_session` control request, after which the CLI stops its tasks, reporting each `stopped`, and exits, in under 2 seconds in the recording), then closes the input, then allows the grace period. Only a harness still running after that is killed with a warning, and only processes still alive after it are named: each is an anomaly now, not the routine end of a turn. Other protocols have no such request, and closing the input is their whole close.
+
+A limit crossed by a turn's last message is not an interrupt: Claude Code's `result` carries the cumulative cost and the turn's end together, so by the time the engine sees the cost the turn is over. The engine ends it over budget without asking the harness to stop a turn it no longer runs (it used to log "interrupt failed: rejected: no turn is in flight" and kill the harness).
 
 ### Antigravity
 

@@ -700,8 +700,17 @@ pub fn steer(target: &Target, branch: &str, prompt: &str, task: &TaskArgs, json:
              (steer {})\n",
             steer.id
         )),
-        branchyard::SteerState::Delivered | branchyard::SteerState::Accepted => print(&format!(
-            "delivered into {branch}'s running turn (steer {})\n",
+        branchyard::SteerState::Written => print(&format!(
+            "written to {branch}'s harness for its running turn; the harness has not confirmed \
+             it yet (steer {})\n",
+            steer.id
+        )),
+        branchyard::SteerState::Accepted => print(&format!(
+            "joined {branch}'s running turn; the model reads it at {} (steer {})\n",
+            steer
+                .boundary
+                .as_deref()
+                .unwrap_or("the harness's next boundary"),
             steer.id
         )),
     }

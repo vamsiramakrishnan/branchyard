@@ -431,16 +431,33 @@ pub struct Inspection {
     pub depth: u32,
     pub turns: u32,
     pub candidate: Option<CandidateInfo>,
-    /// The branch's own cost estimate; `None` when its harness reports none.
+    /// The branch's own cost estimate, while a turn runs too (from the
+    /// harness's usage as it comes); `None` when its harness has reported
+    /// none.
     pub cost_usd: Option<f64>,
-    /// Its own and its descendants' reported costs. Unreported costs count
-    /// as zero here.
+    /// Its own and its descendants' reported costs, removed descendants'
+    /// included. Unreported costs count as zero here.
     pub subtree_cost_usd: f64,
     /// The cost limit its turns run under, when there is one.
     pub max_usd: Option<f64>,
-    /// What is left of `max_usd` after its own spend and its children's
-    /// reservations: what it can still spend or grant.
+    /// What is left of `max_usd` after its own spend, what its live
+    /// children hold (`reserved_usd`) and what its settled and removed
+    /// children spent (`settled_children_usd`): what it can still spend or
+    /// grant.
     pub remaining_usd: Option<f64>,
+    /// What its live children (running, waiting, blocked or awaiting plan
+    /// approval) hold of its budget: each one's whole limit, or what its
+    /// subtree spent if that is more, since it may spend that much without
+    /// asking. A child that settles (ready, merged, failed, ...) holds only
+    /// what it spent, until it is sent something again.
+    #[serde(default)]
+    pub reserved_usd: f64,
+    /// How many live children hold `reserved_usd`.
+    #[serde(default)]
+    pub reserving_children: u32,
+    /// What its settled and removed children's subtrees spent.
+    #[serde(default)]
+    pub settled_children_usd: f64,
     pub envelope: Option<Envelope>,
     /// The harness's text since the branch's last prompt, truncated from
     /// the front.
@@ -1060,43 +1077,106 @@ fn narrowed(policy: &Policy, deny: &[String]) -> Policy {
     }
 }
 
-/// What `record`'s children hold of its budget: each child's limit, or its
-/// subtree's spend if that is more.
-pub(crate) fn reserved(store: &Store, record: &Record) -> f64 {
+/// Whether a child can run turns without its parent asking again, and so
+/// holds its whole limit: running, waiting for its prerequisites (it
+/// starts on its own when they settle), blocked (a graph proposal reopens
+/// it), or with a plan awaiting approval (approving it starts a turn).
+/// Every other status is settled for now: the child holds only what it
+/// spent until it is sent something again.
+pub(crate) fn is_live(status: &BranchStatus) -> bool {
+    matches!(
+        status,
+        BranchStatus::Running
+            | BranchStatus::Waiting
+            | BranchStatus::Blocked { .. }
+            | BranchStatus::AwaitingPlanApproval
+    )
+}
+
+/// How many of `record`'s children are live ([`is_live`]), not counting
+/// `except`: what its envelope's `max_children` bounds.
+fn live_children(store: &Store, record: &Record, except: Option<&str>) -> usize {
     record
         .info
         .children
         .iter()
+        .filter(|child| Some(child.as_str()) != except)
         .filter_map(|child| store.read(child).ok())
-        .map(|child| {
-            let spent = subtree_spent(store, &child, &mut BTreeSet::new());
-            // A discarded child runs no more turns: it holds what it spent.
-            if matches!(child.info.status, BranchStatus::Discarded { .. }) {
-                return spent;
-            }
-            let limit = child
-                .grant
-                .as_ref()
-                .and_then(|g| g.limits.as_ref())
-                .and_then(|l| l.max_usd);
-            limit.map_or(spent, |limit| limit.max(spent))
-        })
-        .sum()
+        .filter(|child| is_live(&child.info.status))
+        .count()
 }
 
-/// Reported costs of `record` and its descendants; unreported counts as 0.
-fn subtree_spent(store: &Store, record: &Record, seen: &mut BTreeSet<String>) -> f64 {
-    if !seen.insert(record.info.name.clone()) {
-        return 0.0;
+/// What `record`'s children hold of its budget; see [`Held`].
+pub(crate) fn reserved(store: &Store, record: &Record) -> f64 {
+    held(store, record).total()
+}
+
+/// What a branch's children hold of its budget, by kind.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Held {
+    /// Held by live children ([`is_live`]): each one's limit, or what its
+    /// subtree spent if that is more.
+    pub live_usd: f64,
+    /// How many live children hold it.
+    pub live: u32,
+    /// Spent by settled children's subtrees (what a live grandchild of
+    /// one holds included), and by removed children's, from the ledger.
+    pub settled_usd: f64,
+}
+
+impl Held {
+    pub fn total(&self) -> f64 {
+        self.live_usd + self.settled_usd
     }
-    record.info.cost_usd.unwrap_or(0.0)
-        + record
-            .info
-            .children
-            .iter()
-            .filter_map(|child| store.read(child).ok())
-            .map(|child| subtree_spent(store, &child, seen))
-            .sum::<f64>()
+}
+
+pub(crate) fn held(store: &Store, record: &Record) -> Held {
+    let mut held = Held {
+        settled_usd: record.removed_spent(),
+        ..Held::default()
+    };
+    for child in record
+        .info
+        .children
+        .iter()
+        .filter_map(|child| store.read(child).ok())
+    {
+        match is_live(&child.info.status) {
+            true => {
+                held.live += 1;
+                held.live_usd += holds(store, &child);
+            }
+            false => held.settled_usd += holds(store, &child),
+        }
+    }
+    held
+}
+
+/// What one child holds of its parent's budget. A live child holds its
+/// limit, or its subtree's spend if that is more, since it may spend up to
+/// its limit without asking. A settled one holds what it spent, and what
+/// its own children hold.
+fn holds(store: &Store, child: &Record) -> f64 {
+    let spent = subtree_spent(store, child);
+    match is_live(&child.info.status) {
+        true => limit_usd(child).map_or(spent, |limit| limit.max(spent)),
+        false => (child.info.cost_usd.unwrap_or(0.0) + reserved(store, child)).max(spent),
+    }
+}
+
+/// The cost limit a delegated child's turns run under.
+fn limit_usd(record: &Record) -> Option<f64> {
+    record
+        .grant
+        .as_ref()
+        .and_then(|g| g.limits.as_ref())
+        .and_then(|l| l.max_usd)
+}
+
+/// Reported costs of `record` and its descendants, removed ones included
+/// (from each parent's ledger); unreported counts as 0.
+fn subtree_spent(store: &Store, record: &Record) -> f64 {
+    record.subtree_spent(&mut |name| store.read(name).ok())
 }
 
 /// Whether any direct child of `name` is currently running a turn. Read
@@ -1461,8 +1541,71 @@ impl Local {
 
     /// This branch's own spend: the record's, or the running turn's if more.
     fn own_spent(&self, record: &Record) -> f64 {
-        let live = self.cost.as_ref().and_then(|cost| *lock(cost));
-        record.info.cost_usd.unwrap_or(0.0).max(live.unwrap_or(0.0))
+        record
+            .info
+            .cost_usd
+            .unwrap_or(0.0)
+            .max(self.live_cost().unwrap_or(0.0))
+    }
+
+    /// The running turn's spend as the engine last observed it.
+    fn live_cost(&self) -> Option<f64> {
+        self.cost.as_ref().and_then(|cost| *lock(cost))
+    }
+
+    /// Before settled child `name` runs again: it is about to hold its
+    /// whole limit again ([`is_live`]), so it must fit in its parent's
+    /// `max_children` and in what its parent has left. A limit that does
+    /// not fit is narrowed to what is left: `Some((from, to, parent))`. A
+    /// parent with nothing left, or no room for another live child,
+    /// refuses the send.
+    fn reserve_again(&self, name: &str) -> Result<Option<(f64, f64, String)>, Error> {
+        let store = self.store();
+        let child = store.read(name)?;
+        if is_live(&child.info.status) {
+            // Running already, or started by its parent's graph; the send
+            // is refused or needs no new reservation.
+            return Ok(None);
+        }
+        let Some(parent_name) = child.info.parent.clone() else {
+            return Ok(None);
+        };
+        let parent = store.read(&parent_name)?;
+        if let Some(grant) = &parent.grant {
+            let live = live_children(&store, &parent, Some(name));
+            if live >= grant.envelope.max_children as usize {
+                return Err(Error::Denied(format!(
+                    "{parent_name} already has {live} live children, its envelope's \
+                     max_children; {name} can run again once one of them settles"
+                )));
+            }
+        }
+        let (Some(limit), Some(parent_limit)) = (
+            limit_usd(&child),
+            match parent_name == self.branch {
+                true => self.options.budget.max_usd,
+                false => limit_usd(&parent),
+            },
+        ) else {
+            return Ok(None);
+        };
+        let parent_spent = match parent_name == self.branch {
+            true => self.own_spent(&parent),
+            false => parent.info.cost_usd.unwrap_or(0.0),
+        };
+        // `child` counts as settled in `reserved` now.
+        let left = parent_limit - parent_spent - reserved(&store, &parent);
+        let settled = holds(&store, &child);
+        let live = limit.max(subtree_spent(&store, &child));
+        if live - settled <= left + EPSILON_USD {
+            return Ok(None);
+        }
+        if left <= EPSILON_USD {
+            return Err(Error::Denied(format!(
+                "{parent_name} has nothing left of its ${parent_limit:.4} for {name} to spend"
+            )));
+        }
+        Ok(Some((limit, settled + left, parent_name)))
     }
 
     fn remaining(&self, record: &Record) -> Option<f64> {
@@ -1777,22 +1920,13 @@ impl Local {
         taken: &BTreeSet<String>,
     ) -> Result<Planned, Error> {
         let store = self.store();
-        // A removed or discarded child no longer holds a slot.
-        let live = caller
-            .info
-            .children
-            .iter()
-            .filter(|child| {
-                store
-                    .read(child)
-                    .is_ok_and(|r| !matches!(r.info.status, BranchStatus::Discarded { .. }))
-            })
-            .count()
-            + planned.len();
+        // A removed, discarded or otherwise settled child holds no slot.
+        let live = live_children(&store, caller, None) + planned.len();
         if live >= grant.envelope.max_children as usize {
             return Err(Error::Denied(format!(
-                "{} already has {live} children, its envelope's max_children; `by discard` \
-                 a settled one, or `by rm` it, to free its slot",
+                "{} already has {live} live children (running, waiting, blocked or awaiting \
+                 plan approval), its envelope's max_children; settled children do not count, \
+                 so wait for one to settle, or `by discard` or `by rm` one, to free its slot",
                 self.branch
             )));
         }
@@ -2187,11 +2321,22 @@ impl Local {
                 .and_then(|g| g.limits.as_ref())
                 .and_then(|l| l.max_usd),
         };
+        let held = held(&store, &record);
         let remaining_usd = match own {
             true => self.remaining(&record),
-            false => max_usd.map(|limit| {
-                limit - record.info.cost_usd.unwrap_or(0.0) - reserved(&store, &record)
-            }),
+            false => {
+                max_usd.map(|limit| limit - record.info.cost_usd.unwrap_or(0.0) - held.total())
+            }
+        };
+        let cost_usd = match own {
+            // Its running turn's spend, which the engine may not have
+            // written yet.
+            true => record
+                .info
+                .cost_usd
+                .or(self.live_cost())
+                .map(|_| self.own_spent(&record)),
+            false => record.info.cost_usd,
         };
         let events = record::read(&store, branch)?;
         let info = record.info.clone();
@@ -2201,7 +2346,11 @@ impl Local {
             None => (None, Vec::new()),
         };
         Ok(Inspection {
-            subtree_cost_usd: subtree_spent(&store, &record, &mut BTreeSet::new()),
+            subtree_cost_usd: subtree_spent(&store, &record).max(if own {
+                self.own_spent(&record) + held.settled_usd
+            } else {
+                0.0
+            }),
             name: info.name,
             status: info.status,
             harness: info.harness,
@@ -2211,9 +2360,12 @@ impl Local {
             depth: info.depth,
             turns: info.turns,
             candidate: info.candidate,
-            cost_usd: info.cost_usd,
+            cost_usd,
             max_usd,
             remaining_usd: remaining_usd.map(|r| r.max(0.0)),
+            reserved_usd: held.live_usd,
+            reserving_children: held.live,
+            settled_children_usd: held.settled_usd,
             envelope: record.grant.map(|g| g.envelope),
             last_message: last_message(&events),
             seat,
@@ -2254,7 +2406,28 @@ impl Local {
     fn try_send(&self, branch: &str, prompt: &str) -> Result<Sent, Error> {
         self.require_descendant(branch, false)?;
         let _spawning = lock(&self.yard.hub.spawning);
-        let prepared = run::prepare_send(&self.yard, branch, &self.child_options(), true)?;
+        let narrowed = self.reserve_again(branch)?;
+        let mut prepared = run::prepare_send(&self.yard, branch, &self.child_options(), true)?;
+        if let Some((from, to, parent)) = narrowed {
+            if let Some(limits) = prepared
+                .record
+                .grant
+                .as_mut()
+                .and_then(|g| g.limits.as_mut())
+            {
+                limits.max_usd = Some(to);
+            }
+            self.store()
+                .write_fenced(&prepared.record, prepared.lease.fence())?;
+            let note = format!(
+                "its cost limit was narrowed from ${from:.4} to ${to:.4}, what {parent} had left \
+                 for it"
+            );
+            prepared.note = Some(match prepared.note.take() {
+                Some(earlier) => format!("{earlier}; {note}"),
+                None => note,
+            });
+        }
         let info = prepared.record.info.clone();
         self.start(prepared, prompt.to_owned())?;
         Ok(Sent {
@@ -2389,9 +2562,11 @@ impl Local {
         self.note("steer", branch, &result, |s| match &s.state {
             SteerState::Refused { reason } => format!("steered input {} refused: {reason}", s.id),
             SteerState::Pending => format!("steered input {} queued", s.id),
-            SteerState::Delivered | SteerState::Accepted => {
-                format!("steered input {} delivered", s.id)
-            }
+            SteerState::Written => format!(
+                "steered input {} written to the harness, not confirmed yet",
+                s.id
+            ),
+            SteerState::Accepted => format!("steered input {} joined the running turn", s.id),
         });
         result
     }
@@ -2708,26 +2883,56 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
     })
 }
 
-/// The text of the last turn, at most [`LAST_MESSAGE_MAX`] characters.
-/// The harness's text since the branch's last prompt, truncated from the
-/// front. Also used to build a reincarnation's handoff brief.
+/// The harness's last message since the branch's last prompt: its text
+/// after its last tool call, permission request or steered input, or the
+/// last text before one when nothing came after. Text the harness wrote
+/// earlier in the turn is not run together with it; Claude Code's
+/// separate text blocks of one message come apart by a blank line, as its
+/// driver writes them. Longer than [`LAST_MESSAGE_MAX`] characters, it
+/// keeps its beginning and its end, with the cut marked between. Also
+/// used to build a reincarnation's handoff brief.
 pub(crate) fn last_message(events: &[RecordedEvent]) -> String {
     let start = events
         .iter()
         .rposition(|e| matches!(e.activity, Activity::Prompt(_)))
         .map_or(0, |i| i + 1);
-    let text: String = events[start..]
-        .iter()
-        .filter_map(|e| match &e.activity {
-            Activity::Harness(Event::MessageDelta { text, .. }) => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
-    let count = text.chars().count();
-    match count > LAST_MESSAGE_MAX {
-        true => text.chars().skip(count - LAST_MESSAGE_MAX).collect(),
-        false => text,
+    let mut messages = vec![String::new()];
+    for event in &events[start..] {
+        match &event.activity {
+            Activity::Harness(Event::MessageDelta { text, .. }) => {
+                if let Some(last) = messages.last_mut() {
+                    last.push_str(text);
+                }
+            }
+            Activity::Harness(Event::ToolStarted { .. } | Event::PermissionRequested { .. })
+            | Activity::Steered { .. } => {
+                if messages.last().is_some_and(|m| !m.trim().is_empty()) {
+                    messages.push(String::new());
+                }
+            }
+            _ => {}
+        }
     }
+    let last = messages
+        .iter()
+        .rev()
+        .find(|m| !m.trim().is_empty())
+        .map_or("", |m| m.trim());
+    elide(last, LAST_MESSAGE_MAX)
+}
+
+/// `text` in at most `max` characters: whole when it fits, else its start
+/// and its end with an ellipsis line between.
+fn elide(text: &str, max: usize) -> String {
+    const CUT: &str = "\n…\n";
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_owned();
+    }
+    let keep = max.saturating_sub(CUT.chars().count());
+    let head: String = text.chars().take(keep / 2).collect();
+    let tail: String = text.chars().skip(count - (keep - keep / 2)).collect();
+    format!("{head}{CUT}{tail}")
 }
 
 #[derive(Deserialize)]
@@ -3110,6 +3315,7 @@ mod tests {
             plan: None,
             goal: None,
             deny: Vec::new(),
+            removed: Vec::new(),
         }
     }
 
@@ -3125,6 +3331,53 @@ mod tests {
             table: std::collections::BTreeMap::new(),
         });
         r
+    }
+
+    /// The last message is the harness's final one, not every text of
+    /// the turn run together; a long one keeps its start and its end.
+    #[test]
+    fn the_last_message_is_the_final_one_and_long_ones_keep_both_ends() {
+        let at = |activity: Activity| RecordedEvent { at_ms: 0, activity };
+        let text = |text: &str| {
+            at(Activity::Harness(Event::MessageDelta {
+                turn: 1,
+                text: text.into(),
+            }))
+        };
+        let tool = at(Activity::Harness(Event::ToolStarted {
+            turn: 1,
+            call_id: "t".into(),
+            name: "Bash".into(),
+        }));
+        let events = vec![
+            at(Activity::Prompt("earlier".into())),
+            text("Old turn."),
+            at(Activity::Prompt("do it".into())),
+            text("Let me look."),
+            tool.clone(),
+            text("Found it"),
+            text(", fixing."),
+            tool,
+            text("Done: all four modules pass."),
+            text("\n\nNothing else changed."),
+            at(Activity::Harness(Event::TurnEnded {
+                turn: 1,
+                outcome: crate::TurnOutcome::Completed,
+            })),
+        ];
+        assert_eq!(
+            last_message(&events),
+            "Done: all four modules pass.\n\nNothing else changed."
+        );
+        // A turn that ends on a tool call keeps the text before it.
+        assert_eq!(last_message(&events[..7]), "Found it, fixing.");
+        assert_eq!(last_message(&events[..3]), "");
+
+        let long = format!("BEGIN{}END", "x".repeat(2 * LAST_MESSAGE_MAX));
+        let cut = last_message(&[text(&long)]);
+        assert_eq!(cut.chars().count(), LAST_MESSAGE_MAX);
+        assert!(cut.starts_with("BEGIN") && cut.ends_with("END"), "{cut}");
+        assert!(cut.contains("\n…\n"));
     }
 
     #[test]
@@ -3169,32 +3422,88 @@ mod tests {
     }
 
     #[test]
-    fn a_childs_reservation_is_its_limit_or_its_subtrees_spend() {
+    fn a_live_child_holds_its_limit_and_a_settled_one_what_it_spent() {
         let (_temp, store) = temp_store();
-        // root -> a (limit 0.5, spent 0.1) -> g (spent 0.3)
-        //      -> b (limit 0.2, spent 0.1) -> h (spent 0.4, over b's limit)
-        //      -> c (no limit, spent 0.05)
+        // root -> a (running, limit 0.5, spent 0.1) -> g (spent 0.3)
+        //      -> b (ready, limit 0.2, spent 0.1) -> h (running, limit
+        //           0.6, spent 0.4)
+        //      -> c (ready, no limit, spent 0.05)
+        //      -> d (merged, limit 0.9, spent 0.25)
+        let with = |mut r: Record, status: BranchStatus, parent: &str| {
+            r.info.status = status;
+            r.info.parent = Some(parent.to_owned());
+            r
+        };
+        let merged = BranchStatus::Merged {
+            target: "by/root".into(),
+            commit: "c".into(),
+        };
         for r in [
-            record("root", &["a", "b", "c", "gone"], Some(0.2), None),
-            record("a", &["g"], Some(0.1), Some(0.5)),
-            record("g", &[], Some(0.3), None),
-            record("b", &["h"], Some(0.1), Some(0.2)),
-            record("h", &[], Some(0.4), None),
-            record("c", &[], Some(0.05), None),
+            record("root", &["a", "b", "c", "d", "gone"], Some(0.2), None),
+            with(
+                record("a", &["g"], Some(0.1), Some(0.5)),
+                BranchStatus::Running,
+                "root",
+            ),
+            with(record("g", &[], Some(0.3), None), BranchStatus::Ready, "a"),
+            with(
+                record("b", &["h"], Some(0.1), Some(0.2)),
+                BranchStatus::Ready,
+                "root",
+            ),
+            with(
+                record("h", &[], Some(0.4), Some(0.6)),
+                BranchStatus::Running,
+                "b",
+            ),
+            with(
+                record("c", &[], Some(0.05), None),
+                BranchStatus::Ready,
+                "root",
+            ),
+            with(record("d", &[], Some(0.25), Some(0.9)), merged, "root"),
         ] {
             store.write(&r).unwrap();
         }
         let root = store.read("root").unwrap();
-        // a reserves 0.5; b's subtree spent 0.5 > its 0.2; c its 0.05.
-        assert!((reserved(&store, &root) - 1.05).abs() < 1e-9);
-        let spent = subtree_spent(&store, &root, &mut BTreeSet::new());
-        assert!((spent - 1.15).abs() < 1e-9, "{spent}");
+        // a holds its whole limit, 0.5. b is settled but its child h runs:
+        // b's own 0.1 and h's limit 0.6. c and d hold what they spent.
+        let held = held(&store, &root);
+        assert_eq!(held.live, 1);
+        assert!((held.live_usd - 0.5).abs() < 1e-9, "{held:?}");
+        assert!(
+            (held.settled_usd - (0.7 + 0.05 + 0.25)).abs() < 1e-9,
+            "{held:?}"
+        );
+        assert!((reserved(&store, &root) - 1.5).abs() < 1e-9);
+        let spent = subtree_spent(&store, &root);
+        assert!((spent - 1.4).abs() < 1e-9, "{spent}");
         let names: Vec<String> = descendants(&store, "root")
             .unwrap()
             .into_iter()
             .map(|i| i.name)
             .collect();
-        assert_eq!(names, ["a", "b", "c", "g", "h"]);
+        assert_eq!(names, ["a", "b", "c", "d", "g", "h"]);
+
+        // Removing a child keeps its spend in its parent's ledger: the
+        // subtree cost and what root has left do not change.
+        store.delete("d").unwrap();
+        let root = store.read("root").unwrap();
+        assert_eq!(root.removed.len(), 1);
+        assert_eq!(root.removed[0].name, "d");
+        assert!((subtree_spent(&store, &root) - 1.4).abs() < 1e-9);
+        assert!((reserved(&store, &root) - 1.5).abs() < 1e-9);
+        // A stale write of root keeps the ledger, as it keeps children.
+        store.write(&record("root", &[], Some(0.2), None)).unwrap();
+        assert_eq!(store.read("root").unwrap().removed.len(), 1);
+        // Removing a subtree's root keeps all it spent: b and its h.
+        store.delete("b").unwrap();
+        let root = store.read("root").unwrap();
+        assert!(
+            (root.removed[1].spent_usd - 0.5).abs() < 1e-9,
+            "{:?}",
+            root.removed
+        );
     }
 
     #[test]

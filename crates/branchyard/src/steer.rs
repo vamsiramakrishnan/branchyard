@@ -77,31 +77,51 @@ pub(crate) fn queue(
 /// A steer as it stands. One still pending whose turn no longer holds the
 /// lease was never delivered, and is reported refused.
 pub(crate) fn state(store: &Store, name: &str, id: u64) -> Result<Steer, Error> {
+    observe(store, name, id).map(|(steer, _)| steer)
+}
+
+/// [`state`], and whether the turn it is for still runs.
+fn observe(store: &Store, name: &str, id: u64) -> Result<(Steer, bool), Error> {
     let row = store
         .backend()
         .steer(name, id)?
         .ok_or_else(|| Error::State(format!("{name} has no steered input {id}")))?;
-    let mut steer = public(row.clone());
-    if steer.state == SteerState::Pending {
-        let held = store
-            .backend()
-            .leases()?
-            .iter()
-            .any(|l| l.branch == name && l.turn == row.turn && l.owner.is_some());
-        if !held {
+    let running = store
+        .backend()
+        .leases()?
+        .iter()
+        .any(|l| l.branch == name && l.turn == row.turn && l.owner.is_some());
+    let mut steer = public(row);
+    match steer.state {
+        SteerState::Pending if !running => {
             steer.state = SteerState::Refused {
                 reason: "the turn ended before its engine delivered it".into(),
             };
         }
+        SteerState::Written | SteerState::Accepted => {
+            steer.boundary = store
+                .read(name)
+                .ok()
+                .and_then(|record| profiles::by_id(&record.info.profile))
+                .map(|profile| profile.driver().steer_boundary().to_owned());
+        }
+        _ => {}
     }
-    Ok(steer)
+    Ok((steer, running))
 }
 
-/// Wait up to `timeout` for the steer to leave [`SteerState::Pending`].
+/// Wait up to `timeout` for the steer to settle: accepted into the
+/// running turn or refused. Input written to a harness that has not
+/// confirmed it by the time its turn ends stays [`SteerState::Written`].
 pub(crate) fn wait(store: &Store, name: &str, id: u64, timeout: Duration) -> Result<Steer, Error> {
     let found = store.wait(timeout, || {
-        let steer = state(store, name, id)?;
-        Ok((steer.state != SteerState::Pending).then_some(steer))
+        let (steer, running) = observe(store, name, id)?;
+        let settled = match steer.state {
+            SteerState::Pending => false,
+            SteerState::Written => !running,
+            SteerState::Accepted | SteerState::Refused { .. } => true,
+        };
+        Ok(settled.then_some(steer))
     })?;
     match found {
         Some(steer) => Ok(steer),
@@ -117,5 +137,6 @@ pub(crate) fn public(row: SteerRow) -> Steer {
         text: row.text,
         requested_at_ms: row.requested_ms,
         state: row.state,
+        boundary: None,
     }
 }

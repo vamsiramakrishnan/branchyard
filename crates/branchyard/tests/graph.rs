@@ -351,7 +351,8 @@ fn an_invalid_proposal_changes_nothing() {
             "already started",
         ),
         (
-            vec![budgeted("p", 0.5, &[]), budgeted("q", 0.4, &["p"])],
+            // `kid` has settled, so all of root's $1.00 is left.
+            vec![budgeted("p", 0.6, &[]), budgeted("q", 0.5, &["p"])],
             1,
             "exceeds what root has left",
         ),
@@ -361,6 +362,7 @@ fn an_invalid_proposal_changes_nothing() {
                 budgeted("q", 0.1, &[]),
                 budgeted("r", 0.1, &[]),
                 budgeted("s", 0.1, &[]),
+                budgeted("t", 0.1, &[]),
             ],
             1,
             "max_children",
@@ -415,7 +417,7 @@ fn an_invalid_proposal_changes_nothing() {
         assert_eq!(now.children, before.children, "{needle}");
         assert_eq!(now.remaining_usd, before.remaining_usd, "{needle}");
         assert!(f.yard.graph("root").unwrap().dependencies.is_empty());
-        for name in ["p", "q", "r", "s"] {
+        for name in ["p", "q", "r", "s", "t"] {
             assert!(f.yard.branch(name).is_err(), "{needle}: {name} exists");
             assert!(
                 f.yard

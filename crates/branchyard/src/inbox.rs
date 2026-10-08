@@ -98,7 +98,7 @@ impl DeliveryHook for SteerDelivery {
             return false;
         };
         match yard.wait_steer(branch, steer.id, self.wait) {
-            Ok(steer) => matches!(steer.state, SteerState::Delivered | SteerState::Accepted),
+            Ok(steer) => matches!(steer.state, SteerState::Written | SteerState::Accepted),
             Err(_) => false,
         }
     }

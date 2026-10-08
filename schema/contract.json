@@ -16127,12 +16127,12 @@
                 "null"
               ],
               "format": "double",
-              "description": "The branch's own cost estimate; `None` when its harness reports none."
+              "description": "The branch's own cost estimate, while a turn runs too (from the\nharness's usage as it comes); `None` when its harness has reported\nnone."
             },
             "subtree_cost_usd": {
               "type": "number",
               "format": "double",
-              "description": "Its own and its descendants' reported costs. Unreported costs count\nas zero here."
+              "description": "Its own and its descendants' reported costs, removed descendants'\nincluded. Unreported costs count as zero here."
             },
             "max_usd": {
               "type": [
@@ -16148,7 +16148,26 @@
                 "null"
               ],
               "format": "double",
-              "description": "What is left of `max_usd` after its own spend and its children's\nreservations: what it can still spend or grant."
+              "description": "What is left of `max_usd` after its own spend, what its live\nchildren hold (`reserved_usd`) and what its settled and removed\nchildren spent (`settled_children_usd`): what it can still spend or\ngrant."
+            },
+            "reserved_usd": {
+              "type": "number",
+              "format": "double",
+              "description": "What its live children (running, waiting, blocked or awaiting plan\napproval) hold of its budget: each one's whole limit, or what its\nsubtree spent if that is more, since it may spend that much without\nasking. A child that settles (ready, merged, failed, ...) holds only\nwhat it spent, until it is sent something again.",
+              "default": 0.0
+            },
+            "reserving_children": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "How many live children hold `reserved_usd`.",
+              "default": 0
+            },
+            "settled_children_usd": {
+              "type": "number",
+              "format": "double",
+              "description": "What its settled and removed children's subtrees spent.",
+              "default": 0.0
             },
             "envelope": {
               "anyOf": [
@@ -17134,12 +17153,12 @@
                 "null"
               ],
               "format": "double",
-              "description": "The branch's own cost estimate; `None` when its harness reports none."
+              "description": "The branch's own cost estimate, while a turn runs too (from the\nharness's usage as it comes); `None` when its harness has reported\nnone."
             },
             "subtree_cost_usd": {
               "type": "number",
               "format": "double",
-              "description": "Its own and its descendants' reported costs. Unreported costs count\nas zero here."
+              "description": "Its own and its descendants' reported costs, removed descendants'\nincluded. Unreported costs count as zero here."
             },
             "max_usd": {
               "type": [
@@ -17155,7 +17174,26 @@
                 "null"
               ],
               "format": "double",
-              "description": "What is left of `max_usd` after its own spend and its children's\nreservations: what it can still spend or grant."
+              "description": "What is left of `max_usd` after its own spend, what its live\nchildren hold (`reserved_usd`) and what its settled and removed\nchildren spent (`settled_children_usd`): what it can still spend or\ngrant."
+            },
+            "reserved_usd": {
+              "type": "number",
+              "format": "double",
+              "description": "What its live children (running, waiting, blocked or awaiting plan\napproval) hold of its budget: each one's whole limit, or what its\nsubtree spent if that is more, since it may spend that much without\nasking. A child that settles (ready, merged, failed, ...) holds only\nwhat it spent, until it is sent something again.",
+              "default": 0.0
+            },
+            "reserving_children": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "How many live children hold `reserved_usd`.",
+              "default": 0
+            },
+            "settled_children_usd": {
+              "type": "number",
+              "format": "double",
+              "description": "What its settled and removed children's subtrees spent.",
+              "default": 0.0
             },
             "envelope": {
               "anyOf": [
@@ -18610,6 +18648,102 @@
             {
               "type": "object",
               "properties": {
+                "turn": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint64",
+                  "minimum": 0,
+                  "description": "The turn in flight, if any."
+                },
+                "type": {
+                  "type": "string",
+                  "const": "progress"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "description": "The harness is working without anything else to report: a tool is\nstill running, or the model is still thinking. A liveness signal\nfor stall detection; the engine does not record it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "task": {
+                  "$ref": "#/$defs/HarnessTask",
+                  "description": "The task."
+                },
+                "background": {
+                  "type": "boolean",
+                  "description": "Whether it runs on after the call that started it returned."
+                },
+                "type": {
+                  "type": "string",
+                  "const": "harness_task_started"
+                }
+              },
+              "required": [
+                "type",
+                "task",
+                "background"
+              ],
+              "description": "The harness started a task of its own: a shell command, a subagent\nor a monitor. `background` is true when it runs on after the call\nthat started it returned, possibly after the turn ends."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "task_id": {
+                  "type": "string",
+                  "description": "The harness's identifier for the task."
+                },
+                "status": {
+                  "type": "string",
+                  "description": "How it ended, in the harness's words."
+                },
+                "summary": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The harness's one-line summary of it, when it gives one."
+                },
+                "type": {
+                  "type": "string",
+                  "const": "harness_task_ended"
+                }
+              },
+              "required": [
+                "type",
+                "task_id",
+                "status"
+              ],
+              "description": "A task of the harness's own ended. `status` is the harness's word\nfor how (`completed`, `failed`, `stopped`, ...)."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "running": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/HarnessTask"
+                  },
+                  "description": "Every background task running now."
+                },
+                "type": {
+                  "type": "string",
+                  "const": "background_tasks"
+                }
+              },
+              "required": [
+                "type",
+                "running"
+              ],
+              "description": "The complete set of the harness's background tasks now running,\neach time it changes. Non-empty at a turn's end, it means the\nharness is still working on something the turn started."
+            },
+            {
+              "type": "object",
+              "properties": {
                 "kind": {
                   "type": "string"
                 },
@@ -18704,6 +18838,31 @@
               ],
               "format": "double",
               "description": "The harness's own cost estimate in USD, not a billing statement."
+            },
+            "cache_write_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Input written to a prompt cache that lives five minutes (or the\nprovider's only cache), when the protocol says."
+            },
+            "cache_write_1h_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Input written to Anthropic's one-hour prompt cache."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the tokens were spent on, when the protocol names it, so\na consumer can price a per-call observation that carries no cost."
             }
           },
           "required": [
@@ -18784,6 +18943,31 @@
               "description": "The model declined to continue."
             }
           ]
+        },
+        "HarnessTask": {
+          "type": "object",
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "The harness's own identifier for the task."
+            },
+            "kind": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What kind of task, in the harness's words (`local_bash`,\n`local_agent`, ...), when it says."
+            },
+            "description": {
+              "type": "string",
+              "description": "What the task does, in the harness's words."
+            }
+          },
+          "required": [
+            "task_id",
+            "description"
+          ],
+          "description": "A task a harness runs of its own, as [`Event::HarnessTaskStarted`] and\n[`Event::BackgroundTasks`] report it."
         },
         "DecisionSource": {
           "oneOf": [
@@ -23137,6 +23321,102 @@
             {
               "type": "object",
               "properties": {
+                "turn": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint64",
+                  "minimum": 0,
+                  "description": "The turn in flight, if any."
+                },
+                "type": {
+                  "type": "string",
+                  "const": "progress"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "description": "The harness is working without anything else to report: a tool is\nstill running, or the model is still thinking. A liveness signal\nfor stall detection; the engine does not record it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "task": {
+                  "$ref": "#/$defs/HarnessTask",
+                  "description": "The task."
+                },
+                "background": {
+                  "type": "boolean",
+                  "description": "Whether it runs on after the call that started it returned."
+                },
+                "type": {
+                  "type": "string",
+                  "const": "harness_task_started"
+                }
+              },
+              "required": [
+                "type",
+                "task",
+                "background"
+              ],
+              "description": "The harness started a task of its own: a shell command, a subagent\nor a monitor. `background` is true when it runs on after the call\nthat started it returned, possibly after the turn ends."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "task_id": {
+                  "type": "string",
+                  "description": "The harness's identifier for the task."
+                },
+                "status": {
+                  "type": "string",
+                  "description": "How it ended, in the harness's words."
+                },
+                "summary": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The harness's one-line summary of it, when it gives one."
+                },
+                "type": {
+                  "type": "string",
+                  "const": "harness_task_ended"
+                }
+              },
+              "required": [
+                "type",
+                "task_id",
+                "status"
+              ],
+              "description": "A task of the harness's own ended. `status` is the harness's word\nfor how (`completed`, `failed`, `stopped`, ...)."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "running": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/HarnessTask"
+                  },
+                  "description": "Every background task running now."
+                },
+                "type": {
+                  "type": "string",
+                  "const": "background_tasks"
+                }
+              },
+              "required": [
+                "type",
+                "running"
+              ],
+              "description": "The complete set of the harness's background tasks now running,\neach time it changes. Non-empty at a turn's end, it means the\nharness is still working on something the turn started."
+            },
+            {
+              "type": "object",
+              "properties": {
                 "kind": {
                   "type": "string"
                 },
@@ -23231,6 +23511,31 @@
               ],
               "format": "double",
               "description": "The harness's own cost estimate in USD, not a billing statement."
+            },
+            "cache_write_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Input written to a prompt cache that lives five minutes (or the\nprovider's only cache), when the protocol says."
+            },
+            "cache_write_1h_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Input written to Anthropic's one-hour prompt cache."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the tokens were spent on, when the protocol names it, so\na consumer can price a per-call observation that carries no cost."
             }
           },
           "required": [
@@ -23311,6 +23616,31 @@
               "description": "The model declined to continue."
             }
           ]
+        },
+        "HarnessTask": {
+          "type": "object",
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "The harness's own identifier for the task."
+            },
+            "kind": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What kind of task, in the harness's words (`local_bash`,\n`local_agent`, ...), when it says."
+            },
+            "description": {
+              "type": "string",
+              "description": "What the task does, in the harness's words."
+            }
+          },
+          "required": [
+            "task_id",
+            "description"
+          ],
+          "description": "A task a harness runs of its own, as [`Event::HarnessTaskStarted`] and\n[`Event::BackgroundTasks`] report it."
         },
         "DecisionSource": {
           "oneOf": [
@@ -27598,12 +27928,12 @@
                 "null"
               ],
               "format": "double",
-              "description": "The branch's own cost estimate; `None` when its harness reports none."
+              "description": "The branch's own cost estimate, while a turn runs too (from the\nharness's usage as it comes); `None` when its harness has reported\nnone."
             },
             "subtree_cost_usd": {
               "type": "number",
               "format": "double",
-              "description": "Its own and its descendants' reported costs. Unreported costs count\nas zero here."
+              "description": "Its own and its descendants' reported costs, removed descendants'\nincluded. Unreported costs count as zero here."
             },
             "max_usd": {
               "type": [
@@ -27619,7 +27949,26 @@
                 "null"
               ],
               "format": "double",
-              "description": "What is left of `max_usd` after its own spend and its children's\nreservations: what it can still spend or grant."
+              "description": "What is left of `max_usd` after its own spend, what its live\nchildren hold (`reserved_usd`) and what its settled and removed\nchildren spent (`settled_children_usd`): what it can still spend or\ngrant."
+            },
+            "reserved_usd": {
+              "type": "number",
+              "format": "double",
+              "description": "What its live children (running, waiting, blocked or awaiting plan\napproval) hold of its budget: each one's whole limit, or what its\nsubtree spent if that is more, since it may spend that much without\nasking. A child that settles (ready, merged, failed, ...) holds only\nwhat it spent, until it is sent something again.",
+              "default": 0.0
+            },
+            "reserving_children": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "How many live children hold `reserved_usd`.",
+              "default": 0
+            },
+            "settled_children_usd": {
+              "type": "number",
+              "format": "double",
+              "description": "What its settled and removed children's subtrees spent.",
+              "default": 0.0
             },
             "envelope": {
               "anyOf": [
@@ -29075,12 +29424,12 @@
             "null"
           ],
           "format": "double",
-          "description": "The branch's own cost estimate; `None` when its harness reports none."
+          "description": "The branch's own cost estimate, while a turn runs too (from the\nharness's usage as it comes); `None` when its harness has reported\nnone."
         },
         "subtree_cost_usd": {
           "type": "number",
           "format": "double",
-          "description": "Its own and its descendants' reported costs. Unreported costs count\nas zero here."
+          "description": "Its own and its descendants' reported costs, removed descendants'\nincluded. Unreported costs count as zero here."
         },
         "max_usd": {
           "type": [
@@ -29096,7 +29445,26 @@
             "null"
           ],
           "format": "double",
-          "description": "What is left of `max_usd` after its own spend and its children's\nreservations: what it can still spend or grant."
+          "description": "What is left of `max_usd` after its own spend, what its live\nchildren hold (`reserved_usd`) and what its settled and removed\nchildren spent (`settled_children_usd`): what it can still spend or\ngrant."
+        },
+        "reserved_usd": {
+          "type": "number",
+          "format": "double",
+          "description": "What its live children (running, waiting, blocked or awaiting plan\napproval) hold of its budget: each one's whole limit, or what its\nsubtree spent if that is more, since it may spend that much without\nasking. A child that settles (ready, merged, failed, ...) holds only\nwhat it spent, until it is sent something again.",
+          "default": 0.0
+        },
+        "reserving_children": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "How many live children hold `reserved_usd`.",
+          "default": 0
+        },
+        "settled_children_usd": {
+          "type": "number",
+          "format": "double",
+          "description": "What its settled and removed children's subtrees spent.",
+          "default": 0.0
         },
         "envelope": {
           "anyOf": [
@@ -30830,6 +31198,102 @@
             {
               "type": "object",
               "properties": {
+                "turn": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint64",
+                  "minimum": 0,
+                  "description": "The turn in flight, if any."
+                },
+                "type": {
+                  "type": "string",
+                  "const": "progress"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "description": "The harness is working without anything else to report: a tool is\nstill running, or the model is still thinking. A liveness signal\nfor stall detection; the engine does not record it."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "task": {
+                  "$ref": "#/$defs/HarnessTask",
+                  "description": "The task."
+                },
+                "background": {
+                  "type": "boolean",
+                  "description": "Whether it runs on after the call that started it returned."
+                },
+                "type": {
+                  "type": "string",
+                  "const": "harness_task_started"
+                }
+              },
+              "required": [
+                "type",
+                "task",
+                "background"
+              ],
+              "description": "The harness started a task of its own: a shell command, a subagent\nor a monitor. `background` is true when it runs on after the call\nthat started it returned, possibly after the turn ends."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "task_id": {
+                  "type": "string",
+                  "description": "The harness's identifier for the task."
+                },
+                "status": {
+                  "type": "string",
+                  "description": "How it ended, in the harness's words."
+                },
+                "summary": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The harness's one-line summary of it, when it gives one."
+                },
+                "type": {
+                  "type": "string",
+                  "const": "harness_task_ended"
+                }
+              },
+              "required": [
+                "type",
+                "task_id",
+                "status"
+              ],
+              "description": "A task of the harness's own ended. `status` is the harness's word\nfor how (`completed`, `failed`, `stopped`, ...)."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "running": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/HarnessTask"
+                  },
+                  "description": "Every background task running now."
+                },
+                "type": {
+                  "type": "string",
+                  "const": "background_tasks"
+                }
+              },
+              "required": [
+                "type",
+                "running"
+              ],
+              "description": "The complete set of the harness's background tasks now running,\neach time it changes. Non-empty at a turn's end, it means the\nharness is still working on something the turn started."
+            },
+            {
+              "type": "object",
+              "properties": {
                 "kind": {
                   "type": "string"
                 },
@@ -30924,6 +31388,31 @@
               ],
               "format": "double",
               "description": "The harness's own cost estimate in USD, not a billing statement."
+            },
+            "cache_write_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Input written to a prompt cache that lives five minutes (or the\nprovider's only cache), when the protocol says."
+            },
+            "cache_write_1h_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Input written to Anthropic's one-hour prompt cache."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the tokens were spent on, when the protocol names it, so\na consumer can price a per-call observation that carries no cost."
             }
           },
           "required": [
@@ -31004,6 +31493,31 @@
               "description": "The model declined to continue."
             }
           ]
+        },
+        "HarnessTask": {
+          "type": "object",
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "The harness's own identifier for the task."
+            },
+            "kind": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What kind of task, in the harness's words (`local_bash`,\n`local_agent`, ...), when it says."
+            },
+            "description": {
+              "type": "string",
+              "description": "What the task does, in the harness's words."
+            }
+          },
+          "required": [
+            "task_id",
+            "description"
+          ],
+          "description": "A task a harness runs of its own, as [`Event::HarnessTaskStarted`] and\n[`Event::BackgroundTasks`] report it."
         },
         "DecisionSource": {
           "oneOf": [
@@ -34605,6 +35119,13 @@
         },
         "state": {
           "$ref": "#/$defs/SteerState"
+        },
+        "boundary": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Where the harness delivers steered input within the running turn,\nas `docs/harness-integration.md` \"Steering a running turn\" names\neach profile's boundary (`claude_next_model_call`,\n`codex_turn_steer`, ...). Set once the input is written."
         }
       },
       "required": [
@@ -34632,20 +35153,20 @@
               "required": [
                 "state"
               ],
-              "description": "Queued for the running turn; the engine running it writes it to the\nharness within about 100 ms, in whichever process it runs."
+              "description": "Queued in Branchyard for the running turn; the engine running it\nwrites it to the harness within about 100 ms, in whichever process\nit runs."
             },
             {
               "type": "object",
               "properties": {
                 "state": {
                   "type": "string",
-                  "const": "delivered"
+                  "const": "written"
                 }
               },
               "required": [
                 "state"
               ],
-              "description": "Written to the harness, which has not yet confirmed it."
+              "description": "Written to the harness's input; the harness has not confirmed it\nyet. Stored as `delivered` before it had this name, which still\nreads as this state."
             },
             {
               "type": "object",
@@ -34658,7 +35179,7 @@
               "required": [
                 "state"
               ],
-              "description": "The harness took it into the running turn."
+              "description": "Joined the running turn: the harness queued it into the turn in\nflight, and the model reads it at the [`Steer::boundary`] the\nharness delivers steered input at (for Claude Code, before its next\nmodel call, still within this turn). Steered input never waits for\na later turn: one the turn does not take is refused."
             },
             {
               "type": "object",

@@ -39,8 +39,10 @@ session, and merging overlapping edits produces conflicts.
    seconds; in Python, `branchyard.wait(name, timeout=...)` does the polling.
    To correct a child that is still running,
    `by send <child> --steer "<text>"` adds to its running turn without
-   stopping it; the child reads it at its next step. Some harnesses cannot
-   take it, and the refusal says so.
+   stopping it. It answers `accepted` once the running turn took it (the
+   child reads it at its next step, never in a later turn), or `written` if
+   the harness has not confirmed it yet. Some harnesses cannot take it, and
+   the refusal says so.
 4. Integrate. When a child is `ready`, `by integrate <child>` merges it
    into your branch after its check passes. Your working tree moves to the
    merge. A conflict or failed check is an error: send the child a fix with
@@ -49,18 +51,32 @@ session, and merging overlapping edits produces conflicts.
    below it. A child that already finished is not running, so cancel
    changes nothing; set a finished child you will not use aside with
    `by discard <child> --reason "<why>"`. It keeps its record and cost,
-   is never integrated, and frees its slot for another child.
+   is never integrated or sent more work, and so never holds a slot or
+   your budget again.
 
 Statuses: `running`, `ready` (a candidate to merge), `no_changes`,
 `interrupted`, `budget_exceeded`, `failed`, `merged`, `discarded`.
 
-Budgets: `--budget-usd` sets a child's cost limit, which refusals and
-statuses call `max_usd`. A child reserves its limit from yours until it
-is merged or discarded. `by inspect` shows what you have left.
-
 Inside a harness, `by spawn` refuses `--parent`, `--yes`, `--ask` and
 `--permissions`: your children run under your policy. `by spawn --help`
 marks every flag you may not pass.
+
+Budget: `--budget-usd` sets a child's cost limit, which refusals and statuses
+call `max_usd`. A child that is running, waiting, blocked or awaiting plan
+approval holds its whole budget of yours. Once it settles (any other status,
+`discarded` included) it holds only what it spent, and the rest is yours again;
+a removed child's spend still counts. `by inspect` shows what live children hold (`reserved_usd`, by
+`reserving_children`) and what settled ones spent (`settled_children_usd`).
+Sending a settled child more work holds its budget again, narrowed to what you
+have left. Your envelope's `max_children` counts only live children.
+
+## Commits and scratch files
+
+Branchyard commits everything in your worktree at the end of each of your
+turns, and in each child's, as commits named `by/<branch>: turn <n>`: you need
+not commit, and those commits are Branchyard's. Write scratch files under
+`$TMPDIR`, a directory private to your branch, not in `/tmp`, which other
+branches share.
 
 ## With `by`
 

@@ -802,7 +802,7 @@ fn input_steered_from_another_process_reaches_the_running_turn() {
         .wait_steer("crashy", steer.id, Duration::from_secs(30))
         .unwrap();
     assert!(
-        matches!(settled.state, SteerState::Delivered | SteerState::Accepted),
+        matches!(settled.state, SteerState::Written | SteerState::Accepted),
         "{settled:?}"
     );
     assert!(child.0.wait().unwrap().success());

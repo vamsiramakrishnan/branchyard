@@ -337,6 +337,7 @@ impl Codex {
                         output_tokens: total["outputTokens"].as_u64(),
                         cached_input_tokens: total["cachedInputTokens"].as_u64(),
                         cost_usd: None,
+                        ..Usage::default()
                     },
                 })
             }
