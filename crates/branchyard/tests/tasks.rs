@@ -182,10 +182,10 @@ fn a_run_is_a_task_whose_record_is_committed_and_kept_out_of_merges_and_diffs() 
         diff.contains("notes.txt") && !diff.contains(".task"),
         "{diff}"
     );
-    // A turn that changes no file keeps the candidate; its record has the
-    // conversation so far.
+    // A turn that changes no file keeps the candidate, ready; its record
+    // has the conversation so far.
     let again = branch.send("just answer", allow(&f)).unwrap();
-    assert_eq!(again.info().status, BranchStatus::NoChanges);
+    assert_eq!(again.info().status, BranchStatus::Ready);
     assert_eq!(again.info().candidate, Some(candidate));
     let view = tasks::view(&f.yard, "first").unwrap();
     assert_eq!(view.attempts[0].conversation, ["1.jsonl", "2.jsonl"]);

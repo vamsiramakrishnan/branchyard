@@ -428,7 +428,8 @@ fn a_kept_sandbox_that_vanished_falls_back_to_a_fresh_one_recorded_as_such() {
     let kept_name = started_names(&branch)[0].clone();
     fake.vanish(&kept_name);
     let branch = branch.send(READ_MARK, kept(&f)).unwrap();
-    assert_eq!(branch.info().status, BranchStatus::NoChanges);
+    // Reading changes nothing: the first turn's candidate stays, ready.
+    assert_eq!(branch.info().status, BranchStatus::Ready);
     match origins(&branch).last().unwrap() {
         SandboxOrigin::Fresh {
             reason: Some(reason),

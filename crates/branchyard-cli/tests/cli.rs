@@ -1431,6 +1431,95 @@ fn the_same_commands_act_with_your_authority_outside_a_harness() {
     let _ = agent;
 }
 
+/// A turn that changes nothing on a branch with a candidate leaves it
+/// `ready` with that candidate on every surface that shows its status; the
+/// turn's own events say it changed nothing.
+#[test]
+fn a_turn_that_changes_nothing_leaves_a_branch_with_a_candidate_ready() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&["run", "say hi", "--name", "root", "--delegate=2", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let spawned = repo.json(&[
+        "spawn",
+        "WRITE kid.txt=k",
+        "--parent",
+        "root",
+        "--name",
+        "kid",
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(spawned["status"]["state"], "ready", "{spawned}");
+    let candidate = spawned["candidate"].clone();
+    assert_eq!(candidate["files_changed"], 1, "{spawned}");
+
+    // The second turn only reads.
+    let sent = repo.json(&["send", "kid", "WHOAMI", "--wait", "--json"]);
+    assert_eq!(sent["status"]["state"], "ready", "{sent}");
+
+    let inspected = repo.json(&["inspect", "kid", "--json"]);
+    assert_eq!(inspected["status"]["state"], "ready", "{inspected}");
+    assert_eq!(inspected["candidate"], candidate, "{inspected}");
+    let children = repo.json(&["children", "root", "--json"]);
+    let kid = &children["descendants"][0];
+    assert_eq!(kid["name"], "kid", "{children}");
+    assert_eq!(kid["status"]["state"], "ready", "{children}");
+    let listed = repo.json(&["ls", "--json"]);
+    let kid = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["name"] == "kid")
+        .unwrap();
+    assert_eq!(kid["status"]["state"], "ready", "{listed}");
+    assert_eq!(kid["candidate"], candidate, "{listed}");
+    let shown = repo.json(&["show", "kid", "--json"]);
+    assert_eq!(shown["status"]["state"], "ready", "{shown}");
+
+    for args in [&["inspect", "kid"][..], &["show", "kid"]] {
+        let text = stdout(&repo.by(args));
+        assert!(
+            text.contains("ready") && !text.contains("no changes"),
+            "{args:?}:\n{text}"
+        );
+    }
+    // The lists show root too, which did end with no changes.
+    for args in [&["children", "root"][..], &["ls"]] {
+        let text = stdout(&repo.by(args));
+        let line = text
+            .lines()
+            .find(|l| l.contains("kid"))
+            .unwrap_or_else(|| panic!("{args:?} does not list kid:\n{text}"));
+        assert!(
+            line.contains("ready") && !line.contains("no changes"),
+            "{args:?}:\n{text}"
+        );
+    }
+
+    // The turn says it changed nothing, once, in its own events.
+    let log = stdout(&repo.by(&["log", "kid"]));
+    assert_eq!(log.matches("the turn changed no file").count(), 1, "{log}");
+    let events = repo.json(&["log", "kid", "--json"]);
+    let events = events.as_array().unwrap();
+    let note = events
+        .iter()
+        .position(|e| {
+            e["activity"] == "warning"
+                && e["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("the turn changed no file"))
+        })
+        .unwrap();
+    let last_prompt = events
+        .iter()
+        .rposition(|e| e["activity"] == "prompt")
+        .unwrap();
+    assert!(
+        note > last_prompt,
+        "the note is the second turn's: {events:?}"
+    );
+}
+
 #[test]
 fn a_delegating_harness_gets_tools_and_skill_outside_its_worktree() {
     let repo = Repo::new();

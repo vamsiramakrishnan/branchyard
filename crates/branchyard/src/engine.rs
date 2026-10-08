@@ -1758,6 +1758,20 @@ pub(crate) fn conclude(
         if let (true, false, Some(candidate)) = (changed, replayed, &candidate) {
             recorder.record(Activity::Snapshot(candidate.clone()))?;
         }
+        // The branch's status says what it holds; that this turn changed
+        // nothing is the turn's own to say, in its events.
+        let completed = matches!(
+            driven.end,
+            End::Outcome {
+                outcome: TurnOutcome::Completed
+            }
+        );
+        if completed && !changed && !replayed && candidate.is_some() {
+            recorder.record(Activity::Warning(
+                "the turn changed no file; the branch keeps its candidate from an earlier turn"
+                    .into(),
+            ))?;
+        }
         info.candidate = candidate;
     }
     if !replayed {
@@ -1766,9 +1780,11 @@ pub(crate) fn conclude(
             .finish_step(fence, fence.turn, STEP_SNAPSHOT, &to_value(&snapshotted))?;
     }
     info.status = match driven.end {
+        // `ready` while the branch has a candidate, whichever turn made it;
+        // `no_changes` only when it has none.
         End::Outcome {
             outcome: TurnOutcome::Completed,
-        } if changed && info.candidate.is_some() => BranchStatus::Ready,
+        } if info.candidate.is_some() => BranchStatus::Ready,
         End::Outcome {
             outcome: TurnOutcome::Completed,
         } => BranchStatus::NoChanges,

@@ -222,10 +222,23 @@ fn send_resumes_the_session_in_the_same_worktree() {
         .collect();
     assert_eq!(prompts, ["WHOAMI", "WHOAMI WRITE notes.txt=more"]);
 
-    // A third turn without changes keeps the candidate.
+    // A third turn without changes keeps the candidate, and the branch
+    // stays ready with it: the turn's own events say it changed nothing.
     let third = second.send("WHOAMI", f.options()).unwrap();
-    assert_eq!(third.info().status, BranchStatus::NoChanges);
+    assert_eq!(third.info().status, BranchStatus::Ready);
     assert_eq!(third.info().candidate, info.candidate);
+    let events = third.events().unwrap();
+    let notes = events
+        .iter()
+        .filter(|e| {
+            matches!(&e.activity, Activity::Warning(w) if w.contains("the turn changed no file"))
+        })
+        .count();
+    assert_eq!(notes, 1, "only the third turn said so: {events:?}");
+    assert_eq!(
+        events.last().unwrap().activity,
+        Activity::Status(BranchStatus::Ready)
+    );
 }
 
 #[test]

@@ -206,7 +206,13 @@ fn a_killed_engine_is_recovered_its_harness_killed_and_nothing_resubmitted() {
     assert!(
         matches!(sent.retry_prompt(), Err(Error::Denied(why)) if why.contains("no cut-off turn"))
     );
-    assert_eq!(sent.info().status, BranchStatus::NoChanges);
+    // The cut-off turn's orphan.log is the candidate, which this turn,
+    // changing nothing, keeps: the branch is ready with it.
+    assert_eq!(sent.info().status, BranchStatus::Ready);
+    assert_eq!(
+        sent.info().candidate.as_ref().unwrap().commit,
+        branch.info().candidate.as_ref().unwrap().commit
+    );
     assert!(text(&sent.events().unwrap()).contains("session fake-session-1 resumed=true"));
     assert_eq!(
         noted,

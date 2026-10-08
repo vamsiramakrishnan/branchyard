@@ -116,6 +116,52 @@ fn a_harness_spawns_a_child_and_integrates_it_into_its_own_branch() {
     assert!(root.wait_subtree().unwrap().len() == 1);
 }
 
+/// A child's turn that changes nothing leaves it `ready` with the
+/// candidate an earlier turn made, as `wait`, `inspect` and `children` show.
+#[test]
+fn a_childs_turn_that_changes_nothing_leaves_it_ready() {
+    let f = Fixture::new();
+    let prompt = [
+        r#"MCP spawn {"prompt": "WRITE child.txt=hello", "name": "kid"}"#,
+        "MCP wait kid",
+        r#"MCP send {"branch": "kid", "prompt": "WHOAMI"}"#,
+        "MCP wait kid",
+        r#"MCP inspect {"branch": "kid"}"#,
+        "MCP children",
+    ]
+    .join("\n");
+    f.yard
+        .task(prompt)
+        .options(f.delegating(Envelope::default()))
+        .name("root")
+        .run()
+        .unwrap()
+        .wait_subtree()
+        .unwrap();
+    let said = reply(&f, "root");
+    assert_eq!(said.matches("mcp wait: ready").count(), 2, "{said}");
+    let inspected = result(&said, "inspect");
+    assert_eq!(inspected["status"], json!({"state": "ready"}), "{said}");
+    assert_eq!(inspected["candidate"]["files_changed"], 1, "{said}");
+    let children = result(&said, "children");
+    assert_eq!(
+        children["descendants"][0]["status"],
+        json!({"state": "ready"}),
+        "{said}"
+    );
+    let kid = f.yard.branch("kid").unwrap();
+    assert_eq!(kid.info().turns, 2);
+    assert_eq!(kid.info().status, BranchStatus::Ready);
+    let events = kid.events().unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.activity,
+            Activity::Warning(w) if w.contains("the turn changed no file")
+        )),
+        "{events:?}"
+    );
+}
+
 #[test]
 fn refusals_reach_the_harness_as_tool_errors() {
     let f = Fixture::new();
