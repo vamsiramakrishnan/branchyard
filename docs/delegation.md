@@ -6,7 +6,7 @@ There is one set of operations and one authority model. Four surfaces reach them
 
 | Surface | Use it when |
 |---|---|
-| `by spawn`, `by inspect`, `by events`, `by send` (and `by send --steer`), `by integrate`, `by cancel`, `by children`, `by graph` | The harness can run shell commands. This is the primary path: every coding harness has a shell, and `--json` output composes in scripts. |
+| `by spawn`, `by inspect`, `by events`, `by send` (and `by send --steer`), `by wait`, `by integrate`, `by cancel`, `by children`, `by graph` | The harness can run shell commands. This is the primary path: every coding harness has a shell, and `--json` output composes in scripts. |
 | The Python module `branchyard` | The harness writes Python to orchestrate: loops, fan-out, waiting. It runs `by --json` for you. |
 | The Rust SDK, `branchyard::Delegate` | You write the meta-harness in Rust, in or out of a harness. |
 | Branchyard's MCP server (`by mcp`) | The harness cannot run commands, or its shell cannot reach the repository, but it can call MCP tools. |
@@ -22,7 +22,21 @@ by run "Split the parser rewrite into tokenizer and formatter work, delegate bot
 
 `--delegate` lets the harness create children one level deep; `--delegate=2` allows grandchildren. In the SDK, set `TaskOptions::delegation` to an `Envelope`. The envelope is stored with the branch, so later sends keep it.
 
-`by run` waits until every branch it delegated has finished, whichever process runs it, says which are still running while it waits, and prints a table of them. A delegated branch whose engine stopped is recovered and ends `interrupted` rather than being waited for. `by ls` shows the tree.
+`by run` waits until every branch it delegated has finished, whichever process runs it, says which are still running while it waits, and prints a table of them. When the harness ended its turn while its children ran, `by run` also waits for the turn that wakes it ([below](#waiting-on-children)) and summarizes the branch as that turn left it. A delegated branch whose engine stopped is recovered rather than waited for: `ready` with a warning when its lost turn had written work, else `interrupted` ([durability](durability.md#recovery)). `by ls` shows the tree.
+
+## Waiting on children
+
+A harness may end its turn while children it delegated still run. Claude Code does this on its own: it moves a long wait into a background task and ends its turn ("I'll get a notification when they finish"). Branchyard does not take the end of that turn for the end of the branch's work:
+
+- When a turn of a branch that may delegate ends `ready` or `no_changes` while one of its descendants is `running`, `waiting` for prerequisites, or itself waiting on its children, the branch is recorded `waiting_on_children`, with what its turn ended as and its limits, instead of finished. Its log says which children it waits on (`delegated: wait <branch>: ...`).
+- When all of them have settled, its next turn starts by itself, resuming its harness session, with a prompt between `<branchyard-wake>` tags: for each child it waited on, its status, candidate (`1 file +12 -3 at 1a2b3c4d5e`), cost, its last message (the last 600 characters) and why it failed or is blocked; one line for its other children not yet merged; and what it can do next (`by integrate a b`, `by send`, `by inspect`, `by wait`). If that turn ends while children run again, it is parked and woken again.
+- It waits for **all** of them, not the first, so one wake carries every result and a parent of six children is not woken six times. A parent that wants to act on each child as it finishes waits inside its turn: `by wait --any`. A `blocked` child does not keep its parent parked, since only the parent can unblock it; the wake lists it with its reason.
+
+**Bounds.** At most `max_wakes` automatic wakes in a row (`Envelope::max_wakes`, 8 by default; a child's is at most its parent's); a turn something else starts (a `send`, a plan approval) resets the count. The wake is a turn like any other, under the parent's own cost, turn and duration limits, stored with it when it parked; a parent whose cost or turn limit is spent, or that reached `max_wakes`, is not woken and ends as its parked turn did, with a warning saying why.
+
+**Opting out.** `by run --no-wake`, `Envelope::no_wake()` (`max_wakes` 0) in `TaskOptions::delegation`: the turn ends as it is, and the caller waits for the children (`by wait`, `Delegate::wait_for`).
+
+**Whichever process.** The parked state is in the store, and whichever engine settles the last child looks at its parked ancestors, in any process: starting the wake is a compare-and-swap from `waiting_on_children` to `running` with the first lease, so exactly one engine wakes it. The wake runs under the options of the parked turn when the process that ran it starts it (so `by run`'s policy and console), else under those of the turn that settled the last child, which are the parent's policy and tools. A wait for the subtree (`by run`, `Branch::wait_subtree`, every server operation that waits for one) wakes what it finds parked and waits for that turn too. After a crash, `Yard::resume_graph` (`by graph resume --yes`, and every server's and `by worker`'s recovery tick) wakes a parked branch whose children have all settled, under the options it is given; `by send <branch>` continues it by hand at any time. `by cancel` on a parked branch ends it `interrupted` and stops its children.
 
 ## What a delegating harness gets
 
@@ -53,7 +67,7 @@ The delegation server and skill reach the harness through [provisioning](provisi
 | Pi, Amp | Refused | Refused | No verified way to pass either, so a turn asking for delegation fails with the driver's refusal rather than running without the tools |
 | ACP agents | Stdio servers in `mcpServers` on `session/new`, `session/resume` and `session/load` | No instructions field exists, so the first prompt of each session starts with the skill between `<branchyard-instructions>` tags; the recorded prompt is unchanged | Frames deserialize as `agent-client-protocol-schema` 1.9.1 request types; the fake agent reads the servers, starts `branchyard-mcp` and calls it |
 
-The skill is a Claude Code skill, [`plugins/branchyard/skills/delegate/SKILL.md`](../plugins/branchyard/skills/delegate/SKILL.md), with `name` and `description` frontmatter. It teaches when to delegate and how: decompose, pick a harness per subtask, set budgets within the envelope, wait or poll, integrate, cancel, with worked examples for `by` and Python. You can also load the plugin yourself: `claude --plugin-dir plugins/branchyard`.
+The skill is a Claude Code skill, [`plugins/branchyard/skills/delegate/SKILL.md`](../plugins/branchyard/skills/delegate/SKILL.md), with `name` and `description` frontmatter. It teaches when to delegate and how: decompose, pick a harness per subtask, set budgets within the envelope, end the turn and be woken or wait with `by wait`, integrate (several together when they share a check), cancel, with worked examples for `by` and Python. You can also load the plugin yourself: `claude --plugin-dir plugins/branchyard`.
 
 ## The CLI
 
@@ -61,18 +75,25 @@ Inside a delegating harness, each command acts as the harness's branch, on its d
 
 | Command | Inside a harness | Outside a harness |
 |---|---|---|
-| `by spawn "<prompt>" [--seat S] [--harness H] [--name N] [--base REV] [--budget-usd X] [--max-turns N] [--max-minutes N] [--check "CMD"] [--max-depth N] [--deny T,T] [--depends-on A,B [--after integrated]] [--bind SCRATCH:ACCESS] [--connector GRANT] [--plan] [--wait]` | Creates a child of this branch and returns once it has started (or, with `--depends-on`, once it is created waiting); `--wait` waits for its turn to end. With `--plan` the child's first turn is read-only and its plan is escalated to this branch's inbox ([plans](plans-and-goals.md#delegated-children)) | Needs `--parent <branch>`; the child runs in this process, so the command always waits. `--yes`/`--ask` answer its permissions |
+| `by spawn "<prompt>" [--seat S] [--harness H] [--name N] [--base REV] [--budget-usd X] [--max-turns N] [--max-minutes N] [--check "CMD"] [--max-depth N] [--deny T,T] [--depends-on A,B [--after integrated]] [--bind SCRATCH:ACCESS] [--connector GRANT] [--plan] [--wait]` | Creates a child of this branch and returns once it has started (or, with `--depends-on`, once it is created waiting); `--wait` waits for its turn to end. The output names the check the child must pass when it is integrated, and whether it is its parent's. With `--plan` the child's first turn is read-only and its plan is escalated to this branch's inbox ([plans](plans-and-goals.md#delegated-children)) | Needs `--parent <branch>`; the child runs in this process, so the command always waits. `--yes`/`--ask` answer its permissions |
 | `by plan approve <child> [--edit \| --file FILE]`, `by plan reject <child> [--reason TEXT] [--replan]` | Approve a descendant's plan (its next turn runs it) or reject it (it ends, or plans again); returns once the turn has started | A person decides any branch's plan |
 | `by inspect [<branch>]` | This branch, or a descendant | Any branch |
 | `by events [<branch>] [--cursor N] [--limit N]` | Same | Any branch |
 | `by send <branch> "<prompt>"` | Starts a descendant's next turn and returns | Runs the turn in the foreground, as before |
 | `by send <branch> --steer "<text>"` | Adds the text to a descendant's running turn without interrupting it, and waits up to 10 s for delivery | Any branch's running turn, in any process |
-| `by integrate <branch>` | Merges a descendant into this branch | Merges a delegated child into its parent |
+| `by integrate <branch> [<branch>...]` | Merges a descendant into this branch; several are merged together, in order, all or none, checked once ([below](#integrating-several-children)) | Merges delegated children into their parent; several must share it |
+| `by wait [<branch>...] [--any\|--all] [--timeout S]` | Blocks until descendants settle: all of them, or the first with `--any`; without branches, its children still running. With `--timeout` it gives up, prints what is pending with `timed_out`, and exits 1 | Needs the branches; any branch |
 | `by cancel <branch>` | Stops a descendant's turn and every turn below it | Any branch and its subtree |
 | `by children [<branch>]` | This branch's descendants | Any branch's |
 | `by graph show [<branch>]`, `by graph apply FILE \| --edits JSON --expected-revision N` | This branch's graph of children, or a descendant's; applies a proposal to this branch's children ([task graphs](graph.md)) | `graph show` any branch's; `graph apply` needs `--parent <branch>` and waits for the children; `by graph resume [--yes]` starts dependents no engine started |
 
 Every command takes `--json`. With it, stdout holds exactly one JSON value, and harness activity goes to stderr. A failure prints `{"error": {"kind": "...", "message": "..."}}` and exits 1. Kinds are stable: `denied` (envelope, budget or authority), `running`, `not_running`, `steer_refused`, `unknown_branch`, `no_candidate`, `conflict`, `check_failed`, `target_moved`, `dirty_target`, `unsupported`, `state`, and the rest of `branchyard::Error::kind`.
+
+### Integrating several children
+
+A child inherits its parent's check unless its spawn gives one (`Spawned.check`, and `check_inherited`, say which; so does `by spawn`'s output and `--help`). The check runs on the merge when the child is integrated, so when the parent's check runs the whole test suite, siblings that each implement part of it pass it only together. `by integrate a b c` (`Delegate::integrate_all`, `branchyard.integrate("a", "b", "c")`, the MCP `propose_integration` with `branches`, `POST …/integrate` with `with`) merges their candidates in the order given in one temporary worktree, runs each distinct check of theirs once on the final merge, and moves the parent's branch with one compare-and-swap: all of them, or none. One merge commit per child sits on the parent's line, so each child's merge is still its own. A conflict names the child that conflicted, the children merged before it and the files (`conflict`, the message `b conflicts with by/root plus a in calc.py; nothing was integrated`). Each child's merge is journaled before the swap, as a single integration's is ([durability](durability.md#journaled-steps)), and every child is recorded `merged`.
+
+**Already contained is not an error.** A child whose candidate the parent's branch already contains, say brought in by a sibling that merged it, is recorded `merged` through the commit that brought it in, and the result says `already: true` and `via` (`5a8d4a6 Merge words (b1242a7...) into by/root`). Whenever the parent's branch moves, however it moved (an integration, a merge its harness ran itself, a turn's checkpoint), Branchyard records as merged each of its `ready` or `interrupted` children whose candidate it now contains, with a warning on the child's log naming the commit; what depends on them is looked at again ([task graphs](graph.md#dependencies)). Never `git merge` children by hand to get around a check: their status follows, but the check does not run.
 
 ### JSON shapes
 
@@ -80,22 +101,23 @@ These are the Rust types' serde forms, identical across `by --json`, the Python 
 
 | Command | Result |
 |---|---|
-| `spawn` | `Spawned`: `{name, git_branch, harness, profile, base, depth, status, budget: {max_usd, max_turns, max_minutes}}`, and `seat` for a child spawned by seat. With `--wait`, or outside a harness: `Inspection` |
+| `spawn` | `Spawned`: `{name, git_branch, harness, profile, base, depth, status, budget: {max_usd, max_turns, max_minutes}}`, and `seat` for a child spawned by seat, `check` (with `check_inherited: true` when it is its parent's). With `--wait`, or outside a harness: `Inspection` |
 | `inspect` | `Inspection`: `{name, status, harness, profile, parent, children, depth, turns, candidate, cost_usd, subtree_cost_usd, max_usd, remaining_usd, envelope, last_message}`, and for a branch in a rig its `seat` and the `seats` it may spawn |
 | `events` | `EventPage`: `{branch, events: [{at_ms, activity}], next_cursor, total}` |
 | `send` | `Sent`: `{name, status}` |
 | `send --steer` / `steer` | `Steer`: `{id, branch, by, text, requested_at_ms, state}`, `state` `{"state": "delivered" \| "accepted" \| "pending"}`; a refusal is the error `steer_refused`, carrying the `Steer` |
-| `integrate` | `Merged`: `{branch, target, previous, commit}` |
+| `integrate` | `Merged`: `{branch, target, previous, commit}`, and `already: true` with `via` when the target already contained the candidate. With several branches, `MergedAll`: `{target, previous, commit, branches: [Merged]}` |
+| `wait` | `Waited`: `{settled: [Inspection], pending: [branch]}`, and `timed_out: true` when the timeout passed first |
 | `cancel` | `Cancelled`: `{cancelled: [branch]}` |
 | `children` | `Children`: `{branch, descendants: [BranchInfo]}` |
 | `graph show` / `graph` | `Graph`: `{branch, revision, children: [{name, status, depends_on, bindings, seat}], dependencies: [{dependent, prerequisite, after}]}` |
 | `graph apply` / `apply_graph` | `GraphApplied`: `{branch, revision, spawned: [Spawned], dependencies}`; a stale revision is the error `stale_revision` |
 
-`status` is `{"state": "running" | "waiting" | "ready" | "no_changes" | "interrupted" | "budget_exceeded" | "failed" | "blocked" | "merged", ...}`; `waiting` and `blocked` are for a child with prerequisites ([task graphs](graph.md#dependencies)). `Spawned` has `depends_on`, and `Inspection` `graph_revision`, `depends_on` and `bindings`, each omitted when empty. `candidate` is `{commit, files_changed, insertions, deletions}` or null. `events` without `--cursor` returns the most recent; pass `next_cursor` back to continue.
+`status` is `{"state": "running" | "waiting" | "waiting_on_children" | "ready" | "no_changes" | "interrupted" | "budget_exceeded" | "failed" | "blocked" | "merged", ...}`; `waiting` and `blocked` are for a child with prerequisites ([task graphs](graph.md#dependencies)), `waiting_on_children` for a parent whose turn ended while its children ran ([above](#waiting-on-children)). An envelope's `max_wakes` is omitted while it is the default, 8. `Spawned` has `depends_on`, and `Inspection` `graph_revision`, `depends_on` and `bindings`, each omitted when empty. `candidate` is `{commit, files_changed, insertions, deletions}` or null. `events` without `--cursor` returns the most recent; pass `next_cursor` back to continue.
 
 ## Python
 
-The module is standard library only. It finds `by` from `BRANCHYARD_BY`, else on `PATH`, and raises `DeniedError`, `RunningError`, `NotRunningError`, `SteerRefusedError`, `NotFoundError`, `StaleRevisionError` or `BranchyardError`, each with the `kind`. `branchyard.steer(branch, text)` adds to a running child's turn; `branchyard.graph()` and `branchyard.apply_graph(edits, expected_revision)` reach [task graphs](graph.md), and `spawn` takes `depends_on`, `after` and `bindings`.
+The module is standard library only. It finds `by` from `BRANCHYARD_BY`, else on `PATH`, and raises `DeniedError`, `RunningError`, `NotRunningError`, `SteerRefusedError`, `NotFoundError`, `StaleRevisionError` or `BranchyardError`, each with the `kind`. `branchyard.steer(branch, text)` adds to a running child's turn; `branchyard.graph()` and `branchyard.apply_graph(edits, expected_revision)` reach [task graphs](graph.md), and `spawn` takes `depends_on`, `after` and `bindings`. `branchyard.wait_all(*branches, timeout=None)` and `wait_any(...)` run `by wait` and return a `Waited`, raising `RunningError` when the timeout passes; `wait(branch)` is the same for one branch. `branchyard.integrate(a, b, ...)` integrates several together and returns a `MergedAll`; one branch returns a `Merged`.
 
 ```python
 import branchyard
@@ -125,13 +147,16 @@ let child = me.spawn(Spawn {
 })?;
 let done = me.wait(&child.name, std::time::Duration::from_secs(1800))?;
 me.integrate(&done.name)?;
+// Several together, checked once; a wait on the store's notifications.
+let waited = me.wait_for(&["tokenizer", "formatter"], false, None)?;
+me.integrate_all(&["tokenizer", "formatter"])?;
 ```
 
-`Yard::as_branch(token)` finds the branch a token was issued to, in the engine's process or through its broker. `Branch::delegate(options)` acts as a branch with your own authority. `Delegate::call(tool, json)` takes the MCP tools' arguments and returns their results. `Branch::wait_subtree` waits until no descendant is running: it joins those on this process's threads, and waits for any another process drives through its durable status, recovering one whose engine stopped ([durability](durability.md#waiting-for-turns-in-other-processes)). Call it before the process exits, or the children on its threads are left to recovery. `Delegate::wait` waits for one branch the same way.
+`Yard::as_branch(token)` finds the branch a token was issued to, in the engine's process or through its broker. `Branch::delegate(options)` acts as a branch with your own authority. `Delegate::call(tool, json)` takes the MCP tools' arguments and returns their results. `Branch::wait_subtree` waits until no descendant is running: it joins those on this process's threads, and waits for any another process drives through its durable status, recovering one whose engine stopped ([durability](durability.md#waiting-for-turns-in-other-processes)). Call it before the process exits, or the children on its threads are left to recovery. It also wakes a parked branch of the subtree, and the branch itself, whose children have settled, and waits for that turn. `Delegate::wait` waits for one branch the same way; `Delegate::wait_for(branches, any, timeout)`, `wait_any` and `wait_all` (and `Yard::wait_for`, with your authority) for several, returning a `Waited`.
 
 ## MCP tools
 
-`spawn`, `inspect`, `events`, `send`, `steer` (`{branch, text}`), `propose_integration`, `cancel`, `children`, `apply_graph` (`{expected_revision, edits}`) and `graph` (`{branch?}`) ([task graphs](graph.md)), the storage tools (`publish_artifact`, `list_artifacts`, `get_artifact`, `share_artifact`, `create_scratch`, `list_scratch`, `share_scratch`, `lock_scratch`, `unlock_scratch`; see [storage](storage.md)), `ask`, `report`, `escalate`, `answer` and `inbox`, `approve_plan` (`{branch, edited?}`) and `reject_plan` (`{branch, reason?, replan?}`) ([plans](plans-and-goals.md#delegated-children)), with the arguments of the CLI flags (`spawn`'s `plan` makes the child plan first) (`budget` is `{max_usd, max_turns, max_minutes}`; `check`, `harnesses`, `deny` and `depends_on` are arrays; `seat` names a rig seat; `bindings` is `[{scratch, access}]`; `ask`'s `wait_seconds` blocks for an answer). Refusals come back as tool results with `isError: true` and the reason, so the model can adjust; a malformed call is a JSON-RPC error. The server uses the official Rust SDK, `rmcp` 3.4, server role and stdio transport only. It is `by mcp`, or the standalone `branchyard-mcp` binary.
+`spawn`, `inspect`, `events`, `send`, `steer` (`{branch, text}`), `propose_integration` (`{branch}`, or `{branches}` to integrate several together), `wait` (`{branches?, any?, timeout_seconds?}`, returning `Waited`), `cancel`, `children`, `apply_graph` (`{expected_revision, edits}`) and `graph` (`{branch?}`) ([task graphs](graph.md)), the storage tools (`publish_artifact`, `list_artifacts`, `get_artifact`, `share_artifact`, `create_scratch`, `list_scratch`, `share_scratch`, `lock_scratch`, `unlock_scratch`; see [storage](storage.md)), `ask`, `report`, `escalate`, `answer` and `inbox`, `approve_plan` (`{branch, edited?}`) and `reject_plan` (`{branch, reason?, replan?}`) ([plans](plans-and-goals.md#delegated-children)), with the arguments of the CLI flags (`spawn`'s `plan` makes the child plan first) (`budget` is `{max_usd, max_turns, max_minutes}`; `check`, `harnesses`, `deny` and `depends_on` are arrays; `seat` names a rig seat; `bindings` is `[{scratch, access}]`; `ask`'s `wait_seconds` blocks for an answer). Refusals come back as tool results with `isError: true` and the reason, so the model can adjust; a malformed call is a JSON-RPC error. The server uses the official Rust SDK, `rmcp` 3.4, server role and stdio transport only. It is `by mcp`, or the standalone `branchyard-mcp` binary.
 
 ## Inbox
 
@@ -187,7 +212,7 @@ A message sits *pending* until it is acknowledged. Acknowledging it (marking it 
 
 A child's limits and denials are stored with it and bound every later turn, whoever sends it.
 
-Branchyard also ships an opt-in permission rule, `Policy::allow_delegation_commands(by_path)` or `--allow-delegation`. It allows exactly the harness's shell commands that run `by` (by name, or the exposed path) with one of the eight delegation subcommands (`spawn`, `inspect`, `events`, `send`, `integrate`, `cancel`, `children`, `graph`), as a single simple command: plain or quoted words, no variables, substitutions, globs, redirections, pipes or command lists. It looks through one `sh -c` or `bash -lc` wrapper, which is how Codex reports commands. Like any rule it is ordered, so an earlier deny, such as one a parent imposed, still wins. The subcommands act within the envelope, so the rule grants nothing beyond it. It trusts `PATH` to resolve `by` to the one the engine put first; a harness that can rewrite its `PATH` can already run anything.
+Branchyard also ships an opt-in permission rule, `Policy::allow_delegation_commands(by_path)` or `--allow-delegation`. It allows exactly the harness's shell commands that run `by` (by name, or the exposed path) with one of the nine delegation subcommands (`wait`, `spawn`, `inspect`, `events`, `send`, `integrate`, `cancel`, `children`, `graph`), as a single simple command: plain or quoted words, no variables, substitutions, globs, redirections, pipes or command lists. It looks through one `sh -c` or `bash -lc` wrapper, which is how Codex reports commands. Like any rule it is ordered, so an earlier deny, such as one a parent imposed, still wins. The subcommands act within the envelope, so the rule grants nothing beyond it. It trusts `PATH` to resolve `by` to the one the engine put first; a harness that can rewrite its `PATH` can already run anything.
 
 ## Seats
 
@@ -241,7 +266,9 @@ A child's own spend counts against every ancestor through the reservations. `ins
 ## Not guaranteed
 
 - Cost limits for harnesses that report no cost, such as every ACP agent today.
-- Tool calls longer than a harness's own MCP or shell timeout, such as an integration whose check runs for many minutes.
+- Tool calls longer than a harness's own MCP or shell timeout, such as an integration whose check runs for many minutes, or a `by wait` without `--timeout` (ending the turn and being woken has no such limit).
+- A wake under the parked turn's own policy after its process exits: an engine in another process wakes it under the policy of the turn that settled its last child, and `resume_graph` under what it is given (on a server, the default, deny).
+- A parked branch whose children never settle (one waiting on a prerequisite that is never integrated) stays parked; `by send` or `by cancel` ends that.
 - Isolation. Local mode runs everything as your user.
 - Delegation from a sandboxed harness. The tools reach the engine over a host socket with the host's `by`, so a turn with `--provider microsandbox` and `--delegate` fails, and a sandboxed branch runs without the tools.
 - A boundary through a server. Harnesses on the server still run as the server's user unless a sandbox provider is used, and a sandboxed turn gets no tools; the envelope stops honest mistakes there too.
