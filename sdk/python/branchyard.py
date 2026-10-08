@@ -439,11 +439,14 @@ def _by() -> str:
     return os.environ.get("BRANCHYARD_BY") or "by"
 
 
-def _run(args: List[str], result_on_failure: bool = False) -> Any:
+def _run(args: List[str], result_on_failure: bool = False, stdin: Optional[str] = None) -> Any:
+    # `stdin`, when given, is what `by` reads on its standard input, such as
+    # a prompt too long for a command line (`--prompt-file -`).
     try:
         done = subprocess.run(
             [_by(), args[0], "--json", *args[1:]],
-            stdin=subprocess.DEVNULL,
+            input=stdin,
+            stdin=subprocess.DEVNULL if stdin is None else None,
             capture_output=True,
             text=True,
             check=False,
@@ -546,7 +549,9 @@ def spawn(
         flags += ["--bind", f"{scratch}:{access}"]
     if plan:
         flags.append("--plan")
-    return _make(Spawned, _run(["spawn", *flags, "--", prompt]))
+    # On stdin, so a prompt of any length fits: a command-line argument is
+    # limited to 128 KiB on Linux.
+    return _make(Spawned, _run(["spawn", *flags, "--prompt-file", "-"], stdin=prompt))
 
 
 def graph(branch: Optional[str] = None) -> Graph:

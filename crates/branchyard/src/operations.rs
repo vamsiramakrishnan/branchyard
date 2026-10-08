@@ -294,6 +294,11 @@ pub const OPERATIONS: &[Operation] = &[
             Param::all("--connector", "connectors", "connectors"),
             Param::all("--plan", "plan", "plan"),
             Param::cli(
+                "--prompt-file",
+                "a tool call and a Python string carry a prompt of any length; only a shell \
+                 command line needs a file (Python passes its prompt to by on stdin)",
+            ),
+            Param::cli(
                 "--issue",
                 "reads the issue with gh on the caller's machine; elsewhere, put it in the prompt",
             ),

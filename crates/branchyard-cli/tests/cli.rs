@@ -830,6 +830,44 @@ fn a_message_steered_into_the_running_turn_is_still_unread_in_it() {
     assert!(said.contains("from kid [unread]: tests-pass"), "{said}");
 }
 
+/// The battery's knowledge-work campaign: `by spawn` took its prompt only
+/// as an argument, so a meta with a long task spawned from Python. It
+/// reads one from a file, or from standard input with `-`.
+#[test]
+fn spawn_reads_its_prompt_from_a_file_or_stdin() {
+    let repo = Repo::new();
+    let task = repo.dir.join("task.md");
+    fs::write(&task, "WRITE file.txt=f\n\n").unwrap();
+    let empty = repo.dir.join("empty.md");
+    fs::write(&empty, "\n").unwrap();
+    let prompt = [
+        format!(
+            "SH by spawn --prompt-file {} --name from-file --wait --json",
+            task.display()
+        ),
+        "SH printf 'WRITE stdin.txt=s' | by spawn --prompt-file - --name from-stdin --wait --json"
+            .to_owned(),
+        format!("SH by spawn --prompt-file {} --name none", empty.display()),
+        format!("SH by spawn inline --prompt-file {}", task.display()),
+    ]
+    .join("\n");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    for (n, name) in [(0, "from-file"), (1, "from-stdin")] {
+        let (code, child) = sh_json(&said, n);
+        assert_eq!(code, 0, "{said}");
+        assert_eq!(child["name"], name);
+        assert_eq!(child["status"]["state"], "ready", "{child}");
+    }
+    assert_eq!(
+        repo.json(&["show", "from-file", "--json"])["prompt"],
+        "WRITE file.txt=f"
+    );
+    assert!(said.contains("holds no prompt"), "{said}");
+    assert!(said.contains("cannot be used with"), "{said}");
+}
+
 #[test]
 fn a_harness_steers_its_running_children_with_by_and_python() {
     let repo = Repo::new();

@@ -465,7 +465,17 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             reason,
             json,
         } => commands::discard(target, &branch, reason.as_deref(), json),
-        Command::Spawn { prompt, spawn } => commands::spawn(env, target, &prompt, &spawn),
+        Command::Spawn {
+            prompt,
+            prompt_file,
+            spawn,
+        } => {
+            let prompt = match prompt_file {
+                Some(path) => commands::read_prompt_file(&path)?,
+                None => prompt,
+            };
+            commands::spawn(env, target, &prompt, &spawn)
+        }
         Command::Inspect { branch, json } => commands::inspect(env, target, branch, json),
         Command::Events {
             branch,

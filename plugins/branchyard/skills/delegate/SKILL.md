@@ -111,6 +111,7 @@ by inspect                      # your own branch: budget left, children
 by spawn "Make tests/parser_test.rs deterministic; run cargo test -p parser" \
   --name parser-flake --harness codex --budget-usd 0.50 --max-turns 3
 by spawn "Document the retry policy in docs/retries.md" --name retry-docs --budget-usd 0.20
+by spawn --prompt-file "$TMPDIR/port-task.md" --name port --budget-usd 0.50   # a long task
 by children
 by inspect parser-flake
 by events parser-flake --cursor 0

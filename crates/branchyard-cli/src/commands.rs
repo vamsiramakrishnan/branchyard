@@ -1368,6 +1368,29 @@ fn required_outside(branch: Option<String>, command: &str) -> Result<String, bra
     })
 }
 
+/// `--prompt-file PATH`: the prompt a file holds, `-` for standard input,
+/// without its trailing newlines. An empty one is refused, as an empty
+/// prompt is.
+pub fn read_prompt_file(path: &str) -> Result<String, Failure> {
+    let text = match path {
+        "-" => {
+            let mut text = String::new();
+            io::Read::read_to_string(&mut io::stdin(), &mut text)
+                .map_err(|e| Failure::Message(format!("--prompt-file -: {e}")))?;
+            text
+        }
+        path => std::fs::read_to_string(path)
+            .map_err(|e| Failure::Message(format!("--prompt-file {path}: {e}")))?,
+    };
+    let text = text.trim_end_matches(['\n', '\r']).to_owned();
+    match text.trim().is_empty() {
+        true => Err(Failure::Message(format!(
+            "--prompt-file {path} holds no prompt"
+        ))),
+        false => Ok(text),
+    }
+}
+
 pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outcome {
     let json = args.json;
     // A child's issue link lives in its prompt's header: a harness has no

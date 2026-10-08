@@ -852,6 +852,7 @@ Examples (inside a harness, the parent is the harness's own branch):
   by spawn \"write the tokenizer\" --harness codex --budget-usd 1 --wait
   by spawn \"write the parser\" --depends-on tokenizer --after integrated
   by spawn \"fix it\" --parent root --yes            # outside a harness
+  by spawn --prompt-file task.md --name parser       # a long task, from a file (- for stdin)
 
 The child's check (--check) defaults to its parent's, and the spawn says which it
 inherits. It runs on the merge when the child is integrated, so siblings that share
@@ -1560,11 +1561,15 @@ pub enum Command {
     Spawn {
         /// The child's task; quote it (with --issue, added to the issue's text)
         #[arg(
-            required_unless_present = "issue",
+            required_unless_present_any = ["issue", "prompt_file"],
             default_value = "",
             hide_default_value = true
         )]
         prompt: String,
+        /// Read the child's task from this file instead, `-` for standard input: for a long
+        /// prompt, or one a shell would mangle
+        #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
+        prompt_file: Option<String>,
         #[command(flatten)]
         spawn: Checked<SpawnFlags>,
     },
@@ -5069,7 +5074,7 @@ mod tests {
 
     #[test]
     fn delegation_commands_parse_with_optional_branches() {
-        let Command::Spawn { prompt, spawn } = parse_str(
+        let Command::Spawn { prompt, spawn, .. } = parse_str(
             "spawn 'fix it' --parent root --harness codex --name fix --budget-usd 0.5 \
              --max-depth 0 --deny Bash,mcp__* --wait --json --yes",
         )
