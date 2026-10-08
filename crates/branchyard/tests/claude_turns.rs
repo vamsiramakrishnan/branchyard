@@ -2,8 +2,9 @@
 //! stand-in that prints the frames Claude Code 2.1.293 prints: how a
 //! session is closed, a cost limit crossed by the turn's last message, the
 //! cost of a turn while it runs, the spending limit the harness is given
-//! and stops at itself (none on the model gateway), and the harness's
-//! private temporary directory. No
+//! and stops at itself (none on the model gateway), the cost of a fresh
+//! session after spending, and the harness's private temporary
+//! directory. No
 //! model is called.
 
 #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
@@ -44,9 +45,12 @@ exec sleep 30
 /// `total_cost_usd` is the session's across `--resume` (2.1.293 reported
 /// $0.0261, $0.0454 and $0.0649 for one session's three turns), it reports
 /// the session's running total, kept in the branch's temporary directory.
+/// A session that is not resumed (no `--resume`) starts its total again.
 fn result(cost: f64) -> String {
     format!(
-        r#"total=$(awk -v spent={cost} -v before="$(cat "$TMPDIR/session-cost" 2>/dev/null || echo 0)" 'BEGIN {{ print before + spent }}')
+        r#"resumed=; for a in "$@"; do [ "$a" = --resume ] && resumed=1; done
+[ -n "$resumed" ] || rm -f "$TMPDIR/session-cost"
+total=$(awk -v spent={cost} -v before="$(cat "$TMPDIR/session-cost" 2>/dev/null || echo 0)" 'BEGIN {{ print before + spent }}')
 printf '%s' "$total" > "$TMPDIR/session-cost"
 printf '{{"type":"result","subtype":"success","is_error":false,"total_cost_usd":%s,"modelUsage":{{"claude-sonnet-4-5":{{"inputTokens":10,"outputTokens":5}}}}}}\n' "$total""#
     )
@@ -311,6 +315,46 @@ fn the_harness_is_given_what_is_left_of_the_budget() {
         .run()
         .unwrap();
     assert_eq!(harness_budget(&f, "unlimited"), None);
+}
+
+/// A fresh session's total starts again from nothing (here after a rewind
+/// to the base), so the branch's cost is what it had spent before plus the
+/// session's total: its recorded cost does not fall, and the next turn is
+/// not given more than is left.
+#[test]
+fn a_fresh_session_adds_to_what_the_branch_spent() {
+    let f = Fixture::new();
+    let args = "printf '%s\\n' \"$@\" > args.txt\n";
+    let options = |cost: f64| TaskOptions {
+        budget: Budget::usd(0.1),
+        ..stand_in(&f, &format!("{args}{}", result(cost)))
+    };
+    let branch = f
+        .yard
+        .task("go")
+        .options(options(0.04))
+        .name("refreshed")
+        .run()
+        .unwrap();
+    assert_eq!(branch.info().cost_usd, Some(0.04));
+    branch.rewind(0).unwrap();
+    let fresh = branch.send("again", options(0.03)).unwrap();
+    let argv = std::fs::read_to_string(fresh.info().worktree.join("args.txt")).unwrap();
+    assert!(!argv.lines().any(|a| a == "--resume"), "{argv}");
+    let spent = fresh.info().cost_usd.unwrap();
+    assert!(
+        (spent - 0.07).abs() < 1e-9,
+        "before plus the session's: {spent}"
+    );
+
+    // The fresh session resumed: its total counts both its turns.
+    let next = fresh.send("more", options(0.01)).unwrap();
+    let argv = std::fs::read_to_string(next.info().worktree.join("args.txt")).unwrap();
+    assert!(argv.lines().any(|a| a == "--resume"), "{argv}");
+    let left = harness_budget(&f, "refreshed").unwrap();
+    assert!((left - 0.03).abs() < 1e-9, "{left}");
+    let spent = next.info().cost_usd.unwrap();
+    assert!((spent - 0.08).abs() < 1e-9, "{spent}");
 }
 
 /// A branch on the model gateway is given no spending limit of its own:

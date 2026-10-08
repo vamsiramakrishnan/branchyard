@@ -401,7 +401,8 @@ fn stop(session: &mut Session) -> Result<(), RuntimeError> {
     }
 }
 
-/// The branch's own share of a cumulative estimate.
+/// The branch's cost from its session's cumulative estimate: see
+/// `Record::cost_baseline`.
 fn spent(reported: f64, baseline: Option<f64>) -> f64 {
     (reported - baseline.unwrap_or(0.0)).max(0.0)
 }
@@ -637,6 +638,17 @@ fn run(
             }
             driven.end = end;
             return Ok(driven);
+        }
+    }
+    // A fresh session's cumulative cost starts again from nothing (after a
+    // rewind, or a lost session): the branch's cost is what it had spent
+    // before, and the session's total added to it. Written at once, so a
+    // turn cut off and resumed reads the session's total the same way.
+    if turn.mode == SessionMode::Fresh {
+        let baseline = record.info.cost_usd.map(|cost| -cost);
+        if record.cost_baseline != baseline {
+            record.cost_baseline = baseline;
+            store.write_fenced(record, fence)?;
         }
     }
     let record: &Record = record;

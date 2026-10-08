@@ -87,8 +87,11 @@ pub(crate) struct Record {
     pub command: Option<Vec<String>>,
     /// Private `HOME` when the branch runs isolated.
     pub home: Option<PathBuf>,
-    /// For a forked session, the parent's cumulative cost at the fork,
-    /// which the harness keeps reporting as part of the fork's.
+    /// What the harness's cumulative cost counts that is not the branch's
+    /// own session's spend: for a forked session, the parent's cost at the
+    /// fork, which the harness keeps reporting as part of the fork's; once
+    /// a fresh session starts, minus the branch's cost before it, which
+    /// the session's total does not count.
     pub cost_baseline: Option<f64>,
     /// Where the harness runs; `None` is local.
     #[serde(default)]
