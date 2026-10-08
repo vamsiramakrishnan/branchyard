@@ -119,8 +119,7 @@ impl World {
 
     fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
         let mut command = Command::new(program);
-        command
-            .env_clear()
+        branchyard_testkit::hermetic(command.env_clear())
             .current_dir(&self.repo)
             .env("PATH", self.path_var())
             .env("HOME", &self.home)

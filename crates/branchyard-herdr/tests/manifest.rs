@@ -133,14 +133,16 @@ fn the_manifest_is_one_herdr_loads() {
 
 #[test]
 fn the_launcher_runs_the_binary() {
-    let output = std::process::Command::new(plugin_dir().join("bin/branchyard-herdr"))
-        .arg("--help")
-        .env(
-            "BRANCHYARD_HERDR_BIN",
-            env!("CARGO_BIN_EXE_branchyard-herdr"),
-        )
-        .output()
-        .unwrap();
+    let output = branchyard_testkit::hermetic(&mut std::process::Command::new(
+        plugin_dir().join("bin/branchyard-herdr"),
+    ))
+    .arg("--help")
+    .env(
+        "BRANCHYARD_HERDR_BIN",
+        env!("CARGO_BIN_EXE_branchyard-herdr"),
+    )
+    .output()
+    .unwrap();
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(help.contains("Usage: branchyard-herdr"), "{help}");

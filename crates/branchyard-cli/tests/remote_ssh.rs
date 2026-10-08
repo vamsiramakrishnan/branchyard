@@ -90,7 +90,7 @@ impl World {
     }
 
     fn by(&self, args: &[&str]) -> Output {
-        Command::new(BY)
+        branchyard_testkit::hermetic(&mut Command::new(BY))
             .current_dir(&self.root)
             .args(args)
             .env("HOME", &self.local_home)
@@ -108,9 +108,6 @@ impl World {
                 "BRANCHYARD_SSH_SERVE_ARGS",
                 "--allow-client-commands --quiet --shutdown-grace 5",
             )
-            .env_remove("BRANCHYARD_REMOTE")
-            .env_remove("BRANCHYARD_TOKEN_FILE")
-            .env_remove("BRANCHYARD_REPO")
             .env_remove("XDG_RUNTIME_DIR")
             .stdin(Stdio::null())
             .output()

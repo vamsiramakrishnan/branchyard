@@ -47,7 +47,7 @@ impl Repo {
 
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_by"));
-        command
+        branchyard_testkit::hermetic(&mut command)
             .current_dir(&self.root)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("NO_COLOR", "1")
@@ -57,16 +57,7 @@ impl Repo {
                 self.root.parent().unwrap().join("user.toml"),
             )
             .stdin(Stdio::null());
-        for var in [
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_REMOTE",
-            "BRANCHYARD_TOKEN_FILE",
-            "BRANCHYARD_REPO",
-            "BRANCHYARD_CA_FILE",
-            "XDG_CONFIG_HOME",
-        ] {
-            command.env_remove(var);
-        }
+        command.env_remove("XDG_CONFIG_HOME");
         command
     }
 
@@ -612,7 +603,8 @@ fn the_wizard_accepts_defaults_on_a_terminal_and_writes_after_review() {
     let repo = Repo::new();
     let by = env!("CARGO_BIN_EXE_by");
     let mut run = Command::new("/usr/bin/script");
-    run.args(["-qfc", &format!("{by} init project"), "/dev/null"])
+    branchyard_testkit::hermetic(&mut run)
+        .args(["-qfc", &format!("{by} init project"), "/dev/null"])
         .current_dir(&repo.root)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("HOME", repo.root.parent().unwrap().join("home"))
@@ -621,8 +613,6 @@ fn the_wizard_accepts_defaults_on_a_terminal_and_writes_after_review() {
             repo.root.parent().unwrap().join("user.toml"),
         )
         .env("TERM", "xterm")
-        .env_remove("BRANCHYARD_REMOTE")
-        .env_remove("BRANCHYARD_BRANCH")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

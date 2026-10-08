@@ -329,7 +329,7 @@ fn result(said: &str, log: &Path) -> Value {
 
 fn by(root: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_by"));
-    command
+    branchyard_testkit::hermetic(&mut command)
         .current_dir(root)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -341,15 +341,7 @@ fn by(root: &Path) -> Command {
         // The mock upstream is on loopback; Anvil refuses other hosts
         // unless allowed.
         .env("ANVIL_ALLOWED_HOSTS", "127.0.0.1");
-    for var in [
-        "BRANCHYARD_DELEGATION",
-        "BRANCHYARD_BRANCH",
-        "BRANCHYARD_ROOT",
-        "BRANCHYARD_BY",
-        "GITHUB_TOKEN",
-    ] {
-        command.env_remove(var);
-    }
+    command.env_remove("GITHUB_TOKEN");
     command
 }
 

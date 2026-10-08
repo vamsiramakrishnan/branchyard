@@ -253,7 +253,7 @@ fn errors_exit_nonzero() {
     assert_eq!(failed.status.code(), Some(1), "{}", stdout(&failed));
     assert!(stdout(&failed).contains("failed"), "{}", stdout(&failed));
 
-    let outside = Command::new(env!("CARGO_BIN_EXE_by"))
+    let outside = branchyard_testkit::hermetic(&mut Command::new(env!("CARGO_BIN_EXE_by")))
         .args(["ls"])
         .current_dir(&repo.dir)
         .env(
@@ -3130,4 +3130,86 @@ fn spawn_gives_a_child_its_model() {
             .contains("ACP v1 has no model parameter"),
         "{refused}"
     );
+}
+
+/// The names of the branches `by ls --json` printed.
+fn names(list: &Value) -> Vec<String> {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn an_inherited_root_is_used_only_in_its_repository_or_the_turns_worktree() {
+    let outer = Repo::new();
+    outer.by_agent(&["run", "WRITE b.txt=two", "--name", "outer"]);
+    let worktree = outer.root.join(".branchyard/worktrees/outer");
+    assert!(worktree.join("b.txt").is_file());
+    let root = outer.root.to_str().unwrap();
+    let inherit = |command: &mut Command| {
+        command
+            .env("BRANCHYARD_ROOT", root)
+            .env("BRANCHYARD_WORKTREE", &worktree);
+    };
+
+    // In the turn's worktree and in the root's own tree, it is the yard.
+    for cwd in [&worktree, &outer.root.join("sub")] {
+        fs::create_dir_all(cwd).unwrap();
+        let mut ls = outer.command(outer.by_path());
+        ls.current_dir(cwd).args(["ls", "--json"]);
+        inherit(&mut ls);
+        let out = ls.output().unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        let list: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(names(&list), ["outer"], "in {}", cwd.display());
+    }
+
+    // In another repository, even one under the yard's `.branchyard/` (as
+    // a test's scratch repository is under a turn's TMPDIR), and in a
+    // directory there that is in no repository, it is refused: nothing is
+    // created in either yard.
+    let mut inner = branchyard_testkit::repo!();
+    inner.set_env("BRANCHYARD_ROOT", root);
+    inner.set_env("BRANCHYARD_WORKTREE", worktree.to_str().unwrap());
+    let tmp = outer.root.join(".branchyard/tmp/outer/scratch");
+    fs::create_dir_all(&tmp).unwrap();
+    let agent = fake_agent(outer.by_path()).display().to_string();
+    let run = [
+        "run",
+        "WRITE c.txt=leak",
+        "--name",
+        "leak",
+        "--harness",
+        "gemini-cli",
+        "--command",
+        &agent,
+    ];
+    for cwd in [&inner.root, &tmp] {
+        let mut command = inner.command(inner.by_path());
+        command.current_dir(cwd).args(run);
+        let out = command.output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "in {}", cwd.display());
+        let error = stderr(&out);
+        assert!(error.contains("BRANCHYARD_ROOT is"), "{error}");
+        assert!(error.contains("neither in that repository"), "{error}");
+    }
+    // Delegation reaches the yard through the same root: refused before
+    // the token is looked at.
+    let mut delegated = inner.command(inner.by_path());
+    delegated
+        .args(["inspect", "--json"])
+        .env("BRANCHYARD_DELEGATION", "not-a-token");
+    let out = delegated.output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stdout(&out).contains("neither in that repository"),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(names(&outer.json(&["ls", "--json"])), ["outer"]);
+    inner.remove_env("BRANCHYARD_ROOT");
+    inner.remove_env("BRANCHYARD_WORKTREE");
+    assert!(names(&inner.json(&["ls", "--json"])).is_empty());
 }

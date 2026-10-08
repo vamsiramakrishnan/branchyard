@@ -129,12 +129,14 @@ pub fn print(text: &str) -> Outcome {
 
 /// The yard: the harness's repository when `by` runs inside a harness,
 /// whose working directory is its branch's worktree, else the current one.
+/// An inherited `BRANCHYARD_ROOT` that is neither is refused; see
+/// [`crate::inherited`].
 pub fn open() -> Result<Yard, Failure> {
     Ok(open_yard()?)
 }
 
 fn open_yard() -> Result<Yard, branchyard::Error> {
-    let yard = match std::env::var_os(branchyard::ENV_ROOT).filter(|v| !v.is_empty()) {
+    let yard = match crate::inherited::root()? {
         Some(root) => Yard::open(root),
         None => Yard::open("."),
     }?;
@@ -1301,6 +1303,9 @@ pub fn mcp(root: &str, branch: &str) -> Outcome {
 pub(crate) fn harness_delegate(json: bool) -> Result<Option<Delegate>, Failure> {
     let set = |name: &str| std::env::var_os(name).is_some_and(|v| !v.is_empty());
     if set(ENV_TOKEN) {
+        if let Err(error) = crate::inherited::root() {
+            return fail(json, &error).map(|()| None);
+        }
         return match Delegate::from_env() {
             Ok(delegate) => Ok(Some(delegate)),
             Err(error) => fail(json, &error).map(|()| None),

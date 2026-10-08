@@ -12,6 +12,8 @@
 //! - [`Repo`]: a throwaway git repository driven through the built `by`
 //!   binary, with the command's output shown when it fails.
 //! - [`Scratch`]: a temporary directory that is removed on drop.
+//! - [`hermetic()`]: a command's environment without the Branchyard turn
+//!   the tests run in, for every test that starts `by` or a server.
 //! - [`MockHttp`]: a mock HTTP server that fails the owning test on any
 //!   I/O error instead of swallowing it.
 //!
@@ -20,6 +22,7 @@
 #![warn(missing_docs)]
 
 mod agent;
+mod env;
 mod mock;
 mod repo;
 mod scratch;
@@ -28,6 +31,7 @@ pub mod wait;
 pub use agent::{
     built, built_uninstrumented, fake_agent, fake_agent_here, fake_agent_here_uninstrumented,
 };
+pub use env::hermetic;
 pub use mock::{MockHttp, Request, Response};
 pub use repo::Repo;
 pub use scratch::Scratch;

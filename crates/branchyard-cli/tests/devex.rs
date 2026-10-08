@@ -68,7 +68,7 @@ impl Repo {
 
     fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
         let mut command = Command::new(program);
-        command
+        branchyard_testkit::hermetic(&mut command)
             .current_dir(&self.root)
             .env("HOME", &self.home)
             .env("CLAUDE_CONFIG_DIR", self.home.join(".claude"))
@@ -80,11 +80,6 @@ impl Repo {
             .env("BRANCHYARD_TRUST_FILE", self.dir.join("user/trust.json"))
             .env("PAGER", "cat");
         for var in [
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-            "BRANCHYARD_REMOTE",
             "LINEAR_API_KEY",
             "LINEAR_ACCESS_TOKEN",
             "LINEAR_API_URL",
@@ -746,7 +741,7 @@ fn listening_ports_belong_to_their_branch_and_can_be_browsed_and_stopped() {
         .local_addr()
         .unwrap()
         .port();
-    let mut manual = Command::new("python3")
+    let mut manual = branchyard_testkit::hermetic(&mut Command::new("python3"))
         .args([
             "-m",
             "http.server",
@@ -755,8 +750,6 @@ fn listening_ports_belong_to_their_branch_and_can_be_browsed_and_stopped() {
             &free.to_string(),
         ])
         .current_dir(&worktree)
-        .env_remove("BRANCHYARD_BRANCH")
-        .env_remove("BRANCHYARD_ROOT")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

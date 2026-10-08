@@ -131,9 +131,8 @@ fn a_token_that_matches_no_running_turn_or_another_branch_is_refused_locally() {
 fn usage_errors_exit_2_before_speaking_mcp() {
     let run = |args: &[&str], token: Option<&str>| {
         let mut command = Command::new(SERVER);
-        command
+        branchyard_testkit::hermetic(&mut command)
             .args(args)
-            .env_remove("BRANCHYARD_DELEGATION")
             .stdin(Stdio::null());
         if let Some(token) = token {
             command.env("BRANCHYARD_DELEGATION", token);

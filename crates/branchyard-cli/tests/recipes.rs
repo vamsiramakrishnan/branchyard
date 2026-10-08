@@ -98,15 +98,13 @@ impl Repo {
     }
 
     fn by(&self, args: &[&str]) -> Output {
-        Command::new(BY)
+        branchyard_testkit::hermetic(&mut Command::new(BY))
             .current_dir(&self.root)
             .args(args)
             .env("BRANCHYARD_TRUST_FILE", &self.trust)
             .env("BRANCHYARD_USER_CONFIG", &self.user)
             .env("BRANCHYARD_SSH", &self.ssh)
             .env("NO_COLOR", "1")
-            .env_remove("BRANCHYARD_BRANCH")
-            .env_remove("BRANCHYARD_REMOTE")
             .stdin(Stdio::null())
             .output()
             .unwrap()
@@ -160,7 +158,7 @@ fn recipes_run_only_once_trusted_and_check_runs_the_whole_lifecycle() {
     assert!(vms(&repo.root).is_empty());
 
     // A harness on a branch can never trust one.
-    let out = Command::new(BY)
+    let out = branchyard_testkit::hermetic(&mut Command::new(BY))
         .current_dir(&repo.root)
         .args(["recipe", "trust", "devbox"])
         .env("BRANCHYARD_TRUST_FILE", &repo.trust)
@@ -376,7 +374,7 @@ impl Repo {
         args.extend(extra.iter().map(|a| (*a).to_owned()));
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let mut command = Command::new(BY);
-        command
+        branchyard_testkit::hermetic(&mut command)
             .current_dir(&self.root)
             .args(&args)
             .env("BRANCHYARD_TRUST_FILE", &self.trust)
@@ -386,15 +384,6 @@ impl Repo {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("NO_COLOR", "1")
             .stdin(Stdio::null());
-        for var in [
-            "BRANCHYARD_BRANCH",
-            "BRANCHYARD_REMOTE",
-            "BRANCHYARD_DELEGATION",
-            "BRANCHYARD_ROOT",
-            "BRANCHYARD_BY",
-        ] {
-            command.env_remove(var);
-        }
         command.output().unwrap()
     }
 }
@@ -503,7 +492,7 @@ fn defaults_can_choose_a_recipe_and_a_changed_recipe_is_refused_again() {
         text(&out.stdout),
         text(&out.stderr)
     );
-    let out = Command::new(BY)
+    let out = branchyard_testkit::hermetic(&mut Command::new(BY))
         .current_dir(&repo.root)
         .args([
             "run",
@@ -521,8 +510,6 @@ fn defaults_can_choose_a_recipe_and_a_changed_recipe_is_refused_again() {
         .env("BRANCHYARD_SSH", &repo.ssh)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("NO_COLOR", "1")
-        .env_remove("BRANCHYARD_BRANCH")
-        .env_remove("BRANCHYARD_REMOTE")
         .stdin(Stdio::null())
         .output()
         .unwrap();

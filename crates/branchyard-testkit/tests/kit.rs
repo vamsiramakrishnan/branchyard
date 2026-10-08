@@ -244,3 +244,47 @@ fn a_closing_response_ends_the_connection_without_a_byte() {
     assert_eq!(mock.requests().len(), 1);
     mock.finish();
 }
+
+/// Run by [`hermetic_clears_every_branchyard_variable`] in a copy of this
+/// binary whose environment holds a turn's variables: prints the
+/// environment `env` gets through `hermetic`. Does nothing otherwise.
+#[test]
+fn hermetic_child() {
+    if std::env::var_os("KIT_HERMETIC_CHILD").is_none() {
+        return;
+    }
+    let out = branchyard_testkit::hermetic(&mut std::process::Command::new("env"))
+        .env("BRANCHYARD_USER_CONFIG", "/set/after")
+        .output()
+        .unwrap();
+    std::io::stdout().write_all(&out.stdout).unwrap();
+}
+
+#[test]
+fn hermetic_clears_every_branchyard_variable() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "hermetic_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("KIT_HERMETIC_CHILD", "1")
+        .env("BRANCHYARD_ROOT", "/the/outer/yard")
+        .env("BRANCHYARD_DELEGATION", "outer-token")
+        .env("BRANCHYARD_SOMETHING_NEW", "x")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let env = String::from_utf8(out.stdout).unwrap();
+    let branchyard: Vec<&str> = env
+        .lines()
+        .filter(|l| l.starts_with("BRANCHYARD_"))
+        .collect();
+    // Only what the command set after `hermetic`.
+    assert_eq!(branchyard, ["BRANCHYARD_USER_CONFIG=/set/after"], "{env}");
+    let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    let ceiling = format!("GIT_CEILING_DIRECTORIES={}", tmp.display());
+    assert!(env.lines().any(|l| l == ceiling), "{env}");
+    assert!(env.contains("KIT_HERMETIC_CHILD=1"), "{env}");
+}

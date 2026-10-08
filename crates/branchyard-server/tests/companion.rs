@@ -52,16 +52,17 @@ fn app_config(f: &Fixture) -> branchyard_server::Config {
 /// `branchyard-server token ...` in the fixture's repository, on its data
 /// directory: stdout, stderr and whether it succeeded.
 fn token_command(f: &Fixture, args: &[&str]) -> (String, String, bool) {
-    let out = Command::new(env!("CARGO_BIN_EXE_branchyard-server"))
-        .arg("token")
-        .args(args)
-        .arg("--data-dir")
-        .arg(&f.data)
-        .current_dir(&f.root)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .unwrap();
+    let out =
+        branchyard_testkit::hermetic(&mut Command::new(env!("CARGO_BIN_EXE_branchyard-server")))
+            .arg("token")
+            .args(args)
+            .arg("--data-dir")
+            .arg(&f.data)
+            .current_dir(&f.root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),

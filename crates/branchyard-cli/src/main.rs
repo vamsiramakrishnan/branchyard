@@ -22,6 +22,7 @@ mod fleet_cmd;
 mod gateway_cmd;
 mod gh;
 mod harness_cmd;
+mod inherited;
 mod init;
 mod json;
 mod knowledge_cmd;

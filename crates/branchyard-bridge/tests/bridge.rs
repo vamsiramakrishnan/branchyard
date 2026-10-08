@@ -85,7 +85,7 @@ impl Bridge {
                 command
             }
         };
-        let mut child = command
+        let mut child = branchyard_testkit::hermetic(&mut command)
             .args(["serve", "--listen", "127.0.0.1:0", "--lifeline-stdin"])
             .args(&self.extra)
             .arg("--identity")
