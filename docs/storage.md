@@ -41,7 +41,7 @@ fn readable(reader, publisher, ancestry_of_publisher_at_publish_time, explicit_s
 
 The ancestor check does not need the publisher's branch record to still exist: at publish time, the publisher's ancestor chain (root..parent) is walked once and snapshotted onto the artifact row, so an ancestor's read survives the publisher's later removal. The descendant check is the reverse: it walks *up* from the reader through recorded `parent` names, which needs no record of the publisher, only of the reader and whatever sits between them — so it too survives the publisher's removal, as long as the reader (and anything between it and the publisher) is still live.
 
-`by artifact share ID --to BRANCH`, the SDK's `Yard::share_artifact`/`Delegate::share_artifact`, and the MCP `share_artifact` tool grant this explicitly; the actor sharing must itself be able to read the artifact (typically the common parent, which is always an ancestor of both siblings).
+`by artifact share ID --to BRANCH`, the SDK's `Yard::share_artifact`/`Delegate::share_artifact`, and the MCP `share_artifact` tool grant this explicitly. The actor need only be able to read the artifact itself under the rule above — any ancestor of the publisher, any descendant, or a prior share recipient, not only the publisher — so a common ancestor of both siblings can run the share, not just the publisher. `BRANCH` must already exist (`unknown_branch` otherwise): spawn the consumer first, or have it `by artifact get` a copy a common ancestor republished to it.
 
 ### Garbage collection
 

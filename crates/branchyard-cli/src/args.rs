@@ -876,9 +876,10 @@ array alone. Each edit is an object tagged by \"kind\":
 
   {\"kind\": \"spawn\", \"prompt\": \"...\", ...}   a new child; it takes what by spawn
       does, by the MCP tool's names: name, harness, base, budget {max_usd,
-      max_turns, max_minutes}, check [argv], max_depth, max_children,
-      harnesses [ids], deny [tools], seat, depends_on [names], after
-      (settled or integrated), bindings [{scratch, access}], connectors
+      max_turns, max_minutes}, check [\"cmd\", \"arg\", ...] (a literal argv
+      array, not a string to shell-split like by spawn --check), max_depth,
+      max_children, harnesses [ids], deny [tools], seat, depends_on [names],
+      after (settled or integrated), bindings [{scratch, access}], connectors
       [grants], plan, model
   {\"kind\": \"add_dependency\", \"dependent\": \"B\", \"prerequisite\": \"A\",
    \"after\": \"settled\"}   B waits for A; B must not have started

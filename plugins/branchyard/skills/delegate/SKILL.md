@@ -44,6 +44,11 @@ session, and merging overlapping edits produces conflicts.
      with a summary of each child (status, diffstat, cost, last message,
      why it failed) and what you can do next. Do not leave a background
      task or monitor polling for them; it is stopped when your turn ends.
+     Never run `by wait` or an orchestration script as a backgrounded shell
+     command and end your turn to wait for it: a backgrounded shell command
+     belongs to your own session and dies with it, unlike your children.
+     Either wait with `by wait` in the foreground, or just end your turn;
+     Branchyard itself wakes you.
    - **Wait in this turn.** `by wait` blocks until your running children
      have settled (`by wait a b`, `--any` for the first, `--timeout S`);
      it is woken by Branchyard, not a poll. `by spawn ... --wait` waits
@@ -219,7 +224,11 @@ by answer 12 "Yes, accept tabs"
 ```
 
 Artifacts you publish are readable by your ancestors and descendants; a
-sibling needs `by artifact share ID --to BRANCH`. An artifact's `digest`
+sibling needs `by artifact share ID --to BRANCH`. Whoever can already
+read the artifact may run that share, not only its publisher — typically
+a common ancestor of both siblings, not either sibling itself. `BRANCH`
+must already exist: spawn the consumer first, or have it `by artifact
+get` a copy a common ancestor republished to it. An artifact's `digest`
 is the blake3 hash of its bytes.
 
 ## With Python
