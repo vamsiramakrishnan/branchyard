@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Delegate parts of a coding task to child branches with Branchyard. Use when you run on a Branchyard branch (BRANCHYARD_BRANCH is set) and the work splits into independent pieces, needs a second harness, or should be tried more than one way. Covers `by spawn` (including children that wait for siblings), `by graph`, `by inspect`, `by integrate`, the Python module and the MCP tools.
+description: Delegate parts of a coding task to child branches with Branchyard. Use when you run on a Branchyard branch (BRANCHYARD_BRANCH is set) and the work splits into independent pieces, needs a second harness, or should be tried more than one way. Covers `by spawn` (including children that wait for siblings), `by graph`, `by inspect`, `by wait`, `by integrate` (several children at once), ending your turn while children run, the Python module and the MCP tools.
 ---
 
 # Delegating with Branchyard
@@ -31,20 +31,39 @@ session, and merging overlapping edits produces conflicts.
    have left (`by inspect` shows `remaining_usd`). A child starts from your
    current work: your uncommitted changes are committed to your branch
    first.
-3. Watch. `by inspect <child>` shows status, diffstat, cost and its last
-   message; `by events <child>` shows its activity. Wait with `--wait` or
-   by polling; do not busy-loop faster than every few seconds. To correct
-   a child that is still running, `by send <child> --steer "<text>"` adds
-   to its running turn without stopping it; the child reads it at its next
-   step. Some harnesses cannot take it, and the refusal says so.
-4. Integrate. When a child is `ready`, `by integrate <child>` merges it
-   into your branch after its check passes. Your working tree moves to the
-   merge. A conflict or failed check is an error: send the child a fix with
-   `by send <child> "<prompt>"`, or do it yourself.
+3. Wait. Either way works:
+   - **End your turn.** You do not have to stay awake: when every child
+     you delegated has settled, Branchyard starts your next turn by itself
+     with a summary of each child (status, diffstat, cost, last message,
+     why it failed) and what you can do next. Do not leave a background
+     task or monitor polling for them; it is stopped when your turn ends.
+   - **Wait in this turn.** `by wait` blocks until your running children
+     have settled (`by wait a b`, `--any` for the first, `--timeout S`);
+     it is woken by Branchyard, not a poll. `by spawn ... --wait` waits
+     for one child.
+   `by inspect <child>` shows status, diffstat, cost and its last message;
+   `by events <child>` shows its activity. To correct a child that is still
+   running, `by send <child> --steer "<text>"` adds to its running turn
+   without stopping it; the child reads it at its next step. Some harnesses
+   cannot take it, and the refusal says so.
+4. Integrate. When children are `ready`, `by integrate <child>` merges one
+   into your branch after its check passes; `by integrate a b c` merges
+   several together, in order, runs the check once on the result and moves
+   your branch once, all or none. Use it when children share a test suite
+   that none passes alone: a child inherits your check (the spawn says
+   which), so with a whole-suite check integrate them together rather than
+   merging them into each other. Never `git merge` children yourself: that
+   bypasses the check, and Branchyard records them as merged only after the
+   fact. A child your branch already contains is recorded as merged, not
+   refused. A conflict names the child and the files, and a failed check
+   shows its output: send the child a fix with `by send <child>
+   "<prompt>"`, or do it yourself.
 5. Clean up. `by cancel <child>` stops a child and everything below it.
 
 Statuses: `running`, `ready` (a candidate to merge), `no_changes`,
-`interrupted`, `budget_exceeded`, `failed`, `merged`.
+`interrupted`, `budget_exceeded`, `failed`, `merged`, `waiting` and
+`blocked` (prerequisites), `waiting_on_children` (its turn ended while
+its children run; it is woken when they settle).
 
 ## With `by`
 
@@ -58,10 +77,13 @@ by inspect parser-flake
 by events parser-flake --cursor 0
 by spawn "Add a regression test for issue 42" --name issue-42 --budget-usd 0.30 --wait
 by send parser-flake --steer "Use the fixture in tests/data, not a new one."
+by wait parser-flake retry-docs --timeout 600
 by send parser-flake "The seed must come from the test name, not the clock."
-by integrate parser-flake
+by integrate parser-flake retry-docs
 by cancel retry-docs
 ```
+
+There is no `by inspect --wait`; wait with `by wait`, or end your turn.
 
 Every command takes `--json` for a stable machine-readable result, and
 exits non-zero with `{"error": {"kind", "message"}}` on refusal. Run `by`
@@ -122,20 +144,22 @@ parts = [
     branchyard.spawn("Port the formatter to the new API; run its tests",
                      name="formatter", budget_usd=share),
 ]
-for child in parts:
-    done = branchyard.wait(child.name, timeout=1800)
-    if done.status["state"] == "ready":
-        try:
-            branchyard.integrate(child.name)
-        except branchyard.BranchyardError as error:
-            print(child.name, error.kind, error.message)
+done = branchyard.wait_all(*(child.name for child in parts), timeout=1800)
+ready = [i.name for i in done.settled if i.status["state"] == "ready"]
+try:
+    branchyard.integrate(*ready)        # together, checked once
+except branchyard.BranchyardError as error:
+    print(error.kind, error.message)
 ```
 
-Errors are `DeniedError` (envelope, budget or authority), `RunningError`,
-`NotFoundError`, or `BranchyardError` with a `kind`.
+`branchyard.wait_any(...)` returns when the first settles. Errors are
+`DeniedError` (envelope, budget or authority), `RunningError` (also a wait
+that timed out), `NotFoundError`, or `BranchyardError` with a `kind`.
 
 ## Without a shell
 
 If you cannot run commands, the same operations are MCP tools on the
 `branchyard` server: `spawn` (with `depends_on`), `inspect`, `events`, `send`,
-`propose_integration`, `cancel`, `children`, `graph` and `apply_graph`.
+`propose_integration` (`branch`, or `branches` to integrate several
+together), `wait` (`branches`, `any`, `timeout_seconds`), `cancel`,
+`children`, `graph` and `apply_graph`.

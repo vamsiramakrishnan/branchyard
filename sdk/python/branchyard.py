@@ -17,6 +17,9 @@ as `by --json` reported it:
     if done.status["state"] == "ready":
         branchyard.integrate(child.name)
 
+A harness may also end its turn while its children run: Branchyard starts
+its next turn once they have all settled, with a summary of what each did.
+
 Not guaranteed: anything `by` does not. This module adds no authority,
 retries nothing, and waits only when asked.
 """
@@ -25,7 +28,6 @@ import dataclasses
 import json
 import os
 import subprocess
-import time
 from typing import Any, Dict, List, Optional
 
 __all__ = [
@@ -42,6 +44,8 @@ __all__ = [
     "Sent",
     "Steer",
     "Merged",
+    "MergedAll",
+    "Waited",
     "Cancelled",
     "Children",
     "ArtifactRef",
@@ -63,6 +67,8 @@ __all__ = [
     "graph",
     "apply_graph",
     "wait",
+    "wait_any",
+    "wait_all",
     "publish",
     "list_artifacts",
     "get_artifact",
@@ -137,6 +143,11 @@ class Spawned:
     seat: Optional[str] = None
     # The siblings it waits for; it is {"state": "waiting"} until they settle.
     depends_on: Optional[List[str]] = None
+    # The check its merge must pass when it is integrated, and whether it
+    # is its parent's: siblings sharing a whole-suite check are integrated
+    # together, integrate(a, b).
+    check: Optional[List[str]] = None
+    check_inherited: Optional[bool] = None
 
 
 @dataclasses.dataclass
@@ -175,6 +186,11 @@ class Inspection:
         """Created with prerequisites that have not all settled yet."""
         return self.status.get("state") == "waiting"
 
+    @property
+    def settled(self) -> bool:
+        """Not running, waiting for prerequisites or waiting on its children."""
+        return self.status.get("state") not in ("running", "waiting", "waiting_on_children")
+
 
 @dataclasses.dataclass
 class EventPage:
@@ -207,6 +223,25 @@ class Merged:
     target: str
     previous: str
     commit: str
+    # The target already contained the candidate: recorded as merged through
+    # `via`, the commit that brought it in.
+    already: Optional[bool] = None
+    via: Optional[str] = None
+
+
+@dataclasses.dataclass
+class MergedAll:
+    target: str
+    previous: str
+    commit: str
+    branches: List[Merged]
+
+
+@dataclasses.dataclass
+class Waited:
+    settled: List[Inspection]
+    pending: List[str]
+    timed_out: Optional[bool] = None
 
 
 @dataclasses.dataclass
@@ -311,7 +346,7 @@ def _by() -> str:
     return os.environ.get("BRANCHYARD_BY") or "by"
 
 
-def _run(args: List[str]) -> Any:
+def _run(args: List[str], result_on_failure: bool = False) -> Any:
     try:
         done = subprocess.run(
             [_by(), args[0], "--json", *args[1:]],
@@ -326,6 +361,8 @@ def _run(args: List[str]) -> Any:
         value = json.loads(done.stdout) if done.stdout.strip() else None
     except json.JSONDecodeError:
         value = None
+    if result_on_failure and isinstance(value, dict) and "error" not in value:
+        return value
     if done.returncode != 0 or value is None:
         error = value.get("error") if isinstance(value, dict) else None
         if isinstance(error, dict):
@@ -452,9 +489,23 @@ def steer(branch: str, text: str) -> Steer:
     return _make(Steer, _run(["send", branch, "--steer", "--", text]))
 
 
-def integrate(branch: str) -> Merged:
-    """Merge a finished descendant into your own branch after its check passes."""
-    return _make(Merged, _run(["integrate", branch]))
+def integrate(*branches: str):
+    """Merge finished descendants into your own branch after their check
+    passes. One branch returns a Merged; several are merged together, in
+    order, all or none, with their check run once on the result, and return
+    a MergedAll. A candidate your branch already contains is recorded as
+    merged (already=True), not refused."""
+    if not branches:
+        raise DeniedError("denied", "name at least one branch to integrate")
+    value = _run(["integrate", *branches])
+    if len(branches) == 1:
+        return _make(Merged, value)
+    return MergedAll(
+        target=value["target"],
+        previous=value["previous"],
+        commit=value["commit"],
+        branches=[_make(Merged, item) for item in value["branches"]],
+    )
 
 
 def cancel(branch: str) -> Cancelled:
@@ -539,17 +590,45 @@ def inbox(unread: bool = False) -> Inbox:
     )
 
 
+def _wait(branches: List[str], any_: bool, timeout: Optional[float]) -> Waited:
+    args = ["wait", *branches]
+    if any_:
+        args.append("--any")
+    if timeout is not None:
+        args += ["--timeout", str(timeout)]
+    value = _run(args, result_on_failure=True)
+    waited = Waited(
+        settled=[_make(Inspection, item) for item in value.get("settled", [])],
+        pending=list(value.get("pending", [])),
+        timed_out=value.get("timed_out"),
+    )
+    if waited.timed_out:
+        raise RunningError(
+            "running", f"still running after {timeout}s: {', '.join(waited.pending)}"
+        )
+    return waited
+
+
+def wait_any(*branches: str, timeout: Optional[float] = None) -> Waited:
+    """Block until the first of `branches` (default: your children still
+    running) settles; RunningError after `timeout` seconds. It waits on the
+    engine's notifications, not by polling."""
+    return _wait(list(branches), True, timeout)
+
+
+def wait_all(*branches: str, timeout: Optional[float] = None) -> Waited:
+    """Block until all of `branches` (default: your children still running)
+    have settled; RunningError after `timeout` seconds."""
+    return _wait(list(branches), False, timeout)
+
+
 def wait(branch: str, timeout: Optional[float] = None, poll: float = 1.0) -> Inspection:
-    """Inspect `branch` until it is neither running nor waiting for its
-    prerequisites; RunningError after `timeout` seconds."""
-    deadline = None if timeout is None else time.monotonic() + timeout
-    while True:
-        state = inspect(branch)
-        if not state.running and not state.waiting:
-            return state
-        if deadline is not None and time.monotonic() >= deadline:
-            raise RunningError("running", f"{branch} is still running after {timeout}s")
-        time.sleep(poll)
+    """Wait until `branch` is neither running nor waiting (for its
+    prerequisites or on its children) and return its inspection;
+    RunningError after `timeout` seconds. `poll` is ignored: the wait is
+    the engine's (`by wait`)."""
+    del poll
+    return _wait([branch], False, timeout).settled[0]
 
 
 def publish(path: str, name: Optional[str] = None,

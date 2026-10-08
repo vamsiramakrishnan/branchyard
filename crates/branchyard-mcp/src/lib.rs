@@ -4,7 +4,7 @@
 //! delegate (`TaskOptions::delegation`), passing `--root <repository>
 //! --branch <name>` and the turn's token in `BRANCHYARD_DELEGATION`. The
 //! server offers `spawn`, `inspect`, `events`, `send`, `steer`,
-//! `propose_integration`, `cancel`, `children`, `apply_graph` and `graph`
+//! `propose_integration`, `cancel`, `children`, `wait`, `apply_graph` and `graph`
 //! (dependencies between children; see `docs/graph.md`), and the artifact and
 //! scratch-area tools (`publish_artifact`, `list_artifacts`,
 //! `get_artifact`, `share_artifact`, `create_scratch`, `list_scratch`,
@@ -51,7 +51,7 @@ use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 
 /// Tool names, in the order they are listed.
-pub const TOOLS: [&str; 27] = [
+pub const TOOLS: [&str; 28] = [
     "spawn",
     "inspect",
     "events",
@@ -60,6 +60,7 @@ pub const TOOLS: [&str; 27] = [
     "propose_integration",
     "cancel",
     "children",
+    "wait",
     "apply_graph",
     "graph",
     "publish_artifact",
@@ -85,8 +86,11 @@ const INSTRUCTIONS: &str = "Branchyard runs you on a git branch. These tools let
 delegate: spawn child branches with their own harness and budget, watch them with inspect \
 and events, continue them with send, add to a child's running turn with steer, merge a \
 finished child into your own branch with \
-propose_integration (its check must pass), stop them with cancel, and list them with \
-children. Children run in parallel; spawn returns once a child has started. A child may \
+propose_integration (its check must pass; give several in branches to merge them together and \
+check the result once), stop them with cancel, and list them with \
+children. Children run in parallel; spawn returns once a child has started. To wait for them, \
+call wait, or end your turn: when every child has settled, Branchyard starts your next turn \
+with a summary of what each did. A child may \
 depend on its siblings (depends_on): it waits, and starts once they have settled; apply_graph \
 creates several children and dependencies at once, all or nothing, against the revision graph \
 shows. You act only as your own branch and only \
@@ -263,12 +267,23 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "propose_integration",
             "Merge a finished descendant's candidate into your own branch, after its check \
-             passes on the exact merge. Your uncommitted changes are committed first, and your \
-             working tree moves to the merge. Never touches the user's branches.",
+             passes on the exact merge. With branches, merge several together, in order, all or \
+             none, and run their check once on the result: for children that share a test \
+             suite none passes alone. Your uncommitted changes are committed first, and your \
+             working tree moves to the merge. A candidate your branch already contains is \
+             recorded as merged (already: true), not refused. Never touches the user's branches.",
             schema(json!({
                 "type": "object",
-                "properties": {"branch": branch_property("A descendant that is not running")},
-                "required": ["branch"],
+                "properties": {
+                    "branch": branch_property("A descendant that is not running"),
+                    "branches": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": "Instead of branch: several descendants, integrated together",
+                    },
+                },
+                "oneOf": [{"required": ["branch"]}, {"required": ["branches"]}],
                 "additionalProperties": false,
             })),
         ),
@@ -284,6 +299,27 @@ pub fn tools() -> Vec<Tool> {
             })),
         ),
         children,
+        {
+            let mut t = Tool::new(
+                "wait",
+                "Block until descendants settle (stop running, or waiting for prerequisites or \
+                 on their own children): all of them, or with any the first. Without branches, \
+                 your children that are still running. Returns each settled one's inspection and \
+                 those still pending; timed_out is true when timeout_seconds passed first. You \
+                 may instead end your turn: you are woken when every child has settled.",
+                schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "branches": {"type": "array", "items": {"type": "string"}, "description": "Descendants to wait for; defaults to your children still running"},
+                        "any": {"type": "boolean", "description": "Return when the first of them settles"},
+                        "timeout_seconds": {"type": "number", "minimum": 0},
+                    },
+                    "additionalProperties": false,
+                })),
+            );
+            t.annotations = Some(read_only("Wait for descendants"));
+            t
+        },
         Tool::new(
             "apply_graph",
             "Change your children's graph in one step, all or nothing: spawn children (each may \

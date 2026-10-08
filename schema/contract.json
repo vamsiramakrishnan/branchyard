@@ -488,6 +488,12 @@
                 "type": "string"
               },
               "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
             }
           },
           "required": [
@@ -1914,6 +1920,12 @@
                 "type": "string"
               },
               "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
             }
           },
           "required": [
@@ -3300,6 +3312,19 @@
               "properties": {
                 "state": {
                   "type": "string",
+                  "const": "waiting_on_children"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegating branch whose turn ended while children it delegated\nwere still running or waiting: it is parked, and its next turn\nstarts on its own once they have all settled, with a summary of\nwhat they did (`docs/delegation.md`, \"Waiting on children\"). Not\nfinished: a wait for its subtree waits for that turn too."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
                   "const": "no_changes"
                 }
               },
@@ -3648,6 +3673,19 @@
                 "state"
               ],
               "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "waiting_on_children"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegating branch whose turn ended while children it delegated\nwere still running or waiting: it is parked, and its next turn\nstarts on its own once they have all settled, with a summary of\nwhat they did (`docs/delegation.md`, \"Waiting on children\"). Not\nfinished: a wait for its subtree waits for that turn too."
             },
             {
               "type": "object",
@@ -5573,6 +5611,12 @@
                 "type": "string"
               },
               "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
             }
           },
           "required": [
@@ -6308,6 +6352,12 @@
                 "type": "string"
               },
               "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
             }
           },
           "required": [
@@ -11431,6 +11481,12 @@
                 "type": "string"
               },
               "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
             }
           },
           "required": [
@@ -12170,6 +12226,12 @@
                 "type": "string"
               },
               "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
             }
           },
           "required": [
@@ -13223,6 +13285,12 @@
                 "type": "string"
               },
               "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
             }
           },
           "required": [
@@ -14948,6 +15016,19 @@
               "properties": {
                 "state": {
                   "type": "string",
+                  "const": "waiting_on_children"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegating branch whose turn ended while children it delegated\nwere still running or waiting: it is parked, and its next turn\nstarts on its own once they have all settled, with a summary of\nwhat they did (`docs/delegation.md`, \"Waiting on children\"). Not\nfinished: a wait for its subtree waits for that turn too."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
                   "const": "no_changes"
                 }
               },
@@ -15172,6 +15253,20 @@
                 "type": "string"
               },
               "description": "The siblings it waits for, for a child with prerequisites; it is\n`waiting` (or `blocked`) until they settle, and `base` is empty\nuntil it starts."
+            },
+            "check": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "The check that must pass on its merge when it is integrated: the\none the spawn gave, else its parent's. Omitted when it has none."
+            },
+            "check_inherited": {
+              "type": "boolean",
+              "description": "`check` is its parent's, inherited because the spawn gave none.\nSiblings under a parent's whole-suite check pass it only together:\nintegrate them together ([`Delegate::integrate_all`]). Omitted when\nfalse."
             }
           },
           "required": [
@@ -15255,6 +15350,19 @@
                 "state"
               ],
               "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "waiting_on_children"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegating branch whose turn ended while children it delegated\nwere still running or waiting: it is parked, and its next turn\nstarts on its own once they have all settled, with a summary of\nwhat they did (`docs/delegation.md`, \"Waiting on children\"). Not\nfinished: a wait for its subtree waits for that turn too."
             },
             {
               "type": "object",
@@ -15405,7 +15513,16 @@
     "IntegrateRequest": {
       "type": "object",
       "additionalProperties": false,
-      "description": "`POST /v1/repos/{repo}/branches/{branch}/integrate`: merge a delegated\nchild into the parent that delegated it, like `by integrate`. No fields\nyet.",
+      "properties": {
+        "with": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Siblings of the path's branch, delegated by the same parent, to\nintegrate together with it, in order after it: merged in one\ntemporary worktree, checked once on the result, all or none, like\n`by integrate a b c`. The result is then `merged_all`."
+        }
+      },
+      "description": "`POST /v1/repos/{repo}/branches/{branch}/integrate`: merge a delegated\nchild into the parent that delegated it, like `by integrate`.",
       "title": "IntegrateRequest",
       "$schema": "https://json-schema.org/draft/2020-12/schema"
     },
@@ -15595,6 +15712,17 @@
               "type": "null"
             }
           ]
+        },
+        "merged_all": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MergedAll"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Several children integrated together (`IntegrateRequest::with`)."
         },
         "descendants": {
           "type": "array",
@@ -15849,6 +15977,19 @@
               "properties": {
                 "state": {
                   "type": "string",
+                  "const": "waiting_on_children"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegating branch whose turn ended while children it delegated\nwere still running or waiting: it is parked, and its next turn\nstarts on its own once they have all settled, with a summary of\nwhat they did (`docs/delegation.md`, \"Waiting on children\"). Not\nfinished: a wait for its subtree waits for that turn too."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
                   "const": "no_changes"
                 }
               },
@@ -15937,7 +16078,19 @@
               "type": "string"
             },
             "commit": {
-              "type": "string"
+              "type": "string",
+              "description": "The merge commit that brought the branch's candidate into the\ntarget."
+            },
+            "already": {
+              "type": "boolean",
+              "description": "The target already contained the candidate, so nothing was merged:\nthe branch was recorded as merged through `via`. Omitted when false."
+            },
+            "via": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "For a candidate that was already contained: the commit that brought\nit in, with its subject (such as a sibling's merge). Omitted\notherwise."
             }
           },
           "required": [
@@ -15946,6 +16099,37 @@
             "previous",
             "commit"
           ]
+        },
+        "MergedAll": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string",
+              "description": "The parent's git branch the children were merged into."
+            },
+            "previous": {
+              "type": "string",
+              "description": "The target before the call."
+            },
+            "commit": {
+              "type": "string",
+              "description": "The target after the call; `previous` when every branch was already\ncontained."
+            },
+            "branches": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Merged"
+              },
+              "description": "One per branch, in the order given."
+            }
+          },
+          "required": [
+            "target",
+            "previous",
+            "commit",
+            "branches"
+          ],
+          "description": "Several branches integrated into one target together\n([`Delegate::integrate_all`], `by integrate a b c`): merged in order in\none temporary worktree, checked once on the result, and promoted with\none compare-and-swap of the target from `previous` to `commit`."
         },
         "Inspection": {
           "type": "object",
@@ -16111,6 +16295,12 @@
                 "type": "string"
               },
               "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
             }
           },
           "required": [
@@ -16587,6 +16777,17 @@
                 }
               ]
             },
+            "merged_all": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MergedAll"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Several children integrated together (`IntegrateRequest::with`)."
+            },
             "descendants": {
               "type": "array",
               "items": {
@@ -16838,6 +17039,19 @@
               "properties": {
                 "state": {
                   "type": "string",
+                  "const": "waiting_on_children"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegating branch whose turn ended while children it delegated\nwere still running or waiting: it is parked, and its next turn\nstarts on its own once they have all settled, with a summary of\nwhat they did (`docs/delegation.md`, \"Waiting on children\"). Not\nfinished: a wait for its subtree waits for that turn too."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
                   "const": "no_changes"
                 }
               },
@@ -16926,7 +17140,19 @@
               "type": "string"
             },
             "commit": {
-              "type": "string"
+              "type": "string",
+              "description": "The merge commit that brought the branch's candidate into the\ntarget."
+            },
+            "already": {
+              "type": "boolean",
+              "description": "The target already contained the candidate, so nothing was merged:\nthe branch was recorded as merged through `via`. Omitted when false."
+            },
+            "via": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "For a candidate that was already contained: the commit that brought\nit in, with its subject (such as a sibling's merge). Omitted\notherwise."
             }
           },
           "required": [
@@ -16935,6 +17161,37 @@
             "previous",
             "commit"
           ]
+        },
+        "MergedAll": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string",
+              "description": "The parent's git branch the children were merged into."
+            },
+            "previous": {
+              "type": "string",
+              "description": "The target before the call."
+            },
+            "commit": {
+              "type": "string",
+              "description": "The target after the call; `previous` when every branch was already\ncontained."
+            },
+            "branches": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Merged"
+              },
+              "description": "One per branch, in the order given."
+            }
+          },
+          "required": [
+            "target",
+            "previous",
+            "commit",
+            "branches"
+          ],
+          "description": "Several branches integrated into one target together\n([`Delegate::integrate_all`], `by integrate a b c`): merged in order in\none temporary worktree, checked once on the result, and promoted with\none compare-and-swap of the target from `previous` to `commit`."
         },
         "Inspection": {
           "type": "object",
@@ -17100,6 +17357,12 @@
                 "type": "string"
               },
               "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
             }
           },
           "required": [
@@ -18913,6 +19176,19 @@
                 "state"
               ],
               "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "waiting_on_children"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegating branch whose turn ended while children it delegated\nwere still running or waiting: it is parked, and its next turn\nstarts on its own once they have all settled, with a summary of\nwhat they did (`docs/delegation.md`, \"Waiting on children\"). Not\nfinished: a wait for its subtree waits for that turn too."
             },
             {
               "type": "object",
@@ -23428,6 +23704,19 @@
               "properties": {
                 "state": {
                   "type": "string",
+                  "const": "waiting_on_children"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegating branch whose turn ended while children it delegated\nwere still running or waiting: it is parked, and its next turn\nstarts on its own once they have all settled, with a summary of\nwhat they did (`docs/delegation.md`, \"Waiting on children\"). Not\nfinished: a wait for its subtree waits for that turn too."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
                   "const": "no_changes"
                 }
               },
@@ -26699,6 +26988,19 @@
               "properties": {
                 "state": {
                   "type": "string",
+                  "const": "waiting_on_children"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegating branch whose turn ended while children it delegated\nwere still running or waiting: it is parked, and its next turn\nstarts on its own once they have all settled, with a summary of\nwhat they did (`docs/delegation.md`, \"Waiting on children\"). Not\nfinished: a wait for its subtree waits for that turn too."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
                   "const": "no_changes"
                 }
               },
@@ -26979,6 +27281,17 @@
                 }
               ]
             },
+            "merged_all": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MergedAll"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Several children integrated together (`IntegrateRequest::with`)."
+            },
             "descendants": {
               "type": "array",
               "items": {
@@ -27230,6 +27543,19 @@
               "properties": {
                 "state": {
                   "type": "string",
+                  "const": "waiting_on_children"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegating branch whose turn ended while children it delegated\nwere still running or waiting: it is parked, and its next turn\nstarts on its own once they have all settled, with a summary of\nwhat they did (`docs/delegation.md`, \"Waiting on children\"). Not\nfinished: a wait for its subtree waits for that turn too."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
                   "const": "no_changes"
                 }
               },
@@ -27318,7 +27644,19 @@
               "type": "string"
             },
             "commit": {
-              "type": "string"
+              "type": "string",
+              "description": "The merge commit that brought the branch's candidate into the\ntarget."
+            },
+            "already": {
+              "type": "boolean",
+              "description": "The target already contained the candidate, so nothing was merged:\nthe branch was recorded as merged through `via`. Omitted when false."
+            },
+            "via": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "For a candidate that was already contained: the commit that brought\nit in, with its subject (such as a sibling's merge). Omitted\notherwise."
             }
           },
           "required": [
@@ -27327,6 +27665,37 @@
             "previous",
             "commit"
           ]
+        },
+        "MergedAll": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string",
+              "description": "The parent's git branch the children were merged into."
+            },
+            "previous": {
+              "type": "string",
+              "description": "The target before the call."
+            },
+            "commit": {
+              "type": "string",
+              "description": "The target after the call; `previous` when every branch was already\ncontained."
+            },
+            "branches": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Merged"
+              },
+              "description": "One per branch, in the order given."
+            }
+          },
+          "required": [
+            "target",
+            "previous",
+            "commit",
+            "branches"
+          ],
+          "description": "Several branches integrated into one target together\n([`Delegate::integrate_all`], `by integrate a b c`): merged in order in\none temporary worktree, checked once on the result, and promoted with\none compare-and-swap of the target from `previous` to `commit`."
         },
         "Inspection": {
           "type": "object",
@@ -27492,6 +27861,12 @@
                 "type": "string"
               },
               "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
             }
           },
           "required": [
@@ -28477,7 +28852,19 @@
           "type": "string"
         },
         "commit": {
-          "type": "string"
+          "type": "string",
+          "description": "The merge commit that brought the branch's candidate into the\ntarget."
+        },
+        "already": {
+          "type": "boolean",
+          "description": "The target already contained the candidate, so nothing was merged:\nthe branch was recorded as merged through `via`. Omitted when false."
+        },
+        "via": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "For a candidate that was already contained: the commit that brought\nit in, with its subject (such as a sibling's merge). Omitted\notherwise."
         }
       },
       "required": [
@@ -28704,6 +29091,19 @@
                 "state"
               ],
               "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "waiting_on_children"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegating branch whose turn ended while children it delegated\nwere still running or waiting: it is parked, and its next turn\nstarts on its own once they have all settled, with a summary of\nwhat they did (`docs/delegation.md`, \"Waiting on children\"). Not\nfinished: a wait for its subtree waits for that turn too."
             },
             {
               "type": "object",
@@ -29007,6 +29407,19 @@
               "properties": {
                 "state": {
                   "type": "string",
+                  "const": "waiting_on_children"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegating branch whose turn ended while children it delegated\nwere still running or waiting: it is parked, and its next turn\nstarts on its own once they have all settled, with a summary of\nwhat they did (`docs/delegation.md`, \"Waiting on children\"). Not\nfinished: a wait for its subtree waits for that turn too."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
                   "const": "no_changes"
                 }
               },
@@ -29132,6 +29545,12 @@
                 "type": "string"
               },
               "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
             }
           },
           "required": [
@@ -29445,6 +29864,19 @@
                 "state"
               ],
               "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "waiting_on_children"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegating branch whose turn ended while children it delegated\nwere still running or waiting: it is parked, and its next turn\nstarts on its own once they have all settled, with a summary of\nwhat they did (`docs/delegation.md`, \"Waiting on children\"). Not\nfinished: a wait for its subtree waits for that turn too."
             },
             {
               "type": "object",
@@ -31007,6 +31439,19 @@
                 "state"
               ],
               "description": "A planning turn proposed a plan, and the branch waits for it to be\napproved, edited or rejected before anything changes; see\n[`Yard::approve_plan`]."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "waiting_on_children"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "A delegating branch whose turn ended while children it delegated\nwere still running or waiting: it is parked, and its next turn\nstarts on its own once they have all settled, with a summary of\nwhat they did (`docs/delegation.md`, \"Waiting on children\"). Not\nfinished: a wait for its subtree waits for that turn too."
             },
             {
               "type": "object",
@@ -35550,6 +35995,12 @@
                 "type": "string"
               },
               "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
             }
           },
           "required": [
@@ -37205,6 +37656,12 @@
                 "type": "string"
               },
               "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
             }
           },
           "required": [
@@ -38879,6 +39336,12 @@
                 "type": "string"
               },
               "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
             }
           },
           "required": [
@@ -40549,6 +41012,12 @@
                 "type": "string"
               },
               "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
             }
           },
           "required": [
@@ -42584,6 +43053,12 @@
                 "type": "string"
               },
               "description": "Harness or profile IDs children may run. Empty: only this branch's\nown profile."
+            },
+            "max_wakes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Times the branch's next turn may start on its own after its turn\nended while children it delegated were still running, once they\nhave settled (`docs/delegation.md`, \"Waiting on children\"). 0 turns\nthis off (`--no-wake`): such a turn then ends as it is. A child's is\nat most its parent's. Absent in a stored envelope:\n[`DEFAULT_MAX_WAKES`]."
             }
           },
           "required": [

@@ -62,8 +62,14 @@ pub enum Work {
         request: SpawnRequest,
     },
     /// `POST .../branches/{branch}/integrate`, into the parent found at
-    /// admission.
-    Integrate { branch: String, parent: String },
+    /// admission, with the siblings integrated together with it.
+    Integrate {
+        branch: String,
+        parent: String,
+        /// Siblings integrated together with `branch`, after it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        with: Vec<String>,
+    },
     /// `POST .../branches/{branch}/plan/approve`.
     ApprovePlan {
         branch: String,
@@ -258,19 +264,35 @@ impl Work {
                     ..OperationResult::default()
                 })
             }
-            Work::Integrate { branch, parent } => {
+            Work::Integrate {
+                branch,
+                parent,
+                with,
+            } => {
                 let run = || {
                     let options = TaskOptions {
                         observer: Some(crate::api::observer(&repo.wake)),
                         ..TaskOptions::default()
                     };
-                    let merged = yard
-                        .branch(&parent)?
-                        .delegate(options)?
-                        .integrate(&branch)?;
-                    Ok::<_, branchyard::Error>(OperationResult {
-                        branches: vec![yard.branch(&branch)?.info().clone()],
-                        merged: Some(merged),
+                    let delegate = yard.branch(&parent)?.delegate(options)?;
+                    if with.is_empty() {
+                        let merged = delegate.integrate(&branch)?;
+                        return Ok::<_, branchyard::Error>(OperationResult {
+                            branches: vec![yard.branch(&branch)?.info().clone()],
+                            merged: Some(merged),
+                            ..OperationResult::default()
+                        });
+                    }
+                    let mut names = vec![branch.as_str()];
+                    names.extend(with.iter().map(String::as_str));
+                    let merged = delegate.integrate_all(&names)?;
+                    let branches = names
+                        .iter()
+                        .map(|name| Ok(yard.branch(name)?.info().clone()))
+                        .collect::<Result<Vec<_>, branchyard::Error>>()?;
+                    Ok(OperationResult {
+                        branches,
+                        merged_all: Some(merged),
                         ..OperationResult::default()
                     })
                 };
@@ -1020,6 +1042,12 @@ mod tests {
             Work::Integrate {
                 branch: "b-c".into(),
                 parent: "b".into(),
+                with: Vec::new(),
+            },
+            Work::Integrate {
+                branch: "b-c".into(),
+                parent: "b".into(),
+                with: vec!["b-d".into()],
             },
         ];
         for work in works {
