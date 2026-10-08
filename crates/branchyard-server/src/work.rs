@@ -149,8 +149,9 @@ impl Work {
                 };
                 let target = yard.branch(&branch).map_err(sdk)?;
                 send_allowed(app, &target, &branch, &request).map_err(api)?;
+                let prompt = sent_prompt(&target, &request).map_err(api)?;
                 target
-                    .send(&request.prompt, options)
+                    .send(&prompt, options)
                     .and_then(|b| finished(vec![b]))
                     .map_err(sdk)
             }
@@ -786,8 +787,14 @@ pub(crate) fn send_options(
     repo: &RepoState,
     request: &SendRequest,
 ) -> Result<TaskOptions, ApiError> {
-    if request.prompt.trim().is_empty() {
-        return Err(ApiError::bad_request("prompt is empty"));
+    match (request.retry, request.prompt.trim().is_empty()) {
+        (true, false) => {
+            return Err(ApiError::bad_request(
+                "give a prompt or retry, not both: retry sends the cut-off turn's prompt again",
+            ))
+        }
+        (false, true) => return Err(ApiError::bad_request("prompt is empty")),
+        _ => {}
     }
     let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
     // A send keeps the branch's recorded command unless the request
@@ -814,6 +821,15 @@ pub(crate) fn send_options(
             None,
         )
     })
+}
+
+/// The prompt a send submits: its own, or with `retry` that of the
+/// branch's last turn that was cut off. Blocks: it reads the branch.
+pub(crate) fn sent_prompt(target: &Branch, request: &SendRequest) -> Result<String, ApiError> {
+    match request.retry {
+        true => target.retry_prompt().map_err(|e| error::sdk(&e)),
+        false => Ok(request.prompt.clone()),
+    }
 }
 
 /// Refuse a send that keeps a delegation envelope this server does not

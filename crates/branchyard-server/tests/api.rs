@@ -495,6 +495,168 @@ fn a_running_turn_is_steered_over_http() {
 }
 
 #[test]
+fn branches_are_waited_for_over_http() {
+    let f = Fixture::new();
+    let server = Server::start(f.config());
+    let client = server.client();
+    let repo = client.repo("app");
+    let done = run(&client, &task("WRITE w.txt=1", "done"));
+    assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
+    let op = repo.submit_task(&task("HANG", "held"), &new_key()).unwrap();
+    wait::until("the prompt to be submitted", || {
+        common::started(&client, "app", "held")
+    });
+
+    // All of them: the running one keeps the wait until its timeout.
+    let waited = repo
+        .wait_for(&["done", "held"], false, Some(Duration::from_millis(300)))
+        .unwrap();
+    assert!(waited.timed_out, "{waited:?}");
+    assert_eq!(waited.pending, ["held"]);
+    assert_eq!(waited.settled.len(), 1);
+    assert_eq!(waited.settled[0].name, "done");
+    // Any of them: the settled one satisfies it at once.
+    let waited = repo.wait_for(&["held", "done"], true, None).unwrap();
+    assert!(!waited.timed_out, "{waited:?}");
+    assert_eq!(waited.pending, ["held"]);
+
+    // With no timeout, it returns once the turn ends, whichever process
+    // ends it.
+    let waiting = {
+        let repo = client.repo("app");
+        std::thread::spawn(move || repo.wait_for(&["held"], false, None))
+    };
+    // Held runs until the cancel below, so a wait cannot have returned yet;
+    // the timed-out wait above showed the server blocking meanwhile.
+    assert!(!waiting.is_finished(), "the wait returned while held runs");
+    repo.cancel("held").unwrap();
+    let waited = waiting.join().unwrap().unwrap();
+    assert!(!waited.timed_out && waited.pending.is_empty(), "{waited:?}");
+    assert_eq!(waited.settled[0].status, BranchStatus::Interrupted);
+    await_operation(&client, &op.id);
+
+    let missing = repo.wait_for(&["nope"], false, None).unwrap_err();
+    assert_eq!(missing.code(), Some("unknown_branch"));
+    for body in [
+        r#"{"branches": []}"#,
+        r#"{"branches": ["done"], "timeout_seconds": -1}"#,
+        r#"{"branches": ["done"], "all": true}"#,
+    ] {
+        let (status, _, answer) = raw(
+            server.addr,
+            &post("/v1/repos/app/wait", Some(TOKEN), "", body),
+        );
+        assert_eq!(status, 400, "{body}: {answer}");
+        assert_eq!(json(&answer)["error"]["code"], "invalid_request");
+    }
+}
+
+#[test]
+fn a_settled_branch_is_discarded_over_http() {
+    let f = Fixture::new();
+    let server = Server::start(f.config());
+    let client = server.client();
+    let repo = client.repo("app");
+    let op = repo.submit_task(&task("HANG", "held"), &new_key()).unwrap();
+    wait::until("the prompt to be submitted", || {
+        common::started(&client, "app", "held")
+    });
+    // A running turn is cancelled first; the operation holds the branch.
+    let busy = repo.discard("held", Some("not now")).unwrap_err();
+    assert_eq!(busy.code(), Some("branch_busy"), "{busy}");
+    repo.cancel("held").unwrap();
+    await_operation(&client, &op.id);
+
+    let discarded = repo.discard("held", Some("  superseded  ")).unwrap();
+    assert_eq!(discarded.name, "held");
+    assert_eq!(
+        discarded.status,
+        BranchStatus::Discarded {
+            reason: "superseded".into()
+        }
+    );
+    assert_eq!(repo.branch("held").unwrap().status, discarded.status);
+    // It runs no more turns.
+    let op = repo
+        .send(
+            "held",
+            &SendRequest {
+                prompt: "WRITE again.txt=1".into(),
+                policy: PolicySpec::allow_all(),
+                ..SendRequest::default()
+            },
+            &new_key(),
+        )
+        .unwrap();
+    let refused = await_operation(&client, &op.id);
+    assert_eq!(refused.state, OperationState::Failed, "{refused:?}");
+    assert_eq!(repo.branch("held").unwrap().status, discarded.status);
+
+    let missing = repo.discard("nope", None).unwrap_err();
+    assert_eq!(missing.code(), Some("unknown_branch"));
+    let (status, _, body) = raw(
+        server.addr,
+        &post(
+            "/v1/repos/app/branches/held/discard",
+            Some(TOKEN),
+            "",
+            r#"{"why": "x"}"#,
+        ),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(json(&body)["error"]["code"], "invalid_request");
+}
+
+#[test]
+fn a_cut_off_turn_is_retried_over_http() {
+    let f = Fixture::new();
+    let server = Server::start(f.config());
+    let client = server.client();
+    let repo = client.repo("app");
+    let done = run(&client, &task("WRITE first.txt=1", "cut"));
+    assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
+    let retry = |prompt: &str| SendRequest {
+        prompt: prompt.into(),
+        retry: true,
+        policy: PolicySpec::allow_all(),
+        ..SendRequest::default()
+    };
+
+    // Nothing was cut off: refused before anything is queued.
+    let refused = repo.send("cut", &retry(""), &new_key()).unwrap_err();
+    assert_eq!(refused.code(), Some("denied"), "{refused}");
+    assert!(refused.to_string().contains("no cut-off turn"), "{refused}");
+
+    // As recovery leaves a branch whose engine stopped in its turn.
+    let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+    let text: String = db
+        .query_row("SELECT record FROM branches WHERE name = 'cut'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let mut record = json(&text);
+    record["retry"] = "WRITE again.txt=2".into();
+    db.execute(
+        "UPDATE branches SET record = ?1 WHERE name = 'cut'",
+        [record.to_string()],
+    )
+    .unwrap();
+
+    let both = repo.send("cut", &retry("other"), &new_key()).unwrap_err();
+    assert_eq!(both.code(), Some("invalid_request"), "{both}");
+    let op = repo.send("cut", &retry(""), &new_key()).unwrap();
+    let sent = await_operation(&client, &op.id);
+    assert_eq!(sent.state, OperationState::Succeeded, "{sent:?}");
+    assert!(repo.diff("cut").unwrap().contains("+2"));
+    let events = repo.events("cut", 0).unwrap().events;
+    assert!(events.iter().any(|e| matches!(&e.activity,
+        branchyard::Activity::Prompt(p) if p.contains("WRITE again.txt=2"))));
+    // A prompt reached the harness: nothing is left to retry.
+    let again = repo.send("cut", &retry(""), &new_key()).unwrap_err();
+    assert_eq!(again.code(), Some("denied"), "{again}");
+}
+
+#[test]
 fn operations_survive_a_restart() {
     let f = Fixture::new();
     let server = Server::start(f.config());

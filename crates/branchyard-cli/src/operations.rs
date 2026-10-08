@@ -210,9 +210,18 @@ mod tests {
             after.contains("Inside a harness, by send takes only"),
             "{after}"
         );
-        let discard = cmd.find_subcommand("discard").unwrap();
-        let after = discard.get_after_help().unwrap().to_string();
+        let export = cmd
+            .find_subcommand("artifact")
+            .and_then(|a| a.find_subcommand("export"))
+            .unwrap();
+        let after = export.get_after_help().unwrap().to_string();
         assert!(after.contains("Not with --remote"), "{after}");
+        let discard = cmd.find_subcommand("discard").unwrap();
+        let after = discard
+            .get_after_help()
+            .map(|h| h.to_string())
+            .unwrap_or_default();
+        assert!(!after.contains("Not with --remote"), "{after}");
     }
 
     /// A command line from the docs: its subcommand path and its flags.

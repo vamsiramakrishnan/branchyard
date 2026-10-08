@@ -335,7 +335,13 @@ pub struct TaskList {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SendRequest {
+    /// Empty with `retry`.
+    #[serde(default)]
     pub prompt: String,
+    /// Submit again the prompt of the branch's last turn that was cut off,
+    /// like `by send --retry`, instead of `prompt`. Refused when none was.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub retry: bool,
     #[serde(default)]
     pub budget: BudgetSpec,
     #[serde(default)]
@@ -630,6 +636,37 @@ pub struct CancelRequest {}
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelResult {
     pub cancelled: Vec<String>,
+}
+
+/// `POST /v1/repos/{repo}/branches/{branch}/discard`: set a settled
+/// branch aside, like `by discard`. The answer is the branch's
+/// [`branchyard::Inspection`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscardRequest {
+    /// Why, recorded in the branch's status; the server names the caller
+    /// when it is omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `POST /v1/repos/{repo}/wait`: block until branches settle, like
+/// `by wait`. The answer is a [`branchyard::Waited`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaitRequest {
+    /// The branches to wait for; at least one.
+    pub branches: Vec<String>,
+    /// Return once any one of them has settled, not all.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub any: bool,
+    /// Return after this many seconds even if the wait is not satisfied,
+    /// with `timed_out` set. The server caps it, at 30 seconds, so a
+    /// longer wait asks again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<f64>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/ask`: a question to the

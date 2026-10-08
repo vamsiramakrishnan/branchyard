@@ -20,10 +20,10 @@ use branchyard::{
     Yard,
 };
 use branchyard_client::api::{
-    BranchEvents, BranchList, CancelRequest, CancelResult, Diff, FeedEntry, ForkRequest,
-    GraphRequest, HarnessList, IntegrateRequest, InventoryReport, MergeRequest, Operation,
-    OperationKind, PolicySpec, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest,
-    SpawnRequest, SteerRequest, TaskRequest, WorkerInventory,
+    BranchEvents, BranchList, CancelRequest, CancelResult, Diff, DiscardRequest, FeedEntry,
+    ForkRequest, GraphRequest, HarnessList, IntegrateRequest, InventoryReport, MergeRequest,
+    Operation, OperationKind, PolicySpec, ReincarnateRequest, Removed, RepoEntry, RepoList,
+    SendRequest, SpawnRequest, SteerRequest, TaskRequest, WaitRequest, WorkerInventory,
 };
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::de::DeserializeOwned;
@@ -693,6 +693,7 @@ pub fn router(app: Shared) -> Router {
         .route("/v1/repos/{repo}/tasks", axum::routing::post(post_task))
         .route("/v1/repos/{repo}/branches", get(branches))
         .route("/v1/repos/{repo}/operations", get(repo_operations))
+        .route("/v1/repos/{repo}/wait", axum::routing::post(post_wait))
         .route(
             "/v1/repos/{repo}/branches/{branch}",
             get(branch).delete(delete_branch),
@@ -716,6 +717,10 @@ pub fn router(app: Shared) -> Router {
         .route(
             "/v1/repos/{repo}/branches/{branch}/cancel",
             axum::routing::post(post_cancel),
+        )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/discard",
+            axum::routing::post(post_discard),
         )
         .route(
             "/v1/repos/{repo}/branches/{branch}/steer",
@@ -1527,7 +1532,12 @@ async fn post_send(
     let target = existing(&repo.yard, &branch).await?;
     {
         let (app, branch, request) = (app.clone(), branch.clone(), request.clone());
-        blocking(move || work::send_allowed(&app, &target, &branch, &request)).await??;
+        blocking(move || {
+            work::send_allowed(&app, &target, &branch, &request)?;
+            // Refused now, not once queued, when no turn was cut off.
+            work::sent_prompt(&target, &request).map(drop)
+        })
+        .await??;
     }
     let cursor = sync_feed(&repo.feed).await?;
     let new = NewOperation {
@@ -1704,6 +1714,77 @@ async fn post_cancel(
         .await?
         .map_err(|e| error::sdk(&e))?;
     Ok(Json(CancelResult { cancelled }))
+}
+
+/// Set a settled branch aside with the caller's authority, like
+/// `by discard`; the answer is its inspection. Like a removal, held in the
+/// operation store, so no operation on any server sharing it starts a turn
+/// of the branch meanwhile. Refused with 409 `running` while a turn runs.
+async fn post_discard(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
+    JsonBody(DiscardRequest { reason }, _): JsonBody<DiscardRequest>,
+) -> Result<Json<branchyard::Inspection>, ApiError> {
+    let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
+    let reason = reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map_or_else(
+            || format!("discarded by {} through the server", caller.name()),
+            str::to_owned,
+        );
+    let registry = app.registry.clone();
+    blocking(move || {
+        let hold = registry.hold(&repo.name, &branch, "a discard")?;
+        let discarded = repo
+            .yard
+            .discard(&branch, &reason)
+            .and_then(|_| repo.yard.branch(&branch)?.delegate(TaskOptions::default()))
+            .and_then(|d| d.inspect(&branch))
+            .map_err(|e| error::sdk(&e));
+        drop(hold);
+        discarded
+    })
+    .await?
+    .map(Json)
+}
+
+/// The longest one wait request blocks a server worker: a caller that
+/// wants longer asks again, as `by --remote wait` does.
+const MAX_WAIT: Duration = Duration::from_secs(30);
+
+/// Block until branches settle, like `by wait`, with the caller's authority
+/// to read them, for up to [`MAX_WAIT`]. Reading their durable status, it
+/// sees turns that run in any process; while it waits it does what the
+/// server's recovery interval does for them, sooner.
+async fn post_wait(
+    State(app): State<Shared>,
+    Path(repo): Path<String>,
+    Extension(caller): Extension<Caller>,
+    JsonBody(request, _): JsonBody<WaitRequest>,
+) -> Result<Json<branchyard::Waited>, ApiError> {
+    let yard = app.authorized_repo(&caller, &repo, "read")?.yard.clone();
+    if request.branches.is_empty() {
+        return Err(ApiError::bad_request("give the branches to wait for"));
+    }
+    let timeout = match request.timeout_seconds {
+        None => MAX_WAIT,
+        Some(s) if s.is_finite() && s >= 0.0 => Duration::from_secs_f64(s.min(1e9)).min(MAX_WAIT),
+        Some(s) => {
+            return Err(ApiError::bad_request(format!(
+                "timeout_seconds takes a number of seconds, not {s}"
+            )))
+        }
+    };
+    blocking(move || {
+        let names: Vec<&str> = request.branches.iter().map(String::as_str).collect();
+        yard.wait_for(&names, request.any, Some(timeout))
+    })
+    .await?
+    .map(Json)
+    .map_err(|e| error::sdk(&e))
 }
 
 /// How long a steer request waits for the engine running the turn to

@@ -611,16 +611,16 @@ pub fn send(
             format!("sent to {}; its turn is running\n", sent.name)
         });
     }
+    if let Target::Remote(remote) = target {
+        if json {
+            let sent = remote::send_json(env, remote, branch, prompt, task);
+            return emit(true, sent, |_| String::new());
+        }
+        return remote::send(env, remote, branch, prompt, task);
+    }
     let retried: String;
     let prompt = match prompt {
         Prompt::Text(prompt) => prompt,
-        Prompt::Retry if matches!(target, Target::Remote(_)) => {
-            let error = branchyard::Error::Unsupported(
-                "by send --retry is not available through a server yet; send the prompt again"
-                    .into(),
-            );
-            return fail(json, &error);
-        }
         Prompt::Retry => {
             retried = match open_yard().and_then(|yard| yard.branch(branch)?.retry_prompt()) {
                 Ok(prompt) => prompt,
@@ -629,13 +629,6 @@ pub fn send(
             &retried
         }
     };
-    if let Target::Remote(remote) = target {
-        if json {
-            let sent = remote::send_json(env, remote, branch, prompt, task);
-            return emit(true, sent, |_| String::new());
-        }
-        return remote::send(env, remote, branch, prompt, task);
-    }
     let branch = open()?.branch(branch)?;
     if json {
         let live = Live::start_to(env, task, true, true, branch.provider()?);
@@ -1694,15 +1687,14 @@ pub fn wait(
     let names: Vec<&str> = branches.iter().map(String::as_str).collect();
     let result = match (harness_delegate(json)?, target) {
         (Some(delegate), _) => delegate.wait_for(&names, any, timeout),
-        (None, Target::Remote(_)) => Err(branchyard::Error::Unsupported(
-            "by --remote wait is not available yet; poll by --remote inspect".into(),
+        (None, _) if names.is_empty() => Err(branchyard::Error::Denied(
+            "outside a harness, by wait needs the branches to wait for".into(),
         )),
-        (None, Target::Local) => match names.is_empty() {
-            true => Err(branchyard::Error::Denied(
-                "outside a harness, by wait needs the branches to wait for".into(),
-            )),
-            false => open_yard().and_then(|yard| yard.wait_for(&names, any, timeout)),
-        },
+        (None, Target::Remote(remote)) => remote
+            .repo
+            .wait_for(&names, any, timeout)
+            .map_err(remote::sdk_error),
+        (None, Target::Local) => open_yard().and_then(|yard| yard.wait_for(&names, any, timeout)),
     };
     let timed_out = result.as_ref().is_ok_and(|w| w.timed_out);
     emit(json, result, |w| {
@@ -1757,11 +1749,10 @@ pub fn cancel(target: &Target, branch: &str, json: bool) -> Outcome {
 pub fn discard(target: &Target, branch: &str, reason: Option<&str>, json: bool) -> Outcome {
     let result = match (harness_delegate(json)?, target) {
         (Some(delegate), _) => delegate.discard(branch, reason),
-        (None, Target::Remote(_)) => Err(branchyard::Error::Unsupported(
-            "by --remote discard: the server has no route for it yet; run by discard on the \
-             server's host"
-                .into(),
-        )),
+        (None, Target::Remote(remote)) => remote
+            .repo
+            .discard(branch, reason)
+            .map_err(remote::sdk_error),
         (None, Target::Local) => (|| {
             let reason = reason
                 .map(str::trim)

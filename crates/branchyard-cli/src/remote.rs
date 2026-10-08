@@ -25,7 +25,7 @@ use branchyard_client::api::{
 use branchyard_client::{new_key, Client, Repo};
 
 use crate::args::{Globals, Permissions, RigArgs, SpawnArgs, TaskArgs};
-use crate::commands::{self, branch_outcome, print, Env, Failure, Outcome};
+use crate::commands::{self, branch_outcome, print, Env, Failure, Outcome, Prompt};
 use crate::console::Console;
 use crate::render::{self, Renderer};
 use crate::rig::{Fallback, RigPlan};
@@ -444,7 +444,7 @@ pub fn plan_approve(
     task: &TaskArgs,
     json: bool,
 ) -> Outcome {
-    let (send, notice) = send_request(task, "plan approval")?;
+    let (send, notice) = send_request(task, Prompt::Text("plan approval"))?;
     let request = branchyard_client::knowledge_api::PlanApproveRequest {
         edited: edited.map(str::to_owned),
         send,
@@ -464,7 +464,7 @@ pub fn plan_reject(
     task: &TaskArgs,
     json: bool,
 ) -> Outcome {
-    let (send, notice) = send_request(task, "plan rejection")?;
+    let (send, notice) = send_request(task, Prompt::Text("plan rejection"))?;
     let request = branchyard_client::knowledge_api::PlanRejectRequest {
         reason: reason.map(str::to_owned),
         replan,
@@ -692,12 +692,16 @@ fn map_finish(
 
 fn send_request(
     task: &TaskArgs,
-    prompt: &str,
+    prompt: Prompt<'_>,
 ) -> Result<(SendRequest, Option<&'static str>), Failure> {
     let (policy, notice) = permissions(task)?;
     Ok((
         SendRequest {
-            prompt: prompt.to_owned(),
+            prompt: match prompt {
+                Prompt::Text(text) => text.to_owned(),
+                Prompt::Retry => String::new(),
+            },
+            retry: matches!(prompt, Prompt::Retry),
             budget: budget(task),
             policy,
             check: task.check.clone(),
@@ -713,7 +717,15 @@ fn send_request(
     ))
 }
 
-pub fn send(env: &Env, remote: &Remote, branch: &str, prompt: &str, task: &TaskArgs) -> Outcome {
+/// `by --remote send`: `prompt`, or with `--retry` the cut-off turn's,
+/// which the server reads.
+pub fn send(
+    env: &Env,
+    remote: &Remote,
+    branch: &str,
+    prompt: Prompt<'_>,
+    task: &TaskArgs,
+) -> Outcome {
     let (request, notice) = send_request(task, prompt)?;
     let op = remote.repo.send(branch, &request, &new_key())?;
     announce(remote, notice, None);
@@ -727,7 +739,7 @@ pub fn send_json(
     env: &Env,
     remote: &Remote,
     branch: &str,
-    prompt: &str,
+    prompt: Prompt<'_>,
     task: &TaskArgs,
 ) -> Result<Sent, branchyard::Error> {
     let (request, notice) = send_request(task, prompt)?;

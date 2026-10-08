@@ -23,7 +23,7 @@ The server registers <!-- fact:http.route_count -->85<!-- /fact --> routes; each
 | Fan out to several harnesses | `run_on` | `fan` | yes | `harnesses` in the task | yes | no: a child has one harness; spawn one per harness |
 | Check a [rig](rigs.md) and print its plan | no: the planner is the CLI's (`rig::plan`); build `Seats` yourself | `rig check` | the same, locally: nothing is sent | n/a | n/a | n/a |
 | Run a rig's root seat | `TaskOptions::seats` with `delegation` | `rig run` | server opt-in `--allow-delegation` | `seats` in the task | yes | no: a child's seats come from its parent's rig |
-| Continue a branch | `Branch::send` | `send` | yes | `POST …/send` | `send` | `send`, to a descendant, returning once its turn started |
+| Continue a branch | `Branch::send` | `send` | yes, `--retry` too | `POST …/send`, `retry` for `--retry` | `send` | `send`, to a descendant, returning once its turn started |
 | `send --json` (`Sent`) | the SDK returns the `Branch` | yes | yes | the operation's `branches` | yes | yes |
 | Fork | `Branch::fork` | `fork` | yes | `POST …/fork` | `fork` | no: children start from a revision, not a session |
 | Reincarnate ([lifecycle](lifecycle.md#reincarnation)) | `Branch::reincarnate` | `reincarnate` | yes | `POST …/reincarnate` | `reincarnate` | no: not a delegation operation; act as the branch's owner instead |
@@ -74,9 +74,9 @@ A person acts with their own authority, or the server's, bounded by the branch's
 | Inspect | `Delegate::inspect` | `inspect` | yes | `GET …/inspection` | `inspect` |
 | Events page from a cursor | `Delegate::events` | `events` | yes | `GET …/event-page` | `event_page` |
 | Integrate a child into its parent | `Delegate::integrate` | `integrate` | yes | `POST …/integrate` | `integrate` |
-| Set a settled child aside, never run again | `Yard::discard`, `Delegate::discard` | `discard [--reason TEXT]` | no: the server has no route for it yet | none | none |
+| Set a settled child aside, never run again | `Yard::discard`, `Delegate::discard` | `discard [--reason TEXT]` | yes, with the server's authority | `POST …/discard` | `discard` |
 | Integrate several children together, checked once, all or none ([delegation](delegation.md#integrating-several-children)) | `Delegate::integrate_all` → `MergedAll` | `integrate a b c` | yes | `POST …/integrate` with `with`; the result's `merged_all` | `integrate_all` |
-| Wait for branches to settle, all or the first ([delegation](delegation.md#waiting-on-children)) | `Yard::wait_for`, `Delegate::wait_for` → `Waited` | `wait BRANCH... [--any] [--timeout S]` | no: poll `inspect` | n/a | n/a |
+| Wait for branches to settle, all or the first ([delegation](delegation.md#waiting-on-children)) | `Yard::wait_for`, `Delegate::wait_for` → `Waited` | `wait BRANCH... [--any] [--timeout S]` | yes; each request capped at 30s, asked again past it | `POST /v1/repos/{repo}/wait` | `wait_for` |
 | Children | `Branch::descendants`, `Delegate::children` | `children` | yes | `GET …/children` | `children` |
 | A branch's graph: children, dependencies, revision ([task graphs](graph.md)) | `Yard::graph`, `Delegate::graph` | `graph show` | yes | `GET …/graph` | `graph` |
 | Apply a graph proposal, all or nothing | `Delegate::apply_graph` | `graph apply --parent` | yes; server opt-in `--allow-delegation` for spawns | `POST …/graph`; `409 stale_revision` | `apply_graph` |

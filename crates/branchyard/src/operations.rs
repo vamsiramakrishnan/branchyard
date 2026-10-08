@@ -83,12 +83,6 @@ const EVERYWHERE: Contexts = Contexts {
     remote: Context::Yes,
 };
 
-const LOCAL: Contexts = Contexts {
-    inside: Context::Yes,
-    outside: Context::Yes,
-    remote: Context::No("the server has no route for it yet; run it on the server's host"),
-};
-
 /// One argument of an operation, as each surface spells it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Param {
@@ -219,11 +213,6 @@ const fn op(
 }
 
 impl Operation {
-    const fn contexts(mut self, contexts: Contexts) -> Operation {
-        self.contexts = contexts;
-        self
-    }
-
     const fn person_flags(mut self, why: &'static str) -> Operation {
         self.person_flags = Some(why);
         self
@@ -421,8 +410,7 @@ pub const OPERATIONS: &[Operation] = &[
         "discard",
         Capability::Delegate,
         &[TARGET, Param::all("--reason", "reason", "reason"), JSON],
-    )
-    .contexts(LOCAL),
+    ),
     op(
         "children",
         &["children"],
@@ -455,12 +443,7 @@ pub const OPERATIONS: &[Operation] = &[
             Param::all("--timeout", "timeout_seconds", "timeout"),
             JSON,
         ],
-    )
-    .contexts(Contexts {
-        inside: Context::Yes,
-        outside: Context::Yes,
-        remote: Context::No("the server has no route for it yet; poll inspect"),
-    }),
+    ),
     op(
         "apply_graph",
         &["graph", "apply"],

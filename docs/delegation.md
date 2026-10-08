@@ -311,7 +311,6 @@ A child's own spend counts against every ancestor through the reservations. `ins
 
 - Cost limits for harnesses that report no cost, such as every ACP agent today.
 - Tool calls longer than a harness's own MCP or shell timeout, such as an integration whose check runs for many minutes, or a `by wait` without `--timeout` (ending the turn and being woken has no such limit).
-- `by discard` through a server: the server has no route for it yet, and `by --remote discard` says so.
 - A wake under the parked turn's own policy after its process exits: an engine in another process wakes it under the policy of the turn that settled its last child, and `resume_graph` under what it is given (on a server, the default, deny).
 - A parked branch whose children never settle (one waiting on a prerequisite that is never integrated) stays parked; `by send` or `by cancel` ends that.
 - Isolation. Local mode runs everything as your user.

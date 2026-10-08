@@ -434,6 +434,18 @@ fn remote_commands_print_what_local_ones_do() {
         same_json(args);
     }
 
+    // Waits, discards and retries go through the server's routes.
+    same(&["wait", "p", "exits"]);
+    same(&["wait", "slow", "hello", "--any", "--timeout", "5"]);
+    same_json(&["wait", "p", "--json"]);
+    let (_, r) = same(&["discard", "exits", "--reason", "superseded"]);
+    assert!(
+        text(&r.stdout).starts_with("discarded exits: superseded;"),
+        "{}",
+        text(&r.stdout)
+    );
+    same_json(&["show", "exits", "--json"]);
+
     let (_, r) = same(&["merge", "hello"]);
     assert!(text(&r.stdout).starts_with("merged hello into main"));
     assert_eq!(fs::read_to_string(there.join("hello.txt")).unwrap(), "hi\n");
@@ -449,6 +461,9 @@ fn remote_commands_print_what_local_ones_do() {
         &["run", "x", "--harness", "nope"],
         &["rm", "nope"],
         &["cancel", "nope"],
+        &["wait", "nope"],
+        &["discard", "nope"],
+        &["send", "p", "--retry"],
     ] {
         let (l, r) = same(args);
         assert_eq!(l.status.code(), Some(1), "{args:?}");
