@@ -44,9 +44,9 @@ use std::sync::{Arc, Mutex};
 
 use branchyard::{Delegate, ENV_TOKEN};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
-    ToolAnnotations,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
+    Tool, ToolAnnotations,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
@@ -261,10 +261,13 @@ pub fn tools() -> Vec<Tool> {
                         "type": "array",
                         "items": {"type": "string"},
                         "minItems": 1,
-                        "description": "Instead of branch: several descendants, integrated together",
+                        "description": "Instead of branch (give exactly one of the two): several descendants, integrated together",
                     },
                 },
-                "oneOf": [{"required": ["branch"]}, {"required": ["branches"]}],
+                // Exactly one of the two, checked when called: a tool's
+                // input schema may not have oneOf, anyOf or allOf at its top
+                // level, and Claude Code drops every tool of a server that
+                // lists one.
                 "additionalProperties": false,
             })),
         ),
@@ -625,7 +628,13 @@ impl ServerHandler for Server {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        Ok(ListToolsResult::with_all_items(tools()))
+        // Protocol 2026-07-28 requires the cache hints on a list, and
+        // Claude Code 2.1.293 negotiates it and refuses a list without
+        // them: the server shows as connected, with no tools. The tools
+        // are this branch's alone and may change with the binary.
+        Ok(ListToolsResult::with_all_items(tools())
+            .with_ttl_ms(0)
+            .with_cache_scope(CacheScope::Private))
     }
 
     async fn call_tool(
@@ -749,6 +758,24 @@ mod tests {
     /// The server lists exactly the table's tools, in its order, each with
     /// exactly the arguments the table names; a tool or an argument added
     /// here but not there (or there but not here) fails.
+    /// Model APIs refuse a tool whose input schema combines alternatives
+    /// at its top level, and Claude Code then lists none of this server's
+    /// tools, silently. Every schema is a plain object.
+    #[test]
+    fn no_schema_has_top_level_alternatives() {
+        for tool in tools() {
+            let schema = tool.input_schema.as_ref();
+            assert_eq!(schema.get("type"), Some(&json!("object")), "{}", tool.name);
+            for key in ["oneOf", "anyOf", "allOf", "not", "enum", "if"] {
+                assert!(
+                    !schema.contains_key(key),
+                    "{} has top-level {key}",
+                    tool.name
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_tools_are_the_operations_table() {
         let listed = tools();

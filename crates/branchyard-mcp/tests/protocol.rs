@@ -18,6 +18,44 @@ fn temp_root(tag: &str) -> std::path::PathBuf {
     dir
 }
 
+/// Claude Code 2.1.293 negotiates 2026-07-28, under which a list result
+/// must carry its cache hints; without them it refuses the list and the
+/// server shows as connected with no tools at all.
+#[test]
+fn a_2026_07_28_client_gets_a_list_it_accepts() {
+    let root = temp_root("modern");
+    let mut client = Client::start(&root, "b", "t0k");
+    // As Claude Code does: no initialize, a discover probe, then each
+    // request names its version in _meta.
+    let meta = json!({"_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "test", "version": "0"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }});
+    let discovered = client.request("server/discover", meta.clone());
+    assert!(
+        discovered["result"]["supportedVersions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("2026-07-28")),
+        "{discovered}"
+    );
+    let listed = client.request("tools/list", meta);
+    let result = &listed["result"];
+    assert!(result["ttlMs"].is_u64(), "{listed}");
+    assert!(
+        ["public", "private"].contains(&result["cacheScope"].as_str().unwrap_or_default()),
+        "{listed}"
+    );
+    let names: Vec<&str> = result["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, tool_names());
+}
+
 #[test]
 fn initialize_lists_the_tools_and_calls_answer_without_an_engine() {
     let root = temp_root("init");
