@@ -3845,6 +3845,43 @@ fn parse<T: DeserializeOwned>(tool: &str, arguments: Value) -> Result<T, Error> 
         .map_err(|e| Error::Denied(format!("invalid arguments for {tool}: {e}")))
 }
 
+/// The flat limits a spawn's arguments may give in place of `budget`,
+/// with the name each has inside it.
+const FLAT_BUDGET: &[(&str, &str)] = &[
+    ("budget_usd", "max_usd"),
+    ("max_turns", "max_turns"),
+    ("max_minutes", "max_minutes"),
+];
+
+/// A spawn's arguments with its flat limits (`budget_usd`, as the CLI and
+/// Python name them) moved into `budget`. Both forms at once are refused.
+fn nest_budget(mut spawn: Value) -> Result<Value, Error> {
+    let Some(fields) = spawn.as_object_mut() else {
+        return Ok(spawn);
+    };
+    let mut budget = serde_json::Map::new();
+    for (flat, nested) in FLAT_BUDGET {
+        match fields.remove(*flat) {
+            None | Some(Value::Null) => {}
+            Some(value) => {
+                budget.insert((*nested).to_owned(), value);
+            }
+        }
+    }
+    if budget.is_empty() {
+        return Ok(spawn);
+    }
+    if fields.get("budget").is_some_and(|b| !b.is_null()) {
+        return Err(Error::Denied(
+            "give a child's limits either as budget {max_usd, max_turns, max_minutes} or as \
+             budget_usd, max_turns and max_minutes, not both"
+                .into(),
+        ));
+    }
+    fields.insert("budget".into(), Value::Object(budget));
+    Ok(spawn)
+}
+
 fn required(tool: &str, branch: Option<String>) -> Result<String, Error> {
     branch.ok_or_else(|| Error::Denied(format!("{tool} needs a branch")))
 }
@@ -3861,10 +3898,18 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
     local.require(operation.capability, operation.name)?;
     match tool {
         "spawn" => {
-            let spec: SpawnSpec = parse(tool, arguments)?;
+            let spec: SpawnSpec = parse(tool, nest_budget(arguments)?)?;
             to_json(&local.spawn(&spec.to_spawn()?)?)
         }
         "apply_graph" => {
+            let mut arguments = arguments;
+            if let Some(edits) = arguments.get_mut("edits").and_then(Value::as_array_mut) {
+                for edit in edits {
+                    if edit.get("kind") == Some(&json!("spawn")) {
+                        *edit = nest_budget(edit.take())?;
+                    }
+                }
+            }
             let args: ApplyGraphArgs = parse(tool, arguments)?;
             to_json(&local.apply_graph(&args.edits, args.expected_revision)?)
         }

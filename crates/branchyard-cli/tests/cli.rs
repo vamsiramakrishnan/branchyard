@@ -1118,6 +1118,47 @@ fn spawn_reads_its_prompt_from_a_file_or_stdin() {
     assert!(said.contains("cannot be used with"), "{said}");
 }
 
+/// The battery's metas inlined long follow-ups in a shell argument, where
+/// backticks ran as command substitution: `by send` and `by steer` read
+/// their text from a file, or from standard input with `-`, as `by spawn`
+/// does.
+#[test]
+fn send_and_steer_read_their_text_from_a_file_or_stdin() {
+    let repo = Repo::new();
+    let follow_up = repo.dir.join("follow-up.md");
+    fs::write(&follow_up, "WRITE b.txt=`two`\n").unwrap();
+    let note = repo.dir.join("note.md");
+    fs::write(&note, "mind the `edge` case\n").unwrap();
+    let prompt = [
+        "SH by spawn 'WRITE a.txt=1' --name kid --wait --json".to_owned(),
+        format!(
+            "SH by send kid --prompt-file {} --wait --json",
+            follow_up.display()
+        ),
+        "SH printf 'WRITE c.txt=3' | by send kid --prompt-file - --wait --json".to_owned(),
+        "SH by spawn AWAIT_STEER --name live --json".to_owned(),
+        format!("SH by steer live --prompt-file {} --json", note.display()),
+        format!("SH by send kid inline --prompt-file {}", note.display()),
+    ]
+    .join("\n");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    for n in 0..5 {
+        let (code, _) = sh_json(&said, n);
+        assert_eq!(code, 0, "command {n}: {said}");
+    }
+    let (_, steered) = sh_json(&said, 4);
+    assert_eq!(steered["branch"], "live", "{said}");
+    assert!(said.contains("cannot be used with"), "{said}");
+    let log = repo.json(&["log", "kid", "--json"]).to_string();
+    for prompt in ["WRITE b.txt=`two`", "WRITE c.txt=3"] {
+        assert!(log.contains(prompt), "{prompt:?} missing from {log}");
+    }
+    let live = reply(&repo, "live");
+    assert!(live.contains("steered: mind the `edge` case"), "{live}");
+}
+
 #[test]
 fn a_harness_steers_its_running_children_with_by_and_python() {
     let repo = Repo::new();

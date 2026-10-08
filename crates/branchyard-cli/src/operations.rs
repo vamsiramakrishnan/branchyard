@@ -159,25 +159,45 @@ mod tests {
                     );
                 }
             }
+            if let Some(alias) = operation.alias {
+                let sub = subcommand(&cmd, alias).unwrap_or_else(|| {
+                    panic!("{} has no `by {}`", operation.name, alias.join(" "))
+                });
+                for param in operation.params {
+                    if let Some(cli) = param.cli {
+                        assert!(
+                            find(sub, cli).is_some(),
+                            "`by {}` has no {cli}",
+                            alias.join(" ")
+                        );
+                    }
+                }
+                only_listed(sub, operation, &format!("by {}", alias.join(" ")));
+            }
             if operation.selector.is_some() || operation.person_flags.is_some() {
                 continue;
             }
-            for arg in sub.get_arguments() {
-                if arg.is_global_set() || ["help", "version"].contains(&arg.get_id().as_str()) {
-                    continue;
-                }
-                let listed =
-                    operation.params.iter().filter_map(|p| p.cli).any(|cli| {
-                        find(sub, cli).is_some_and(|found| found.get_id() == arg.get_id())
-                    });
-                assert!(
-                    listed,
-                    "`{}` has {} ({:?}), which branchyard::operations does not list",
-                    operation.command(),
-                    arg.get_id(),
-                    arg.get_long()
-                );
+            only_listed(sub, operation, &operation.command());
+        }
+    }
+
+    /// `sub` has no flag `operation` does not list.
+    fn only_listed(sub: &clap::Command, operation: &Operation, command: &str) {
+        for arg in sub.get_arguments() {
+            if arg.is_global_set() || ["help", "version"].contains(&arg.get_id().as_str()) {
+                continue;
             }
+            let listed = operation
+                .params
+                .iter()
+                .filter_map(|p| p.cli)
+                .any(|cli| find(sub, cli).is_some_and(|found| found.get_id() == arg.get_id()));
+            assert!(
+                listed,
+                "`{command}` has {} ({:?}), which branchyard::operations does not list",
+                arg.get_id(),
+                arg.get_long()
+            );
         }
     }
 
@@ -388,6 +408,11 @@ mod tests {
             let selected = operation.selector.is_none_or(|flag| doc.contains(flag));
             if !doc.contains(&command) || !selected {
                 missing.insert(operation.command());
+            }
+            if let Some(alias) = operation.alias {
+                if !doc.contains(&format!("`by {}", alias.join(" "))) {
+                    missing.insert(format!("by {}", alias.join(" ")));
+                }
             }
             if let Some(tool) = operation.tool {
                 if !doc.contains(&format!("`{tool}`")) {

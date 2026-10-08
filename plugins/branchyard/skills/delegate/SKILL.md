@@ -55,8 +55,11 @@ session, and merging overlapping edits produces conflicts.
      for one child.
    `by inspect <child>` shows status, diffstat, cost and its last message;
    `by events <child>` shows its activity. To correct a child that is still
-   running, `by send <child> --steer "<text>"` adds to its running turn
-   without stopping it. Its answer starts with `accepted:` once the running
+   running, `by steer <child> "<text>"` (the same as
+   `by send <child> --steer "<text>"`) adds to its running turn
+   without stopping it. For long text, or text with backticks or quotes a
+   shell would mangle, write it to a file and pass `--prompt-file <path>`
+   (`-` for standard input) to `by send` or `by steer` instead. Its answer starts with `accepted:` once the running
    turn took it, and says when the child reads it (for Claude Code, before
    its next model call; never in a later turn), or with `written:` if the
    harness has not confirmed it yet. Some harnesses cannot
@@ -144,9 +147,10 @@ by children
 by inspect parser-flake
 by events parser-flake --cursor 0
 by spawn "Add a regression test for issue 42" --name issue-42 --budget-usd 0.30 --wait
-by send parser-flake --steer "Use the fixture in tests/data, not a new one."
+by steer parser-flake "Use the fixture in tests/data, not a new one."
 by wait parser-flake retry-docs --timeout 600
 by send parser-flake "The seed must come from the test name, not the clock."
+by send parser-flake --prompt-file "$TMPDIR/review.md"   # a long or quoted follow-up
 by integrate parser-flake retry-docs
 by cancel retry-docs
 by discard retry-docs --reason "superseded by parser-flake"

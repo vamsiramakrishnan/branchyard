@@ -234,6 +234,53 @@ fn refusals_reach_the_harness_as_tool_errors() {
     assert!(f.yard.branch("other").unwrap().info().children.is_empty());
 }
 
+/// The spawn tool and a graph's spawn edit take the flat limits the CLI and
+/// Python name (`budget_usd`), as a model first tries them, or the nested
+/// `budget`; not both.
+#[test]
+fn spawn_takes_flat_limits_or_a_budget_but_not_both() {
+    let f = Fixture::new();
+    let options = TaskOptions {
+        budget: Budget::usd(2.0),
+        ..f.delegating(Envelope::default())
+    };
+    let graph = json!({"expected_revision": 1, "edits": [
+        {"kind": "spawn", "name": "graphed", "prompt": "say g", "budget_usd": 0.25, "max_minutes": 5},
+    ]});
+    let prompt = [
+        r#"MCP spawn {"prompt": "say a", "name": "flat", "budget_usd": 0.5, "max_turns": 2}"#
+            .to_owned(),
+        r#"MCP spawn {"prompt": "say b", "budget_usd": 0.5, "budget": {"max_usd": 0.5}}"#
+            .to_owned(),
+        format!("MCP apply_graph {graph}"),
+        r#"MCP wait {"branches": ["flat", "graphed"]}"#.to_owned(),
+    ]
+    .join("\n");
+    f.yard
+        .task(prompt)
+        .options(options)
+        .name("root")
+        .run()
+        .unwrap()
+        .wait_subtree()
+        .unwrap();
+    let said = reply(&f, "root");
+    let spawned = result(&said, "spawn");
+    assert_eq!(spawned["name"], "flat", "{said}");
+    assert_eq!(spawned["budget"]["max_usd"], 0.5, "{said}");
+    assert_eq!(spawned["budget"]["max_turns"], 2, "{said}");
+    assert!(
+        said.contains("mcp spawn error: denied: give a child's limits either as budget"),
+        "{said}"
+    );
+    assert_eq!(
+        result(&said, "apply_graph")["spawned"][0]["budget"]["max_usd"],
+        0.25,
+        "{said}"
+    );
+    assert_eq!(f.yard.branches().unwrap().len(), 3);
+}
+
 #[test]
 fn steer_adds_to_a_running_childs_turn() {
     let f = Fixture::new();

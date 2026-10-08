@@ -49,12 +49,38 @@ pub(crate) fn validate(name: &str) -> Result<BranchName, Error> {
         name: name.to_owned(),
         reason,
     };
+    let hint = match suggestion(name) {
+        Some(valid) => format!("; try {valid:?}"),
+        None => String::new(),
+    };
     if name.contains('/') {
-        return Err(invalid(
-            "local mode uses single-segment names, without '/'".into(),
-        ));
+        return Err(invalid(format!(
+            "local mode uses single-segment names, without '/'{hint}"
+        )));
     }
-    BranchName::new(name).map_err(|e| invalid(e.to_string()))
+    BranchName::new(name).map_err(|e| invalid(format!("{e}{hint}")))
+}
+
+/// A usable name close to `name` (`task-A` → `task-a`): lowercased, each
+/// run of other characters a hyphen, trimmed to start with a letter or
+/// digit. `None` when nothing usable is left.
+fn suggestion(name: &str) -> Option<String> {
+    let mut out = String::new();
+    for c in name.chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || (".-_".contains(c) && !out.is_empty()) {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    while out.contains("..") {
+        out = out.replace("..", ".");
+    }
+    let mut out = out.trim_end_matches(['-', '.', '_']).to_owned();
+    out.truncate(SLUG_MAX * 2);
+    let out = out.trim_end_matches(['-', '.', '_']).to_owned();
+    (out != name && BranchName::new(out.as_str()).is_ok()).then_some(out)
 }
 
 /// Names for one task: `[base]` with no harnesses, else `<base>-<harness>`
@@ -215,5 +241,19 @@ mod tests {
         assert!(matches!(validate("-x"), Err(Error::InvalidName { .. })));
         assert_eq!(candidates("t", &["codex", "goose"]), ["t-codex", "t-goose"]);
         assert_eq!(candidates("t", &[]), ["t"]);
+    }
+
+    /// A refused name suggests a usable one, which a model can retry with.
+    #[test]
+    fn an_invalid_name_suggests_a_valid_one() {
+        let refused = validate("task-A").unwrap_err().to_string();
+        assert!(refused.contains("try \"task-a\""), "{refused}");
+        let refused = validate("a/B c").unwrap_err().to_string();
+        assert!(refused.contains("try \"a-b-c\""), "{refused}");
+        assert_eq!(suggestion("-Fix.lock."), None);
+        assert_eq!(suggestion("_Parser v2.."), Some("parser-v2".into()));
+        assert_eq!(suggestion("!!!"), None);
+        let refused = validate("!!!").unwrap_err().to_string();
+        assert!(!refused.contains("try"), "{refused}");
     }
 }

@@ -783,7 +783,13 @@ see docs/fleet.md.";
 const SEND_EXAMPLES: &str = "\
 Examples:
   by send fix-the-flaky-test \"now add a regression test\"
-  by send fix-the-flaky-test \"also cover Windows\" --steer";
+  by send fix-the-flaky-test \"also cover Windows\" --steer
+  by send fix-the-flaky-test --prompt-file review.md     # a long prompt, from a file (- for stdin)";
+
+const STEER_EXAMPLES: &str = "\
+Examples:
+  by steer fix-the-flaky-test \"also cover Windows\"
+  by steer fix-the-flaky-test --prompt-file note.md     # from a file (- for stdin)";
 
 const REVIEW_EXAMPLES: &str = "\
 Opens the branch's diff in your editor. Write a comment on its own line
@@ -1164,18 +1170,22 @@ pub enum Command {
         branch: String,
         /// The next prompt; quote it
         #[arg(
-            required_unless_present = "retry",
+            required_unless_present_any = ["retry", "prompt_file"],
             default_value = "",
             hide_default_value = true
         )]
         prompt: String,
+        /// Read the prompt from this file instead, `-` for standard input: for a long prompt,
+        /// or one a shell would mangle
+        #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
+        prompt_file: Option<String>,
         /// Add the prompt to the branch's running turn without interrupting it, instead of
         /// starting a new turn; refused when no turn runs or the harness cannot take it
         #[arg(long)]
         steer: bool,
         /// Submit again the prompt of the branch's last turn that was cut off when the engine
         /// running it stopped (the recovery note names it), instead of a new prompt
-        #[arg(long, conflicts_with_all = ["steer", "prompt"])]
+        #[arg(long, conflicts_with_all = ["steer", "prompt", "prompt_file"])]
         retry: bool,
         /// Wait for the turn to end and show it (outside a harness, send always waits)
         #[arg(long)]
@@ -1185,6 +1195,25 @@ pub enum Command {
         json: bool,
         #[command(flatten)]
         task: Checked<SendFlags>,
+    },
+    /// Add to a branch's running turn without interrupting it, as `by send --steer` does
+    #[command(display_order = 102, after_help = STEER_EXAMPLES)]
+    Steer {
+        branch: String,
+        /// What to add; quote it
+        #[arg(
+            required_unless_present = "prompt_file",
+            default_value = "",
+            hide_default_value = true
+        )]
+        prompt: String,
+        /// Read it from this file instead, `-` for standard input: for a long text, or one a
+        /// shell would mangle
+        #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
+        prompt_file: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Comment on a branch's diff in your editor, then send every comment as one prompt
     #[command(display_order = 111, after_help = REVIEW_EXAMPLES)]
@@ -5282,6 +5311,39 @@ mod tests {
     }
 
     #[test]
+    fn send_and_steer_take_a_prompt_file() {
+        let Command::Send {
+            steer, prompt_file, ..
+        } = parse_str("send b --steer --prompt-file note.md").unwrap()
+        else {
+            panic!("not send")
+        };
+        assert!(steer);
+        assert_eq!(prompt_file.as_deref(), Some("note.md"));
+        let Command::Send { prompt_file, .. } = parse_str("send b --prompt-file -").unwrap() else {
+            panic!("not send")
+        };
+        assert_eq!(prompt_file.as_deref(), Some("-"));
+        assert!(err("send b go --prompt-file f").contains("cannot be used with"));
+        assert!(err("send b --retry --prompt-file f").contains("cannot be used with"));
+        assert_eq!(
+            parse_str("steer b also --json").unwrap(),
+            Command::Steer {
+                branch: "b".into(),
+                prompt: "also".into(),
+                prompt_file: None,
+                json: true
+            }
+        );
+        let Command::Steer { prompt_file, .. } = parse_str("steer b --prompt-file f").unwrap()
+        else {
+            panic!("not steer")
+        };
+        assert_eq!(prompt_file.as_deref(), Some("f"));
+        assert_eq!(kind("steer b"), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
     fn mcp_needs_a_root_and_a_branch() {
         assert_eq!(
             parse_str("mcp --root /r --branch b").unwrap(),
@@ -5345,6 +5407,7 @@ mod tests {
         let Command::Send {
             branch,
             prompt,
+            prompt_file,
             task,
             steer,
             retry,
@@ -5365,7 +5428,7 @@ mod tests {
                 ..TaskArgs::default()
             }
         );
-        assert!(!steer && !retry && !wait && !json);
+        assert!(!steer && !retry && !wait && !json && prompt_file.is_none());
         // --retry takes the cut-off turn's prompt, so none is given with it.
         let Command::Send { retry, prompt, .. } = parse_str("send flaky --retry").unwrap() else {
             panic!("not send")
