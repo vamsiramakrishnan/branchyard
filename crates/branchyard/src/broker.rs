@@ -156,9 +156,35 @@ fn handle(yard: &Yard, line: &str) -> Result<Value, Error> {
     delegation::dispatch(&local, field("tool")?, request["arguments"].clone())
 }
 
+/// Why a delegation call could not reach the engine running `branch`'s
+/// turn. Nothing listening at its socket means the engine stopped: say so,
+/// and how the turn is recovered and continued, since the harness's own
+/// tool calls fail too from then on (Claude Code reports `Tool permission
+/// request failed: AbortError: Stream closed`).
+fn engine_gone(branch: &str, socket: &Path, error: &io::Error) -> Error {
+    match error.kind() {
+        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound => Error::State(format!(
+            "the Branchyard engine running {branch}'s turn has stopped (nothing listens at {}): \
+             this turn can no longer delegate, and its tool calls are no longer answered \
+             (Claude Code reports them as `Tool permission request failed: AbortError: Stream \
+             closed`). End the turn; its worktree is kept. Once the engine is recovered (any `by` \
+             command run outside the harness, such as `by ls`, recovers it), `by send {branch} \
+             \"<prompt>\"` continues this session, starting with a note of what happened and \
+             where its children are",
+            socket.display()
+        )),
+        _ => Error::State(format!(
+            "could not reach the engine at {}: {error}",
+            socket.display()
+        )),
+    }
+}
+
 /// A connection to the engine running a branch's turn, acting as that
 /// branch.
 pub(crate) struct Remote {
+    /// The branch the token was issued to, for messages.
+    branch: String,
     socket: PathBuf,
     token: String,
     connection: Option<(BufReader<UnixStream>, UnixStream)>,
@@ -177,6 +203,7 @@ impl Remote {
         };
         let TokenFile { branch, broker, .. } = file;
         let remote = Remote {
+            branch: branch.clone(),
             socket: broker,
             token: token.to_owned(),
             connection: None,
@@ -197,12 +224,8 @@ impl Remote {
     /// Outer error: transport; inner: the engine's answer.
     fn exchange(&mut self, tool: &str, arguments: Value) -> Result<Result<Value, Error>, Error> {
         if self.connection.is_none() {
-            let stream = UnixStream::connect(&self.socket).map_err(|e| {
-                Error::State(format!(
-                    "could not reach the engine at {}: {e}",
-                    self.socket.display()
-                ))
-            })?;
+            let stream = UnixStream::connect(&self.socket)
+                .map_err(|e| engine_gone(&self.branch, &self.socket, &e))?;
             let writer = stream
                 .try_clone()
                 .map_err(|e| Error::State(format!("connection to the engine: {e}")))?;
@@ -230,5 +253,30 @@ impl Remote {
             (Some(ok), None) => Ok(ok.clone()),
             (None, None) => Err(Error::State("the engine's answer has no result".into())),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The battery's crash scenario: after the engine was killed, every
+    /// in-harness `by` failed with no word of why.
+    #[test]
+    fn a_stopped_engine_is_named_with_how_to_go_on() {
+        let mut remote = Remote {
+            branch: "meta".into(),
+            socket: PathBuf::from("/nonexistent/branchyard/broker.sock"),
+            token: "t".into(),
+            connection: None,
+        };
+        let error = remote.call("children", json!({})).unwrap_err().to_string();
+        for needed in [
+            "engine running meta's turn has stopped",
+            "AbortError: Stream closed",
+            "by send meta",
+        ] {
+            assert!(error.contains(needed), "{needed:?} missing from {error}");
+        }
     }
 }

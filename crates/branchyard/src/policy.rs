@@ -207,7 +207,8 @@ impl fmt::Display for PolicyPreset {
 }
 
 /// `by` subcommands that act as the calling branch.
-pub(crate) const DELEGATION_SUBCOMMANDS: [&str; 8] = [
+pub(crate) const DELEGATION_SUBCOMMANDS: [&str; 9] = [
+    "wait",
     "spawn",
     "inspect",
     "events",

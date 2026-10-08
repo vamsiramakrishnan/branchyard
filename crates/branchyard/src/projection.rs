@@ -98,6 +98,10 @@ pub(crate) struct Hub {
     /// this process gave its children, by parent: a dependent started
     /// here later runs under them (see `crate::graph`).
     pub graph_options: Mutex<HashMap<String, crate::TaskOptions>>,
+    /// The turn options of each branch whose turn parked in this process
+    /// waiting on its children, by branch: its automatic wake runs under
+    /// them (see `crate::wake`).
+    pub wake_options: Mutex<HashMap<String, crate::TaskOptions>>,
     /// Set by [`crate::Yard::deny_workspace_scripts`]: workspace setup and
     /// teardown commands never run on this yard.
     scripts_denied: std::sync::atomic::AtomicBool,
@@ -130,6 +134,7 @@ impl Default for Hub {
             spawning: Default::default(),
             delivery_hook: Mutex::new(Some(Arc::new(crate::inbox::SteerDelivery::default()))),
             graph_options: Default::default(),
+            wake_options: Default::default(),
             scripts_denied: Default::default(),
             sandbox_provider: Default::default(),
             connectors: Default::default(),

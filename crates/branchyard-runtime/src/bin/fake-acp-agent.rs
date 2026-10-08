@@ -32,7 +32,8 @@
 //!   replies `mcp <tool>: <text>` or `mcp <tool> error: <text>` for each
 //!   line. `MCP tools` replies the listed tool names instead,
 //!   `MCP wait <branch>` calls `inspect` until the branch is neither
-//!   running nor waiting for its prerequisites, and `MCP started <branch>` calls `events` until the branch's prompt
+//!   running nor waiting (for its prerequisites or on its children; `MCP
+//!   wait {...}` calls the `wait` tool instead), and `MCP started <branch>` calls `events` until the branch's prompt
 //!   has been recorded, which it is just before the prompt is submitted.
 //!   Without a server it replies `mcp: no server`.
 //! - `SH <command>`, one per line: runs the command with `sh -c` in its
@@ -59,6 +60,12 @@
 //! turn is open answers `injected` and replies `steered: <text>` into it;
 //! with none open, it answers `promptRequired`. With
 //! `FAKE_ACP_NO_STEER=1` it neither advertises nor handles the extension.
+//!
+//! With `FAKE_ACP_WAKE=<file>` in its environment, a prompt that is
+//! Branchyard's automatic wake of a parent waiting on its children
+//! (it contains `<branchyard-wake>`) is acted on as if it were the file's
+//! contents instead, so a test scripts what a woken parent does; without
+//! it, a wake is echoed like any prompt.
 //!
 //! With `FAKE_ACP_SILENT=1` in its environment it never answers
 //! `initialize`, so no prompt is ever submitted to it.
@@ -230,6 +237,15 @@ fn main() {
                         instructed = true;
                         preamble = given.to_owned();
                         text = prompt.trim_start();
+                    }
+                }
+                let woken;
+                if text.contains("<branchyard-wake>") {
+                    if let Some(script) = std::env::var_os("FAKE_ACP_WAKE") {
+                        woken = std::fs::read_to_string(&script).unwrap_or_else(|e| {
+                            format!("wake script {}: {e}", script.to_string_lossy())
+                        });
+                        text = &woken;
                     }
                 }
                 if let Some(path) = text
@@ -598,7 +614,8 @@ fn mcp(server: &Value, text: &str) -> String {
                     .collect();
                 (false, names.join(","))
             }),
-            "wait" => wait(&mut client, rest.trim()),
+            // `MCP wait <branch>` polls; `MCP wait {...}` calls the tool.
+            "wait" if !rest.trim_start().starts_with('{') => wait(&mut client, rest.trim()),
             "started" => started(&mut client, rest.trim()),
             _ => match serde_json::from_str::<Value>(if rest.trim().is_empty() {
                 "{}"
@@ -618,8 +635,8 @@ fn mcp(server: &Value, text: &str) -> String {
     out
 }
 
-/// Poll `inspect` until `branch` is neither running nor waiting for its
-/// prerequisites, for up to a minute.
+/// Poll `inspect` until `branch` is neither running nor waiting (for its
+/// prerequisites or on its children), for up to a minute.
 fn wait(client: &mut McpClient, branch: &str) -> Result<(bool, String), String> {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
@@ -632,7 +649,11 @@ fn wait(client: &mut McpClient, branch: &str) -> Result<(bool, String), String> 
             .as_str()
             .unwrap_or_default()
             .to_owned();
-        if !matches!(state.as_str(), "running" | "waiting") || Instant::now() >= deadline {
+        if !matches!(
+            state.as_str(),
+            "running" | "waiting" | "waiting_on_children"
+        ) || Instant::now() >= deadline
+        {
             return Ok((false, state));
         }
         std::thread::sleep(Duration::from_millis(50));

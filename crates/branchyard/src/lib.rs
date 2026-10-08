@@ -114,6 +114,7 @@ mod goal;
 mod graph;
 mod harness;
 mod inbox;
+mod integrate;
 pub mod inventory;
 mod json_schema;
 mod judge;
@@ -152,6 +153,7 @@ mod storage;
 pub mod store_codec;
 mod tarball;
 pub mod tasks;
+mod wake;
 mod workspace;
 
 use branchyard_support::best_effort;
@@ -186,7 +188,7 @@ pub use checkpoint::{
 pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, AttemptCheck};
 pub use delegation::{
     Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inbox, Inspection,
-    Sent, Spawn, Spawned,
+    Sent, Spawn, Spawned, Waited, DEFAULT_MAX_WAKES,
 };
 pub use egress::{EgressActivity, Enforcement as EgressEnforcement};
 pub use environments::{
@@ -345,6 +347,23 @@ impl Yard {
     /// ([`Branch::wait_subtree`] on their parent). See `docs/graph.md`.
     pub fn resume_graph(&self, options: &TaskOptions) -> Result<Vec<String>, Error> {
         graph::resume(self, options)
+    }
+
+    /// Block until `branches` have settled, any one of them with `any`,
+    /// else all, or until `timeout` passes, whichever process runs them:
+    /// the wait reads their durable status and wakes when it changes
+    /// ([`Delegate::wait_for`] is the same wait acting as a branch). With
+    /// your authority: any branch may be waited for.
+    pub fn wait_for(
+        &self,
+        branches: &[&str],
+        any: bool,
+        timeout: Option<Duration>,
+    ) -> Result<Waited, Error> {
+        let names: Vec<String> = branches.iter().map(|b| (*b).to_owned()).collect();
+        delegation::wait_for(self, &names, any, timeout, |name| {
+            delegation::trusted(self, name, TaskOptions::default())?.inspect(name)
+        })
     }
 
     /// `branch`'s graph: its children, the dependencies among them, and its
@@ -1976,6 +1995,12 @@ pub enum BranchStatus {
     /// approved, edited or rejected before anything changes; see
     /// [`Yard::approve_plan`].
     AwaitingPlanApproval,
+    /// A delegating branch whose turn ended while children it delegated
+    /// were still running or waiting: it is parked, and its next turn
+    /// starts on its own once they have all settled, with a summary of
+    /// what they did (`docs/delegation.md`, "Waiting on children"). Not
+    /// finished: a wait for its subtree waits for that turn too.
+    WaitingOnChildren,
     /// The last turn completed without changing any file.
     NoChanges,
     Interrupted,
@@ -2702,7 +2727,36 @@ pub struct Merged {
     pub branch: String,
     pub target: String,
     pub previous: String,
+    /// The merge commit that brought the branch's candidate into the
+    /// target.
     pub commit: String,
+    /// The target already contained the candidate, so nothing was merged:
+    /// the branch was recorded as merged through `via`. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub already: bool,
+    /// For a candidate that was already contained: the commit that brought
+    /// it in, with its subject (such as a sibling's merge). Omitted
+    /// otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+}
+
+/// Several branches integrated into one target together
+/// ([`Delegate::integrate_all`], `by integrate a b c`): merged in order in
+/// one temporary worktree, checked once on the result, and promoted with
+/// one compare-and-swap of the target from `previous` to `commit`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MergedAll {
+    /// The parent's git branch the children were merged into.
+    pub target: String,
+    /// The target before the call.
+    pub previous: String,
+    /// The target after the call; `previous` when every branch was already
+    /// contained.
+    pub commit: String,
+    /// One per branch, in the order given.
+    pub branches: Vec<Merged>,
 }
 
 /// Known harness profiles, whether their executable is on `PATH`, and
@@ -2760,6 +2814,20 @@ pub enum Error {
         actual: Option<String>,
     },
     Conflict {
+        files: Vec<String>,
+    },
+    /// Integrating several branches together: `branch` conflicted, in
+    /// `files`, with the target plus the branches in `merged`, merged
+    /// before it in the same call. Nothing was integrated. Its kind is
+    /// `conflict`, like [`Error::Conflict`].
+    ConflictBetween {
+        /// The branch whose merge conflicted.
+        branch: String,
+        /// The git branch merged into.
+        target: String,
+        /// The branches merged before it in the same call.
+        merged: Vec<String>,
+        /// The conflicting paths.
         files: Vec<String>,
     },
     CheckFailed {
@@ -2840,6 +2908,24 @@ impl fmt::Display for Error {
                 actual: None,
             } => write!(f, "target at {expected} no longer exists"),
             Error::Conflict { files } => write!(f, "merge conflicts in {}", files.join(", ")),
+            Error::ConflictBetween {
+                branch,
+                target,
+                merged,
+                files,
+            } => match merged.is_empty() {
+                true => write!(
+                    f,
+                    "{branch} conflicts with {target} in {}; nothing was integrated",
+                    files.join(", ")
+                ),
+                false => write!(
+                    f,
+                    "{branch} conflicts with {target} plus {} in {}; nothing was integrated",
+                    merged.join(", "),
+                    files.join(", ")
+                ),
+            },
             Error::CheckFailed { output_tail } => write!(f, "check failed:\n{output_tail}"),
             Error::CheckTimedOut {
                 timeout,
@@ -2895,7 +2981,7 @@ impl Error {
             Error::Unsupported(_) => "unsupported",
             Error::NoCandidate(_) => "no_candidate",
             Error::TargetMoved { .. } => "target_moved",
-            Error::Conflict { .. } => "conflict",
+            Error::Conflict { .. } | Error::ConflictBetween { .. } => "conflict",
             Error::CheckFailed { .. } => "check_failed",
             Error::CheckTimedOut { .. } => "check_timed_out",
             Error::CheckNotStarted(_) => "check_not_started",

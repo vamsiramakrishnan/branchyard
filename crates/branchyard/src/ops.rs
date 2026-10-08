@@ -193,6 +193,8 @@ fn landed(
             .unwrap_or_default()
             .to_owned(),
         commit: head,
+        already: false,
+        via: None,
     }))
 }
 
@@ -250,10 +252,12 @@ fn integrate(
         target: target.to_owned(),
         previous: integrated.previous.0,
         commit: integrated.merged.0,
+        already: false,
+        via: None,
     })
 }
 
-fn integration_error(error: IntegrationError, target: &str) -> Error {
+pub(crate) fn integration_error(error: IntegrationError, target: &str) -> Error {
     match error {
         IntegrationError::TargetMoved { expected, actual } => Error::TargetMoved {
             expected: expected.0,

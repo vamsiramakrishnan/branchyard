@@ -552,6 +552,7 @@ fn status(status: &branchyard::BranchStatus) -> String {
         S::Failed { reason } => format!("failed ({reason})"),
         S::Merged { target, .. } => format!("merged into {target}"),
         S::AwaitingPlanApproval => "awaiting approval of its plan".into(),
+        S::WaitingOnChildren => "waiting on its children".into(),
     }
 }
 

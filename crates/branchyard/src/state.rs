@@ -127,6 +127,19 @@ pub(crate) struct Record {
     /// The goal a judge verifies when a turn ends ready. See `crate::goal`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<crate::goal::GoalState>,
+    /// While the branch is [`crate::BranchStatus::WaitingOnChildren`]: what
+    /// its parked turn ended with and what wakes it. See `crate::wake`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked: Option<crate::wake::Parked>,
+    /// Automatic wakes since the last turn something else started; bounded
+    /// by the envelope's `max_wakes`.
+    #[serde(default, skip_serializing_if = "crate::wake::is_zero")]
+    pub wakes: u32,
+    /// Why its last turn was lost when its engine stopped, until a turn
+    /// tells its harness: recovery sets it, and the next turn's prompt
+    /// starts with what happened. See `crate::wake::recovered_note`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lost: Option<String>,
 }
 
 /// The right to write a branch's state for one turn: the branch's current

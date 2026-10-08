@@ -253,6 +253,7 @@ impl Seats {
                 .map(|seat| seat.instances)
                 .sum(),
             harnesses,
+            ..Envelope::default()
         }
     }
 
@@ -320,6 +321,7 @@ mod tests {
                 max_depth: 2,
                 max_children: 3,
                 harnesses: vec!["claude-code".into(), "codex".into(), "gemini-cli".into()],
+                ..Envelope::default()
             }
         );
         let below = s.below("impl");

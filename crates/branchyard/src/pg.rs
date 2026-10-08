@@ -2424,12 +2424,18 @@ impl GraphBackend for Postgres {
         })
     }
 
-    fn claim(&self, record: &Record, owner: &Owner, ttl: Duration) -> Result<Option<Fence>, Error> {
+    fn claim_if(
+        &self,
+        record: &Record,
+        owner: &Owner,
+        ttl: Duration,
+        from: fn(&BranchStatus) -> bool,
+    ) -> Result<Option<Fence>, Error> {
         let name = &record.info.name;
         self.tx(true, |tx| {
             let waiting = self
                 .stored_record(tx, name)?
-                .is_some_and(|stored| stored.info.status == BranchStatus::Waiting);
+                .is_some_and(|stored| from(&stored.info.status));
             let Some(incarnation) = self.incarnation(tx, name)? else {
                 return Ok(None);
             };
@@ -2440,12 +2446,17 @@ impl GraphBackend for Postgres {
         })
     }
 
-    fn settle_waiting(&self, record: &Record, event: &RecordedEvent) -> Result<bool, Error> {
+    fn settle_if(
+        &self,
+        record: &Record,
+        event: &RecordedEvent,
+        from: fn(&BranchStatus) -> bool,
+    ) -> Result<bool, Error> {
         let name = &record.info.name;
         self.tx(true, |tx| {
             let waiting = self
                 .stored_record(tx, name)?
-                .is_some_and(|stored| stored.info.status == BranchStatus::Waiting);
+                .is_some_and(|stored| from(&stored.info.status));
             if !waiting || self.held(tx, name)? {
                 return Ok(false);
             }
