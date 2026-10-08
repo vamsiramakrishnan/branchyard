@@ -955,9 +955,24 @@ impl Store {
         self.backend.list()
     }
 
-    /// Delete a branch's record and what the engine kept for its turns.
+    /// Delete a branch's record and what the engine kept for its turns,
+    /// whoever holds its lease; [`Store::delete_held`] outside tests.
+    #[cfg(test)]
     pub fn delete(&self, name: &str) -> Result<(), Error> {
         self.backend.delete(name)
+    }
+
+    /// Delete a branch whose lease `lease` holds: its lease goes with its
+    /// record, so the lease is spent, not released (releasing it after
+    /// would find no lease and warn that another engine took it). On an
+    /// error nothing was deleted, and the lease is released as usual.
+    pub fn delete_held(&self, lease: Lease) -> Result<(), Error> {
+        let mut lease = lease;
+        // Stopped first, so no renewal races the delete.
+        lease.heartbeat.take();
+        self.backend.delete(&lease.fence.branch)?;
+        lease.done = true;
+        Ok(())
     }
 
     /// Write `record` and take its branch's lease for a new turn. Refused
