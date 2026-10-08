@@ -126,9 +126,13 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
         E::Remote { kind, .. } => error_out.detail(json!({ "kind": kind })),
         E::CheckFailed {
             output_tail,
+            checks,
             shared,
         } => {
             let mut detail = json!({ "output_tail": output_tail });
+            if !checks.is_empty() {
+                detail["checks"] = json!(checks);
+            }
             if let Some(shared) = shared.as_ref().and_then(|s| serde_json::to_value(s).ok()) {
                 detail["shared"] = shared;
             }
@@ -137,10 +141,17 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
         E::CheckTimedOut {
             timeout,
             output_tail,
-        } => error_out.detail(json!({
-            "timeout_seconds": timeout.as_secs_f64(),
-            "output_tail": output_tail,
-        })),
+            checks,
+        } => {
+            let mut detail = json!({
+                "timeout_seconds": timeout.as_secs_f64(),
+                "output_tail": output_tail,
+            });
+            if !checks.is_empty() {
+                detail["checks"] = json!(checks);
+            }
+            error_out.detail(detail)
+        }
         _ => error_out,
     }
 }
@@ -160,5 +171,39 @@ mod tests {
             files: vec!["a.txt".into()],
         });
         assert_eq!(e.body.detail, Some(json!({ "files": ["a.txt"] })));
+    }
+
+    /// A failed integration check names every check, its branches and its
+    /// outcome in the detail, beside the failed one's output.
+    #[test]
+    fn a_failed_check_names_every_check_in_its_detail() {
+        let e = sdk(&branchyard::Error::CheckFailed {
+            output_tail: "boom".into(),
+            checks: vec![
+                branchyard::IntegrationCheck {
+                    check: vec!["make".into(), "lint".into()],
+                    branches: vec!["a".into()],
+                    outcome: branchyard::CheckVerdict::Passed,
+                },
+                branchyard::IntegrationCheck {
+                    check: vec!["make".into(), "test".into()],
+                    branches: vec!["b".into(), "c".into()],
+                    outcome: branchyard::CheckVerdict::Failed,
+                },
+            ],
+            shared: None,
+        });
+        assert_eq!(
+            (e.status, e.body.code.as_str()),
+            (StatusCode::UNPROCESSABLE_ENTITY, "check_failed")
+        );
+        let detail = e.body.detail.unwrap();
+        assert_eq!(detail["output_tail"], "boom");
+        assert_eq!(
+            detail["checks"][1],
+            json!({ "check": ["make", "test"], "branches": ["b", "c"], "outcome": "failed" })
+        );
+        assert_eq!(detail["checks"][0]["outcome"], "passed");
+        assert!(e.body.message.contains("`make test` (b, c) failed"));
     }
 }

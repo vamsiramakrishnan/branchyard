@@ -238,13 +238,21 @@ pub fn sdk_error(error: branchyard_client::Error) -> branchyard::Error {
                     .to_owned(),
                 code => code.to_owned(),
             };
-            // A failed check's siblings, as a local `by` reports them.
-            let detail = error
-                .detail
-                .as_ref()
-                .and_then(|d| d.get("shared"))
-                .cloned()
-                .map(Box::new);
+            // A failed check's siblings and every check of the
+            // integration, as a local `by` reports them.
+            let detail = error.detail.as_ref().and_then(|d| {
+                let mut local = d
+                    .get("shared")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if let Some(checks) = d.get("checks") {
+                    local["checks"] = checks.clone();
+                }
+                local
+                    .as_object()
+                    .is_some_and(|l| !l.is_empty())
+                    .then(|| Box::new(local))
+            });
             branchyard::Error::Remote {
                 kind,
                 message: error.message,
@@ -1069,4 +1077,44 @@ fn rig_failed(json: bool, error: branchyard::Error) -> Outcome {
         return Err(Failure::Reported);
     }
     Err(Failure::Sdk(error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A server's failed integration check reads as a local one: the
+    /// shared check's fields and every check of the integration, at the
+    /// top of the detail.
+    #[test]
+    fn a_remote_check_failure_keeps_its_checks_and_siblings() {
+        let checks = serde_json::json!([
+            {"check": ["make", "test"], "branches": ["b"], "outcome": "failed"}
+        ]);
+        let error = sdk_error(branchyard_client::Error::Api {
+            status: 422,
+            error: Box::new(branchyard_client::api::ErrorBody {
+                code: "check_failed".into(),
+                message: "check failed:\nboom".into(),
+                detail: Some(serde_json::json!({
+                    "output_tail": "boom",
+                    "checks": checks,
+                    "shared": {"integrate_together": ["b", "e"]},
+                })),
+            }),
+        });
+        assert_eq!(error.kind(), "check_failed");
+        let detail = error.detail().unwrap();
+        assert_eq!(detail["checks"], checks);
+        assert_eq!(detail["integrate_together"], serde_json::json!(["b", "e"]));
+        let plain = sdk_error(branchyard_client::Error::Api {
+            status: 422,
+            error: Box::new(branchyard_client::api::ErrorBody {
+                code: "check_failed".into(),
+                message: "check failed:\nboom".into(),
+                detail: Some(serde_json::json!({ "output_tail": "boom" })),
+            }),
+        });
+        assert_eq!(plain.detail(), None);
+    }
 }

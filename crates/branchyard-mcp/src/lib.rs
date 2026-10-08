@@ -23,7 +23,10 @@
 //!   call leaves this process, and the engine checks it again.
 //! - Refusals (envelope, budget, authority) are tool results with
 //!   `isError: true` and a reason, so the model can adjust; malformed calls
-//!   are JSON-RPC errors.
+//!   are JSON-RPC errors. An error that carries more than its message,
+//!   such as a failed check naming every check of an integration, also has
+//!   it as structured content, `{"error": {kind, message, detail}}`, as
+//!   `by --json` prints it.
 //!
 //! Not guaranteed:
 //!
@@ -668,10 +671,22 @@ impl ServerHandler for Server {
                 }
                 result
             }
-            Err(error) => CallToolResult::error(vec![ContentBlock::text(error.to_string())]),
+            Err(error) => tool_error(&error),
         }
         .into())
     }
+}
+
+/// A failed call as the model reads it: the error's message, and its
+/// detail, when it has one, as structured content.
+fn tool_error(error: &branchyard::Error) -> CallToolResult {
+    let mut result = CallToolResult::error(vec![ContentBlock::text(error.to_string())]);
+    if let Some(detail) = error.detail() {
+        result.structured_content = Some(json!({
+            "error": {"kind": error.kind(), "message": error.to_string(), "detail": detail}
+        }));
+    }
+    result
 }
 
 /// Serve `branch`'s tools on stdin and stdout until the client closes them.
@@ -757,6 +772,29 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    /// An error with a detail, as the broker returns a failed integration
+    /// check, gives it as structured content beside its text; one without
+    /// gives text alone.
+    #[test]
+    fn an_error_with_a_detail_has_it_as_structured_content() {
+        let detail = json!({"checks": [
+            {"check": ["make", "test"], "branches": ["b"], "outcome": "failed"}
+        ]});
+        let failed = tool_error(&branchyard::Error::Remote {
+            kind: "check_failed".into(),
+            message: "check failed:\nboom".into(),
+            detail: Some(Box::new(detail.clone())),
+        });
+        assert_eq!(failed.is_error, Some(true));
+        let structured = failed.structured_content.unwrap();
+        assert_eq!(structured["error"]["kind"], "check_failed");
+        assert_eq!(structured["error"]["message"], "check failed:\nboom");
+        assert_eq!(structured["error"]["detail"], detail);
+        let plain = tool_error(&branchyard::Error::Denied("no".into()));
+        assert_eq!(plain.is_error, Some(true));
+        assert!(plain.structured_content.is_none());
+    }
 
     /// The server lists exactly the table's tools, in its order, each with
     /// exactly the arguments the table names; a tool or an argument added

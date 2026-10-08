@@ -695,6 +695,7 @@ fn integrate_many_refuses_a_failed_combined_check_and_cleans_up() {
     let a = fixture.candidate("a", "a-part.txt", "a\n");
     let b = fixture.candidate("b", "b-part.txt", "b\n");
     let ran = fixture.dir.join("second-ran");
+    let passing = sh("true", Duration::from_secs(30));
     let failing = sh("echo suite-broken; exit 3", Duration::from_secs(30));
     let second = sh(
         &format!("touch '{}'", ran.display()),
@@ -702,14 +703,20 @@ fn integrate_many_refuses_a_failed_combined_check_and_cleans_up() {
     );
     match fixture
         .repo
-        .integrate_many(&[a, b], "main", &expected, &[failing, second])
+        .integrate_many(&[a, b], "main", &expected, &[passing, failing, second])
     {
-        Err(IntegrationError::CheckFailed {
-            status,
-            output_tail,
-        }) => {
-            assert_eq!(status.code(), Some(3));
-            assert!(output_tail.contains("suite-broken"), "{output_tail}");
+        Err(IntegrationError::CheckStopped { index, error }) => {
+            assert_eq!(index, 1, "the failed check is named by its place");
+            match *error {
+                IntegrationError::CheckFailed {
+                    status,
+                    output_tail,
+                } => {
+                    assert_eq!(status.code(), Some(3));
+                    assert!(output_tail.contains("suite-broken"), "{output_tail}");
+                }
+                other => panic!("{other:?}"),
+            }
         }
         other => panic!("{other:?}"),
     }
@@ -731,7 +738,8 @@ fn integrate_many_refuses_a_check_that_times_out_or_cannot_start() {
         fixture
             .repo
             .integrate_many(std::slice::from_ref(&a), "main", &expected, &[slow]),
-        Err(IntegrationError::CheckTimedOut { .. })
+        Err(IntegrationError::CheckStopped { index: 0, error })
+            if matches!(*error, IntegrationError::CheckTimedOut { .. })
     ));
     let missing = Check {
         argv: vec!["/nonexistent/branchyard-check".into()],
@@ -741,7 +749,8 @@ fn integrate_many_refuses_a_check_that_times_out_or_cannot_start() {
         fixture
             .repo
             .integrate_many(&[a], "main", &expected, &[missing]),
-        Err(IntegrationError::CheckNotStarted(_))
+        Err(IntegrationError::CheckStopped { index: 0, error })
+            if matches!(*error, IntegrationError::CheckNotStarted(_))
     ));
     assert_eq!(fixture.head("main"), expected);
     fixture.assert_no_integration_worktrees();

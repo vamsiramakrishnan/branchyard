@@ -489,7 +489,7 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 | `invalid_name`, `unknown_harness` | 400 | SDK refusals |
 | `denied` | 403 | The envelope or authority refused a delegation operation, as `by --json` reports `denied` |
 | `remote_error` | 502 | An error the engine running a delegating turn returned through its broker; `detail.kind` is its kind |
-| `harness_unavailable`, `unsupported`, `check_failed`, `check_timed_out`, `check_not_started`, `invalid_candidate` | 422 | SDK refusals; check failures have `detail.output_tail` |
+| `harness_unavailable`, `unsupported`, `check_failed`, `check_timed_out`, `check_not_started`, `invalid_candidate` | 422 | SDK refusals; check failures have `detail.output_tail`, and an integration's `check_failed` and `check_timed_out` have `detail.checks`, every check of the branches integrated as `{check, branches, outcome}` (`passed`, `failed`, `timed_out`, `not_started` or `not_run`) |
 
 ## Published schema
 

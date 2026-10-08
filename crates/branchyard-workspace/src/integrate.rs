@@ -121,6 +121,17 @@ pub enum IntegrationError {
     },
     /// The check could not be started (empty argv, program not found, ...).
     CheckNotStarted(io::Error),
+    /// In a [`Repository::integrate_many`], the check at `index` in the
+    /// checks given stopped the integration with `error`: an
+    /// [`IntegrationError::CheckFailed`], [`IntegrationError::CheckTimedOut`]
+    /// or [`IntegrationError::CheckNotStarted`]. The checks before it
+    /// passed, and those after it did not run.
+    CheckStopped {
+        /// The check's place in the checks given, from 0.
+        index: usize,
+        /// How it stopped the integration.
+        error: Box<IntegrationError>,
+    },
     /// A worktree with the target checked out has uncommitted changes to
     /// tracked files, or files where the merge would add new ones.
     DirtyTarget {
@@ -162,6 +173,7 @@ impl fmt::Display for IntegrationError {
             Self::CheckFailed { status, .. } => write!(f, "check failed: {status}"),
             Self::CheckTimedOut { timeout, .. } => write!(f, "check timed out after {timeout:?}"),
             Self::CheckNotStarted(e) => write!(f, "check could not start: {e}"),
+            Self::CheckStopped { index, error } => write!(f, "check {}: {error}", index + 1),
             Self::DirtyTarget { worktree } => write!(
                 f,
                 "target is checked out with uncommitted changes in {}",
@@ -178,6 +190,7 @@ impl std::error::Error for IntegrationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::CheckNotStarted(e) => Some(e),
+            Self::CheckStopped { error, .. } => Some(error.as_ref()),
             Self::Git(e) => Some(e),
             _ => None,
         }
@@ -304,6 +317,8 @@ impl Repository {
     ///
     /// A conflict is [`IntegrationError::ConflictWith`], naming the
     /// candidate that conflicted, the ones merged before it and the files.
+    /// A check that does not pass is [`IntegrationError::CheckStopped`],
+    /// naming which of `checks` it was; the ones after it do not run.
     /// Any error leaves the target where it was.
     pub fn integrate_many(
         &self,
@@ -409,25 +424,26 @@ impl Repository {
         }
 
         let mut check_output_tails = Vec::new();
-        for check in checks {
-            match check::run(check, &scratch.path) {
-                Err(e) => return Err(IntegrationError::CheckNotStarted(e)),
+        for (index, check) in checks.iter().enumerate() {
+            let error = match check::run(check, &scratch.path) {
+                Err(e) => IntegrationError::CheckNotStarted(e),
                 Ok((CheckOutcome::Exited(status), tail)) if status.success() => {
-                    check_output_tails.push(tail)
+                    check_output_tails.push(tail);
+                    continue;
                 }
-                Ok((CheckOutcome::Exited(status), output_tail)) => {
-                    return Err(IntegrationError::CheckFailed {
-                        status,
-                        output_tail,
-                    })
-                }
-                Ok((CheckOutcome::TimedOut, output_tail)) => {
-                    return Err(IntegrationError::CheckTimedOut {
-                        timeout: check.timeout,
-                        output_tail,
-                    })
-                }
-            }
+                Ok((CheckOutcome::Exited(status), output_tail)) => IntegrationError::CheckFailed {
+                    status,
+                    output_tail,
+                },
+                Ok((CheckOutcome::TimedOut, output_tail)) => IntegrationError::CheckTimedOut {
+                    timeout: check.timeout,
+                    output_tail,
+                },
+            };
+            return Err(IntegrationError::CheckStopped {
+                index,
+                error: Box::new(error),
+            });
         }
 
         let names: Vec<String> = candidates.iter().map(|c| c.branch.branch()).collect();

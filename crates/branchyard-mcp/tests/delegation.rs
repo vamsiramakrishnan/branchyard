@@ -663,6 +663,12 @@ fn a_harness_waits_for_its_children_and_integrates_them_together() {
         said.contains("mcp propose_integration error: check failed"),
         "{said}"
     );
+    assert!(
+        said.contains(
+            "Checks on the merged result: `sh -c test -f a.part && test -f b.part` (a) failed"
+        ),
+        "{said}"
+    );
     let together = nth_result(&said, "propose_integration", 0);
     assert_eq!(together["target"], "by/root");
     assert_eq!(together["branches"][0]["branch"], "a");

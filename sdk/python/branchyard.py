@@ -127,7 +127,16 @@ class CheckFailedError(BranchyardError):
     names the branches to integrate at once, `integrate(*e.integrate_together)`,
     and `unsettled` those of them still to wait for. Both are empty
     otherwise: the check failed on its own.
+
+    `checks` names every check of the branches integrated, in the order
+    they ran, as dicts `{check, branches, outcome}`: `outcome` is "passed",
+    "failed", "timed_out", "not_started" or "not_run" (a check before it
+    failed).
     """
+
+    @property
+    def checks(self) -> List[Dict[str, Any]]:
+        return list((self.detail or {}).get("checks", []))
 
     @property
     def integrate_together(self) -> List[str]:
@@ -325,6 +334,8 @@ class MergedAll:
     branches: List[Merged]
     # The distinct checks that ran once on the result, as argv lists.
     checks: Optional[List[List[str]]] = None
+    # The same, as dicts {check, branches, outcome}: whose check each is.
+    check_results: Optional[List[Dict[str, Any]]] = None
 
 
 @dataclasses.dataclass
@@ -636,8 +647,9 @@ def integrate(*branches: str):
     order, all or none, with their check run once on the result, and return
     a MergedAll. A candidate your branch already contains is recorded as
     merged (already=True), not refused. A failed check raises
-    CheckFailedError; when siblings sharing it were left out, its
-    `integrate_together` names the branches to integrate at once."""
+    CheckFailedError: its `checks` name every check, the branches it
+    belongs to and how it ended, and when siblings sharing it were left
+    out, its `integrate_together` names the branches to integrate at once."""
     if not branches:
         raise DeniedError("denied", "name at least one branch to integrate")
     value = _run(["integrate", *branches])
@@ -649,6 +661,7 @@ def integrate(*branches: str):
         commit=value["commit"],
         branches=[_make(Merged, item) for item in value["branches"]],
         checks=value.get("checks"),
+        check_results=value.get("check_results"),
     )
 
 

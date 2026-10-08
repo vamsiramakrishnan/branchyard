@@ -1872,6 +1872,7 @@ fn sharing_check(store: &Store, record: &Record) -> Vec<Record> {
 fn with_shared_check(store: &Store, error: Error, branches: &[String]) -> Error {
     let Error::CheckFailed {
         output_tail,
+        checks,
         shared: None,
     } = error
     else {
@@ -1907,6 +1908,7 @@ fn with_shared_check(store: &Store, error: Error, branches: &[String]) -> Error 
     }
     Error::CheckFailed {
         output_tail,
+        checks,
         shared: shared.filter(|s| !s.siblings.is_empty()).map(Box::new),
     }
 }
@@ -3903,6 +3905,7 @@ mod tests {
     fn a_shared_check_names_the_siblings_still_running() {
         let error = Error::CheckFailed {
             output_tail: "2 failed".into(),
+            checks: Vec::new(),
             shared: Some(Box::new(SharedCheck {
                 check: vec!["make".into(), "test".into()],
                 inherited_from: None,
@@ -3925,6 +3928,7 @@ mod tests {
         assert!(detail.get("inherited_from").is_none());
         let plain = Error::CheckFailed {
             output_tail: "x".into(),
+            checks: Vec::new(),
             shared: None,
         };
         assert_eq!(
@@ -3932,7 +3936,75 @@ mod tests {
             ("check failed:\nx".into(), None)
         );
     }
-    use crate::{PermissionDecision, PermissionKey, PermissionRequest};
+
+    /// A failed check of an integration whose branches' checks differ
+    /// names every check, its branches and how it ended, in the text and
+    /// in the detail, beside a shared check's fields.
+    #[test]
+    fn a_failed_check_names_every_check_its_branches_and_outcome() {
+        let check = |argv: &str, branches: &[&str], outcome| IntegrationCheck {
+            check: argv.split(' ').map(str::to_owned).collect(),
+            branches: branches.iter().map(|b| (*b).to_owned()).collect(),
+            outcome,
+        };
+        let checks = vec![
+            check("make lint", &["a", "c"], CheckVerdict::Passed),
+            check("make test", &["b"], CheckVerdict::Failed),
+            check("make docs", &["d"], CheckVerdict::NotRun),
+        ];
+        let error = Error::CheckFailed {
+            output_tail: "2 failed".into(),
+            checks: checks.clone(),
+            shared: None,
+        };
+        assert_eq!(
+            error.to_string(),
+            "check failed:\n2 failed\nChecks on the merged result: `make lint` (a, c) passed; \
+             `make test` (b) failed; `make docs` (d) did not run"
+        );
+        let detail = error.detail().unwrap();
+        assert_eq!(detail["checks"][1]["check"], json!(["make", "test"]));
+        assert_eq!(detail["checks"][1]["branches"], json!(["b"]));
+        assert_eq!(detail["checks"][1]["outcome"], "failed");
+        assert_eq!(detail["checks"][2]["outcome"], "not_run");
+        assert!(detail.get("integrate_together").is_none(), "{detail}");
+
+        let shared = Error::CheckFailed {
+            output_tail: "2 failed".into(),
+            checks,
+            shared: Some(Box::new(SharedCheck {
+                check: vec!["make".into(), "test".into()],
+                inherited_from: None,
+                siblings: vec!["e".into()],
+                unsettled: Vec::new(),
+                integrate_together: vec!["b".into(), "e".into()],
+            })),
+        };
+        let text = shared.to_string();
+        assert!(
+            text.contains("(d) did not run\nNothing was integrated. Siblings e"),
+            "{text}"
+        );
+        let detail = shared.detail().unwrap();
+        assert_eq!(detail["integrate_together"], json!(["b", "e"]));
+        assert_eq!(detail["checks"].as_array().unwrap().len(), 3);
+
+        let timed_out = Error::CheckTimedOut {
+            timeout: Duration::from_secs(2),
+            output_tail: String::new(),
+            checks: vec![check("make test", &["b"], CheckVerdict::TimedOut)],
+        };
+        assert!(timed_out
+            .to_string()
+            .ends_with("Checks on the merged result: `make test` (b) timed out"));
+        assert_eq!(
+            timed_out.detail().unwrap()["checks"][0]["outcome"],
+            "timed_out"
+        );
+    }
+    use crate::{
+        CheckVerdict, IntegrationCheck, PermissionDecision, PermissionKey, PermissionRequest,
+    };
     use std::fs;
     use std::path::PathBuf;
 

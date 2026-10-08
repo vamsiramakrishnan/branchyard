@@ -733,7 +733,7 @@ fn a_failed_shared_check_names_the_siblings_to_integrate_together() {
          of them: integrate them together, `by integrate a b`",
         "python check_failed ['a', 'b']",
         "merged a into by/root",
-        ", after `test -f a.txt -a -f b.txt` passed once on the result",
+        ", after `test -f a.txt -a -f b.txt` (a, b) passed once on the result",
     ] {
         assert!(said.contains(expected), "{expected:?} missing from\n{said}");
     }
@@ -768,6 +768,72 @@ fn a_failed_shared_check_names_the_siblings_to_integrate_together() {
     );
     assert_eq!(a["check_inherited"], true);
     assert_eq!(a["check_shared_with"], serde_json::json!(["b"]));
+}
+
+/// Integrating branches whose checks differ ran each distinct check once
+/// on the result, and a failure said only the failed one's output. Every
+/// surface names each check, the branches it belongs to and how it ended:
+/// those before the failed one passed, those after it did not run.
+#[test]
+fn a_failed_integration_names_every_check_its_branches_and_outcome() {
+    let repo = Repo::new();
+    let script = "import branchyard as b\n\
+                  try:\n    b.integrate('a', 'b', 'c', 'd')\n\
+                  except b.CheckFailedError as e:\n    \
+                  print('python', e.kind, [(c['branches'], c['outcome']) for c in e.checks])\n\
+                  m = b.integrate('d', 'e')\n\
+                  print('python merged', [(c['branches'], c['outcome']) for c in m.check_results])\n";
+    let file = repo.dir.join("which-check.py");
+    fs::write(&file, script).unwrap();
+    let prompt = [
+        "SH by spawn 'WRITE a.txt=a' --name a --check 'test -f a.txt' --wait --json".to_owned(),
+        "SH by spawn 'WRITE b.txt=b' --name b --check 'test -f missing.txt' --wait --json"
+            .to_owned(),
+        "SH by spawn 'WRITE c.txt=c' --name c --check 'test -f a.txt' --wait --json".to_owned(),
+        "SH by spawn 'WRITE d.txt=d' --name d --check true --wait --json".to_owned(),
+        "SH by spawn 'WRITE e.txt=e' --name e --check true --wait --json".to_owned(),
+        "SH by integrate a b c d".to_owned(),
+        "SH by integrate a b c d --json".to_owned(),
+        format!("SH python3 {}", file.display()),
+        "SH by integrate a c --json".to_owned(),
+    ]
+    .join("\n");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    for expected in [
+        "Checks on the merged result: `test -f a.txt` (a, c) passed; `test -f missing.txt` (b) \
+         failed; `true` (d) did not run",
+        "python check_failed [(['a', 'c'], 'passed'), (['b'], 'failed'), (['d'], 'not_run')]",
+        "python merged [(['d', 'e'], 'passed')]",
+    ] {
+        assert!(said.contains(expected), "{expected:?} missing from\n{said}");
+    }
+    let (code, failed) = sh_json(&said, 6);
+    assert_eq!(code, 1, "{said}");
+    assert_eq!(failed["error"]["kind"], "check_failed");
+    assert_eq!(
+        failed["error"]["detail"]["checks"],
+        serde_json::json!([
+            {"check": ["test", "-f", "a.txt"], "branches": ["a", "c"], "outcome": "passed"},
+            {"check": ["test", "-f", "missing.txt"], "branches": ["b"], "outcome": "failed"},
+            {"check": ["true"], "branches": ["d"], "outcome": "not_run"},
+        ]),
+        "{said}"
+    );
+    let (code, merged) = sh_json(&said, 8);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        merged["check_results"],
+        serde_json::json!([
+            {"check": ["test", "-f", "a.txt"], "branches": ["a", "c"], "outcome": "passed"},
+        ]),
+        "{said}"
+    );
+    assert_eq!(
+        merged["checks"],
+        serde_json::json!([["test", "-f", "a.txt"]])
+    );
 }
 
 /// The battery's crash scenario: after its engine stopped, the meta was

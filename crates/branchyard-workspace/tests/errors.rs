@@ -70,6 +70,16 @@ fn every_integration_error_names_its_cause() {
             "check could not start: no such program",
         ),
         (
+            IntegrationError::CheckStopped {
+                index: 1,
+                error: Box::new(IntegrationError::CheckFailed {
+                    status: ExitStatus::from_raw(3 << 8),
+                    output_tail: String::new(),
+                }),
+            },
+            "check 2: check failed: exit status: 3",
+        ),
+        (
             IntegrationError::DirtyTarget {
                 worktree: PathBuf::from("/w"),
             },

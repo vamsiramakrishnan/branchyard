@@ -73,7 +73,8 @@ session, and merging overlapping edits produces conflicts.
    bypasses the check, and Branchyard records them as merged only after the
    fact. A child your branch already contains is recorded as merged, not
    refused. A conflict names the child and the files, and a failed check
-   shows its output: send the child a fix with `by send <child>
+   shows its output and names every check that ran, the children it
+   belongs to and whether it passed, so you know whose to fix: send the child a fix with `by send <child>
    "<prompt>"`, or do it yourself.
 5. Clean up. `by cancel <child>` stops a running child and everything
    below it. A child that already finished is not running, so cancel

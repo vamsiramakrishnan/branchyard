@@ -315,6 +315,7 @@ pub(crate) fn integration_error(error: IntegrationError, target: &str) -> Error 
         IntegrationError::Conflict { files } => Error::Conflict { files },
         IntegrationError::CheckFailed { output_tail, .. } => Error::CheckFailed {
             output_tail,
+            checks: Vec::new(),
             shared: None,
         },
         IntegrationError::CheckTimedOut {
@@ -323,7 +324,9 @@ pub(crate) fn integration_error(error: IntegrationError, target: &str) -> Error 
         } => Error::CheckTimedOut {
             timeout,
             output_tail,
+            checks: Vec::new(),
         },
+        IntegrationError::CheckStopped { error, .. } => integration_error(*error, target),
         IntegrationError::CheckNotStarted(e) => Error::CheckNotStarted(e.to_string()),
         IntegrationError::DirtyTarget { worktree } => Error::DirtyTarget(worktree),
         IntegrationError::AlreadyIntegrated => Error::AlreadyMerged {

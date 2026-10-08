@@ -2818,6 +2818,10 @@ pub struct MergedAll {
     /// nothing moved. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<Vec<String>>,
+    /// The same checks, each with the branches whose check it is and its
+    /// outcome (all passed). Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_results: Vec<IntegrationCheck>,
 }
 
 /// Known harness profiles, whether their executable is on `PATH`, and
@@ -2892,7 +2896,12 @@ pub enum Error {
         files: Vec<String>,
     },
     CheckFailed {
+        /// The output of the check that failed.
         output_tail: String,
+        /// Integrating branches: every check of the branches merged, in
+        /// order, each with its branches and outcome, the failed one among
+        /// them. Empty for a merge of no delegated branch (`by merge`).
+        checks: Vec<IntegrationCheck>,
         /// When the branches integrated left out siblings that share their
         /// check: who they are, and the integration that runs it on all of
         /// them. A child under its parent's whole-suite check passes it
@@ -2902,6 +2911,8 @@ pub enum Error {
     CheckTimedOut {
         timeout: Duration,
         output_tail: String,
+        /// As [`Error::CheckFailed`]'s `checks`.
+        checks: Vec<IntegrationCheck>,
     },
     /// The check command could not be started.
     CheckNotStarted(String),
@@ -3002,16 +3013,24 @@ impl fmt::Display for Error {
             },
             Error::CheckFailed {
                 output_tail,
-                shared: None,
-            } => write!(f, "check failed:\n{output_tail}"),
-            Error::CheckFailed {
-                output_tail,
-                shared: Some(shared),
-            } => write!(f, "check failed:\n{output_tail}\n{shared}"),
+                checks,
+                shared,
+            } => {
+                write!(f, "check failed:\n{output_tail}")?;
+                write_checks(f, checks)?;
+                match shared {
+                    Some(shared) => write!(f, "\n{shared}"),
+                    None => Ok(()),
+                }
+            }
             Error::CheckTimedOut {
                 timeout,
                 output_tail,
-            } => write!(f, "check timed out after {timeout:?}:\n{output_tail}"),
+                checks,
+            } => {
+                write!(f, "check timed out after {timeout:?}:\n{output_tail}")?;
+                write_checks(f, checks)
+            }
             Error::CheckNotStarted(reason) => write!(f, "check could not start: {reason}"),
             Error::DirtyTarget(worktree) => write!(
                 f,
@@ -3085,19 +3104,93 @@ impl Error {
 
 impl Error {
     /// What the error carries beyond its message, as JSON: `by --json`
-    /// prints it as the error's `detail`, the broker passes it on, and the
-    /// Python module raises it as `BranchyardError.detail`. `None` for an
-    /// error with nothing more to say.
+    /// prints it as the error's `detail`, the broker passes it on, the MCP
+    /// tools return it as the error's structured content, and the Python
+    /// module raises it as `BranchyardError.detail`. A failed check of an
+    /// integration has its `checks` ([`IntegrationCheck`]) and, when it
+    /// left out siblings sharing it, the [`SharedCheck`]'s fields. `None`
+    /// for an error with nothing more to say.
     pub fn detail(&self) -> Option<serde_json::Value> {
         match self {
-            Error::CheckFailed {
-                shared: Some(shared),
-                ..
-            } => serde_json::to_value(shared).ok(),
+            Error::CheckFailed { checks, shared, .. } => {
+                let mut detail = shared
+                    .as_ref()
+                    .and_then(|shared| serde_json::to_value(shared).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if !checks.is_empty() {
+                    detail["checks"] = serde_json::to_value(checks).ok()?;
+                }
+                detail
+                    .as_object()
+                    .is_some_and(|d| !d.is_empty())
+                    .then_some(detail)
+            }
+            Error::CheckTimedOut { checks, .. } if !checks.is_empty() => {
+                Some(serde_json::json!({ "checks": checks }))
+            }
             Error::Remote { detail, .. } => detail.as_deref().cloned(),
             _ => None,
         }
     }
+}
+
+/// After a failed check's output, which of an integration's checks ran,
+/// on which branches, and how each ended.
+fn write_checks(f: &mut fmt::Formatter<'_>, checks: &[IntegrationCheck]) -> fmt::Result {
+    if checks.is_empty() {
+        return Ok(());
+    }
+    let said: Vec<String> = checks.iter().map(ToString::to_string).collect();
+    write!(f, "\nChecks on the merged result: {}", said.join("; "))
+}
+
+/// One check of the branches an integration merged, run once on the
+/// result ([`MergedAll::check_results`], [`Error::CheckFailed`]).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrationCheck {
+    /// The check, as its argv.
+    pub check: Vec<String>,
+    /// The branches integrated whose check it is, in the order named.
+    pub branches: Vec<String>,
+    /// How it ended.
+    pub outcome: CheckVerdict,
+}
+
+impl fmt::Display for IntegrationCheck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let outcome = match self.outcome {
+            CheckVerdict::Passed => "passed",
+            CheckVerdict::Failed => "failed",
+            CheckVerdict::TimedOut => "timed out",
+            CheckVerdict::NotStarted => "could not start",
+            CheckVerdict::NotRun => "did not run",
+        };
+        write!(
+            f,
+            "`{}` ({}) {outcome}",
+            self.check.join(" "),
+            self.branches.join(", ")
+        )
+    }
+}
+
+/// How an [`IntegrationCheck`] ended. The checks run in order and stop at
+/// the first that does not pass: those after it are `not_run`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckVerdict {
+    /// The check exited successfully.
+    Passed,
+    /// The check exited unsuccessfully.
+    Failed,
+    /// The check ran past its timeout and was killed.
+    TimedOut,
+    /// The check could not be started.
+    NotStarted,
+    /// A check before it did not pass.
+    NotRun,
 }
 
 /// Siblings that share a check an integration failed, and the integration

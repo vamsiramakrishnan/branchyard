@@ -25,7 +25,10 @@ use serde_json::json;
 use crate::ops::{self, CHECK_TIMEOUT};
 use crate::record::Recorder;
 use crate::state::{Begun, Lease, Record};
-use crate::{git, names, Activity, BranchStatus, Error, Merged, MergedAll, RecordedEvent, Yard};
+use crate::{
+    git, names, Activity, BranchStatus, CheckVerdict, Error, IntegrationCheck, Merged, MergedAll,
+    RecordedEvent, Yard,
+};
 use branchyard_support::time::now_ms;
 
 /// Integrate `names`' candidates into `target`, all or none; see the
@@ -94,7 +97,8 @@ pub(crate) fn merge_many(yard: &Yard, names: &[String], target: &str) -> Result<
 
     // Everything still to merge, in the order named.
     let mut candidates = Vec::new();
-    let mut checks: Vec<Vec<String>> = Vec::new();
+    // Each distinct check, with the branches whose check it is.
+    let mut checks: Vec<(Vec<String>, Vec<String>)> = Vec::new();
     let mut by_git_branch: BTreeMap<String, String> = BTreeMap::new();
     for ((record, _), done) in held.iter().zip(&settled) {
         if done.is_some() {
@@ -116,15 +120,17 @@ pub(crate) fn merge_many(yard: &Yard, names: &[String], target: &str) -> Result<
             },
         });
         if let Some(check) = &record.check {
-            if !checks.contains(check) {
-                checks.push(check.clone());
+            match checks.iter_mut().find(|(argv, _)| argv == check) {
+                Some((_, owners)) => owners.push(record.info.name.clone()),
+                None => checks.push((check.clone(), vec![record.info.name.clone()])),
             }
         }
     }
-    let checks: Vec<Check> = checks
-        .into_iter()
-        .map(|argv| Check {
-            argv,
+    let owners: Vec<(Vec<String>, Vec<String>)> = checks;
+    let checks: Vec<Check> = owners
+        .iter()
+        .map(|(argv, _)| Check {
+            argv: argv.clone(),
             timeout: CHECK_TIMEOUT,
         })
         .collect();
@@ -141,7 +147,7 @@ pub(crate) fn merge_many(yard: &Yard, names: &[String], target: &str) -> Result<
                 Err(error) => {
                     // Refused before the target moved: nothing happened.
                     abandon(&store, &held, &begun);
-                    return Err(many_error(error, target, &by_git_branch));
+                    return Err(many_error(error, target, &by_git_branch, &owners));
                 }
             }
         }
@@ -161,10 +167,11 @@ pub(crate) fn merge_many(yard: &Yard, names: &[String], target: &str) -> Result<
         })
         .collect();
     // The checks ran once on the result when the target moved.
-    let checked: Vec<Vec<String>> = match integrated.as_ref() {
-        Some(i) if i.merged != i.previous => checks.iter().map(|c| c.argv.clone()).collect(),
+    let check_results: Vec<IntegrationCheck> = match integrated.as_ref() {
+        Some(i) if i.merged != i.previous => verdicts(&owners, owners.len(), CheckVerdict::Passed),
         _ => Vec::new(),
     };
+    let checked = check_results.iter().map(|c| c.check.clone()).collect();
 
     let mut branches = Vec::new();
     for ((mut record, lease), done) in held.into_iter().zip(settled) {
@@ -263,7 +270,30 @@ pub(crate) fn merge_many(yard: &Yard, names: &[String], target: &str) -> Result<
         commit: after,
         branches,
         checks: checked,
+        check_results,
     })
+}
+
+/// Each check in `owners`, with its branches: those before `stopped`
+/// passed, the one at `stopped` ended `how`, and those after did not run.
+fn verdicts(
+    owners: &[(Vec<String>, Vec<String>)],
+    stopped: usize,
+    how: CheckVerdict,
+) -> Vec<IntegrationCheck> {
+    owners
+        .iter()
+        .enumerate()
+        .map(|(index, (check, branches))| IntegrationCheck {
+            check: check.clone(),
+            branches: branches.clone(),
+            outcome: match index.cmp(&stopped) {
+                std::cmp::Ordering::Less => CheckVerdict::Passed,
+                std::cmp::Ordering::Equal => how,
+                std::cmp::Ordering::Greater => CheckVerdict::NotRun,
+            },
+        })
+        .collect()
 }
 
 /// Abandon the merge steps this call began: the target did not move.
@@ -278,7 +308,15 @@ fn abandon(store: &crate::state::Store, held: &[(Record, Lease)], begun: &[Strin
     }
 }
 
-fn many_error(error: IntegrationError, target: &str, names: &BTreeMap<String, String>) -> Error {
+/// `error` from integrating several branches, said with their names: a
+/// check that stopped it names every check (`owners`, with the branches
+/// whose check each is) and how each ended.
+fn many_error(
+    error: IntegrationError,
+    target: &str,
+    names: &BTreeMap<String, String>,
+    owners: &[(Vec<String>, Vec<String>)],
+) -> Error {
     let name = |git_branch: &str| {
         names
             .get(git_branch)
@@ -295,6 +333,30 @@ fn many_error(error: IntegrationError, target: &str, names: &BTreeMap<String, St
             target: target.to_owned(),
             merged: merged.iter().map(|m| name(m)).collect(),
             files,
+        },
+        IntegrationError::CheckStopped { index, error } => match *error {
+            IntegrationError::CheckFailed { output_tail, .. } => Error::CheckFailed {
+                output_tail,
+                checks: verdicts(owners, index, CheckVerdict::Failed),
+                shared: None,
+            },
+            IntegrationError::CheckTimedOut {
+                timeout,
+                output_tail,
+            } => Error::CheckTimedOut {
+                timeout,
+                output_tail,
+                checks: verdicts(owners, index, CheckVerdict::TimedOut),
+            },
+            IntegrationError::CheckNotStarted(e) => {
+                let checks = verdicts(owners, index, CheckVerdict::NotStarted);
+                let said: Vec<String> = checks.iter().map(ToString::to_string).collect();
+                Error::CheckNotStarted(format!(
+                    "{e}; checks on the merged result: {}",
+                    said.join("; ")
+                ))
+            }
+            other => ops::integration_error(other, target),
         },
         other => ops::integration_error(other, target),
     }
