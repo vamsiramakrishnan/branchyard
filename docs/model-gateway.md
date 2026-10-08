@@ -135,7 +135,7 @@ A branch on the gateway costs exactly what its calls cost: each turn adds its ca
 
 ### Budgets
 
-- **The branch's.** `--budget-usd`, a delegated child's limits, and what its children reserved, as for any branch ([budgets](design.md)). A call that would start over it is refused before it is forwarded; a call already running is not cut short, so a branch can end slightly over by its last call.
+- **The branch's.** `--budget-usd`, a delegated child's limits, and what its children reserved, as for any branch ([budgets](design.md)). A call that would start over it is refused before it is forwarded; a call already running is not cut short, so a branch can end slightly over by its last call. The harness is not given a spending limit of its own (Claude Code's `--max-budget-usd`, [harness integration](harness-integration.md)): the gateway holds the branch's limit on the metered cost, and the harness's estimate is not used.
 - **The repository's.** `[models.budget]`: daily and monthly (UTC) cost and tokens over every branch, removed ones included, read from the stored usage before each call. A call is refused when a limit is reached. When a call takes spending past `alert_at` of a limit (default 0.8), a `model budget alert` event is recorded, once per period in each process.
 
 ## Subscription logins and direct mode

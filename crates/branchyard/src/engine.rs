@@ -724,8 +724,11 @@ fn run(
     let driver = turn.profile.driver_with(turn.command.clone());
     // A harness that can hold a spending limit itself is given what is
     // left of the branch's, so it stops before it goes over rather than
-    // after it reports; the engine's own check below still holds.
-    let max_budget_usd = match (driver.capabilities().budget, bounds.budget.max_usd) {
+    // after it reports; the engine's own check below still holds. Not on
+    // the model gateway, which refuses an over-budget call itself and
+    // whose metered cost replaces the harness's own.
+    let self_limit = driver.capabilities().budget && model_gateway.is_none();
+    let max_budget_usd = match (self_limit, bounds.budget.max_usd) {
         (true, Some(max)) => {
             Some(max - record.info.cost_usd.unwrap_or(0.0) - delegation::reserved(&store, record))
                 .filter(|left| *left > 0.0)

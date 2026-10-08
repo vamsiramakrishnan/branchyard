@@ -2,7 +2,8 @@
 //! stand-in that prints the frames Claude Code 2.1.293 prints: how a
 //! session is closed, a cost limit crossed by the turn's last message, the
 //! cost of a turn while it runs, the spending limit the harness is given
-//! and stops at itself, and the harness's private temporary directory. No
+//! and stops at itself (none on the model gateway), and the harness's
+//! private temporary directory. No
 //! model is called.
 
 #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
@@ -11,9 +12,10 @@ mod common;
 use std::os::unix::fs::PermissionsExt as _;
 use std::time::{Duration, Instant};
 
-use branchyard::{Activity, BranchStatus, Budget, Policy, TaskOptions};
+use branchyard::{models, Activity, BranchStatus, Budget, Policy, Provisioning, TaskOptions};
 use branchyard_testkit::wait;
 use common::Fixture;
+use serde_json::json;
 
 /// Answers every control request it reads; `$1` is what it does once it
 /// has the prompt. Like Claude Code with a background task, it does not
@@ -38,9 +40,15 @@ done
 exec sleep 30
 "#;
 
+/// A turn's `result` after it spends `cost`. Like Claude Code, whose
+/// `total_cost_usd` is the session's across `--resume` (2.1.293 reported
+/// $0.0261, $0.0454 and $0.0649 for one session's three turns), it reports
+/// the session's running total, kept in the branch's temporary directory.
 fn result(cost: f64) -> String {
     format!(
-        r#"echo '{{"type":"result","subtype":"success","is_error":false,"total_cost_usd":{cost},"modelUsage":{{"claude-sonnet-4-5":{{"inputTokens":10,"outputTokens":5}}}}}}'"#
+        r#"total=$(awk -v spent={cost} -v before="$(cat "$TMPDIR/session-cost" 2>/dev/null || echo 0)" 'BEGIN {{ print before + spent }}')
+printf '%s' "$total" > "$TMPDIR/session-cost"
+printf '{{"type":"result","subtype":"success","is_error":false,"total_cost_usd":%s,"modelUsage":{{"claude-sonnet-4-5":{{"inputTokens":10,"outputTokens":5}}}}}}\n' "$total""#
     )
 }
 
@@ -256,11 +264,17 @@ fn harness_budget(f: &Fixture, name: &str) -> Option<f64> {
 }
 
 /// Claude Code is given what is left of the branch's budget for each turn,
-/// its limit less what it has spent, and nothing without a limit.
+/// its limit less what it has spent, and nothing without a limit. Its
+/// `--max-budget-usd` counts only its own process's spend while the cost
+/// it reports is the session's (2.1.293: a resumed turn given $0.0209
+/// succeeded at a cumulative $0.0649), so a resumed turn is given the
+/// limit less the earlier turns' spend, and the branch's cost is the
+/// session's total.
 #[test]
 fn the_harness_is_given_what_is_left_of_the_budget() {
     let f = Fixture::new();
-    let turn = format!("printf '%s\\n' \"$@\" > args.txt\n{}", result(0.04));
+    let args = "printf '%s\\n' \"$@\" > args.txt\n";
+    let turn = format!("{args}{}", result(0.04));
     let branch = f
         .yard
         .task("go")
@@ -273,17 +287,22 @@ fn the_harness_is_given_what_is_left_of_the_budget() {
         .unwrap();
     assert_eq!(harness_budget(&f, "capped"), Some(0.1));
     assert_eq!(branch.info().cost_usd, Some(0.04));
-    branch
+    let again = branch
         .send(
             "again",
             TaskOptions {
                 budget: Budget::usd(0.1),
-                ..stand_in(&f, &turn)
+                ..stand_in(&f, &format!("{args}{}", result(0.03)))
             },
         )
         .unwrap();
+    let worktree = &again.info().worktree;
+    let argv = std::fs::read_to_string(worktree.join("args.txt")).unwrap();
+    assert!(argv.lines().any(|a| a == "--resume"), "{argv}");
     let left = harness_budget(&f, "capped").unwrap();
     assert!((left - 0.06).abs() < 1e-9, "{left}");
+    let spent = again.info().cost_usd.unwrap();
+    assert!((spent - 0.07).abs() < 1e-9, "the session's total: {spent}");
 
     f.yard
         .task("go")
@@ -292,6 +311,54 @@ fn the_harness_is_given_what_is_left_of_the_budget() {
         .run()
         .unwrap();
     assert_eq!(harness_budget(&f, "unlimited"), None);
+}
+
+/// A branch on the model gateway is given no spending limit of its own:
+/// the gateway refuses an over-budget call itself, and its metered cost,
+/// not the harness's, is the branch's.
+#[test]
+fn a_harness_on_the_model_gateway_is_given_no_limit() {
+    let f = Fixture::new();
+    std::fs::write(f.dir.join("anthropic"), "sk-real-anthropic-1\n").unwrap();
+    let config: models::Config = serde_json::from_value(json!({
+        "backends": {
+            "anthropic": {"api": "anthropic", "url": "http://127.0.0.1:9", "key": "anthropic"}
+        },
+        "routes": [{"model": "claude-*", "backends": ["anthropic"]}]
+    }))
+    .unwrap();
+    let signer = models::Signer::local(&f.yard).unwrap();
+    let dir = f.dir.clone();
+    f.yard.use_models(
+        models::Gateway::new(&config, signer, move |name| {
+            models::KeySource::File(dir.join(name))
+        })
+        .unwrap(),
+    );
+    let turn = format!(
+        "printf '%s\\n' \"$@\" > args.txt\nprintf '%s' \"$ANTHROPIC_BASE_URL\" > base.txt\n{}",
+        result(0.04)
+    );
+    let branch = f
+        .yard
+        .task("go")
+        .options(TaskOptions {
+            budget: Budget::usd(0.1),
+            provision: Some(Provisioning {
+                models: Some(models::ModelAccess {
+                    allow: vec!["claude-*".into()],
+                }),
+                ..Provisioning::default()
+            }),
+            ..stand_in(&f, &turn)
+        })
+        .name("metered")
+        .run()
+        .unwrap();
+    assert_eq!(branch.info().status, BranchStatus::Ready);
+    let base = std::fs::read_to_string(branch.info().worktree.join("base.txt")).unwrap();
+    assert!(base.ends_with("/anthropic"), "on the gateway: {base:?}");
+    assert_eq!(harness_budget(&f, "metered"), None);
 }
 
 /// A harness that stops itself at the limit it was given ends the turn

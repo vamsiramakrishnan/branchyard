@@ -3,7 +3,8 @@
 #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use branchyard_harness::claude_code::ClaudeCode;
 use branchyard_harness::conformance::{
-    assert_contract_greeted, assert_steer_contract, check_frame, Direction, Replay, Transcript,
+    assert_contract_greeted, assert_steer_contract, check_frame, handshake, line, Direction,
+    Replay, Transcript,
 };
 use branchyard_harness::profiles::{Protocol, PROFILES};
 use branchyard_harness::{Driver, Event, Open, PermissionDecision, SessionMode, TurnOutcome};
@@ -334,7 +335,8 @@ fn drivers_without_a_verified_projection_refuse_servers_and_instructions() {
 }
 
 /// A driver's `model` capability says what its open does with a model: it
-/// takes one it offers to choose, and refuses one it does not, giving the
+/// passes on one it offers to choose, in its launch argv or a frame it
+/// writes before it is ready, and refuses one it does not, giving the
 /// reason it records.
 #[test]
 fn the_model_capability_matches_what_open_does_with_a_model() {
@@ -345,12 +347,37 @@ fn the_model_capability_matches_what_open_does_with_a_model() {
             model: Some("small-model".into()),
             ..fresh()
         };
-        let opened = profile.driver().open(open);
+        let mut chosen = profile.driver();
+        let opened = chosen.open(open);
         match offered {
             true => {
-                opened.unwrap_or_else(|e| {
+                let opened = opened.unwrap_or_else(|e| {
                     panic!("{} offers a model but refused one: {e}", profile.id)
                 });
+                let mut frames = opened.frames.clone();
+                let mut events = Vec::new();
+                for message in greeting(profile.protocol) {
+                    let output = chosen.receive(&line(&message));
+                    events.extend(output.events);
+                    frames.extend(output.frames);
+                }
+                let answer = answer(profile.protocol);
+                let mut written = Vec::new();
+                events.extend(handshake(chosen.as_mut(), &frames, |frame| {
+                    written.push(frame.clone());
+                    answer(frame)
+                }));
+                assert!(events.contains(&Event::Ready), "{}: {events:?}", profile.id);
+                let in_argv = opened.launch.argv.iter().any(|a| a == "small-model");
+                let in_frame = written
+                    .iter()
+                    .any(|f| f.to_string().contains(r#""small-model""#));
+                assert!(
+                    in_argv || in_frame,
+                    "{} offers a model but does not pass it on: {:?} {written:?}",
+                    profile.id,
+                    opened.launch.argv
+                );
             }
             false => {
                 assert!(
