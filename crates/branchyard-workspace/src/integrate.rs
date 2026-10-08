@@ -515,9 +515,25 @@ impl Repository {
             .args(["rev-list", "--first-parent", "--reverse"])
             .arg(&range)
             .run()?;
-        // An empty range: the commit is the target's head, or on its line.
+        let lines: Vec<&str> = listed.lines().filter(|l| !l.is_empty()).collect();
+        // An empty range: the commit is the target's head. When the oldest
+        // commit of the first-parent walk is a child of `commit`'s by its
+        // first parent, `commit` is on the target's line itself (the target
+        // fast-forwarded to it and moved on): it brought itself in, and the
+        // commits after it on the line did not.
+        if let Some(oldest) = lines.first() {
+            let parent = Git::new(&self.root)
+                .args(["rev-parse", "--verify", "--quiet"])
+                .arg(format!("{}^1^{{commit}}", oldest.trim()))
+                .run()
+                // A root commit has no first parent: then it is not on the line.
+                .ok();
+            if parent.as_deref().map(str::trim) == Some(commit.as_str()) {
+                return Ok(Some(commit.clone()));
+            }
+        }
         let mut first = None;
-        for line in listed.lines().filter(|l| !l.is_empty()) {
+        for line in lines {
             let candidate = Commit(line.trim().to_owned());
             if self.is_ancestor(commit, &candidate)? {
                 first = Some(candidate);

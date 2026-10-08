@@ -904,6 +904,27 @@ fn check_commit_reports_each_outcome() {
     fixture.assert_no_integration_worktrees();
 }
 
+/// A candidate the target fast-forwarded to, then built on, is on the
+/// target's first-parent line itself: it brought itself in, not the
+/// unrelated commit after it.
+#[test]
+fn brought_in_by_a_fast_forward_is_the_commit_itself() {
+    let fixture = Fixture::new();
+    let candidate = fixture.candidate("ff", "ff.txt", "f\n");
+    git(&fixture.root(), &["merge", "-q", "--ff-only", "by/ff"]);
+    let later = fixture.commit_on_main("later.txt", "l\n");
+    assert_ne!(later, candidate.head);
+    assert_eq!(
+        fixture.repo.brought_in_by(&candidate.head, "main").unwrap(),
+        Some(candidate.head.clone())
+    );
+    // At the head itself, and after a merge, as before.
+    assert_eq!(
+        fixture.repo.brought_in_by(&later, "main").unwrap(),
+        Some(later)
+    );
+}
+
 #[test]
 fn stale_candidate_after_target_moved() {
     let fixture = Fixture::new();
