@@ -303,7 +303,8 @@ pub struct Spawn {
     pub plan: bool,
     /// The model the child's harness runs, or a size alias (`small`,
     /// `medium`, `large`, `extra-large`) where its harness defines one.
-    /// Unset: its seat's, else its parent's. A harness whose driver cannot
+    /// Unset: its seat's, else its parent's when it runs its parent's
+    /// harness, else its harness's default. A harness whose driver cannot
     /// choose a model refuses it.
     pub model: Option<String>,
 }
@@ -2593,17 +2594,17 @@ impl Local {
         let seat = seated.as_ref().map(|(_, seat, _)| seat);
         let isolated =
             caller.home.is_some() || self.options.isolated || seat.is_some_and(|s| s.isolated);
-        let mut provision = match seat.and_then(|s| s.provision.clone()) {
-            Some(own) => Some(own),
-            None => caller.provision.clone(),
-        };
-        // A seat's provisioning replaces its parent's, but a seat without a
-        // model on its parent's harness keeps its parent's model; another
-        // harness's model would mean nothing to it.
-        if let (Some(spec), Some(_)) = (&mut provision, seat) {
-            if spec.model.is_none() && profile.harness == own.harness {
-                spec.model = caller.provision.as_ref().and_then(|p| p.model.clone());
-            }
+        let seated_provision = seat.and_then(|s| s.provision.as_ref());
+        let model = child_model(
+            request.model.as_deref(),
+            seated_provision,
+            caller.provision.as_ref(),
+            profile.harness == own.harness,
+        )?;
+        // A seat's provisioning replaces its parent's.
+        let mut provision = seated_provision.or(caller.provision.as_ref()).cloned();
+        if model.is_some() || provision.is_some() {
+            provision.get_or_insert_with(Default::default).model = model;
         }
         // Connectors: what the request asks for, else its seat's, else the
         // parent's; always within the parent's grant.
@@ -2662,15 +2663,7 @@ impl Local {
                 })
             }
         }
-        // Its model: what the request asks for, else its seat's (or what it
-        // inherited), where its profile can deliver one.
-        if let Some(model) = &request.model {
-            let model = model.trim();
-            if model.is_empty() {
-                return Err(Error::Denied("a child's model may not be blank".into()));
-            }
-            provision.get_or_insert_with(Default::default).model = Some(model.to_owned());
-        }
+        // Its model, where its profile can deliver one.
         if let Some(model) = provision.as_ref().and_then(|p| p.model.as_deref()) {
             harness::check_model(
                 profile,
@@ -4041,6 +4034,32 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
     }
 }
 
+/// A child's model: what its spawn asks for, else its seat's, else its
+/// parent's when it runs its parent's harness (another harness's model
+/// would mean nothing to it), else none, its harness's default. `seat` is
+/// its seat's provisioning, `parent` its parent's.
+fn child_model(
+    asked: Option<&str>,
+    seat: Option<&crate::Provisioning>,
+    parent: Option<&crate::Provisioning>,
+    same_harness: bool,
+) -> Result<Option<String>, Error> {
+    if let Some(model) = asked {
+        let model = model.trim();
+        if model.is_empty() {
+            return Err(Error::Denied("a child's model may not be blank".into()));
+        }
+        return Ok(Some(model.to_owned()));
+    }
+    if let Some(model) = seat.and_then(|s| s.model.clone()) {
+        return Ok(Some(model));
+    }
+    Ok(match same_harness {
+        true => parent.and_then(|p| p.model.clone()),
+        false => None,
+    })
+}
+
 #[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
@@ -4669,5 +4688,43 @@ Checks on the merged result: \
         let own_only = Envelope::default();
         assert!(own_only.allows(own, own));
         assert!(!own_only.allows(profiles::by_id("qwen-code-acp").unwrap(), own));
+    }
+
+    /// A child naming no model keeps its parent's on its parent's harness
+    /// only: a goose-acp child of a parent run with a model gets none, and
+    /// so is not refused, while a model its spawn asks for still is.
+    #[test]
+    fn a_child_keeps_its_parents_model_only_on_its_parents_harness() {
+        let with = |model: &str| crate::Provisioning {
+            model: Some(model.into()),
+            ..crate::Provisioning::default()
+        };
+        let parent = with("opus");
+        let model = |asked, seat, same| child_model(asked, seat, Some(&parent), same).unwrap();
+        assert_eq!(model(None, None, true).as_deref(), Some("opus"));
+        assert_eq!(model(None, None, false), None);
+        // A seat's provisioning without a model, and a seat's model.
+        let bare = crate::Provisioning::default();
+        assert_eq!(model(None, Some(&bare), true).as_deref(), Some("opus"));
+        assert_eq!(model(None, Some(&bare), false), None);
+        let haiku = with("haiku");
+        assert_eq!(model(None, Some(&haiku), false).as_deref(), Some("haiku"));
+        assert_eq!(
+            model(Some(" sonnet "), Some(&haiku), true).as_deref(),
+            Some("sonnet")
+        );
+        assert!(matches!(
+            child_model(Some(" "), None, Some(&parent), true),
+            Err(Error::Denied(_))
+        ));
+
+        let goose = profiles::by_id("goose-acp").unwrap();
+        assert_eq!(model(None, None, goose.harness == "claude-code"), None);
+        match harness::check_model(goose, "opus", false) {
+            Err(Error::Unsupported(why)) => {
+                assert!(why.contains("goose-acp cannot be given a model"), "{why}");
+            }
+            other => panic!("expected the model refused, got {other:?}"),
+        }
     }
 }

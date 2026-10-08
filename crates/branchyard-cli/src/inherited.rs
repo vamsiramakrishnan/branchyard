@@ -15,9 +15,10 @@
 //! 2. `BRANCHYARD_ROOT` applies when `cwd` is inside `BRANCHYARD_WORKTREE`,
 //!    the turn's own worktree, and `cwd`'s repository is none or that
 //!    worktree or an ancestor of it (not a repository nested inside it).
-//! 3. Otherwise it applies when `cwd`'s repository shares its git
-//!    directory with `BRANCHYARD_ROOT`: the root itself, or one of its
-//!    linked worktrees.
+//! 3. Otherwise it applies when `cwd`'s repository keeps its git
+//!    directory in `BRANCHYARD_ROOT`'s common git directory: the root
+//!    itself, one of its linked worktrees, or a submodule of either (whose
+//!    git directory is `.git/[worktrees/<b>/]modules/<x>`).
 //! 4. Otherwise `by` refuses, rather than act on the inherited yard or, as
 //!    a person, on the one it was run in.
 //!
@@ -66,7 +67,9 @@ pub(crate) fn applies(root: &Path, worktree: Option<&Path>, cwd: &Path) -> bool 
         }
     }
     match (repository, git_dir(&canonical(root))) {
-        (Some(repository), Some(root)) => git_dir(&repository).is_some_and(|dir| dir == root),
+        (Some(repository), Some(root)) => {
+            own_git_dir(&repository).is_some_and(|dir| dir.starts_with(&root))
+        }
         _ => false,
     }
 }
@@ -84,16 +87,24 @@ fn repository(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// The common git directory of the working tree at `top`: its `.git`
-/// directory, or for a linked worktree (whose `.git` is a file naming its
-/// own git directory) the one that git directory's `commondir` names.
-fn git_dir(top: &Path) -> Option<PathBuf> {
+/// The git directory of the working tree at `top`: its `.git` directory,
+/// or the one its `.git` file names (for a linked worktree or a submodule).
+fn own_git_dir(top: &Path) -> Option<PathBuf> {
     let dot_git = top.join(".git");
     if dot_git.is_dir() {
         return Some(canonical(&dot_git));
     }
     let text = fs::read_to_string(&dot_git).ok()?;
-    let own = top.join(text.trim().strip_prefix("gitdir:")?.trim());
+    Some(canonical(
+        &top.join(text.trim().strip_prefix("gitdir:")?.trim()),
+    ))
+}
+
+/// The common git directory of the working tree at `top`: its own git
+/// directory, or the one that directory's `commondir` names (for a linked
+/// worktree).
+fn git_dir(top: &Path) -> Option<PathBuf> {
+    let own = own_git_dir(top)?;
     let common = match fs::read_to_string(own.join("commondir")) {
         Ok(common) => own.join(common.trim()),
         Err(_) => own,
@@ -194,5 +205,53 @@ mod tests {
         let root = dir.path().join("yard");
         assert!(applies(&root, Some(&worktree), &worktree.join("src")));
         assert!(!applies(&root, None, &worktree.join("src")));
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(["-c", "protocol.file.allow=always"])
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    #[test]
+    fn the_root_applies_in_a_submodule_of_it_or_of_its_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        let root = dir.path().join("yard");
+        for repo in [&sub, &root] {
+            fs::create_dir_all(repo).unwrap();
+            git(repo, &["init", "-q", "-b", "main"]);
+            git(repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        }
+        git(
+            &root,
+            &["submodule", "add", "-q", sub.to_str().unwrap(), "x"],
+        );
+        git(&root, &["commit", "-q", "-m", "submodule"]);
+        let worktree = root.join(".branchyard/worktrees/b");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "b",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        git(&worktree, &["submodule", "update", "-q", "--init"]);
+        // The worktree's submodule keeps its git directory under
+        // `.git/worktrees/b/modules/x`, the root's under `.git/modules/x`.
+        assert!(applies(&root, Some(&worktree), &worktree.join("x")));
+        assert!(applies(&root, None, &worktree.join("x")));
+        assert!(applies(&root, None, &root.join("x")));
+        // The submodule's own repository is not the root's.
+        assert!(!applies(&root, Some(&worktree), &sub));
     }
 }
