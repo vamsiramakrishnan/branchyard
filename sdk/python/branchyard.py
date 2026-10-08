@@ -185,6 +185,9 @@ class Inspection:
     reserved_usd: Optional[float] = None
     reserving_children: Optional[int] = None
     settled_children_usd: Optional[float] = None
+    # What its children may run, as harness= names it: the envelope's list,
+    # or its own profile when that list is empty ("its own only").
+    allowed_harnesses: Optional[List[str]] = None
 
     @property
     def running(self) -> bool:

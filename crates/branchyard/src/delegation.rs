@@ -160,10 +160,21 @@ impl Envelope {
             .any(|h| h == profile.id || h == profile.harness)
     }
 
+    /// The harnesses or profiles children may run, as a refusal names
+    /// them: the list, or the branch's own profile by its label.
     fn allowed_text(&self, own: &Profile) -> String {
         match self.harnesses.is_empty() {
-            true => own.id.to_owned(),
+            true => format!("{} only (its own)", own.label()),
             false => self.harnesses.join(", "),
+        }
+    }
+
+    /// What `--harness` its children may name: the list as given, or,
+    /// when it is empty, the branch's own `profile` alone.
+    pub fn allowed(&self, profile: &str) -> Vec<String> {
+        match self.harnesses.is_empty() {
+            true => vec![profile.to_owned()],
+            false => self.harnesses.clone(),
         }
     }
 
@@ -502,6 +513,11 @@ pub struct Inspection {
     #[serde(default)]
     pub settled_children_usd: f64,
     pub envelope: Option<Envelope>,
+    /// What its children may run, as `--harness` names it: the envelope's
+    /// `harnesses`, or its own profile when that list is empty (which
+    /// means "its own only", not "none"). Empty without an envelope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_harnesses: Vec<String>,
     /// The harness's text since the branch's last prompt, truncated from
     /// the front.
     pub last_message: String,
@@ -1714,7 +1730,10 @@ fn spawn_outcome(spawned: &Spawned) -> String {
     match &spawned.status {
         BranchStatus::Waiting => format!("waiting for {}", spawned.depends_on.join(", ")),
         BranchStatus::Blocked { reason } => format!("blocked: {reason}"),
-        _ => format!("started on {}", spawned.profile),
+        _ => format!(
+            "started on {}",
+            profiles::label(&spawned.harness, &spawned.profile)
+        ),
     }
 }
 
@@ -2195,7 +2214,7 @@ impl Local {
             return Err(Error::Denied(format!(
                 "{} may not delegate to {}; allowed: {}",
                 self.branch,
-                profile.id,
+                profile.label(),
                 grant.envelope.allowed_text(own)
             )));
         }
@@ -2589,6 +2608,11 @@ impl Local {
             Some(seats) => (Some(seats.seat.clone()), seats.delegates_to.clone()),
             None => (None, Vec::new()),
         };
+        let allowed_harnesses = record
+            .grant
+            .as_ref()
+            .map(|g| g.envelope.allowed(&info.profile))
+            .unwrap_or_default();
         Ok(Inspection {
             subtree_cost_usd: subtree_spent(&store, &record).max(if own {
                 self.own_spent(&record) + held.settled_usd
@@ -2610,6 +2634,7 @@ impl Local {
             reserved_usd: held.live_usd,
             reserving_children: held.live,
             settled_children_usd: held.settled_usd,
+            allowed_harnesses,
             envelope: record.grant.map(|g| g.envelope),
             last_message: last_message(&events),
             seat,

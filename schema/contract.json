@@ -16363,6 +16363,13 @@
                 }
               ]
             },
+            "allowed_harnesses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "What its children may run, as `--harness` names it: the envelope's\n`harnesses`, or its own profile when that list is empty (which\nmeans \"its own only\", not \"none\"). Empty without an envelope."
+            },
             "last_message": {
               "type": "string",
               "description": "The harness's text since the branch's last prompt, truncated from\nthe front."
@@ -17461,6 +17468,13 @@
                   "type": "null"
                 }
               ]
+            },
+            "allowed_harnesses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "What its children may run, as `--harness` names it: the envelope's\n`harnesses`, or its own profile when that list is empty (which\nmeans \"its own only\", not \"none\"). Empty without an envelope."
             },
             "last_message": {
               "type": "string",
@@ -28349,6 +28363,13 @@
                 }
               ]
             },
+            "allowed_harnesses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "What its children may run, as `--harness` names it: the envelope's\n`harnesses`, or its own profile when that list is empty (which\nmeans \"its own only\", not \"none\"). Empty without an envelope."
+            },
             "last_message": {
               "type": "string",
               "description": "The harness's text since the branch's last prompt, truncated from\nthe front."
@@ -29875,6 +29896,13 @@
               "type": "null"
             }
           ]
+        },
+        "allowed_harnesses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What its children may run, as `--harness` names it: the envelope's\n`harnesses`, or its own profile when that list is empty (which\nmeans \"its own only\", not \"none\"). Empty without an envelope."
         },
         "last_message": {
           "type": "string",

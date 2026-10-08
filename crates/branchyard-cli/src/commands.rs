@@ -1394,7 +1394,7 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
                 branchyard::BranchStatus::Waiting => format!(
                     "created {} on {}, waiting for {}\n",
                     s.name,
-                    s.profile,
+                    render::harness_label(&s.harness, &s.profile),
                     s.depends_on.join(", ")
                 ),
                 branchyard::BranchStatus::Blocked { reason } => {
@@ -1403,7 +1403,7 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
                 _ => format!(
                     "spawned {} on {} from {}\n{}",
                     s.name,
-                    s.profile,
+                    render::harness_label(&s.harness, &s.profile),
                     short(&s.base),
                     check_note(s)
                 ),

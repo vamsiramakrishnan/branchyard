@@ -726,7 +726,8 @@ Every connector call that changes the world is decided, written to a ledger befo
 | `by spawn --max-children`, `--harnesses`; `SpawnRequest::max_children`, `harnesses`, `plan`; Python `spawn(max_children=, harnesses=, plan=)` | SDK and MCP only | every surface |
 | MCP `spawn`'s `connectors`, `inbox`'s `unread` | not in the schema; `by inbox --unread --json` returned every message | in the schema; `--unread` filters the JSON too |
 | `by artifact publish --media-type`, `Delegate::publish_artifact(path, name, media_type, labels)`, Python `publish(media_type=)` | ignored on the CLI (always `application/octet-stream`) | recorded; the printed line names the media type and that the digest is blake3 |
-| `by inspect` text | `harnesses: its own` | the profile, as `harnesses: <profile> only (its own)` |
+| `by inspect` text | `harnesses: its own` | the harness and profile, as `harnesses: <harness> (<profile>) only (its own)`; `Inspection::allowed_harnesses` lists the same in JSON, where the envelope's empty `harnesses` would read as "none" |
+| A harness's name in `by spawn`, `by inspect`, `by show`, a spawn's event and an envelope refusal | the profile alone (`spawned x on claude-code-stream-json`), though the person typed `--harness claude-code` | one label everywhere, `branchyard_harness::profiles::label`: `claude-code (claude-code-stream-json)`, the harness typed and the profile it resolved to |
 | A cost refusal, `over budget:` | `max_usd` | `max_usd (--budget-usd)` |
 | `by graph apply --help` | no edit format | the edit JSON with an example |
 | `by <command> --help` of a delegation command | | each flag a harness may not pass marked with the reason; `by inspect`, `events`, `children` and `graph show` keep `[BRANCH]` optional in an error's usage |

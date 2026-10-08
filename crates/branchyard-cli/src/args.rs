@@ -3940,7 +3940,8 @@ pub struct SpawnFlags {
     /// instructions
     #[arg(long, value_name = "NAME")]
     seat: Option<String>,
-    /// Harness or profile ID (default: claude-code)
+    /// Harness or profile ID, such as claude-code or claude-code-acp (default: the parent's own
+    /// profile); shown as both, `claude-code (claude-code-stream-json)`
     #[arg(long, value_name = "ID")]
     harness: Option<String>,
     /// Take the task from this issue: GitHub's (URL, #N or N, through gh), linear:KEY, jira:KEY,

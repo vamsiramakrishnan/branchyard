@@ -1233,6 +1233,12 @@ fn held_text(i: &branchyard::Inspection) -> String {
     }
 }
 
+/// A branch's harness as every command names it to a person: the harness
+/// ID typed (`--harness claude-code`) and the profile it resolved to.
+pub fn harness_label(harness: &str, profile: &str) -> String {
+    branchyard_harness::profiles::label(harness, profile)
+}
+
 /// `by inspect`.
 pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     let (status, tone) = status_text(&i.status);
@@ -1244,7 +1250,7 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     let mut pairs = vec![
         ("branch", i.name.clone()),
         ("status", style.paint(tone, &status)),
-        ("harness", format!("{} ({})", i.harness, i.profile)),
+        ("harness", harness_label(&i.harness, &i.profile)),
         ("parent", i.parent.clone().unwrap_or_else(|| "none".into())),
         (
             "children",
@@ -1272,7 +1278,7 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     if let Some(envelope) = &i.envelope {
         // Empty means the branch's own profile only: name it.
         let harnesses = match envelope.harnesses.is_empty() {
-            true => format!("{} only (its own)", i.profile),
+            true => format!("{} only (its own)", harness_label(&i.harness, &i.profile)),
             false => envelope.harnesses.join(", "),
         };
         pairs.push((
@@ -1390,7 +1396,7 @@ pub fn details(info: &BranchInfo, now: u64, style: Style, extra: Vec<(&str, Stri
     let mut pairs = vec![
         ("branch", info.name.clone()),
         ("git branch", info.git_branch.clone()),
-        ("harness", format!("{} ({})", info.harness, info.profile)),
+        ("harness", harness_label(&info.harness, &info.profile)),
         ("status", style.paint(tone, &status)),
         ("prompt", info.prompt.clone()),
     ];

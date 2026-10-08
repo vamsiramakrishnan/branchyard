@@ -635,6 +635,48 @@ fn a_harness_delegates_with_by_in_its_shell() {
     assert_eq!(repo.json(&["show", "kid", "--json"])["depth"], 1);
 }
 
+/// The battery's harness mismatch: `--harness claude-code` came back as
+/// `claude-code-stream-json` with nothing relating the two. Every surface
+/// names a harness by the ID typed and the profile it resolved to.
+#[test]
+fn a_harness_is_named_by_the_id_typed_and_its_profile_everywhere() {
+    let repo = Repo::new();
+    let prompt = [
+        "SH by spawn 'WRITE kid.txt=k' --name kid --harness gemini-cli",
+        "SH by inspect",
+        "SH by inspect --json",
+        "SH by spawn x --name other --harness qwen-code",
+    ]
+    .join("\n");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    for expected in [
+        "spawned kid on gemini-cli (gemini-cli-acp) from",
+        "harnesses: gemini-cli (gemini-cli-acp) only (its own)",
+        "root may not delegate to qwen-code (qwen-code-acp); allowed: gemini-cli \
+         (gemini-cli-acp) only (its own)",
+    ] {
+        assert!(said.contains(expected), "{expected:?} missing from\n{said}");
+    }
+    assert!(
+        said.lines()
+            .any(|l| l.starts_with("harness ") && l.ends_with(" gemini-cli (gemini-cli-acp)")),
+        "{said}"
+    );
+    let (_, me) = sh_json(&said, 2);
+    assert_eq!(me["envelope"]["harnesses"], serde_json::json!([]));
+    assert_eq!(
+        me["allowed_harnesses"],
+        serde_json::json!(["gemini-cli-acp"])
+    );
+    let events = stdout(&repo.by(&["log", "root"]));
+    assert!(
+        events.contains("started on gemini-cli (gemini-cli-acp)"),
+        "{events}"
+    );
+}
+
 #[test]
 fn a_harness_steers_its_running_children_with_by_and_python() {
     let repo = Repo::new();
@@ -1974,14 +2016,15 @@ fn discard_sets_a_settled_child_aside_and_frees_its_slot() {
         !err.contains('\x1b') && !stdout(&removed).contains('\x1b'),
         "{err}"
     );
-    // The envelope names the profile it allows.
+    // The envelope names the harness and profile it allows.
     let shown = stdout(&repo.by(&["inspect", "root"]));
-    let profile = repo.json(&["show", "root", "--json"])["profile"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let root = repo.json(&["show", "root", "--json"]);
+    let (harness, profile) = (
+        root["harness"].as_str().unwrap(),
+        root["profile"].as_str().unwrap(),
+    );
     assert!(
-        shown.contains(&format!("harnesses: {profile} only (its own)")),
+        shown.contains(&format!("harnesses: {harness} ({profile}) only (its own)")),
         "{shown}"
     );
 }

@@ -163,7 +163,7 @@ fn the_envelope_bounds_depth_width_and_harnesses() {
             harness: Some("qwen-code".into()),
             ..spawn("x", "q")
         }),
-        "may not delegate to qwen-code-acp",
+        "may not delegate to qwen-code (qwen-code-acp)",
     );
     // A child cannot be allowed what its parent is not.
     denied(

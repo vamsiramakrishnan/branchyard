@@ -184,6 +184,24 @@ pub fn by_id(id: &str) -> Option<&'static Profile> {
     PROFILES.iter().find(|profile| profile.id == id)
 }
 
+/// How every surface names a branch's harness to a person:
+/// `claude-code (claude-code-stream-json)`, the harness ID a person types
+/// (`--harness claude-code`) and the profile it resolved to. A harness
+/// and profile that are one word are named once.
+pub fn label(harness: &str, profile: &str) -> String {
+    match harness.is_empty() || harness == profile {
+        true => profile.to_owned(),
+        false => format!("{harness} ({profile})"),
+    }
+}
+
+impl Profile {
+    /// [`label`] for this profile.
+    pub fn label(&self) -> String {
+        label(self.harness, self.id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,6 +214,14 @@ mod tests {
             "/../../docs/harness-integration.md"
         );
         std::fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn a_label_names_the_harness_typed_and_the_profile_it_resolved_to() {
+        let default = default_for("claude-code").unwrap();
+        assert_eq!(default.label(), "claude-code (claude-code-stream-json)");
+        assert_eq!(label("x", "x"), "x");
+        assert_eq!(label("", "pi-rpc"), "pi-rpc");
     }
 
     #[test]

@@ -161,7 +161,7 @@ fn refusals_reach_the_harness_as_tool_errors() {
     );
     assert!(errors[1].contains("only on its descendants"), "{said}");
     assert!(
-        errors[2].contains("may not delegate to qwen-code-acp"),
+        errors[2].contains("may not delegate to qwen-code (qwen-code-acp)"),
         "{said}"
     );
     assert!(
