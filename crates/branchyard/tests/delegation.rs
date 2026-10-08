@@ -1063,11 +1063,12 @@ fn a_parent_woken_max_wakes_times_settles_without_another_wake() {
         Activity::Warning(w) if w.contains("woken 1 times in a row, its envelope's max_wakes"))));
 }
 
-/// A harness whose driver cannot choose a model refuses a child's, with
-/// the driver's reason, before anything is created; a blank one is
-/// refused too.
+/// A child's model is refused where its profile cannot deliver it, with
+/// the reason, before anything is created: Gemini CLI's ACP profile takes
+/// one only in its `settings.json`, so only with a private home. A blank
+/// one is refused too.
 #[test]
-fn a_model_its_harness_cannot_choose_is_refused() {
+fn a_model_its_profile_cannot_deliver_is_refused() {
     let f = Fixture::new();
     let options = delegating(&f, Envelope::default());
     let root = f
@@ -1088,7 +1089,8 @@ fn a_model_its_harness_cannot_choose_is_refused() {
                 why.contains("gemini-cli-acp cannot be given a model"),
                 "{why}"
             );
-            assert!(why.contains("ACP v1 has no model parameter"), "{why}");
+            assert!(why.contains("Gemini CLI's settings.json"), "{why}");
+            assert!(why.contains("--isolated"), "{why}");
         }
         other => panic!("expected the model refused, got {other:?}"),
     }
@@ -1099,4 +1101,78 @@ fn a_model_its_harness_cannot_choose_is_refused() {
     denied(delegate.spawn(blank), "may not be blank");
     assert!(f.yard.branch("root").unwrap().info().children.is_empty());
     assert!(f.yard.branch("kid").is_err());
+}
+
+/// An ACP profile whose provisioner sets the model itself takes a child's:
+/// isolated, Gemini CLI's is written to its `settings.json`.
+#[test]
+fn a_model_its_provisioner_delivers_is_given_over_acp() {
+    let f = Fixture::new();
+    let options = TaskOptions {
+        isolated: true,
+        ..delegating(&f, Envelope::default())
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options).unwrap();
+    let kid = delegate
+        .spawn(Spawn {
+            model: Some("gemini-2.5-flash".into()),
+            ..spawn("WRITE kid.txt=k", "kid")
+        })
+        .unwrap();
+    assert_eq!(kid.profile, "gemini-cli-acp");
+    assert_eq!(kid.model.as_deref(), Some("gemini-2.5-flash"));
+    wait::until("kid to finish", || {
+        f.yard.branch("kid").unwrap().info().status == BranchStatus::Ready
+    });
+    assert_eq!(
+        f.yard.branch("kid").unwrap().info().model.as_deref(),
+        Some("gemini-2.5-flash")
+    );
+}
+
+/// A seat's provisioning replaces its parent's, but on its parent's
+/// harness a seat without a model keeps its parent's; a seat's own model
+/// wins.
+#[test]
+fn a_seat_without_a_model_keeps_its_parents_on_the_same_harness() {
+    let f = Fixture::new();
+    let mut seats = team();
+    seats.table.get_mut("planner").unwrap().provision = Some(Provisioning {
+        model: Some("gemini-2.5-pro".into()),
+        ..Provisioning::default()
+    });
+    let options = TaskOptions {
+        isolated: true,
+        provision: Some(Provisioning {
+            model: Some("gemini-2.5-flash".into()),
+            ..Provisioning::default()
+        }),
+        seats: Some(seats.clone()),
+        ..delegating(&f, seats.envelope())
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let lead = root.delegate(options).unwrap();
+    let worker = lead.spawn(by_seat("worker", "say work")).unwrap();
+    assert_eq!(worker.model.as_deref(), Some("gemini-2.5-flash"));
+    let planner = lead.spawn(by_seat("planner", "say plan")).unwrap();
+    assert_eq!(planner.model.as_deref(), Some("gemini-2.5-pro"));
+    // The worker's own provisioning is kept with it.
+    edit_record(&f.root, &worker.name, |record| {
+        let provision = &record["provision"];
+        assert_eq!(provision["instructions"], "You are the worker.", "{record}");
+        assert_eq!(provision["model"], "gemini-2.5-flash", "{record}");
+    });
 }

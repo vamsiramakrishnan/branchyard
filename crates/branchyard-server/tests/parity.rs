@@ -348,8 +348,9 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
         error.message.contains("may not delegate to codex"),
         "{error:?}"
     );
-    // A spawn's model reaches the engine, which refuses it for a harness
-    // whose driver cannot choose one.
+    // A spawn's model reaches the engine, which refuses it where the
+    // profile cannot deliver one: Gemini CLI's ACP profile writes it into
+    // its home, and this child would have none of its own.
     let op = await_operation(
         &client,
         &repo
@@ -369,7 +370,10 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
     let error = op.error.unwrap();
     assert_eq!(error.code, "unsupported", "{error:?}");
     assert!(
-        error.message.contains("ACP v1 has no model parameter"),
+        error
+            .message
+            .contains("gemini-cli-acp cannot be given a model")
+            && error.message.contains("--isolated"),
         "{error:?}"
     );
     drop(server);

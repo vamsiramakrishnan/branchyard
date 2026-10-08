@@ -3214,7 +3214,8 @@ fn spawn_gives_a_child_its_model() {
         .unwrap();
     assert!(root.get("model").is_none(), "{listed}");
 
-    // An ACP harness cannot be given one.
+    // Gemini CLI's ACP profile takes one only in its settings.json, so not
+    // without a home of its own.
     let out = repo.by_agent(&["run", "say hi", "--name", "acp", "--delegate=2", "--yes"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let refused = repo.by(&[
@@ -3227,7 +3228,7 @@ fn spawn_gives_a_child_its_model() {
         refused["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("ACP v1 has no model parameter"),
+            .contains("gemini-cli-acp cannot be given a model: Gemini CLI's settings.json"),
         "{refused}"
     );
 }

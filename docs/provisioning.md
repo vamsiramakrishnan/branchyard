@@ -55,7 +55,7 @@ Scion's nine provisioners map onto Branchyard's harness IDs through [`branchyard
 
 Every other harness (Pi, Amp, Goose, Cursor, Qwen Code, Kimi CLI, Oh My Pi, DeepSeek Harness) has no provisioner: MCP servers, instructions and a model pass to its driver, which accepts or refuses them; secrets are reported unused; effort and telemetry are refused.
 
-**Model.** Branchyard had no per-task model option. `Provisioning::model` (`--model`) is one, set where each harness takes it, as the table says. An ACP profile without a native setting refuses it, because ACP v1 has no model parameter.
+**Model.** Branchyard had no per-task model option. `Provisioning::model` (`--model`) is one, set where each harness takes it, as the table says. An ACP profile without a native setting refuses it, because ACP v1 has no model parameter. A child's model (`by spawn --model`) is checked the same way before the child is created ([delegation](delegation.md#models)): where the provisioner sets it, the profile takes it, whatever its driver can do; a setting written into the home (Codex's `config.toml`, Gemini CLI's `settings.json`) needs a private one.
 
 ### Secrets and the harness's tools
 

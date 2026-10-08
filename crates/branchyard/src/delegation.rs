@@ -2461,6 +2461,14 @@ impl Local {
             Some(own) => Some(own),
             None => caller.provision.clone(),
         };
+        // A seat's provisioning replaces its parent's, but a seat without a
+        // model on its parent's harness keeps its parent's model; another
+        // harness's model would mean nothing to it.
+        if let (Some(spec), Some(_)) = (&mut provision, seat) {
+            if spec.model.is_none() && profile.harness == own.harness {
+                spec.model = caller.provision.as_ref().and_then(|p| p.model.clone());
+            }
+        }
         // Connectors: what the request asks for, else its seat's, else the
         // parent's; always within the parent's grant.
         let parent_grant = caller
@@ -2519,14 +2527,20 @@ impl Local {
             }
         }
         // Its model: what the request asks for, else its seat's (or what it
-        // inherited), where its harness's driver can choose one.
+        // inherited), where its profile can deliver one.
         if let Some(model) = &request.model {
             let model = model.trim();
             if model.is_empty() {
                 return Err(Error::Denied("a child's model may not be blank".into()));
             }
-            harness::check_model(profile)?;
             provision.get_or_insert_with(Default::default).model = Some(model.to_owned());
+        }
+        if let Some(model) = provision.as_ref().and_then(|p| p.model.as_deref()) {
+            harness::check_model(
+                profile,
+                model,
+                isolated || crate::placement::sandboxed(caller.provider.as_ref()),
+            )?;
         }
         // Its approvals: its seat's (or what it inherited), within the
         // parent's; only ever stricter (docs/effects.md).

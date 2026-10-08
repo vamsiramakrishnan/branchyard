@@ -83,19 +83,32 @@ pub(crate) fn check_approvals(profile: &Profile, allowed: bool) -> Result<(), Er
     )))
 }
 
-/// Refuse a model for a profile whose driver cannot choose one, with the
-/// reason the driver records.
-pub(crate) fn check_model(profile: &Profile) -> Result<(), Error> {
+/// Refuse `model` for a profile that cannot deliver it. Its provisioner
+/// decides first, as a turn's provisioning would: it sets the model itself
+/// (Claude Code's `ANTHROPIC_MODEL`, Codex's `config.toml` over ACP, Gemini
+/// CLI's `settings.json`, Hermes's `HERMES_INFERENCE_MODEL`), refuses it,
+/// or leaves it to the driver, which must then be able to choose one. A
+/// setting written into the home needs `private_home`.
+pub(crate) fn check_model(profile: &Profile, model: &str, private_home: bool) -> Result<(), Error> {
+    let refuse = |reason: &str| {
+        Error::Unsupported(format!(
+            "{} cannot be given a model: {reason}; drop the model or choose another harness",
+            profile.id
+        ))
+    };
+    let mut context =
+        branchyard_provision::Context::new(profile.harness, profile.protocol, "/home", "/work");
+    context.private_home = private_home;
+    context.model = Some(model.to_owned());
+    let plan = branchyard_provision::plan(&context).map_err(|why| refuse(&why.0))?;
     let driver = profile.driver();
-    if driver.capabilities().model {
+    if plan.session.model.is_none() || driver.capabilities().model {
         return Ok(());
     }
     let reasons = branchyard_harness::reasons_for(&["model"], driver.capability_reasons());
-    let reason = reasons.first().map_or("not verified", |(_, why)| why);
-    Err(Error::Unsupported(format!(
-        "{} cannot be given a model: {reason}; drop the model or choose another harness",
-        profile.id
-    )))
+    Err(refuse(
+        reasons.first().map_or("not verified", |(_, why)| why),
+    ))
 }
 
 /// Fail with [`Error::HarnessUnavailable`] unless `command[0]` is an
@@ -202,6 +215,49 @@ mod tests {
             select(Some("nope")),
             Err(Error::UnknownHarness(id)) if id == "nope"
         ));
+    }
+
+    #[test]
+    fn a_model_is_refused_only_where_neither_provisioner_nor_driver_delivers_it() {
+        let check =
+            |id: &str, private: bool| check_model(select(Some(id)).unwrap(), "small", private);
+        // A driver that takes one, and provisioners that set one themselves.
+        for id in [
+            "claude-code-stream-json",
+            "claude-code-acp",
+            "codex-acp",
+            "gemini-cli-acp",
+            "hermes-acp",
+        ] {
+            assert!(check(id, true).is_ok(), "{id}: {:?}", check(id, true));
+        }
+        // Through the environment, without a private home too.
+        assert!(check("claude-code-acp", false).is_ok());
+        assert!(check("hermes-acp", false).is_ok());
+        // A setting written into the home needs one of its own.
+        for id in ["codex-acp", "gemini-cli-acp"] {
+            let refused = check(id, false);
+            assert!(
+                matches!(&refused, Err(Error::Unsupported(why))
+                    if why.starts_with(&format!("{id} cannot be given a model"))
+                        && why.contains("--isolated")),
+                "{refused:?}"
+            );
+        }
+        // A provisioner that refuses it, and a driver left to choose it
+        // that cannot.
+        let refused = check("opencode-acp", true);
+        assert!(
+            matches!(&refused, Err(Error::Unsupported(why)) if why.contains("a model cannot be provisioned for opencode")),
+            "{refused:?}"
+        );
+        let refused = check("goose-acp", true);
+        assert!(
+            matches!(&refused, Err(Error::Unsupported(why))
+                if why.starts_with("goose-acp cannot be given a model")
+                    && why.contains("ACP v1 has no model parameter")),
+            "{refused:?}"
+        );
     }
 
     #[test]
