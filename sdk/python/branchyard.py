@@ -278,7 +278,10 @@ class MergedAll:
     target: str
     previous: str
     commit: str
+    # Merges stack: each one's `previous` is the merge before it.
     branches: List[Merged]
+    # The distinct checks that ran once on the result, as argv lists.
+    checks: Optional[List[List[str]]] = None
 
 
 @dataclasses.dataclass
@@ -552,7 +555,9 @@ def integrate(*branches: str):
     passes. One branch returns a Merged; several are merged together, in
     order, all or none, with their check run once on the result, and return
     a MergedAll. A candidate your branch already contains is recorded as
-    merged (already=True), not refused."""
+    merged (already=True), not refused. A failed check raises
+    CheckFailedError; when siblings sharing it were left out, its
+    `integrate_together` names the branches to integrate at once."""
     if not branches:
         raise DeniedError("denied", "name at least one branch to integrate")
     value = _run(["integrate", *branches])
@@ -563,6 +568,7 @@ def integrate(*branches: str):
         previous=value["previous"],
         commit=value["commit"],
         branches=[_make(Merged, item) for item in value["branches"]],
+        checks=value.get("checks"),
     )
 
 

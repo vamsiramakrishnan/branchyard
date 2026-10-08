@@ -2798,8 +2798,15 @@ pub struct MergedAll {
     /// The target after the call; `previous` when every branch was already
     /// contained.
     pub commit: String,
-    /// One per branch, in the order given.
+    /// One per branch, in the order given. Merges stack: each one's
+    /// `previous` is the merge before it (the target's `previous` for the
+    /// first), so `previous..commit` is that merge's own range.
     pub branches: Vec<Merged>,
+    /// The distinct checks of the branches merged, each run once on the
+    /// result, in the order they ran; empty when none has a check or
+    /// nothing moved. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<Vec<String>>,
 }
 
 /// Known harness profiles, whether their executable is on `PATH`, and

@@ -720,9 +720,27 @@ fn a_failed_shared_check_names_the_siblings_to_integrate_together() {
          of them: integrate them together, `by integrate a b`",
         "python check_failed ['a', 'b']",
         "merged a into by/root",
+        ", after `test -f a.txt -a -f b.txt` passed once on the result",
     ] {
         assert!(said.contains(expected), "{expected:?} missing from\n{said}");
     }
+    // Merges stack, and each line shows its own range: b's starts where
+    // a's ended, and the target moved once over both.
+    let range = |prefix: &str| -> (String, String) {
+        let line = said.lines().find(|l| l.starts_with(prefix)).unwrap();
+        let inner = line.rsplit_once('(').unwrap().1.trim_end_matches(')');
+        let inner = inner.split(',').next().unwrap();
+        let (from, to) = inner.split_once("..").unwrap();
+        (from.to_owned(), to.to_owned())
+    };
+    let (a_from, a_to) = range("merged a into by/root");
+    let (b_from, b_to) = range("merged b into by/root");
+    assert_eq!(a_to, b_from, "{said}");
+    let moved = said
+        .lines()
+        .find(|l| l.starts_with("by/root moved once: "))
+        .unwrap();
+    assert!(moved.contains(&format!("{a_from}..{b_to}")), "{said}");
     let (code, failed) = sh_json(&said, 4);
     assert_eq!(code, 1, "{said}");
     assert_eq!(failed["error"]["kind"], "check_failed");

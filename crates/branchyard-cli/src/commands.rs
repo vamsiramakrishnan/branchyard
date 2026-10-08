@@ -1590,8 +1590,19 @@ fn integrate_all(target: &Target, branches: &[String], json: bool) -> Outcome {
     emit(json, result, |all| {
         let mut text: String = all.branches.iter().map(merged_line).collect();
         if all.commit != all.previous {
+            let checked = match all.checks.is_empty() {
+                true => "with no check: none of them has one".to_owned(),
+                false => format!(
+                    "after {} passed once on the result",
+                    all.checks
+                        .iter()
+                        .map(|c| format!("`{}`", c.join(" ")))
+                        .collect::<Vec<_>>()
+                        .join(" and ")
+                ),
+            };
             text.push_str(&format!(
-                "{} moved once: {}..{}\n",
+                "{} moved once: {}..{}, {checked}\n",
                 all.target,
                 short(&all.previous),
                 short(&all.commit)

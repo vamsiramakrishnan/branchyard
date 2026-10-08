@@ -10,7 +10,7 @@ use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use branchyard_workspace::{
-    BranchName, Candidate, Check, Commit, GitError, IntegrationError, Repository,
+    BranchName, Candidate, Check, CheckResult, Commit, GitError, IntegrationError, Repository,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -608,6 +608,10 @@ fn integrate_many_checks_the_combined_merge_once() {
     let branches: Vec<&str> = done.candidates.iter().map(|c| c.branch.as_str()).collect();
     assert_eq!(branches, ["by/a", "by/b"]);
     assert!(done.candidates.iter().all(|c| c.merge.is_some()));
+    // Merges stack: the second is made onto the first, not the old target.
+    assert_eq!(done.candidates[0].onto, expected);
+    assert_eq!(done.candidates[1].onto, fixture.head("parent^1"));
+    assert_eq!(done.candidates[1].merge.as_ref(), Some(&done.merged));
     // The merge that brought each in.
     assert_eq!(
         fixture.repo.brought_in_by(&a.head, "parent").unwrap(),
@@ -679,6 +683,225 @@ fn integrate_many_skips_a_candidate_an_earlier_one_brought_in() {
         fixture.repo.brought_in_by(&bounds.head, "main").unwrap(),
         Some(done.merged)
     );
+}
+
+/// A check that fails on the combined merge refuses all of them: the
+/// target stays, the checks after it never run, and the temporary
+/// worktree is gone.
+#[test]
+fn integrate_many_refuses_a_failed_combined_check_and_cleans_up() {
+    let fixture = Fixture::new();
+    let expected = fixture.head("main");
+    let a = fixture.candidate("a", "a-part.txt", "a\n");
+    let b = fixture.candidate("b", "b-part.txt", "b\n");
+    let ran = fixture.dir.join("second-ran");
+    let failing = sh("echo suite-broken; exit 3", Duration::from_secs(30));
+    let second = sh(
+        &format!("touch '{}'", ran.display()),
+        Duration::from_secs(30),
+    );
+    match fixture
+        .repo
+        .integrate_many(&[a, b], "main", &expected, &[failing, second])
+    {
+        Err(IntegrationError::CheckFailed {
+            status,
+            output_tail,
+        }) => {
+            assert_eq!(status.code(), Some(3));
+            assert!(output_tail.contains("suite-broken"), "{output_tail}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!ran.exists(), "a check after the failed one ran");
+    assert_eq!(fixture.head("main"), expected);
+    assert_eq!(git(&fixture.root(), &["status", "--porcelain"]), "");
+    fixture.assert_no_integration_worktrees();
+}
+
+/// A check that runs past its timeout, or cannot start, refuses the
+/// integration like a failed one.
+#[test]
+fn integrate_many_refuses_a_check_that_times_out_or_cannot_start() {
+    let fixture = Fixture::new();
+    let expected = fixture.head("main");
+    let a = fixture.candidate("a", "a-part.txt", "a\n");
+    let slow = sh("sleep 30", Duration::from_millis(200));
+    assert!(matches!(
+        fixture
+            .repo
+            .integrate_many(std::slice::from_ref(&a), "main", &expected, &[slow]),
+        Err(IntegrationError::CheckTimedOut { .. })
+    ));
+    let missing = Check {
+        argv: vec!["/nonexistent/branchyard-check".into()],
+        timeout: Duration::from_secs(30),
+    };
+    assert!(matches!(
+        fixture
+            .repo
+            .integrate_many(&[a], "main", &expected, &[missing]),
+        Err(IntegrationError::CheckNotStarted(_))
+    ));
+    assert_eq!(fixture.head("main"), expected);
+    fixture.assert_no_integration_worktrees();
+}
+
+/// Refusals before anything merges: a target that moved, an expected
+/// commit that is not one, a forged candidate, a dirty checkout. None
+/// moves the target or leaves a worktree.
+#[test]
+fn integrate_many_refuses_bad_inputs_before_merging() {
+    let fixture = Fixture::new();
+    let old = fixture.head("main");
+    let a = fixture.candidate("a", "a-part.txt", "a\n");
+    let moved = fixture.commit_on_main("b.txt", "b\n");
+    match fixture
+        .repo
+        .integrate_many(std::slice::from_ref(&a), "main", &old, &[])
+    {
+        Err(IntegrationError::TargetMoved { expected, actual }) => {
+            assert_eq!((expected, actual), (old.clone(), Some(moved.clone())));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        fixture.repo.integrate_many(
+            std::slice::from_ref(&a),
+            "main",
+            &Commit("main".into()),
+            &[]
+        ),
+        Err(IntegrationError::Git(GitError::InvalidRevision(_)))
+    ));
+    let mut forged = a.clone();
+    forged.head = Commit("f".repeat(40));
+    assert!(matches!(
+        fixture
+            .repo
+            .integrate_many(&[a.clone(), forged], "main", &moved, &[]),
+        Err(IntegrationError::InvalidCandidate(_))
+    ));
+    fs::write(fixture.root().join("a.txt"), "local edit\n").unwrap();
+    match fixture.repo.integrate_many(&[a], "main", &moved, &[]) {
+        Err(IntegrationError::DirtyTarget { worktree }) => assert_eq!(worktree, fixture.root()),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(fixture.head("main"), moved);
+    fixture.assert_no_integration_worktrees();
+}
+
+/// Nothing to merge is not an error: no candidates, or a candidate named
+/// twice, whose second merge the first already made.
+#[test]
+fn integrate_many_takes_no_candidates_and_a_repeated_one() {
+    let fixture = Fixture::new();
+    let expected = fixture.head("main");
+    let none = fixture
+        .repo
+        .integrate_many(&[], "main", &expected, &[])
+        .unwrap();
+    assert_eq!(none.merged, expected);
+    assert!(none.candidates.is_empty() && none.check_output_tails.is_empty());
+
+    let a = fixture.candidate("a", "a-part.txt", "a\n");
+    let twice = fixture
+        .repo
+        .integrate_many(&[a.clone(), a.clone()], "main", &expected, &[])
+        .unwrap();
+    assert_eq!(fixture.head("main"), twice.merged);
+    assert_eq!(twice.candidates[0].merge.as_ref(), Some(&twice.merged));
+    assert_eq!(
+        twice.candidates[1].merge, None,
+        "the first merge brought it in"
+    );
+    assert_eq!(twice.candidates[1].onto, twice.merged);
+    fixture.assert_no_integration_worktrees();
+}
+
+/// The target moved while the combined check ran: the compare-and-swap
+/// loses, the concurrent commit stays, and nothing is left behind.
+#[test]
+fn integrate_many_loses_the_swap_to_a_concurrent_commit() {
+    let fixture = Fixture::new();
+    let expected = fixture.head("main");
+    let a = fixture.candidate("a", "a-part.txt", "a\n");
+    let b = fixture.candidate("b", "b-part.txt", "b\n");
+    let check = sh(
+        &format!(
+            "git -C '{}' commit -q --allow-empty -m concurrent",
+            fixture.root().display()
+        ),
+        Duration::from_secs(30),
+    );
+    match fixture
+        .repo
+        .integrate_many(&[a, b], "main", &expected, &[check])
+    {
+        Err(IntegrationError::TargetMoved {
+            expected: e,
+            actual,
+        }) => {
+            assert_eq!(e, expected);
+            assert_eq!(actual, Some(fixture.head("main")));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(fixture.head("main^"), expected);
+    assert!(!fixture.root().join("a-part.txt").exists());
+    fixture.assert_no_integration_worktrees();
+}
+
+/// A candidate the target already contains is recorded without a merge,
+/// in its place among the others, and the next one merges onto the
+/// target as it was.
+#[test]
+fn integrate_many_passes_over_a_candidate_the_target_contains() {
+    let fixture = Fixture::new();
+    let start = fixture.head("main");
+    let old = fixture.candidate("old", "old.txt", "o\n");
+    let first = fixture.repo.integrate(&old, "main", &start, None).unwrap();
+    let new = fixture.candidate("new", "new.txt", "n\n");
+    let done = fixture
+        .repo
+        .integrate_many(&[old.clone(), new], "main", &first.merged, &[])
+        .unwrap();
+    assert_eq!(done.candidates[0].merge, None);
+    assert_eq!(done.candidates[0].onto, first.merged);
+    assert_eq!(done.candidates[1].onto, first.merged);
+    assert_eq!(done.candidates[1].merge.as_ref(), Some(&done.merged));
+    assert_eq!(fixture.head("main^1"), first.merged);
+    fixture.assert_no_integration_worktrees();
+}
+
+/// `check_commit` runs a check on one commit and says how it went:
+/// passed, failed or timed out, leaving no worktree.
+#[test]
+fn check_commit_reports_each_outcome() {
+    let fixture = Fixture::new();
+    let head = fixture.head("main");
+    let run = |script: &str, timeout| fixture.repo.check_commit(&head, &sh(script, timeout));
+    assert!(matches!(
+        run("test -f a.txt && echo here", Duration::from_secs(30)).unwrap(),
+        CheckResult::Passed { output_tail } if output_tail.contains("here")
+    ));
+    assert!(matches!(
+        run("echo broken; exit 1", Duration::from_secs(30)).unwrap(),
+        CheckResult::Failed { output_tail } if output_tail.contains("broken")
+    ));
+    assert!(matches!(
+        run("sleep 30", Duration::from_millis(200)).unwrap(),
+        CheckResult::TimedOut { .. }
+    ));
+    let empty = Check {
+        argv: Vec::new(),
+        timeout: Duration::from_secs(30),
+    };
+    assert!(matches!(
+        fixture.repo.check_commit(&head, &empty),
+        Err(GitError::Io(e)) if e.to_string().contains("argv is empty")
+    ));
+    fixture.assert_no_integration_worktrees();
 }
 
 #[test]

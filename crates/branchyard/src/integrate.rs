@@ -149,11 +149,22 @@ pub(crate) fn merge_many(yard: &Yard, names: &[String], target: &str) -> Result<
     let after = integrated
         .as_ref()
         .map_or_else(|| expected.clone(), |i| i.merged.0.clone());
-    let merges: BTreeMap<String, Option<String>> = integrated
+    // Each merge's own range: merges stack, each on the one before it.
+    let merges: BTreeMap<String, (String, Option<String>)> = integrated
         .iter()
         .flat_map(|i| &i.candidates)
-        .map(|c| (c.branch.clone(), c.merge.as_ref().map(|m| m.0.clone())))
+        .map(|c| {
+            (
+                c.branch.clone(),
+                (c.onto.0.clone(), c.merge.as_ref().map(|m| m.0.clone())),
+            )
+        })
         .collect();
+    // The checks ran once on the result when the target moved.
+    let checked: Vec<Vec<String>> = match integrated.as_ref() {
+        Some(i) if i.merged != i.previous => checks.iter().map(|c| c.argv.clone()).collect(),
+        _ => Vec::new(),
+    };
 
     let mut branches = Vec::new();
     for ((mut record, lease), done) in held.into_iter().zip(settled) {
@@ -168,16 +179,16 @@ pub(crate) fn merge_many(yard: &Yard, names: &[String], target: &str) -> Result<
                     .as_ref()
                     .map(|c| c.commit.clone())
                     .unwrap_or_default();
-                let merged = match merges.get(&git_branch).cloned().flatten() {
-                    Some(commit) => Merged {
+                let merged = match merges.get(&git_branch).cloned() {
+                    Some((onto, Some(commit))) => Merged {
                         branch: name.clone(),
                         target: target.to_owned(),
-                        previous: expected.clone(),
+                        previous: onto,
                         commit,
                         already: false,
                         via: None,
                     },
-                    None => {
+                    _ => {
                         let via = brought_in_by(yard, &head, target)?.unwrap_or(after.clone());
                         Merged {
                             branch: name.clone(),
@@ -251,6 +262,7 @@ pub(crate) fn merge_many(yard: &Yard, names: &[String], target: &str) -> Result<
         previous: expected,
         commit: after,
         branches,
+        checks: checked,
     })
 }
 

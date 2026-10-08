@@ -16247,7 +16247,17 @@
               "items": {
                 "$ref": "#/$defs/Merged"
               },
-              "description": "One per branch, in the order given."
+              "description": "One per branch, in the order given. Merges stack: each one's\n`previous` is the merge before it (the target's `previous` for the\nfirst), so `previous..commit` is that merge's own range."
+            },
+            "checks": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "description": "The distinct checks of the branches merged, each run once on the\nresult, in the order they ran; empty when none has a check or\nnothing moved. Omitted when empty."
             }
           },
           "required": [
@@ -17374,7 +17384,17 @@
               "items": {
                 "$ref": "#/$defs/Merged"
               },
-              "description": "One per branch, in the order given."
+              "description": "One per branch, in the order given. Merges stack: each one's\n`previous` is the merge before it (the target's `previous` for the\nfirst), so `previous..commit` is that merge's own range."
+            },
+            "checks": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "description": "The distinct checks of the branches merged, each run once on the\nresult, in the order they ran; empty when none has a check or\nnothing moved. Omitted when empty."
             }
           },
           "required": [
@@ -28289,7 +28309,17 @@
               "items": {
                 "$ref": "#/$defs/Merged"
               },
-              "description": "One per branch, in the order given."
+              "description": "One per branch, in the order given. Merges stack: each one's\n`previous` is the merge before it (the target's `previous` for the\nfirst), so `previous..commit` is that merge's own range."
+            },
+            "checks": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "description": "The distinct checks of the branches merged, each run once on the\nresult, in the order they ran; empty when none has a check or\nnothing moved. Omitted when empty."
             }
           },
           "required": [

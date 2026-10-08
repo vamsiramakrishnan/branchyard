@@ -39,6 +39,10 @@ pub struct MergedCandidate {
     pub branch: String,
     /// The candidate's head commit.
     pub head: Commit,
+    /// What it was merged onto: the target as it was for the first
+    /// candidate, then the merge before it. Merges stack, so each one's
+    /// range is `onto..merge`, not `previous..merge`.
+    pub onto: Commit,
     /// The merge commit made for it, or `None` when the target, or a
     /// candidate merged before it in the same call, already contained it.
     pub merge: Option<Commit>,
@@ -338,6 +342,7 @@ impl Repository {
                     .map(|c| MergedCandidate {
                         branch: c.branch.branch(),
                         head: c.head.clone(),
+                        onto: expected.clone(),
                         merge: None,
                     })
                     .collect(),
@@ -360,6 +365,7 @@ impl Repository {
                 results.push(MergedCandidate {
                     branch: name,
                     head: candidate.head.clone(),
+                    onto: head.clone(),
                     merge: None,
                 });
                 continue;
@@ -377,6 +383,7 @@ impl Repository {
                 }
                 Err(error) => return Err(error),
             };
+            let onto = head.clone();
             if let Some(commit) = &merge_commit {
                 head = commit.clone();
                 merged_names.push(name.clone());
@@ -384,6 +391,7 @@ impl Repository {
             results.push(MergedCandidate {
                 branch: name,
                 head: candidate.head.clone(),
+                onto,
                 merge: merge_commit,
             });
         }
