@@ -622,6 +622,38 @@ fn a_parent_whose_limits_are_spent_is_not_woken() {
         Activity::Warning(w) if w.contains("its max_turns is spent; it was not woken"))));
 }
 
+/// The battery's wait-since scenario: a `wait` after a `send` waits for
+/// the turn the send started, not the settled one before it.
+#[test]
+fn a_wait_after_a_send_waits_for_the_sent_turn() {
+    let f = Fixture::new();
+    let go = f.dir.join("go");
+    let send = json!({"branch": "kid", "prompt": held_child(&go, "kid.txt")});
+    let prompt = [
+        r#"MCP spawn {"prompt": "WRITE first.txt=1", "name": "kid"}"#.to_owned(),
+        r#"MCP wait {"branches": ["kid"]}"#.to_owned(),
+        format!("MCP send {send}"),
+        r#"MCP wait {"branches": ["kid"], "timeout_seconds": 0.3}"#.to_owned(),
+    ]
+    .join("\n");
+    let root = f
+        .yard
+        .task(prompt)
+        .options(f.delegating(Envelope::default()))
+        .name("root")
+        .run()
+        .unwrap();
+    let said = reply(&f, "root");
+    let first = nth_result(&said, "wait", 0);
+    assert_eq!(first["settled"][0]["turns"], 1, "{said}");
+    let after = nth_result(&said, "wait", 1);
+    assert_eq!(after["timed_out"], true, "{said}");
+    assert_eq!(after["pending"], json!(["kid"]), "{said}");
+    fs::write(&go, "").unwrap();
+    root.wait_subtree().unwrap();
+    assert_eq!(f.yard.branch("kid").unwrap().info().turns, 2);
+}
+
 /// The `wait` tool blocks in the engine until descendants settle, and
 /// `propose_integration` takes several branches, integrated together and
 /// checked once (M1, M2).

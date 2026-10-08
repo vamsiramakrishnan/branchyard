@@ -362,10 +362,29 @@ impl Yard {
         any: bool,
         timeout: Option<Duration>,
     ) -> Result<Waited, Error> {
+        self.wait_for_queued(branches, any, timeout, |_| Ok(false))
+    }
+
+    /// [`Yard::wait_for`], also waiting for a branch while `queued` says a
+    /// turn was asked of it that has not started yet, such as a server's
+    /// admitted send: its status is still the last turn's, and a wait
+    /// called after the send waits for the turn the send asked for.
+    pub fn wait_for_queued(
+        &self,
+        branches: &[&str],
+        any: bool,
+        timeout: Option<Duration>,
+        queued: impl Fn(&str) -> Result<bool, Error>,
+    ) -> Result<Waited, Error> {
         let names: Vec<String> = branches.iter().map(|b| (*b).to_owned()).collect();
-        delegation::wait_for(self, &names, any, timeout, |name| {
-            delegation::trusted(self, name, TaskOptions::default())?.inspect(name)
-        })
+        delegation::wait_for(
+            self,
+            &names,
+            any,
+            timeout,
+            |name| delegation::trusted(self, name, TaskOptions::default())?.inspect(name),
+            queued,
+        )
     }
 
     /// `branch`'s graph: its children, the dependencies among them, and its

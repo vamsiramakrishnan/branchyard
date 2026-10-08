@@ -745,6 +745,47 @@ fn recovered(f: &Fixture, name: &str) -> Vec<String> {
         .collect()
 }
 
+/// The battery's wait-since scenario: a wait after a send waits for the
+/// turn the send started, not the settled one before it, through the
+/// engine's process and another's.
+#[test]
+fn a_wait_after_a_send_waits_for_the_sent_turn() {
+    let f = Fixture::new();
+    let options = delegating(&f, Envelope::default());
+    let root = f
+        .yard
+        .task("WRITE root.txt=r")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options.clone()).unwrap();
+    delegate.spawn(spawn("WRITE first.txt=1", "kid")).unwrap();
+    let first = delegate.wait("kid", Duration::from_secs(30)).unwrap();
+    assert_eq!((first.status, first.turns), (BranchStatus::Ready, 1));
+    let go = f.root.join("go");
+    let held = format!(
+        "SH until [ -f {} ]; do sleep 0.05; done; echo k > kid.txt",
+        go.display()
+    );
+    delegate.send("kid", &held).unwrap();
+    let short = Duration::from_millis(300);
+    let waited = delegate.wait_for(&["kid"], false, Some(short)).unwrap();
+    assert!(waited.timed_out, "{waited:?}");
+    assert_eq!(waited.pending, ["kid"]);
+    assert!(matches!(
+        delegate.wait("kid", short),
+        Err(Error::Running(_))
+    ));
+    let other = Yard::open(&f.root).unwrap();
+    let waited = other.wait_for(&["kid"], false, Some(short)).unwrap();
+    assert_eq!(waited.pending, ["kid"], "{waited:?}");
+    fs::write(&go, "").unwrap();
+    let done = delegate.wait("kid", Duration::from_secs(30)).unwrap();
+    assert_eq!((done.status, done.turns), (BranchStatus::Ready, 2));
+    root.wait_subtree().unwrap();
+}
+
 #[test]
 fn a_subtree_driven_by_another_engine_is_waited_for_and_a_stopped_ones_recovered() {
     let f = Fixture::new();

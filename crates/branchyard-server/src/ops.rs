@@ -439,6 +439,32 @@ impl Registry {
             .map_err(|e| ApiError::internal(format!("could not read the operations: {e}")))
     }
 
+    /// Whether a queued or running operation of `repo`, of any tenant, runs
+    /// a turn of `branch` or creates it: a send, a task, a spawn. Until a
+    /// worker starts it the branch's status is still its last turn's, so a
+    /// wait for the branch waits for the operation too. A merge or an
+    /// integration runs no turn of it and is not counted.
+    pub fn turn_queued(&self, repo: &str, branch: &str) -> Result<bool, ApiError> {
+        let read = |e: io::Error| ApiError::internal(format!("could not read the queue: {e}"));
+        for queued in self.store.queue().map_err(read)? {
+            if queued.repo != repo {
+                continue;
+            }
+            let Some(stored) = self.store.get(&queued.id).map_err(read)? else {
+                continue;
+            };
+            let operation = &stored.operation;
+            if !matches!(
+                operation.kind,
+                OperationKind::Merge | OperationKind::Integrate
+            ) && operation.branches.iter().any(|b| b == branch)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// The operation an earlier request of `tenant` with this key created,
     /// if any.
     pub fn replay(&self, idem: &Idempotency, tenant: &str) -> Result<Option<Operation>, ApiError> {

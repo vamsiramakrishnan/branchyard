@@ -1758,14 +1758,18 @@ const MAX_WAIT: Duration = Duration::from_secs(30);
 /// Block until branches settle, like `by wait`, with the caller's authority
 /// to read them, for up to [`MAX_WAIT`]. Reading their durable status, it
 /// sees turns that run in any process; while it waits it does what the
-/// server's recovery interval does for them, sooner.
+/// server's recovery interval does for them, sooner. A branch an operation
+/// queued before the wait will run a turn of is waited for until that turn
+/// has run, not reported with the turn before it.
 async fn post_wait(
     State(app): State<Shared>,
     Path(repo): Path<String>,
     Extension(caller): Extension<Caller>,
     JsonBody(request, _): JsonBody<WaitRequest>,
 ) -> Result<Json<branchyard::Waited>, ApiError> {
-    let yard = app.authorized_repo(&caller, &repo, "read")?.yard.clone();
+    let state = app.authorized_repo(&caller, &repo, "read")?;
+    let (yard, repo) = (state.yard.clone(), state.name.clone());
+    let registry = app.registry.clone();
     if request.branches.is_empty() {
         return Err(ApiError::bad_request("give the branches to wait for"));
     }
@@ -1780,7 +1784,13 @@ async fn post_wait(
     };
     blocking(move || {
         let names: Vec<&str> = request.branches.iter().map(String::as_str).collect();
-        yard.wait_for(&names, request.any, Some(timeout))
+        // A send admitted before this wait has not started its turn until
+        // a worker claims it; the wait is for that turn.
+        yard.wait_for_queued(&names, request.any, Some(timeout), |branch| {
+            registry
+                .turn_queued(&repo, branch)
+                .map_err(|e| branchyard::Error::State(e.body.message))
+        })
     })
     .await?
     .map(Json)

@@ -551,6 +551,55 @@ fn branches_are_waited_for_over_http() {
     }
 }
 
+/// The battery's wait-since scenario: a wait called after a send, before a
+/// worker started its turn, returned at once with the previous turn's
+/// `ready`. It waits for the sent turn.
+#[test]
+fn a_wait_after_a_send_waits_for_the_sent_turn_over_http() {
+    let f = Fixture::new();
+    let mut config = f.config();
+    config.labels = vec!["linux".into()];
+    let server = Server::start(config);
+    let client = server.client();
+    let repo = client.repo("app");
+    let done = run(&client, &task("WRITE w.txt=1", "kid"));
+    assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
+    assert_eq!(repo.branch("kid").unwrap().status, BranchStatus::Ready);
+    let mut request = SendRequest {
+        prompt: "WRITE w.txt=2".into(),
+        policy: PolicySpec::allow_all(),
+        ..SendRequest::default()
+    };
+    // No worker here carries the label, so the send stays queued.
+    request.require_labels = vec!["gpu".into()];
+    let op = repo.send("kid", &request, &new_key()).unwrap();
+    let waited = repo
+        .wait_for(&["kid"], false, Some(Duration::from_millis(300)))
+        .unwrap();
+    assert!(waited.timed_out, "{waited:?}");
+    assert_eq!(waited.pending, ["kid"]);
+    assert!(waited.settled.is_empty(), "{waited:?}");
+    // Another branch's queued send does not hold it.
+    let other = run(&client, &task("WRITE o.txt=1", "other"));
+    assert_eq!(other.state, OperationState::Succeeded, "{other:?}");
+    let waited = repo.wait_for(&["other"], false, None).unwrap();
+    assert!(!waited.timed_out, "{waited:?}");
+
+    // A worker with the label runs it; the wait returns with its turn.
+    server.stop();
+    let mut config = f.config();
+    config.labels = vec!["linux".into(), "gpu".into()];
+    let server = Server::start(config);
+    let client = server.client();
+    let repo = client.repo("app");
+    let waited = repo.wait_for(&["kid"], false, None).unwrap();
+    assert!(!waited.timed_out, "{waited:?}");
+    assert_eq!(waited.settled[0].turns, 2, "{waited:?}");
+    assert_eq!(waited.settled[0].status, BranchStatus::Ready);
+    let done = await_operation(&client, &op.id);
+    assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
+}
+
 #[test]
 fn a_settled_branch_is_discarded_over_http() {
     let f = Fixture::new();

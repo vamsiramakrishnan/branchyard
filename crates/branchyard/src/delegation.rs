@@ -1219,19 +1219,24 @@ impl Delegate {
 /// a wait can: a turn whose engine stopped is recovered, a dependent whose
 /// prerequisites settled is started, a parked branch whose children settled
 /// is woken, each when this process can.
+///
+/// `queued` says whether a branch has a turn asked for that has not
+/// started yet, such as a server's admitted send: such a branch is waited
+/// for though its status is still the last turn's.
 pub(crate) fn wait_for(
     yard: &Yard,
     names: &[String],
     any: bool,
     timeout: Option<Duration>,
     inspect: impl Fn(&str) -> Result<Inspection, Error>,
+    queued: impl Fn(&str) -> Result<bool, Error>,
 ) -> Result<Waited, Error> {
     let store = yard.store();
     let deadline = timeout.and_then(|t| Instant::now().checked_add(t));
-    let statuses = |store: &Store| -> Result<Vec<BranchStatus>, Error> {
+    let statuses = |store: &Store| -> Result<Vec<(BranchStatus, bool)>, Error> {
         names
             .iter()
-            .map(|name| store.read(name).map(|r| r.info.status))
+            .map(|name| Ok((store.read(name)?.info.status, queued(name)?)))
             .collect()
     };
     loop {
@@ -1239,7 +1244,7 @@ pub(crate) fn wait_for(
         let pending: Vec<String> = names
             .iter()
             .zip(&now)
-            .filter(|(_, status)| crate::wake::unsettled(status))
+            .filter(|(_, (status, queued))| *queued || crate::wake::unsettled(status))
             .map(|(name, _)| name.clone())
             .collect();
         let done = match any {
@@ -1259,7 +1264,7 @@ pub(crate) fn wait_for(
                 timed_out: !done,
             });
         }
-        for (name, status) in names.iter().zip(&now) {
+        for (name, (status, _)) in names.iter().zip(&now) {
             match status {
                 BranchStatus::Running => recover::settle(yard, name)?,
                 BranchStatus::Waiting => {
@@ -3198,7 +3203,14 @@ impl Local {
         for name in &names {
             self.require_descendant(name, true)?;
         }
-        wait_for(&self.yard, &names, any, timeout, |name| self.inspect(name))
+        wait_for(
+            &self.yard,
+            &names,
+            any,
+            timeout,
+            |name| self.inspect(name),
+            |_| Ok(false),
+        )
     }
 
     /// A relative path from a tool call, resolved against this branch's own

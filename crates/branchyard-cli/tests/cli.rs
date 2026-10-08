@@ -2991,6 +2991,34 @@ fn by_wait_blocks_until_children_settle() {
     );
 }
 
+/// The battery's wait-since scenario: after `by send kid ...`, `by wait
+/// kid` returned at once with the previous turn's `ready` and last
+/// message. A wait waits for the turn the send started.
+#[test]
+fn by_wait_after_a_send_waits_for_the_sent_turn() {
+    let repo = Repo::new();
+    let go = repo.dir.join("go");
+    let prompt = [
+        "SH by spawn 'SH echo first' --name kid --wait --json".to_owned(),
+        format!("SH by send kid '{}'", held_child(&go, "kid.txt")),
+        "SH by wait kid --timeout 0.3 --json".to_owned(),
+        format!("SH touch {}", go.display()),
+        "SH by wait kid --json".to_owned(),
+    ]
+    .join("\n");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    let (code, early) = sh_line_json(&said, 2);
+    assert_eq!(code, 1, "{said}");
+    assert_eq!(early["timed_out"], true, "{said}");
+    assert_eq!(early["pending"], serde_json::json!(["kid"]), "{said}");
+    let (code, waited) = sh_line_json(&said, 4);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(waited["settled"][0]["status"]["state"], "ready", "{said}");
+    assert_eq!(waited["settled"][0]["turns"], 2, "{said}");
+}
+
 /// The battery's calc4, conflict3, envelope, graph and recovery scenarios
 /// (M2): a check the children inherit runs the whole suite, which no child
 /// passes alone, so each `by integrate` was refused; agents merged
@@ -3214,6 +3242,34 @@ fn the_python_module_waits_for_children_and_integrates_them_together() {
         "merged by/root ['a', 'held']",
         "again True",
     ] {
+        assert!(said.contains(expected), "{expected:?} missing from\n{said}");
+    }
+}
+
+/// The battery's wait-since scenario through the Python module: `wait`
+/// after `send` waits for the sent turn, not the settled one before it.
+#[test]
+fn the_python_module_waits_for_the_turn_it_sent() {
+    let repo = Repo::new();
+    let go = repo.dir.join("go");
+    let script = format!(
+        "import branchyard as b\n\
+         b.spawn('WRITE a.part=a', name='kid')\n\
+         print('first', b.wait('kid').turns)\n\
+         b.send('kid', '{held}')\n\
+         try:\n    b.wait('kid', timeout=0.3)\nexcept b.RunningError as e:\n    print('timed out', e.kind)\n\
+         open('{go}', 'w').close()\n\
+         print('second', b.wait('kid').turns)\n",
+        held = held_child(&go, "kid.part"),
+        go = go.display(),
+    );
+    let file = repo.dir.join("send_wait.py");
+    fs::write(&file, script).unwrap();
+    let prompt = format!("SH python3 {}", file.display());
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    for expected in ["first 1", "timed out running", "second 2"] {
         assert!(said.contains(expected), "{expected:?} missing from\n{said}");
     }
 }
