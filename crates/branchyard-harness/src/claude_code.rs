@@ -44,21 +44,55 @@
 //! `cancel_queued: true` (advertised as `interrupt_cancel_queued_v1`), so
 //! they are cancelled rather than run after the interrupt; their
 //! cancellation is [`Event::SteerRejected`].
+//!
+//! Closing the session sends the `end_session` control request before the
+//! input closes. Claude Code 2.1.293 does not exit when its input closes
+//! while a background task of its own runs (a `Bash` command with
+//! `run_in_background`, a monitor, a subagent): it waits for the task,
+//! runs another model turn on the task's notification, and only then
+//! exits. `end_session` makes it stop those tasks (`task_updated` with
+//! `killed`, `task_notification` with `stopped`) and exit at once, checked
+//! against the real CLI (`tests/fixtures/claude-code-2.1.293-*`).
+//!
+//! Live cost: each `assistant` frame carries the usage of the model call
+//! it came from. The driver reports each call once, as it grows, as a
+//! per-call [`Usage`] with the model's name and no cost, so a consumer
+//! can price the turn while it runs; the frame's output count is the one
+//! streamed so far, so the estimate runs low until the `result`, whose
+//! cumulative `total_cost_usd` replaces it.
+//!
+//! Every message type Claude Code 2.1.293 prints is mapped or ignored on
+//! purpose (`receive` and `system` below give each its reason); only a
+//! type it did not print is [`Event::Unrecognized`].
 
 use std::collections::HashMap;
 
 use serde_json::json;
 
 use crate::{
-    frame, parse, Capabilities, Driver, Event, Frame, Instructions, LaunchSpec, McpServer,
-    NativeSession, Open, Opened, Output, PermissionDecision, PermissionKey, PermissionRequest,
-    Rejected, RemoteMcpServer, SessionMode, Submitted, TurnOutcome, Turns, Usage, Value,
+    frame, parse, Capabilities, Driver, Event, Frame, HarnessTask, Instructions, LaunchSpec,
+    McpServer, NativeSession, Open, Opened, Output, PermissionDecision, PermissionKey,
+    PermissionRequest, Rejected, RemoteMcpServer, SessionMode, Submitted, TurnOutcome, Turns,
+    Usage, Value,
 };
 
 #[derive(Debug)]
 enum Pending {
     Initialize,
     Interrupt(u64),
+    EndSession,
+}
+
+/// The usage of one model call reported so far: its message ID and its
+/// token counts as last reported.
+#[derive(Debug, Default)]
+struct Call {
+    id: String,
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    cache_write_1h: u64,
 }
 
 /// A Claude Code stream-json session.
@@ -80,6 +114,11 @@ pub struct ClaudeCode {
     /// yet and the CLI has not cancelled.
     steers: Vec<Steer>,
     next_steer: u64,
+    /// The model call whose usage was reported last.
+    call: Option<Call>,
+    /// The last event of the turn in flight was assistant text, so another
+    /// text block starts a new paragraph.
+    after_text: bool,
 }
 
 /// One steered user message.
@@ -109,6 +148,8 @@ impl ClaudeCode {
             interrupting: false,
             steers: Vec::new(),
             next_steer: 0,
+            call: None,
+            after_text: false,
         }
     }
 
@@ -171,6 +212,10 @@ impl ClaudeCode {
             Some(Pending::Interrupt(_)) => Output::event(Event::Warning {
                 message: format!("interrupt failed: {error}"),
             }),
+            Some(Pending::EndSession) if success => Output::default(),
+            Some(Pending::EndSession) => Output::event(Event::Warning {
+                message: format!("Claude Code refused to end its session: {error}"),
+            }),
             None => Output::event(Event::ProtocolViolation {
                 detail: format!("control response for unknown request {id:?}"),
             }),
@@ -216,6 +261,7 @@ impl ClaudeCode {
 
     fn system(&mut self, message: &Value) -> Output {
         let subtype = message["subtype"].as_str().unwrap_or_default();
+        let text = |field: &str| message[field].as_str().unwrap_or_default().to_owned();
         match subtype {
             "init" => self.init(message),
             "api_retry" => Output::event(Event::Warning {
@@ -225,10 +271,144 @@ impl ClaudeCode {
                     message["max_retries"].as_u64().unwrap_or(0)
                 ),
             }),
+            // A shell command, subagent or monitor of the CLI's own; also
+            // reported for a foreground command, with `is_backgrounded`
+            // false.
+            "task_started" => Output::event(Event::HarnessTaskStarted {
+                task: task(message),
+                background: message["is_backgrounded"] == true,
+            }),
+            "task_notification" => Output::event(Event::HarnessTaskEnded {
+                task_id: text("task_id"),
+                status: text("status"),
+                summary: message["summary"].as_str().map(str::to_owned),
+            }),
+            "background_tasks_changed" => Output::event(Event::BackgroundTasks {
+                running: message["tasks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(task)
+                    .collect(),
+            }),
+            // The model is producing (thinking) tokens, or a hook or the
+            // CLI itself is busy: alive, with nothing else to say.
+            "thinking_tokens" | "status" | "hook_started" | "hook_progress" | "hook_response" => {
+                Output::event(Event::Progress {
+                    turn: self.turns.active,
+                })
+            }
+            // The model changed under the turn: worth a line in the log.
+            "model_fallback" | "model_refusal_fallback" | "model_consent_fallback" => {
+                Output::event(Event::Warning {
+                    message: format!(
+                        "Claude Code switched models ({subtype}){}",
+                        message["model"]
+                            .as_str()
+                            .map(|m| format!(" to {m}"))
+                            .unwrap_or_default()
+                    ),
+                })
+            }
+            "api_error" => Output::event(Event::Warning {
+                message: format!(
+                    "API error{}",
+                    message["error"]
+                        .as_str()
+                        .map(|e| format!(": {e}"))
+                        .unwrap_or_default()
+                ),
+            }),
+            // Ignored on purpose, each for its reason:
+            // - task_updated and task_progress: steps of a task whose start
+            //   and end are reported above;
+            // - task_summary and post_turn_summary: the CLI's own one-line
+            //   summaries for its UI; the turn's text and result say more;
+            // - vcs_state_changed: the CLI saw the repository change, which
+            //   Branchyard reads for itself;
+            // - compact_boundary and microcompact_boundary: the CLI trimmed
+            //   its context, which changes nothing Branchyard tracks;
+            // - session_state_changed, session_metadata,
+            //   session_title_changed, commands_changed, notification,
+            //   informational, local_command, turn_duration,
+            //   stop_hook_summary, files_persisted, permission_denied and
+            //   away_summary: UI state of an interactive session.
+            "task_updated"
+            | "task_progress"
+            | "task_summary"
+            | "post_turn_summary"
+            | "vcs_state_changed"
+            | "compact_boundary"
+            | "microcompact_boundary"
+            | "session_state_changed"
+            | "session_metadata"
+            | "session_title_changed"
+            | "commands_changed"
+            | "notification"
+            | "informational"
+            | "local_command"
+            | "turn_duration"
+            | "stop_hook_summary"
+            | "files_persisted"
+            | "permission_denied"
+            | "away_summary" => Output::default(),
             other => Output::event(Event::Unrecognized {
                 kind: format!("system/{other}"),
             }),
         }
+    }
+
+    /// Usage of the model call `message` came from, once per call and
+    /// only as it grows: the token counts added since the call's last
+    /// report, with no cost.
+    fn call_usage(&mut self, message: &Value) -> Option<Event> {
+        let turn = self.turns.active?;
+        let id = message["id"].as_str()?;
+        let usage = &message["usage"];
+        if !usage.is_object() {
+            return None;
+        }
+        let count = |field: &str| usage[field].as_u64().unwrap_or(0);
+        let one_hour = usage["cache_creation"]["ephemeral_1h_input_tokens"]
+            .as_u64()
+            .unwrap_or(0);
+        let now = Call {
+            id: id.to_owned(),
+            input: count("input_tokens"),
+            output: count("output_tokens"),
+            cache_read: count("cache_read_input_tokens"),
+            cache_write: count("cache_creation_input_tokens").saturating_sub(one_hour),
+            cache_write_1h: one_hour,
+        };
+        let before = match self.call.take() {
+            Some(call) if call.id == now.id => call,
+            _ => Call::default(),
+        };
+        let added = |now: u64, before: u64| Some(now.saturating_sub(before));
+        let usage = Usage {
+            cumulative: false,
+            input_tokens: added(now.input, before.input),
+            output_tokens: added(now.output, before.output),
+            cached_input_tokens: added(now.cache_read, before.cache_read),
+            cost_usd: None,
+            cache_write_tokens: added(now.cache_write, before.cache_write),
+            cache_write_1h_tokens: added(now.cache_write_1h, before.cache_write_1h),
+            model: message["model"].as_str().map(str::to_owned),
+        };
+        let grew = [
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cached_input_tokens,
+            usage.cache_write_tokens,
+            usage.cache_write_1h_tokens,
+        ]
+        .iter()
+        .any(|n| n.unwrap_or(0) > 0);
+        self.call = Some(now);
+        grew.then_some(Event::UsageObserved {
+            turn: Some(turn),
+            usage,
+        })
     }
 
     fn init(&mut self, message: &Value) -> Output {
@@ -298,18 +478,29 @@ impl ClaudeCode {
             .flatten()
         {
             match block["type"].as_str() {
-                Some("text") => events.push(Event::MessageDelta {
-                    turn,
-                    text: block["text"].as_str().unwrap_or_default().to_owned(),
-                }),
-                Some("tool_use") => events.push(Event::ToolStarted {
-                    turn,
-                    call_id: block["id"].as_str().unwrap_or_default().to_owned(),
-                    name: block["name"].as_str().unwrap_or_default().to_owned(),
-                }),
+                Some("text") => {
+                    let text = block["text"].as_str().unwrap_or_default();
+                    // Each frame is a whole block, not a fragment of one:
+                    // a block after a block is a new paragraph.
+                    let text = match self.after_text {
+                        true => format!("\n\n{text}"),
+                        false => text.to_owned(),
+                    };
+                    self.after_text = true;
+                    events.push(Event::MessageDelta { turn, text });
+                }
+                Some("tool_use") => {
+                    self.after_text = false;
+                    events.push(Event::ToolStarted {
+                        turn,
+                        call_id: block["id"].as_str().unwrap_or_default().to_owned(),
+                        name: block["name"].as_str().unwrap_or_default().to_owned(),
+                    });
+                }
                 _ => {}
             }
         }
+        events.extend(self.call_usage(&message["message"]));
         Output {
             events,
             frames: Vec::new(),
@@ -361,6 +552,8 @@ impl ClaudeCode {
             });
         };
         self.turn_uuid = None;
+        self.call = None;
+        self.after_text = false;
         let interrupted = std::mem::take(&mut self.interrupting);
         events.push(Event::UsageObserved {
             turn: Some(turn),
@@ -396,6 +589,17 @@ fn usage(message: &Value) -> Usage {
         output_tokens: sum("outputTokens"),
         cached_input_tokens: sum("cacheReadInputTokens"),
         cost_usd: message["total_cost_usd"].as_f64(),
+        cache_write_tokens: sum("cacheCreationInputTokens"),
+        ..Usage::default()
+    }
+}
+
+/// A task as `task_started` and `background_tasks_changed` describe it.
+fn task(value: &Value) -> HarnessTask {
+    HarnessTask {
+        task_id: value["task_id"].as_str().unwrap_or_default().to_owned(),
+        kind: value["task_type"].as_str().map(str::to_owned),
+        description: value["description"].as_str().unwrap_or_default().to_owned(),
     }
 }
 
@@ -599,7 +803,36 @@ impl Driver for ClaudeCode {
                     Output::default()
                 }
             }
-            "keep_alive" | "user" | "stream_event" => Output::default(),
+            // Ignored on purpose: keep_alive is the transport's heartbeat,
+            // which comes while the CLI waits as much as while it works,
+            // so it is not progress; user echoes tool results the
+            // assistant frames already account for; stream_event is
+            // partial-message streaming, which this launch does not ask
+            // for; active_goal and autocompact_state describe the
+            // session's settings as it opens.
+            "keep_alive" | "user" | "stream_event" | "active_goal" | "autocompact_state" => {
+                Output::default()
+            }
+            // A tool call still running reports its elapsed time.
+            "tool_progress" => Output::event(Event::Progress {
+                turn: self.turns.active,
+            }),
+            // The account's rate limit: news only when it bites.
+            "rate_limit_event" => {
+                let info = &message["rate_limit_info"];
+                match info["status"].as_str() {
+                    None | Some("allowed") => Output::default(),
+                    Some(status) => Output::event(Event::Warning {
+                        message: format!(
+                            "rate limit {status}{}",
+                            info["rateLimitType"]
+                                .as_str()
+                                .map(|kind| format!(" ({kind})"))
+                                .unwrap_or_default()
+                        ),
+                    }),
+                }
+            }
             "command_lifecycle" => {
                 let state = message["state"].as_str().unwrap_or_default();
                 let uuid = message["command_uuid"].as_str();
@@ -634,6 +867,8 @@ impl Driver for ClaudeCode {
         let uuid = uuid_v4();
         self.turn_uuid = Some((uuid.clone(), false));
         self.steers.clear();
+        self.call = None;
+        self.after_text = false;
         Ok(Submitted {
             turn,
             frames: vec![user_message(prompt, &uuid)],
@@ -692,6 +927,15 @@ impl Driver for ClaudeCode {
             "type": "control_response",
             "response": {"subtype": "success", "request_id": key.0, "response": result},
         }))])
+    }
+
+    fn close(&mut self) -> Vec<Frame> {
+        if !self.ready {
+            return Vec::new();
+        }
+        // Without it, the CLI outlives its input for as long as a
+        // background task of its own runs.
+        vec![self.control_request(Pending::EndSession, json!({"subtype": "end_session"}))]
     }
 
     fn transport_closed(&mut self) -> Vec<Event> {

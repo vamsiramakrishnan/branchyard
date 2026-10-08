@@ -327,6 +327,7 @@ impl Pi {
                 output_tokens: usage["output"].as_u64(),
                 cached_input_tokens: usage["cacheRead"].as_u64(),
                 cost_usd: usage["cost"]["total"].as_f64(),
+                ..Usage::default()
             },
         })
     }

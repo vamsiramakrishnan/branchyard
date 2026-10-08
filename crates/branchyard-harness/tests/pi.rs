@@ -275,7 +275,8 @@ fn outcomes_follow_the_last_assistant_stop_reason() {
                     input_tokens: Some(12),
                     output_tokens: Some(3),
                     cached_input_tokens: Some(5),
-                    cost_usd: Some(0.3)
+                    cost_usd: Some(0.3),
+                    ..Usage::default()
                 }
             }]
         );

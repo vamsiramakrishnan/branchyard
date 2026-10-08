@@ -97,7 +97,8 @@ fn replays_the_documented_multi_turn_input_session() {
                     input_tokens: Some(10),
                     output_tokens: Some(67),
                     cached_input_tokens: Some(0),
-                    cost_usd: None
+                    cost_usd: None,
+                    ..Usage::default()
                 }
             },
             Event::TurnEnded {
