@@ -35450,6 +35450,15 @@
           "items": {
             "$ref": "#/$defs/Message"
           }
+        },
+        "steered_this_turn": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "description": "Messages delivered by steering into the branch's running turn, by\nid. They count delivered once written to the harness, which takes\nthem only at its next step (such as after the call reading this),\nso the turn has not read them yet: with the messages not delivered,\nthey are what `inbox --unread` lists ([`Inbox::is_unread`]).\nOmitted when empty."
         }
       },
       "required": [

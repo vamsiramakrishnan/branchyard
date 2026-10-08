@@ -480,6 +480,34 @@ pub struct Children {
 pub struct Inbox {
     pub branch: String,
     pub messages: Vec<Message>,
+    /// Messages delivered by steering into the branch's running turn, by
+    /// id. They count delivered once written to the harness, which takes
+    /// them only at its next step (such as after the call reading this),
+    /// so the turn has not read them yet: with the messages not delivered,
+    /// they are what `inbox --unread` lists ([`Inbox::is_unread`]).
+    /// Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steered_this_turn: Vec<u64>,
+}
+
+impl Inbox {
+    /// Whether the branch's turns have not read `message` yet: it is not
+    /// delivered, or it was steered into the running turn.
+    pub fn is_unread(&self, message: &Message) -> bool {
+        !message.delivered || self.steered_this_turn.contains(&message.id)
+    }
+
+    /// Only the messages not read yet ([`Inbox::is_unread`]).
+    pub fn unread_only(mut self) -> Inbox {
+        let unread: Vec<Message> = self
+            .messages
+            .iter()
+            .filter(|m| self.is_unread(m))
+            .cloned()
+            .collect();
+        self.messages = unread;
+        self
+    }
 }
 
 /// A question sent, and its answer if one arrived within the wait.
@@ -3268,9 +3296,11 @@ impl Local {
     }
 
     fn inbox(&self) -> Result<Inbox, Error> {
+        let store = self.store();
         Ok(Inbox {
             branch: self.branch.clone(),
-            messages: self.store().backend().inbox(&self.branch)?,
+            messages: store.backend().inbox(&self.branch)?,
+            steered_this_turn: inbox::steered_this_turn(&store, &self.branch)?,
         })
     }
 }
@@ -3781,11 +3811,11 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
         }
         "inbox" => {
             let args: InboxArgs = parse(tool, arguments)?;
-            let mut inbox = local.inbox()?;
-            if args.unread {
-                inbox.messages.retain(|m| !m.delivered);
+            let inbox = local.inbox()?;
+            match args.unread {
+                true => to_json(&inbox.unread_only()),
+                false => to_json(&inbox),
             }
-            to_json(&inbox)
         }
         other => Err(Error::Denied(format!("no delegation tool named {other}"))),
     }

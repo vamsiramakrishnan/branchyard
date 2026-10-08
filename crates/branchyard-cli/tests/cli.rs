@@ -804,6 +804,32 @@ fn a_send_without_limits_keeps_the_ones_given_before() {
     assert_eq!(me["max_usd"], 7.0);
 }
 
+/// The battery's recovery scenario: a child's question was steered into
+/// its parent's running turn and counted delivered once written to the
+/// harness, which reads it only at its next step; the parent's
+/// `by inbox --unread` in that step printed `empty`. Its own inbox now
+/// reads such a message as unread until the turn ends.
+#[test]
+fn a_message_steered_into_the_running_turn_is_still_unread_in_it() {
+    let repo = Repo::new();
+    let prompt = [
+        "SH by spawn 'SH by report tests-pass' --name kid",
+        "SH by wait kid > /dev/null",
+        "SH by inbox --unread --json",
+        "SH by inbox --unread",
+    ]
+    .join("\n");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    let (code, unread) = sh_json(&said, 2);
+    assert_eq!(code, 0, "{said}");
+    let messages = unread["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1, "{said}");
+    assert_eq!(messages[0]["text"], "tests-pass");
+    assert!(said.contains("from kid [unread]: tests-pass"), "{said}");
+}
+
 #[test]
 fn a_harness_steers_its_running_children_with_by_and_python() {
     let repo = Repo::new();

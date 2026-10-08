@@ -203,6 +203,42 @@ pub(crate) fn try_deliver_now(yard: &Yard, store: &Store, to: &str, message: &Me
     }
 }
 
+/// The messages delivered by steering into `branch`'s running turn, by
+/// id: written to its harness, which takes them only at its next step
+/// (such as after the tool call reading the inbox), so that turn has not
+/// read them yet. `inbox --unread` lists them; without this, one made
+/// while a message was on its way missed it ([`crate::Inbox::is_unread`]).
+pub(crate) fn steered_this_turn(store: &Store, branch: &str) -> Result<Vec<u64>, Error> {
+    let running = store
+        .backend()
+        .leases()?
+        .into_iter()
+        .find(|l| l.branch == branch && l.owner.is_some())
+        .map(|l| l.turn);
+    let Some(turn) = running else {
+        return Ok(Vec::new());
+    };
+    let mut steered = Vec::new();
+    for message in store
+        .backend()
+        .inbox(branch)?
+        .iter()
+        .filter(|m| m.delivered)
+    {
+        let Some(steer) = store.backend().message_steer(message.id)? else {
+            continue;
+        };
+        if store
+            .backend()
+            .steer(branch, steer)?
+            .is_some_and(|row| row.turn == turn)
+        {
+            steered.push(message.id);
+        }
+    }
+    Ok(steered)
+}
+
 /// Every message pending delivery to `branch`, oldest first.
 pub(crate) fn pending(store: &Store, branch: &str) -> Result<Vec<Message>, Error> {
     Ok(store

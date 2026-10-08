@@ -1876,18 +1876,12 @@ pub fn inbox(target: &Target, as_branch: Option<String>, unread: bool, json: boo
             .and_then(|b| as_user(&b, TaskOptions::default())?.inbox()),
     };
     // --unread holds for the JSON too, which the Python module reads.
-    let result = result.map(|mut inbox| {
-        if unread {
-            inbox.messages.retain(|m| !m.delivered);
-        }
-        inbox
+    let result = result.map(|inbox| match unread {
+        true => inbox.unread_only(),
+        false => inbox,
     });
     emit(json, result, |inbox| {
-        let messages: Vec<&branchyard::Message> = inbox
-            .messages
-            .iter()
-            .filter(|m| !unread || !m.delivered)
-            .collect();
+        let messages: Vec<&branchyard::Message> = inbox.messages.iter().collect();
         if messages.is_empty() {
             return "empty\n".to_owned();
         }
@@ -1898,7 +1892,7 @@ pub fn inbox(target: &Target, as_branch: Option<String>, unread: bool, json: boo
                     Some(id) => format!(" (re #{id})"),
                     None => String::new(),
                 };
-                let read = if m.delivered { "" } else { " [unread]" };
+                let read = if inbox.is_unread(m) { " [unread]" } else { "" };
                 format!(
                     "#{} {} from {}{reply}{read}: {}\n",
                     m.id, m.kind, m.from, m.text

@@ -391,6 +391,9 @@ class Asked:
 class Inbox:
     branch: str
     messages: List[Message]
+    # Ids of messages steered into your running turn: delivered, but not
+    # read until your next step, so unread=True still lists them.
+    steered_this_turn: Optional[List[int]] = None
 
 
 def _by() -> str:
@@ -677,6 +680,7 @@ def inbox(unread: bool = False) -> Inbox:
     return Inbox(
         branch=value["branch"],
         messages=[_message(m) for m in value["messages"]],
+        steered_this_turn=value.get("steered_this_turn"),
     )
 
 
