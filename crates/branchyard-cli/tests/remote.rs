@@ -501,9 +501,15 @@ fn by_cancel_stops_a_turn_on_the_server() {
         text(&ran.stdout)
     );
     let json_cancel = server.by(&dir.0, &["cancel", "held", "--json"]);
-    assert_eq!(
-        serde_json::from_slice::<Value>(&json_cancel.stdout).unwrap(),
-        serde_json::json!({"cancelled": []})
+    // Nothing runs any more; the note says so, through the server too.
+    let json_cancel: Value = serde_json::from_slice(&json_cancel.stdout).unwrap();
+    assert_eq!(json_cancel["cancelled"], serde_json::json!([]));
+    assert!(
+        json_cancel["note"]
+            .as_str()
+            .unwrap()
+            .contains("by discard held"),
+        "{json_cancel}"
     );
 }
 

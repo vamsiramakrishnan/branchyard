@@ -431,6 +431,10 @@ mod tests {
             "by cancel parser",
             "by children --json",
             "/bin/bash -lc 'by spawn \"do it\" --wait'",
+            "by discard parser --reason lost",
+            "by artifact publish out.json --media-type application/json",
+            "by ask 'which file?' --wait 30",
+            "by inbox --unread --json",
         ] {
             assert!(allowed(command), "{command}");
         }

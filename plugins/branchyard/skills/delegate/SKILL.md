@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Delegate parts of a coding task to child branches with Branchyard. Use when you run on a Branchyard branch (BRANCHYARD_BRANCH is set) and the work splits into independent pieces, needs a second harness, or should be tried more than one way. Covers `by spawn` (including children that wait for siblings), `by graph`, `by inspect`, `by integrate`, the Python module and the MCP tools.
+description: Delegate parts of a coding task to child branches with Branchyard. Use when you run on a Branchyard branch (BRANCHYARD_BRANCH is set) and the work splits into independent pieces, needs a second harness, or should be tried more than one way. Covers `by spawn` (including children that wait for siblings), `by graph`, `by inspect`, `by integrate`, `by discard`, artifacts, messaging your parent, the Python module and the MCP tools.
 ---
 
 # Delegating with Branchyard
@@ -32,19 +32,35 @@ session, and merging overlapping edits produces conflicts.
    current work: your uncommitted changes are committed to your branch
    first.
 3. Watch. `by inspect <child>` shows status, diffstat, cost and its last
-   message; `by events <child>` shows its activity. Wait with `--wait` or
-   by polling; do not busy-loop faster than every few seconds. To correct
-   a child that is still running, `by send <child> --steer "<text>"` adds
-   to its running turn without stopping it; the child reads it at its next
-   step. Some harnesses cannot take it, and the refusal says so.
+   message; `by events <child>` shows its activity.
+
+   To wait for a child, spawn it with `by spawn ... --wait`, which returns
+   when its turn ends, or poll `by inspect <child>` no faster than every few
+   seconds; in Python, `branchyard.wait(name, timeout=...)` does the polling.
+   To correct a child that is still running,
+   `by send <child> --steer "<text>"` adds to its running turn without
+   stopping it; the child reads it at its next step. Some harnesses cannot
+   take it, and the refusal says so.
 4. Integrate. When a child is `ready`, `by integrate <child>` merges it
    into your branch after its check passes. Your working tree moves to the
    merge. A conflict or failed check is an error: send the child a fix with
    `by send <child> "<prompt>"`, or do it yourself.
-5. Clean up. `by cancel <child>` stops a child and everything below it.
+5. Clean up. `by cancel <child>` stops a running child and everything
+   below it. A child that already finished is not running, so cancel
+   changes nothing; set a finished child you will not use aside with
+   `by discard <child> --reason "<why>"`. It keeps its record and cost,
+   is never integrated, and frees its slot for another child.
 
 Statuses: `running`, `ready` (a candidate to merge), `no_changes`,
-`interrupted`, `budget_exceeded`, `failed`, `merged`.
+`interrupted`, `budget_exceeded`, `failed`, `merged`, `discarded`.
+
+Budgets: `--budget-usd` sets a child's cost limit, which refusals and
+statuses call `max_usd`. A child reserves its limit from yours until it
+is merged or discarded. `by inspect` shows what you have left.
+
+Inside a harness, `by spawn` refuses `--parent`, `--yes`, `--ask` and
+`--permissions`: your children run under your policy. `by spawn --help`
+marks every flag you may not pass.
 
 ## With `by`
 
@@ -61,6 +77,7 @@ by send parser-flake --steer "Use the fixture in tests/data, not a new one."
 by send parser-flake "The seed must come from the test name, not the clock."
 by integrate parser-flake
 by cancel retry-docs
+by discard retry-docs --reason "superseded by parser-flake"
 ```
 
 Every command takes `--json` for a stable machine-readable result, and
@@ -167,4 +184,6 @@ Errors are `DeniedError` (envelope, budget or authority), `RunningError`,
 
 If you cannot run commands, the same operations are MCP tools on the
 `branchyard` server: `spawn` (with `depends_on`), `inspect`, `events`, `send`,
-`propose_integration`, `cancel`, `children`, `graph` and `apply_graph`.
+`steer`, `propose_integration`, `cancel`, `discard`, `children`, `graph`,
+`apply_graph`, the artifact and scratch tools, and `ask`, `report`,
+`escalate`, `answer` and `inbox`.

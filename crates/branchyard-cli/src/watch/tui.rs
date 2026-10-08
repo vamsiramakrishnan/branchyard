@@ -1054,6 +1054,7 @@ fn status_style(status: &BranchStatus) -> (&'static str, Style) {
             Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         BranchStatus::Merged { .. } => ("◆", Style::new().fg(Color::Blue)),
+        BranchStatus::Discarded { .. } => ("⊘", Style::new().fg(Color::DarkGray)),
         BranchStatus::AwaitingPlanApproval => (
             "?",
             Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),

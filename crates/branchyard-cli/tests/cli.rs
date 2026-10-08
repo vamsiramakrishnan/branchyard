@@ -211,9 +211,11 @@ fn by_cancel_stops_a_turn_that_another_by_runs() {
     );
     let log = stdout(&repo.by(&["log", "held"]));
     assert!(log.contains("warning: cancelled by by cancel"), "{log}");
-    assert_eq!(
-        stdout(&repo.by(&["cancel", "held"])),
-        "nothing was running\n"
+    // Settled: a second cancel changes nothing and says what to use.
+    let again = stdout(&repo.by(&["cancel", "held"]));
+    assert!(
+        again.starts_with("held is not running (interrupted)") && again.contains("by discard held"),
+        "{again}"
     );
 }
 
@@ -924,9 +926,14 @@ fn the_same_commands_act_with_your_authority_outside_a_harness() {
     assert_eq!(children["descendants"][0]["name"], "kid");
     let events = repo.json(&["events", "kid", "--cursor", "0", "--limit", "2", "--json"]);
     assert_eq!(events["next_cursor"], 2);
-    assert_eq!(
-        repo.json(&["cancel", "kid", "--json"]),
-        serde_json::json!({"cancelled": []})
+    let cancelled = repo.json(&["cancel", "kid", "--json"]);
+    assert_eq!(cancelled["cancelled"], serde_json::json!([]));
+    assert!(
+        cancelled["note"]
+            .as_str()
+            .unwrap()
+            .contains("by integrate kid"),
+        "{cancelled}"
     );
     let merged = repo.json(&["integrate", "kid", "--json"]);
     assert_eq!(merged["target"], "by/root");
@@ -992,7 +999,7 @@ fn a_delegating_harness_gets_tools_and_skill_outside_its_worktree() {
     assert!(tools.status.success(), "{}", stderr(&tools));
     assert!(
         reply(&repo, "mcp").contains(
-            "mcp tools: spawn,inspect,events,send,steer,propose_integration,cancel,children"
+            "mcp tools: spawn,inspect,events,send,steer,propose_integration,cancel,discard,children"
         ),
         "{}",
         reply(&repo, "mcp")
@@ -1694,6 +1701,369 @@ fn checkpoints_show_and_log_then_rewind_and_fork_at() {
         stderr(&missing).contains("no checkpoint 7"),
         "{}",
         stderr(&missing)
+    );
+}
+
+/// A depth-0 child, which may not spawn, still acts as itself: it publishes
+/// and reads its storage, asks and reports to its parent and reads its own
+/// inbox, through `by` on its `PATH`. Everything outside its branch is
+/// refused. Before, it had no token, so its `by` refused all of it.
+#[test]
+fn a_leaf_child_uses_its_storage_and_messages_its_parent_but_nothing_else() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&["run", "say hi", "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    repo.json(&[
+        "spawn", "say hi", "--parent", "root", "--name", "sib", "--wait", "--yes", "--json",
+    ]);
+    let file = repo.dir.join("sib.txt");
+    fs::write(&file, "sibling's\n").unwrap();
+    let theirs = repo.json(&[
+        "artifact",
+        "publish",
+        file.to_str().unwrap(),
+        "--media-type",
+        "text/plain",
+        "--branch",
+        "sib",
+        "--json",
+    ]);
+    // --media-type is recorded, outside a harness as inside one.
+    assert_eq!(theirs["media_type"], "text/plain", "{theirs}");
+    let theirs = theirs["id"].as_str().unwrap().to_owned();
+    let prompt = [
+        "SH printf hi > data.txt".to_owned(),
+        "SH by artifact publish data.txt --media-type application/json --json".to_owned(),
+        "SH by artifact list --json".to_owned(),
+        "SH by inspect --json".to_owned(),
+        "SH by report halfway --json".to_owned(),
+        "SH by ask 'which file?' --json".to_owned(),
+        "SH by inbox --json".to_owned(),
+        "SH test \"$BRANCHYARD_BY\" = \"$(command -v by)\"".to_owned(),
+        "SH by spawn x --name grandkid --json".to_owned(),
+        "SH by inspect root --json".to_owned(),
+        "SH by artifact list --branch root --json".to_owned(),
+        format!("SH by artifact get {theirs} --out x.txt --json"),
+        "SH by cancel sib --json".to_owned(),
+        "SH by discard sib --json".to_owned(),
+        "SH by integrate sib --json".to_owned(),
+    ]
+    .join("\n");
+    let leaf = repo.json(&[
+        "spawn", &prompt, "--parent", "root", "--name", "leaf", "--wait", "--yes", "--json",
+    ]);
+    assert_eq!(leaf["envelope"]["max_depth"], 0, "{leaf}");
+    let said = reply(&repo, "leaf");
+    let (code, published) = sh_json(&said, 1);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(published["publisher_branch"], "leaf");
+    assert_eq!(published["media_type"], "application/json");
+    let (code, listed) = sh_json(&said, 2);
+    assert_eq!(code, 0, "{said}");
+    let names: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["publisher_branch"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["leaf"], "a sibling's artifact is not listed");
+    let (code, me) = sh_json(&said, 3);
+    assert_eq!((code, me["name"].as_str()), (0, Some("leaf")), "{said}");
+    let (code, reported) = sh_json(&said, 4);
+    assert_eq!((code, reported["to"].as_str()), (0, Some("root")), "{said}");
+    let (code, asked) = sh_json(&said, 5);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(asked["message"]["kind"], "question");
+    let (code, inbox) = sh_json(&said, 6);
+    assert_eq!(
+        (code, inbox["branch"].as_str()),
+        (0, Some("leaf")),
+        "{said}"
+    );
+    assert!(said.contains("sh: 0\n"), "{said}");
+    let found_by = said.split("sh: ").nth(8).unwrap();
+    assert!(
+        found_by.starts_with("0\n"),
+        "BRANCHYARD_BY is by on PATH: {said}"
+    );
+    for (n, why) in [
+        (8, "leaf may not spawn: its envelope's max_depth is 0"),
+        (9, "leaf may not act on root"),
+        (10, "acts only as leaf"),
+        (11, "may not read"),
+        (12, "leaf may not cancel"),
+        (13, "leaf may not discard"),
+        (14, "leaf may not integrate"),
+    ] {
+        let (code, refused) = sh_json(&said, n);
+        assert_eq!(code, 1, "command {n}: {said}");
+        assert_eq!(refused["error"]["kind"], "denied", "command {n}: {refused}");
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(message.contains(why), "command {n}: {message}");
+    }
+    // The parent got the report and the question, which it answers.
+    let messages = repo.json(&["inbox", "--as", "root", "--unread", "--json"]);
+    let messages = messages["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    // The same token reaches the MCP server, with the same scope.
+    let sent = repo.json(&[
+        "send",
+        "leaf",
+        "MCP list_artifacts {}\nMCP spawn {\"prompt\": \"x\"}",
+        "--wait",
+        "--yes",
+        "--json",
+    ]);
+    assert_ne!(sent["status"]["state"], "failed", "{sent}");
+    let said = reply(&repo, "leaf");
+    assert!(said.contains("mcp list_artifacts: ["), "{said}");
+    assert!(
+        said.contains("mcp spawn error: denied: leaf may not spawn"),
+        "{said}"
+    );
+}
+
+/// The ask/answer protocol with a leaf: it asks and waits, its parent
+/// answers from another process, and the wait returns the answer.
+#[test]
+fn a_leaf_asks_and_waits_for_its_parents_answer() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&["run", "say hi", "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let mut leaf = repo
+        .command(env!("CARGO_BIN_EXE_by"))
+        .args(["spawn", "SH by ask 'tabs or spaces?' --wait 60 --json"])
+        .args([
+            "--parent", "root", "--name", "leaf", "--wait", "--yes", "--json",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let question = wait::until("the leaf's question", || {
+        let inbox = repo.json(&["inbox", "--as", "root", "--json"]);
+        inbox["messages"]
+            .as_array()
+            .and_then(|m| m.first())
+            .and_then(|m| m["id"].as_u64())
+    });
+    repo.json(&[
+        "answer",
+        &question.to_string(),
+        "tabs",
+        "--as",
+        "root",
+        "--json",
+    ]);
+    assert!(leaf.wait().unwrap().success());
+    let (code, asked) = sh_json(&reply(&repo, "leaf"), 0);
+    assert_eq!(code, 0);
+    assert_eq!(asked["answer"]["text"], "tabs", "{asked}");
+}
+
+/// Every harness Branchyard starts finds `by`, delegated or not.
+#[test]
+fn every_harness_gets_by_on_its_path() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&["run", "ENV BRANCHYARD_BY", "--name", "plain", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let said = reply(&repo, "plain");
+    assert!(said.contains("BRANCHYARD_BY=/"), "{said}");
+    assert!(said.contains(env!("CARGO_BIN_EXE_by")), "{said}");
+}
+
+/// `by discard` sets a settled child aside, inside a harness and out:
+/// discarded with the reason, its record kept, its slot free. `by cancel`
+/// on a settled child says to use it, and `by rm` releases the lease it
+/// deletes without a warning.
+#[test]
+fn discard_sets_a_settled_child_aside_and_frees_its_slot() {
+    let repo = Repo::new();
+    let prompt = [
+        "SH by spawn 'say hi' --name k --wait --json",
+        "SH by cancel k --json",
+        "SH by discard k --reason 'not needed' --json",
+        "SH python3 -c \"import branchyard as b; print('py', b.discard('k').status['state'])\"",
+    ]
+    .join("\n");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let said = reply(&repo, "root");
+    let (code, cancelled) = sh_json(&said, 1);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(cancelled["cancelled"], serde_json::json!([]));
+    assert!(
+        cancelled["note"].as_str().unwrap().contains("by discard k"),
+        "{cancelled}"
+    );
+    let (code, discarded) = sh_json(&said, 2);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        discarded["status"],
+        serde_json::json!({"state": "discarded", "reason": "not needed"})
+    );
+    assert!(said.contains("py discarded"), "{said}");
+    // k holds no slot: three more children and one more after a discard.
+    for name in ["a", "b", "c", "d"] {
+        repo.json(&[
+            "spawn", "say hi", "--parent", "root", "--name", name, "--wait", "--yes", "--json",
+        ]);
+    }
+    let full = repo.by(&[
+        "spawn", "say hi", "--parent", "root", "--name", "e", "--wait", "--yes", "--json",
+    ]);
+    assert_eq!(full.status.code(), Some(1));
+    let full: Value = serde_json::from_slice(&full.stdout).unwrap();
+    assert!(
+        full["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("by discard"),
+        "{full}"
+    );
+    let cancel = repo.by(&["cancel", "a"]);
+    assert!(cancel.status.success(), "{}", stderr(&cancel));
+    assert!(
+        stdout(&cancel).contains("by discard a"),
+        "{}",
+        stdout(&cancel)
+    );
+    let text = repo.by(&["discard", "a", "--reason", "lost the race"]);
+    assert!(text.status.success(), "{}", stderr(&text));
+    assert!(
+        stdout(&text).contains("discarded: lost the race"),
+        "{}",
+        stdout(&text)
+    );
+    let shown = repo.json(&["show", "a", "--json"]);
+    assert_eq!(shown["status"]["state"], "discarded");
+    repo.json(&[
+        "spawn", "say hi", "--parent", "root", "--name", "e", "--wait", "--yes", "--json",
+    ]);
+    // Removing a settled child is quiet: no lease warning, no escapes.
+    let removed = repo.by(&["rm", "b"]);
+    assert!(removed.status.success(), "{}", stderr(&removed));
+    let err = stderr(&removed);
+    assert!(!err.contains("WARN") && !err.contains("fenced"), "{err}");
+    assert!(
+        !err.contains('\x1b') && !stdout(&removed).contains('\x1b'),
+        "{err}"
+    );
+    // The envelope names the profile it allows.
+    let shown = stdout(&repo.by(&["inspect", "root"]));
+    let profile = repo.json(&["show", "root", "--json"])["profile"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        shown.contains(&format!("harnesses: {profile} only (its own)")),
+        "{shown}"
+    );
+}
+
+/// `by run --deny` denies a tool before any permission answer, `--yes`
+/// included, and the branch keeps it for later sends.
+#[test]
+fn run_denies_tools_and_the_branch_keeps_the_denial() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&[
+        "run",
+        "PERMISSION WRITE marker.txt=x",
+        "--name",
+        "kept",
+        "--deny",
+        "write*",
+        "--yes",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        reply(&repo, "kept").contains("denied"),
+        "{}",
+        reply(&repo, "kept")
+    );
+    let sent = repo.by_agent(&["send", "kept", "PERMISSION WRITE marker.txt=x", "--yes"]);
+    assert!(sent.status.success(), "{}", stderr(&sent));
+    assert!(
+        reply(&repo, "kept").contains("denied"),
+        "{}",
+        reply(&repo, "kept")
+    );
+    assert_eq!(
+        repo.json(&["show", "kept", "--json"])["candidate"],
+        Value::Null
+    );
+    // A cost refusal names the flag as well as the limit.
+    let root = repo.by_agent(&[
+        "run",
+        "SH by spawn x --budget-usd 2 --json",
+        "--name",
+        "root",
+        "--delegate",
+        "--budget-usd",
+        "1",
+        "--yes",
+    ]);
+    assert!(root.status.success(), "{}", stderr(&root));
+    let (code, refused) = sh_json(&reply(&repo, "root"), 0);
+    assert_eq!(code, 1, "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("max_usd (--budget-usd) 2 exceeds"),
+        "{refused}"
+    );
+}
+
+/// `--mcp NAME=https://URL` reaches the harness's MCP configuration; a
+/// header is a secret, so it needs a private home, and names a server.
+#[test]
+fn mcp_takes_an_http_server_and_its_headers() {
+    let repo = Repo::new();
+    let record = repo.dir.join("launch.json");
+    let agent = fake_agent!().display().to_string();
+    let command = format!("{agent} --record-launch {}", record.display());
+    let out = repo.by(&[
+        "run",
+        "say hi",
+        "--name",
+        "web",
+        "--harness",
+        "claude-code-stream-json",
+        "--command",
+        &command,
+        "--mcp",
+        "search=https://mcp.example.invalid/mcp",
+        "--yes",
+    ]);
+    assert!(record.is_file(), "{}\n{}", stdout(&out), stderr(&out));
+    let launched: Value = serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+    assert_eq!(
+        launched["mcp_config"]["servers"],
+        serde_json::json!(["search"]),
+        "{launched}"
+    );
+    let header = repo.by(&[
+        "run",
+        "say hi",
+        "--mcp",
+        "search=https://mcp.example.invalid/mcp",
+        "--mcp-header",
+        "search:Authorization=@/nonexistent",
+        "--yes",
+    ]);
+    assert!(!header.status.success());
+    assert!(
+        stderr(&header).contains("--isolated"),
+        "{}",
+        stderr(&header)
+    );
+    let unknown = repo.by(&["run", "say hi", "--mcp-header", "other:Authorization=VAR"]);
+    assert_eq!(unknown.status.code(), Some(2));
+    assert!(
+        stderr(&unknown).contains("no --mcp other="),
+        "{}",
+        stderr(&unknown)
     );
 }
 

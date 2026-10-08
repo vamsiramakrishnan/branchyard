@@ -59,6 +59,7 @@ __all__ = [
     "steer",
     "integrate",
     "cancel",
+    "discard",
     "children",
     "graph",
     "apply_graph",
@@ -473,6 +474,16 @@ def integrate(branch: str) -> Merged:
 def cancel(branch: str) -> Cancelled:
     """Stop a descendant's turn and every turn running below it."""
     return _make(Cancelled, _run(["cancel", branch]))
+
+
+def discard(branch: str, reason: Optional[str] = None) -> Inspection:
+    """Set a settled descendant aside: it ends `discarded` with `reason`,
+    keeps its record and cost, is never integrated, and frees its slot in
+    your max_children. A running one is refused: cancel it first."""
+    args = ["discard", branch]
+    if reason is not None:
+        args += ["--reason", reason]
+    return _make(Inspection, _run(args))
 
 
 def children() -> Children:

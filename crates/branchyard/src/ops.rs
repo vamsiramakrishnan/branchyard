@@ -169,6 +169,46 @@ pub(crate) fn merge(yard: &Yard, name: &str, target: &str) -> Result<Merged, Err
     Ok(merged)
 }
 
+/// Set a settled branch aside: it ends `discarded` with `reason`, keeps its
+/// record, worktree and cost, runs no more turns and is never merged, and
+/// what waits for it is blocked. A branch still `waiting` for its
+/// prerequisites never starts. Refused while a turn runs and once merged;
+/// discarding a discarded branch again changes nothing.
+pub(crate) fn discard(yard: &Yard, name: &str, reason: &str) -> Result<BranchInfo, Error> {
+    let store = yard.store();
+    let (mut record, lease) = hold(yard, name)?;
+    match &record.info.status {
+        BranchStatus::Running => return Err(Error::Running(name.to_owned())),
+        BranchStatus::Merged { target, .. } => {
+            return Err(Error::Denied(format!(
+                "{name} was merged into {target}; there is nothing to discard (by rm removes it)"
+            )))
+        }
+        BranchStatus::Discarded { .. } => return Ok(record.info),
+        _ => {}
+    }
+    record.info.status = BranchStatus::Discarded {
+        reason: reason.to_owned(),
+    };
+    // A discarded branch runs no more turns: its kept sandbox goes, as a
+    // merged one's does.
+    let discarded = crate::snapshots::discard_kept(yard, &record, "the branch was discarded");
+    if !discarded.is_empty() {
+        let mut recorder = Recorder::fenced(&store, lease.fence(), None);
+        for activity in discarded {
+            recorder.record(activity)?;
+        }
+    }
+    let event = RecordedEvent {
+        at_ms: now_ms(),
+        activity: Activity::Status(record.info.status.clone()),
+    };
+    lease.finish(Some(&record), Some(&event))?;
+    // What waited for it can never start now.
+    crate::graph::settled(yard, name, None);
+    Ok(record.info)
+}
+
 /// For a merge whose engine stopped after recording its intent: the
 /// merge, if the candidate is already in the target.
 fn landed(

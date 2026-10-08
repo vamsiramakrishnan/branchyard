@@ -4,7 +4,7 @@
 //! delegate (`TaskOptions::delegation`), passing `--root <repository>
 //! --branch <name>` and the turn's token in `BRANCHYARD_DELEGATION`. The
 //! server offers `spawn`, `inspect`, `events`, `send`, `steer`,
-//! `propose_integration`, `cancel`, `children`, `apply_graph` and `graph`
+//! `propose_integration`, `cancel`, `discard`, `children`, `apply_graph` and `graph`
 //! (dependencies between children; see `docs/graph.md`), and the artifact and
 //! scratch-area tools (`publish_artifact`, `list_artifacts`,
 //! `get_artifact`, `share_artifact`, `create_scratch`, `list_scratch`,
@@ -52,47 +52,26 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 
-/// Tool names, in the order they are listed.
-pub const TOOLS: [&str; 27] = [
-    "spawn",
-    "inspect",
-    "events",
-    "send",
-    "steer",
-    "propose_integration",
-    "cancel",
-    "children",
-    "apply_graph",
-    "graph",
-    "publish_artifact",
-    "list_artifacts",
-    "get_artifact",
-    "share_artifact",
-    "create_scratch",
-    "list_scratch",
-    "share_scratch",
-    "lock_scratch",
-    "unlock_scratch",
-    "ask",
-    "report",
-    "escalate",
-    "answer",
-    "inbox",
-    "approve_plan",
-    "reject_plan",
-    "answer_approval",
-];
+/// Tool names, in the order they are listed: the MCP tools of
+/// [`branchyard::operations::OPERATIONS`].
+pub fn tool_names() -> Vec<&'static str> {
+    branchyard::operations::tools()
+        .filter_map(|operation| operation.tool)
+        .collect()
+}
 
 const INSTRUCTIONS: &str = "Branchyard runs you on a git branch. These tools let you \
 delegate: spawn child branches with their own harness and budget, watch them with inspect \
 and events, continue them with send, add to a child's running turn with steer, merge a \
 finished child into your own branch with \
-propose_integration (its check must pass), stop them with cancel, and list them with \
-children. Children run in parallel; spawn returns once a child has started. A child may \
+propose_integration (its check must pass), stop them with cancel, set a settled one aside with \
+discard (it frees its slot), and list them with children. Children run in parallel; spawn returns once a child has started. A child may \
 depend on its siblings (depends_on): it waits, and starts once they have settled; apply_graph \
 creates several children and dependencies at once, all or nothing, against the revision graph \
 shows. You act only as your own branch and only \
-on your descendants. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
+on your descendants. A branch that may not delegate (its envelope's max_depth is 0) still has \
+inspect, the artifact and scratch tools, and ask, report, escalate and inbox; the other tools \
+refuse it. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
 may spawn. You can also message: ask your parent a question (optionally waiting for its \
 answer), report to it, escalate to it or, if your rig seat allows, further up; answer a \
 descendant's message; and read your own inbox. A child spawned with plan: true writes a plan read-only and escalates it to you: approve_plan runs it (as proposed or edited), reject_plan ends it or, with replan, has it plan again. When a descendant's tool or connector call needs approval, the ask is escalated to you: answer_approval allows or denies it.";
@@ -282,6 +261,22 @@ pub fn tools() -> Vec<Tool> {
             schema(json!({
                 "type": "object",
                 "properties": {"branch": branch_property("A descendant")},
+                "required": ["branch"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "discard",
+            "Set a settled descendant aside: it ends discarded with your reason, runs no more \
+             turns, is never integrated, keeps its record and cost, and no longer counts \
+             against your max_children. Refused while it runs (cancel it first). Returns it as \
+             inspect shows it.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "branch": branch_property("A descendant that is not running"),
+                    "reason": {"type": "string", "description": "Why, recorded with it"},
+                },
                 "required": ["branch"],
                 "additionalProperties": false,
             })),

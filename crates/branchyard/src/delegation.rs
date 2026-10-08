@@ -348,6 +348,47 @@ pub struct Sent {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Cancelled {
     pub cancelled: Vec<String>,
+    /// When nothing was running: what the branch is, and the command that
+    /// does what a cancel cannot (`by discard` sets a settled child aside).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Cancelled {
+    /// What a cancel of `branch`, now `status`, stopped.
+    pub fn of(cancelled: Vec<String>, branch: &str, status: &BranchStatus) -> Cancelled {
+        let note = match (cancelled.is_empty(), status) {
+            (false, _) => None,
+            (true, BranchStatus::Ready) => Some(format!(
+                "{branch} is not running: it ended ready, so there is nothing to cancel. \
+                 Keep its work with `by integrate {branch}`, or set it aside with \
+                 `by discard {branch} --reason TEXT`, which frees its slot"
+            )),
+            (true, BranchStatus::Merged { target, .. }) => Some(format!(
+                "{branch} is not running: it was merged into {target}. `by rm {branch}` \
+                 removes its worktree"
+            )),
+            (true, BranchStatus::Discarded { .. }) => {
+                Some(format!("{branch} is not running: it was already discarded"))
+            }
+            (true, BranchStatus::Running) => Some(format!("{branch} was already asked to stop")),
+            (true, status) => Some(format!(
+                "{branch} is not running ({}), so there is nothing to cancel. Continue it \
+                 with `by send {branch} \"<prompt>\"`, or set it aside with \
+                 `by discard {branch} --reason TEXT`, which frees its slot",
+                status_word(status)
+            )),
+        };
+        Cancelled { cancelled, note }
+    }
+}
+
+/// A status's `state`, as JSON names it.
+fn status_word(status: &BranchStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|v| v["state"].as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 /// A branch's subtree.
@@ -661,6 +702,18 @@ impl Delegate {
         match &self.via {
             Via::Local(local) => local.cancel(branch),
             Via::Remote(_) => self.typed("cancel", json!({ "branch": branch })),
+        }
+    }
+
+    /// Set a settled descendant aside: it ends `discarded` with `reason`,
+    /// runs no more turns, is never integrated, keeps its record and cost,
+    /// and frees its slot in this branch's `max_children`. Refused while it
+    /// runs (cancel it first) and once it was merged. Returns it as
+    /// [`Delegate::inspect`] shows it.
+    pub fn discard(&self, branch: &str, reason: Option<&str>) -> Result<Inspection, Error> {
+        match &self.via {
+            Via::Local(local) => local.discard(branch, reason),
+            Via::Remote(_) => self.typed("discard", json!({"branch": branch, "reason": reason})),
         }
     }
 
@@ -1016,12 +1069,16 @@ pub(crate) fn reserved(store: &Store, record: &Record) -> f64 {
         .iter()
         .filter_map(|child| store.read(child).ok())
         .map(|child| {
+            let spent = subtree_spent(store, &child, &mut BTreeSet::new());
+            // A discarded child runs no more turns: it holds what it spent.
+            if matches!(child.info.status, BranchStatus::Discarded { .. }) {
+                return spent;
+            }
             let limit = child
                 .grant
                 .as_ref()
                 .and_then(|g| g.limits.as_ref())
                 .and_then(|l| l.max_usd);
-            let spent = subtree_spent(store, &child, &mut BTreeSet::new());
             limit.map_or(spent, |limit| limit.max(spent))
         })
         .sum()
@@ -1720,16 +1777,22 @@ impl Local {
         taken: &BTreeSet<String>,
     ) -> Result<Planned, Error> {
         let store = self.store();
+        // A removed or discarded child no longer holds a slot.
         let live = caller
             .info
             .children
             .iter()
-            .filter(|child| store.read(child).is_ok())
+            .filter(|child| {
+                store
+                    .read(child)
+                    .is_ok_and(|r| !matches!(r.info.status, BranchStatus::Discarded { .. }))
+            })
             .count()
             + planned.len();
         if live >= grant.envelope.max_children as usize {
             return Err(Error::Denied(format!(
-                "{} already has {live} children, its envelope's max_children",
+                "{} already has {live} children, its envelope's max_children; `by discard` \
+                 a settled one, or `by rm` it, to free its slot",
                 self.branch
             )));
         }
@@ -2337,12 +2400,32 @@ impl Local {
         let result = self
             .require_descendant(branch, false)
             .and_then(|()| cancel_tree(&self.yard, branch, &self.branch))
-            .map(|cancelled| Cancelled { cancelled });
+            .and_then(|cancelled| {
+                let status = self.store().read(branch)?.info.status;
+                Ok(Cancelled::of(cancelled, branch, &status))
+            });
         self.note("cancel", branch, &result, |c| {
-            match c.cancelled.is_empty() {
-                true => "nothing was running".into(),
-                false => format!("asked {} to stop", c.cancelled.join(", ")),
+            match (&c.note, c.cancelled.is_empty()) {
+                (Some(note), _) => note.clone(),
+                (None, true) => "nothing was running".into(),
+                (None, false) => format!("asked {} to stop", c.cancelled.join(", ")),
             }
+        });
+        result
+    }
+
+    fn discard(&self, branch: &str, reason: Option<&str>) -> Result<Inspection, Error> {
+        let result = self.require_descendant(branch, false).and_then(|()| {
+            let reason = reason
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .map_or_else(|| format!("discarded by {}", self.branch), str::to_owned);
+            ops::discard(&self.yard, branch, &reason)?;
+            self.inspect(branch)
+        });
+        self.note("discard", branch, &result, |i| match &i.status {
+            BranchStatus::Discarded { reason } => format!("discarded: {reason}"),
+            _ => "discarded".into(),
         });
         result
     }
@@ -2715,6 +2798,21 @@ struct NoArgs {}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct DiscardArgs {
+    branch: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InboxArgs {
+    #[serde(default)]
+    unread: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PublishArtifactArgs {
     path: String,
     name: Option<String>,
@@ -2847,6 +2945,10 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
         "cancel" => {
             let args: TargetArgs = parse(tool, arguments)?;
             to_json(&local.cancel(&required(tool, args.branch)?)?)
+        }
+        "discard" => {
+            let args: DiscardArgs = parse(tool, arguments)?;
+            to_json(&local.discard(&args.branch, args.reason.as_deref())?)
         }
         "children" => {
             let _: NoArgs = parse(tool, arguments)?;

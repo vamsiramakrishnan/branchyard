@@ -850,6 +850,41 @@ Examples (inside a harness, the parent is the harness's own branch):
   by spawn \"write the parser\" --depends-on tokenizer --after integrated
   by spawn \"fix it\" --parent root --yes            # outside a harness";
 
+const DISCARD_EXAMPLES: &str = "\
+Examples:
+  by discard lru-linkedlist --reason \"the ordered-dict version won\"
+  by discard flaky-fix --json
+
+A running child is refused: by cancel it first. by cancel stops a turn; by
+discard settles what a stopped or finished child is. Its worktree stays until
+by rm.";
+
+/// The edit format of `by graph apply`, from `branchyard::GraphEdit`.
+pub(crate) const GRAPH_APPLY_HELP: &str = "\
+A proposal is {\"expected_revision\": N, \"edits\": [EDIT, ...]}; --edits takes the
+array alone. Each edit is an object tagged by \"kind\":
+
+  {\"kind\": \"spawn\", \"prompt\": \"...\", ...}   a new child; it takes what by spawn
+      does, by the MCP tool's names: name, harness, base, budget {max_usd,
+      max_turns, max_minutes}, check [argv], max_depth, max_children,
+      harnesses [ids], deny [tools], seat, depends_on [names], after
+      (settled or integrated), bindings [{scratch, access}], connectors
+      [grants], plan
+  {\"kind\": \"add_dependency\", \"dependent\": \"B\", \"prerequisite\": \"A\",
+   \"after\": \"settled\"}   B waits for A; B must not have started
+  {\"kind\": \"remove_dependency\", \"dependent\": \"B\", \"prerequisite\": \"A\"}
+
+Examples:
+  by graph show --json          # the revision to propose against
+  by graph apply --expected-revision 3 --edits '[
+    {\"kind\": \"spawn\", \"name\": \"schema\", \"prompt\": \"Add the migration\"},
+    {\"kind\": \"spawn\", \"name\": \"api\", \"prompt\": \"Use the column\",
+     \"depends_on\": [\"schema\"], \"after\": \"integrated\"}]'
+  by graph apply proposal.json --parent root --yes      # outside a harness
+
+All or nothing: a stale revision is the error stale_revision; run by graph
+show and propose again. See docs/graph.md.";
+
 const MERGE_EXAMPLES: &str = "\
 Examples:
   by merge fix-the-flaky-test
@@ -1548,10 +1583,23 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Stop a branch's running turn and every turn delegated below it
+    /// Stop a branch's running turn and every turn delegated below it (a settled child: by
+    /// discard)
     #[command(display_order = 304)]
     Cancel {
         branch: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set a settled child aside: it ends discarded with your reason, keeps its record and cost,
+    /// is never integrated, and frees its slot in its parent's max_children
+    #[command(display_order = 304, after_help = DISCARD_EXAMPLES)]
+    Discard {
+        branch: String,
+        /// Why, recorded with it (default: who discarded it)
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
+        reason: Option<String>,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -3092,8 +3140,8 @@ pub struct Delegation {
         value_parser = delegate_depth
     )]
     delegate: Option<u32>,
-    /// Allow the harness's own `by spawn|inspect|events|send|integrate|cancel|children`
-    /// commands without asking; nothing else
+    /// Allow the harness's own by commands that act as its branch (spawn, inspect, send,
+    /// discard, artifact, ask, ...; see docs/delegation.md) without asking; nothing else
     #[arg(long)]
     allow_delegation: bool,
 }

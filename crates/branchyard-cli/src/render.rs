@@ -833,7 +833,11 @@ pub fn status_text(status: &BranchStatus) -> (String, Tone) {
         BranchStatus::Ready => ("ready".into(), Tone::Green),
         BranchStatus::NoChanges => ("no changes".into(), Tone::Dim),
         BranchStatus::Interrupted => ("interrupted".into(), Tone::Yellow),
-        BranchStatus::BudgetExceeded { limit } => (format!("over budget: {limit}"), Tone::Yellow),
+        BranchStatus::BudgetExceeded { limit } => (
+            format!("over budget: {}", branchyard::operations::limit_text(limit)),
+            Tone::Yellow,
+        ),
+        BranchStatus::Discarded { reason } => (format!("discarded: {reason}"), Tone::Dim),
         BranchStatus::Failed { reason } => (format!("failed: {reason}"), Tone::Red),
         BranchStatus::Merged { target, .. } => (format!("merged into {target}"), Tone::Blue),
         BranchStatus::Waiting => ("waiting".into(), Tone::Dim),
@@ -1092,7 +1096,9 @@ pub fn next_commands(info: &BranchInfo) -> Vec<String> {
             format!("by plan approve {name} [--edit]"),
             format!("by plan reject {name} --reason \"...\" [--replan]"),
         ],
-        BranchStatus::Merged { .. } => vec![format!("by rm {name}")],
+        BranchStatus::Merged { .. } | BranchStatus::Discarded { .. } => {
+            vec![format!("by rm {name}")]
+        }
         BranchStatus::Waiting | BranchStatus::Blocked { .. } => {
             let parent = info.parent.as_deref().map(shell_quote).unwrap_or_default();
             vec![format!("by graph show {parent}"), format!("by rm {name}")]

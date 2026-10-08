@@ -452,6 +452,11 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             },
         ),
         Command::Cancel { branch, json } => commands::cancel(target, &branch, json),
+        Command::Discard {
+            branch,
+            reason,
+            json,
+        } => commands::discard(env, target, &branch, reason.as_deref(), json),
         Command::Spawn { prompt, spawn } => commands::spawn(env, target, &prompt, &spawn),
         Command::Inspect { branch, json } => commands::inspect(env, target, branch, json),
         Command::Events {
