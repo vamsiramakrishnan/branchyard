@@ -127,6 +127,11 @@ pub(crate) struct Record {
     /// The goal a judge verifies when a turn ends ready. See `crate::goal`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<crate::goal::GoalState>,
+    /// Tools the branch was started denying (`by run --deny`), ahead of
+    /// every policy its turns run under, and passed on to its children.
+    /// A delegated child's own come from its parent, in its grant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
 }
 
 /// The right to write a branch's state for one turn: the branch's current
@@ -955,9 +960,24 @@ impl Store {
         self.backend.list()
     }
 
-    /// Delete a branch's record and what the engine kept for its turns.
+    /// Delete a branch's record and what the engine kept for its turns,
+    /// whoever holds its lease; [`Store::delete_held`] outside tests.
+    #[cfg(test)]
     pub fn delete(&self, name: &str) -> Result<(), Error> {
         self.backend.delete(name)
+    }
+
+    /// Delete a branch whose lease `lease` holds: its lease goes with its
+    /// record, so the lease is spent, not released (releasing it after
+    /// would find no lease and warn that another engine took it). On an
+    /// error nothing was deleted, and the lease is released as usual.
+    pub fn delete_held(&self, lease: Lease) -> Result<(), Error> {
+        let mut lease = lease;
+        // Stopped first, so no renewal races the delete.
+        lease.heartbeat.take();
+        self.backend.delete(&lease.fence.branch)?;
+        lease.done = true;
+        Ok(())
     }
 
     /// Write `record` and take its branch's lease for a new turn. Refused

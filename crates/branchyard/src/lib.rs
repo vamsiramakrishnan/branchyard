@@ -123,6 +123,7 @@ mod map;
 mod map_input;
 pub mod models;
 mod names;
+pub mod operations;
 mod ops;
 #[cfg(feature = "postgres")]
 mod pg;
@@ -365,6 +366,16 @@ impl Yard {
     /// event log names.
     pub fn cancel_as(&self, branch: &str, by: &str) -> Result<Vec<String>, Error> {
         delegation::cancel_tree(self, branch, by)
+    }
+
+    /// Set a settled branch aside with your authority (`by discard`): it
+    /// ends [`BranchStatus::Discarded`] with `reason`, keeps its record,
+    /// worktree and cost, runs no more turns, is never merged, and no
+    /// longer counts against its parent's `max_children`. What waits for
+    /// it is blocked. Refused while a turn runs ([`Error::Running`]: cancel
+    /// it first) and once merged; a discarded branch stays as it is.
+    pub fn discard(&self, branch: &str, reason: &str) -> Result<BranchInfo, Error> {
+        ops::discard(self, branch, reason)
     }
 
     /// Deliver `text` into `branch`'s running turn as input from `by`,
@@ -1317,6 +1328,13 @@ pub struct TaskOptions {
     /// fork joins its parent's). Read only when a branch is created; see
     /// [`tasks`].
     pub join_task: Option<String>,
+    /// Tools a new branch's harness is denied outright, ahead of
+    /// [`TaskOptions::policy`]'s rules; a trailing `*` matches a prefix
+    /// (`by run --deny`). Stored with the branch: they bound every later
+    /// turn, whoever sends it, and every child it delegates to, as a
+    /// parent's denials bound a spawned child (`by spawn --deny`). Read
+    /// only when a branch is created.
+    pub deny: Vec<String>,
 }
 
 /// The variable a turn's harness gets [`TaskOptions::trace_parent`] in.
@@ -1989,6 +2007,14 @@ pub enum BranchStatus {
         target: String,
         commit: String,
     },
+    /// Settled and set aside on purpose, with the reason (`by discard`):
+    /// it runs no more turns and is never integrated, its record and cost
+    /// are kept, and it no longer counts against its parent's
+    /// `max_children`.
+    Discarded {
+        /// Why, as whoever discarded it said.
+        reason: String,
+    },
 }
 
 /// Limits enforced by the engine. The cost limit uses the harness's own
@@ -2176,9 +2202,11 @@ impl Policy {
         self
     }
 
-    /// Allow exactly the harness's shell commands that run `by` with a
-    /// delegation subcommand (`spawn`, `inspect`, `events`, `send`,
-    /// `integrate`, `cancel`, `children`), and nothing else. The command
+    /// Allow exactly the harness's shell commands that run `by` with an
+    /// operation a harness may run on its own branch (every row of
+    /// [`operations::OPERATIONS`] allowed inside a harness: `spawn`,
+    /// `inspect`, `send`, `discard`, `artifact publish`, `ask`, ...),
+    /// and nothing else. The command
     /// must be a single simple command: plain or quoted words, no
     /// variables, substitutions, globs, redirections, pipes or command
     /// lists. Its program must be `by_path` itself or `by` by name, which

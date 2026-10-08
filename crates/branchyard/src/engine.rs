@@ -530,10 +530,16 @@ fn run(
     }
     let record: &Record = record;
     // Every local harness learns which branch it is on, so `by` inside it
-    // never mistakes it for a person; only a delegating one gets a token.
+    // never mistakes it for a person, and finds `by` itself; only a
+    // delegated one gets a token.
     if !placement.is_sandbox() {
         placement.set_env(ENV_ROOT, &turn.yard.root.display().to_string());
         placement.set_env(ENV_BRANCH, &record.info.name);
+        if let Some(by) = crate::projection::by_path(turn.options) {
+            for (name, value) in crate::projection::by_env(&by) {
+                placement.set_env(&name, &value);
+            }
+        }
         placement.set_env(
             crate::workspace::ENV_WORKTREE,
             &record.info.worktree.display().to_string(),

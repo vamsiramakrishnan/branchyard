@@ -74,6 +74,7 @@ A person acts with their own authority, or the server's, bounded by the branch's
 | Inspect | `Delegate::inspect` | `inspect` | yes | `GET …/inspection` | `inspect` |
 | Events page from a cursor | `Delegate::events` | `events` | yes | `GET …/event-page` | `event_page` |
 | Integrate a child into its parent | `Delegate::integrate` | `integrate` | yes | `POST …/integrate` | `integrate` |
+| Set a settled child aside, freeing its slot | `Yard::discard`, `Delegate::discard` | `discard [--reason TEXT]` | no: the server has no route for it yet | none | none |
 | Children | `Branch::descendants`, `Delegate::children` | `children` | yes | `GET …/children` | `children` |
 | A branch's graph: children, dependencies, revision ([task graphs](graph.md)) | `Yard::graph`, `Delegate::graph` | `graph show` | yes | `GET …/graph` | `graph` |
 | Apply a graph proposal, all or nothing | `Delegate::apply_graph` | `graph apply --parent` | yes; server opt-in `--allow-delegation` for spawns | `POST …/graph`; `409 stale_revision` | `apply_graph` |
@@ -703,3 +704,26 @@ Every connector call that changes the world is decided, written to a ledger befo
 | `/metrics` | | adds `branchyard_effects{repo,class,state}` and `branchyard_approvals_pending{repo}` |
 | The companion page | Branches, Inbox, Triggers, Queue, Settings | adds Approvals (asks and the ledger) and the `approval` notice; push kind `approval` |
 | Store | | `effects`, `effect_events`, `approval_asks` (SQLite); `by_effects`, `by_effect_events`, `by_approval_asks` (PostgreSQL, each made on its own when missing) |
+
+## Added with the operations table, leaf capabilities and discard
+
+| Surface | Before | Now |
+|---|---|---|
+| `branchyard::operations` | none | `OPERATIONS` (each delegation operation's `by` subcommand and flags, MCP tool and arguments, Python function and keyword arguments, `Delegate` method, `Capability`, where it may run, and which flags a harness may not pass and why), `Operation`, `Param`, `Capability`, `Context`, `Contexts`, `tools`, `by_tool`, `by_name`, `is_harness_command`, `limit_text`, `LIMIT_FLAGS`, `SHARED_TASK_FLAGS`; parity tests in `branchyard`, `branchyard-mcp` and `branchyard-cli` check every surface, the skill and `docs/delegation.md` against it |
+| A delegated branch whose envelope allows no children (a leaf) | no token, no tools: `by` refused it, so it could not publish, read artifacts, ask, report or read its inbox | a token for its turns scoped to its own branch: itself, its storage and its parent's inbox; spawning and acting on descendants refused `denied` (the engine checks each call's `Capability`); the MCP server; the Python module; a short note ([`plugins/branchyard/leaf.md`](../plugins/branchyard/leaf.md)) instead of the skill |
+| `BRANCHYARD_BY`, `by` first on `PATH` | a delegating harness only | every local harness |
+| `Policy::allow_delegation_commands`, `--allow-delegation` | eight subcommands | every operation the table allows inside a harness |
+| `by discard <child> [--reason TEXT]`, `Yard::discard`, `Delegate::discard`, `branchyard.discard`, the MCP `discard` tool | none | `BranchStatus::Discarded { reason }`; record, worktree and cost kept; no longer counted in `max_children`; its reservation drops to what it spent; dependents blocked |
+| `by cancel` on a settled child | "nothing was running" | `Cancelled::note`: what it is and what to use instead (`integrate`, `send`, `discard`) |
+| `by rm` | a `release a lease dropped without finish: fenced` warning, its lease deleted with its record before release | no warning: the lease is spent by the delete (`Store::delete_held`) |
+| Command logs on stderr | ANSI colors always | colors only on a terminal without `NO_COLOR` (`branchyard_server::logging::ansi`) |
+| `by run --deny T,T`, `TaskOptions::deny`, `TaskRequest::deny` | none (`by spawn --deny` only) | denials stored with the branch, ahead of every turn's policy, passed on to its children |
+| `by run --mcp NAME=https://URL`, `--mcp-header NAME:HEADER=VAR\|@FILE` | stdio only (`--mcp NAME=COMMAND`) | an HTTP MCP server, its headers secrets read each turn (needs a private home) |
+| `by spawn --max-children`, `--harnesses`; `SpawnRequest::max_children`, `harnesses`, `plan`; Python `spawn(max_children=, harnesses=, plan=)` | SDK and MCP only | every surface |
+| MCP `spawn`'s `connectors`, `inbox`'s `unread` | not in the schema; `by inbox --unread --json` returned every message | in the schema; `--unread` filters the JSON too |
+| `by artifact publish --media-type`, `Delegate::publish_artifact(path, name, media_type, labels)`, Python `publish(media_type=)` | ignored on the CLI (always `application/octet-stream`) | recorded; the printed line names the media type and that the digest is blake3 |
+| `by inspect` text | `harnesses: its own` | the profile, as `harnesses: <profile> only (its own)` |
+| A cost refusal, `over budget:` | `max_usd` | `max_usd (--budget-usd)` |
+| `by graph apply --help` | no edit format | the edit JSON with an example |
+| `by <command> --help` of a delegation command | | each flag a harness may not pass marked with the reason; `by inspect`, `events`, `children` and `graph show` keep `[BRANCH]` optional in an error's usage |
+

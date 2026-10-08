@@ -278,6 +278,7 @@ impl Live {
             plan: task.plan,
             goal: crate::plan_cmd::goal(task),
             join_task: None,
+            deny: task.deny.clone(),
         })
     }
 
@@ -1340,6 +1341,8 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         },
         check: task.check.clone(),
         max_depth: args.max_depth,
+        max_children: args.max_children,
+        harnesses: args.harnesses.clone(),
         deny: args.deny.clone(),
         seat: args.seat.clone(),
         depends_on: args.depends_on.clone(),
@@ -1347,13 +1350,16 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         bindings: args.bindings.clone(),
         connectors: (!args.connectors.is_empty()).then(|| args.connectors.clone()),
         plan: args.plan,
-        ..Spawn::default()
     };
     if let Some(delegate) = harness_delegate(json)? {
-        if args.parent.is_some() || task.permissions != args::Permissions::Unset {
+        if args.parent.is_some()
+            || task.permissions != args::Permissions::Unset
+            || task.unapproved_tools
+        {
             let error = branchyard::Error::Denied(
                 "inside a harness, the parent is the harness's own branch and the child \
-                 inherits its policy; drop --parent, --yes and --ask"
+                 inherits its policy and approval routing; drop --parent, --yes, --ask, \
+                 --permissions and --allow-unapproved-tools (by spawn --help says why)"
                     .into(),
             );
             return fail(json, &error);
@@ -1497,16 +1503,65 @@ pub fn cancel(target: &Target, branch: &str, json: bool) -> Outcome {
         (Some(delegate), _) => delegate.cancel(branch),
         (None, Target::Remote(remote)) => {
             let cancelled = remote.repo.cancel(branch)?;
-            Ok(branchyard::Cancelled { cancelled })
+            let status = remote.repo.branch(branch)?.status;
+            Ok(branchyard::Cancelled::of(cancelled, branch, &status))
         }
-        (None, Target::Local) => open_yard()
-            .and_then(|yard| yard.cancel_as(branch, "by cancel"))
-            .map(|cancelled| branchyard::Cancelled { cancelled }),
+        (None, Target::Local) => open_yard().and_then(|yard| {
+            let cancelled = yard.cancel_as(branch, "by cancel")?;
+            let status = yard.branch(branch)?.info().status.clone();
+            Ok(branchyard::Cancelled::of(cancelled, branch, &status))
+        }),
     };
-    emit(json, result, |c| match c.cancelled.is_empty() {
-        true => "nothing was running\n".into(),
-        false => format!("asked {} to stop\n", c.cancelled.join(", ")),
+    emit(json, result, |c| match (&c.note, c.cancelled.is_empty()) {
+        (Some(note), _) => format!("{note}\n"),
+        (None, true) => "nothing was running\n".into(),
+        (None, false) => format!("asked {} to stop\n", c.cancelled.join(", ")),
     })
+}
+
+/// Set a settled child aside: inside a harness, a descendant, with the
+/// branch's authority; otherwise any branch, with yours.
+pub fn discard(
+    env: &Env,
+    target: &Target,
+    branch: &str,
+    reason: Option<&str>,
+    json: bool,
+) -> Outcome {
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => delegate.discard(branch, reason),
+        (None, Target::Remote(_)) => Err(branchyard::Error::Unsupported(
+            "by --remote discard: the server has no route for it yet; run by discard on the \
+             server's host"
+                .into(),
+        )),
+        (None, Target::Local) => (|| {
+            let reason = reason
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .unwrap_or("discarded with by discard");
+            open_yard()?.discard(branch, reason)?;
+            as_user(branch, TaskOptions::default())?.inspect(branch)
+        })(),
+    };
+    emit(json, result, |i| render::inspection(i, env.style()))
+}
+
+/// Inside a harness, a command acts as the harness's own branch only: a
+/// `--branch` or `--as` naming another is refused, not ignored.
+fn as_itself(
+    delegate: &Delegate,
+    named: Option<&str>,
+    flag: &str,
+) -> Result<(), branchyard::Error> {
+    match named {
+        Some(other) if other != delegate.branch() => Err(branchyard::Error::Denied(format!(
+            "inside a harness, by acts only as {}, the harness's own branch; {flag} {other} \
+             names another",
+            delegate.branch()
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// The acting branch outside a harness: `--as`, required, since these
@@ -1531,7 +1586,8 @@ pub fn ask(
 ) -> Outcome {
     let wait = wait_seconds.map(std::time::Duration::from_secs_f64);
     let result = match (harness_delegate(json)?, target) {
-        (Some(delegate), _) => delegate.ask(text, wait),
+        (Some(delegate), _) => as_itself(&delegate, as_branch.as_deref(), "--as")
+            .and_then(|()| delegate.ask(text, wait)),
         (None, Target::Remote(remote)) => as_branch_required(as_branch, "ask").and_then(|b| {
             remote
                 .repo
@@ -1555,7 +1611,9 @@ pub fn ask(
 
 pub fn report(target: &Target, as_branch: Option<String>, text: &str, json: bool) -> Outcome {
     let result = match (harness_delegate(json)?, target) {
-        (Some(delegate), _) => delegate.report(text),
+        (Some(delegate), _) => {
+            as_itself(&delegate, as_branch.as_deref(), "--as").and_then(|()| delegate.report(text))
+        }
         (None, Target::Remote(remote)) => as_branch_required(as_branch, "report")
             .and_then(|b| remote.repo.report(&b, text).map_err(remote::sdk_error)),
         (None, Target::Local) => as_branch_required(as_branch, "report")
@@ -1568,7 +1626,8 @@ pub fn report(target: &Target, as_branch: Option<String>, text: &str, json: bool
 
 pub fn escalate(target: &Target, as_branch: Option<String>, text: &str, json: bool) -> Outcome {
     let result = match (harness_delegate(json)?, target) {
-        (Some(delegate), _) => delegate.escalate(text),
+        (Some(delegate), _) => as_itself(&delegate, as_branch.as_deref(), "--as")
+            .and_then(|()| delegate.escalate(text)),
         (None, Target::Remote(remote)) => as_branch_required(as_branch, "escalate")
             .and_then(|b| remote.repo.escalate(&b, text).map_err(remote::sdk_error)),
         (None, Target::Local) => as_branch_required(as_branch, "escalate")
@@ -1587,7 +1646,8 @@ pub fn answer(
     json: bool,
 ) -> Outcome {
     let result = match (harness_delegate(json)?, target) {
-        (Some(delegate), _) => delegate.answer(message_id, text),
+        (Some(delegate), _) => as_itself(&delegate, as_branch.as_deref(), "--as")
+            .and_then(|()| delegate.answer(message_id, text)),
         (None, Target::Remote(remote)) => as_branch_required(as_branch, "answer").and_then(|b| {
             remote
                 .repo
@@ -1604,12 +1664,21 @@ pub fn answer(
 
 pub fn inbox(target: &Target, as_branch: Option<String>, unread: bool, json: bool) -> Outcome {
     let result = match (harness_delegate(json)?, target) {
-        (Some(delegate), _) => delegate.inbox(),
+        (Some(delegate), _) => {
+            as_itself(&delegate, as_branch.as_deref(), "--as").and_then(|()| delegate.inbox())
+        }
         (None, Target::Remote(remote)) => as_branch_required(as_branch, "inbox")
             .and_then(|b| remote.repo.inbox(&b).map_err(remote::sdk_error)),
         (None, Target::Local) => as_branch_required(as_branch, "inbox")
             .and_then(|b| as_user(&b, TaskOptions::default())?.inbox()),
     };
+    // --unread holds for the JSON too, which the Python module reads.
+    let result = result.map(|mut inbox| {
+        if unread {
+            inbox.messages.retain(|m| !m.delivered);
+        }
+        inbox
+    });
     emit(json, result, |inbox| {
         let messages: Vec<&branchyard::Message> = inbox
             .messages
@@ -1807,7 +1876,10 @@ fn acting_branch(
     command: &str,
 ) -> Result<String, branchyard::Error> {
     match (delegate, branch) {
-        (Some(delegate), _) => Ok(delegate.branch().to_owned()),
+        (Some(delegate), named) => {
+            as_itself(delegate, named.as_deref(), "--branch")?;
+            Ok(delegate.branch().to_owned())
+        }
         (None, Some(branch)) => Ok(branch.clone()),
         (None, None) => Err(branchyard::Error::Denied(format!(
             "outside a harness, by {command} needs --branch"
@@ -1836,11 +1908,12 @@ pub fn artifact(target: &Target, args: &ArtifactArgs) -> Outcome {
         "publish" => {
             let path = absolute(given(args.arg.as_deref(), "arg")?);
             let labels = args.labels.iter().cloned().collect();
-            let result = act.publish_artifact(&path, args.name.clone(), labels);
+            let result =
+                act.publish_artifact(&path, args.name.clone(), args.media_type.clone(), labels);
             emit(json, result, |a| {
                 format!(
-                    "published {} as {} ({} bytes, {})\n",
-                    a.name, a.id, a.size, a.digest
+                    "published {} as {} ({} bytes, {}, blake3 {})\n",
+                    a.name, a.id, a.size, a.media_type, a.digest
                 )
             })
         }

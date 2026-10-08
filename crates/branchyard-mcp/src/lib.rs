@@ -4,7 +4,7 @@
 //! delegate (`TaskOptions::delegation`), passing `--root <repository>
 //! --branch <name>` and the turn's token in `BRANCHYARD_DELEGATION`. The
 //! server offers `spawn`, `inspect`, `events`, `send`, `steer`,
-//! `propose_integration`, `cancel`, `children`, `apply_graph` and `graph`
+//! `propose_integration`, `cancel`, `discard`, `children`, `apply_graph` and `graph`
 //! (dependencies between children; see `docs/graph.md`), and the artifact and
 //! scratch-area tools (`publish_artifact`, `list_artifacts`,
 //! `get_artifact`, `share_artifact`, `create_scratch`, `list_scratch`,
@@ -32,7 +32,9 @@
 //!   as your user and can read `.branchyard/`. See `docs/delegation.md`.
 //!
 //! It uses the official Rust MCP SDK (`rmcp`), server role and stdio
-//! transport only, on a current-thread Tokio runtime.
+//! transport only, on a current-thread Tokio runtime. Its tools and their
+//! arguments are checked against [`branchyard::operations`] by this
+//! crate's tests.
 #![warn(missing_docs)]
 
 use branchyard_support::LockExt as _;
@@ -50,47 +52,26 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 
-/// Tool names, in the order they are listed.
-pub const TOOLS: [&str; 27] = [
-    "spawn",
-    "inspect",
-    "events",
-    "send",
-    "steer",
-    "propose_integration",
-    "cancel",
-    "children",
-    "apply_graph",
-    "graph",
-    "publish_artifact",
-    "list_artifacts",
-    "get_artifact",
-    "share_artifact",
-    "create_scratch",
-    "list_scratch",
-    "share_scratch",
-    "lock_scratch",
-    "unlock_scratch",
-    "ask",
-    "report",
-    "escalate",
-    "answer",
-    "inbox",
-    "approve_plan",
-    "reject_plan",
-    "answer_approval",
-];
+/// Tool names, in the order they are listed: the MCP tools of
+/// [`branchyard::operations::OPERATIONS`].
+pub fn tool_names() -> Vec<&'static str> {
+    branchyard::operations::tools()
+        .filter_map(|operation| operation.tool)
+        .collect()
+}
 
 const INSTRUCTIONS: &str = "Branchyard runs you on a git branch. These tools let you \
 delegate: spawn child branches with their own harness and budget, watch them with inspect \
 and events, continue them with send, add to a child's running turn with steer, merge a \
 finished child into your own branch with \
-propose_integration (its check must pass), stop them with cancel, and list them with \
-children. Children run in parallel; spawn returns once a child has started. A child may \
+propose_integration (its check must pass), stop them with cancel, set a settled one aside with \
+discard (it frees its slot), and list them with children. Children run in parallel; spawn returns once a child has started. A child may \
 depend on its siblings (depends_on): it waits, and starts once they have settled; apply_graph \
 creates several children and dependencies at once, all or nothing, against the revision graph \
 shows. You act only as your own branch and only \
-on your descendants. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
+on your descendants. A branch that may not delegate (its envelope's max_depth is 0) still has \
+inspect, the artifact and scratch tools, and ask, report, escalate and inbox; the other tools \
+refuse it. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
 may spawn. You can also message: ask your parent a question (optionally waiting for its \
 answer), report to it, escalate to it or, if your rig seat allows, further up; answer a \
 descendant's message; and read your own inbox. A child spawned with plan: true writes a plan read-only and escalates it to you: approve_plan runs it (as proposed or edited), reject_plan ends it or, with replan, has it plan again. When a descendant's tool or connector call needs approval, the ask is escalated to you: answer_approval allows or denies it.";
@@ -193,6 +174,7 @@ pub fn tools() -> Vec<Tool> {
                 "additionalProperties": false,
             },
         },
+        "connectors": {"type": "array", "items": {"type": "string"}, "description": "Connector grants, as --connector takes them (github:read, 'github:write:issues.*'); narrowed to yours. Unset: yours, or the seat's"},
         "plan": {"type": "boolean", "description": "Plan first: the child's first turn is read-only and proposes a plan, escalated to your inbox; it changes nothing until you approve_plan"},
     });
     let mut spawn_edit = spawn_properties.clone();
@@ -283,6 +265,22 @@ pub fn tools() -> Vec<Tool> {
                 "additionalProperties": false,
             })),
         ),
+        Tool::new(
+            "discard",
+            "Set a settled descendant aside: it ends discarded with your reason, runs no more \
+             turns, is never integrated, keeps its record and cost, and no longer counts \
+             against your max_children. Refused while it runs (cancel it first). Returns it as \
+             inspect shows it.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "branch": branch_property("A descendant that is not running"),
+                    "reason": {"type": "string", "description": "Why, recorded with it"},
+                },
+                "required": ["branch"],
+                "additionalProperties": false,
+            })),
+        ),
         children,
         Tool::new(
             "apply_graph",
@@ -319,14 +317,15 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "publish_artifact",
             "Publish a file at a path in your worktree as a new immutable artifact of your \
-             branch, content-addressed by its blake3 digest. Ancestors and descendants of your \
-             branch can read it; a sibling needs an explicit share_artifact.",
+             branch, content-addressed by its digest (the blake3 hash of its bytes, hex). \
+             Ancestors and descendants of your branch can read it; a sibling needs an explicit \
+             share_artifact.",
             schema(json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path to the file, in your worktree"},
                     "name": {"type": "string", "description": "Defaults to the file's name"},
-                    "media_type": {"type": "string"},
+                    "media_type": {"type": "string", "description": "Recorded with it, such as application/json; default application/octet-stream"},
                     "labels": {"type": "object", "additionalProperties": {"type": "string"}},
                 },
                 "required": ["path"],
@@ -474,8 +473,13 @@ pub fn tools() -> Vec<Tool> {
         {
             let mut inbox = Tool::new(
                 "inbox",
-                "Every message addressed to you, oldest first.",
-                schema(json!({"type": "object", "properties": {}, "additionalProperties": false})),
+                "Every message addressed to you, oldest first; with unread, only those not yet \
+                 delivered to a turn.",
+                schema(json!({
+                    "type": "object",
+                    "properties": {"unread": {"type": "boolean"}},
+                    "additionalProperties": false,
+                })),
             );
             inbox.annotations = Some(read_only("Read your inbox"));
             inbox
@@ -595,7 +599,7 @@ impl ServerHandler for Server {
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let tool = request.name.to_string();
-        if !TOOLS.contains(&tool.as_str()) {
+        if !tool_names().contains(&tool.as_str()) {
             return Err(ErrorData::invalid_params(
                 Cow::Owned(format!("no tool named {tool}")),
                 None,
@@ -698,4 +702,42 @@ pub fn serve_branch(root: PathBuf, branch: &str) -> Result<(), Failure> {
         .filter(|t| !t.is_empty())
         .ok_or_else(|| Failure::Usage(format!("{ENV_TOKEN} is not set")))?;
     serve_stdio(root, branch, &token).map_err(|e| Failure::Serve(format!("serving MCP: {e}")))
+}
+
+#[allow(clippy::unwrap_used, clippy::panic)] // tests: a panic is the failure report
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    /// The server lists exactly the table's tools, in its order, each with
+    /// exactly the arguments the table names; a tool or an argument added
+    /// here but not there (or there but not here) fails.
+    #[test]
+    fn the_tools_are_the_operations_table() {
+        let listed = tools();
+        let names: Vec<&str> = listed.iter().map(|t| t.name.as_ref()).collect();
+        assert_eq!(names, tool_names());
+        for tool in &listed {
+            let operation = branchyard::operations::by_tool(&tool.name).unwrap();
+            let properties = &tool.input_schema["properties"];
+            let listed: BTreeSet<String> =
+                properties.as_object().unwrap().keys().cloned().collect();
+            let expected: BTreeSet<String> = operation
+                .params
+                .iter()
+                .filter_map(|p| p.tool)
+                .map(|path| path.split('.').next().unwrap().to_owned())
+                .collect();
+            assert_eq!(listed, expected, "{}'s arguments", tool.name);
+            // A nested argument, such as budget.max_usd, is in its object.
+            for path in operation.params.iter().filter_map(|p| p.tool) {
+                if let Some((outer, inner)) = path.split_once('.') {
+                    let nested = &properties[outer]["properties"][inner];
+                    assert!(nested.is_object(), "{} has no {path}", tool.name);
+                }
+            }
+        }
+    }
 }

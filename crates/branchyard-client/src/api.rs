@@ -243,6 +243,11 @@ pub struct TaskRequest {
     /// A goal a judge verifies, like `by run --goal`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<GoalRequest>,
+    /// Tools the branch's harness is denied outright, like `by run --deny`
+    /// and [`branchyard::TaskOptions::deny`]: stored with the branch, ahead
+    /// of every policy its turns run under, and passed on to its children.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
 }
 
 /// A task's goal: its text, the follow-up turns it may get, and the judge
@@ -548,6 +553,18 @@ pub struct SpawnRequest {
     /// narrowed to its parent's; unset is its seat's or its parent's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connectors: Option<Vec<branchyard::connectors::GrantEntry>>,
+    /// Children the child may have, like [`branchyard::Spawn::max_children`];
+    /// at most its parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_children: Option<u32>,
+    /// Harnesses the child may delegate to, like
+    /// [`branchyard::Spawn::harnesses`]; each must be allowed to its parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harnesses: Option<Vec<String>>,
+    /// Plan first, like `by spawn --plan`: the child's first turn is
+    /// read-only and its plan is escalated to its parent.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub plan: bool,
 }
 
 fn is_settled(after: &After) -> bool {

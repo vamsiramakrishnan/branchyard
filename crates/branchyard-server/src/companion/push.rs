@@ -181,7 +181,8 @@ impl Tracker {
                         self.status.remove(branch);
                         return None;
                     }
-                    BranchStatus::Merged { .. } => return None,
+                    // Set aside by whoever discarded it: nothing to tell.
+                    BranchStatus::Merged { .. } | BranchStatus::Discarded { .. } => return None,
                     BranchStatus::Ready => ("finished", format!("{branch} is ready to merge")),
                     BranchStatus::NoChanges => {
                         ("finished", format!("{branch} finished with no changes"))

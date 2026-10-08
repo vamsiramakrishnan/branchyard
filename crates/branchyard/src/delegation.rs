@@ -46,6 +46,7 @@ use crate::graph::{
     self, After, Binding, Dependency, DependencyRef, Graph, GraphApplied, GraphCommit, GraphEdit,
     SpawnSpec, MAX_EDITS,
 };
+use crate::operations::Capability;
 use crate::projection::{lock, same_token, ENV_BRANCH, ENV_ROOT, ENV_TOKEN};
 use crate::record::{self, Recorder};
 use crate::recover;
@@ -347,6 +348,47 @@ pub struct Sent {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Cancelled {
     pub cancelled: Vec<String>,
+    /// When nothing was running: what the branch is, and the command that
+    /// does what a cancel cannot (`by discard` sets a settled child aside).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Cancelled {
+    /// What a cancel of `branch`, now `status`, stopped.
+    pub fn of(cancelled: Vec<String>, branch: &str, status: &BranchStatus) -> Cancelled {
+        let note = match (cancelled.is_empty(), status) {
+            (false, _) => None,
+            (true, BranchStatus::Ready) => Some(format!(
+                "{branch} is not running: it ended ready, so there is nothing to cancel. \
+                 Keep its work with `by integrate {branch}`, or set it aside with \
+                 `by discard {branch} --reason TEXT`, which frees its slot"
+            )),
+            (true, BranchStatus::Merged { target, .. }) => Some(format!(
+                "{branch} is not running: it was merged into {target}. `by rm {branch}` \
+                 removes its worktree"
+            )),
+            (true, BranchStatus::Discarded { .. }) => {
+                Some(format!("{branch} is not running: it was already discarded"))
+            }
+            (true, BranchStatus::Running) => Some(format!("{branch} was already asked to stop")),
+            (true, status) => Some(format!(
+                "{branch} is not running ({}), so there is nothing to cancel. Continue it \
+                 with `by send {branch} \"<prompt>\"`, or set it aside with \
+                 `by discard {branch} --reason TEXT`, which frees its slot",
+                status_word(status)
+            )),
+        };
+        Cancelled { cancelled, note }
+    }
+}
+
+/// A status's `state`, as JSON names it.
+fn status_word(status: &BranchStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|v| v["state"].as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 /// A branch's subtree.
@@ -663,6 +705,18 @@ impl Delegate {
         }
     }
 
+    /// Set a settled descendant aside: it ends `discarded` with `reason`,
+    /// runs no more turns, is never integrated, keeps its record and cost,
+    /// and frees its slot in this branch's `max_children`. Refused while it
+    /// runs (cancel it first) and once it was merged. Returns it as
+    /// [`Delegate::inspect`] shows it.
+    pub fn discard(&self, branch: &str, reason: Option<&str>) -> Result<Inspection, Error> {
+        match &self.via {
+            Via::Local(local) => local.discard(branch, reason),
+            Via::Remote(_) => self.typed("discard", json!({"branch": branch, "reason": reason})),
+        }
+    }
+
     /// This branch's descendants.
     pub fn children(&self) -> Result<Children, Error> {
         match &self.via {
@@ -703,17 +757,22 @@ impl Delegate {
 
     /// Publish `path` as a new immutable artifact of this branch; see
     /// `docs/storage.md`.
+    ///
+    /// `media_type` is recorded with it (default
+    /// `application/octet-stream`); its `digest` is the blake3 hash of its
+    /// bytes, in lower-case hex.
     pub fn publish_artifact(
         &self,
         path: &Path,
         name: Option<String>,
+        media_type: Option<String>,
         labels: std::collections::BTreeMap<String, String>,
     ) -> Result<crate::ArtifactRef, Error> {
         match &self.via {
-            Via::Local(local) => local.publish_artifact(path, name, None, labels),
+            Via::Local(local) => local.publish_artifact(path, name, media_type, labels),
             Via::Remote(_) => self.typed(
                 "publish_artifact",
-                json!({"path": path, "name": name, "labels": labels}),
+                json!({"path": path, "name": name, "media_type": media_type, "labels": labels}),
             ),
         }
     }
@@ -856,6 +915,11 @@ impl Delegate {
         self.typed("inbox", json!({}))
     }
 
+    /// The messages addressed to this branch not yet delivered to a turn.
+    pub fn unread(&self) -> Result<Inbox, Error> {
+        self.typed("inbox", json!({"unread": true}))
+    }
+
     /// Inspect `branch` until it is not running a turn, for up to
     /// `timeout`. Fails with [`Error::Running`] if it still is.
     ///
@@ -972,11 +1036,14 @@ pub(crate) fn effective_budget(record: &Record, budget: &Budget) -> Budget {
     }
 }
 
-/// The caller's policy with the denials a parent imposed put first.
+/// The caller's policy with the denials a parent imposed, and those the
+/// branch was started with, put first.
 pub(crate) fn effective_policy(record: &Record, policy: &Policy) -> Policy {
-    match record.grant.as_ref().map(|g| &g.deny) {
-        Some(deny) if !deny.is_empty() => narrowed(policy, deny),
-        _ => policy.clone(),
+    let given = record.grant.as_ref().map_or(&[][..], |g| g.deny.as_slice());
+    let deny = run::with_denials(given, &record.deny);
+    match deny.is_empty() {
+        true => policy.clone(),
+        false => narrowed(policy, &deny),
     }
 }
 
@@ -1002,12 +1069,16 @@ pub(crate) fn reserved(store: &Store, record: &Record) -> f64 {
         .iter()
         .filter_map(|child| store.read(child).ok())
         .map(|child| {
+            let spent = subtree_spent(store, &child, &mut BTreeSet::new());
+            // A discarded child runs no more turns: it holds what it spent.
+            if matches!(child.info.status, BranchStatus::Discarded { .. }) {
+                return spent;
+            }
             let limit = child
                 .grant
                 .as_ref()
                 .and_then(|g| g.limits.as_ref())
                 .and_then(|l| l.max_usd);
-            let spent = subtree_spent(store, &child, &mut BTreeSet::new());
             limit.map_or(spent, |limit| limit.max(spent))
         })
         .sum()
@@ -1342,6 +1413,28 @@ impl Local {
         self.yard.store()
     }
 
+    /// Fail unless this branch holds `capability`: every branch reaches
+    /// itself, its storage and its parent's inbox; only one whose envelope
+    /// allows children acts on descendants. See [`crate::operations`].
+    fn require(&self, capability: Capability, what: &str) -> Result<(), Error> {
+        if capability != Capability::Delegate {
+            return Ok(());
+        }
+        let grant = self.store().read(&self.branch)?.grant;
+        match grant.as_ref().is_some_and(Grant::can_spawn) {
+            true => Ok(()),
+            false => Err(Error::Denied(format!(
+                "{} may not {what}: {}; it acts only on itself, the artifacts and scratch \
+                 areas it may reach, and its parent's inbox",
+                self.branch,
+                match grant {
+                    Some(_) => "its envelope's max_depth is 0, so it has no children",
+                    None => "it was not given delegation",
+                }
+            ))),
+        }
+    }
+
     /// Fail unless `target` is a descendant, or this branch itself when
     /// `or_self`.
     fn require_descendant(&self, target: &str, or_self: bool) -> Result<(), Error> {
@@ -1353,6 +1446,7 @@ impl Local {
                 ))),
             };
         }
+        self.require(Capability::Delegate, &format!("act on {target}"))?;
         let found = descendants(&self.store(), &self.branch)?
             .iter()
             .any(|info| info.name == target);
@@ -1683,16 +1777,22 @@ impl Local {
         taken: &BTreeSet<String>,
     ) -> Result<Planned, Error> {
         let store = self.store();
+        // A removed or discarded child no longer holds a slot.
         let live = caller
             .info
             .children
             .iter()
-            .filter(|child| store.read(child).is_ok())
+            .filter(|child| {
+                store
+                    .read(child)
+                    .is_ok_and(|r| !matches!(r.info.status, BranchStatus::Discarded { .. }))
+            })
             .count()
             + planned.len();
         if live >= grant.envelope.max_children as usize {
             return Err(Error::Denied(format!(
-                "{} already has {live} children, its envelope's max_children",
+                "{} already has {live} children, its envelope's max_children; `by discard` \
+                 a settled one, or `by rm` it, to free its slot",
                 self.branch
             )));
         }
@@ -1725,12 +1825,8 @@ impl Local {
         let envelope = grant.envelope.child(request, own)?;
         let planned_usd: f64 = planned.iter().filter_map(|p| p.limits.max_usd).sum();
         let limits = self.child_limits(caller, &request.budget, planned_usd)?;
-        let mut deny = grant.deny.clone();
-        for pattern in &request.deny {
-            if !deny.contains(pattern) {
-                deny.push(pattern.clone());
-            }
-        }
+        // The parent's own denials, those it was given, then the request's.
+        let deny = run::with_denials(&run::with_denials(&grant.deny, &caller.deny), &request.deny);
         let child_grant = Grant {
             envelope,
             deny,
@@ -1865,6 +1961,8 @@ impl Local {
                 provider: caller.provider.clone(),
                 grant: Some(child_grant),
                 depth: caller.info.depth + 1,
+                // Its denials are in its grant.
+                deny: Vec::new(),
                 provision,
                 workspace: caller.workspace.as_ref().map(|w| w.spec.clone()),
                 // Resolved when it starts, from its parent as it is then
@@ -1982,21 +2080,24 @@ impl Local {
         let max_usd = match (bounds.max_usd, asked.max_usd) {
             (_, Some(ask)) if !(ask.is_finite() && ask > 0.0) => {
                 return Err(Error::Denied(format!(
-                    "a child's max_usd must be a positive number, not {ask}"
+                    "a child's {} must be a positive number, not {ask}",
+                    crate::operations::limit_text("max_usd")
                 )))
             }
             (Some(_), None) => {
                 let remaining = (self.remaining(caller).unwrap_or(0.0) - planned_usd).max(0.0);
                 return Err(Error::Denied(format!(
-                    "{} has a cost limit, so a child needs max_usd; ${remaining:.4} remains",
-                    self.branch
+                    "{} has a cost limit, so a child needs one too, {}; ${remaining:.4} remains",
+                    self.branch,
+                    crate::operations::limit_text("max_usd")
                 )));
             }
             (Some(_), Some(ask)) => {
                 let remaining = self.remaining(caller).unwrap_or(0.0) - planned_usd;
                 if ask > remaining + EPSILON_USD {
                     return Err(Error::Denied(format!(
-                        "max_usd {ask} exceeds what {} has left, ${:.4}",
+                        "{} {ask} exceeds what {} has left, ${:.4}",
+                        crate::operations::limit_text("max_usd"),
                         self.branch,
                         remaining.max(0.0)
                     )));
@@ -2008,7 +2109,8 @@ impl Local {
         let max_turns = match (bounds.max_turns, asked.max_turns) {
             (Some(limit), Some(ask)) if ask > limit => {
                 return Err(Error::Denied(format!(
-                    "max_turns {ask} exceeds {}'s {limit}",
+                    "{} {ask} exceeds {}'s {limit}",
+                    crate::operations::limit_text("max_turns"),
                     self.branch
                 )))
             }
@@ -2298,12 +2400,32 @@ impl Local {
         let result = self
             .require_descendant(branch, false)
             .and_then(|()| cancel_tree(&self.yard, branch, &self.branch))
-            .map(|cancelled| Cancelled { cancelled });
+            .and_then(|cancelled| {
+                let status = self.store().read(branch)?.info.status;
+                Ok(Cancelled::of(cancelled, branch, &status))
+            });
         self.note("cancel", branch, &result, |c| {
-            match c.cancelled.is_empty() {
-                true => "nothing was running".into(),
-                false => format!("asked {} to stop", c.cancelled.join(", ")),
+            match (&c.note, c.cancelled.is_empty()) {
+                (Some(note), _) => note.clone(),
+                (None, true) => "nothing was running".into(),
+                (None, false) => format!("asked {} to stop", c.cancelled.join(", ")),
             }
+        });
+        result
+    }
+
+    fn discard(&self, branch: &str, reason: Option<&str>) -> Result<Inspection, Error> {
+        let result = self.require_descendant(branch, false).and_then(|()| {
+            let reason = reason
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .map_or_else(|| format!("discarded by {}", self.branch), str::to_owned);
+            ops::discard(&self.yard, branch, &reason)?;
+            self.inspect(branch)
+        });
+        self.note("discard", branch, &result, |i| match &i.status {
+            BranchStatus::Discarded { reason } => format!("discarded: {reason}"),
+            _ => "discarded".into(),
         });
         result
     }
@@ -2398,6 +2520,7 @@ impl Local {
     }
 
     fn answer(&self, message_id: u64, text: &str) -> Result<Message, Error> {
+        self.require(Capability::Delegate, "answer a descendant")?;
         let question = self
             .store()
             .backend()
@@ -2675,6 +2798,21 @@ struct NoArgs {}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct DiscardArgs {
+    branch: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InboxArgs {
+    #[serde(default)]
+    unread: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PublishArtifactArgs {
     path: String,
     name: Option<String>,
@@ -2753,6 +2891,9 @@ fn to_json<T: Serialize>(value: &T) -> Result<Value, Error> {
 /// One operation with its tool's JSON arguments. Every surface ends here or
 /// in the typed methods it calls.
 pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Value, Error> {
+    let operation = crate::operations::by_tool(tool)
+        .ok_or_else(|| Error::Denied(format!("no delegation tool named {tool}")))?;
+    local.require(operation.capability, operation.name)?;
     match tool {
         "spawn" => {
             let spec: SpawnSpec = parse(tool, arguments)?;
@@ -2804,6 +2945,10 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
         "cancel" => {
             let args: TargetArgs = parse(tool, arguments)?;
             to_json(&local.cancel(&required(tool, args.branch)?)?)
+        }
+        "discard" => {
+            let args: DiscardArgs = parse(tool, arguments)?;
+            to_json(&local.discard(&args.branch, args.reason.as_deref())?)
         }
         "children" => {
             let _: NoArgs = parse(tool, arguments)?;
@@ -2879,8 +3024,12 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
             to_json(&local.answer(args.message_id, &args.text)?)
         }
         "inbox" => {
-            let _: NoArgs = parse(tool, arguments)?;
-            to_json(&local.inbox()?)
+            let args: InboxArgs = parse(tool, arguments)?;
+            let mut inbox = local.inbox()?;
+            if args.unread {
+                inbox.messages.retain(|m| !m.delivered);
+            }
+            to_json(&inbox)
         }
         other => Err(Error::Denied(format!("no delegation tool named {other}"))),
     }
@@ -2960,6 +3109,7 @@ mod tests {
             actor: None,
             plan: None,
             goal: None,
+            deny: Vec::new(),
         }
     }
 

@@ -59,6 +59,7 @@ __all__ = [
     "steer",
     "integrate",
     "cancel",
+    "discard",
     "children",
     "graph",
     "apply_graph",
@@ -77,6 +78,8 @@ __all__ = [
     "escalate",
     "answer",
     "inbox",
+    "approve_plan",
+    "reject_plan",
 ]
 
 
@@ -351,12 +354,15 @@ def spawn(
     max_minutes: Optional[float] = None,
     check: Optional[str] = None,
     max_depth: Optional[int] = None,
+    max_children: Optional[int] = None,
+    harnesses: Optional[List[str]] = None,
     deny: Optional[List[str]] = None,
     seat: Optional[str] = None,
     depends_on: Optional[List[str]] = None,
     after: Optional[str] = None,
     bindings: Optional[Dict[str, str]] = None,
     connectors: Optional[List[str]] = None,
+    plan: bool = False,
 ) -> Spawned:
     """Create a child branch and start it; returns once it has started.
 
@@ -373,6 +379,10 @@ def spawn(
     them ("github:read", "github:write:issues.*"); they are narrowed to
     yours, and one you hold nothing of is refused. Unset, the child has
     your grant (or its seat's). See docs/connectors.md.
+
+    `max_children` and `harnesses` narrow what the child may delegate;
+    `plan=True` has it plan first, read-only, and escalate its plan to you
+    (approve_plan or reject_plan).
     """
     options = {
         "--seat": seat,
@@ -384,6 +394,8 @@ def spawn(
         "--max-minutes": max_minutes,
         "--check": check,
         "--max-depth": max_depth,
+        "--max-children": max_children,
+        "--harnesses": ",".join(harnesses) if harnesses else None,
         "--deny": ",".join(deny) if deny else None,
         "--depends-on": ",".join(depends_on) if depends_on else None,
         "--after": after,
@@ -396,6 +408,8 @@ def spawn(
         flags += ["--connector", grant]
     for scratch, access in (bindings or {}).items():
         flags += ["--bind", f"{scratch}:{access}"]
+    if plan:
+        flags.append("--plan")
     return _make(Spawned, _run(["spawn", *flags, "--", prompt]))
 
 
@@ -460,6 +474,16 @@ def integrate(branch: str) -> Merged:
 def cancel(branch: str) -> Cancelled:
     """Stop a descendant's turn and every turn running below it."""
     return _make(Cancelled, _run(["cancel", branch]))
+
+
+def discard(branch: str, reason: Optional[str] = None) -> Inspection:
+    """Set a settled descendant aside: it ends `discarded` with `reason`,
+    keeps its record and cost, is never integrated, and frees its slot in
+    your max_children. A running one is refused: cancel it first."""
+    args = ["discard", branch]
+    if reason is not None:
+        args += ["--reason", reason]
+    return _make(Inspection, _run(args))
 
 
 def children() -> Children:
@@ -553,14 +577,19 @@ def wait(branch: str, timeout: Optional[float] = None, poll: float = 1.0) -> Ins
 
 
 def publish(path: str, name: Optional[str] = None,
-            labels: Optional[Dict[str, str]] = None) -> ArtifactRef:
+            labels: Optional[Dict[str, str]] = None,
+            media_type: Optional[str] = None) -> ArtifactRef:
     """Publish the file at `path` as a new immutable artifact of your
-    branch, content-addressed by its blake3 digest. Ancestors and
-    descendants of your branch can read it; a sibling needs share_artifact.
+    branch, content-addressed by its digest (the blake3 hash of its bytes,
+    in hex), with `media_type` (default application/octet-stream).
+    Ancestors and descendants of your branch can read it; a sibling needs
+    share_artifact.
     """
     args = ["artifact", "publish", path]
     if name is not None:
         args += ["--name", name]
+    if media_type is not None:
+        args += ["--media-type", media_type]
     for key, value in (labels or {}).items():
         args += ["--label", f"{key}={value}"]
     return _make(ArtifactRef, _run(args))

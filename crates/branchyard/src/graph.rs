@@ -445,6 +445,9 @@ fn verdict(store: &Store, record: &Record) -> Result<Verdict, Error> {
                 return blocked(format!("stopped at its {limit} limit"))
             }
             (BranchStatus::Blocked { .. }, _) => return blocked("is blocked".into()),
+            (BranchStatus::Discarded { reason }, _) => {
+                return blocked(format!("was discarded: {reason}"))
+            }
         }
     }
     Ok(match wait {

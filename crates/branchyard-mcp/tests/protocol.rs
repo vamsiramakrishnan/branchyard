@@ -5,7 +5,7 @@ mod common;
 
 use std::process::{Command, Stdio};
 
-use branchyard_mcp::TOOLS;
+use branchyard_mcp::tool_names;
 use common::{Client, SERVER};
 use serde_json::{json, Value};
 
@@ -35,7 +35,7 @@ fn initialize_lists_the_tools_and_calls_answer_without_an_engine() {
     let listed = client.request("tools/list", json!({}));
     let tools = listed["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, TOOLS);
+    assert_eq!(names, tool_names());
     for tool in tools {
         let schema = &tool["inputSchema"];
         assert_eq!(schema["type"], "object", "{tool}");

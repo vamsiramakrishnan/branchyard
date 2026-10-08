@@ -405,6 +405,7 @@ pub fn run(env: &Env, remote: &Remote, prompt: &str, task: &TaskArgs) -> Outcome
         priority: task.priority,
         plan: task.plan,
         goal: goal_request(task),
+        deny: task.deny.clone(),
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -536,6 +537,7 @@ pub fn fan(
         priority: task.priority,
         plan: task.plan,
         goal: goal_request(task),
+        deny: task.deny.clone(),
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
     announce(remote, notice, provider.as_ref());
@@ -597,6 +599,7 @@ pub fn map(env: &Env, remote: &Remote, args: &crate::args::MapArgs, json: bool) 
             priority: task.priority,
             plan: false,
             goal: None,
+            deny: Vec::new(),
         },
     };
     let name = request
@@ -834,6 +837,9 @@ pub fn spawn(
         require_labels: task.require_labels.clone(),
         priority: task.priority,
         connectors: (!args.connectors.is_empty()).then(|| args.connectors.clone()),
+        max_children: args.max_children,
+        harnesses: args.harnesses.clone(),
+        plan: args.plan,
     };
     let op = remote
         .repo
@@ -990,6 +996,7 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
         priority: None,
         plan: false,
         goal: None,
+        deny: Vec::new(),
     };
     let op = match remote.repo.submit_task(&request, &new_key()) {
         Ok(op) => op,
