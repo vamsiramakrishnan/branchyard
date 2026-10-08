@@ -418,6 +418,35 @@ fn a_result_for_another_message_does_not_end_the_turn() {
     ));
 }
 
+/// A result of the CLI's own that says nothing is queued after it leaves
+/// none of the turn's messages to run: the turn ends there, as a protocol
+/// violation, rather than waiting for a result that never comes.
+#[test]
+fn a_foreign_result_with_nothing_queued_ends_the_turn() {
+    for answered in [json!(["not-ours"]), json!([])] {
+        let mut driver = ready(SessionMode::Fresh);
+        let uuid = submit(&mut driver, "mine");
+        feed(&mut driver, &lifecycle(&uuid, "queued"));
+        let queued = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": answered, "queued_turn_count": 1});
+        let (events, _) = feed(&mut driver, &queued);
+        assert!(turn_ends(&events).is_empty(), "{events:?}");
+        let last = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": answered, "queued_turn_count": 0, "total_cost_usd": 0.5});
+        let (events, _) = feed(&mut driver, &last);
+        assert!(
+            matches!(&events[..], [
+                Event::UsageObserved { turn: Some(1), usage },
+                Event::Warning { message },
+                Event::ProtocolViolation { detail },
+                Event::TurnEnded { turn: 1, outcome: TurnOutcome::Failed { .. } },
+            ] if usage.cost_usd == Some(0.5)
+                && message.contains("a turn of its own")
+                && detail.contains("nothing queued")),
+            "{events:?}"
+        );
+        assert_eq!(driver.submit("next").map(|s| s.turn), Ok(2));
+    }
+}
+
 fn branchyard_server() -> McpServer {
     McpServer {
         name: "branchyard".into(),
@@ -771,6 +800,203 @@ fn a_plain_interrupt_is_unchanged_without_queued_steers() {
     assert_eq!(frame["request"], json!({"subtype": "interrupt"}));
 }
 
+/// Submit `prompt`, returning the UUID the driver stamped on it.
+fn submit(driver: &mut ClaudeCode, prompt: &str) -> String {
+    let submitted = driver.submit(prompt).unwrap();
+    decode(&submitted.frames[0])["uuid"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn lifecycle(uuid: &str, state: &str) -> Value {
+    json!({"type": "command_lifecycle", "command_uuid": uuid, "state": state})
+}
+
+/// Before the CLI acknowledged the turn's message it may not have read it
+/// yet: a foreign result with nothing queued only warns, and the turn's
+/// own result still ends it.
+#[test]
+fn a_foreign_result_before_the_turns_message_is_acknowledged_only_warns() {
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "mine");
+    let foreign = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": ["not-ours"], "queued_turn_count": 0});
+    let (events, _) = feed(&mut driver, &foreign);
+    assert!(
+        matches!(
+            &events[..],
+            [
+                Event::UsageObserved { turn: Some(1), .. },
+                Event::Warning { .. }
+            ]
+        ),
+        "{events:?}"
+    );
+    let own = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": [uuid], "queued_turn_count": 0});
+    let (events, _) = feed(&mut driver, &own);
+    assert_eq!(turn_ends(&events), [&TurnOutcome::Completed]);
+}
+
+/// Seen live on a resumed session: the CLI acknowledged the prompt as
+/// queued, then printed a result naming no message (a turn of its own,
+/// run on the stopped tasks' notification) before it started the prompt.
+/// That result is not the turn's; the turn ends at its own result.
+#[test]
+fn an_unnamed_result_before_the_acknowledged_message_starts_is_not_the_turns() {
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "mine");
+    let (events, _) = feed(&mut driver, &lifecycle(&uuid, "queued"));
+    assert!(matches!(events[..], [Event::TurnAccepted { turn: 1, .. }]));
+    let unnamed = json!({"type": "result", "subtype": "success", "is_error": false, "queued_turn_count": 0, "total_cost_usd": 2.12});
+    let (events, _) = feed(&mut driver, &unnamed);
+    assert!(
+        matches!(&events[..], [
+            Event::UsageObserved { turn: Some(1), usage },
+            Event::Warning { message },
+        ] if usage.cost_usd == Some(2.12) && message.contains("a turn of its own")),
+        "{events:?}"
+    );
+    feed(&mut driver, &lifecycle(&uuid, "started"));
+    let assistant = json!({"type": "assistant", "user_message_uuid": uuid, "message": {"id": "m", "content": [{"type": "text", "text": "done"}]}});
+    let (events, _) = feed(&mut driver, &assistant);
+    assert!(events.contains(&Event::MessageDelta {
+        turn: 1,
+        text: "done".into()
+    }));
+    let own = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": [uuid], "queued_turn_count": 0});
+    let (events, _) = feed(&mut driver, &own);
+    assert_eq!(turn_ends(&events), [&TurnOutcome::Completed]);
+}
+
+/// A CLI that reports no lifecycle names no messages either: its unnamed
+/// result is the turn's, as is one after the turn's message started.
+#[test]
+fn an_unnamed_result_ends_the_turn_without_a_queued_acknowledgment() {
+    let unnamed = json!({"type": "result", "subtype": "success", "is_error": false});
+    let mut driver = ready(SessionMode::Fresh);
+    driver.submit("mine").unwrap();
+    assert_eq!(
+        turn_ends(&feed(&mut driver, &unnamed).0),
+        [&TurnOutcome::Completed]
+    );
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "mine");
+    feed(&mut driver, &lifecycle(&uuid, "queued"));
+    feed(&mut driver, &lifecycle(&uuid, "started"));
+    assert_eq!(
+        turn_ends(&feed(&mut driver, &unnamed).0),
+        [&TurnOutcome::Completed]
+    );
+}
+
+/// A background task that ends after the turn's result makes the CLI run
+/// its notification as a turn of its own, whose result comes with no turn
+/// in flight: recorded with its cost, named or not, where the CLI names
+/// the messages it answers. A result for a message of ours, or an unnamed
+/// one from a CLI that names none, is still a violation.
+#[test]
+fn a_result_after_the_turn_ended_is_the_clis_own_unless_it_is_ours() {
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "mine");
+    let own = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": [uuid], "queued_turn_count": 0});
+    assert_eq!(
+        turn_ends(&feed(&mut driver, &own).0),
+        [&TurnOutcome::Completed]
+    );
+    for notification in [
+        json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": ["notification"], "queued_turn_count": 0, "total_cost_usd": 0.25}),
+        json!({"type": "result", "subtype": "success", "is_error": false, "total_cost_usd": 0.25}),
+    ] {
+        let (events, _) = feed(&mut driver, &notification);
+        assert!(
+            matches!(&events[..], [
+                Event::UsageObserved { turn: None, usage },
+                Event::Warning { message },
+            ] if usage.cost_usd == Some(0.25) && message.contains("a turn of its own")),
+            "{events:?}"
+        );
+    }
+    let (events, _) = feed(&mut driver, &own);
+    assert!(
+        matches!(&events[..], [Event::ProtocolViolation { detail }] if detail.contains("without a turn in flight")),
+        "{events:?}"
+    );
+    assert_eq!(driver.submit("next").map(|s| s.turn), Ok(2));
+
+    let unnamed = json!({"type": "result", "subtype": "success", "is_error": false});
+    let mut driver = ready(SessionMode::Fresh);
+    driver.submit("mine").unwrap();
+    assert_eq!(
+        turn_ends(&feed(&mut driver, &unnamed).0),
+        [&TurnOutcome::Completed]
+    );
+    let (events, _) = feed(&mut driver, &unnamed);
+    assert!(
+        matches!(&events[..], [Event::ProtocolViolation { .. }]),
+        "{events:?}"
+    );
+}
+
+/// On resume the prompt waits queued behind the notification turn the CLI
+/// runs first. An interrupt then cancels it too, and its cancellation ends
+/// the turn interrupted; the notification turn's own result after it ends
+/// nothing.
+#[test]
+fn an_interrupt_cancels_the_turns_own_message_while_it_is_queued() {
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "go");
+    let (events, _) = feed(&mut driver, &lifecycle(&uuid, "queued"));
+    assert!(matches!(events[..], [Event::TurnAccepted { turn: 1, .. }]));
+    let frame = decode(&driver.interrupt().unwrap()[0]);
+    assert_eq!(
+        frame["request"],
+        json!({"subtype": "interrupt", "cancel_queued": true})
+    );
+    let (events, _) = feed(&mut driver, &lifecycle(&uuid, "cancelled"));
+    assert_eq!(
+        events,
+        [Event::TurnEnded {
+            turn: 1,
+            outcome: TurnOutcome::Interrupted
+        }]
+    );
+    let acknowledged = json!({"type": "control_response", "response": {"subtype": "success", "request_id": frame["request_id"], "response": {"cancelled": [uuid]}}});
+    assert_eq!(
+        feed(&mut driver, &acknowledged).0,
+        [Event::InterruptAcknowledged { turn: 1 }]
+    );
+    let notification = json!({"type": "result", "subtype": "error_during_execution", "is_error": true, "terminal_reason": "aborted_streaming", "user_message_uuids": ["notification"], "queued_turn_count": 0});
+    let (events, _) = feed(&mut driver, &notification);
+    assert!(turn_ends(&events).is_empty(), "{events:?}");
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::ProtocolViolation { .. })),
+        "{events:?}"
+    );
+    assert_eq!(driver.submit("next").map(|s| s.turn), Ok(2));
+}
+
+/// Once the turn's message has started, its cancellation is the CLI
+/// tidying up after an interrupt the turn's result reports; and a message
+/// cancelled before it ran without an interrupt fails the turn.
+#[test]
+fn only_an_unstarted_turn_ends_at_its_messages_cancellation() {
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "go");
+    feed(&mut driver, &lifecycle(&uuid, "started"));
+    let (events, _) = feed(&mut driver, &lifecycle(&uuid, "cancelled"));
+    assert_eq!(events, []);
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "go");
+    let (events, _) = feed(&mut driver, &lifecycle(&uuid, "discarded"));
+    assert!(
+        matches!(&events[..], [Event::TurnEnded { turn: 1, outcome: TurnOutcome::Failed { message } }]
+            if message.contains("discarded")),
+        "{events:?}"
+    );
+}
+
 #[test]
 fn steering_needs_a_handshake_and_a_turn_in_flight() {
     let (mut driver, _) = open_with(SessionMode::Fresh);
@@ -888,7 +1114,9 @@ fn background_tasks_are_reported_and_end_session_stops_them() {
 /// On `--resume`, Claude Code 2.1.293 first runs the earlier session's
 /// queued `<task-notification>` as a turn with its own result. That result
 /// answers the notification, not the prompt: it is recorded with its cost,
-/// its text is not the turn's, and the turn ends at its own result.
+/// its text and tool calls are not the turn's, even those after its tool
+/// call, whose frames name no message, and the turn ends at its own
+/// result.
 #[test]
 fn a_resumed_sessions_queued_notification_does_not_end_the_turn() {
     let recorded = fixture_2_1_293("resume-notification");
@@ -898,9 +1126,13 @@ fn a_resumed_sessions_queued_notification_does_not_end_the_turn() {
     let replayed = Replay::new(&recorded)
         .alias("/request_id")
         .alias("/uuid")
+        .answer_permissions(PermissionDecision::Allow)
         .prompt("Reply with the single word resumed and end your turn.")
         .run(&mut driver, &opened);
-    assert_eq!(replayed.sent, 2, "initialize and the prompt");
+    assert_eq!(
+        replayed.sent, 3,
+        "initialize, the prompt and the notification turn's permission"
+    );
     assert!(replayed.unsent.is_empty(), "{:?}", replayed.unsent);
     let events = replayed.events;
     assert!(
@@ -932,6 +1164,12 @@ fn a_resumed_sessions_queued_notification_does_not_end_the_turn() {
         texts,
         ["resumed"],
         "the notification's answer is not the turn's"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::ToolStarted { .. })),
+        "the notification's tool call is not the turn's: {events:?}"
     );
     let costs: Vec<f64> = events
         .iter()
