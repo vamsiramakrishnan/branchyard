@@ -327,7 +327,10 @@ pub(crate) fn integration_error(error: IntegrationError, target: &str) -> Error 
             checks: Vec::new(),
         },
         IntegrationError::CheckStopped { error, .. } => integration_error(*error, target),
-        IntegrationError::CheckNotStarted(e) => Error::CheckNotStarted(e.to_string()),
+        IntegrationError::CheckNotStarted(e) => Error::CheckNotStarted {
+            reason: e.to_string(),
+            checks: Vec::new(),
+        },
         IntegrationError::DirtyTarget { worktree } => Error::DirtyTarget(worktree),
         IntegrationError::AlreadyIntegrated => Error::AlreadyMerged {
             target: target.to_owned(),

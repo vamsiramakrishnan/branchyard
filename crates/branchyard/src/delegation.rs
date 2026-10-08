@@ -4040,6 +4040,33 @@ mod tests {
             timed_out.detail().unwrap()["checks"][0]["outcome"],
             "timed_out"
         );
+
+        let not_started = Error::CheckNotStarted {
+            reason: "no such program".into(),
+            checks: vec![
+                check("make lint", &["a"], CheckVerdict::Passed),
+                check("nope", &["b"], CheckVerdict::NotStarted),
+                check("make docs", &["d"], CheckVerdict::NotRun),
+            ],
+        };
+        assert_eq!(
+            not_started.to_string(),
+            "check could not start: no such program
+Checks on the merged result: \
+             `make lint` (a) passed; `nope` (b) could not start; `make docs` (d) did not run"
+        );
+        let detail = not_started.detail().unwrap();
+        assert_eq!(detail["checks"][1]["branches"], json!(["b"]));
+        assert_eq!(detail["checks"][1]["outcome"], "not_started");
+        assert_eq!(detail["checks"][2]["outcome"], "not_run");
+        let plain = Error::CheckNotStarted {
+            reason: "no such program".into(),
+            checks: Vec::new(),
+        };
+        assert_eq!(
+            (plain.to_string(), plain.detail()),
+            ("check could not start: no such program".into(), None)
+        );
     }
     use crate::{
         CheckVerdict, IntegrationCheck, PermissionDecision, PermissionKey, PermissionRequest,

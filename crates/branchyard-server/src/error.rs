@@ -93,7 +93,7 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
         E::Conflict { .. } | E::ConflictBetween { .. } => (S::CONFLICT, "conflict"),
         E::CheckFailed { .. } => (S::UNPROCESSABLE_ENTITY, "check_failed"),
         E::CheckTimedOut { .. } => (S::UNPROCESSABLE_ENTITY, "check_timed_out"),
-        E::CheckNotStarted(_) => (S::UNPROCESSABLE_ENTITY, "check_not_started"),
+        E::CheckNotStarted { .. } => (S::UNPROCESSABLE_ENTITY, "check_not_started"),
         E::DirtyTarget(_) => (S::CONFLICT, "dirty_target"),
         E::AlreadyMerged { .. } => (S::CONFLICT, "already_merged"),
         E::InvalidCandidate(_) => (S::UNPROCESSABLE_ENTITY, "invalid_candidate"),
@@ -152,6 +152,9 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
             }
             error_out.detail(detail)
         }
+        E::CheckNotStarted { checks, .. } if !checks.is_empty() => {
+            error_out.detail(json!({ "checks": checks }))
+        }
         _ => error_out,
     }
 }
@@ -205,5 +208,43 @@ mod tests {
         );
         assert_eq!(detail["checks"][0]["outcome"], "passed");
         assert!(e.body.message.contains("`make test` (b, c) failed"));
+    }
+
+    /// A check of an integration that could not start names every check
+    /// in its detail, as a failed one does; one of a single branch's merge
+    /// has none.
+    #[test]
+    fn a_check_that_could_not_start_names_every_check_in_its_detail() {
+        let e = sdk(&branchyard::Error::CheckNotStarted {
+            reason: "no such program".into(),
+            checks: vec![
+                branchyard::IntegrationCheck {
+                    check: vec!["nope".into()],
+                    branches: vec!["a".into()],
+                    outcome: branchyard::CheckVerdict::NotStarted,
+                },
+                branchyard::IntegrationCheck {
+                    check: vec!["true".into()],
+                    branches: vec!["b".into()],
+                    outcome: branchyard::CheckVerdict::NotRun,
+                },
+            ],
+        });
+        assert_eq!(
+            (e.status, e.body.code.as_str()),
+            (StatusCode::UNPROCESSABLE_ENTITY, "check_not_started")
+        );
+        let detail = e.body.detail.unwrap();
+        assert_eq!(
+            detail["checks"][0],
+            json!({ "check": ["nope"], "branches": ["a"], "outcome": "not_started" })
+        );
+        assert_eq!(detail["checks"][1]["outcome"], "not_run");
+        assert!(e.body.message.contains("`nope` (a) could not start"));
+        let plain = sdk(&branchyard::Error::CheckNotStarted {
+            reason: "no such program".into(),
+            checks: Vec::new(),
+        });
+        assert_eq!(plain.body.detail, None);
     }
 }

@@ -813,6 +813,26 @@ mod tests {
         assert!(plain.structured_content.is_none());
     }
 
+    /// A check of an integration that could not start, run in this
+    /// process, gives its checks as structured content too.
+    #[test]
+    fn a_check_that_could_not_start_has_its_checks_as_structured_content() {
+        let not_started = tool_error(&branchyard::Error::CheckNotStarted {
+            reason: "no such program".into(),
+            checks: vec![branchyard::IntegrationCheck {
+                check: vec!["nope".into()],
+                branches: vec!["b".into()],
+                outcome: branchyard::CheckVerdict::NotStarted,
+            }],
+        });
+        let structured = not_started.structured_content.unwrap();
+        assert_eq!(structured["error"]["kind"], "check_not_started");
+        assert_eq!(
+            structured["error"]["detail"]["checks"],
+            json!([{"check": ["nope"], "branches": ["b"], "outcome": "not_started"}])
+        );
+    }
+
     /// The server lists exactly the table's tools, in its order, each with
     /// exactly the arguments the table names; a tool or an argument added
     /// here but not there (or there but not here) fails.

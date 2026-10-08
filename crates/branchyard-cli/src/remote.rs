@@ -1116,5 +1116,15 @@ mod tests {
             }),
         });
         assert_eq!(plain.detail(), None);
+        let not_started = sdk_error(branchyard_client::Error::Api {
+            status: 422,
+            error: Box::new(branchyard_client::api::ErrorBody {
+                code: "check_not_started".into(),
+                message: "check could not start: no such program".into(),
+                detail: Some(serde_json::json!({ "checks": checks })),
+            }),
+        });
+        assert_eq!(not_started.kind(), "check_not_started");
+        assert_eq!(not_started.detail().unwrap()["checks"], checks);
     }
 }

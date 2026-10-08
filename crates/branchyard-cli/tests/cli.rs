@@ -836,6 +836,76 @@ fn a_failed_integration_names_every_check_its_branches_and_outcome() {
     );
 }
 
+/// A check of an integration that could not start said its checks only
+/// in its message. Its `--json` detail and Python's `CheckNotStartedError`
+/// name each check, its branches and how it ended, as a failed one's do;
+/// Python's `CheckTimedOutError` has the same `checks`.
+#[test]
+fn a_check_that_could_not_start_names_every_check_its_branches_and_outcome() {
+    let repo = Repo::new();
+    let fake_by = repo.dir.join("timed-out-by.sh");
+    fs::write(
+        &fake_by,
+        "#!/bin/sh\n\
+         echo '{\"error\": {\"kind\": \"check_timed_out\", \"message\": \"check timed out\", \
+         \"detail\": {\"checks\": [{\"check\": [\"sleep\"], \"branches\": [\"a\"], \
+         \"outcome\": \"timed_out\"}]}}}'\n\
+         exit 1\n",
+    )
+    .unwrap();
+    let mut mode = fs::metadata(&fake_by).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
+    fs::set_permissions(&fake_by, mode).unwrap();
+    let script = format!(
+        "import os\n\
+         import branchyard as b\n\
+         try:\n    b.integrate('a', 'b', 'c')\n\
+         except b.CheckNotStartedError as e:\n    \
+         print('python', e.kind, [(c['branches'], c['outcome']) for c in e.checks])\n\
+         os.environ['BRANCHYARD_BY'] = {:?}\n\
+         try:\n    b.integrate('a', 'b')\n\
+         except b.CheckTimedOutError as e:\n    \
+         print('python', e.kind, [(c['branches'], c['outcome']) for c in e.checks])\n",
+        fake_by.display().to_string()
+    );
+    let file = repo.dir.join("not-started.py");
+    fs::write(&file, script).unwrap();
+    let prompt = [
+        "SH by spawn 'WRITE a.txt=a' --name a --check 'test -f a.txt' --wait --json".to_owned(),
+        "SH by spawn 'WRITE b.txt=b' --name b --check by-no-such-check-program --wait --json"
+            .to_owned(),
+        "SH by spawn 'WRITE c.txt=c' --name c --check true --wait --json".to_owned(),
+        "SH by integrate a b c".to_owned(),
+        "SH by integrate a b c --json".to_owned(),
+        format!("SH python3 {}", file.display()),
+    ]
+    .join("\n");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    for expected in [
+        "Checks on the merged result: `test -f a.txt` (a) passed; `by-no-such-check-program` \
+         (b) could not start; `true` (c) did not run",
+        "python check_not_started [(['a'], 'passed'), (['b'], 'not_started'), (['c'], \
+         'not_run')]",
+        "python check_timed_out [(['a'], 'timed_out')]",
+    ] {
+        assert!(said.contains(expected), "{expected:?} missing from\n{said}");
+    }
+    let (code, failed) = sh_json(&said, 4);
+    assert_eq!(code, 1, "{said}");
+    assert_eq!(failed["error"]["kind"], "check_not_started");
+    assert_eq!(
+        failed["error"]["detail"]["checks"],
+        serde_json::json!([
+            {"check": ["test", "-f", "a.txt"], "branches": ["a"], "outcome": "passed"},
+            {"check": ["by-no-such-check-program"], "branches": ["b"], "outcome": "not_started"},
+            {"check": ["true"], "branches": ["c"], "outcome": "not_run"},
+        ]),
+        "{said}"
+    );
+}
+
 /// The battery's crash scenario: after its engine stopped, the meta was
 /// continued with `by send` and no budget, and its own `by inspect` had
 /// no budget line: a root's limits lived only in the turn that was given

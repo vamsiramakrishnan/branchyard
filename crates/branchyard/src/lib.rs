@@ -2915,7 +2915,13 @@ pub enum Error {
         checks: Vec<IntegrationCheck>,
     },
     /// The check command could not be started.
-    CheckNotStarted(String),
+    CheckNotStarted {
+        /// Why it could not start.
+        reason: String,
+        /// As [`Error::CheckFailed`]'s `checks`, the one that could not
+        /// start among them.
+        checks: Vec<IntegrationCheck>,
+    },
     /// A worktree with the target checked out has uncommitted changes.
     DirtyTarget(PathBuf),
     /// The candidate is already contained in the target.
@@ -3031,7 +3037,10 @@ impl fmt::Display for Error {
                 write!(f, "check timed out after {timeout:?}:\n{output_tail}")?;
                 write_checks(f, checks)
             }
-            Error::CheckNotStarted(reason) => write!(f, "check could not start: {reason}"),
+            Error::CheckNotStarted { reason, checks } => {
+                write!(f, "check could not start: {reason}")?;
+                write_checks(f, checks)
+            }
             Error::DirtyTarget(worktree) => write!(
                 f,
                 "the target is checked out with uncommitted changes in {}",
@@ -3084,7 +3093,7 @@ impl Error {
             Error::Conflict { .. } | Error::ConflictBetween { .. } => "conflict",
             Error::CheckFailed { .. } => "check_failed",
             Error::CheckTimedOut { .. } => "check_timed_out",
-            Error::CheckNotStarted(_) => "check_not_started",
+            Error::CheckNotStarted { .. } => "check_not_started",
             Error::DirtyTarget(_) => "dirty_target",
             Error::AlreadyMerged { .. } => "already_merged",
             Error::InvalidCandidate(_) => "invalid_candidate",
@@ -3106,10 +3115,11 @@ impl Error {
     /// What the error carries beyond its message, as JSON: `by --json`
     /// prints it as the error's `detail`, the broker passes it on, the MCP
     /// tools return it as the error's structured content, and the Python
-    /// module raises it as `BranchyardError.detail`. A failed check of an
-    /// integration has its `checks` ([`IntegrationCheck`]) and, when it
-    /// left out siblings sharing it, the [`SharedCheck`]'s fields. `None`
-    /// for an error with nothing more to say.
+    /// module raises it as `BranchyardError.detail`. A check of an
+    /// integration that failed, timed out or could not start has its
+    /// `checks` ([`IntegrationCheck`]) and, when a failed one left out
+    /// siblings sharing it, the [`SharedCheck`]'s fields. `None` for an
+    /// error with nothing more to say.
     pub fn detail(&self) -> Option<serde_json::Value> {
         match self {
             Error::CheckFailed { checks, shared, .. } => {
@@ -3125,7 +3135,9 @@ impl Error {
                     .is_some_and(|d| !d.is_empty())
                     .then_some(detail)
             }
-            Error::CheckTimedOut { checks, .. } if !checks.is_empty() => {
+            Error::CheckTimedOut { checks, .. } | Error::CheckNotStarted { checks, .. }
+                if !checks.is_empty() =>
+            {
                 Some(serde_json::json!({ "checks": checks }))
             }
             Error::Remote { detail, .. } => detail.as_deref().cloned(),

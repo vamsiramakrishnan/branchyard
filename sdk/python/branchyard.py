@@ -37,6 +37,8 @@ __all__ = [
     "NotRunningError",
     "SteerRefusedError",
     "CheckFailedError",
+    "CheckTimedOutError",
+    "CheckNotStartedError",
     "NotFoundError",
     "StaleRevisionError",
     "Status",
@@ -138,7 +140,7 @@ class CheckFailedError(BranchyardError):
 
     @property
     def checks(self) -> List[Dict[str, Any]]:
-        return list((self.detail or {}).get("checks", []))
+        return _checks(self.detail)
 
     @property
     def integrate_together(self) -> List[str]:
@@ -147,6 +149,31 @@ class CheckFailedError(BranchyardError):
     @property
     def unsettled(self) -> List[str]:
         return list((self.detail or {}).get("unsettled", []))
+
+
+class CheckTimedOutError(BranchyardError):
+    """A branch's check ran past its timeout on the merge; nothing was
+    integrated. `checks` is as CheckFailedError's, the timed-out one's
+    outcome "timed_out" (empty for a single branch's merge)."""
+
+    @property
+    def checks(self) -> List[Dict[str, Any]]:
+        return _checks(self.detail)
+
+
+class CheckNotStartedError(BranchyardError):
+    """A branch's check could not be started on the merge; nothing was
+    integrated. `checks` is as CheckFailedError's, the one that could not
+    start "not_started" (empty for a single branch's merge)."""
+
+    @property
+    def checks(self) -> List[Dict[str, Any]]:
+        return _checks(self.detail)
+
+
+def _checks(detail: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # An integration's checks, as a check error's `detail` carries them.
+    return list((detail or {}).get("checks", []))
 
 
 class NotFoundError(BranchyardError):
@@ -197,6 +224,8 @@ _KINDS = {
     "steer_refused": SteerRefusedError,
     "unknown_branch": NotFoundError,
     "check_failed": CheckFailedError,
+    "check_timed_out": CheckTimedOutError,
+    "check_not_started": CheckNotStartedError,
     "stale_revision": StaleRevisionError,
 }
 
@@ -678,7 +707,9 @@ def integrate(*branches: str):
     merged (already=True), not refused. A failed check raises
     CheckFailedError: its `checks` name every check, the branches it
     belongs to and how it ended, and when siblings sharing it were left
-    out, its `integrate_together` names the branches to integrate at once."""
+    out, its `integrate_together` names the branches to integrate at once.
+    A check that timed out raises CheckTimedOutError, and one that could
+    not start CheckNotStartedError, each with the same `checks`."""
     if not branches:
         raise DeniedError("denied", "name at least one branch to integrate")
     value = _run(["integrate", *branches])

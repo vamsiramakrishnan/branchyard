@@ -457,14 +457,10 @@ fn many_error(
                 output_tail,
                 checks: verdicts(owners, index, CheckVerdict::TimedOut),
             },
-            IntegrationError::CheckNotStarted(e) => {
-                let checks = verdicts(owners, index, CheckVerdict::NotStarted);
-                let said: Vec<String> = checks.iter().map(ToString::to_string).collect();
-                Error::CheckNotStarted(format!(
-                    "{e}; checks on the merged result: {}",
-                    said.join("; ")
-                ))
-            }
+            IntegrationError::CheckNotStarted(e) => Error::CheckNotStarted {
+                reason: e.to_string(),
+                checks: verdicts(owners, index, CheckVerdict::NotStarted),
+            },
             other => ops::integration_error(other, target),
         },
         other => ops::integration_error(other, target),
