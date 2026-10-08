@@ -2075,6 +2075,10 @@ fn mcp_takes_an_http_server_and_its_headers() {
         "search=https://mcp.example.invalid/mcp",
         "--mcp-header",
         "search:Authorization=@/nonexistent",
+        "--harness",
+        "claude-code-stream-json",
+        "--command",
+        &command,
         "--yes",
     ]);
     assert!(!header.status.success());
@@ -2083,7 +2087,16 @@ fn mcp_takes_an_http_server_and_its_headers() {
         "{}",
         stderr(&header)
     );
-    let unknown = repo.by(&["run", "say hi", "--mcp-header", "other:Authorization=VAR"]);
+    let unknown = repo.by(&[
+        "run",
+        "say hi",
+        "--mcp-header",
+        "other:Authorization=VAR",
+        "--harness",
+        "claude-code-stream-json",
+        "--command",
+        &command,
+    ]);
     assert_eq!(unknown.status.code(), Some(2));
     assert!(
         stderr(&unknown).contains("no --mcp other="),
