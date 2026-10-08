@@ -3,6 +3,13 @@
 # usage: run-repo.sh NAME    (QUALIFY_OUT, BY override the output directory and the by binary)
 set -u
 NAME=$1
+# Run from inside a Branchyard turn, the inherited variables name the outer
+# yard, and `by` refuses to act on it from another repository. Each scenario
+# is a yard of its own.
+unset $(env | grep -o '^BRANCHYARD_[A-Z_]*' | grep -vx BRANCHYARD_HOME)
+# QUALIFY_MODEL runs every scenario's meta on that model (default: the harness's).
+MODEL=()
+[ -n "${QUALIFY_MODEL:-}" ] && MODEL=(--model "$QUALIFY_MODEL")
 B=${QUALIFY_OUT:-$(git rev-parse --show-toplevel)/target/qualify-delegation}
 BY=${BY:-$(command -v by || echo "$(git rev-parse --show-toplevel)/target/debug/by")}
 REPO=$B/repos/$NAME
@@ -19,7 +26,7 @@ CRASH=$(python3 -c 'import json,sys;print(1 if json.load(open(sys.argv[1])).get(
 cd "$REPO"
 date -u +%FT%TZ > "$OUT/started"
 if [ "$CRASH" = 1 ]; then
-  setsid "$BY" run --name meta --harness claude-code "$DELEGATE" --yes --budget-usd "$BUDGET" \
+  setsid "$BY" run --name meta --harness claude-code "${MODEL[@]}" "$DELEGATE" --yes --budget-usd "$BUDGET" \
     --check "python3 run_tests.py" "${EXTRA[@]}" "$PROMPT" > "$OUT/run.log" 2>&1 &
   RUNPID=$!
   # Kill the engine once two children are running.
@@ -39,7 +46,7 @@ except Exception: print(0)')
   timeout 2400 "$BY" send meta "Your previous turn was interrupted when Branchyard's engine was killed. Check the state of your children through Branchyard, recover whatever is needed, finish the task and integrate all four modules. Report what you found on recovery." --yes > "$OUT/resume.log" 2>&1
   echo "resume exit=$?" >> "$OUT/resume.log"
 else
-  timeout 2700 "$BY" run --name meta --harness claude-code "$DELEGATE" --yes --budget-usd "$BUDGET" \
+  timeout 2700 "$BY" run --name meta --harness claude-code "${MODEL[@]}" "$DELEGATE" --yes --budget-usd "$BUDGET" \
     --check "python3 run_tests.py" "${EXTRA[@]}" "$PROMPT" > "$OUT/run.log" 2>&1
   echo "exit=$?" >> "$OUT/run.log"
 fi

@@ -42,6 +42,30 @@ For each scenario, `$QUALIFY_OUT/out/<name>/` holds:
 - `git.txt`;
 - `verify.txt`: the scenario's tests, run on `by/meta` checked out separately.
 
+### Scoring a run
+
+`run-battery.sh` runs every scenario (or the ones named), `QUALIFY_JOBS` at a time (default 3), and
+scores the run with `score.py`. Give it a fresh `QUALIFY_OUT` and the `by` under test as `BY`;
+`QUALIFY_MODEL` puts every scenario's meta on one model. Run inside a Branchyard turn it works too:
+`run-repo.sh` clears the inherited `BRANCHYARD_*` variables, so each scenario is a yard of its own.
+
+```sh
+QUALIFY_OUT=/tmp/q1 BY=target/debug/by tools/qualify_delegation/run-battery.sh
+python3 tools/qualify_delegation/score.py /tmp/q2 --compare /tmp/q1/scores.json
+```
+
+`score.py` reports, per scenario and in total:
+- whether the check passed on the meta branch;
+- the tree's cost and the run's wall time;
+- the branches and the meta's turns;
+- protocol violations across every branch;
+- the refusals the meta hit;
+- the items in the meta's friction list.
+
+These are the fixed evaluator for a delegation change. A change holds the pass count and lowers
+violations, refusals or friction without raising cost by more than 10%. Models vary from run to
+run, so compare totals across all twelve scenarios, not single ones.
+
 ## Knowledge-work campaigns (Worldloom)
 
 These campaigns test delegation on work that isn't code. The tasks are multi-step dependency chains
