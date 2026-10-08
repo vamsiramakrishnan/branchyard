@@ -1935,7 +1935,7 @@ fn deliver(
         if let Ok(steer) = steer {
             if matches!(
                 steer.state,
-                branchyard::SteerState::Delivered | branchyard::SteerState::Accepted
+                branchyard::SteerState::Written | branchyard::SteerState::Accepted
             ) {
                 branch.record_pull_request(PullRequestActivity::FeedbackDelivered {
                     keys,

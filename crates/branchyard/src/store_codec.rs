@@ -326,7 +326,7 @@ mod tests {
         // Steer state carries data, so its columns are (text, reason).
         for state in [
             SteerState::Pending,
-            SteerState::Delivered,
+            SteerState::Written,
             SteerState::Accepted,
             SteerState::Refused {
                 reason: "why".to_owned(),

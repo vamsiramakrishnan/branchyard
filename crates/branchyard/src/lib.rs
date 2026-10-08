@@ -168,7 +168,8 @@ pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
 pub use access::{AccessActivity, Ceiling, DelegationScope, NetworkScope};
 pub use adopt::{AdoptSpec, Adoption};
 pub use branchyard_harness::{
-    Event, NativeSession, PermissionDecision, PermissionKey, PermissionRequest, TurnOutcome, Usage,
+    Event, HarnessTask, NativeSession, PermissionDecision, PermissionKey, PermissionRequest,
+    TurnOutcome, Usage,
 };
 pub use branchyard_provision::network::{
     narrow as network_narrow, Enforce as NetworkEnforce, HostRule as NetworkRule, Network,
@@ -2546,6 +2547,12 @@ pub struct Steer {
     /// Milliseconds since the Unix epoch.
     pub requested_at_ms: u64,
     pub state: SteerState,
+    /// Where the harness delivers steered input within the running turn,
+    /// as `docs/harness-integration.md` "Steering a running turn" names
+    /// each profile's boundary (`claude_next_model_call`,
+    /// `codex_turn_steer`, ...). Set once the input is written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<String>,
 }
 
 /// Where a [`Steer`] is. Serialized as an object tagged by `state`, such as
@@ -2556,12 +2563,20 @@ pub struct Steer {
 #[derive(strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum SteerState {
-    /// Queued for the running turn; the engine running it writes it to the
-    /// harness within about 100 ms, in whichever process it runs.
+    /// Queued in Branchyard for the running turn; the engine running it
+    /// writes it to the harness within about 100 ms, in whichever process
+    /// it runs.
     Pending,
-    /// Written to the harness, which has not yet confirmed it.
-    Delivered,
-    /// The harness took it into the running turn.
+    /// Written to the harness's input; the harness has not confirmed it
+    /// yet. Stored as `delivered` before it had this name, which still
+    /// reads as this state.
+    #[serde(alias = "delivered")]
+    Written,
+    /// Joined the running turn: the harness queued it into the turn in
+    /// flight, and the model reads it at the [`Steer::boundary`] the
+    /// harness delivers steered input at (for Claude Code, before its next
+    /// model call, still within this turn). Steered input never waits for
+    /// a later turn: one the turn does not take is refused.
     Accepted,
     /// Never reached the model: the harness refused or dropped it, an
     /// interrupt cancelled it, or the turn ended first.

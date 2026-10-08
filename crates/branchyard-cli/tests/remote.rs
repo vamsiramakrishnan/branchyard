@@ -542,10 +542,7 @@ fn by_send_steer_reaches_a_turn_on_the_server() {
         "{steered}"
     );
     assert!(
-        matches!(
-            steered["state"]["state"].as_str(),
-            Some("delivered" | "accepted")
-        ),
+        matches!(steered["state"]["state"].as_str(), Some("accepted")),
         "{steered}"
     );
     let ran = runner.join().unwrap();

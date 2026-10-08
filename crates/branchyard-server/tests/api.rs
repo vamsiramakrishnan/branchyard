@@ -462,7 +462,7 @@ fn a_running_turn_is_steered_over_http() {
     assert!(
         matches!(
             steer.state,
-            branchyard::SteerState::Delivered | branchyard::SteerState::Accepted
+            branchyard::SteerState::Written | branchyard::SteerState::Accepted
         ),
         "{steer:?}"
     );

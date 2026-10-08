@@ -27,7 +27,7 @@ Writes run in `BEGIN IMMEDIATE` transactions, so a fence check and the write it 
 | `steps` | `(incarnation, turn, step)` | `intent`, `outcome` (`NULL` until done), the generation that wrote it, times |
 | `processes` | `(incarnation, turn, pid)` | Process group, start time and host of each harness process a turn started |
 | `cancels` | `(incarnation, turn)` | Who asked, when, and whether for a subtree; the first request for a turn is kept |
-| `steers` | `id` (autoincrement), indexed by `(incarnation, turn, state)` | Input for a running turn: the turn it is bound to, who sent it, its text, when, and its `state` (`pending`, `delivered`, `accepted`, `refused`) with the `reason` for a refusal |
+| `steers` | `id` (autoincrement), indexed by `(incarnation, turn, state)` | Input for a running turn: the turn it is bound to, who sent it, its text, when, and its `state` (`pending`, `written`, `accepted`, `refused`; `delivered`, the name `written` had before, still reads as `written`) with the `reason` for a refusal |
 | `events` | `id` (autoincrement), unique `(incarnation, seq)` | Branch name, `seq` from 1 per incarnation, `at_ms`, the activity as JSON |
 | `meta` | `key` | Schema version (1) and when earlier state was imported |
 | `graph_edges` | `(dependent, prerequisite)`, indexed by `prerequisite` and `parent` | A dependency between two children of `parent`, and `after` (`settled` or `integrated`); see [task graphs](graph.md) |
