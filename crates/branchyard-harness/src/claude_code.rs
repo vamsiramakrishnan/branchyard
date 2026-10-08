@@ -45,6 +45,15 @@
 //! they are cancelled rather than run after the interrupt; their
 //! cancellation is [`Event::SteerRejected`].
 //!
+//! Each user message the driver writes carries a `uuid`, and a `result`
+//! lists the messages it answered in `user_message_uuids`. A result that
+//! answers none of the turn's is a turn the CLI ran of its own: on
+//! `--resume`, Claude Code 2.1.293 first runs a notification queued in the
+//! earlier session (a stopped background task's `<task-notification>`) as
+//! a turn with its own `result`. It is reported as a [`Event::Warning`]
+//! with its cost, its text is not the turn's, and the turn goes on until
+//! its own result (`tests/fixtures/claude-code-2.1.293-resume-notification.jsonl`).
+//!
 //! Closing the session sends the `end_session` control request before the
 //! input closes. Claude Code 2.1.293 does not exit when its input closes
 //! while a background task of its own runs (a `Bash` command with
@@ -462,20 +471,22 @@ impl ClaudeCode {
     }
 
     fn assistant(&mut self, message: &Value) -> Output {
-        let mut events: Vec<_> = self
-            .acknowledge(message["user_message_uuid"].as_str())
-            .into_iter()
-            .collect();
+        let answering = message["user_message_uuid"].as_str();
+        let mut events: Vec<_> = self.acknowledge(answering).into_iter().collect();
         let Some(turn) = self.turns.active else {
             return Output {
                 events,
                 frames: Vec::new(),
             };
         };
+        // A turn the CLI runs of its own (`harness_turn`) says nothing in
+        // this one, though its model calls still cost.
+        let own = answering.is_none_or(|uuid| self.ours(uuid));
         for block in message["message"]["content"]
             .as_array()
             .into_iter()
             .flatten()
+            .filter(|_| own)
         {
             match block["type"].as_str() {
                 Some("text") => {
@@ -507,24 +518,32 @@ impl ClaudeCode {
         }
     }
 
+    /// Whether `uuid`, a user message a frame answers, is the turn in
+    /// flight's or one of its steered messages.
+    fn ours(&self, uuid: &str) -> bool {
+        self.turn_uuid.as_ref().is_some_and(|(own, _)| own == uuid)
+            || self.steers.iter().any(|s| s.uuid == uuid)
+    }
+
     fn result(&mut self, message: &Value) -> Output {
         let mut events = Vec::new();
-        if let (Some((expected, _)), Some(echoed)) =
-            (&self.turn_uuid, message["user_message_uuid"].as_str())
-        {
-            let steered = self.steers.iter().any(|s| s.uuid == echoed);
-            if expected != echoed && !steered {
-                return Output::event(Event::ProtocolViolation {
-                    detail: format!("result answers {echoed}, not the turn in flight {expected}"),
-                });
-            }
-        }
         // Every message this result answered: several when steered
-        // messages joined the turn.
-        let answered: Vec<&str> = match message["user_message_uuids"].as_array() {
-            Some(uuids) => uuids.iter().filter_map(Value::as_str).collect(),
-            None => message["user_message_uuid"].as_str().into_iter().collect(),
+        // messages joined the turn. None named is a result from before
+        // the CLI listed them, taken as the turn's.
+        let answered: Option<Vec<&str>> = match message["user_message_uuids"].as_array() {
+            Some(uuids) => Some(uuids.iter().filter_map(Value::as_str).collect()),
+            None => message["user_message_uuid"].as_str().map(|uuid| vec![uuid]),
         };
+        if let Some(answered) = answered
+            .as_ref()
+            .filter(|a| !a.iter().any(|u| self.ours(u)))
+        {
+            return Output {
+                events: self.harness_turn(message, answered),
+                frames: Vec::new(),
+            };
+        }
+        let answered = answered.unwrap_or_default();
         self.steers.retain(|s| !answered.contains(&s.uuid.as_str()));
         if let (Some(turn), false) = (self.turns.active, self.steers.is_empty()) {
             // Queued steered messages run as a follow-up the CLI starts
@@ -567,6 +586,33 @@ impl ClaudeCode {
             events,
             frames: Vec::new(),
         }
+    }
+
+    /// A `result` that answers none of the turn's messages: a turn the CLI
+    /// ran of its own, such as the one Claude Code 2.1.293 runs on
+    /// `--resume` for a notification queued in the earlier session (a
+    /// stopped background task's `<task-notification>`), before the
+    /// prompt. It is recorded and its cost counted; the turn in flight
+    /// goes on until its own result.
+    fn harness_turn(&mut self, message: &Value, answered: &[&str]) -> Vec<Event> {
+        self.call = None;
+        let answering = match answered {
+            [] => "no message".to_owned(),
+            uuids => uuids.join(", "),
+        };
+        vec![
+            Event::UsageObserved {
+                turn: self.turns.active,
+                usage: usage(message),
+            },
+            Event::Warning {
+                message: format!(
+                    "Claude Code ran a turn of its own, answering {answering}, which ended {:?}; \
+                     it is not the turn in flight",
+                    outcome(message, false)
+                ),
+            },
+        ]
     }
 }
 

@@ -390,15 +390,27 @@ fn submitting_requires_a_handshake_and_one_turn_at_a_time() {
     assert_eq!(driver.submit("two"), Err(Rejected::TurnInProgress));
 }
 
+/// A result answering another message, or none, is a turn the CLI ran of
+/// its own: recorded with its cost, while the turn in flight goes on.
 #[test]
-fn a_result_for_another_turn_is_rejected() {
+fn a_result_for_another_message_does_not_end_the_turn() {
     let mut driver = ready(SessionMode::Fresh);
     driver.submit("mine").unwrap();
-    let (events, _) = feed(
-        &mut driver,
-        &json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuid": "not-ours"}),
-    );
-    assert!(matches!(&events[0], Event::ProtocolViolation { .. }));
+    for result in [
+        json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuid": "not-ours", "total_cost_usd": 0.5}),
+        json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": [], "total_cost_usd": 0.5}),
+    ] {
+        let (events, _) = feed(&mut driver, &result);
+        assert!(
+            matches!(&events[..], [
+                Event::UsageObserved { turn: Some(1), usage },
+                Event::Warning { message },
+            ] if usage.cumulative
+                && usage.cost_usd == Some(0.5)
+                && message.contains("a turn of its own")),
+            "{events:?}"
+        );
+    }
     let closed = driver.transport_closed();
     assert!(matches!(
         closed[..],
@@ -871,6 +883,68 @@ fn background_tasks_are_reported_and_end_session_stops_them() {
             running: Vec::new()
         })
     );
+}
+
+/// On `--resume`, Claude Code 2.1.293 first runs the earlier session's
+/// queued `<task-notification>` as a turn with its own result. That result
+/// answers the notification, not the prompt: it is recorded with its cost,
+/// its text is not the turn's, and the turn ends at its own result.
+#[test]
+fn a_resumed_sessions_queued_notification_does_not_end_the_turn() {
+    let recorded = fixture_2_1_293("resume-notification");
+    let (mut driver, opened) = open_with(SessionMode::Resume(session(
+        "bab15dd6-ad26-579e-9b3f-4bd2173db7e3",
+    )));
+    let replayed = Replay::new(&recorded)
+        .alias("/request_id")
+        .alias("/uuid")
+        .prompt("Reply with the single word resumed and end your turn.")
+        .run(&mut driver, &opened);
+    assert_eq!(replayed.sent, 2, "initialize and the prompt");
+    assert!(replayed.unsent.is_empty(), "{:?}", replayed.unsent);
+    let events = replayed.events;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::ProtocolViolation { .. })),
+        "{events:?}"
+    );
+    assert_eq!(turn_ends(&events), [&TurnOutcome::Completed]);
+    let ended = events
+        .iter()
+        .position(|e| matches!(e, Event::TurnEnded { .. }))
+        .unwrap();
+    let internal = events
+        .iter()
+        .position(
+            |e| matches!(e, Event::Warning { message } if message.contains("a turn of its own")),
+        )
+        .unwrap();
+    assert!(internal < ended);
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageDelta { turn: 1, text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        ["resumed"],
+        "the notification's answer is not the turn's"
+    );
+    let costs: Vec<f64> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::UsageObserved {
+                turn: Some(1),
+                usage,
+            } if usage.cumulative => usage.cost_usd,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(costs, [0.00061, 0.00079], "both results' costs count");
+    assert_eq!(driver.submit("next").map(|s| s.turn), Ok(2));
 }
 
 #[test]
