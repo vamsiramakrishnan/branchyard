@@ -67,10 +67,20 @@
 //! before that message starts is also a turn of the CLI's own.
 //! Only a turn cycle's first `assistant` frame names the message it
 //! answers (`user_message_uuid`); the frames after a tool call name none
-//! and belong to the message last named, until the cycle's `result`. A
-//! foreign result with `queued_turn_count` 0 after the CLI acknowledged the
-//! turn's message leaves none of them to run, so it ends the turn with a
-//! protocol violation.
+//! and belong to the message last named or last `started`, until the
+//! cycle's `result`. A message queued behind a cycle that calls a tool is
+//! `started` at the tool result and joins that cycle, whose later frames
+//! are then its own (the shape of
+//! `tests/fixtures/claude-code-2.1.283-steer-tool-boundary.jsonl`).
+//!
+//! A turn ends only on a definite signal: a `result` that answers its
+//! message (and every steered one), or `command_lifecycle` `completed` or
+//! `cancelled` for its message with no `result` answering it, once no
+//! cycle of its messages is still running. A foreign result's
+//! `queued_turn_count` is not one: Claude Code 2.1.283 reports 0 with a
+//! steered message queued and then runs it
+//! (`tests/fixtures/claude-code-2.1.283-steer-follow-up.jsonl`), and on
+//! resume the prompt queued behind a notification runs the same way.
 //!
 //! Closing the session sends the `end_session` control request before the
 //! input closes. Claude Code 2.1.293 does not exit when its input closes
@@ -140,9 +150,18 @@ pub struct ClaudeCode {
     /// does, the message waits in the CLI's queue, as on resume behind a
     /// notification the CLI runs first.
     turn_started: bool,
+    /// The CLI is done with the turn's own message, and the outcome the
+    /// turn ends with once no steered message is left to answer: a
+    /// `result` answered it, or the CLI reported it `completed` or
+    /// `cancelled` with none answering it. With it, a warning to give
+    /// when the turn ends: that the CLI completed the message with no
+    /// result answering it, kept while a cycle it joined runs, and dropped
+    /// if that cycle's result answers it after all.
+    turn_done: Option<(TurnOutcome, Option<String>)>,
     /// The user message the CLI's current turn cycle answers, as the last
-    /// frame that named one said. Only a cycle's first `assistant` frame
-    /// names it; the frames after a tool call do not.
+    /// frame that named one, or the last of ours `started`, said. Only a
+    /// cycle's first `assistant` frame names it; the frames after a tool
+    /// call do not.
     answering: Option<String>,
     /// Every user message the driver has written this session, the turns'
     /// and the steered ones.
@@ -188,6 +207,7 @@ impl ClaudeCode {
             turns: Turns::default(),
             turn_uuid: None,
             turn_started: false,
+            turn_done: None,
             answering: None,
             sent: HashSet::new(),
             names_messages: false,
@@ -200,9 +220,13 @@ impl ClaudeCode {
     }
 
     /// `command_lifecycle` for the turn's own message: started is the CLI
-    /// running it. Cancelled, discarded or refused before it started, it
-    /// will never run and no `result` will answer it: the turn ends there,
-    /// interrupted when Branchyard asked, failed otherwise.
+    /// running it, in a cycle of its own or one it joins, whose frames are
+    /// then the turn's. Completed, cancelled, discarded or refused with no
+    /// `result` answering it, no `result` will: the turn ends there, once
+    /// a cycle of its messages still running has its result and every
+    /// steered message is answered. It ends interrupted when Branchyard
+    /// asked, failed when the message was dropped, and completed, with a
+    /// warning, when the CLI says it completed.
     fn turn_lifecycle(&mut self, uuid: &str, state: &str) -> Vec<Event> {
         if self.turn_uuid.as_ref().is_none_or(|(own, _)| own != uuid) {
             return Vec::new();
@@ -210,75 +234,143 @@ impl ClaudeCode {
         match state {
             "started" => {
                 self.turn_started = true;
+                self.answering = Some(uuid.to_owned());
                 Vec::new()
             }
-            "cancelled" | "discarded" | "refused" if !self.turn_started => {
-                let Some(turn) = self.turns.end() else {
+            "completed" | "cancelled" | "discarded" | "refused" if self.turn_done.is_none() => {
+                let Some(turn) = self.turns.active else {
                     return Vec::new();
                 };
-                let interrupted = std::mem::take(&mut self.interrupting);
-                // Steered messages queued behind it are cancelled with it.
-                let mut events: Vec<Event> = std::mem::take(&mut self.steers)
-                    .into_iter()
-                    .map(|steer| Event::SteerRejected {
-                        turn,
-                        steer: steer.number,
-                        reason: format!("Claude Code reported the turn's message {state}"),
-                    })
-                    .collect();
-                self.end_turn();
-                events.push(Event::TurnEnded {
-                    turn,
-                    outcome: match interrupted {
-                        true => TurnOutcome::Interrupted,
-                        false => TurnOutcome::Failed {
-                            message: format!(
+                let mut warning = None;
+                let outcome = match state {
+                    "completed" => {
+                        warning = Some(
+                            "Claude Code reported the turn's message completed with no result \
+                             answering it"
+                                .to_owned(),
+                        );
+                        TurnOutcome::Completed
+                    }
+                    _ => TurnOutcome::Failed {
+                        message: match self.turn_started {
+                            true => format!(
+                                "Claude Code reported the turn's message {state} with no result \
+                                 answering it"
+                            ),
+                            false => format!(
                                 "Claude Code reported the turn's message {state} before it ran"
                             ),
                         },
                     },
-                });
+                };
+                // A cycle of ours still running ends at its result, which
+                // may still answer the message.
+                if self.cycle_running() {
+                    self.turn_done = Some((outcome, warning));
+                    return Vec::new();
+                }
+                self.turn_done = Some((outcome, None));
+                let mut events: Vec<Event> = warning
+                    .into_iter()
+                    .map(|message| Event::Warning { message })
+                    .collect();
+                // Steered messages queued behind a dropped message are
+                // dropped with it; behind a completed one they still run.
+                if state != "completed" {
+                    events.extend(std::mem::take(&mut self.steers).into_iter().map(|steer| {
+                        Event::SteerRejected {
+                            turn,
+                            steer: steer.number,
+                            reason: format!("Claude Code reported the turn's message {state}"),
+                        }
+                    }));
+                }
+                events.extend(self.settle());
                 events
             }
             _ => Vec::new(),
         }
     }
 
+    /// A turn cycle answering one of the turn's messages runs and has not
+    /// had its `result` yet.
+    fn cycle_running(&self) -> bool {
+        self.answering
+            .as_deref()
+            .is_some_and(|uuid| self.ours(uuid))
+    }
+
+    /// End the turn if the CLI is done with its message, no cycle of its
+    /// messages still runs, and no steered message is left to answer.
+    fn settle(&mut self) -> Vec<Event> {
+        if !self.steers.is_empty() || self.cycle_running() {
+            return Vec::new();
+        }
+        let Some((outcome, warning)) = self.turn_done.take() else {
+            return Vec::new();
+        };
+        let Some(turn) = self.turns.end() else {
+            return Vec::new();
+        };
+        self.end_turn();
+        let outcome = match std::mem::take(&mut self.interrupting) {
+            true => TurnOutcome::Interrupted,
+            false => outcome,
+        };
+        let mut events: Vec<Event> = warning
+            .into_iter()
+            .map(|message| Event::Warning { message })
+            .collect();
+        events.push(Event::TurnEnded { turn, outcome });
+        events
+    }
+
     /// Forget the turn that just ended.
     fn end_turn(&mut self) {
         self.turn_uuid = None;
         self.turn_started = false;
+        self.turn_done = None;
         self.answering = None;
         self.call = None;
         self.after_text = false;
     }
 
     /// `command_lifecycle` for a steered message: queued is its
-    /// acceptance; cancelled, discarded and refused drop it undelivered.
-    fn steer_lifecycle(&mut self, uuid: &str, state: &str) -> Option<Event> {
-        let turn = self.turns.active?;
-        let at = self.steers.iter().position(|s| s.uuid == uuid)?;
+    /// acceptance; started is the CLI running it, in a cycle of its own or
+    /// the turn's, whose frames are then the turn's; cancelled, discarded
+    /// and refused drop it undelivered, which ends the turn if the CLI was
+    /// done with the rest.
+    fn steer_lifecycle(&mut self, uuid: &str, state: &str) -> Vec<Event> {
+        let Some(turn) = self.turns.active else {
+            return Vec::new();
+        };
+        let Some(at) = self.steers.iter().position(|s| s.uuid == uuid) else {
+            return Vec::new();
+        };
         match state {
             "queued" if !self.steers[at].accepted => {
                 self.steers[at].accepted = true;
-                Some(Event::SteerAccepted {
+                vec![Event::SteerAccepted {
                     turn,
                     steer: self.steers[at].number,
-                })
+                }]
             }
             "started" => {
                 self.steers[at].started = true;
-                None
+                self.answering = Some(uuid.to_owned());
+                Vec::new()
             }
             "cancelled" | "discarded" | "refused" => {
                 let steer = self.steers.remove(at);
-                Some(Event::SteerRejected {
+                let mut events = vec![Event::SteerRejected {
                     turn,
                     steer: steer.number,
                     reason: format!("Claude Code reported the message {state}"),
-                })
+                }];
+                events.extend(self.settle());
+                events
             }
-            _ => None,
+            _ => Vec::new(),
         }
     }
 
@@ -648,48 +740,41 @@ impl ClaudeCode {
             (None, None) => self.names_messages,
         };
         if foreign {
-            return Output {
-                events: self.harness_turn(message, answered.as_deref()),
-                frames: Vec::new(),
-            };
-        }
-        let answered = answered.unwrap_or_default();
-        self.steers.retain(|s| !answered.contains(&s.uuid.as_str()));
-        if let (Some(turn), false) = (self.turns.active, self.steers.is_empty()) {
-            // Queued steered messages run as a follow-up the CLI starts
-            // itself: the turn goes on until a result answers them.
-            events.push(Event::UsageObserved {
-                turn: Some(turn),
-                usage: usage(message),
-            });
-            match outcome(message, false) {
-                TurnOutcome::Completed => {}
-                other => events.push(Event::Warning {
-                    message: format!(
-                        "part of the turn ended {other:?}; it goes on with steered input"
-                    ),
-                }),
-            }
+            let mut events = self.harness_turn(message, answered.as_deref());
+            // The turn's message completed or was cancelled in this cycle
+            // without its result naming it: nothing else will answer it.
+            // The turn ends with the outcome its message's lifecycle gave,
+            // not this result's, which is the CLI's own cycle's.
+            events.extend(self.settle());
             return Output {
                 events,
                 frames: Vec::new(),
             };
         }
-        let Some(turn) = self.turns.end() else {
+        let Some(turn) = self.turns.active else {
             return Output::event(Event::ProtocolViolation {
                 detail: "result without a turn in flight".into(),
             });
         };
-        self.end_turn();
-        let interrupted = std::mem::take(&mut self.interrupting);
+        let answered = answered.unwrap_or_default();
+        self.steers.retain(|s| !answered.contains(&s.uuid.as_str()));
         events.push(Event::UsageObserved {
             turn: Some(turn),
             usage: usage(message),
         });
-        events.push(Event::TurnEnded {
-            turn,
-            outcome: outcome(message, interrupted),
-        });
+        let outcome = outcome(message, false);
+        // Queued steered messages run as a follow-up the CLI starts itself:
+        // the turn goes on until a result answers them, or the CLI drops
+        // them.
+        if !self.steers.is_empty() && outcome != TurnOutcome::Completed {
+            events.push(Event::Warning {
+                message: format!(
+                    "part of the turn ended {outcome:?}; it goes on with steered input"
+                ),
+            });
+        }
+        self.turn_done = Some((outcome, None));
+        events.extend(self.settle());
         Output {
             events,
             frames: Vec::new(),
@@ -707,12 +792,10 @@ impl ClaudeCode {
     /// `--resume` for a notification queued in the earlier session (a
     /// stopped background task's `<task-notification>`), before the
     /// prompt. It is recorded and its cost counted; the turn in flight
-    /// goes on until its own result. When the CLI has acknowledged the
-    /// turn's message and the result says no turn is queued after it
-    /// (`queued_turn_count` 0), none of the turn's messages is left to run: no result will ever end the turn, so it
-    /// ends here, failed, with a protocol violation. `answered` is `None`
-    /// for a result that names no message, which says nothing of what is
-    /// queued and never ends the turn.
+    /// goes on until its own result or its message's lifecycle ends it.
+    /// Its `queued_turn_count` never does: 0 there does not mean the
+    /// turn's message will not run. `answered` is `None` for a result that
+    /// names no message.
     fn harness_turn(&mut self, message: &Value, answered: Option<&[&str]>) -> Vec<Event> {
         self.call = None;
         let answering = match answered {
@@ -720,7 +803,7 @@ impl ClaudeCode {
             Some([]) => "no message".to_owned(),
             Some(uuids) => uuids.join(", "),
         };
-        let mut events = vec![
+        vec![
             Event::UsageObserved {
                 turn: self.turns.active,
                 usage: usage(message),
@@ -732,31 +815,7 @@ impl ClaudeCode {
                     outcome(message, false)
                 ),
             },
-        ];
-        // Before the CLI acknowledged the turn's message it may not have
-        // read it yet, and nothing queued says nothing about it.
-        let acknowledged = self.turn_uuid.as_ref().is_some_and(|(_, ack)| *ack);
-        if answered.is_none() || !acknowledged || message["queued_turn_count"].as_u64() != Some(0) {
-            return events;
-        }
-        let Some(turn) = self.turns.end() else {
-            return events;
-        };
-        self.end_turn();
-        self.steers.clear();
-        self.interrupting = false;
-        let detail = format!(
-            "Claude Code answered {answering} with nothing queued after it, so no result will \
-             answer the turn's message"
-        );
-        events.push(Event::ProtocolViolation {
-            detail: detail.clone(),
-        });
-        events.push(Event::TurnEnded {
-            turn,
-            outcome: TurnOutcome::Failed { message: detail },
-        });
-        events
+        ]
     }
 }
 

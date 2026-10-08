@@ -418,33 +418,256 @@ fn a_result_for_another_message_does_not_end_the_turn() {
     ));
 }
 
-/// A result of the CLI's own that says nothing is queued after it leaves
-/// none of the turn's messages to run: the turn ends there, as a protocol
-/// violation, rather than waiting for a result that never comes.
+/// A result of the CLI's own that says nothing is queued after it
+/// (`queued_turn_count` 0) does not end the turn: Claude Code says so with
+/// messages still queued, and runs them. The turn's message, and an
+/// accepted steer queued behind it, still run, and the turn ends at their
+/// result.
 #[test]
-fn a_foreign_result_with_nothing_queued_ends_the_turn() {
+fn a_foreign_result_with_nothing_queued_does_not_end_the_turn() {
     for answered in [json!(["not-ours"]), json!([])] {
         let mut driver = ready(SessionMode::Fresh);
         let uuid = submit(&mut driver, "mine");
         feed(&mut driver, &lifecycle(&uuid, "queued"));
-        let queued = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": answered, "queued_turn_count": 1});
-        let (events, _) = feed(&mut driver, &queued);
-        assert!(turn_ends(&events).is_empty(), "{events:?}");
+        let steer = decode(&driver.steer("more").unwrap()[0])["uuid"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        feed(&mut driver, &lifecycle(&steer, "queued"));
         let last = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": answered, "queued_turn_count": 0, "total_cost_usd": 0.5});
         let (events, _) = feed(&mut driver, &last);
         assert!(
             matches!(&events[..], [
                 Event::UsageObserved { turn: Some(1), usage },
                 Event::Warning { message },
-                Event::ProtocolViolation { detail },
-                Event::TurnEnded { turn: 1, outcome: TurnOutcome::Failed { .. } },
-            ] if usage.cost_usd == Some(0.5)
-                && message.contains("a turn of its own")
-                && detail.contains("nothing queued")),
+            ] if usage.cost_usd == Some(0.5) && message.contains("a turn of its own")),
+            "{events:?}"
+        );
+        feed(&mut driver, &lifecycle(&uuid, "started"));
+        let own = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": [uuid, steer], "queued_turn_count": 0});
+        let (events, _) = feed(&mut driver, &own);
+        assert_eq!(turn_ends(&events), [&TurnOutcome::Completed]);
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                Event::ProtocolViolation { .. } | Event::SteerRejected { .. }
+            )),
             "{events:?}"
         );
         assert_eq!(driver.submit("next").map(|s| s.turn), Ok(2));
     }
+}
+
+/// The turn's message reported `completed` or `cancelled` with no result
+/// answering it and no cycle of it running is a definite end: completed
+/// with a warning, interrupted when Branchyard asked, failed when dropped.
+/// A steer queued behind a completed message still runs, and the turn ends
+/// at its result; behind a cancelled one it is rejected, never dropped
+/// silently.
+#[test]
+fn the_turns_message_ending_with_no_result_ends_the_turn() {
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "mine");
+    feed(&mut driver, &lifecycle(&uuid, "queued"));
+    let (events, _) = feed(&mut driver, &lifecycle(&uuid, "completed"));
+    assert!(
+        matches!(&events[..], [
+            Event::Warning { message },
+            Event::TurnEnded { turn: 1, outcome: TurnOutcome::Completed },
+        ] if message.contains("no result")),
+        "{events:?}"
+    );
+    assert_eq!(driver.submit("next").map(|s| s.turn), Ok(2));
+
+    // A steer queued behind it keeps the turn open until it is answered.
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "mine");
+    feed(&mut driver, &lifecycle(&uuid, "queued"));
+    let steer = decode(&driver.steer("more").unwrap()[0])["uuid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    feed(&mut driver, &lifecycle(&steer, "queued"));
+    let (events, _) = feed(&mut driver, &lifecycle(&uuid, "completed"));
+    assert!(turn_ends(&events).is_empty(), "{events:?}");
+    feed(&mut driver, &lifecycle(&steer, "started"));
+    let answer = json!({"type": "assistant", "message": {"id": "m", "content": [{"type": "text", "text": "bananas"}]}});
+    let (events, _) = feed(&mut driver, &answer);
+    assert!(events.contains(&Event::MessageDelta {
+        turn: 1,
+        text: "bananas".into()
+    }));
+    let result = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": [steer], "queued_turn_count": 0});
+    assert_eq!(
+        turn_ends(&feed(&mut driver, &result).0),
+        [&TurnOutcome::Completed]
+    );
+
+    // Interrupted: the steer queued behind it is rejected with it.
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "mine");
+    feed(&mut driver, &lifecycle(&uuid, "queued"));
+    driver.steer("more").unwrap();
+    driver.interrupt().unwrap();
+    let (events, _) = feed(&mut driver, &lifecycle(&uuid, "cancelled"));
+    assert!(
+        matches!(
+            &events[..],
+            [
+                Event::SteerRejected {
+                    turn: 1,
+                    steer: 1,
+                    ..
+                },
+                Event::TurnEnded {
+                    turn: 1,
+                    outcome: TurnOutcome::Interrupted
+                },
+            ]
+        ),
+        "{events:?}"
+    );
+}
+
+/// The turn's message joined a cycle of the CLI's own and completed in
+/// it before that cycle's result: the turn waits for the result, and ends
+/// there even when the result does not name it, warning that nothing
+/// answered its message; a result that does name it ends it quietly.
+#[test]
+fn a_message_completed_in_a_running_cycle_ends_at_its_result() {
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "mine");
+    feed(&mut driver, &lifecycle(&uuid, "queued"));
+    feed(&mut driver, &lifecycle(&uuid, "started"));
+    let (events, _) = feed(&mut driver, &lifecycle(&uuid, "completed"));
+    assert!(turn_ends(&events).is_empty(), "{events:?}");
+    let result = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": ["notification"], "queued_turn_count": 0, "total_cost_usd": 0.5});
+    let (events, _) = feed(&mut driver, &result);
+    assert!(
+        matches!(&events[..], [
+            Event::UsageObserved { turn: Some(1), .. },
+            Event::Warning { message: foreign },
+            Event::Warning { message: unanswered },
+            Event::TurnEnded { turn: 1, outcome: TurnOutcome::Completed },
+        ] if foreign.contains("a turn of its own") && unanswered.contains("no result")),
+        "{events:?}"
+    );
+
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "mine");
+    feed(&mut driver, &lifecycle(&uuid, "started"));
+    feed(&mut driver, &lifecycle(&uuid, "completed"));
+    let result = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": ["notification", uuid], "queued_turn_count": 0});
+    let (events, _) = feed(&mut driver, &result);
+    assert!(
+        matches!(
+            &events[..],
+            [
+                Event::UsageObserved { turn: Some(1), .. },
+                Event::TurnEnded {
+                    turn: 1,
+                    outcome: TurnOutcome::Completed
+                },
+            ]
+        ),
+        "{events:?}"
+    );
+}
+
+/// A steered message started at the tool result of a cycle that names
+/// another message joins that cycle: the frames after it, which name no
+/// message, are the turn's, its tool calls and text included.
+#[test]
+fn a_steer_that_joins_a_foreign_cycle_keeps_its_text_and_tools() {
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "mine");
+    feed(&mut driver, &lifecycle(&uuid, "queued"));
+    let steer = decode(&driver.steer("more").unwrap()[0])["uuid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    feed(&mut driver, &lifecycle(&steer, "queued"));
+    let frame =
+        |content: Value| json!({"type": "assistant", "message": {"id": "m", "content": [content]}});
+    let mut named = frame(json!({"type": "tool_use", "id": "theirs", "name": "Bash"}));
+    named["user_message_uuid"] = json!("notification");
+    let mut events = feed(&mut driver, &named).0;
+    feed(&mut driver, &lifecycle(&steer, "started"));
+    for content in [
+        json!({"type": "tool_use", "id": "ours", "name": "Read"}),
+        json!({"type": "text", "text": "bananas"}),
+    ] {
+        events.extend(feed(&mut driver, &frame(content)).0);
+    }
+    let tools: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ToolStarted { call_id, .. } => Some(call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tools, ["ours"]);
+    assert!(
+        events.contains(&Event::MessageDelta {
+            turn: 1,
+            text: "bananas".into()
+        }),
+        "{events:?}"
+    );
+}
+
+/// The real steer follow-up recording, read as a resume would see it: the
+/// recording's first message is a cycle of the CLI's own, and its queued
+/// second message is the turn's prompt. That cycle's result says
+/// `queued_turn_count` 0 with the prompt queued, and the prompt still runs:
+/// the turn ends at the prompt's own result, with its text.
+#[test]
+fn a_prompt_queued_behind_a_cycle_reporting_nothing_queued_still_runs() {
+    let recorded = steer_fixture("follow-up");
+    let their_prompt = recorded.rows[2].frame["uuid"].as_str().unwrap().to_owned();
+    let queued = recorded.rows[6].frame["uuid"].as_str().unwrap().to_owned();
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, STEER_PROMPT);
+    let mut events = Vec::new();
+    for row in &recorded.rows[3..] {
+        if row.frame["type"] == "user" {
+            continue;
+        }
+        let line = row
+            .frame
+            .to_string()
+            .replace(&their_prompt, "the-clis-own")
+            .replace(&queued, &uuid);
+        events.extend(feed(&mut driver, &serde_json::from_str(&line).unwrap()).0);
+    }
+    assert_eq!(turn_ends(&events), [&TurnOutcome::Completed]);
+    assert!(
+        events.iter().any(
+            |e| matches!(e, Event::Warning { message } if message.contains("a turn of its own"))
+        ),
+        "{events:?}"
+    );
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageDelta { turn: 1, text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(&texts[..], [text] if text.contains(STEER_PROMPT)),
+        "{texts:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::ProtocolViolation { .. })),
+        "{events:?}"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(Event::TurnEnded { turn: 1, .. })
+    ));
 }
 
 fn branchyard_server() -> McpServer {
@@ -1182,6 +1405,59 @@ fn a_resumed_sessions_queued_notification_does_not_end_the_turn() {
         })
         .collect();
     assert_eq!(costs, [0.00061, 0.00079], "both results' costs count");
+    assert_eq!(driver.submit("next").map(|s| s.turn), Ok(2));
+}
+
+/// A resumed prompt queued behind the notification turn joins it at a tool
+/// boundary, the shape Claude Code 2.1.283 recorded for a queued message
+/// (`steer-tool-boundary`): from its `started` on, the frames naming no
+/// message are the turn's, its tool call and text included, and the one
+/// result listing both messages ends the turn.
+#[test]
+fn a_resumed_prompt_that_joins_the_notification_turn_keeps_its_text_and_tools() {
+    let recorded = fixture_2_1_293("resume-joined");
+    let (mut driver, opened) = open_with(SessionMode::Resume(session(
+        "bab15dd6-ad26-579e-9b3f-4bd2173db7e3",
+    )));
+    let replayed = Replay::new(&recorded)
+        .alias("/request_id")
+        .alias("/uuid")
+        .answer_permissions(PermissionDecision::Allow)
+        .prompt("Run echo resumed, then reply with the single word resumed and end your turn.")
+        .run(&mut driver, &opened);
+    assert_eq!(
+        replayed.sent, 4,
+        "initialize, the prompt and two permissions"
+    );
+    assert!(replayed.unsent.is_empty(), "{:?}", replayed.unsent);
+    let events = replayed.events;
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageDelta { turn: 1, text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["resumed"], "only the text after it joined");
+    let tools: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ToolStarted { call_id, .. } => Some(call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tools, ["toolu_01Vb3kQp8sWm2hTx6RcJ4nYe"]);
+    assert_eq!(turn_ends(&events), [&TurnOutcome::Completed]);
+    assert!(matches!(
+        events.last(),
+        Some(Event::TurnEnded { turn: 1, .. })
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::ProtocolViolation { .. } | Event::Warning { .. })),
+        "{events:?}"
+    );
     assert_eq!(driver.submit("next").map(|s| s.turn), Ok(2));
 }
 
