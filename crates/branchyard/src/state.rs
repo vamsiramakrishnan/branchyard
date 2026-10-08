@@ -25,7 +25,7 @@
 
 use branchyard_support::time::now_ms;
 use branchyard_support::{CondvarExt as _, LockExt as _};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -93,6 +93,22 @@ pub(crate) struct Record {
     /// a fresh session starts, minus the branch's cost before it, which
     /// the session's total does not count.
     pub cost_baseline: Option<f64>,
+    /// The native session `cost_baseline` is for: the one its last turn
+    /// ran, and `None` while a fresh session has not yet reported its id.
+    /// Every turn that resumes it keeps the baseline, so a turn cut off
+    /// before the harness reported its total, whose live estimate the
+    /// branch's cost already counts, is not counted again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_session: Option<String>,
+    /// The cumulative cost of each native session the branch left for
+    /// another (after a rewind, or a fresh session), by session id: its
+    /// baseline plus the branch's cost when it was left. A rewind can resume
+    /// an older session, whose total is lower than the latest one's: the
+    /// turn that resumes it sets the baseline from that total, so the
+    /// branch's cost never falls. Empty for a record from before it was
+    /// kept.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub session_costs: BTreeMap<String, f64>,
     /// Where the harness runs; `None` is local.
     #[serde(default)]
     pub provider: Option<Provider>,
@@ -134,6 +150,11 @@ pub(crate) struct Record {
     /// `crate::snapshots`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_seed: Option<crate::snapshots::SandboxSeed>,
+    /// The `merged` status the branch had when its running turn started: a
+    /// turn that changes nothing keeps it, as its candidate is the one
+    /// already integrated. Cleared when the turn ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged: Option<crate::BranchStatus>,
     /// Who the branch acts for at the connector gateway (its token's `sub`
     /// and `by_tenant`): a server's principal, recorded when the branch is
     /// created and inherited by its forks and children. `None`: the yard's

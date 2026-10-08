@@ -1892,10 +1892,11 @@ fn sharing_check(store: &Store, record: &Record) -> Vec<Record> {
 /// out siblings sharing it. Integrating them together could change the
 /// result only when the failed check is theirs, some branch integrated
 /// failed it alone too (its last `by check` of the same work, onto the
-/// same parent's work), and a sibling has a candidate: then say who they
-/// are and the integration that runs it on all of them. Otherwise the
-/// check failed on the integrated branches' own work: say so, naming no
-/// sibling. Any other error is returned as it is.
+/// same parent's work), and a sibling has a candidate or is still
+/// running, to wait for: then say who they are and the integration that
+/// runs it on all of them. Otherwise the check failed on the integrated
+/// branches' own work: say so, naming no sibling. Any other error is
+/// returned as it is.
 fn with_shared_check(yard: &Yard, caller: &str, error: Error, branches: &[String]) -> Error {
     let Error::CheckFailed {
         output_tail,
@@ -1959,7 +1960,11 @@ fn with_shared_check(yard: &Yard, caller: &str, error: Error, branches: &[String
     }
     let shared = shared.filter(|s| !s.siblings.is_empty());
     let (shared, own_work) = match shared {
-        Some(s) if !s.failed_alone.is_empty() && any_candidate => (Some(Box::new(s)), own_work),
+        // A sibling with work to bring in, or still to finish, could change
+        // the result.
+        Some(s) if !s.failed_alone.is_empty() && (any_candidate || !s.unsettled.is_empty()) => {
+            (Some(Box::new(s)), own_work)
+        }
         Some(_) => (None, branches.to_vec()),
         None => (None, own_work),
     };
@@ -4341,6 +4346,8 @@ Checks on the merged result: \
             command: None,
             home: None,
             cost_baseline: None,
+            cost_session: None,
+            session_costs: Default::default(),
             provider: None,
             provision: None,
             grant: Some(Grant {
@@ -4361,6 +4368,7 @@ Checks on the merged result: \
             wakes: 0,
             lost: None,
             sandbox_seed: None,
+            merged: None,
             actor: None,
             plan: None,
             goal: None,

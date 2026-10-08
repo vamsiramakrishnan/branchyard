@@ -420,6 +420,23 @@ fn merge_lands_a_merge_commit_on_main() {
     ));
 }
 
+/// A merged branch sent a turn that changes nothing still holds only the
+/// candidate already integrated: it stays merged, not `ready` to integrate
+/// again. A turn that changes something makes it ready.
+#[test]
+fn a_merged_branch_whose_turn_changes_nothing_stays_merged() {
+    let f = Fixture::new();
+    let branch = f.task("WRITE kept.txt=1").name("kept").run().unwrap();
+    f.yard.merge("kept", "main").unwrap();
+    let merged = status_of(&f, "kept");
+    assert!(matches!(merged, BranchStatus::Merged { .. }), "{merged:?}");
+    let idle = branch.send("WHOAMI", f.options()).unwrap();
+    assert_eq!(idle.info().status, merged);
+    assert_eq!(status_of(&f, "kept"), merged);
+    let changed = branch.send("WRITE kept.txt=2", f.options()).unwrap();
+    assert_eq!(changed.info().status, BranchStatus::Ready);
+}
+
 #[test]
 fn a_target_that_moves_during_the_check_is_refused() {
     let f = Fixture::new();

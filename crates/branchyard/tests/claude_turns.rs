@@ -20,15 +20,24 @@ use serde_json::json;
 
 /// Answers every control request it reads; `$1` is what it does once it
 /// has the prompt. Like Claude Code with a background task, it does not
-/// exit when its input closes, only when asked to end its session.
+/// exit when its input closes, only when asked to end its session. It
+/// continues the session `--resume` names, and otherwise starts a new one,
+/// numbered in the branch's temporary directory.
 const STAND_IN: &str = r#"
 reply() {
   id=$(printf '%s' "$1" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
   printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{}}}\n' "$id"
 }
+session=; previous=
+for a in "$@"; do [ "$previous" = --resume ] && session=$a; previous=$a; done
+if [ -z "$session" ]; then
+  n=$(( $(cat "$TMPDIR/sessions" 2>/dev/null || echo 0) + 1 ))
+  printf '%s' "$n" > "$TMPDIR/sessions"
+  session=stand-in-session-$n
+fi
 read -r line; reply "$line"
 read -r prompt
-echo '{"type":"system","subtype":"init","session_id":"stand-in-session"}'
+printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$session"
 echo '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour"}}'
 eval "$1"
 echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","task_type":"local_bash","description":"sleep"}]}'
@@ -44,14 +53,14 @@ exec sleep 30
 /// A turn's `result` after it spends `cost`. Like Claude Code, whose
 /// `total_cost_usd` is the session's across `--resume` (2.1.293 reported
 /// $0.0261, $0.0454 and $0.0649 for one session's three turns), it reports
-/// the session's running total, kept in the branch's temporary directory.
-/// A session that is not resumed (no `--resume`) starts its total again.
+/// the session's running total, kept in the branch's temporary directory
+/// for each session. A session that is not resumed (no `--resume`) starts
+/// its total again; one resumed continues its own.
 fn result(cost: f64) -> String {
     format!(
-        r#"resumed=; for a in "$@"; do [ "$a" = --resume ] && resumed=1; done
-[ -n "$resumed" ] || rm -f "$TMPDIR/session-cost"
-total=$(awk -v spent={cost} -v before="$(cat "$TMPDIR/session-cost" 2>/dev/null || echo 0)" 'BEGIN {{ print before + spent }}')
-printf '%s' "$total" > "$TMPDIR/session-cost"
+        r#"before=$(cat "$TMPDIR/session-cost-$session" 2>/dev/null || echo 0)
+total=$(awk -v spent={cost} -v before="$before" 'BEGIN {{ print before + spent }}')
+printf '%s' "$total" > "$TMPDIR/session-cost-$session"
 printf '{{"type":"result","subtype":"success","is_error":false,"total_cost_usd":%s,"modelUsage":{{"claude-sonnet-4-5":{{"inputTokens":10,"outputTokens":5}}}}}}\n' "$total""#
     )
 }
@@ -355,6 +364,78 @@ fn a_fresh_session_adds_to_what_the_branch_spent() {
     assert!((left - 0.03).abs() < 1e-9, "{left}");
     let spent = next.info().cost_usd.unwrap();
     assert!((spent - 0.08).abs() < 1e-9, "{spent}");
+}
+
+/// A rewind can resume an older session, whose total is lower than the
+/// latest one's: the turn counts only what it adds to that session's own
+/// total, so the branch's recorded cost does not fall.
+#[test]
+fn resuming_an_older_session_adds_to_what_the_branch_spent() {
+    let f = Fixture::new();
+    let args = "printf '%s\\n' \"$@\" > args.txt\n";
+    let options = |cost: f64| stand_in(&f, &format!("{args}{}", result(cost)));
+    let branch = f
+        .yard
+        .task("go")
+        .options(options(0.01))
+        .name("older")
+        .run()
+        .unwrap();
+    let first = branch.info().session.clone().unwrap();
+    branch.rewind(0).unwrap();
+    let fresh = branch.send("again", options(0.10)).unwrap();
+    assert_ne!(fresh.info().session.as_deref(), Some(first.as_str()));
+    let spent = fresh.info().cost_usd.unwrap();
+    assert!((spent - 0.11).abs() < 1e-9, "{spent}");
+
+    // Back to turn 1, which ended the first session: it resumes, at its
+    // own total of $0.01.
+    branch.rewind(1).unwrap();
+    let resumed = branch.send("more", options(0.01)).unwrap();
+    let argv = std::fs::read_to_string(resumed.info().worktree.join("args.txt")).unwrap();
+    assert!(argv.contains(&format!("--resume\n{first}\n")), "{argv}");
+    let spent = resumed.info().cost_usd.unwrap();
+    assert!((spent - 0.12).abs() < 1e-9, "the cost fell: {spent}");
+
+    // And the latest session, resumed again, still adds only its own.
+    let next = resumed.send("and more", options(0.02)).unwrap();
+    let spent = next.info().cost_usd.unwrap();
+    assert!((spent - 0.14).abs() < 1e-9, "{spent}");
+}
+
+/// A turn cut off before its harness reported a total leaves the branch's
+/// cost at its live estimate, which the session's own total counts too:
+/// the turn that resumes the session counts that spending once.
+#[test]
+fn a_cut_off_turns_spending_is_counted_once_when_its_session_resumes() {
+    let f = Fixture::new();
+    let args = "printf '%s\\n' \"$@\" > args.txt\n";
+    let options = |turn: &str| stand_in(&f, &format!("{args}{turn}"));
+    let branch = f
+        .yard
+        .task("go")
+        .options(options(&result(0.01)))
+        .name("cut")
+        .run()
+        .unwrap();
+    let session = branch.info().session.clone().unwrap();
+    // 1000 input and 2000 output tokens of Sonnet 4.5, $0.033 by the
+    // catalog, then the harness exits with no result; its session's total
+    // counts them.
+    let cut_off = r#"echo '{"type":"assistant","message":{"id":"m1","model":"claude-sonnet-4-5","content":[{"type":"text","text":"working"}],"usage":{"input_tokens":1000,"output_tokens":2000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}'
+before=$(cat "$TMPDIR/session-cost-$session")
+awk -v before="$before" 'BEGIN { print before + 0.033 }' > "$TMPDIR/session-cost-$session"
+exit 3"#;
+    let cut = branch.send("more", options(cut_off)).unwrap();
+    assert_ne!(cut.info().status, BranchStatus::Ready);
+    let live = cut.info().cost_usd.unwrap();
+    assert!((live - 0.043).abs() < 1e-9, "the live estimate: {live}");
+
+    let next = branch.send("again", options(&result(0.01))).unwrap();
+    let argv = std::fs::read_to_string(next.info().worktree.join("args.txt")).unwrap();
+    assert!(argv.contains(&format!("--resume\n{session}\n")), "{argv}");
+    let spent = next.info().cost_usd.unwrap();
+    assert!((spent - 0.053).abs() < 1e-9, "counted twice: {spent}");
 }
 
 /// A branch on the model gateway is given no spending limit of its own:

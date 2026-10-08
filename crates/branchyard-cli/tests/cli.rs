@@ -841,6 +841,49 @@ fn a_check_that_fails_on_the_integrated_work_names_no_sibling() {
     assert!(said.contains("python ['b'] []"), "{said}");
 }
 
+/// A branch that failed its `by check` alone, integrated while a sibling
+/// sharing the check is still in its first turn with no candidate yet:
+/// the sibling may yet bring what the check needs, so the failure names it
+/// and says to wait for it, not that the work is the branch's own to fix.
+#[test]
+fn a_failed_shared_check_waits_for_a_sibling_still_in_its_first_turn() {
+    let repo = Repo::new();
+    let prompt = [
+        "SH by spawn 'WRITE a.txt=a' --name a --wait --json".to_owned(),
+        "SH by spawn HANG --name b --json".to_owned(),
+        "SH by check a --json".to_owned(),
+        "SH by integrate a --json".to_owned(),
+        "SH by cancel b".to_owned(),
+    ]
+    .join("\n");
+    let out = repo.by_agent(&[
+        "run",
+        &prompt,
+        "--name",
+        "root",
+        "--delegate",
+        "--yes",
+        "--check",
+        "test -f a.txt -a -f b.txt",
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    let (code, checked) = sh_json(&said, 2);
+    assert_eq!(
+        (code, &checked["outcome"]),
+        (1, &serde_json::json!("failed")),
+        "{said}"
+    );
+    let (code, failed) = sh_json(&said, 3);
+    assert_eq!(code, 1, "{said}");
+    let detail = &failed["error"]["detail"];
+    assert_eq!(detail["unsettled"], serde_json::json!(["b"]), "{said}");
+    assert_eq!(detail["integrate_together"], serde_json::json!(["a", "b"]));
+    assert!(detail.get("own_work").is_none(), "{said}");
+    let message = failed["error"]["message"].as_str().unwrap();
+    assert!(message.contains("(`by wait b`)"), "{message}");
+}
+
 /// Integrating branches whose checks differ ran each distinct check once
 /// on the result, and a failure said only the failed one's output. Every
 /// surface names each check, the branches it belongs to and how it ended:

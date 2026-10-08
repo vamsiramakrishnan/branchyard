@@ -641,15 +641,36 @@ fn run(
         }
     }
     // A fresh session's cumulative cost starts again from nothing (after a
-    // rewind, or a lost session): the branch's cost is what it had spent
-    // before, and the session's total added to it. Written at once, so a
-    // turn cut off and resumed reads the session's total the same way.
-    if turn.mode == SessionMode::Fresh {
-        let baseline = record.info.cost_usd.map(|cost| -cost);
-        if record.cost_baseline != baseline {
-            record.cost_baseline = baseline;
-            store.write_fenced(record, fence)?;
+    // rewind, or a lost session), and a resumed one other than the
+    // baseline's from its own total when it was left, lower than the
+    // latest session's when a rewind went back to an older one: the
+    // branch's cost is what it had spent before, and what the session's
+    // total adds to it. The session left keeps its total, what the branch
+    // has counted of it. A turn that resumes the baseline's own session,
+    // and a fork's first (its baseline was set when it was forked), keep
+    // the baseline. Written at once, so a turn cut off and resumed reads
+    // the session's total the same way.
+    let resumed = match &turn.mode {
+        SessionMode::Fresh => None,
+        SessionMode::Resume(session) => Some(session.as_str().to_owned()),
+        SessionMode::Fork(_) => record.cost_session.clone(),
+    };
+    let leaving = turn.mode == SessionMode::Fresh || resumed != record.cost_session;
+    if leaving {
+        let before = record.info.cost_usd.unwrap_or(0.0);
+        if let Some(left) = record.cost_session.take() {
+            let total = before + record.cost_baseline.unwrap_or(0.0);
+            record.session_costs.insert(left, total);
         }
+        record.cost_baseline = match &resumed {
+            None => record.info.cost_usd.map(|cost| -cost),
+            Some(session) => match record.session_costs.get(session) {
+                Some(total) => Some(total - before),
+                None => record.cost_baseline,
+            },
+        };
+        record.cost_session = resumed;
+        store.write_fenced(record, fence)?;
     }
     let record: &Record = record;
     // Every local harness learns which branch it is on, so `by` inside it
@@ -1685,12 +1706,14 @@ pub(crate) fn conclude(
 ) -> Result<(), Error> {
     let store = yard.store();
     let excluded = crate::workspace::excluded(record);
+    let merged = record.merged.take();
     let info = &mut record.info;
     if driven.submitted {
         info.turns += 1;
     }
     if let Some(session) = &driven.session {
         info.session = Some(session.to_string());
+        record.cost_session = Some(session.to_string());
     }
     match (driven.metered, driven.cost) {
         (Some(metered), _) => info.cost_usd = Some(info.cost_usd.unwrap_or(0.0) + metered),
@@ -1774,17 +1797,22 @@ pub(crate) fn conclude(
         }
         info.candidate = candidate;
     }
+    // A merged branch whose turn changed nothing still holds the candidate
+    // already integrated. Only a completed turn keeps it: a failed or lost
+    // one says so instead, as the reason its parent and `--retry` act on.
+    let merged = merged.filter(|_| snapshotted.error.is_none() && !changed);
     if !replayed {
         store
             .backend()
             .finish_step(fence, fence.turn, STEP_SNAPSHOT, &to_value(&snapshotted))?;
     }
     info.status = match driven.end {
-        // `ready` while the branch has a candidate, whichever turn made it;
+        // `ready` while the branch has a candidate, whichever turn made it
+        // (still `merged` when it is the one already integrated);
         // `no_changes` only when it has none.
         End::Outcome {
             outcome: TurnOutcome::Completed,
-        } if info.candidate.is_some() => BranchStatus::Ready,
+        } if info.candidate.is_some() => merged.unwrap_or(BranchStatus::Ready),
         End::Outcome {
             outcome: TurnOutcome::Completed,
         } => BranchStatus::NoChanges,
