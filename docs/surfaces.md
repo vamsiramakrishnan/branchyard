@@ -746,6 +746,6 @@ Every connector call that changes the world is decided, written to a ledger befo
 
 | Surface | Before | Now |
 |---|---|---|
-| `by check [BRANCH]`, `Delegate::check` → `CheckReport`, Python `check(branch=None)`, the MCP `check` tool | none: a child learned whether its work passed its check only when its parent integrated it | the branch's check (its own or inherited) run on its current work, uncommitted files included, merged into its parent's branch in a private temporary worktree; nothing is committed or integrated; a leaf may run it on itself; exits 1 when the work would not get past its check |
+| `by check [BRANCH]`, `Delegate::check` → `CheckReport`, Python `check(branch=None)`, the MCP `check` tool | none: a child learned whether its work passed its check only when its parent integrated it | the branch's check (its own or inherited) run on its current work, uncommitted files included, merged into its parent's work as integrating would snapshot it (the parent's uncommitted files included, its excluded files not) in a private temporary worktree; nothing is committed or integrated; a leaf may run it on itself; exits 1 when the work would not get past its check |
 | `branchyard_workspace::Workspace::working_commit`, `Repository::check_merged`, `Repository::merged_worktree` (`MergedWorktree`) | none | a worktree's files as a commit reachable from nothing; a check on a head merged into a target as integrating it would, moving no ref |
 | The delegate skill and the leaf note | | tell a child to run `by check` before it finishes |

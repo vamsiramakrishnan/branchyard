@@ -132,8 +132,8 @@ class CheckFailedError(BranchyardError):
     `integrate_together` names the branches to integrate at once,
     `integrate(*e.integrate_together)`, and `unsettled` those of them still
     to wait for. Both are empty otherwise: the check failed on its own, and
-    when siblings share it, the detail's `own_work` names the branches
-    integrated, on whose own work it failed.
+    when siblings share it, `own_work` names the branches integrated, on
+    whose own work it failed.
 
     `checks` names every check of the branches integrated, in the order
     they ran, as dicts `{check, branches, outcome}`: `outcome` is "passed",
@@ -152,6 +152,10 @@ class CheckFailedError(BranchyardError):
     @property
     def unsettled(self) -> List[str]:
         return list((self.detail or {}).get("unsettled", []))
+
+    @property
+    def own_work(self) -> List[str]:
+        return list((self.detail or {}).get("own_work", []))
 
 
 class CheckTimedOutError(BranchyardError):

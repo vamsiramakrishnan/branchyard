@@ -783,6 +783,15 @@ fn a_failed_shared_check_names_the_siblings_to_integrate_together() {
 fn a_check_that_fails_on_the_integrated_work_names_no_sibling() {
     let repo = Repo::new();
     let flag = repo.dir.join("break-the-check");
+    let script = repo.dir.join("own-work.py");
+    fs::write(
+        &script,
+        "import branchyard as b\n\
+         try:\n    b.integrate('b')\n\
+         except b.CheckFailedError as e:\n    \
+         print('python', e.own_work, e.integrate_together)\n",
+    )
+    .unwrap();
     let prompt = [
         "SH by spawn 'WRITE a.txt=a' --name a --wait --json".to_owned(),
         "SH by spawn 'WRITE b.txt=b' --name b --wait --json".to_owned(),
@@ -791,6 +800,7 @@ fn a_check_that_fails_on_the_integrated_work_names_no_sibling() {
         "SH by integrate a".to_owned(),
         "SH by integrate a --json".to_owned(),
         "SH by integrate b --json".to_owned(),
+        format!("SH python3 {}", script.display()),
     ]
     .join("\n");
     let check = format!("test ! -f {}", flag.display());
@@ -828,6 +838,7 @@ fn a_check_that_fails_on_the_integrated_work_names_no_sibling() {
     let detail = &failed["error"]["detail"];
     assert_eq!(detail["own_work"], serde_json::json!(["b"]), "{said}");
     assert!(detail.get("siblings").is_none(), "{said}");
+    assert!(said.contains("python ['b'] []"), "{said}");
 }
 
 /// Integrating branches whose checks differ ran each distinct check once
