@@ -9,8 +9,8 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 use branchyard::{
-    Activity, BranchStatus, Budget, ChildBudget, Delegate, Envelope, Error, Policy, Provisioning,
-    Seat, Seats, SecretSource, Spawn, SteerState, TaskOptions, Yard,
+    Activity, BranchStatus, Budget, CheckVerdict, ChildBudget, Delegate, Envelope, Error, Policy,
+    Provisioning, Seat, Seats, SecretSource, Spawn, SteerState, TaskOptions, Yard,
 };
 use branchyard_testkit::wait;
 use common::{edit_record, fake_agent, Fixture};
@@ -135,6 +135,97 @@ fn a_parent_integrates_a_child_into_its_own_branch_only() {
         root.info().candidate.as_ref().unwrap().commit,
         merged.commit
     );
+}
+
+/// A child runs the check it inherited on its work as it is, merged into
+/// its parent's branch as integrating it would, and nothing is committed,
+/// moved or integrated.
+#[test]
+fn a_child_checks_its_current_work_before_it_finishes() {
+    let f = Fixture::new();
+    let options = TaskOptions {
+        check: Some(vec![
+            "sh".into(),
+            "-c".into(),
+            "test -f child.txt && test -f extra.txt && test -f root.txt && echo all-there".into(),
+        ]),
+        ..delegating(&f, Envelope::default())
+    };
+    let root = f
+        .yard
+        .task("WRITE root.txt=r")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options.clone()).unwrap();
+    delegate
+        .spawn(spawn("WRITE child.txt=from-kid", "kid"))
+        .unwrap();
+    root.wait_subtree().unwrap();
+    let kid = f
+        .yard
+        .branch("kid")
+        .unwrap()
+        .delegate(options.clone())
+        .unwrap();
+
+    // Its work lacks extra.txt: the inherited check fails, and says why.
+    let failed = kid.check("kid").unwrap();
+    assert_eq!(failed.outcome, CheckVerdict::Failed, "{failed:?}");
+    assert!(!failed.passed());
+    assert_eq!(failed.inherited_from.as_deref(), Some("root"));
+    assert_eq!(failed.target.as_deref(), Some("by/root"));
+    assert!(failed.checked.is_some());
+
+    // Uncommitted work counts, and stays uncommitted.
+    let worktree = f.yard.branch("kid").unwrap().info().worktree.clone();
+    let head = f.git(&["rev-parse", "by/kid"]);
+    let parent_head = f.git(&["rev-parse", "by/root"]);
+    fs::write(worktree.join("extra.txt"), "x\n").unwrap();
+    let passed = kid.check("kid").unwrap();
+    assert_eq!(passed.outcome, CheckVerdict::Passed, "{passed:?}");
+    assert!(passed.passed());
+    assert!(passed.output_tail.contains("all-there"));
+    assert_eq!(f.git(&["rev-parse", "by/kid"]), head);
+    assert_eq!(f.git(&["rev-parse", "by/root"]), parent_head);
+    let status = common::git(&worktree, &["status", "--porcelain"]);
+    assert!(status.contains("?? extra.txt"), "{status}");
+    // The parent sees the same on its child; nothing was integrated.
+    assert_eq!(delegate.check("kid").unwrap().outcome, CheckVerdict::Passed);
+    assert_eq!(
+        f.yard.branch("kid").unwrap().info().status,
+        BranchStatus::Ready
+    );
+    // The same through the tool, with the branch omitted.
+    let called = kid.call("check", serde_json::json!({})).unwrap();
+    assert_eq!(called["outcome"], "passed");
+    assert_eq!(called["branch"], "kid");
+
+    // A branch without a parent is checked alone; a leaf checks only
+    // itself.
+    let alone = delegate.check("root").unwrap();
+    assert_eq!(alone.target, None);
+    assert_eq!(alone.outcome, CheckVerdict::Failed);
+    denied(kid.check("root"), "it acts only on itself");
+}
+
+/// A branch with no check runs none, and integrating it would run none.
+#[test]
+fn a_branch_without_a_check_reports_that_none_ran() {
+    let f = Fixture::new();
+    let root = f
+        .yard
+        .task("WRITE root.txt=r")
+        .options(f.options())
+        .name("root")
+        .run()
+        .unwrap();
+    let report = root.delegate(f.options()).unwrap().check("root").unwrap();
+    assert_eq!(report.check, None);
+    assert_eq!(report.outcome, CheckVerdict::NotRun);
+    assert!(report.passed());
+    assert!(report.conflicts.is_empty());
 }
 
 #[test]

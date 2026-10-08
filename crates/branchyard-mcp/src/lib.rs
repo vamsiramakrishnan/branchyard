@@ -68,7 +68,8 @@ delegate: spawn child branches with their own harness and budget, watch them wit
 and events, continue them with send, add to a child's running turn with steer, merge a \
 finished child into your own branch with \
 propose_integration (its check must pass; give several in branches to merge them together and \
-check the result once), stop them with cancel, set a settled one aside with discard (it is never \
+check the result once), run a branch's check on its current work with check (run it on \
+yourself before you finish), stop them with cancel, set a settled one aside with discard (it is never \
 run again), and list them with children. Children run in parallel; spawn returns once a child has \
 started. To wait for them, call wait, or end your turn: when every child has settled, Branchyard \
 starts your next turn with a summary of what each did. A child may \
@@ -76,7 +77,7 @@ depend on its siblings (depends_on): it waits, and starts once they have settled
 creates several children and dependencies at once, all or nothing, against the revision graph \
 shows. You act only as your own branch and only \
 on your descendants. A branch that may not delegate (its envelope's max_depth is 0) still has \
-inspect, the artifact and scratch tools, and ask, report, escalate and inbox; the other tools \
+inspect, check, the artifact and scratch tools, and ask, report, escalate and inbox; the other tools \
 refuse it. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
 may spawn. You can also message: ask your parent a question (optionally waiting for its \
 answer), report to it, escalate to it or, if your rig seat allows, further up; answer a \
@@ -146,6 +147,21 @@ pub fn tools() -> Vec<Tool> {
         })),
     );
     graph.annotations = Some(read_only("Show a branch's graph"));
+    let mut check = Tool::new(
+        "check",
+        "Run a branch's check (its own, or the one it inherited) on its current work the way \
+         propose_integration would, and integrate nothing: its files as they are, uncommitted \
+         ones included, merged into its parent's branch in a private worktree. Omit branch to \
+         check your own work before you finish: what fails here fails your integration. \
+         Returns the outcome (passed, failed, timed_out, not_started; not_run when there is no \
+         check or the merge conflicts, with conflicts naming the files) and the output's tail.",
+        schema(json!({
+            "type": "object",
+            "properties": {"branch": branch_property("Your own branch or a descendant; defaults to your own")},
+            "additionalProperties": false,
+        })),
+    );
+    check.annotations = Some(read_only("Run a branch's check"));
     let spawn_properties = json!({
         "prompt": {"type": "string", "description": "The child's task"},
         "harness": {"type": "string", "description": "Harness or profile ID, such as codex; defaults to yours and must be allowed by your envelope"},
@@ -277,6 +293,7 @@ pub fn tools() -> Vec<Tool> {
                 "additionalProperties": false,
             })),
         ),
+        check,
         Tool::new(
             "cancel",
             "Stop a descendant's running turn and every turn running below it. Each ends \

@@ -43,6 +43,7 @@ pub use branch::{BranchName, InvalidBranchName, BRANCH_PREFIX};
 pub use check::{Check, OUTPUT_TAIL_BYTES};
 pub use git::{Git, GitError};
 pub use integrate::{
-    CheckResult, Integrated, IntegratedMany, IntegrationError, MergedCandidate, Verified,
+    CheckResult, Integrated, IntegratedMany, IntegrationError, MergedCandidate, MergedWorktree,
+    Verified,
 };
 pub use repo::{Candidate, Commit, DiffStat, Repository, Workspace};

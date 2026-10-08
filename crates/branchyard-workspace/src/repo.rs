@@ -559,6 +559,30 @@ impl Workspace {
         Ok(())
     }
 
+    /// The worktree's files as they are (tracked, untracked, not ignored,
+    /// minus [`Workspace::excluding`]) as a commit whose parent is HEAD,
+    /// written through a private copy of the index. No ref, index or file
+    /// moves, and no hook runs: the commit is reachable from nothing, so
+    /// the work can be checked without committing it.
+    pub fn working_commit(&self, message: &str) -> Result<Commit, GitError> {
+        let tree = self.working_tree()?;
+        let head = resolve_in(&self.path, "HEAD")?;
+        let identity = identity_args(&self.path)?;
+        let commit = Git::new(&self.path)
+            .no_hooks()
+            .args(identity)
+            .args([
+                "commit-tree",
+                tree.as_str(),
+                "-p",
+                head.as_str(),
+                "-m",
+                message,
+            ])
+            .run()?;
+        Ok(Commit(commit.trim().to_owned()))
+    }
+
     /// Writes the working tree (tracked, untracked, not ignored) as a tree
     /// object through a private copy of the index.
     fn working_tree(&self) -> Result<String, GitError> {

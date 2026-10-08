@@ -1538,6 +1538,29 @@ pub fn events(
     })
 }
 
+/// Run a branch's check on its current work as integrating it would:
+/// inside a harness, on itself or a descendant; otherwise on any branch,
+/// with yours. Exits 1 when the work would not get past its check.
+pub fn check(env: &Env, target: &Target, branch: Option<String>, json: bool) -> Outcome {
+    let result = match (harness_delegate(json)?, target) {
+        (Some(delegate), _) => {
+            let branch = branch.unwrap_or_else(|| delegate.branch().to_owned());
+            delegate.check(&branch)
+        }
+        (None, Target::Remote(_)) => Err(branchyard::Error::Unsupported(
+            "the server has no check route; run by check on the repository's host".into(),
+        )),
+        (None, Target::Local) => required_outside(branch, "check")
+            .and_then(|b| as_user(&b, TaskOptions::default())?.check(&b)),
+    };
+    let passed = result.as_ref().is_ok_and(branchyard::CheckReport::passed);
+    emit(json, result, |r| render::check_report(r, env.style()))?;
+    match passed {
+        true => Ok(()),
+        false => Err(Failure::Reported),
+    }
+}
+
 /// Which check a spawned child must pass when it is integrated.
 fn check_note(spawned: &branchyard::Spawned) -> String {
     match (&spawned.check, spawned.check_inherited) {

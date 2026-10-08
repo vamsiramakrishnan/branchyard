@@ -1609,6 +1609,16 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run a branch's check on its current work, merged into its parent's branch as integrate
+    /// would, without integrating it; run it on yourself before you finish
+    #[command(display_order = 303)]
+    Check {
+        /// Default: this harness's own branch
+        branch: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Wait for delegated branches to settle: all of them, or the first with --any
     #[command(display_order = 303)]
     Wait {
@@ -5156,6 +5166,20 @@ mod tests {
             Command::Children {
                 branch: None,
                 json: false
+            }
+        );
+        assert_eq!(
+            parse_str("check").unwrap(),
+            Command::Check {
+                branch: None,
+                json: false
+            }
+        );
+        assert_eq!(
+            parse_str("check kid --json").unwrap(),
+            Command::Check {
+                branch: Some("kid".into()),
+                json: true
             }
         );
         assert_eq!(

@@ -3193,6 +3193,55 @@ pub enum CheckVerdict {
     NotRun,
 }
 
+/// A branch's check run on its current work, as integrating the branch
+/// would run it, with nothing integrated; see [`Delegate::check`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckReport {
+    /// The branch checked.
+    pub branch: String,
+    /// Its check, as its argv: its own, or the one it inherited. `None`
+    /// when it has none: nothing ran, and integrating it runs none.
+    pub check: Option<Vec<String>>,
+    /// The parent whose check it is, when the branch inherited it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_from: Option<String>,
+    /// Its current work as a commit: its worktree's files as they are,
+    /// committed nowhere, or its git branch's head when it has no worktree.
+    pub work: String,
+    /// The git branch the work was merged into first, as integrating it
+    /// would: its parent's. `None` for a branch without a parent, whose
+    /// work was checked alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// The commit the check ran on: the merge of `work` into `target`'s
+    /// head, or `work` itself. `None` when the check did not run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked: Option<String>,
+    /// How it ended; `not_run` when there is no check or the merge
+    /// conflicted.
+    pub outcome: CheckVerdict,
+    /// Files where the work conflicts with `target`: integrating it would
+    /// fail before its check.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
+    /// The last [`branchyard_workspace::OUTPUT_TAIL_BYTES`] bytes of its
+    /// output, or why it could not start.
+    #[serde(default)]
+    pub output_tail: String,
+}
+
+impl CheckReport {
+    /// Whether integrating the work as it is would get past its check:
+    /// the check passed, or there is none and nothing conflicted.
+    pub fn passed(&self) -> bool {
+        match self.check {
+            Some(_) => self.outcome == CheckVerdict::Passed,
+            None => self.conflicts.is_empty(),
+        }
+    }
+}
+
 /// Siblings that share a check an integration failed, and the integration
 /// that runs it on all of them ([`Error::CheckFailed`]).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

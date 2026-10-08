@@ -485,6 +485,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             json,
         } => commands::events(env, target, branch, cursor, limit, json),
         Command::Integrate { branches, json } => commands::integrate(target, &branches, json),
+        Command::Check { branch, json } => commands::check(env, target, branch, json),
         Command::Wait {
             branches,
             any,

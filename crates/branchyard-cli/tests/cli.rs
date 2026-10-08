@@ -1051,6 +1051,37 @@ fn a_harness_delegates_with_the_python_module() {
     assert_eq!(root["candidate"]["files_changed"], 1);
 }
 
+/// `branchyard.check` returns the report, a failing check included, rather
+/// than raising.
+#[test]
+fn the_python_module_checks_a_branchs_current_work() {
+    let repo = Repo::new();
+    let script = "import branchyard as b; c = b.spawn('WRITE py.part=p', name='py'); \
+                  b.wait(c.name, timeout=60, poll=0.05); r = b.check(c.name); \
+                  print('child', r.outcome, r.passed, r.inherited_from, r.target); \
+                  m = b.check(); print('mine', m.outcome, m.passed, m.target)";
+    let prompt = format!("SH python3 -c \"{script}\"");
+    let out = repo.by_agent(&[
+        "run",
+        &prompt,
+        "--name",
+        "root",
+        "--delegate",
+        "--yes",
+        "--check",
+        "test -f py.part",
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    for expected in [
+        "sh: 0",
+        "child passed True root by/root",
+        "mine failed False None",
+    ] {
+        assert!(said.contains(expected), "{expected:?} missing from\n{said}");
+    }
+}
+
 #[test]
 fn artifacts_and_scratch_reach_the_python_module() {
     let repo = Repo::new();
@@ -1300,7 +1331,8 @@ fn a_delegating_harness_gets_tools_and_skill_outside_its_worktree() {
     assert!(tools.status.success(), "{}", stderr(&tools));
     assert!(
         reply(&repo, "mcp").contains(
-            "mcp tools: spawn,inspect,events,send,steer,propose_integration,cancel,discard,children"
+            "mcp tools: spawn,inspect,events,send,steer,propose_integration,check,cancel,discard,\
+             children"
         ),
         "{}",
         reply(&repo, "mcp")
@@ -2962,6 +2994,74 @@ fn by_integrate_merges_siblings_together_and_checks_once() {
     let help = stdout(&repo.by(&["spawn", "--help"]));
     assert!(help.contains("defaults to its parent's"), "{help}");
     assert!(help.contains("by integrate a b"), "{help}");
+}
+
+/// Every gate failure of a dogfood round was a rule the child never saw
+/// until integration. `by check` runs the check it inherited on its work
+/// as it is, merged into its parent's branch, before it finishes.
+#[test]
+fn by_check_runs_a_childs_check_on_its_current_work() {
+    let repo = Repo::new();
+    let prompt = [
+        "SH by spawn 'SH by check --json; echo x > kid.part; by check --json' --name kid --wait --json",
+        "SH by check kid --json",
+    ]
+    .join("\n");
+    let out = repo.by_agent(&[
+        "run",
+        &prompt,
+        "--name",
+        "root",
+        "--delegate",
+        "--yes",
+        "--check",
+        "sh -c 'test -f kid.part && echo kid-part-found'",
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    // The child, a leaf, checked itself: first without the file, then with
+    // it, uncommitted.
+    let kid = reply(&repo, "kid");
+    let jsons: Vec<Value> = serde_json::Deserializer::from_str(kid.split_once('\n').unwrap().1)
+        .into_iter::<Value>()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(jsons.len(), 2, "{kid}");
+    assert_eq!(jsons[0]["outcome"], "failed", "{kid}");
+    assert_eq!(jsons[0]["inherited_from"], "root");
+    assert_eq!(jsons[0]["target"], "by/root");
+    assert_eq!(jsons[1]["outcome"], "passed", "{kid}");
+    assert!(jsons[1]["output_tail"]
+        .as_str()
+        .unwrap()
+        .contains("kid-part-found"));
+    // Its parent checks it too; nothing was integrated.
+    // The last command's output: the spawn's quotes the child's own.
+    let said = reply(&repo, "root");
+    let last = said.rsplit("sh: ").next().unwrap();
+    let (code, checked) = last.split_once('\n').unwrap();
+    let checked: Value = serde_json::from_str(checked).unwrap();
+    assert_eq!(
+        (code, &checked["outcome"]),
+        ("0", &serde_json::json!("passed")),
+        "{said}"
+    );
+    assert_eq!(
+        repo.json(&["show", "kid", "--json"])["status"]["state"],
+        "ready"
+    );
+
+    // A person checks any branch; one whose check fails exits 1, with
+    // the report.
+    let out = repo.by(&["check", "root", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["outcome"], "failed");
+    assert!(report.get("target").is_none(), "{report}");
+    let text = stdout(&repo.ok(&["check", "kid"]));
+    assert!(text.contains("passed"), "{text}");
+    assert!(text.contains("inherited from root"), "{text}");
+    let out = repo.by(&["check"]);
+    assert!(stderr(&out).contains("outside a harness, by check needs a branch"));
 }
 
 /// The battery's conflict3, envelope, depth2 and recovery scenarios (M3):

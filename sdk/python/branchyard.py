@@ -47,6 +47,7 @@ __all__ = [
     "Steer",
     "Merged",
     "MergedAll",
+    "CheckReport",
     "Waited",
     "Cancelled",
     "Children",
@@ -64,6 +65,7 @@ __all__ = [
     "send",
     "steer",
     "integrate",
+    "check",
     "cancel",
     "discard",
     "children",
@@ -336,6 +338,33 @@ class MergedAll:
     checks: Optional[List[List[str]]] = None
     # The same, as dicts {check, branches, outcome}: whose check each is.
     check_results: Optional[List[Dict[str, Any]]] = None
+
+
+@dataclasses.dataclass
+class CheckReport:
+    branch: str
+    # The check as an argv list (its own, or inherited from
+    # `inherited_from`); None when it has none, and nothing ran.
+    check: Optional[List[str]]
+    # Its current work as a commit, committed nowhere.
+    work: str
+    # "passed", "failed", "timed_out", "not_started", or "not_run" when
+    # there is no check or the work conflicts with `target`.
+    outcome: str
+    inherited_from: Optional[str] = None
+    # The parent's git branch the work was merged into, as integrate would.
+    target: Optional[str] = None
+    # The commit the check ran on.
+    checked: Optional[str] = None
+    conflicts: Optional[List[str]] = None
+    output_tail: str = ""
+
+    @property
+    def passed(self) -> bool:
+        """Whether integrating the work as it is would get past its check."""
+        if self.check is None:
+            return not self.conflicts
+        return self.outcome == "passed"
 
 
 @dataclasses.dataclass
@@ -663,6 +692,20 @@ def integrate(*branches: str):
         checks=value.get("checks"),
         check_results=value.get("check_results"),
     )
+
+
+def check(branch: Optional[str] = None) -> CheckReport:
+    """Run a branch's check (its own, or the one it inherited) on its
+    current work the way integrate would, and integrate nothing: your own
+    when `branch` is None, or a descendant's. Its files as they are,
+    uncommitted ones included, are merged into its parent's branch in a
+    private worktree. A check that fails is a CheckReport whose `passed` is
+    False, not an error. Run it on yourself before you finish."""
+    value = _run(["check"] + ([branch] if branch else []), result_on_failure=True)
+    report = _make(CheckReport, value)
+    if report.output_tail is None:
+        report.output_tail = ""
+    return report
 
 
 def cancel(branch: str) -> Cancelled:

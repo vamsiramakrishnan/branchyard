@@ -15,6 +15,10 @@
 //! `via`). [`reconcile_children`] applies the same rule to a parent's
 //! `ready` children whenever the parent's branch moves, however it moved
 //! (an integration, a merge its harness ran itself, a turn's checkpoint).
+//!
+//! [`check_work`] runs a branch's check the way [`merge_many`] would, on
+//! its uncommitted work merged into its parent's branch, and moves nothing:
+//! what `by check` reports.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,8 +30,8 @@ use crate::ops::{self, CHECK_TIMEOUT};
 use crate::record::Recorder;
 use crate::state::{Begun, Lease, Record};
 use crate::{
-    git, names, Activity, BranchStatus, CheckVerdict, Error, IntegrationCheck, Merged, MergedAll,
-    RecordedEvent, Yard,
+    git, names, Activity, BranchStatus, CheckReport, CheckVerdict, Error, IntegrationCheck, Merged,
+    MergedAll, RecordedEvent, Yard,
 };
 use branchyard_support::time::now_ms;
 
@@ -272,6 +276,111 @@ pub(crate) fn merge_many(yard: &Yard, names: &[String], target: &str) -> Result<
         checks: checked,
         check_results,
     })
+}
+
+/// Run `record`'s check (its own or inherited) on its current work as
+/// [`merge_many`] would run it, integrating nothing: the worktree's files
+/// as they are, committed nowhere, merged into its parent's git branch in
+/// a temporary worktree. The git lock is held to create and remove that
+/// worktree, not while the check runs.
+pub(crate) fn check_work(yard: &Yard, record: &Record) -> Result<CheckReport, Error> {
+    let info = &record.info;
+    let branch = names::validate(&info.name)?;
+    let workspace = yard.repo.workspace(&branch).map_err(git::error)?;
+    let work = match workspace.filter(|w| w.path.exists()) {
+        Some(workspace) => {
+            workspace
+                .excluding(crate::workspace::excluded(record))
+                .working_commit(&format!("{}: work checked by by check", info.git_branch))
+                .map_err(git::error)?
+                .0
+        }
+        None => git::local_branch(&yard.root, &info.git_branch)?
+            .ok_or_else(|| Error::Git(format!("{} is missing", info.git_branch)))?,
+    };
+    let parent = match &info.parent {
+        Some(parent) => Some(yard.store().read(parent)?),
+        None => None,
+    };
+    // A branch without a parent is checked alone: its work "merged" into
+    // itself is the work.
+    let (target, onto) = match &parent {
+        Some(parent) => {
+            let target = parent.info.git_branch.clone();
+            let onto = git::local_branch(&yard.root, &target)?
+                .ok_or_else(|| Error::Git(format!("{target} is missing")))?;
+            (Some(target), onto)
+        }
+        None => (None, work.clone()),
+    };
+    let mut report = CheckReport {
+        branch: info.name.clone(),
+        check: record.check.clone(),
+        inherited_from: info.parent.clone().filter(|_| record.check_inherited),
+        work: work.clone(),
+        target: target.clone(),
+        checked: None,
+        outcome: CheckVerdict::NotRun,
+        conflicts: Vec::new(),
+        output_tail: String::new(),
+    };
+    let merged = {
+        let _lock = git::lock();
+        yard.repo.merged_worktree(
+            &branch,
+            &Commit(work),
+            target.as_deref().unwrap_or(&info.git_branch),
+            &Commit(onto),
+        )
+    };
+    let merged = match merged {
+        Ok(merged) => merged,
+        Err(IntegrationError::Conflict { files }) => {
+            report.conflicts = files;
+            return Ok(report);
+        }
+        Err(error) => {
+            return Err(ops::integration_error(
+                error,
+                target.as_deref().unwrap_or(&info.git_branch),
+            ))
+        }
+    };
+    let Some(argv) = record.check.clone() else {
+        let _lock = git::lock();
+        drop(merged);
+        return Ok(report);
+    };
+    let verified = merged.check(&Check {
+        argv,
+        timeout: CHECK_TIMEOUT,
+    });
+    report.checked = Some(merged.commit().0.clone());
+    {
+        let _lock = git::lock();
+        drop(merged);
+    }
+    match verified {
+        Ok(verified) => {
+            report.outcome = match (verified.passed, verified.timed_out) {
+                (true, _) => CheckVerdict::Passed,
+                (false, true) => CheckVerdict::TimedOut,
+                (false, false) => CheckVerdict::Failed,
+            };
+            report.output_tail = verified.output_tail;
+        }
+        Err(IntegrationError::CheckNotStarted(error)) => {
+            report.outcome = CheckVerdict::NotStarted;
+            report.output_tail = error.to_string();
+        }
+        Err(error) => {
+            return Err(ops::integration_error(
+                error,
+                target.as_deref().unwrap_or(&info.git_branch),
+            ))
+        }
+    }
+    Ok(report)
 }
 
 /// Each check in `owners`, with its branches: those before `stopped`

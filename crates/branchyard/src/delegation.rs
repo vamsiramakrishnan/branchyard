@@ -55,8 +55,8 @@ use crate::seats::{Seat, Seats};
 use crate::state::{Record, Store};
 use crate::{
     git, harness, inbox, integrate, names, Activity, BranchInfo, BranchStatus, Budget,
-    CandidateInfo, Error, Event, Merged, MergedAll, Message, MessageKind, Policy, RecordedEvent,
-    Rule, SharedCheck, Steer, SteerState, TaskOptions, Yard,
+    CandidateInfo, CheckReport, Error, Event, Merged, MergedAll, Message, MessageKind, Policy,
+    RecordedEvent, Rule, SharedCheck, Steer, SteerState, TaskOptions, Yard,
 };
 
 /// How long `steer` waits for the input to be delivered.
@@ -880,6 +880,20 @@ impl Delegate {
         match &self.via {
             Via::Local(local) => local.integrate_all(&names),
             Via::Remote(_) => self.typed("propose_integration", json!({ "branches": names })),
+        }
+    }
+
+    /// Run a branch's check (its own, or the one it inherited) on its
+    /// current work, the way integrating it would, and integrate nothing:
+    /// its worktree's files as they are, committed nowhere, merged into its
+    /// parent's git branch in a private temporary worktree. For this
+    /// branch, to learn before it finishes whether its work would pass, or
+    /// a descendant. A conflict with the parent's branch is reported in
+    /// [`CheckReport::conflicts`], and the check does not run.
+    pub fn check(&self, branch: &str) -> Result<CheckReport, Error> {
+        match &self.via {
+            Via::Local(local) => local.check(branch),
+            Via::Remote(_) => self.typed("check", json!({ "branch": branch })),
         }
     }
 
@@ -3081,6 +3095,12 @@ impl Local {
         Ok(merged)
     }
 
+    fn check(&self, branch: &str) -> Result<CheckReport, Error> {
+        self.require_descendant(branch, true)?;
+        let record = self.store().read(branch)?;
+        integrate::check_work(&self.yard, &record)
+    }
+
     fn steer(&self, branch: &str, text: &str) -> Result<Steer, Error> {
         let result = self.require_descendant(branch, false).and_then(|()| {
             let steer = crate::steer::request(&self.yard, branch, text, &self.branch)?;
@@ -3735,6 +3755,11 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
                     "{tool} needs either branch or branches (an array, integrated together)"
                 ))),
             }
+        }
+        "check" => {
+            let args: TargetArgs = parse(tool, arguments)?;
+            let branch = args.branch.unwrap_or_else(|| local.branch.clone());
+            to_json(&local.check(&branch)?)
         }
         "steer" => {
             let args: SteerArgs = parse(tool, arguments)?;

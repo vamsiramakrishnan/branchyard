@@ -74,6 +74,7 @@ A person acts with their own authority, or the server's, bounded by the branch's
 | Inspect | `Delegate::inspect` | `inspect` | yes | `GET …/inspection` | `inspect` |
 | Events page from a cursor | `Delegate::events` | `events` | yes | `GET …/event-page` | `event_page` |
 | Integrate a child into its parent | `Delegate::integrate` | `integrate` | yes | `POST …/integrate` | `integrate` |
+| Run a branch's check on its current work, as integrating it would, integrating nothing ([delegation](delegation.md#the-cli)) | `Delegate::check` → `CheckReport` | `check BRANCH` | no: a check runs on the repository's host | none | none |
 | Set a settled child aside, never run again | `Yard::discard`, `Delegate::discard` | `discard [--reason TEXT]` | yes, with the server's authority | `POST …/discard` | `discard` |
 | Integrate several children together, checked once, all or none ([delegation](delegation.md#integrating-several-children)) | `Delegate::integrate_all` → `MergedAll` | `integrate a b c` | yes | `POST …/integrate` with `with`; the result's `merged_all` | `integrate_all` |
 | Wait for branches to settle, all or the first ([delegation](delegation.md#waiting-on-children)) | `Yard::wait_for`, `Delegate::wait_for` → `Waited` | `wait BRANCH... [--any] [--timeout S]` | yes; each request capped at 30s, asked again past it | `POST /v1/repos/{repo}/wait` | `wait_for` |
@@ -740,3 +741,11 @@ Every connector call that changes the world is decided, written to a ledger befo
 | `branchyard_harness::Capabilities::model`, `Requirements::model` | none | whether a driver passes `Open::model`; a spawn naming a model for a driver without it (ACP, Amp) is refused `unsupported` with the driver's reason |
 | `BranchInfo::model`, `Inspection::model`, `Spawned::model` | none | the model a branch runs, omitted for its harness's default; a `model` line in `by inspect`, `model` in `by ls --json` |
 | Claude Code stream-json provisioning of a model | `ANTHROPIC_MODEL` only | `ANTHROPIC_MODEL` and `--model` (`Plan::session.model`) |
+
+## Added with by check
+
+| Surface | Before | Now |
+|---|---|---|
+| `by check [BRANCH]`, `Delegate::check` → `CheckReport`, Python `check(branch=None)`, the MCP `check` tool | none: a child learned whether its work passed its check only when its parent integrated it | the branch's check (its own or inherited) run on its current work, uncommitted files included, merged into its parent's branch in a private temporary worktree; nothing is committed or integrated; a leaf may run it on itself; exits 1 when the work would not get past its check |
+| `branchyard_workspace::Workspace::working_commit`, `Repository::check_merged`, `Repository::merged_worktree` (`MergedWorktree`) | none | a worktree's files as a commit reachable from nothing; a check on a head merged into a target as integrating it would, moving no ref |
+| The delegate skill and the leaf note | | tell a child to run `by check` before it finishes |

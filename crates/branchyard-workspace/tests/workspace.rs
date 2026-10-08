@@ -1194,6 +1194,69 @@ fn verify_runs_a_check_on_one_commit_without_merging() {
     fixture.assert_no_integration_worktrees();
 }
 
+/// A branch's uncommitted work, checked as integrating it would check it:
+/// merged onto the target's current commit, with nothing committed,
+/// moved or left behind.
+#[test]
+fn check_merged_checks_uncommitted_work_on_the_target_without_moving_anything() {
+    let fixture = Fixture::new();
+    let ws = fixture.workspace("work");
+    fs::write(ws.path.join("feature.txt"), "feature\n").unwrap();
+    fs::write(ws.path.join("debug.log"), "ignored\n").unwrap();
+    let head_before = fixture.head("by/work");
+    let status_before = git(&ws.path, &["status", "--porcelain"]);
+    let work = ws.working_commit("work in progress").unwrap();
+    // Nothing in the worktree moved: its HEAD, index and files are as they were.
+    assert_eq!(fixture.head("by/work"), head_before);
+    assert_eq!(git(&ws.path, &["status", "--porcelain"]), status_before);
+    let listed = git(&fixture.root(), &["ls-tree", "--name-only", work.as_str()]);
+    assert!(listed.contains("feature.txt"), "{listed}");
+    assert!(!listed.contains("debug.log"), "{listed}");
+
+    // The target moved on since the branch began: the check sees both.
+    let main = fixture.commit_on_main("main.txt", "main\n");
+    let both = sh(
+        "test -f feature.txt && test -f main.txt && echo both",
+        Duration::from_secs(30),
+    );
+    let name: BranchName = "work".parse().unwrap();
+    let verified = fixture
+        .repo
+        .check_merged(&name, &work, "main", &main, &both)
+        .unwrap();
+    assert!(verified.passed, "{}", verified.output_tail);
+    assert!(verified.output_tail.contains("both"));
+    assert_ne!(verified.commit, main);
+    let fail = sh("echo nope; exit 2", Duration::from_secs(30));
+    let verified = fixture
+        .repo
+        .check_merged(&name, &work, "main", &main, &fail)
+        .unwrap();
+    assert!(!verified.passed && !verified.timed_out);
+
+    // Work the target already contains is checked on the target itself.
+    let contained = fixture
+        .repo
+        .check_merged(&name, &head_before, "main", &main, &both)
+        .unwrap();
+    assert_eq!(contained.commit, main);
+    assert!(!contained.passed);
+
+    // A conflict with the target is said, and the check does not run.
+    fs::write(ws.path.join("main.txt"), "other\n").unwrap();
+    let clash = ws.working_commit("clash").unwrap();
+    match fixture
+        .repo
+        .check_merged(&name, &clash, "main", &main, &both)
+    {
+        Err(IntegrationError::Conflict { files }) => assert_eq!(files, ["main.txt"]),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(fixture.head("main"), main);
+    assert_eq!(fixture.head("by/work"), head_before);
+    fixture.assert_no_integration_worktrees();
+}
+
 #[test]
 fn push_sends_exactly_the_commit_to_a_remote_branch() {
     let fixture = Fixture::new();

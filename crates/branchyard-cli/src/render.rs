@@ -1318,6 +1318,51 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     key_values(&pairs, style)
 }
 
+/// `by check`: how the branch's check ended on its current work, and its
+/// output's tail when it did not pass.
+pub fn check_report(r: &branchyard::CheckReport, style: Style) -> String {
+    use branchyard::CheckVerdict;
+    let (outcome, tone) = match (&r.check, r.outcome) {
+        (_, _) if !r.conflicts.is_empty() => (
+            format!(
+                "conflicts with {} in {}; the check did not run",
+                r.target.as_deref().unwrap_or("its target"),
+                r.conflicts.join(", ")
+            ),
+            Tone::Red,
+        ),
+        (None, _) => (
+            "no check: integrating it runs none".to_owned(),
+            Tone::Yellow,
+        ),
+        (Some(_), CheckVerdict::Passed) => ("passed".to_owned(), Tone::Green),
+        (Some(_), CheckVerdict::Failed) => ("failed".to_owned(), Tone::Red),
+        (Some(_), CheckVerdict::TimedOut) => ("timed out".to_owned(), Tone::Red),
+        (Some(_), CheckVerdict::NotStarted) => ("could not start".to_owned(), Tone::Red),
+        (Some(_), CheckVerdict::NotRun) => ("did not run".to_owned(), Tone::Red),
+    };
+    let mut pairs = vec![("branch", r.branch.clone())];
+    if let Some(check) = &r.check {
+        let source = match &r.inherited_from {
+            Some(parent) => format!("inherited from {parent}"),
+            None => "its own".into(),
+        };
+        pairs.push(("check", format!("{} ({source})", check.join(" "))));
+    }
+    let work = match &r.target {
+        Some(target) => format!("{} merged into {target}", short_commit(&r.work)),
+        None => short_commit(&r.work).to_owned(),
+    };
+    pairs.push(("work", work));
+    pairs.push(("outcome", style.paint(tone, &outcome)));
+    let mut text = key_values(&pairs, style);
+    if !r.passed() && !r.output_tail.trim().is_empty() {
+        text.push_str(r.output_tail.trim_end());
+        text.push('\n');
+    }
+    text
+}
+
 /// The check a branch's merge must pass, where it came from, and the
 /// siblings that share it, which are integrated together.
 fn check_text(i: &branchyard::Inspection) -> String {

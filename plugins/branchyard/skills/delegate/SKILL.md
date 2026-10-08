@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Delegate parts of a coding task to child branches with Branchyard. Use when you run on a Branchyard branch (BRANCHYARD_BRANCH is set) and the work splits into independent pieces, needs a second harness, or should be tried more than one way. Covers `by spawn` (including children that wait for siblings), `by graph`, `by inspect`, `by wait`, `by integrate` (several children at once), `by discard`, ending your turn while children run, artifacts, messaging your parent, the Python module and the MCP tools.
+description: Delegate parts of a coding task to child branches with Branchyard. Use when you run on a Branchyard branch (BRANCHYARD_BRANCH is set) and the work splits into independent pieces, needs a second harness, or should be tried more than one way. Covers `by spawn` (including children that wait for siblings), `by graph`, `by inspect`, `by wait`, `by integrate` (several children at once), `by check` (run your check before you finish), `by discard`, ending your turn while children run, artifacts, messaging your parent, the Python module and the MCP tools.
 ---
 
 # Delegating with Branchyard
@@ -75,7 +75,8 @@ session, and merging overlapping edits produces conflicts.
    refused. A conflict names the child and the files, and a failed check
    shows its output and names every check that ran, the children it
    belongs to and whether it passed, so you know whose to fix: send the child a fix with `by send <child>
-   "<prompt>"`, or do it yourself.
+   "<prompt>"`, or do it yourself. `by check <child>` runs a child's check
+   on its current work, as integrating it would, without integrating it.
 5. Clean up. `by cancel <child>` stops a running child and everything
    below it. A child that already finished is not running, so cancel
    changes nothing; set a finished child you will not use aside with
@@ -112,10 +113,22 @@ your children commits your work the same way. Write scratch files under
 `$TMPDIR`, a directory private to your branch, not in `/tmp`, which other
 branches share.
 
+## Before you finish
+
+Run `by check` before you end your turn. It runs your branch's check (your
+own, or the one you inherited) on your work as it is, uncommitted files
+included, merged into your parent's branch, the way your parent's
+integration will; nothing is committed or integrated. What fails here
+fails your integration: a repository rule you never saw is in its output.
+Fix it and run `by check` again until it passes. It exits 1 when the check
+fails, times out or your work conflicts with your parent's branch, and
+says so when you have no check to run.
+
 ## With `by`
 
 ```sh
 by inspect                      # your own branch: budget left, children
+by check                        # your work, checked as your integration will be
 by spawn "Make tests/parser_test.rs deterministic; run cargo test -p parser" \
   --name parser-flake --harness codex --budget-usd 0.50 --max-turns 3
 by spawn "Document the retry policy in docs/retries.md" --name retry-docs --budget-usd 0.20
@@ -241,6 +254,6 @@ that timed out), `NotFoundError`, or `BranchyardError` with a `kind`.
 If you cannot run commands, the same operations are MCP tools on the
 `branchyard` server: `spawn` (with `depends_on`), `inspect`, `events`, `send`,
 `steer`, `propose_integration` (`branch`, or `branches` to integrate several
-together), `wait` (`branches`, `any`, `timeout_seconds`), `cancel`, `discard`,
+together), `check` (your own work before you finish, or a child's), `wait` (`branches`, `any`, `timeout_seconds`), `cancel`, `discard`,
 `children`, `graph`, `apply_graph`, the artifact and scratch tools, and `ask`,
 `report`, `escalate`, `answer` and `inbox`.

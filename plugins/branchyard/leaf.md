@@ -3,6 +3,11 @@ cannot create children of your own, but `by` (on your PATH, and in
 `$BRANCHYARD_BY`) acts as your branch for these, each with `--json`:
 
 - `by inspect` shows your status, budget and last message.
+- `by check` runs your branch's check (your own, or the one you
+  inherited) on your work as it is, merged into your parent's branch the
+  way your parent's integration will. Run it before you finish, and fix
+  what it reports until it passes: what fails here fails your
+  integration. It exits 1 when the check does not pass.
 - `by artifact publish FILE [--name N] [--media-type TYPE] [--label K=V]`
   publishes a file your parent and its other descendants can read;
   `by artifact list`, `by artifact get ID --out PATH` and

@@ -235,6 +235,11 @@ impl Operation {
         self
     }
 
+    const fn not_remote(mut self, why: &'static str) -> Operation {
+        self.contexts.remote = Context::No(why);
+        self
+    }
+
     const fn no_python(mut self, why: &'static str) -> Operation {
         self.python = None;
         self.why = why;
@@ -392,6 +397,19 @@ pub const OPERATIONS: &[Operation] = &[
             },
             JSON,
         ],
+    ),
+    op(
+        "check",
+        &["check"],
+        "check",
+        "check",
+        "check",
+        Capability::Own,
+        &[TARGET, JSON],
+    )
+    .not_remote(
+        "the server has no check route; a check runs on the repository's host, so run by check \
+         there or inside the branch's harness",
     ),
     op(
         "cancel",

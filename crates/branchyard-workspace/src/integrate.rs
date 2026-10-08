@@ -11,7 +11,7 @@ use std::time::Duration;
 use crate::check::{self, Check, CheckOutcome};
 use crate::git::{self, identity_args, is_object_id, Git, GitError};
 use crate::repo::{resolve_in, unique_suffix};
-use crate::{Candidate, Commit, Repository};
+use crate::{BranchName, Candidate, Commit, DiffStat, Repository};
 
 /// A completed promotion: `target` moved from `previous` to `merged`, a merge
 /// commit whose first parent is `previous` and second parent the candidate
@@ -568,23 +568,60 @@ impl Repository {
     pub fn verify(&self, commit: &Commit, check: &Check) -> Result<Verified, IntegrationError> {
         let commit = self.resolve(commit.as_str())?;
         let scratch = TempWorktree::create(self, &commit)?;
-        let verified = match check::run(check, &scratch.path) {
-            Err(e) => return Err(IntegrationError::CheckNotStarted(e)),
-            Ok((CheckOutcome::Exited(status), output_tail)) => Verified {
-                commit,
-                passed: status.success(),
-                timed_out: false,
-                output_tail,
-            },
-            Ok((CheckOutcome::TimedOut, output_tail)) => Verified {
-                commit,
-                passed: false,
-                timed_out: true,
-                output_tail,
-            },
-        };
+        let verified = verified(check, &scratch.path, commit);
         drop(scratch);
-        Ok(verified)
+        verified
+    }
+
+    /// Runs `check` on `head` merged into `onto` (a commit of `target`, a
+    /// local branch name) as [`Repository::integrate`] merges a candidate:
+    /// `git merge --no-ff` in a new temporary worktree, hooks and rerere
+    /// off, removed on every return path. No ref moves: this is what
+    /// integrating `head` would check, without integrating it. When `onto`
+    /// already contains `head`, the check runs on `onto` itself.
+    ///
+    /// [`Verified::commit`] is the commit checked. A merge conflict is
+    /// [`IntegrationError::Conflict`]; a check that exits unsuccessfully or
+    /// times out is a [`Verified`] with `passed` false; one that cannot
+    /// start is [`IntegrationError::CheckNotStarted`].
+    pub fn check_merged(
+        &self,
+        branch: &BranchName,
+        head: &Commit,
+        target: &str,
+        onto: &Commit,
+        check: &Check,
+    ) -> Result<Verified, IntegrationError> {
+        self.merged_worktree(branch, head, target, onto)?
+            .check(check)
+    }
+
+    /// The first half of [`Repository::check_merged`]: `head` merged into
+    /// `onto` in a new temporary worktree, removed when the result is
+    /// dropped. A caller that serializes worktree creation and removal
+    /// holds its lock for this and the drop, not for the check.
+    pub fn merged_worktree(
+        &self,
+        branch: &BranchName,
+        head: &Commit,
+        target: &str,
+        onto: &Commit,
+    ) -> Result<MergedWorktree, IntegrationError> {
+        let head = self.resolve(head.as_str())?;
+        let onto = self.resolve(onto.as_str())?;
+        let scratch = TempWorktree::create(self, &onto)?;
+        let candidate = Candidate {
+            branch: branch.clone(),
+            base: onto.clone(),
+            head,
+            stat: DiffStat::default(),
+        };
+        let commit = match merge(&scratch.path, &candidate, target, &onto) {
+            Ok(merged) => merged,
+            Err(IntegrationError::AlreadyIntegrated) => onto,
+            Err(error) => return Err(error),
+        };
+        Ok(MergedWorktree { scratch, commit })
     }
 
     fn target_ref(&self, target: &str) -> Result<String, GitError> {
@@ -646,6 +683,54 @@ impl Repository {
             .filter(|w| !w.bare && !w.prunable && w.branch.as_deref() == Some(full_ref))
             .map(|w| w.path)
             .collect())
+    }
+}
+
+/// A merge in a temporary worktree, from [`Repository::merged_worktree`];
+/// the worktree is removed when this is dropped.
+pub struct MergedWorktree {
+    scratch: TempWorktree,
+    commit: Commit,
+}
+
+impl MergedWorktree {
+    /// The commit checked out: the merge, or the target's commit when it
+    /// already contained the head.
+    pub fn commit(&self) -> &Commit {
+        &self.commit
+    }
+
+    /// Runs `check` there, as [`Repository::check_merged`] does.
+    pub fn check(&self, check: &Check) -> Result<Verified, IntegrationError> {
+        verified(check, &self.scratch.path, self.commit.clone())
+    }
+}
+
+impl fmt::Debug for MergedWorktree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MergedWorktree")
+            .field("path", &self.scratch.path)
+            .field("commit", &self.commit)
+            .finish()
+    }
+}
+
+/// `check` run in `dir`, where `commit` is checked out, as a [`Verified`].
+fn verified(check: &Check, dir: &Path, commit: Commit) -> Result<Verified, IntegrationError> {
+    match check::run(check, dir) {
+        Err(e) => Err(IntegrationError::CheckNotStarted(e)),
+        Ok((CheckOutcome::Exited(status), output_tail)) => Ok(Verified {
+            commit,
+            passed: status.success(),
+            timed_out: false,
+            output_tail,
+        }),
+        Ok((CheckOutcome::TimedOut, output_tail)) => Ok(Verified {
+            commit,
+            passed: false,
+            timed_out: true,
+            output_tail,
+        }),
     }
 }
 
