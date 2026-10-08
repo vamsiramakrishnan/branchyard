@@ -2931,6 +2931,8 @@ pub enum Error {
     Remote {
         kind: String,
         message: String,
+        /// What the error carried beyond its message, as
+        /// [`Error::detail`] gave it there.
         detail: Option<Box<serde_json::Value>>,
     },
     Git(String),
