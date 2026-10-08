@@ -2987,11 +2987,14 @@ fn sh_line_json(reply: &str, n: usize) -> (i32, Value) {
 }
 
 /// A child's prompt that runs until `go` exists, then writes `file`: a
-/// child still running when its parent's turn ends, until released.
+/// child still running when its parent's turn ends, until released. It
+/// also ends once `go`'s directory is gone, so a test that ends without
+/// releasing it leaves nothing waiting.
 fn held_child(go: &Path, file: &str) -> String {
     format!(
-        "SH until [ -f {} ]; do sleep 0.05; done; echo k > {file}",
-        go.display()
+        "SH until [ -f {} ] || [ ! -d {} ]; do sleep 0.05; done; echo k > {file}",
+        go.display(),
+        go.parent().unwrap().display()
     )
 }
 
@@ -3081,11 +3084,6 @@ fn a_parked_branch_settled_without_a_wake_starts_its_dependents() {
     let repo = Repo::new();
     let go = repo.dir.join("go");
     let hold = repo.dir.join("hold");
-    // Releases `other` however the test ends.
-    let _other = Background {
-        child: None,
-        go: hold.clone(),
-    };
     let grandchild = repo.dir.join("gk.prompt");
     fs::write(&grandchild, held_child(&go, "gk.txt")).unwrap();
     let lead = repo.dir.join("lead.prompt");
@@ -3113,7 +3111,7 @@ fn a_parked_branch_settled_without_a_wake_starts_its_dependents() {
     ]
     .join("\n");
     let agent = fake_agent!().display().to_string();
-    let _running = Background {
+    let mut running = Background {
         child: Some(
             repo.command(env!("CARGO_BIN_EXE_by"))
                 .args(["run", &prompt, "--name", "root", "--delegate=2", "--yes"])
@@ -3124,6 +3122,12 @@ fn a_parked_branch_settled_without_a_wake_starts_its_dependents() {
                 .unwrap(),
         ),
         go: go.clone(),
+    };
+    // Releases `other` however the test ends, before `running` is stopped
+    // (locals drop in reverse order).
+    let _other = Background {
+        child: None,
+        go: hold.clone(),
     };
     wait::until("sib to start once lead settles", || {
         let out = repo.by(&["show", "sib", "--json"]);
@@ -3142,6 +3146,15 @@ fn a_parked_branch_settled_without_a_wake_starts_its_dependents() {
     assert!(
         log.contains("max_turns is spent; it was not woken"),
         "{log}"
+    );
+    // Release `other` and let `by run` finish it, rather than kill `by run`
+    // under a running harness.
+    fs::write(&hold, "").unwrap();
+    let status = running.child.take().unwrap().wait().unwrap();
+    assert!(status.success(), "{status}");
+    assert_eq!(
+        repo.json(&["show", "other", "--json"])["status"]["state"],
+        "ready"
     );
 }
 
@@ -3420,10 +3433,18 @@ fn by_check_merges_into_the_parents_uncommitted_work_as_integrate_does() {
 fn a_by_check_whose_caller_is_killed_stops_its_check() {
     let repo = Repo::new();
     let pid = repo.dir.join("check.pid");
+    // The caller is killed only once the check has started (written its
+    // pid), as a tool timeout would kill it: killed earlier, the probe read
+    // no pid and saw `/proc/` alive.
     let prompt = [
-        "SH timeout 3 by check".to_owned(),
         format!(
-            "SH s=$(cat '{}'); sleep 1; if [ -d /proc/$s ] && ! grep -q ') Z ' /proc/$s/stat; \
+            "SH by check & c=$!; n=0; until [ -s '{0}' ] || [ $n -ge 600 ]; do sleep 0.05; \
+             n=$((n+1)); done; kill $c; wait $c; echo caller=$?",
+            pid.display()
+        ),
+        format!(
+            "SH s=$(cat '{}'); [ -n \"$s\" ] || echo no-pid; sleep 1; \
+             if [ -d /proc/$s ] && ! grep -q ') Z ' /proc/$s/stat; \
              then echo check-alive; else echo check-gone; fi",
             pid.display()
         ),
@@ -3442,7 +3463,8 @@ fn a_by_check_whose_caller_is_killed_stops_its_check() {
     ]);
     assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
     let said = reply(&repo, "root");
-    assert!(said.contains("sh: 124\n"), "{said}");
+    assert!(said.contains("caller=143\n"), "{said}");
+    assert!(!said.contains("no-pid"), "{said}");
     assert!(said.contains("check-gone"), "{said}");
 }
 
@@ -3640,6 +3662,69 @@ fn spawn_gives_a_child_its_model() {
             .unwrap()
             .contains("gemini-cli-acp cannot be given a model: Gemini CLI's settings.json"),
         "{refused}"
+    );
+}
+
+/// A child naming no model keeps its parent's on its parent's harness
+/// only, through `by spawn` end to end: a goose child of a lead run with a
+/// model gets none, and so is not refused (goose cannot be given one),
+/// while a gemini-cli child gets the lead's.
+#[test]
+fn a_spawned_child_keeps_its_parents_model_only_on_its_parents_harness() {
+    let mut repo = Repo::new();
+    let agent = fake_agent!().display().to_string();
+    // `goose`, the goose-acp profile's command, is the fake agent too.
+    let bin = repo.dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&agent, bin.join("goose")).unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    repo.0.set_env("PATH", &format!("{}:{path}", bin.display()));
+    let spec = repo.dir.join("models.toml");
+    fs::write(
+        &spec,
+        r#"
+version = 1
+name = "models"
+root = "lead"
+
+[seats.lead]
+harness = "gemini-cli"
+model = "gemini-2.5-pro"
+isolated = true
+delegates_to = ["same", "other"]
+policy = { default = "allow" }
+
+[seats.same]
+description = "On the lead's harness."
+
+[seats.other]
+description = "On another harness."
+harness = "goose"
+"#,
+    )
+    .unwrap();
+    let prompt = [
+        "SH by spawn --seat same 'say same' --json",
+        "SH by spawn --seat other 'say other' --json",
+    ]
+    .join("\n");
+    let spec = spec.display().to_string();
+    let out = repo.by(&["rig", "run", &spec, &prompt, "--command", &agent, "--json"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "models");
+    let (code, same) = sh_json(&said, 0);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(same["profile"], "gemini-cli-acp", "{same}");
+    assert_eq!(same["model"], "gemini-2.5-pro", "{same}");
+    let (code, other) = sh_json(&said, 1);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(other["profile"], "goose-acp", "{other}");
+    assert!(other.get("model").is_none(), "{other}");
+    let shown = repo.json(&["inspect", "models-other", "--json"]);
+    assert!(shown.get("model").is_none(), "{shown}");
+    assert_eq!(
+        repo.json(&["inspect", "models-same", "--json"])["model"],
+        "gemini-2.5-pro"
     );
 }
 

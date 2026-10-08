@@ -1408,11 +1408,21 @@ fn graph_commands_print_what_local_ones_do() {
         same_json(&["graph", "show", "root", "--json"])["revision"],
         0
     );
-    let edits = r#"[{"kind":"spawn","prompt":"WRITE lib.txt=1","name":"lib"},
-        {"kind":"spawn","prompt":"WRITE app.txt=1","name":"app","depends_on":["lib"],"after":"integrated"},
-        {"kind":"spawn","prompt":"EXIT","name":"bad"},
-        {"kind":"spawn","prompt":"WRITE x.txt=1","name":"blocked","depends_on":["bad"]}]"#;
-    let applied = same_json(&[
+    // `bad` fails (its harness dies mid-turn) only once both sides have
+    // read the statuses they print: an `EXIT` that failed at once raced the
+    // local command, and `blocked` was `blocked` on one side and `waiting`
+    // on the other.
+    let go = dir.0.join("go");
+    let edits = format!(
+        r#"[{{"kind":"spawn","prompt":"WRITE lib.txt=1","name":"lib"}},
+        {{"kind":"spawn","prompt":"WRITE app.txt=1","name":"app","depends_on":["lib"],"after":"integrated"}},
+        {{"kind":"spawn","prompt":"SH until [ -f {go} ] || [ ! -d {dir} ]; do sleep 0.05; done; kill -9 $PPID","name":"bad"}},
+        {{"kind":"spawn","prompt":"WRITE x.txt=1","name":"blocked","depends_on":["bad"]}}]"#,
+        go = go.display(),
+        dir = dir.0.display(),
+    );
+    let edits = edits.as_str();
+    let apply = [
         "graph",
         "apply",
         "--parent",
@@ -1423,7 +1433,37 @@ fn graph_commands_print_what_local_ones_do() {
         "0",
         "--yes",
         "--json",
-    ]);
+    ];
+    // The local command waits for its children before it prints, so it
+    // runs alongside; the remote one returns once applied.
+    let local_apply = command(BY, &here)
+        .args(with_agent(&apply))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let r = server.by(
+        &dir.0,
+        &with_agent(&apply)
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
+    // Its parent's log notes the apply once its result is read.
+    wait::until("the local apply to be noted", || {
+        text(&local(&here, &["events", "root", "--json"]).stdout).contains("apply_graph")
+    });
+    fs::write(&go, "").unwrap();
+    let l = local_apply.wait_with_output().unwrap();
+    assert_eq!(
+        l.status.code(),
+        r.status.code(),
+        "local: {}\nremote: {}",
+        text(&l.stderr),
+        text(&r.stderr)
+    );
+    let applied = json(&r.stdout, &there);
+    assert_eq!(json(&l.stdout, &here), applied);
     assert_eq!(applied["revision"], 1);
     assert_eq!(applied["spawned"][1]["status"]["state"], "waiting");
     settled(&["lib", "bad", "blocked"]);

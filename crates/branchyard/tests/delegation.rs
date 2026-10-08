@@ -1097,14 +1097,16 @@ fn a_parent_woken_max_wakes_times_settles_without_another_wake() {
     wait::until("root to settle", || {
         f.yard.branch("root").unwrap().info().status == BranchStatus::Ready
     });
-    // The warning is recorded just after the status it explains.
-    wait::until("root's log to say why", || {
-        let log = f.yard.branch("root").unwrap().events().unwrap();
-        log.iter().any(|e| {
-            matches!(&e.activity,
+    // The warning is recorded with the status it explains, just before it.
+    let log = f.yard.branch("root").unwrap().events().unwrap();
+    let why = log.iter().position(|e| {
+        matches!(&e.activity,
             Activity::Warning(w) if w.contains("woken 1 times in a row, its envelope's max_wakes"))
-        })
     });
+    let settled = log
+        .iter()
+        .rposition(|e| e.activity == Activity::Status(BranchStatus::Ready));
+    assert!(why.is_some() && why < settled, "{log:?}");
     let root_info = f.yard.branch("root").unwrap().info().clone();
     assert_eq!(root_info.turns, 1, "not woken");
 }

@@ -1595,10 +1595,11 @@ pub(crate) fn cancel_tree(yard: &Yard, name: &str, by: &str) -> Result<Vec<Strin
                     at_ms: branchyard_support::time::now_ms(),
                     activity: Activity::Status(BranchStatus::Interrupted),
                 };
-                if store
-                    .graph()
-                    .settle_if(&ended, &event, crate::wake::is_parked)?
-                {
+                if store.graph().settle_if(
+                    &ended,
+                    std::slice::from_ref(&event),
+                    crate::wake::is_parked,
+                )? {
                     store.notify();
                     // What waits for it is looked at, as every settle does.
                     graph::settled(yard, &info.name, None);

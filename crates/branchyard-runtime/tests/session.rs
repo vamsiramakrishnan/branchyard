@@ -206,6 +206,31 @@ fn dropping_a_session_kills_its_process_group() {
     wait::gone(pid);
 }
 
+/// A test that ended while a child's `SH` line still waited left the fake
+/// agent and its shell running for good: the agent now exits with its
+/// directory, and takes its process group with it.
+#[test]
+fn the_fake_agent_exits_with_its_directory() {
+    let (mut session, dir) = start("vanish");
+    let pid = dir.with_extension("pid");
+    branchyard_support::cleanup_file(&pid);
+    session
+        .submit(&format!("SH echo $$ > {}; sleep 600; true", pid.display()))
+        .unwrap();
+    let shell: u32 = wait::until("the shell to start", || {
+        std::fs::read_to_string(&pid).ok()?.trim().parse().ok()
+    });
+    std::fs::remove_dir_all(&dir).unwrap();
+    wait::gone(shell);
+    wait::until("the agent to exit", || {
+        matches!(
+            session.next_event(Duration::from_millis(50)),
+            Err(RuntimeError::HarnessExited { .. })
+        )
+    });
+    branchyard_support::cleanup_file(&pid);
+}
+
 #[test]
 fn killing_mid_turn_reports_an_unknown_outcome() {
     let (mut session, _) = start("kill");

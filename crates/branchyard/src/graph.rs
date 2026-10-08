@@ -363,14 +363,15 @@ pub(crate) trait GraphBackend: Send + Sync + fmt::Debug {
     /// Write `record` and append `event`, only if the stored record is
     /// still `waiting` and no lease is held. False when it is not.
     fn settle_waiting(&self, record: &Record, event: &RecordedEvent) -> Result<bool, Error> {
-        self.settle_if(record, event, is_waiting)
+        self.settle_if(record, std::slice::from_ref(event), is_waiting)
     }
     /// [`GraphBackend::settle_waiting`] from any stored status `from`
-    /// accepts, such as a `blocked` dependent reopened.
+    /// accepts, such as a `blocked` dependent reopened, appending `events`
+    /// in order.
     fn settle_if(
         &self,
         record: &Record,
-        event: &RecordedEvent,
+        events: &[RecordedEvent],
         from: fn(&BranchStatus) -> bool,
     ) -> Result<bool, Error>;
 }
@@ -625,7 +626,9 @@ fn reopen(store: &Store, record: &Record) -> Result<bool, Error> {
         at_ms: now_ms(),
         activity: Activity::Status(BranchStatus::Waiting),
     };
-    let done = store.graph().settle_if(&reopened, &event, is_blocked)?;
+    let done = store
+        .graph()
+        .settle_if(&reopened, std::slice::from_ref(&event), is_blocked)?;
     if done {
         store.notify();
         if let Ok(mut recorder) = Recorder::open(store, &record.info.name, None) {

@@ -337,18 +337,21 @@ fn unpark(
     settled.info.status = parked.ended.clone();
     settled.parked = None;
     settled.wakes = 0;
-    let event = RecordedEvent {
-        at_ms: now_ms(),
-        activity: Activity::Status(settled.info.status.clone()),
-    };
-    if store.graph().settle_if(&settled, &event, is_parked)? {
+    // The warning first, with the status it explains, in one write: whoever
+    // sees the status sees why.
+    let at_ms = now_ms();
+    let events = [
+        RecordedEvent {
+            at_ms,
+            activity: Activity::Warning(why),
+        },
+        RecordedEvent {
+            at_ms,
+            activity: Activity::Status(settled.info.status.clone()),
+        },
+    ];
+    if store.graph().settle_if(&settled, &events, is_parked)? {
         store.notify();
-        if let Ok(mut recorder) = Recorder::open(store, &record.info.name, None) {
-            best_effort(
-                "record the activity",
-                recorder.record(Activity::Warning(why)),
-            );
-        }
         crate::graph::settled(yard, &record.info.name, options);
     }
     Ok(())
