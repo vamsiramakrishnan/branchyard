@@ -261,6 +261,8 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         session: last_session(yard, &row.branch),
         cost: turn_cost(yard, &row.branch),
         metered: metered_turn(yard, &row.branch),
+        // What the turn spent as it ran is in the record it wrote.
+        live_cost: None,
     };
     if let Err(error) = engine::conclude(yard, &prompt, &fence, &mut record, &mut recorder, driven)
     {

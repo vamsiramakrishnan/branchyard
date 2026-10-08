@@ -19,6 +19,7 @@
 //! cancel, bound to this turn, and written to the harness while the turn
 //! runs; what became of each is recorded in the store and the event log.
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -52,6 +53,21 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(30);
 const TICK: Duration = Duration::from_millis(100);
 /// Events drained without waiting once the turn has ended.
 const DRAIN_MAX: usize = 10_000;
+/// The variables that name a temporary directory: POSIX's, and the two
+/// that Python's `tempfile` and Windows-minded tools read first.
+pub(crate) const TMP_VARIABLES: [&str; 3] = ["TMPDIR", "TMP", "TEMP"];
+
+/// `name`'s private temporary directory, created readable by its owner
+/// only. It lives as long as the branch; [`crate::ops::remove`] removes it.
+pub(crate) fn private_tmp(store: &Store, name: &str) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let dir = store.tmp(name);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)?;
+    Ok(dir)
+}
 
 /// One turn to run on a branch whose record is already written.
 pub(crate) struct Turn<'a> {
@@ -124,6 +140,63 @@ pub(crate) struct Driven {
     /// when set, the branch's cost is this added to what it had, and the
     /// harness's estimate is not used.
     pub metered: Option<f64>,
+    /// The branch's spend as last estimated while the turn ran, from the
+    /// harness's per-call usage; its cost when the harness never reported
+    /// a cumulative one.
+    pub live_cost: Option<f64>,
+}
+
+/// A running turn's spend: the branch's spend when the turn started, or
+/// as of the harness's latest cumulative report, plus what each model
+/// call since cost (the harness's per-call figure, or the catalog's price
+/// of its tokens). The next cumulative report replaces the estimate.
+struct LiveCost {
+    anchor: f64,
+    since: f64,
+}
+
+impl LiveCost {
+    fn new(spent: f64) -> LiveCost {
+        LiveCost {
+            anchor: spent,
+            since: 0.0,
+        }
+    }
+
+    fn reported(&mut self, spent: f64) {
+        self.anchor = spent;
+        self.since = 0.0;
+    }
+
+    fn add(&mut self, cost: f64) {
+        if cost.is_finite() && cost > 0.0 {
+            self.since += cost;
+        }
+    }
+
+    fn total(&self) -> f64 {
+        self.anchor + self.since
+    }
+}
+
+/// What one model call's tokens cost by the catalog, when the usage names
+/// a model it prices.
+fn priced(usage: &branchyard_harness::Usage) -> Option<f64> {
+    let model = usage.model.as_deref()?;
+    let tokens = crate::models::Tokens {
+        input: usage.input_tokens.unwrap_or(0),
+        output: usage.output_tokens.unwrap_or(0),
+        cache_read: usage.cached_input_tokens.unwrap_or(0),
+        cache_write: usage.cache_write_tokens.unwrap_or(0),
+        cache_write_1h: usage.cache_write_1h_tokens.unwrap_or(0),
+    };
+    crate::models::pricing::cost(crate::models::Api::Generic, model, &tokens)
+}
+
+/// Whether an event goes in the branch's log: all but liveness, which
+/// only moves the stall clock.
+fn recorded(event: &Event) -> bool {
+    !matches!(event, Event::Progress { .. })
 }
 
 enum Phase {
@@ -291,6 +364,19 @@ fn exhausted(store: &crate::state::Store, record: &Record, budget: &Budget) -> O
     None
 }
 
+/// Ask the harness to stop the turn in flight; its `TurnEnded` follows.
+/// The driver may have no turn in flight any more although the engine has
+/// not yet seen it end: the harness ended it in the same message that
+/// prompted the stop (Claude Code's `result` carries the usage that went
+/// over a limit and the turn's end together). That turn's `TurnEnded` is
+/// already on its way, so this is not a failure.
+fn stop(session: &mut Session) -> Result<(), RuntimeError> {
+    match session.interrupt() {
+        Err(RuntimeError::Rejected(Rejected::NoTurn)) => Ok(()),
+        other => other,
+    }
+}
+
 /// The branch's own share of a cumulative estimate.
 fn spent(reported: f64, baseline: Option<f64>) -> f64 {
     (reported - baseline.unwrap_or(0.0)).max(0.0)
@@ -346,6 +432,7 @@ fn run(
         session: None,
         cost: None,
         metered: None,
+        live_cost: None,
     };
     let sandboxed = crate::placement::sandboxed(record.provider.as_ref());
     // Revoked when this function returns, after the harness and its
@@ -632,6 +719,25 @@ fn run(
     if let Some(spawn) = &spawn {
         placement.set_env(crate::proc::ENV_SPAWN, spawn);
     }
+    // A local harness gets a temporary directory of its own, so what one
+    // branch leaves in a shared `/tmp` cannot shadow another's files (a
+    // stray `/tmp/inspect.py` once shadowed Python's `inspect`). A
+    // sandbox has a `/tmp` of its own already.
+    if !placement.is_sandbox() {
+        match private_tmp(&store, &record.info.name) {
+            Ok(dir) => {
+                let dir = dir.display().to_string();
+                for name in TMP_VARIABLES {
+                    placement.set_env(name, &dir);
+                }
+            }
+            Err(error) => {
+                driven.end =
+                    End::failed(format!("could not create its temporary directory: {error}"));
+                return Ok(driven);
+            }
+        }
+    }
     let intent = json!({
         "command": turn.command,
         "sandbox": placement.is_sandbox(),
@@ -696,11 +802,22 @@ fn run(
     // the store by whichever process runs the wait).
     let mut last_activity = started;
     let mut stalled = false;
-    let write_stalled = |value: bool| -> Result<(), Error> {
+    // What the branch has spent, while the turn runs: see `LiveCost`.
+    // Written to its record as it changes, so a parent inspecting it, or
+    // the branch inspecting itself, sees a figure and not "unknown".
+    let mut live = LiveCost::new(record.info.cost_usd.unwrap_or(0.0));
+    let shown: Cell<Option<f64>> = Cell::new(None);
+    let write = |stalled: Option<bool>| -> Result<(), Error> {
         let mut updated = record.clone();
-        updated.info.stalled = value;
+        if let Some(value) = stalled {
+            updated.info.stalled = value;
+        }
+        if let Some(cost) = shown.get() {
+            updated.info.cost_usd = Some(cost);
+        }
         store.write_fenced(&updated, fence)
     };
+    let write_stalled = |value: bool| write(Some(value));
     let fail = |confirmed: bool, detail: String| -> End {
         End::failed(match (&turn.mode, confirmed) {
             (SessionMode::Fresh, _) | (_, true) => detail,
@@ -742,7 +859,7 @@ fn run(
             }
             (Phase::Running(n), Some(by)) => {
                 let n = *n;
-                if let Err(error) = session.interrupt() {
+                if let Err(error) = stop(&mut session) {
                     recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
                     kill = true;
                     break End::cancelled(by);
@@ -772,7 +889,7 @@ fn run(
                     .is_some_and(|max| own + delegation::reserved(&store, record) > max);
                 if let (true, Phase::Running(n)) = (over, &phase) {
                     let n = *n;
-                    if let Err(error) = session.interrupt() {
+                    if let Err(error) = stop(&mut session) {
                         recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
                         kill = true;
                         break End::budget("max_usd");
@@ -798,7 +915,7 @@ fn run(
                 recorder.record(Activity::Stalled { since_ms })?;
                 write_stalled(true)?;
                 if bounds.budget.stall_action == StallAction::Interrupt {
-                    if let Err(error) = session.interrupt() {
+                    if let Err(error) = stop(&mut session) {
                         recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
                         kill = true;
                         break End::Stalled;
@@ -825,7 +942,7 @@ fn run(
             }
             Phase::Running(n) if late => {
                 let n = *n;
-                if let Err(error) = session.interrupt() {
+                if let Err(error) = stop(&mut session) {
                     recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
                     kill = true;
                     break End::budget("max_duration");
@@ -864,8 +981,11 @@ fn run(
             }
             Err(error) => break fail(confirmed, error.to_string()),
         };
-        recorder.record(Activity::Harness(event.clone()))?;
-        steering.event(recorder, &store, fence, &event)?;
+        // Liveness only: it moves the stall clock and is not recorded.
+        if recorded(&event) {
+            recorder.record(Activity::Harness(event.clone()))?;
+            steering.event(recorder, &store, fence, &event)?;
+        }
         last_activity = Instant::now();
         if stalled && matches!(phase, Phase::Running(_)) {
             stalled = false;
@@ -961,7 +1081,7 @@ fn run(
                 last_activity = Instant::now();
                 if let Some(reason) = answered {
                     if let Phase::Running(n) = phase {
-                        if session.interrupt().is_err() {
+                        if stop(&mut session).is_err() {
                             kill = true;
                             break End::failed(reason);
                         }
@@ -973,22 +1093,38 @@ fn run(
                     }
                 }
             }
-            Event::UsageObserved { usage, .. } if usage.cumulative => {
+            Event::UsageObserved { usage, .. } => {
                 // On the model gateway, the metered cost is the branch's.
                 if model_gateway.is_some() {
                     continue;
                 }
-                let Some(cost) = usage.cost_usd else { continue };
-                driven.cost = Some(driven.cost.map_or(cost, |c: f64| c.max(cost)));
-                if let Some(projection) = &projection {
-                    projection.observe_cost(spent(cost, record.cost_baseline));
+                if usage.cumulative {
+                    let Some(cost) = usage.cost_usd else { continue };
+                    driven.cost = Some(driven.cost.map_or(cost, |c: f64| c.max(cost)));
+                    live.reported(spent(driven.cost.unwrap_or(cost), record.cost_baseline));
+                } else {
+                    // One model call's: the harness's own figure, or the
+                    // catalog's price of its tokens.
+                    let Some(cost) = usage.cost_usd.or_else(|| priced(&usage)) else {
+                        continue;
+                    };
+                    live.add(cost);
                 }
-                let over = bounds.budget.max_usd.is_some_and(|max| {
-                    spent(cost, record.cost_baseline) + delegation::reserved(&store, record) > max
-                });
+                let own = live.total();
+                if shown.get() != Some(own) {
+                    shown.set(Some(own));
+                    write(None)?;
+                }
+                if let Some(projection) = &projection {
+                    projection.observe_cost(own);
+                }
+                let over = bounds
+                    .budget
+                    .max_usd
+                    .is_some_and(|max| own + delegation::reserved(&store, record) > max);
                 if let (true, Phase::Running(n)) = (over, &phase) {
                     let n = *n;
-                    if let Err(error) = session.interrupt() {
+                    if let Err(error) = stop(&mut session) {
                         recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
                         kill = true;
                         break End::budget("max_usd");
@@ -1030,15 +1166,17 @@ fn run(
         }
     };
     driven.end = end;
+    driven.live_cost = shown.get();
 
     if !kill {
         // Whatever the harness already sent after the turn ended.
         for _ in 0..DRAIN_MAX {
             match session.next_event(Duration::ZERO) {
-                Ok(Some(event)) => {
+                Ok(Some(event)) if recorded(&event) => {
                     recorder.record(Activity::Harness(event.clone()))?;
                     steering.event(recorder, &store, fence, &event)?;
                 }
+                Ok(Some(_)) => {}
                 _ => break,
             }
         }
@@ -1050,7 +1188,7 @@ fn run(
     if kill {
         match session.kill() {
             Ok(events) => {
-                for event in events {
+                for event in events.into_iter().filter(recorded) {
                     recorder.record(Activity::Harness(event))?;
                 }
             }
@@ -1066,7 +1204,7 @@ fn run(
     }
     match session.close(CLOSE_GRACE) {
         Ok(closed) => {
-            for event in closed.events {
+            for event in closed.events.into_iter().filter(recorded) {
                 recorder.record(Activity::Harness(event))?;
             }
             if closed.forced {
@@ -1253,7 +1391,7 @@ impl Steering {
                         let message =
                             store
                                 .backend()
-                                .settle_steer(fence, row.id, &SteerState::Delivered)?;
+                                .settle_steer(fence, row.id, &SteerState::Written)?;
                         self.delivered(recorder, row.id, message)?;
                         None
                     }
@@ -1488,7 +1626,11 @@ pub(crate) fn conclude(
     match (driven.metered, driven.cost) {
         (Some(metered), _) => info.cost_usd = Some(info.cost_usd.unwrap_or(0.0) + metered),
         (None, Some(cost)) => info.cost_usd = Some(spent(cost, record.cost_baseline)),
-        (None, None) => {}
+        (None, None) => {
+            if let Some(live) = driven.live_cost {
+                info.cost_usd = Some(live);
+            }
+        }
     }
     let message = format!("{}: turn {}\n\n{}\n", info.git_branch, info.turns, prompt);
     let previous = info.candidate.as_ref().map(|c| c.commit.clone());

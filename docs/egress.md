@@ -2,7 +2,7 @@
 
 A harness should reach only what its task needs: the connector gateway, a package registry, the git remote. A branch's **network policy** says which hosts those are. Branchyard applies it through an allowlisting proxy, and on Linux it confines a local harness to that proxy in a network namespace. Where it cannot confine, it says so, and a policy that must be enforced is refused.
 
-This page also covers [permission presets](#permission-presets), the named tool policies that replace hand-written rules for common cases.
+This page also covers [permission presets](#permission-presets), the named tool policies that replace hand-written rules for common cases, and the [private temporary directory](#a-private-temporary-directory) every local harness gets.
 
 Status, 1 October 2026: built and tested hermetically against listeners on loopback and the fake ACP agent. No real harness has run under a policy.
 
@@ -193,3 +193,11 @@ The enforced tests need a host that allows unprivileged user and network namespa
 - Microsandbox and Substrate do not apply a policy at all; routing a guest to the proxy, or using the runtime's own egress controls, is future work.
 - `by spawn` has no `--network` of its own: a child narrows through its seat or inherits its parent's.
 - A server's operator can cap a request's policy per principal (`ceilings`), but not set a default for requests that name none.
+
+## A private temporary directory
+
+Branches share a host, and so its `/tmp`. A file one branch's harness leaves there can change what another runs: a stray `/tmp/inspect.py`, left by one session, shadowed Python's own `inspect` module in another that ran a script from `/tmp`. So every local harness runs with `TMPDIR`, `TMP` and `TEMP` set to a directory of its own branch, `.branchyard/tmp/<branch>`, created readable by its owner only (0700) before each turn. It lives as long as the branch, so a turn finds what the branch's earlier turns left there, and goes when the branch is removed. Each harness is also told, in its instructions or its delegation skill, to put scratch files there rather than in `/tmp`, since a harness can still name `/tmp` itself; Claude Code keeps its own temporary files (its background tasks' output among them) under `TMPDIR` as well.
+
+A sandboxed harness has a `/tmp` of its own already and is not given one. `XDG_CACHE_HOME` is left alone on purpose: caches (pip's, npm's, cargo's) are keyed by content and safe to share, and sharing them is what makes a second branch's setup fast; a branch run with a private home (`--isolated`) has a private cache under it anyway.
+
+`crates/branchyard/tests/claude_turns.rs` (`every_branch_has_its_own_temporary_directory`) checks the three variables, the mode, that two branches get different directories, and the removal.
