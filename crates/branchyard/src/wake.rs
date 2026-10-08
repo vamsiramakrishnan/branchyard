@@ -424,6 +424,18 @@ pub(crate) fn summary(
             text.push_str(&format!("  last message: {}", quoted.replace('\n', "\n  ")));
             text.push('\n');
         }
+        let cut = delegation::background_at_end(&events);
+        if !cut.is_empty() {
+            let tasks: Vec<String> = cut
+                .iter()
+                .map(|t| format!("{:?} ({})", t.description, t.task_id))
+                .collect();
+            text.push_str(&format!(
+                "  warning: its turn ended with background tasks still running, which ending its \
+                 session stopped: {}\n",
+                tasks.join(", ")
+            ));
+        }
     }
     if !others.is_empty() {
         text.push_str(&format!("\nYour other children: {}.", others.join(", ")));

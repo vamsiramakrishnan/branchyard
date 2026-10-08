@@ -617,6 +617,19 @@ impl Session {
         self.driver.capabilities()
     }
 
+    /// Whether the turn in flight is held open for the harness's
+    /// background tasks; see [`Driver::holding`].
+    pub fn holding(&self) -> bool {
+        self.driver.holding()
+    }
+
+    /// Whether the turn in flight is held open at all, including the wait
+    /// for the harness's answer to its tasks' notification; see
+    /// [`Driver::held`].
+    pub fn held(&self) -> bool {
+        self.driver.held()
+    }
+
     /// The last few hundred bytes of the harness's stderr.
     pub fn stderr_tail(&self) -> String {
         let bytes = self.stderr.bytes.lock_recovering("bytes");

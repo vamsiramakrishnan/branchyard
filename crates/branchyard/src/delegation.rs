@@ -3662,6 +3662,33 @@ pub(crate) fn last_message(events: &[RecordedEvent]) -> String {
     elide(last, LAST_MESSAGE_MAX)
 }
 
+/// The harness's background tasks still running when the branch's last
+/// turn ended: the last set it reported before that turn's end. A driver
+/// that holds a turn open for its background work (Claude Code's) ends it
+/// with tasks running only when a limit, a cancel or the end of its
+/// session cut the hold short, and closing the session stops them.
+pub(crate) fn background_at_end(events: &[RecordedEvent]) -> Vec<crate::HarnessTask> {
+    let start = events
+        .iter()
+        .rposition(|e| matches!(e.activity, Activity::Prompt(_)))
+        .map_or(0, |i| i + 1);
+    let turn = &events[start..];
+    let Some(end) = turn
+        .iter()
+        .rposition(|e| matches!(e.activity, Activity::Harness(Event::TurnEnded { .. })))
+    else {
+        return Vec::new();
+    };
+    turn[..end]
+        .iter()
+        .rev()
+        .find_map(|e| match &e.activity {
+            Activity::Harness(Event::BackgroundTasks { running }) => Some(running.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 /// `text` in at most `max` characters: whole when it fits, else its start
 /// and its end with an ellipsis line between.
 fn elide(text: &str, max: usize) -> String {
@@ -4482,6 +4509,94 @@ Checks on the merged result: \
         assert_eq!(cut.chars().count(), LAST_MESSAGE_MAX);
         assert!(cut.starts_with("BEGIN") && cut.ends_with("END"), "{cut}");
         assert!(cut.contains("\n…\n"));
+    }
+
+    /// What still ran at the last turn's end is the last set reported
+    /// before it ended, not one an earlier turn or the close reported.
+    #[test]
+    fn background_work_at_the_end_is_the_last_set_before_the_turn_ended() {
+        let at = |activity: Activity| RecordedEvent { at_ms: 0, activity };
+        let running = |ids: &[&str]| {
+            at(Activity::Harness(Event::BackgroundTasks {
+                running: ids
+                    .iter()
+                    .map(|id| crate::HarnessTask {
+                        task_id: (*id).into(),
+                        kind: None,
+                        description: "by check".into(),
+                    })
+                    .collect(),
+            }))
+        };
+        let ended = at(Activity::Harness(Event::TurnEnded {
+            turn: 1,
+            outcome: crate::TurnOutcome::Interrupted,
+        }));
+        let ids = |events: &[RecordedEvent]| -> Vec<String> {
+            background_at_end(events)
+                .into_iter()
+                .map(|t| t.task_id)
+                .collect()
+        };
+        let events = vec![
+            at(Activity::Prompt("earlier".into())),
+            running(&["old"]),
+            ended.clone(),
+            at(Activity::Prompt("do it".into())),
+            running(&["b1", "b2"]),
+            running(&["b1"]),
+            ended.clone(),
+            running(&[]),
+        ];
+        assert_eq!(ids(&events), ["b1"]);
+        assert_eq!(ids(&events[..3]), ["old"]);
+        assert!(ids(&events[..6]).is_empty(), "no end yet");
+        let finished = [&events[3..5], &[running(&[]), ended]].concat();
+        assert!(ids(&finished).is_empty());
+    }
+
+    /// A parent woken when its children settle reads which of a child's
+    /// background tasks its turn's end cut off.
+    #[test]
+    fn the_wake_names_background_work_a_childs_turn_cut_off() {
+        let (_temp, store) = temp_store();
+        let parent = record("root", &["kid", "calm"], None, None);
+        store.write(&parent).unwrap();
+        for name in ["kid", "calm"] {
+            store.write(&record(name, &[], None, None)).unwrap();
+        }
+        let mut kid = Recorder::open(&store, "kid", None).unwrap();
+        kid.record(Activity::Prompt("check it".into())).unwrap();
+        kid.record(Activity::Harness(Event::BackgroundTasks {
+            running: vec![crate::HarnessTask {
+                task_id: "b1".into(),
+                kind: Some("local_bash".into()),
+                description: "by check".into(),
+            }],
+        }))
+        .unwrap();
+        kid.record(Activity::Harness(Event::TurnEnded {
+            turn: 1,
+            outcome: crate::TurnOutcome::Interrupted,
+        }))
+        .unwrap();
+        let parked = crate::wake::Parked {
+            since_ms: 0,
+            ended: BranchStatus::NoChanges,
+            on: vec!["kid".into(), "calm".into()],
+            budget: Limits::default(),
+        };
+        let wake = crate::wake::summary(&store, &parent, &parked, 8).unwrap();
+        let warned: Vec<&str> = wake
+            .lines()
+            .filter(|l| l.contains("background tasks still running"))
+            .collect();
+        assert_eq!(warned.len(), 1, "{wake}");
+        assert!(warned[0].contains("\"by check\" (b1)"), "{wake}");
+        let kid_at = wake.find("- kid:").unwrap();
+        let calm_at = wake.find("- calm:").unwrap();
+        let warned_at = wake.find(warned[0]).unwrap();
+        assert!(kid_at < warned_at && warned_at < calm_at, "{wake}");
     }
 
     #[test]

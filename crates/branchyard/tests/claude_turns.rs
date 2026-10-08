@@ -13,7 +13,9 @@ mod common;
 use std::os::unix::fs::PermissionsExt as _;
 use std::time::{Duration, Instant};
 
-use branchyard::{models, Activity, BranchStatus, Budget, Policy, Provisioning, TaskOptions};
+use branchyard::{
+    models, Activity, BranchStatus, Budget, Policy, Provisioning, StallAction, TaskOptions,
+};
 use branchyard_testkit::wait;
 use common::Fixture;
 use serde_json::json;
@@ -123,6 +125,140 @@ fn a_harness_with_background_work_is_closed_quietly() {
         &e.activity,
         Activity::Harness(branchyard::Event::Unrecognized { .. })
     )));
+}
+
+/// `by check` started in the background, as a child does before it ends
+/// its turn ("I'll wait for its notification").
+const CHECK_RUNNING: &str = r#"echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"c1","task_type":"local_bash","description":"by check"}]}'
+echo '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"I will wait for the check to finish."}]}}'"#;
+
+/// The harness's warnings, as `by events` shows them.
+fn harness_warnings(f: &Fixture, name: &str) -> Vec<String> {
+    f.yard
+        .branch(name)
+        .unwrap()
+        .events()
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.activity {
+            Activity::Harness(branchyard::Event::Warning { message }) => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A child once ended its turn while `by check` ran in the background, and
+/// the session's close killed the check. Now the turn is held open, quiet
+/// as it is, without counting as a stall, until the task ends and Claude
+/// Code has answered its notification; that answer is the turn's.
+#[test]
+fn a_turn_is_held_open_while_its_background_work_runs() {
+    let f = Fixture::new();
+    let turn = format!(
+        r#"{CHECK_RUNNING}
+{first}
+sleep 1.5
+echo '{{"type":"system","subtype":"task_notification","task_id":"c1","status":"completed"}}'
+echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[]}}'
+echo '{{"type":"assistant","message":{{"id":"m2","content":[{{"type":"text","text":"The check passed."}}]}}}}'
+{second}"#,
+        first = result(0.01),
+        second = result(0.02),
+    );
+    let options = TaskOptions {
+        budget: Budget::default()
+            .stall_after(Duration::from_millis(300))
+            .stall_action(StallAction::Interrupt),
+        ..stand_in(&f, &turn)
+    };
+    let started = Instant::now();
+    let branch = f
+        .yard
+        .task("go")
+        .options(options)
+        .name("held")
+        .run()
+        .unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(1500));
+    assert_eq!(branch.info().status, BranchStatus::NoChanges);
+    let cost = branch.info().cost_usd.unwrap();
+    assert!((cost - 0.03).abs() < 1e-9, "the follow-up's cost: {cost}");
+    let events = branch.events().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.activity, Activity::Stalled { .. })),
+        "{events:?}"
+    );
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match &e.activity {
+            Activity::Harness(branchyard::Event::MessageDelta { text, .. }) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "I will wait for the check to finish.",
+            "\n\nThe check passed."
+        ]
+    );
+    let ended = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e.activity,
+                Activity::Harness(branchyard::Event::TurnEnded { .. })
+            )
+        })
+        .unwrap();
+    let check_ended = events
+        .iter()
+        .position(|e| matches!(&e.activity,
+            Activity::Harness(branchyard::Event::HarnessTaskEnded { task_id, .. }) if task_id == "c1"))
+        .unwrap();
+    assert!(check_ended < ended);
+}
+
+/// The turn's limits bound the hold: at `max_duration` the engine
+/// interrupts, Claude Code answers, and the turn ends over its limit with
+/// a warning naming the task still running.
+#[test]
+fn a_limit_ends_the_hold_with_a_warning_naming_the_running_tasks() {
+    let f = Fixture::new();
+    let turn = format!("{CHECK_RUNNING}\n{}", result(0.01));
+    let options = TaskOptions {
+        budget: Budget::default().duration(Duration::from_secs(1)),
+        ..stand_in(&f, &turn)
+    };
+    let started = Instant::now();
+    let branch = f
+        .yard
+        .task("go")
+        .options(options)
+        .name("cut")
+        .run()
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        branch.info().status,
+        BranchStatus::BudgetExceeded {
+            limit: "max_duration".into()
+        }
+    );
+    let cut: Vec<String> = harness_warnings(&f, "cut")
+        .into_iter()
+        .filter(|w| w.contains("ended with Claude Code's background tasks still running"))
+        .collect();
+    assert_eq!(cut.len(), 1, "{:?}", harness_warnings(&f, "cut"));
+    // The stand-in reports its own `sleep` running once its turn's frames
+    // are out, so that is the set the limit cut off.
+    assert!(cut[0].contains("(b1)"), "{cut:?}");
 }
 
 /// The usage that crosses the cost limit arrives with the turn's end, in

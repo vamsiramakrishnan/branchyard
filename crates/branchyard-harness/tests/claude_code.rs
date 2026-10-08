@@ -1250,7 +1250,7 @@ fn replay_2_1_293(name: &str, prompt: &str) -> Vec<Event> {
         .alias("/uuid")
         .answer_permissions(PermissionDecision::Allow)
         .prompt(prompt);
-    if name == "background-task" {
+    if name.starts_with("background-") {
         replay = replay.close();
     }
     let replayed = replay.run(&mut driver, &opened);
@@ -1270,24 +1270,26 @@ const THINKING_PROMPT: &str = "Think step by step briefly about what 17*23 is. T
 
 /// Real Claude Code 2.1.293 output: rate limits, session settings, task
 /// lifecycles, tool progress, thinking tokens and turn summaries are each
-/// mapped to an event or ignored on purpose, never "unrecognized".
+/// mapped to an event or ignored on purpose, never "unrecognized". The
+/// only warnings are the hold's, for a turn with background work.
 #[test]
 fn every_frame_claude_code_2_1_293_printed_is_mapped_or_ignored_on_purpose() {
     for (name, prompt) in [
         ("background-task", BACKGROUND_PROMPT),
+        ("background-hold", BACKGROUND_PROMPT),
         ("tool-progress", PROGRESS_PROMPT),
         ("thinking", THINKING_PROMPT),
     ] {
         let events = replay_2_1_293(name, prompt);
         let odd: Vec<&Event> = events
             .iter()
-            .filter(|e| {
-                matches!(
-                    e,
-                    Event::Unrecognized { .. }
-                        | Event::ProtocolViolation { .. }
-                        | Event::Warning { .. }
-                )
+            .filter(|e| match e {
+                Event::Unrecognized { .. } | Event::ProtocolViolation { .. } => true,
+                Event::Warning { message } => {
+                    !(name.starts_with("background-")
+                        && message.contains("background tasks still running"))
+                }
+                _ => false,
             })
             .collect();
         assert!(odd.is_empty(), "{name}: {odd:?}");
@@ -1297,10 +1299,20 @@ fn every_frame_claude_code_2_1_293_printed_is_mapped_or_ignored_on_purpose() {
 
 /// A background task is reported as it starts, in the set of running
 /// tasks at the turn's end, and as it ends; `end_session` is what stops
-/// it, and its answer is no event.
+/// it. The turn, held for the task, ends when the CLI agrees to end its
+/// session, as it was answered, with a warning naming the task.
 #[test]
 fn background_tasks_are_reported_and_end_session_stops_them() {
     let events = replay_2_1_293("background-task", BACKGROUND_PROMPT);
+    let held = events
+        .iter()
+        .position(|e| matches!(e, Event::Warning { message } if message.contains("held open")))
+        .unwrap();
+    assert!(
+        matches!(&events[held - 1], Event::UsageObserved { usage, .. } if usage.cumulative),
+        "held at the turn's result: {events:?}"
+    );
+    assert_eq!(turn_ends(&events), [&TurnOutcome::Completed]);
     let (task, background) = events
         .iter()
         .find_map(|e| match e {
@@ -1323,6 +1335,11 @@ fn background_tasks_are_reported_and_end_session_stops_them() {
         })
         .unwrap();
     assert_eq!(running_at_end, std::slice::from_ref(&task));
+    assert!(
+        matches!(&events[ended - 1], Event::Warning { message }
+            if message.contains("still running") && message.contains(&task.task_id)),
+        "{events:?}"
+    );
     assert!(events[ended..].iter().any(|e| matches!(e,
         Event::HarnessTaskEnded { task_id, status, .. }
             if *task_id == task.task_id && status == "stopped")));
@@ -1331,6 +1348,315 @@ fn background_tasks_are_reported_and_end_session_stops_them() {
         Some(&Event::BackgroundTasks {
             running: Vec::new()
         })
+    );
+}
+
+/// A turn whose result comes while its background task runs is held open
+/// until the task ends and the CLI has answered its notification, in a
+/// cycle of its own whose text, tool calls and cost are the turn's; only
+/// then does the turn end, and the session close.
+#[test]
+fn a_turn_is_held_open_until_its_background_task_and_follow_up_finish() {
+    let recorded = fixture_2_1_293("background-hold");
+    let (mut driver, opened) = open_with(SessionMode::Fresh);
+    let replayed = Replay::new(&recorded)
+        .alias("/request_id")
+        .alias("/uuid")
+        .answer_permissions(PermissionDecision::Allow)
+        .prompt(BACKGROUND_PROMPT)
+        .close()
+        .run(&mut driver, &opened);
+    assert_eq!(
+        replayed.sent, 4,
+        "initialize, the prompt, the follow-up's permission and end_session"
+    );
+    assert!(replayed.unsent.is_empty(), "{:?}", replayed.unsent);
+    let events = replayed.events;
+    assert_eq!(turn_ends(&events), [&TurnOutcome::Completed]);
+    let ended = events
+        .iter()
+        .position(|e| matches!(e, Event::TurnEnded { .. }))
+        .unwrap();
+    let ended_task = events
+        .iter()
+        .position(|e| matches!(e, Event::HarnessTaskEnded { status, .. } if status == "completed"))
+        .unwrap();
+    assert!(ended_task < ended, "the turn outlived its task: {events:?}");
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageDelta { turn: 1, text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "started",
+            "\n\nThe background command finished. Checking what it printed.",
+            "It printed done."
+        ],
+        "the follow-up's text is the turn's"
+    );
+    let tools: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ToolStarted {
+                turn: 1, call_id, ..
+            } => Some(call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tools,
+        [
+            "toolu_012rXvRdN5b9GwfmAc7FQLu7",
+            "toolu_01Hd5kTq9wRm3xPe7sLc2VbN"
+        ]
+    );
+    let costs: Vec<f64> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::UsageObserved {
+                turn: Some(1),
+                usage,
+            } if usage.cumulative => usage.cost_usd,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        costs,
+        [0.00267417, 0.00342817],
+        "the follow-up's cost counts"
+    );
+    let warnings: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Warning { message } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains("held open") && warnings[0].contains("bs73ajn7n"),
+        "{warnings:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::ProtocolViolation { .. })),
+        "{events:?}"
+    );
+    assert_eq!(driver.submit("next").map(|s| s.turn), Ok(2));
+}
+
+fn background_tasks(tasks: &[(&str, &str)]) -> Value {
+    let tasks: Vec<Value> = tasks
+        .iter()
+        .map(|(id, description)| json!({"task_id": id, "task_type": "local_bash", "description": description}))
+        .collect();
+    json!({"type": "system", "subtype": "background_tasks_changed", "tasks": tasks})
+}
+
+/// A turn held with `by check` running in the background, and answered by
+/// its result.
+fn held_turn() -> (ClaudeCode, String) {
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "go");
+    feed(&mut driver, &lifecycle(&uuid, "queued"));
+    feed(&mut driver, &lifecycle(&uuid, "started"));
+    feed(&mut driver, &background_tasks(&[("b1", "by check")]));
+    let own = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": [uuid], "total_cost_usd": 0.5});
+    let (events, _) = feed(&mut driver, &own);
+    assert!(turn_ends(&events).is_empty(), "{events:?}");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Warning { message } if message.contains("held open"))),
+        "{events:?}"
+    );
+    (driver, uuid)
+}
+
+/// A steer during the hold runs as a cycle of its own and keeps the turn
+/// held; an interrupt then ends the hold when the CLI answers it, as an
+/// interrupted turn with a warning naming the task still running. The
+/// task's notification turn after it is the CLI's own.
+#[test]
+fn an_interrupt_ends_a_held_turn_naming_its_running_tasks() {
+    let (mut driver, _) = held_turn();
+    let steered = decode(&driver.steer("status?").unwrap()[0]);
+    let steer = steered["uuid"].as_str().unwrap().to_owned();
+    feed(&mut driver, &lifecycle(&steer, "queued"));
+    feed(&mut driver, &lifecycle(&steer, "started"));
+    let assistant = json!({"type": "assistant", "user_message_uuid": steer, "message": {"id": "m2", "content": [{"type": "text", "text": "still checking"}]}});
+    let (events, _) = feed(&mut driver, &assistant);
+    assert!(events.contains(&Event::MessageDelta {
+        turn: 1,
+        text: "still checking".into()
+    }));
+    let answered = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": [steer]});
+    let (events, _) = feed(&mut driver, &answered);
+    assert!(turn_ends(&events).is_empty(), "{events:?}");
+    let frame = decode(&driver.interrupt().unwrap()[0]);
+    assert_eq!(frame["request"], json!({"subtype": "interrupt"}));
+    let acknowledged = json!({"type": "control_response", "response": {"subtype": "success", "request_id": frame["request_id"]}});
+    let (events, _) = feed(&mut driver, &acknowledged);
+    assert!(
+        matches!(&events[..], [
+            Event::InterruptAcknowledged { turn: 1 },
+            Event::Warning { message },
+            Event::TurnEnded { turn: 1, outcome: TurnOutcome::Interrupted },
+        ] if message.contains("\"by check\" (b1)")),
+        "{events:?}"
+    );
+    let notification = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": ["notification"]});
+    let (events, _) = feed(&mut driver, &notification);
+    assert!(
+        matches!(&events[..], [Event::UsageObserved { turn: None, .. }, Event::Warning { message }]
+            if message.contains("a turn of its own")),
+        "{events:?}"
+    );
+}
+
+/// An interrupt the CLI refuses still ends the hold, which has no cycle
+/// for it to stop.
+#[test]
+fn a_refused_interrupt_still_ends_a_held_turn() {
+    let (mut driver, _) = held_turn();
+    let frame = decode(&driver.interrupt().unwrap()[0]);
+    let refused = json!({"type": "control_response", "response": {"subtype": "error", "request_id": frame["request_id"], "error": "idle"}});
+    let (events, _) = feed(&mut driver, &refused);
+    assert_eq!(
+        turn_ends(&events),
+        [&TurnOutcome::Interrupted],
+        "{events:?}"
+    );
+}
+
+/// The hold waits for the cycle on a task's notification, not only for the
+/// task: the set emptying after the task ended does not end the turn, the
+/// follow-up's result does. Tasks gone with no word of their ending leave
+/// nothing to wait for.
+#[test]
+fn the_hold_waits_for_the_notifications_cycle() {
+    let (mut driver, _) = held_turn();
+    let notified = json!({"type": "system", "subtype": "task_notification", "task_id": "b1", "status": "completed"});
+    feed(&mut driver, &notified);
+    let (events, _) = feed(&mut driver, &background_tasks(&[]));
+    assert!(turn_ends(&events).is_empty(), "{events:?}");
+    let follow_up = json!({"type": "assistant", "user_message_uuid": "notification", "message": {"id": "m3", "content": [{"type": "text", "text": "the check passed"}]}});
+    let (events, _) = feed(&mut driver, &follow_up);
+    assert!(events.contains(&Event::MessageDelta {
+        turn: 1,
+        text: "the check passed".into()
+    }));
+    let result = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": ["notification"], "total_cost_usd": 0.75});
+    let (events, _) = feed(&mut driver, &result);
+    assert!(
+        matches!(&events[..], [
+            Event::UsageObserved { turn: Some(1), usage },
+            Event::TurnEnded { turn: 1, outcome: TurnOutcome::Completed },
+        ] if usage.cost_usd == Some(0.75)),
+        "{events:?}"
+    );
+
+    let (mut driver, _) = held_turn();
+    let (events, _) = feed(&mut driver, &background_tasks(&[]));
+    assert_eq!(turn_ends(&events), [&TurnOutcome::Completed], "{events:?}");
+}
+
+/// Two background tasks: one that ends during the cycle on the other's
+/// notification waits for a cycle of its own, so the turn does not end at
+/// the first cycle's result. Its ending reported twice (`task_updated`,
+/// then `task_notification`) waits for one cycle, not two.
+#[test]
+fn a_task_ending_during_anothers_follow_up_waits_for_its_own() {
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "go");
+    feed(&mut driver, &lifecycle(&uuid, "started"));
+    feed(
+        &mut driver,
+        &background_tasks(&[("b1", "by check"), ("b2", "cargo test")]),
+    );
+    let own = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": [uuid]});
+    assert!(turn_ends(&feed(&mut driver, &own).0).is_empty());
+    let ended = |id: &str| {
+        [
+            json!({"type": "system", "subtype": "task_updated", "task_id": id, "patch": {"status": "completed"}}),
+            json!({"type": "system", "subtype": "task_notification", "task_id": id, "status": "completed"}),
+        ]
+    };
+    let cycle = |n: &str| json!({"type": "assistant", "user_message_uuid": n, "message": {"id": n, "content": [{"type": "text", "text": n}]}});
+    let answered = |n: &str| json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": [n]});
+    for frame in ended("b1") {
+        feed(&mut driver, &frame);
+    }
+    feed(&mut driver, &background_tasks(&[("b2", "cargo test")]));
+    feed(&mut driver, &cycle("n1"));
+    // b2 ends while the cycle on b1's notification runs.
+    for frame in ended("b2") {
+        feed(&mut driver, &frame);
+    }
+    let (events, _) = feed(&mut driver, &background_tasks(&[]));
+    assert!(turn_ends(&events).is_empty(), "{events:?}");
+    let (events, _) = feed(&mut driver, &answered("n1"));
+    assert!(
+        turn_ends(&events).is_empty(),
+        "b2's cycle is still to come: {events:?}"
+    );
+    let (events, _) = feed(&mut driver, &cycle("n2"));
+    assert!(events.contains(&Event::MessageDelta {
+        turn: 1,
+        text: "\n\nn2".into()
+    }));
+    let (events, _) = feed(&mut driver, &answered("n2"));
+    assert_eq!(turn_ends(&events), [&TurnOutcome::Completed], "{events:?}");
+}
+
+/// The engine is told the turn is holding (no stall) only while the tasks
+/// it is held for still run, and held (bounded by the cap) for the whole
+/// hold, the wait for their notification's cycle included.
+#[test]
+fn holding_is_reported_while_the_held_turns_tasks_run() {
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "go");
+    feed(&mut driver, &background_tasks(&[("b1", "by check")]));
+    assert!(!driver.holding(), "running, not held, before the result");
+    let own = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": [uuid]});
+    feed(&mut driver, &own);
+    assert!(driver.holding());
+    let notified = json!({"type": "system", "subtype": "task_notification", "task_id": "b1", "status": "completed"});
+    feed(&mut driver, &notified);
+    assert!(driver.held());
+    let (events, _) = feed(&mut driver, &background_tasks(&[]));
+    assert!(turn_ends(&events).is_empty(), "{events:?}");
+    assert!(!driver.holding(), "no task runs");
+    assert!(
+        driver.held(),
+        "still held for the follow-up, which the cap bounds"
+    );
+    let follow_up = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": ["notification"]});
+    feed(&mut driver, &follow_up);
+    assert!(!driver.held());
+}
+
+/// A turn that hit a limit of the CLI's own is not held: it ends at once,
+/// saying which background tasks were still running.
+#[test]
+fn a_turn_at_its_own_limit_is_not_held() {
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "go");
+    feed(&mut driver, &background_tasks(&[("b1", "by check")]));
+    let limited = json!({"type": "result", "subtype": "error_max_budget_usd", "is_error": true, "user_message_uuids": [uuid]});
+    let (events, _) = feed(&mut driver, &limited);
+    assert!(
+        matches!(&events[..], [
+            Event::UsageObserved { .. },
+            Event::Warning { message },
+            Event::TurnEnded { outcome: TurnOutcome::LimitReached { .. }, .. },
+        ] if message.contains("still running")),
+        "{events:?}"
     );
 }
 

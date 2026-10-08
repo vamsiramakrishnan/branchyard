@@ -51,6 +51,11 @@ const CLOSE_GRACE: Duration = Duration::from_secs(10);
 const INTERRUPT_GRACE: Duration = Duration::from_secs(30);
 /// How often limits are checked while the harness is quiet.
 const TICK: Duration = Duration::from_millis(100);
+/// How long a turn with no duration limit may be held open after the
+/// harness answered it, for its background tasks and the harness's answer
+/// to their notification ([`branchyard_harness::Driver::held`]), before it
+/// is interrupted.
+const HOLD_CAP: Duration = Duration::from_secs(30 * 60);
 /// Events drained without waiting once the turn has ended.
 const DRAIN_MAX: usize = 10_000;
 /// The variables that name a temporary directory: POSIX's, and the two
@@ -221,6 +226,21 @@ enum Stop {
     /// Stopping after a stall, with [`Budget::stall_action`]
     /// [`StallAction::Interrupt`].
     Stall,
+    /// Stopping a turn held open past [`HOLD_CAP`] for background tasks,
+    /// with no duration limit of its own.
+    Hold,
+}
+
+/// Whether a turn held open since `since` for background tasks has been
+/// held too long: only without a duration limit (`deadline`), which bounds
+/// the hold itself, after `cap`.
+fn hold_cut(
+    since: Option<Instant>,
+    now: Instant,
+    deadline: Option<Instant>,
+    cap: Duration,
+) -> bool {
+    deadline.is_none() && since.is_some_and(|since| now.duration_since(since) >= cap)
 }
 
 /// Run the turn under `lease` and record its result. Harness failures
@@ -876,9 +896,14 @@ fn run(
     // stops the loop from ticking at all), while a child branch is running
     // (`delegation::any_child_running`), or while the harness is blocked in
     // `ask --wait` for an answer (`inbox::waiting_for_answer`, recorded in
-    // the store by whichever process runs the wait).
+    // the store by whichever process runs the wait), nor while the driver
+    // holds the turn open after its answer for background tasks the
+    // harness still reports running (a long command in the background says
+    // nothing); that hold is bounded by the turn's duration limit, or else
+    // by `HOLD_CAP`.
     let mut last_activity = started;
     let mut stalled = false;
+    let mut held_since: Option<Instant> = None;
     // What the branch has spent, while the turn runs: see `LiveCost`.
     // Written to its record as it changes, so a parent inspecting it, or
     // the branch inspecting itself, sees a figure and not "unknown".
@@ -950,6 +975,9 @@ fn run(
             _ => {}
         }
         steering.poll(recorder, &mut session, &store, fence, &phase)?;
+        let holding = session.holding();
+        // The cap covers the whole hold, the wait for the follow-up included.
+        held_since = session.held().then(|| held_since.unwrap_or(now));
         // A turn on the model gateway is metered exactly; its limit is
         // held here as a harness's own estimate is below.
         if let Some(gateway) = &model_gateway {
@@ -984,6 +1012,7 @@ fn run(
             let idle = now.duration_since(last_activity);
             if !stalled
                 && idle >= window
+                && !holding
                 && !delegation::any_child_running(&store, &record.info.name)
                 && !crate::inbox::waiting_for_answer(&store, &record.info.name)
             {
@@ -1030,6 +1059,26 @@ fn run(
                     since: now,
                 };
             }
+            Phase::Running(n) if hold_cut(held_since, now, deadline, HOLD_CAP) => {
+                let n = *n;
+                recorder.record(Activity::Warning(format!(
+                    "the turn was held open {} minutes for the harness's background tasks, with \
+                     no duration limit; interrupting it",
+                    HOLD_CAP.as_secs() / 60
+                )))?;
+                if let Err(error) = stop(&mut session) {
+                    recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
+                    kill = true;
+                    break End::Outcome {
+                        outcome: TurnOutcome::Interrupted,
+                    };
+                }
+                phase = Phase::Stopping {
+                    turn: n,
+                    why: Stop::Hold,
+                    since: now,
+                };
+            }
             Phase::Stopping { why, since, .. } if now.duration_since(*since) >= INTERRUPT_GRACE => {
                 recorder.record(Activity::Warning(format!(
                     "the harness did not end the turn within {}s of the interrupt; killing it",
@@ -1041,6 +1090,9 @@ fn run(
                     Stop::Cancelled(by) => End::cancelled(by.clone()),
                     Stop::Failure(reason) => End::failed(reason.clone()),
                     Stop::Stall => End::Stalled,
+                    Stop::Hold => End::Outcome {
+                        outcome: TurnOutcome::Interrupted,
+                    },
                 };
             }
             _ => {}
@@ -1913,5 +1965,26 @@ mod tests {
         assert_eq!(spent(0.5, None), 0.5);
         assert_eq!(spent(0.75, Some(0.5)), 0.25);
         assert_eq!(spent(0.25, Some(0.5)), 0.0);
+    }
+
+    /// A hold is cut after the cap only when the turn has no duration
+    /// limit, which bounds the hold itself, and only while it lasts.
+    #[test]
+    fn a_hold_without_a_duration_limit_is_cut_at_the_cap() {
+        let cap = Duration::from_secs(60);
+        let since = Instant::now();
+        let later = since + cap;
+        assert!(hold_cut(Some(since), later, None, cap));
+        assert!(!hold_cut(
+            Some(since),
+            later - Duration::from_secs(1),
+            None,
+            cap
+        ));
+        assert!(!hold_cut(None, later, None, cap), "not held");
+        assert!(
+            !hold_cut(Some(since), later, Some(later + cap), cap),
+            "the duration limit bounds it"
+        );
     }
 }

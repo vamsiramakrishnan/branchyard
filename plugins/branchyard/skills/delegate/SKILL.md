@@ -43,12 +43,15 @@ session, and merging overlapping edits produces conflicts.
      you delegated has settled, Branchyard starts your next turn by itself
      with a summary of each child (status, diffstat, cost, last message,
      why it failed) and what you can do next. Do not leave a background
-     task or monitor polling for them; it is stopped when your turn ends.
-     Never run `by wait` or an orchestration script as a backgrounded shell
-     command and end your turn to wait for it: a backgrounded shell command
-     belongs to your own session and dies with it, unlike your children.
-     Either wait with `by wait` in the foreground, or just end your turn;
-     Branchyard itself wakes you.
+     task or monitor polling for them. A turn with background work still
+     running is held until it finishes (within your turn's limits, and
+     at most 30 minutes without a duration limit), so a poll that never
+     ends keeps your turn open until that bound stops it. Never run `by wait` or an
+     orchestration script as a backgrounded shell command and end your
+     turn to wait for it: a backgrounded shell command belongs to your own
+     session, and once your turn's limits end the hold it dies with the
+     session, unlike your children. Either wait with `by wait` in the
+     foreground, or just end your turn; Branchyard itself wakes you.
    - **Wait in this turn.** `by wait` blocks until your running children
      have settled (`by wait a b`, `--any` for the first, `--timeout S`);
      it is woken by Branchyard, not a poll. `by spawn ... --wait` waits

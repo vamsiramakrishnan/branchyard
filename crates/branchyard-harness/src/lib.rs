@@ -868,6 +868,24 @@ pub trait Driver {
     /// The harness's stdout closed or the process exited.
     fn transport_closed(&mut self) -> Vec<Event>;
 
+    /// Whether the turn in flight is held open after the harness answered
+    /// it, for background tasks of the harness's own it still reports
+    /// running (Claude Code's; see its module). The engine counts no stall
+    /// meanwhile, and bounds the hold when the turn has no duration limit.
+    /// The default holds nothing.
+    fn holding(&self) -> bool {
+        false
+    }
+
+    /// Whether the turn in flight is held open after the harness answered
+    /// it, for the whole hold: while its background tasks run, and while
+    /// it waits for the harness to answer their notification once they
+    /// ended. The engine bounds this whole hold when the turn has no
+    /// duration limit. The default holds nothing.
+    fn held(&self) -> bool {
+        false
+    }
+
     /// Frames that ask the harness to end its session, written just before
     /// its input is closed, for a protocol that has such a request. A
     /// harness may otherwise outlive the end of its input, waiting on work
