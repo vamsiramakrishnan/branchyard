@@ -2946,7 +2946,12 @@ impl fmt::Display for Error {
                 write!(f, "{} is not inside a git work tree", path.display())
             }
             Error::UnknownBranch(name) => write!(f, "no branch named {name}"),
-            Error::BranchExists(name) => write!(f, "branch {name} already exists"),
+            Error::BranchExists(name) => write!(
+                f,
+                "branch {name} already exists; a branch that was discarded or merged keeps its \
+                 name until it is removed: `by rm {name}` frees it (a removed child's spend \
+                 still counts in its parent's budget), or choose another name"
+            ),
             Error::UnknownMessage(id) => write!(f, "no message #{id} in this inbox"),
             Error::UnknownKnowledge(id) => write!(f, "no knowledge entry #{id}"),
             Error::NoPlan(why) => write!(f, "no plan: {why}"),

@@ -1724,13 +1724,7 @@ pub fn cancel(target: &Target, branch: &str, json: bool) -> Outcome {
 
 /// Set a settled child aside: inside a harness, a descendant, with the
 /// branch's authority; otherwise any branch, with yours.
-pub fn discard(
-    env: &Env,
-    target: &Target,
-    branch: &str,
-    reason: Option<&str>,
-    json: bool,
-) -> Outcome {
+pub fn discard(target: &Target, branch: &str, reason: Option<&str>, json: bool) -> Outcome {
     let result = match (harness_delegate(json)?, target) {
         (Some(delegate), _) => delegate.discard(branch, reason),
         (None, Target::Remote(_)) => Err(branchyard::Error::Unsupported(
@@ -1747,7 +1741,18 @@ pub fn discard(
             as_user(branch, TaskOptions::default())?.inspect(branch)
         })(),
     };
-    emit(json, result, |i| render::inspection(i, env.style()))
+    // One line: a meta discards several children in a row, and `by
+    // inspect` shows the rest.
+    emit(json, result, |i| {
+        let reason = match &i.status {
+            branchyard::BranchStatus::Discarded { reason } => format!(": {reason}"),
+            _ => String::new(),
+        };
+        format!(
+            "discarded {}{reason}; its record, worktree and cost stay until `by rm {}`\n",
+            i.name, i.name
+        )
+    })
 }
 
 /// Inside a harness, a command acts as the harness's own branch only: a

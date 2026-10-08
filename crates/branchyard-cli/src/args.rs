@@ -1272,7 +1272,8 @@ pub enum Command {
         #[command(subcommand)]
         action: crate::recipe_cmd::RecipeAction,
     },
-    /// Remove a branch's worktree and record
+    /// Remove a branch's worktree and record, which frees its name. A removed child leaves its
+    /// parent's children, and what its subtree spent still counts in the parent's budget
     #[command(display_order = 106)]
     Rm {
         branch: String,

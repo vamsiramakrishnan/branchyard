@@ -72,7 +72,9 @@ session, and merging overlapping edits produces conflicts.
    changes nothing; set a finished child you will not use aside with
    `by discard <child> --reason "<why>"`. It keeps its record and cost,
    is never integrated or sent more work, and so never holds a slot or
-   your budget again, and never keeps you waiting.
+   your budget again, and never keeps you waiting. It keeps its name, its
+   worktree and its git branch until `by rm <child>` removes them; what it
+   spent still counts in your budget.
 
 Statuses: `running`, `ready` (a candidate to merge), `no_changes`,
 `interrupted`, `budget_exceeded`, `failed`, `merged`, `discarded`,

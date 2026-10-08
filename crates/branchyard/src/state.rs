@@ -213,9 +213,11 @@ impl Record {
 }
 
 /// Record in `parent`'s ledger that its child `removed` is being deleted,
-/// with what its subtree spent (its descendants read with `read`). False,
-/// and nothing changed, when `removed` is not one of `parent`'s delegated
-/// children (a fork names the branch it came from as its parent too).
+/// with what its subtree spent (its descendants read with `read`), and
+/// take it off `parent`'s children: one list of children, which `inspect`,
+/// `children` and the envelope all read. False, and nothing changed, when
+/// `removed` is not one of `parent`'s delegated children (a fork names the
+/// branch it came from as its parent too).
 pub(crate) fn note_removed(
     parent: &mut Record,
     removed: &Record,
@@ -230,6 +232,7 @@ pub(crate) fn note_removed(
         spent_usd: removed.subtree_spent(read),
         removed_ms: now_ms(),
     });
+    parent.info.children.retain(|child| child != name);
     true
 }
 

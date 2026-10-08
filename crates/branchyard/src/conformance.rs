@@ -780,9 +780,18 @@ pub(crate) fn removed_children(s: Opened) {
     assert!((root.removed[0].spent_usd - 0.375).abs() < 1e-9);
     assert!((root.subtree_spent(&mut |_| None) - 0.875).abs() < 1e-9);
 
-    // A stale write of the parent keeps the ledger.
-    store.write(&spent("root", None, 0.5), None).unwrap();
-    assert_eq!(store.read("root").unwrap().unwrap().removed.len(), 1);
+    // The removed child left its parent's children: one list, which
+    // inspect and children both read.
+    assert!(root.info.children.is_empty(), "{:?}", root.info.children);
+
+    // A stale write of the parent keeps the ledger, and does not bring the
+    // removed child back.
+    let mut stale = spent("root", None, 0.5);
+    stale.info.children = vec!["kid".into()];
+    store.write(&stale, None).unwrap();
+    let root = store.read("root").unwrap().unwrap();
+    assert_eq!(root.removed.len(), 1);
+    assert!(root.info.children.is_empty(), "{:?}", root.info.children);
 }
 
 pub(crate) fn reservations(s: Opened) {

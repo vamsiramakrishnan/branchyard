@@ -2136,10 +2136,20 @@ fn discard_sets_a_settled_child_aside_and_frees_its_slot() {
     );
     let text = repo.by(&["discard", "a", "--reason", "lost the race"]);
     assert!(text.status.success(), "{}", stderr(&text));
+    // One line per discard, not the whole inspection.
+    assert_eq!(
+        stdout(&text),
+        "discarded a: lost the race; its record, worktree and cost stay until `by rm a`\n"
+    );
+    // The discarded child keeps its name until it is removed, and the
+    // refusal says how to free it.
+    let taken = repo.by(&["spawn", "x", "--parent", "root", "--name", "a", "--yes"]);
+    assert!(!taken.status.success());
     assert!(
-        stdout(&text).contains("discarded: lost the race"),
+        stderr(&taken).contains("branch a already exists")
+            && stderr(&taken).contains("`by rm a` frees it"),
         "{}",
-        stdout(&text)
+        stderr(&taken)
     );
     let shown = repo.json(&["show", "a", "--json"]);
     assert_eq!(shown["status"]["state"], "discarded");
@@ -2170,6 +2180,21 @@ fn discard_sets_a_settled_child_aside_and_frees_its_slot() {
         !err.contains('\x1b') && !stdout(&removed).contains('\x1b'),
         "{err}"
     );
+    // One list of children: inspect and children agree once b is removed,
+    // and its name is free again.
+    let inspected = repo.json(&["inspect", "root", "--json"]);
+    let listed: Vec<String> = repo.json(&["children", "root", "--json"])["descendants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["parent"] == "root")
+        .map(|d| d["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(inspected["children"], serde_json::json!(listed));
+    assert!(!listed.contains(&"b".to_owned()), "{listed:?}");
+    repo.json(&[
+        "spawn", "say hi", "--parent", "root", "--name", "b", "--wait", "--yes", "--json",
+    ]);
     // The envelope names the harness and profile it allows.
     let shown = stdout(&repo.by(&["inspect", "root"]));
     let root = repo.json(&["show", "root", "--json"]);

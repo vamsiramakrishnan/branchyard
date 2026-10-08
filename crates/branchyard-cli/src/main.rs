@@ -464,7 +464,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             branch,
             reason,
             json,
-        } => commands::discard(env, target, &branch, reason.as_deref(), json),
+        } => commands::discard(target, &branch, reason.as_deref(), json),
         Command::Spawn { prompt, spawn } => commands::spawn(env, target, &prompt, &spawn),
         Command::Inspect { branch, json } => commands::inspect(env, target, branch, json),
         Command::Events {

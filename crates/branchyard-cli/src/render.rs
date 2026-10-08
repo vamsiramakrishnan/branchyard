@@ -1377,7 +1377,27 @@ pub fn graph(g: &branchyard::Graph, style: Style) -> String {
             width = width
         );
         if !waits.is_empty() {
-            line.push_str(&format!("  after {}", dependencies_text(&waits)));
+            // Waiting (or blocked) it is still after them; otherwise the
+            // dependency is history, and a discarded prerequisite says so.
+            let after = match child.status {
+                BranchStatus::Waiting | BranchStatus::Blocked { .. } => "after",
+                _ => "was after",
+            };
+            let named: Vec<String> = waits
+                .iter()
+                .map(|d| {
+                    let discarded = g.children.iter().any(|c| {
+                        c.name == d.prerequisite
+                            && matches!(c.status, BranchStatus::Discarded { .. })
+                    });
+                    let mut text = dependencies_text(std::slice::from_ref(d));
+                    if discarded {
+                        text.push_str(", now discarded");
+                    }
+                    text
+                })
+                .collect();
+            line.push_str(&format!("  {after} {}", named.join(", ")));
         }
         if !child.bindings.is_empty() {
             line.push_str(&format!("  binds {}", bindings_text(&child.bindings)));
@@ -2078,6 +2098,48 @@ mod tests {
         assert_eq!(
             [5, 42, 600, 7_200, 200_000].map(age_text),
             ["now", "42s", "10m", "2h", "2d"]
+        );
+    }
+
+    /// The battery's graph scenario: after every child was discarded,
+    /// `by graph show` still read `after models (integrated)` as if they
+    /// waited. A dependency of a child that no longer waits is history, and
+    /// a discarded prerequisite says so.
+    #[test]
+    fn a_graph_shows_dependencies_that_no_longer_wait_as_history() {
+        let node = |name: &str, status: BranchStatus| branchyard::GraphNode {
+            name: name.into(),
+            status,
+            depends_on: Vec::new(),
+            bindings: Vec::new(),
+            seat: None,
+        };
+        let discarded = || BranchStatus::Discarded {
+            reason: "redo".into(),
+        };
+        let after = |dependent: &str| branchyard::Dependency {
+            dependent: dependent.into(),
+            prerequisite: "models".into(),
+            after: branchyard::After::Integrated,
+        };
+        let graph = branchyard::Graph {
+            branch: "meta".into(),
+            revision: 3,
+            children: vec![
+                node("models", discarded()),
+                node("store", discarded()),
+                node("api", BranchStatus::Waiting),
+            ],
+            dependencies: vec![after("store"), after("api")],
+        };
+        let text = super::graph(&graph, PLAIN);
+        assert!(
+            text.contains("was after models (integrated), now discarded"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  after models (integrated), now discarded"),
+            "{text}"
         );
     }
 
