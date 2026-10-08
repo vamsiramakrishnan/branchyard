@@ -22,6 +22,7 @@ fn open_with(mode: SessionMode) -> (ClaudeCode, Opened) {
             mode,
             cwd: "/workspace".into(),
             model: None,
+            max_budget_usd: None,
             mcp_servers: Vec::new(),
             instructions: None,
             mcp_config_file: None,
@@ -262,6 +263,49 @@ fn interrupts_are_acknowledged_then_end_the_turn() {
         Some(&Event::TurnEnded {
             turn: 1,
             outcome: TurnOutcome::Interrupted
+        })
+    );
+}
+
+/// A spending limit is passed as `--max-budget-usd`, and the turn Claude
+/// Code stops at it ends at that limit; a limit that is not a positive
+/// number is refused before launch.
+#[test]
+fn a_spending_limit_is_passed_and_stopping_at_it_is_a_limit() {
+    let mut driver = ClaudeCode::new(vec!["claude".into()]);
+    let opened = driver
+        .open(Open {
+            max_budget_usd: Some(0.0125),
+            ..Open::new(SessionMode::Fresh, "/workspace")
+        })
+        .unwrap();
+    let argv = opened.launch.argv;
+    let at = argv.iter().position(|a| a == "--max-budget-usd").unwrap();
+    assert_eq!(argv[at + 1], "0.0125");
+    for usd in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let refused = ClaudeCode::new(vec!["claude".into()]).open(Open {
+            max_budget_usd: Some(usd),
+            ..Open::new(SessionMode::Fresh, "/workspace")
+        });
+        assert!(
+            matches!(refused, Err(Rejected::InvalidOpen(_))),
+            "{usd}: {refused:?}"
+        );
+    }
+    let (_, argv, _) = open(SessionMode::Fresh);
+    assert!(!argv.contains(&"--max-budget-usd".to_owned()));
+
+    let mut driver = ready(SessionMode::Fresh);
+    let turn = driver.submit("go").unwrap().turn;
+    let result = json!({"type": "result", "subtype": "error_max_budget_usd", "is_error": true, "total_cost_usd": 0.013});
+    let (events, _) = feed(&mut driver, &result);
+    assert_eq!(
+        events.last(),
+        Some(&Event::TurnEnded {
+            turn,
+            outcome: TurnOutcome::LimitReached {
+                limit: "max_budget_usd".into()
+            }
         })
     );
 }

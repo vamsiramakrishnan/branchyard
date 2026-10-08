@@ -109,13 +109,19 @@ pub enum SessionMode {
 }
 
 /// Parameters for opening a session.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Open {
     pub mode: SessionMode,
     /// Working directory inside the sandbox.
     pub cwd: String,
     /// Harness-specific model name, when the task pins one.
     pub model: Option<String>,
+    /// The most, in US dollars, the harness may spend from its start, for a
+    /// driver that can stop its harness at such a limit
+    /// ([`Capabilities::budget`]); a driver that cannot refuses it. The
+    /// caller's own limit still holds: the harness's figure is its
+    /// estimate.
+    pub max_budget_usd: Option<f64>,
     /// MCP servers the harness starts for this session, in its native
     /// configuration shape. Resumes and forks pass them again: harnesses do
     /// not keep them with the session.
@@ -143,6 +149,7 @@ impl Open {
             mode,
             cwd: cwd.into(),
             model: None,
+            max_budget_usd: None,
             mcp_servers: Vec::new(),
             instructions: None,
             mcp_config_file: None,
@@ -257,6 +264,20 @@ pub(crate) fn refuse_projection(open: &Open, harness: &str) -> Result<(), Reject
         )));
     }
     Ok(())
+}
+
+/// The limit [`TurnOutcome::LimitReached`] names when the harness stopped
+/// itself at [`Open::max_budget_usd`].
+pub const BUDGET_LIMIT: &str = "max_budget_usd";
+
+/// Refuse a spending limit for a driver whose harness cannot enforce one
+/// ([`Capabilities::budget`]), giving `reason`, the driver's recorded
+/// reason, rather than dropping it silently.
+pub(crate) fn refuse_budget(open: &Open, reason: &str) -> Result<(), Rejected> {
+    match open.max_budget_usd {
+        Some(_) => Err(Rejected::Unsupported(format!("a spending limit: {reason}"))),
+        None => Ok(()),
+    }
 }
 
 /// Refuse HTTP and SSE MCP servers for a driver that cannot pass them.
@@ -691,6 +712,9 @@ pub struct Capabilities {
     pub steer: bool,
     /// A model chosen per session ([`Open::model`]).
     pub model: bool,
+    /// A spending limit the harness enforces itself, stopping before it
+    /// goes over ([`Open::max_budget_usd`]).
+    pub budget: bool,
 }
 
 /// What a task needs from its harness. Unset fields are not required.
@@ -705,6 +729,9 @@ pub struct Requirements {
     pub steer: bool,
     /// A model chosen per session ([`Capabilities::model`]).
     pub model: bool,
+    /// A spending limit the harness enforces itself
+    /// ([`Capabilities::budget`]).
+    pub budget: bool,
 }
 
 /// A capability name (as [`admit`] and [`Driver::capabilities`] name it,
@@ -756,6 +783,7 @@ pub fn admit(required: &Requirements, offered: &Capabilities) -> Result<(), Vec<
         ("usage", required.usage, offered.usage),
         ("steer", required.steer, offered.steer),
         ("model", required.model, offered.model),
+        ("budget", required.budget, offered.budget),
     ]
     .into_iter()
     .filter(|(_, needed, available)| *needed && !available)

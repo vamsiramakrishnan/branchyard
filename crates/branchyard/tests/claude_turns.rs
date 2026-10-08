@@ -1,8 +1,9 @@
 //! The engine driving Claude Code's stream-json profile against a shell
 //! stand-in that prints the frames Claude Code 2.1.293 prints: how a
 //! session is closed, a cost limit crossed by the turn's last message, the
-//! cost of a turn while it runs, and the harness's private temporary
-//! directory. No model is called.
+//! cost of a turn while it runs, the spending limit the harness is given
+//! and stops at itself, and the harness's private temporary directory. No
+//! model is called.
 
 #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
@@ -243,4 +244,92 @@ fn a_child_spawned_with_a_model_runs_it() {
     let inspected = delegate.inspect("kid").unwrap();
     assert_eq!(inspected.model.as_deref(), Some("claude-haiku-5-5"));
     assert_eq!(f.yard.branch("root").unwrap().info().model, None);
+}
+
+/// The `--max-budget-usd` a turn's stand-in was started with, if any.
+fn harness_budget(f: &Fixture, name: &str) -> Option<f64> {
+    let worktree = f.yard.branch(name).unwrap().info().worktree.clone();
+    let args = std::fs::read_to_string(worktree.join("args.txt")).unwrap();
+    let mut args = args.lines();
+    args.by_ref().find(|a| *a == "--max-budget-usd")?;
+    args.next()?.parse().ok()
+}
+
+/// Claude Code is given what is left of the branch's budget for each turn,
+/// its limit less what it has spent, and nothing without a limit.
+#[test]
+fn the_harness_is_given_what_is_left_of_the_budget() {
+    let f = Fixture::new();
+    let turn = format!("printf '%s\\n' \"$@\" > args.txt\n{}", result(0.04));
+    let branch = f
+        .yard
+        .task("go")
+        .options(TaskOptions {
+            budget: Budget::usd(0.1),
+            ..stand_in(&f, &turn)
+        })
+        .name("capped")
+        .run()
+        .unwrap();
+    assert_eq!(harness_budget(&f, "capped"), Some(0.1));
+    assert_eq!(branch.info().cost_usd, Some(0.04));
+    branch
+        .send(
+            "again",
+            TaskOptions {
+                budget: Budget::usd(0.1),
+                ..stand_in(&f, &turn)
+            },
+        )
+        .unwrap();
+    let left = harness_budget(&f, "capped").unwrap();
+    assert!((left - 0.06).abs() < 1e-9, "{left}");
+
+    f.yard
+        .task("go")
+        .options(stand_in(&f, &turn))
+        .name("unlimited")
+        .run()
+        .unwrap();
+    assert_eq!(harness_budget(&f, "unlimited"), None);
+}
+
+/// A harness that stops itself at the limit it was given ends the turn
+/// over the branch's budget, and the log says the harness stopped it,
+/// whether or not the cost it last reported crossed the limit too.
+#[test]
+fn a_harness_stopping_at_its_own_limit_is_recorded() {
+    let f = Fixture::new();
+    for (name, cost) in [("under", 0.09), ("over", 0.12)] {
+        let turn = format!(
+            r#"echo '{{"type":"result","subtype":"error_max_budget_usd","is_error":true,"total_cost_usd":{cost}}}'"#
+        );
+        let branch = f
+            .yard
+            .task("go")
+            .options(TaskOptions {
+                budget: Budget::usd(0.1),
+                ..stand_in(&f, &turn)
+            })
+            .name(name)
+            .run()
+            .unwrap();
+        assert_eq!(
+            branch.info().status,
+            BranchStatus::BudgetExceeded {
+                limit: "max_usd".into()
+            },
+            "{name}"
+        );
+        assert_eq!(branch.info().cost_usd, Some(cost));
+        assert_eq!(
+            warnings(&f, name),
+            vec![
+                "the harness stopped itself at the $0.1000 spending limit it was given, \
+                 what was left of max_usd (--budget-usd) when the turn started"
+                    .to_owned()
+            ],
+            "{name}"
+        );
+    }
 }

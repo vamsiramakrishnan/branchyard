@@ -248,6 +248,7 @@ impl Driver for Amp {
             usage: true,
             steer: false,
             model: false,
+            budget: false,
         }
     }
 
@@ -258,6 +259,7 @@ impl Driver for Amp {
                 "model",
                 "Amp selects models through agent modes, not a model name",
             ),
+            ("budget", "Amp's CLI has no spending limit flag"),
             (
                 "cancellation",
                 "Amp's streaming input has no cancellation message",
@@ -285,6 +287,7 @@ impl Driver for Amp {
                 "Amp selects models through agent modes, not a model name".into(),
             ));
         }
+        crate::refuse_budget(&open, "Amp's CLI has no spending limit flag")?;
         let mut argv = self.command.clone();
         if let SessionMode::Resume(thread) = &open.mode {
             argv.extend(["threads".into(), "continue".into(), thread.to_string()]);

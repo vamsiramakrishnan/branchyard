@@ -693,6 +693,7 @@ impl Driver for ClaudeCode {
             usage: true,
             steer: true,
             model: true,
+            budget: true,
         }
     }
 
@@ -719,6 +720,18 @@ impl Driver for ClaudeCode {
         );
         if let Some(model) = &open.model {
             argv.extend(["--model".into(), model.clone()]);
+        }
+        // Claude Code stops the turn with `error_max_budget_usd` once the
+        // process's own spend reaches it; a resumed session's earlier cost
+        // does not count.
+        match open.max_budget_usd {
+            Some(usd) if !(usd.is_finite() && usd > 0.0) => {
+                return Err(Rejected::InvalidOpen(format!(
+                    "the spending limit must be a positive number of dollars, not {usd}"
+                )));
+            }
+            Some(usd) => argv.extend(["--max-budget-usd".into(), usd.to_string()]),
+            None => {}
         }
         crate::check_all_mcp_servers(&open)?;
         let secret_bearing = open.mcp_servers.iter().any(|s| !s.env.is_empty())

@@ -444,14 +444,18 @@ impl Driver for Pi {
             usage: true,
             steer: true,
             model: true,
+            budget: false,
         }
     }
 
     fn capability_reasons(&self) -> &'static [crate::CapabilityReason] {
-        &[(
-            "tool_approvals",
-            "Pi never asks for tool approval; its tools run with the process's own permissions, so restrict them with --tools/--no-tools and the sandbox instead",
-        )]
+        &[
+            (
+                "tool_approvals",
+                "Pi never asks for tool approval; its tools run with the process's own permissions, so restrict them with --tools/--no-tools and the sandbox instead",
+            ),
+            ("budget", "Pi's RPC mode has no spending limit"),
+        ]
     }
 
     fn open(&mut self, open: Open) -> Result<Opened, Rejected> {
@@ -462,6 +466,7 @@ impl Driver for Pi {
             return Err(Rejected::InvalidOpen("the session is already open".into()));
         }
         crate::refuse_projection(&open, "Pi")?;
+        crate::refuse_budget(&open, "Pi's RPC mode has no spending limit")?;
         let mut argv = self.command.clone();
         argv.extend(["--mode".into(), "rpc".into()]);
         if let Some(model) = &open.model {

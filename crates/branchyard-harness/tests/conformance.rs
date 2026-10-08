@@ -14,6 +14,7 @@ fn fresh() -> Open {
         mode: SessionMode::Fresh,
         cwd: "/workspace".into(),
         model: None,
+        max_budget_usd: None,
         mcp_servers: Vec::new(),
         instructions: None,
         mcp_config_file: None,
@@ -363,6 +364,53 @@ fn the_model_capability_matches_what_open_does_with_a_model() {
                         .iter()
                         .any(|(c, _)| *c == "model"),
                     "{} gives no reason it cannot choose a model",
+                    profile.id
+                );
+            }
+        }
+    }
+}
+
+/// A driver's `budget` capability says what its open does with a spending
+/// limit: it passes on one its harness enforces, and refuses one it
+/// cannot, giving the reason it records.
+#[test]
+fn the_budget_capability_matches_what_open_does_with_a_limit() {
+    for profile in PROFILES {
+        let driver = profile.driver();
+        let offered = driver.capabilities().budget;
+        let open = Open {
+            max_budget_usd: Some(0.25),
+            ..fresh()
+        };
+        let opened = profile.driver().open(open);
+        match offered {
+            true => {
+                let opened = opened.unwrap_or_else(|e| {
+                    panic!(
+                        "{} offers a spending limit but refused one: {e}",
+                        profile.id
+                    )
+                });
+                let unlimited = profile.driver().open(fresh()).unwrap();
+                assert_ne!(
+                    opened.launch, unlimited.launch,
+                    "{} offers a spending limit but does not pass it on",
+                    profile.id
+                );
+            }
+            false => {
+                assert!(
+                    matches!(opened, Err(branchyard_harness::Rejected::Unsupported(_))),
+                    "{} must refuse a spending limit it cannot enforce: {opened:?}",
+                    profile.id
+                );
+                assert!(
+                    driver
+                        .capability_reasons()
+                        .iter()
+                        .any(|(c, _)| *c == "budget"),
+                    "{} gives no reason it cannot enforce a spending limit",
                     profile.id
                 );
             }

@@ -96,9 +96,14 @@ pub(crate) enum End {
     Outcome {
         outcome: TurnOutcome,
     },
-    /// Stopped by the engine at this budget limit.
+    /// Stopped at this budget limit: by the engine, or by the harness
+    /// itself at the spending limit it was given.
     Budget {
         limit: String,
+        /// The spending limit the harness stopped itself at: what was left
+        /// of the branch's `max_usd` when the turn started.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        harness_usd: Option<f64>,
     },
     /// Stopped at the request of this ancestor.
     Cancelled {
@@ -716,7 +721,19 @@ fn run(
     // A per-turn MCP file lives until this function returns, after the
     // harness is gone.
     let _turn_file = provisioned.turn_file;
+    let driver = turn.profile.driver_with(turn.command.clone());
+    // A harness that can hold a spending limit itself is given what is
+    // left of the branch's, so it stops before it goes over rather than
+    // after it reports; the engine's own check below still holds.
+    let max_budget_usd = match (driver.capabilities().budget, bounds.budget.max_usd) {
+        (true, Some(max)) => {
+            Some(max - record.info.cost_usd.unwrap_or(0.0) - delegation::reserved(&store, record))
+                .filter(|left| *left > 0.0)
+        }
+        _ => None,
+    };
     let open = Open {
+        max_budget_usd,
         mcp_servers: provisioned.session.mcp_servers,
         instructions: provisioned.session.instructions,
         model: provisioned.session.model,
@@ -724,7 +741,6 @@ fn run(
         remote_mcp_servers: provisioned.session.remote_mcp_servers,
         ..Open::new(turn.mode.clone(), placement.cwd())
     };
-    let driver = turn.profile.driver_with(turn.command.clone());
     let mut steering = Steering::new(
         turn.profile.id,
         driver.capabilities().steer,
@@ -1162,7 +1178,20 @@ fn run(
                 }
             }
             Event::TurnEnded { turn: n, outcome } if phase_turn(&phase) == Some(n) => {
+                let stopped_itself = max_budget_usd.is_some()
+                    && matches!(&outcome, TurnOutcome::LimitReached { limit }
+                        if limit == branchyard_harness::BUDGET_LIMIT);
                 break match phase {
+                    // The harness stopped at the limit it was given, which
+                    // its last cost report may also have crossed.
+                    Phase::Running(_)
+                    | Phase::Stopping {
+                        why: Stop::Limit("max_usd"),
+                        ..
+                    } if stopped_itself => End::Budget {
+                        limit: "max_usd".into(),
+                        harness_usd: max_budget_usd,
+                    },
                     Phase::Stopping {
                         why: Stop::Limit(limit),
                         ..
@@ -1744,7 +1773,16 @@ pub(crate) fn conclude(
         } => BranchStatus::Failed {
             reason: "the model refused to continue".into(),
         },
-        End::Budget { limit } => BranchStatus::BudgetExceeded { limit },
+        End::Budget { limit, harness_usd } => {
+            if let Some(usd) = harness_usd {
+                recorder.record(Activity::Warning(format!(
+                    "the harness stopped itself at the ${usd:.4} spending limit it was given, \
+                     what was left of {} when the turn started",
+                    crate::operations::limit_text(&limit)
+                )))?;
+            }
+            BranchStatus::BudgetExceeded { limit }
+        }
         End::Cancelled { by } => {
             recorder.record(Activity::Warning(format!("cancelled by {by}")))?;
             BranchStatus::Interrupted
@@ -1798,6 +1836,7 @@ impl End {
     fn budget(limit: impl Into<String>) -> End {
         End::Budget {
             limit: limit.into(),
+            harness_usd: None,
         }
     }
 

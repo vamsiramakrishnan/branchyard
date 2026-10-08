@@ -227,12 +227,14 @@ impl Driver for Antigravity {
             usage: true,
             steer: false,
             model: true,
+            budget: false,
         }
     }
 
     fn capability_reasons(&self) -> &'static [crate::CapabilityReason] {
         &[
             ("fork", "the Antigravity CLI cannot fork a conversation"),
+            ("budget", "the Antigravity CLI has no spending limit flag"),
             (
                 "cancellation",
                 "the Antigravity stream has no cancellation message; a signal ends the whole process",
@@ -252,6 +254,7 @@ impl Driver for Antigravity {
             return Err(Rejected::InvalidOpen("the session is already open".into()));
         }
         crate::refuse_projection(&open, "the Antigravity CLI")?;
+        crate::refuse_budget(&open, "the Antigravity CLI has no spending limit flag")?;
         if let SessionMode::Fork(_) = open.mode {
             return Err(Rejected::Unsupported(
                 "the Antigravity CLI cannot fork a conversation".into(),
