@@ -214,7 +214,7 @@ parts = [
                      name="formatter", budget_usd=share),
 ]
 done = branchyard.wait_all(*(child.name for child in parts), timeout=1800)
-ready = [i.name for i in done.settled if i.status["state"] == "ready"]
+ready = [i.name for i in done.settled if i.status.state == "ready"]
 try:
     branchyard.integrate(*ready)        # together, checked once
 except branchyard.BranchyardError as error:

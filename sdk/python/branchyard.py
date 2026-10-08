@@ -14,7 +14,7 @@ as `by --json` reported it:
     child = branchyard.spawn("Make the parser test deterministic",
                              harness="codex", budget_usd=0.5)
     done = branchyard.wait(child.name)
-    if done.status["state"] == "ready":
+    if done.status.state == "ready":       # or done.status["state"]
         branchyard.integrate(child.name)
 
 A harness may also end its turn while its children run: Branchyard starts
@@ -39,6 +39,7 @@ __all__ = [
     "CheckFailedError",
     "NotFoundError",
     "StaleRevisionError",
+    "Status",
     "Spawned",
     "Inspection",
     "EventPage",
@@ -145,6 +146,39 @@ class StaleRevisionError(BranchyardError):
     """A graph proposal was made against a revision that moved on; read `graph()` again."""
 
 
+class Status(dict):
+    """A branch's status as `by --json` gives it, such as
+    {"state": "budget_exceeded", "limit": "max_usd"}: still a dict, so
+    `status["state"]` works, whose keys also read as attributes:
+    `status.state`, `status.reason`, `status.limit`, `status.target`,
+    `status.commit` (None when the state has no such field). It compares
+    equal to its state's name: `status == "ready"`.
+    """
+
+    _FIELDS = ("state", "reason", "limit", "target", "commit")
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError:
+            if name in Status._FIELDS:
+                return None
+            raise AttributeError(name) from None
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, str):
+            return self.get("state") == other
+        return dict.__eq__(self, other)
+
+    def __ne__(self, other: object) -> bool:
+        return not self.__eq__(other)
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __str__(self) -> str:
+        return str(self.get("state", ""))
+
+
 _KINDS = {
     "denied": DeniedError,
     "running": RunningError,
@@ -164,7 +198,7 @@ class Spawned:
     profile: str
     base: str
     depth: int
-    status: Dict[str, Any]
+    status: Status
     budget: Dict[str, Any]
     # The rig seat the child fills; None when it was spawned without one.
     seat: Optional[str] = None
@@ -180,7 +214,7 @@ class Spawned:
 @dataclasses.dataclass
 class Inspection:
     name: str
-    status: Dict[str, Any]
+    status: Status
     harness: str
     profile: str
     parent: Optional[str]
@@ -219,6 +253,11 @@ class Inspection:
     check_shared_with: Optional[List[str]] = None
 
     @property
+    def state(self) -> Optional[str]:
+        """The status's state, such as "ready": `status.state`."""
+        return self.status.get("state")
+
+    @property
     def running(self) -> bool:
         return self.status.get("state") == "running"
 
@@ -244,7 +283,7 @@ class EventPage:
 @dataclasses.dataclass
 class Sent:
     name: str
-    status: Dict[str, Any]
+    status: Status
 
 
 @dataclasses.dataclass
@@ -257,7 +296,7 @@ class Steer:
     # {"state": "pending" | "written" | "accepted"}; refusals raise.
     # "accepted": it joined the running turn, which delivers it at
     # `boundary`; "written": the harness has not confirmed it yet.
-    state: Dict[str, Any]
+    state: Status
     boundary: Optional[str] = None
 
 
@@ -432,7 +471,13 @@ def _run(args: List[str], result_on_failure: bool = False) -> Any:
 
 def _make(cls, value: Dict[str, Any]):
     names = {field.name for field in dataclasses.fields(cls)}
-    return cls(**{key: value.get(key) for key in names})
+    made = {key: value.get(key) for key in names}
+    # A status (and a steer's state) reads as attributes too.
+    for key in ("status", "state"):
+        found = made.get(key)
+        if isinstance(found, dict):
+            made[key] = Status(found)
+    return cls(**made)
 
 
 def spawn(

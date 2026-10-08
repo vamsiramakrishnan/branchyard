@@ -922,6 +922,8 @@ fn a_harness_delegates_with_the_python_module() {
     let script = "import branchyard as b; c = b.spawn('WRITE py.txt=p', name='py'); \
                   print('spawned', c.name, c.status['state']); d = b.wait(c.name, timeout=60, poll=0.05); \
                   print('finished', d.status['state'], d.candidate['files_changed']); \
+                  w = b.wait_all(c.name); s = w.settled[0]; \
+                  print('typed', s.status.state, s.state, s.status == 'ready', s.status.reason); \
                   print('merged into', b.integrate(c.name).target); \
                   print('children', [x['name'] for x in b.children().descendants]); \
                   exec('try:\\n b.inspect(\\'main\\')\\nexcept b.DeniedError as e:\\n print(\\'denied\\', e.kind)')";
@@ -933,6 +935,7 @@ fn a_harness_delegates_with_the_python_module() {
         "sh: 0",
         "spawned py running",
         "finished ready 1",
+        "typed ready ready True None",
         "merged into by/root",
         "children ['py']",
         "denied denied",

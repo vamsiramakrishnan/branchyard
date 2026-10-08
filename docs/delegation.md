@@ -128,7 +128,7 @@ These are the Rust types' serde forms, identical across `by --json`, the Python 
 
 ## Python
 
-The module is standard library only. It finds `by` from `BRANCHYARD_BY`, else on `PATH`, and raises `DeniedError`, `RunningError`, `NotRunningError`, `SteerRefusedError`, `NotFoundError`, `StaleRevisionError`, `CheckFailedError` or `BranchyardError`, each with the `kind` and the error's `detail`. `branchyard.steer(branch, text)` adds to a running child's turn; `branchyard.discard(branch, reason=None)` sets a settled one aside; `branchyard.graph()` and `branchyard.apply_graph(edits, expected_revision)` reach [task graphs](graph.md), and `spawn` takes `depends_on`, `after`, `bindings`, `max_children`, `harnesses` and `plan`. `branchyard.wait_all(*branches, timeout=None)` and `wait_any(...)` run `by wait` and return a `Waited`, raising `RunningError` when the timeout passes; `wait(branch)` is the same for one branch. `branchyard.integrate(a, b, ...)` integrates several together and returns a `MergedAll`; one branch returns a `Merged`. `branchyard.publish(path, name=, labels=, media_type=)` records the artifact's media type.
+The module is standard library only. It finds `by` from `BRANCHYARD_BY`, else on `PATH`, and raises `DeniedError`, `RunningError`, `NotRunningError`, `SteerRefusedError`, `NotFoundError`, `StaleRevisionError`, `CheckFailedError` or `BranchyardError`, each with the `kind` and the error's `detail`. `branchyard.steer(branch, text)` adds to a running child's turn; `branchyard.discard(branch, reason=None)` sets a settled one aside; `branchyard.graph()` and `branchyard.apply_graph(edits, expected_revision)` reach [task graphs](graph.md), and `spawn` takes `depends_on`, `after`, `bindings`, `max_children`, `harnesses` and `plan`. `branchyard.wait_all(*branches, timeout=None)` and `wait_any(...)` run `by wait` and return a `Waited`, raising `RunningError` when the timeout passes; `wait(branch)` is the same for one branch. `branchyard.integrate(a, b, ...)` integrates several together and returns a `MergedAll`; one branch returns a `Merged`. A `status` (and a `Steer`'s `state`) is a `Status`: still the dict `by --json` gives, so `status["state"]` works, whose keys also read as attributes (`status.state`, `status.reason`, `status.limit`) and which compares equal to its state's name (`status == "ready"`); `Inspection.state` is the same. `branchyard.publish(path, name=, labels=, media_type=)` records the artifact's media type.
 
 ```python
 import branchyard
@@ -138,7 +138,7 @@ child = branchyard.spawn("Port the tokenizer to the new API; run its tests",
                          harness="codex", name="tokenizer",
                          budget_usd=(me.remaining_usd or 0) / 2)
 done = branchyard.wait(child.name, timeout=1800)
-if done.status["state"] == "ready":
+if done.status.state == "ready":
     branchyard.integrate(child.name)
 ```
 
