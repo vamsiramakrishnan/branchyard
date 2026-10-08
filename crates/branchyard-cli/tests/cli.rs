@@ -1872,20 +1872,36 @@ fn every_harness_gets_by_on_its_path() {
 }
 
 /// `by discard` sets a settled child aside, inside a harness and out:
-/// discarded with the reason, its record kept, its slot free. `by cancel`
-/// on a settled child says to use it, and `by rm` releases the lease it
-/// deletes without a warning.
+/// discarded with the reason, its record kept, never run again. Like any
+/// settled child it holds no slot in `max_children`, which counts the live
+/// ones and points to `by discard`. `by cancel` on a settled child says to
+/// use it, and `by rm` releases the lease it deletes without a warning.
 #[test]
 fn discard_sets_a_settled_child_aside_and_frees_its_slot() {
     let repo = Repo::new();
-    let prompt = [
-        "SH by spawn 'say hi' --name k --wait --json",
-        "SH by cancel k --json",
-        "SH by discard k --reason 'not needed' --json",
-        "SH python3 -c \"import branchyard as b; print('py', b.discard('k').status['state'])\"",
-    ]
-    .join("\n");
-    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    let mut prompt = vec![
+        "SH by spawn 'say hi' --name k --wait --json".to_owned(),
+        "SH by cancel k --json".to_owned(),
+        "SH by discard k --reason 'not needed' --json".to_owned(),
+        "SH python3 -c \"import branchyard as b; print('py', b.discard('k').status['state'])\""
+            .to_owned(),
+    ];
+    // k holds no slot: four live children fill the envelope beside it.
+    for name in ["a", "b", "c", "d"] {
+        prompt.push(format!("SH by spawn AWAIT_STEER --name {name} --json"));
+    }
+    prompt.push("SH by spawn 'say hi' --name e --json".to_owned());
+    for name in ["a", "b", "c", "d"] {
+        prompt.push(format!("SH by send {name} --steer 'that is all' --json"));
+    }
+    let out = repo.by_agent(&[
+        "run",
+        &prompt.join("\n"),
+        "--name",
+        "root",
+        "--delegate",
+        "--yes",
+    ]);
     assert!(out.status.success(), "{}", stderr(&out));
     let said = reply(&repo, "root");
     let (code, cancelled) = sh_json(&said, 1);
@@ -1902,24 +1918,19 @@ fn discard_sets_a_settled_child_aside_and_frees_its_slot() {
         serde_json::json!({"state": "discarded", "reason": "not needed"})
     );
     assert!(said.contains("py discarded"), "{said}");
-    // k holds no slot: three more children and one more after a discard.
-    for name in ["a", "b", "c", "d"] {
-        repo.json(&[
-            "spawn", "say hi", "--parent", "root", "--name", name, "--wait", "--yes", "--json",
-        ]);
+    for n in 4..8 {
+        assert_eq!(sh_json(&said, n).0, 0, "{said}");
     }
-    let full = repo.by(&[
-        "spawn", "say hi", "--parent", "root", "--name", "e", "--wait", "--yes", "--json",
-    ]);
-    assert_eq!(full.status.code(), Some(1));
-    let full: Value = serde_json::from_slice(&full.stdout).unwrap();
+    let (code, full) = sh_json(&said, 8);
+    assert_eq!(code, 1, "{said}");
+    let message = full["error"]["message"].as_str().unwrap();
     assert!(
-        full["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("by discard"),
+        message.contains("4 live children") && message.contains("by discard"),
         "{full}"
     );
+    for n in 9..13 {
+        assert_eq!(sh_json(&said, n).0, 0, "{said}");
+    }
     let cancel = repo.by(&["cancel", "a"]);
     assert!(cancel.status.success(), "{}", stderr(&cancel));
     assert!(
@@ -1936,6 +1947,21 @@ fn discard_sets_a_settled_child_aside_and_frees_its_slot() {
     );
     let shown = repo.json(&["show", "a", "--json"]);
     assert_eq!(shown["status"]["state"], "discarded");
+    // A discarded child runs no more turns.
+    let again = repo.by(&["send", "a", "say more", "--yes", "--json"]);
+    assert_eq!(again.status.code(), Some(1));
+    let again: Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert!(
+        again["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("runs no more turns"),
+        "{again}"
+    );
+    assert_eq!(
+        repo.json(&["show", "a", "--json"])["status"]["state"],
+        "discarded"
+    );
     repo.json(&[
         "spawn", "say hi", "--parent", "root", "--name", "e", "--wait", "--yes", "--json",
     ]);

@@ -1017,6 +1017,14 @@ pub(crate) fn prepare_send_with(
                  dependency with a graph proposal to start it"
             )))
         }
+        // Settled for good: it holds no slot and only what it spent of its
+        // parent's budget because it never runs again.
+        BranchStatus::Discarded { reason } => {
+            return Err(Error::Denied(format!(
+                "{name} was discarded ({reason}) and runs no more turns; `by rm {name}` \
+                 removes it"
+            )))
+        }
         BranchStatus::AwaitingPlanApproval if !plan => {
             return Err(Error::Denied(format!(
                 "{name}'s plan awaits approval; approve it (by plan approve {name}) or reject \
