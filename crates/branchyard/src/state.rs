@@ -66,6 +66,10 @@ pub(crate) struct Record {
     /// Milliseconds since the Unix epoch, for ordering.
     pub created_ms: u64,
     pub check: Option<Vec<String>>,
+    /// `check` is its parent's, inherited because its spawn gave none.
+    /// Siblings that inherited one whole-suite check pass it only together.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub check_inherited: bool,
     /// Command override, reused by sends and forks.
     pub command: Option<Vec<String>>,
     /// Private `HOME` when the branch runs isolated.

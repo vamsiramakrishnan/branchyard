@@ -56,7 +56,7 @@ use crate::state::{Record, Store};
 use crate::{
     git, harness, inbox, integrate, names, Activity, BranchInfo, BranchStatus, Budget,
     CandidateInfo, Error, Event, Merged, MergedAll, Message, MessageKind, Policy, RecordedEvent,
-    Rule, Steer, SteerState, TaskOptions, Yard,
+    Rule, SharedCheck, Steer, SteerState, TaskOptions, Yard,
 };
 
 /// How long `steer` waits for the input to be delivered.
@@ -513,6 +513,19 @@ pub struct Inspection {
     #[serde(default)]
     pub settled_children_usd: f64,
     pub envelope: Option<Envelope>,
+    /// The check its merge must pass when it is integrated. Omitted when
+    /// it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<Vec<String>>,
+    /// `check` is its parent's, inherited because its spawn gave none.
+    /// Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub check_inherited: bool,
+    /// Its siblings that share `check` and may still be integrated (ready,
+    /// or not settled yet): a whole-suite check passes only with all of
+    /// them, so they are integrated together. Omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_shared_with: Vec<String>,
     /// What its children may run, as `--harness` names it: the envelope's
     /// `harnesses`, or its own profile when that list is empty (which
     /// means "its own only", not "none"). Empty without an envelope.
@@ -1717,6 +1730,77 @@ struct Planned {
     after: After,
 }
 
+/// `record`'s siblings that share its check and may still be integrated:
+/// ready, not settled yet, or stopped with a candidate. Oldest first.
+fn sharing_check(store: &Store, record: &Record) -> Vec<Record> {
+    let (Some(check), Some(parent)) = (&record.check, &record.info.parent) else {
+        return Vec::new();
+    };
+    let Ok(parent) = store.read(parent) else {
+        return Vec::new();
+    };
+    parent
+        .info
+        .children
+        .iter()
+        .filter(|child| **child != record.info.name)
+        .filter_map(|child| store.read(child).ok())
+        .filter(|sibling| sibling.check.as_ref() == Some(check))
+        .filter(|sibling| match &sibling.info.status {
+            BranchStatus::Ready => true,
+            BranchStatus::Interrupted | BranchStatus::BudgetExceeded { .. } => {
+                sibling.info.candidate.is_some()
+            }
+            status => is_live(status),
+        })
+        .collect()
+}
+
+/// A failed check of an integration of `branches` that left out siblings
+/// sharing it: say who they are and the integration that runs it on all
+/// of them. Any other error is returned as it is.
+fn with_shared_check(store: &Store, error: Error, branches: &[String]) -> Error {
+    let Error::CheckFailed {
+        output_tail,
+        shared: None,
+    } = error
+    else {
+        return error;
+    };
+    let mut shared: Option<SharedCheck> = None;
+    for record in branches.iter().filter_map(|b| store.read(b).ok()) {
+        let (Some(check), siblings) = (record.check.clone(), sharing_check(store, &record)) else {
+            continue;
+        };
+        let into = shared.get_or_insert_with(|| SharedCheck {
+            check,
+            inherited_from: record
+                .info
+                .parent
+                .clone()
+                .filter(|_| record.check_inherited),
+            siblings: Vec::new(),
+            unsettled: Vec::new(),
+            integrate_together: branches.to_vec(),
+        });
+        for sibling in siblings {
+            let name = sibling.info.name;
+            if branches.contains(&name) || into.siblings.contains(&name) {
+                continue;
+            }
+            if is_live(&sibling.info.status) {
+                into.unsettled.push(name.clone());
+            }
+            into.integrate_together.push(name.clone());
+            into.siblings.push(name);
+        }
+    }
+    Error::CheckFailed {
+        output_tail,
+        shared: shared.filter(|s| !s.siblings.is_empty()).map(Box::new),
+    }
+}
+
 /// What became of an integrated branch, for its parent's event log.
 fn merged_outcome(merged: &Merged) -> String {
     match (&merged.via, merged.already) {
@@ -2369,6 +2453,7 @@ impl Local {
             },
         )?;
         record.info.status = BranchStatus::Waiting;
+        record.check_inherited = request.check.is_none() && record.check.is_some();
         record.bindings = request.bindings.clone();
         record.start_base = base;
         if request.plan {
@@ -2386,7 +2471,7 @@ impl Local {
             }
         }
         Ok(Planned {
-            check_inherited: request.check.is_none() && record.check.is_some(),
+            check_inherited: record.check_inherited,
             record,
             limits,
             seat: seated.map(|(name, _, _)| name),
@@ -2608,6 +2693,10 @@ impl Local {
             Some(seats) => (Some(seats.seat.clone()), seats.delegates_to.clone()),
             None => (None, Vec::new()),
         };
+        let check_shared_with = sharing_check(&store, &record)
+            .into_iter()
+            .map(|r| r.info.name)
+            .collect();
         let allowed_harnesses = record
             .grant
             .as_ref()
@@ -2635,6 +2724,9 @@ impl Local {
             reserving_children: held.live,
             settled_children_usd: held.settled_usd,
             allowed_harnesses,
+            check: record.check.clone(),
+            check_inherited: record.check_inherited,
+            check_shared_with,
             envelope: record.grant.map(|g| g.envelope),
             last_message: last_message(&events),
             seat,
@@ -2837,7 +2929,8 @@ impl Local {
             &caller,
             &format!("snapshot before integrating {}", branches.join(", ")),
         )?;
-        let merged = integrate::merge_many(&self.yard, branches, &caller.info.git_branch)?;
+        let merged = integrate::merge_many(&self.yard, branches, &caller.info.git_branch)
+            .map_err(|error| with_shared_check(&store, error, branches))?;
         // A sibling waiting for these to be integrated may start now, and
         // any other child this branch now contains is merged too.
         for branch in branches {
@@ -3615,6 +3708,42 @@ mod tests {
         assert!(!is_live(&BranchStatus::Discarded { reason: "x".into() }));
         assert!(!is_live(&BranchStatus::Ready));
     }
+
+    /// A failed shared check says what to wait for, and that its own check
+    /// lets a child land alone; the detail carries the same.
+    #[test]
+    fn a_shared_check_names_the_siblings_still_running() {
+        let error = Error::CheckFailed {
+            output_tail: "2 failed".into(),
+            shared: Some(Box::new(SharedCheck {
+                check: vec!["make".into(), "test".into()],
+                inherited_from: None,
+                siblings: vec!["b".into(), "c".into()],
+                unsettled: vec!["c".into()],
+                integrate_together: vec!["a".into(), "b".into(), "c".into()],
+            })),
+        };
+        let text = error.to_string();
+        for needed in [
+            "check failed:\n2 failed\n",
+            "Siblings b, c share the same check",
+            "`by integrate a b c`, once c settles (`by wait c`)",
+            "needs a check of its own (`by spawn --check`)",
+        ] {
+            assert!(text.contains(needed), "{needed:?} missing from {text}");
+        }
+        let detail = error.detail().unwrap();
+        assert_eq!(detail["unsettled"], json!(["c"]));
+        assert!(detail.get("inherited_from").is_none());
+        let plain = Error::CheckFailed {
+            output_tail: "x".into(),
+            shared: None,
+        };
+        assert_eq!(
+            (plain.to_string(), plain.detail()),
+            ("check failed:\nx".into(), None)
+        );
+    }
     use crate::{PermissionDecision, PermissionKey, PermissionRequest};
     use std::fs;
     use std::path::PathBuf;
@@ -3662,6 +3791,7 @@ mod tests {
             },
             created_ms: 0,
             check: None,
+            check_inherited: false,
             command: None,
             home: None,
             cost_baseline: None,

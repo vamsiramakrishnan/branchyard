@@ -1275,6 +1275,7 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
             ),
         ));
     }
+    pairs.push(("check", check_text(i)));
     if let Some(envelope) = &i.envelope {
         // Empty means the branch's own profile only: name it.
         let harnesses = match envelope.harnesses.is_empty() {
@@ -1309,6 +1310,29 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
         pairs.push(("last message", i.last_message.trim_end().to_owned()));
     }
     key_values(&pairs, style)
+}
+
+/// The check a branch's merge must pass, where it came from, and the
+/// siblings that share it, which are integrated together.
+fn check_text(i: &branchyard::Inspection) -> String {
+    let Some(check) = &i.check else {
+        return "none".into();
+    };
+    let command = check.join(" ");
+    let source = match (i.check_inherited, &i.parent) {
+        (true, Some(parent)) => format!("inherited from {parent}"),
+        _ => "its own".into(),
+    };
+    match i.check_shared_with.is_empty() {
+        true => format!("{command} ({source})"),
+        false => format!(
+            "{command} ({source}); shared with {}, so they are integrated together: by \
+             integrate {} {}",
+            i.check_shared_with.join(", "),
+            i.name,
+            i.check_shared_with.join(" ")
+        ),
+    }
 }
 
 fn dependencies_text(dependencies: &[branchyard::Dependency]) -> String {

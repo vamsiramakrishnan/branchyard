@@ -51,10 +51,14 @@ session, and merging overlapping edits produces conflicts.
 4. Integrate. When children are `ready`, `by integrate <child>` merges one
    into your branch after its check passes; `by integrate a b c` merges
    several together, in order, runs the check once on the result and moves
-   your branch once, all or none. Use it when children share a test suite
-   that none passes alone: a child inherits your check (the spawn says
-   which), so with a whole-suite check integrate them together rather than
-   merging them into each other. Never `git merge` children yourself: that
+   your branch once, all or none. Children that share your check integrate
+   together: a child inherits your check unless you give it one (the spawn
+   and `by inspect <child>` say which, and which siblings share it), and a
+   whole-suite check passes only with all of them, so integrate them
+   together rather than merging them into each other. Give a child its own
+   check with `by spawn --check` when it should land alone. If you integrate one that shares
+   its check and the check fails, the error names the siblings and the
+   command (`by integrate a b c`). Never `git merge` children yourself: that
    bypasses the check, and Branchyard records them as merged only after the
    fact. A child your branch already contains is recorded as merged, not
    refused. A conflict names the child and the files, and a failed check

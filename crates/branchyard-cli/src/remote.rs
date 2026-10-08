@@ -238,14 +238,23 @@ pub fn sdk_error(error: branchyard_client::Error) -> branchyard::Error {
                     .to_owned(),
                 code => code.to_owned(),
             };
+            // A failed check's siblings, as a local `by` reports them.
+            let detail = error
+                .detail
+                .as_ref()
+                .and_then(|d| d.get("shared"))
+                .cloned()
+                .map(Box::new);
             branchyard::Error::Remote {
                 kind,
                 message: error.message,
+                detail,
             }
         }
         other => branchyard::Error::Remote {
             kind: "unavailable".into(),
             message: other.to_string(),
+            detail: None,
         },
     }
 }
@@ -258,6 +267,7 @@ impl From<Failure> for branchyard::Error {
             other => branchyard::Error::Remote {
                 kind: "unavailable".into(),
                 message: other.to_string(),
+                detail: None,
             },
         }
     }

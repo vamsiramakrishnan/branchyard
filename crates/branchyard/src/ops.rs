@@ -313,7 +313,10 @@ pub(crate) fn integration_error(error: IntegrationError, target: &str) -> Error 
             actual: actual.map(|c| c.0),
         },
         IntegrationError::Conflict { files } => Error::Conflict { files },
-        IntegrationError::CheckFailed { output_tail, .. } => Error::CheckFailed { output_tail },
+        IntegrationError::CheckFailed { output_tail, .. } => Error::CheckFailed {
+            output_tail,
+            shared: None,
+        },
         IntegrationError::CheckTimedOut {
             timeout,
             output_tail,

@@ -677,6 +677,68 @@ fn a_harness_is_named_by_the_id_typed_and_its_profile_everywhere() {
     );
 }
 
+/// The battery's inherited whole-suite check: each child inherits its
+/// parent's, which passes only once every sibling is in, and integrating
+/// one alone failed with nothing but the check's output. `by inspect`
+/// shows the check and who shares it, and the failure names the siblings
+/// and the command, in text, JSON and Python.
+#[test]
+fn a_failed_shared_check_names_the_siblings_to_integrate_together() {
+    let repo = Repo::new();
+    let script = "import branchyard as b\n\
+                  try:\n    b.integrate('a')\n\
+                  except b.CheckFailedError as e:\n    print('python', e.kind, e.integrate_together)\n";
+    let file = repo.dir.join("shared-check.py");
+    fs::write(&file, script).unwrap();
+    let prompt = [
+        "SH by spawn 'WRITE a.txt=a' --name a --wait --json".to_owned(),
+        "SH by spawn 'WRITE b.txt=b' --name b --wait --json".to_owned(),
+        "SH by inspect a".to_owned(),
+        "SH by integrate a".to_owned(),
+        "SH by integrate a --json".to_owned(),
+        format!("SH python3 {}", file.display()),
+        "SH by inspect a --json".to_owned(),
+        "SH by integrate a b".to_owned(),
+    ]
+    .join("\n");
+    let out = repo.by_agent(&[
+        "run",
+        &prompt,
+        "--name",
+        "root",
+        "--delegate",
+        "--yes",
+        "--check",
+        "test -f a.txt -a -f b.txt",
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    for expected in [
+        "test -f a.txt -a -f b.txt (inherited from root); shared with b, so they are \
+         integrated together: by integrate a b",
+        "Siblings b share root's check, which they inherited, which may pass only with all \
+         of them: integrate them together, `by integrate a b`",
+        "python check_failed ['a', 'b']",
+        "merged a into by/root",
+    ] {
+        assert!(said.contains(expected), "{expected:?} missing from\n{said}");
+    }
+    let (code, failed) = sh_json(&said, 4);
+    assert_eq!(code, 1, "{said}");
+    assert_eq!(failed["error"]["kind"], "check_failed");
+    let detail = &failed["error"]["detail"];
+    assert_eq!(detail["integrate_together"], serde_json::json!(["a", "b"]));
+    assert_eq!(detail["siblings"], serde_json::json!(["b"]));
+    assert_eq!(detail["inherited_from"], "root");
+    let (_, a) = sh_json(&said, 6);
+    assert_eq!(
+        a["check"],
+        serde_json::json!(["test", "-f", "a.txt", "-a", "-f", "b.txt"])
+    );
+    assert_eq!(a["check_inherited"], true);
+    assert_eq!(a["check_shared_with"], serde_json::json!(["b"]));
+}
+
 #[test]
 fn a_harness_steers_its_running_children_with_by_and_python() {
     let repo = Repo::new();

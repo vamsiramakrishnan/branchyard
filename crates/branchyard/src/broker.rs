@@ -141,7 +141,11 @@ fn serve(yard: &Yard, stream: UnixStream) {
 }
 
 fn describe(error: &Error) -> Value {
-    json!({"kind": error.kind(), "message": error.to_string()})
+    let mut described = json!({"kind": error.kind(), "message": error.to_string()});
+    if let Some(detail) = error.detail() {
+        described["detail"] = detail;
+    }
+    described
 }
 
 fn handle(yard: &Yard, line: &str) -> Result<Value, Error> {
@@ -249,6 +253,7 @@ impl Remote {
             (_, Some(error)) => Err(Error::Remote {
                 kind: error["kind"].as_str().unwrap_or("error").to_owned(),
                 message: error["message"].as_str().unwrap_or("error").to_owned(),
+                detail: error.get("detail").cloned().map(Box::new),
             }),
             (Some(ok), None) => Ok(ok.clone()),
             (None, None) => Err(Error::State("the engine's answer has no result".into())),

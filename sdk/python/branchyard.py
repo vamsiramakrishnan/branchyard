@@ -36,6 +36,7 @@ __all__ = [
     "RunningError",
     "NotRunningError",
     "SteerRefusedError",
+    "CheckFailedError",
     "NotFoundError",
     "StaleRevisionError",
     "Spawned",
@@ -90,12 +91,15 @@ __all__ = [
 
 
 class BranchyardError(Exception):
-    """`by` failed. `kind` is the stable error kind, such as "denied"."""
+    """`by` failed. `kind` is the stable error kind, such as "denied", and
+    `detail` what the error carries beyond its message (None when nothing),
+    as `by --json` reported them."""
 
-    def __init__(self, kind: str, message: str):
+    def __init__(self, kind: str, message: str, detail: Optional[Dict[str, Any]] = None):
         super().__init__(message)
         self.kind = kind
         self.message = message
+        self.detail = detail
 
 
 class DeniedError(BranchyardError):
@@ -114,6 +118,25 @@ class SteerRefusedError(BranchyardError):
     """The running turn did not take steered input; the message says why."""
 
 
+class CheckFailedError(BranchyardError):
+    """A branch's check failed on its merge; nothing was integrated.
+
+    When siblings left out of the integration share the check (a parent's
+    whole-suite check passes only with all of them), `integrate_together`
+    names the branches to integrate at once, `integrate(*e.integrate_together)`,
+    and `unsettled` those of them still to wait for. Both are empty
+    otherwise: the check failed on its own.
+    """
+
+    @property
+    def integrate_together(self) -> List[str]:
+        return list((self.detail or {}).get("integrate_together", []))
+
+    @property
+    def unsettled(self) -> List[str]:
+        return list((self.detail or {}).get("unsettled", []))
+
+
 class NotFoundError(BranchyardError):
     """No such branch."""
 
@@ -128,6 +151,7 @@ _KINDS = {
     "not_running": NotRunningError,
     "steer_refused": SteerRefusedError,
     "unknown_branch": NotFoundError,
+    "check_failed": CheckFailedError,
     "stale_revision": StaleRevisionError,
 }
 
@@ -188,6 +212,11 @@ class Inspection:
     # What its children may run, as harness= names it: the envelope's list,
     # or its own profile when that list is empty ("its own only").
     allowed_harnesses: Optional[List[str]] = None
+    # The check its merge must pass, whether it is its parent's, and the
+    # siblings sharing it, which are integrated together with it.
+    check: Optional[List[str]] = None
+    check_inherited: Optional[bool] = None
+    check_shared_with: Optional[List[str]] = None
 
     @property
     def running(self) -> bool:
@@ -382,7 +411,10 @@ def _run(args: List[str], result_on_failure: bool = False) -> Any:
         error = value.get("error") if isinstance(value, dict) else None
         if isinstance(error, dict):
             kind = str(error.get("kind", "error"))
-            raise _KINDS.get(kind, BranchyardError)(kind, str(error.get("message", "")))
+            detail = error.get("detail")
+            raise _KINDS.get(kind, BranchyardError)(
+                kind, str(error.get("message", "")), detail if isinstance(detail, dict) else None
+            )
         detail = done.stderr.strip() or f"exit status {done.returncode}"
         raise BranchyardError("error", f"by {args[0]}: {detail}")
     return value

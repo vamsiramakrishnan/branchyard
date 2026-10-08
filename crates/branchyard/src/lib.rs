@@ -2875,6 +2875,11 @@ pub enum Error {
     },
     CheckFailed {
         output_tail: String,
+        /// When the branches integrated left out siblings that share their
+        /// check: who they are, and the integration that runs it on all of
+        /// them. A child under its parent's whole-suite check passes it
+        /// only together with its siblings.
+        shared: Option<Box<SharedCheck>>,
     },
     CheckTimedOut {
         timeout: Duration,
@@ -2908,10 +2913,11 @@ pub enum Error {
         actual: u64,
     },
     /// An error the engine running a delegating turn returned through its
-    /// broker, with the [`Error::kind`] it had there.
+    /// broker, with the [`Error::kind`] and [`Error::detail`] it had there.
     Remote {
         kind: String,
         message: String,
+        detail: Option<Box<serde_json::Value>>,
     },
     Git(String),
     Harness(String),
@@ -2969,7 +2975,14 @@ impl fmt::Display for Error {
                     files.join(", ")
                 ),
             },
-            Error::CheckFailed { output_tail } => write!(f, "check failed:\n{output_tail}"),
+            Error::CheckFailed {
+                output_tail,
+                shared: None,
+            } => write!(f, "check failed:\n{output_tail}"),
+            Error::CheckFailed {
+                output_tail,
+                shared: Some(shared),
+            } => write!(f, "check failed:\n{output_tail}\n{shared}"),
             Error::CheckTimedOut {
                 timeout,
                 output_tail,
@@ -3042,6 +3055,72 @@ impl Error {
             Error::Io(_) => "io",
             Error::State(_) => "state",
         }
+    }
+}
+
+impl Error {
+    /// What the error carries beyond its message, as JSON: `by --json`
+    /// prints it as the error's `detail`, the broker passes it on, and the
+    /// Python module raises it as `BranchyardError.detail`. `None` for an
+    /// error with nothing more to say.
+    pub fn detail(&self) -> Option<serde_json::Value> {
+        match self {
+            Error::CheckFailed {
+                shared: Some(shared),
+                ..
+            } => serde_json::to_value(shared).ok(),
+            Error::Remote { detail, .. } => detail.as_deref().cloned(),
+            _ => None,
+        }
+    }
+}
+
+/// Siblings that share a check an integration failed, and the integration
+/// that runs it on all of them ([`Error::CheckFailed`]).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SharedCheck {
+    /// The check, as its argv.
+    pub check: Vec<String>,
+    /// The parent whose check it is, when the branches inherited it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_from: Option<String>,
+    /// Siblings left out of the integration that share it and may still
+    /// be integrated (ready, or not settled yet), oldest first.
+    pub siblings: Vec<String>,
+    /// Those of `siblings` that have not settled yet: wait for them first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsettled: Vec<String>,
+    /// The branches to integrate together: those named, then `siblings`.
+    pub integrate_together: Vec<String>,
+}
+
+impl fmt::Display for SharedCheck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let whose = match &self.inherited_from {
+            Some(parent) => format!("{parent}'s check, which they inherited"),
+            None => "the same check".to_owned(),
+        };
+        write!(
+            f,
+            "Nothing was integrated. Siblings {} share {whose}, which may pass only with all \
+             of them: integrate them together, `by integrate {}`",
+            self.siblings.join(", "),
+            self.integrate_together.join(" ")
+        )?;
+        if !self.unsettled.is_empty() {
+            write!(
+                f,
+                ", once {} settle{} (`by wait {}`)",
+                self.unsettled.join(", "),
+                if self.unsettled.len() == 1 { "s" } else { "" },
+                self.unsettled.join(" ")
+            )?;
+        }
+        write!(
+            f,
+            ". A child that should land alone needs a check of its own (`by spawn --check`)"
+        )
     }
 }
 

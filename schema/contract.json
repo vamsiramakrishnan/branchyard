@@ -16363,6 +16363,27 @@
                 }
               ]
             },
+            "check": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "The check its merge must pass when it is integrated. Omitted when\nit has none."
+            },
+            "check_inherited": {
+              "type": "boolean",
+              "description": "`check` is its parent's, inherited because its spawn gave none.\nOmitted when false."
+            },
+            "check_shared_with": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Its siblings that share `check` and may still be integrated (ready,\nor not settled yet): a whole-suite check passes only with all of\nthem, so they are integrated together. Omitted when none."
+            },
             "allowed_harnesses": {
               "type": "array",
               "items": {
@@ -17468,6 +17489,27 @@
                   "type": "null"
                 }
               ]
+            },
+            "check": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "The check its merge must pass when it is integrated. Omitted when\nit has none."
+            },
+            "check_inherited": {
+              "type": "boolean",
+              "description": "`check` is its parent's, inherited because its spawn gave none.\nOmitted when false."
+            },
+            "check_shared_with": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Its siblings that share `check` and may still be integrated (ready,\nor not settled yet): a whole-suite check passes only with all of\nthem, so they are integrated together. Omitted when none."
             },
             "allowed_harnesses": {
               "type": "array",
@@ -28363,6 +28405,27 @@
                 }
               ]
             },
+            "check": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "The check its merge must pass when it is integrated. Omitted when\nit has none."
+            },
+            "check_inherited": {
+              "type": "boolean",
+              "description": "`check` is its parent's, inherited because its spawn gave none.\nOmitted when false."
+            },
+            "check_shared_with": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Its siblings that share `check` and may still be integrated (ready,\nor not settled yet): a whole-suite check passes only with all of\nthem, so they are integrated together. Omitted when none."
+            },
             "allowed_harnesses": {
               "type": "array",
               "items": {
@@ -29896,6 +29959,27 @@
               "type": "null"
             }
           ]
+        },
+        "check": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "The check its merge must pass when it is integrated. Omitted when\nit has none."
+        },
+        "check_inherited": {
+          "type": "boolean",
+          "description": "`check` is its parent's, inherited because its spawn gave none.\nOmitted when false."
+        },
+        "check_shared_with": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Its siblings that share `check` and may still be integrated (ready,\nor not settled yet): a whole-suite check passes only with all of\nthem, so they are integrated together. Omitted when none."
         },
         "allowed_harnesses": {
           "type": "array",

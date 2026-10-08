@@ -159,6 +159,7 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
         },
         created_ms,
         check: new.check,
+        check_inherited: false,
         command: new.command,
         home: new
             .home
@@ -1141,6 +1142,7 @@ fn prepare(
     }
     if options.check.is_some() {
         record.check = options.check.clone();
+        record.check_inherited = false;
     }
     if let Some(asked) = &options.provision {
         let mut spec = same_model(name, &record, asked.clone())?;

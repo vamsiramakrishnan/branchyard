@@ -124,7 +124,16 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
             expected, actual, ..
         } => error_out.detail(json!({ "expected": expected, "actual": actual })),
         E::Remote { kind, .. } => error_out.detail(json!({ "kind": kind })),
-        E::CheckFailed { output_tail } => error_out.detail(json!({ "output_tail": output_tail })),
+        E::CheckFailed {
+            output_tail,
+            shared,
+        } => {
+            let mut detail = json!({ "output_tail": output_tail });
+            if let Some(shared) = shared.as_ref().and_then(|s| serde_json::to_value(s).ok()) {
+                detail["shared"] = shared;
+            }
+            error_out.detail(detail)
+        }
         E::CheckTimedOut {
             timeout,
             output_tail,

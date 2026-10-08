@@ -681,6 +681,7 @@ pub fn steer(target: &Target, branch: &str, prompt: &str, task: &TaskArgs, json:
                 .map_err(|e| branchyard::Error::Remote {
                     kind: e.code().unwrap_or("remote").to_owned(),
                     message: e.to_string(),
+                    detail: None,
                 })
         }
         (None, Target::Local) => open_yard().and_then(|yard| {
@@ -1305,8 +1306,11 @@ pub(crate) fn to_json<T: Serialize>(value: &T) -> String {
 /// `--json`, else on stderr; exit 1 either way.
 pub(crate) fn fail(json: bool, error: &branchyard::Error) -> Outcome {
     if json {
-        let value =
+        let mut value =
             serde_json::json!({"error": {"kind": error.kind(), "message": error.to_string()}});
+        if let Some(detail) = error.detail() {
+            value["error"]["detail"] = detail;
+        }
         print(&format!("{}\n", to_json(&value)))?;
         return Err(Failure::Reported);
     }
@@ -1484,7 +1488,8 @@ fn check_note(spawned: &branchyard::Spawned) -> String {
     match (&spawned.check, spawned.check_inherited) {
         (Some(check), true) => format!(
             "its check, inherited from its parent: {}; siblings that share it are integrated \
-             together (by integrate a b)\n",
+             together (by integrate a b), and a child that should land alone needs its own \
+             (--check)\n",
             check.join(" ")
         ),
         (Some(check), false) => format!("its check: {}\n", check.join(" ")),

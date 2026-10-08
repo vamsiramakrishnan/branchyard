@@ -441,7 +441,7 @@ fn a_failing_check_blocks_the_merge() {
         .unwrap();
     let before = f.git(&["rev-parse", "main"]);
     match f.yard.merge("checked", "main") {
-        Err(Error::CheckFailed { output_tail }) => assert!(output_tail.contains("nope")),
+        Err(Error::CheckFailed { output_tail, .. }) => assert!(output_tail.contains("nope")),
         other => panic!("expected CheckFailed, got {other:?}"),
     }
     assert_eq!(f.git(&["rev-parse", "main"]), before);
