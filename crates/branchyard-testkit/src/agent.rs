@@ -62,6 +62,22 @@ pub fn built_uninstrumented(package: &str, bin: &str, artifact: &Path) -> &'stat
     build(package, bin, artifact, true)
 }
 
+/// The workspace's `Cargo.toml` in the checkout under test: the nearest
+/// above the running test's package (`CARGO_MANIFEST_DIR`, which cargo
+/// sets at run time) that declares `[workspace]`. Not this crate's
+/// compile-time path: a target directory shared by several checkouts reuses
+/// this crate built in another, whose directory may be gone.
+fn workspace_manifest() -> PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .and_then(|dir| {
+            Path::new(&dir)
+                .ancestors()
+                .map(|d| d.join("Cargo.toml"))
+                .find(|m| std::fs::read_to_string(m).is_ok_and(|t| t.contains("[workspace]")))
+        })
+        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml").into())
+}
+
 fn build(package: &str, bin: &str, artifact: &Path, plain: bool) -> &'static Path {
     static BUILT: Mutex<BTreeMap<(PathBuf, String), &'static Path>> = Mutex::new(BTreeMap::new());
     let profile_dir = profile_dir(artifact);
@@ -78,7 +94,7 @@ fn build(package: &str, bin: &str, artifact: &Path, plain: bool) -> &'static Pat
     let mut command = Command::new(cargo);
     command
         .args(["build", "--quiet", "--offline", "--manifest-path"])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
+        .arg(workspace_manifest())
         .args(["-p", package, "--bin", bin]);
     // A plain build under `cargo llvm-cov` goes to a target directory of its
     // own: cargo's fingerprint does not see the RUSTC_WRAPPER that
@@ -145,5 +161,23 @@ mod tests {
             profile_dir(Path::new("/t/debug/deps/cli-1a2b")),
             Path::new("/t/debug")
         );
+    }
+
+    /// The workspace is found from where cargo runs the test, not from where
+    /// this crate was compiled.
+    #[test]
+    fn the_workspace_is_the_one_the_test_runs_in() {
+        let here = std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets it for a test");
+        let manifest = workspace_manifest();
+        assert_eq!(
+            manifest.canonicalize().unwrap(),
+            Path::new(&here)
+                .join("../../Cargo.toml")
+                .canonicalize()
+                .unwrap()
+        );
+        assert!(std::fs::read_to_string(&manifest)
+            .unwrap()
+            .contains("[workspace]"));
     }
 }
