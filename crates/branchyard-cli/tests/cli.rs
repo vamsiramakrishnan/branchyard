@@ -2560,6 +2560,80 @@ fn by_run_wakes_a_parent_whose_turn_ended_while_its_child_ran() {
     assert_eq!(repo.git(&["show", "by/root:kid.txt"]), "k\n");
 }
 
+/// A parked parent that may not be woken (its `--max-turns` is spent)
+/// settles as its turn ended when its children do, and a sibling waiting
+/// for it starts then, while a cousin still runs (so `by run`'s own sweep
+/// for waiting branches, which runs once nothing does, cannot be what
+/// started it): the settle goes through the one path every settle takes.
+#[test]
+fn a_parked_branch_settled_without_a_wake_starts_its_dependents() {
+    let repo = Repo::new();
+    let go = repo.dir.join("go");
+    let hold = repo.dir.join("hold");
+    // Releases `other` however the test ends.
+    let _other = Background {
+        child: None,
+        go: hold.clone(),
+    };
+    let grandchild = repo.dir.join("gk.prompt");
+    fs::write(&grandchild, held_child(&go, "gk.txt")).unwrap();
+    let lead = repo.dir.join("lead.prompt");
+    fs::write(
+        &lead,
+        format!(
+            "SH by spawn \"$(cat {})\" --name gk --json",
+            grandchild.display()
+        ),
+    )
+    .unwrap();
+    let prompt = [
+        format!(
+            "SH by spawn \"$(cat {})\" --name lead --max-turns 1 --json",
+            lead.display()
+        ),
+        "SH by spawn 'WRITE s.txt=s' --name sib --depends-on lead --json".to_owned(),
+        format!(
+            "SH by spawn '{}' --name other --json",
+            held_child(&hold, "other.txt")
+        ),
+        "SH until by inspect lead --json | grep -q waiting_on_children; do sleep 0.05; done"
+            .to_owned(),
+        format!("SH touch {}", go.display()),
+    ]
+    .join("\n");
+    let agent = fake_agent!().display().to_string();
+    let _running = Background {
+        child: Some(
+            repo.command(env!("CARGO_BIN_EXE_by"))
+                .args(["run", &prompt, "--name", "root", "--delegate=2", "--yes"])
+                .args(["--harness", "gemini-cli", "--command", &agent])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        ),
+        go: go.clone(),
+    };
+    wait::until("sib to start once lead settles", || {
+        let out = repo.by(&["show", "sib", "--json"]);
+        let shown: Value = serde_json::from_slice(&out.stdout).ok()?;
+        let state = shown["status"]["state"].as_str()?.to_owned();
+        (state == "ready").then_some(())
+    });
+    assert_eq!(
+        repo.json(&["show", "other", "--json"])["status"]["state"],
+        "running"
+    );
+    let lead = repo.json(&["show", "lead", "--json"]);
+    assert_eq!(lead["turns"], 1, "{lead}");
+    assert_eq!(lead["status"]["state"], "no_changes", "{lead}");
+    let log = stdout(&repo.by(&["log", "lead"]));
+    assert!(
+        log.contains("max_turns is spent; it was not woken"),
+        "{log}"
+    );
+}
+
 /// `by wait` blocks until children settle, inside a harness and outside
 /// one; with --timeout it gives up and says so (M1). The delegate skill
 /// told agents to use `by inspect --wait`, which never existed.

@@ -928,3 +928,46 @@ fn seats_are_checked_before_anything_is_created() {
         .unwrap();
     assert_eq!(root.info().status, BranchStatus::NoChanges);
 }
+
+/// The envelope's `max_wakes` caps consecutive automatic wakes: a parent
+/// parked after as many wakes as it allows is not woken again when its
+/// children settle; it settles as its turn ended, and its log says why.
+#[test]
+fn a_parent_woken_max_wakes_times_settles_without_another_wake() {
+    let f = Fixture::new();
+    let envelope = Envelope {
+        max_wakes: 1,
+        ..Envelope::default()
+    };
+    let options = delegating(&f, envelope);
+    let root = f
+        .yard
+        .task("WRITE root.txt=r")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options).unwrap();
+    delegate.spawn(spawn("HANG", "kid")).unwrap();
+    // As the engine leaves a parent whose turn ended while kid ran, after
+    // the one wake its envelope allows.
+    edit_record(&f.root, "root", |record| {
+        record["info"]["status"] = serde_json::json!({"state": "waiting_on_children"});
+        record["parked"] = serde_json::json!({
+            "since_ms": 0,
+            "ended": {"state": "ready"},
+            "on": ["kid"],
+            "budget": {},
+        });
+        record["wakes"] = serde_json::json!(1);
+    });
+    delegate.cancel("kid").unwrap();
+    wait::until("root to settle", || {
+        f.yard.branch("root").unwrap().info().status == BranchStatus::Ready
+    });
+    let root_info = f.yard.branch("root").unwrap().info().clone();
+    assert_eq!(root_info.turns, 1, "not woken");
+    let log = f.yard.branch("root").unwrap().events().unwrap();
+    assert!(log.iter().any(|e| matches!(&e.activity,
+        Activity::Warning(w) if w.contains("woken 1 times in a row, its envelope's max_wakes"))));
+}

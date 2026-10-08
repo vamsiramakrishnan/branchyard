@@ -261,12 +261,14 @@ pub(crate) fn look(yard: &Yard, name: &str, given: Option<&TaskOptions>) -> Resu
         .grant
         .as_ref()
         .map_or(0, |grant| grant.envelope.max_wakes);
-    // Settled without a wake from here on: its options are not needed.
+    // Settled without a wake from here on: its options are not needed,
+    // except to start what waits for it.
     let forget = || lock(&yard.hub.wake_options).remove(name);
     if record.wakes >= max_wakes {
-        forget();
+        let own = forget();
         unpark(
-            &store,
+            yard,
+            own.as_ref().or(given),
             &record,
             &parked,
             format!(
@@ -278,9 +280,10 @@ pub(crate) fn look(yard: &Yard, name: &str, given: Option<&TaskOptions>) -> Resu
         return Ok(false);
     }
     if let Some(limit) = crate::engine::exhausted(&store, &record, &budget) {
-        forget();
+        let own = forget();
         unpark(
-            &store,
+            yard,
+            own.as_ref().or(given),
             &record,
             &parked,
             format!("its children settled, but its {limit} is spent; it was not woken"),
@@ -301,9 +304,10 @@ pub(crate) fn look(yard: &Yard, name: &str, given: Option<&TaskOptions>) -> Resu
         // Another engine woke it, or something else started a turn.
         Ok(None) | Err(Error::Running(_)) => return Ok(false),
         Err(error) => {
-            forget();
+            let own = forget();
             unpark(
-                &store,
+                yard,
+                own.as_ref().or(Some(&options)),
                 &record,
                 &parked,
                 format!("its children settled, but its next turn could not start: {error}"),
@@ -317,8 +321,18 @@ pub(crate) fn look(yard: &Yard, name: &str, given: Option<&TaskOptions>) -> Resu
     Ok(true)
 }
 
-/// Settle a parked branch as its turn ended, with `why` on its log.
-fn unpark(store: &Store, record: &Record, parked: &Parked, why: String) -> Result<(), Error> {
+/// Settle a parked branch as its turn ended, with `why` on its log, and
+/// then look at what waits for it and its parked ancestors, as every
+/// settle does ([`crate::graph::settled`]), under `options`: a sibling
+/// waiting for it starts now, not at the next unrelated look.
+fn unpark(
+    yard: &Yard,
+    options: Option<&TaskOptions>,
+    record: &Record,
+    parked: &Parked,
+    why: String,
+) -> Result<(), Error> {
+    let store = &yard.store();
     let mut settled = record.clone();
     settled.info.status = parked.ended.clone();
     settled.parked = None;
@@ -335,6 +349,7 @@ fn unpark(store: &Store, record: &Record, parked: &Parked, why: String) -> Resul
                 recorder.record(Activity::Warning(why)),
             );
         }
+        crate::graph::settled(yard, &record.info.name, options);
     }
     Ok(())
 }
