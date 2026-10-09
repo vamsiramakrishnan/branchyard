@@ -1061,6 +1061,7 @@ fn budget_for(task: &Budget, entry: &Budget) -> Budget {
         stall_after: task.stall_after.or(entry.stall_after),
         stall_action: task.stall_action,
         hold_cap: task.hold_cap.or(entry.hold_cap),
+        follow_up_grace: None,
     }
 }
 

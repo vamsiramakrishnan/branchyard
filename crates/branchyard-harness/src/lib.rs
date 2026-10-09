@@ -886,6 +886,15 @@ pub trait Driver {
         false
     }
 
+    /// Whether the held turn waits only for the harness to start a cycle
+    /// on the notification of background tasks that ended: none runs and
+    /// no cycle has started since the hold began or the last one ended.
+    /// The engine ends the hold when none starts within a grace, as a
+    /// notification may never come. The default holds nothing.
+    fn awaiting_follow_up(&self) -> bool {
+        false
+    }
+
     /// The outcome a held turn ends with when the engine cuts its hold:
     /// the harness's answer, which the hold only kept open. `None` when
     /// the turn is not held. The default holds nothing.

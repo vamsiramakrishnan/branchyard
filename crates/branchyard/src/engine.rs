@@ -59,6 +59,13 @@ const TICK: Duration = Duration::from_millis(100);
 /// ([`branchyard_harness::Driver::held_outcome`]), as it does at its
 /// duration limit.
 const HOLD_CAP: Duration = Duration::from_secs(30 * 60);
+/// How long a held turn waits, with no background task running, for the
+/// harness to start the cycle on an ended task's notification
+/// ([`branchyard_harness::Driver::awaiting_follow_up`]) before the hold
+/// ends, unless [`Budget::follow_up_grace`] says otherwise. Claude Code
+/// starts one within about 2 seconds of the result, or never (a task the
+/// model stopped, a notification it already read).
+const FOLLOW_UP_GRACE: Duration = Duration::from_secs(10);
 /// Events drained without waiting once the turn has ended.
 const DRAIN_MAX: usize = 10_000;
 /// The variables that name a temporary directory: POSIX's, and the two
@@ -157,6 +164,10 @@ pub(crate) struct Driven {
     /// harness's per-call usage; its cost when the harness never reported
     /// a cumulative one.
     pub live_cost: Option<f64>,
+    /// The descendants still running when the turn's hold began, if the
+    /// engine cut the hold: what the turn's answer cannot have seen
+    /// settle, which its branch is woken for ([`crate::wake::park`]).
+    pub held_on: Vec<String>,
 }
 
 /// A running turn's spend: the branch's spend when the turn started, or
@@ -303,17 +314,26 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
         } else {
             let driven = drive(&mut recorder, &turn, &mut record, &bounds, &lease);
             graph::unbind(turn.yard, &record);
+            let driven = driven?;
+            let driven_held_on = driven.held_on.clone();
             conclude(
                 turn.yard,
                 turn.prompt,
                 &fence,
                 &mut record,
                 &mut recorder,
-                driven?,
+                driven,
             )?;
-            // A delegating turn that ended while its children still run
-            // waits on them; see `crate::wake`.
-            crate::wake::park(turn.yard, &mut record, &mut recorder, &bounds.budget)?;
+            // A delegating turn that ended while its children still run,
+            // or whose cut hold they settled in, waits on them; see
+            // `crate::wake`.
+            crate::wake::park(
+                turn.yard,
+                &mut record,
+                &mut recorder,
+                &bounds.budget,
+                &driven_held_on,
+            )?;
         }
         Ok(())
     })();
@@ -482,6 +502,7 @@ fn run(
         cost: None,
         metered: None,
         live_cost: None,
+        held_on: Vec::new(),
     };
     let sandboxed = crate::placement::sandboxed(record.provider.as_ref());
     // Revoked when this function returns, after the harness and its
@@ -909,6 +930,10 @@ fn run(
     let mut stalled = false;
     let mut held_since: Option<Instant> = None;
     let hold_cap = bounds.budget.hold_cap.unwrap_or(HOLD_CAP);
+    let mut awaiting_since: Option<Instant> = None;
+    let mut held_on: Vec<String> = Vec::new();
+    let mut cut_hold = false;
+    let follow_up_grace = bounds.budget.follow_up_grace.unwrap_or(FOLLOW_UP_GRACE);
     // What the branch has spent, while the turn runs: see `LiveCost`.
     // Written to its record as it changes, so a parent inspecting it, or
     // the branch inspecting itself, sees a figure and not "unknown".
@@ -982,7 +1007,18 @@ fn run(
         steering.poll(recorder, &mut session, &store, fence, &phase)?;
         let holding = session.holding();
         // The cap covers the whole hold, the wait for the follow-up included.
+        if session.held() && held_since.is_none() {
+            held_on = delegation::descendants(&store, &record.info.name)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|info| crate::wake::unsettled(&info.status))
+                .map(|info| info.name)
+                .collect();
+        }
         held_since = session.held().then(|| held_since.unwrap_or(now));
+        awaiting_since = session
+            .awaiting_follow_up()
+            .then(|| awaiting_since.unwrap_or(now));
         // A turn on the model gateway is metered exactly; its limit is
         // held here as a harness's own estimate is below.
         if let Some(gateway) = &model_gateway {
@@ -1067,6 +1103,7 @@ fn run(
                     }
                     None => Stop::Limit("max_duration"),
                 };
+                cut_hold = matches!(why, Stop::Hold(_));
                 if let Err(error) = stop(&mut session) {
                     recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
                     kill = true;
@@ -1089,6 +1126,30 @@ fn run(
                     branchyard_support::time::human_duration(hold_cap)
                 )))?;
                 let outcome = session.held_outcome().unwrap_or(TurnOutcome::Interrupted);
+                cut_hold = true;
+                if let Err(error) = stop(&mut session) {
+                    recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
+                    kill = true;
+                    break End::Outcome { outcome };
+                }
+                phase = Phase::Stopping {
+                    turn: n,
+                    why: Stop::Hold(outcome),
+                    since: now,
+                };
+            }
+            Phase::Running(n)
+                if awaiting_since
+                    .is_some_and(|since| now.duration_since(since) >= follow_up_grace) =>
+            {
+                let n = *n;
+                recorder.record(Activity::Warning(format!(
+                    "the harness started no cycle on its ended background tasks' notification \
+                     within {} of the turn's hold; ending the hold, the turn keeps its outcome",
+                    branchyard_support::time::human_duration(follow_up_grace)
+                )))?;
+                let outcome = session.held_outcome().unwrap_or(TurnOutcome::Interrupted);
+                cut_hold = true;
                 if let Err(error) = stop(&mut session) {
                     recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
                     kill = true;
@@ -1337,6 +1398,9 @@ fn run(
     };
     driven.end = end;
     driven.live_cost = shown.get();
+    if cut_hold {
+        driven.held_on = held_on;
+    }
 
     if !kill {
         // Whatever the harness already sent after the turn ended.

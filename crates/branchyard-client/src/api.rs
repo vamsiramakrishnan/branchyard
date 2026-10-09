@@ -84,6 +84,7 @@ impl BudgetSpec {
             stall_action: self.stall_action.unwrap_or_default(),
             // Not on the wire: a remote turn's hold has the default cap.
             hold_cap: None,
+            follow_up_grace: None,
         })
     }
 }

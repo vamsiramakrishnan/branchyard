@@ -91,11 +91,16 @@ pub(crate) fn is_parked(status: &BranchStatus) -> bool {
 /// branch is merged again when it settles: its status is restored from
 /// [`Parked::ended`], and its wake keeps it ([`crate::run`]).
 /// `budget` is the turn's own, stored for a wake started elsewhere.
+/// `held_on` are the descendants that ran when the turn's hold began, if
+/// the engine cut the hold: those that settled since, its answer never
+/// saw, so it parks for them too, and the look after the turn wakes it at
+/// once if nothing still runs.
 pub(crate) fn park(
     yard: &Yard,
     record: &mut Record,
     recorder: &mut Recorder,
     budget: &Budget,
+    held_on: &[String],
 ) -> Result<(), Error> {
     if !matches!(
         record.info.status,
@@ -111,14 +116,21 @@ pub(crate) fn park(
         return Ok(());
     }
     let store = yard.store();
-    let on: Vec<String> = delegation::descendants(&store, &record.info.name)?
-        .into_iter()
+    let below = delegation::descendants(&store, &record.info.name)?;
+    let running: Vec<String> = below
+        .iter()
         .filter(|info| unsettled(&info.status))
-        .map(|info| info.name)
+        .map(|info| info.name.clone())
         .collect();
-    if on.is_empty() {
+    let unseen: Vec<String> = below
+        .iter()
+        .filter(|info| !unsettled(&info.status) && held_on.contains(&info.name))
+        .map(|info| info.name.clone())
+        .collect();
+    if running.is_empty() && unseen.is_empty() {
         return Ok(());
     }
+    let on: Vec<String> = running.iter().chain(&unseen).cloned().collect();
     if record.wakes >= max_wakes {
         recorder.record(Activity::Warning(format!(
             "its turn ended while {} still run, but it was woken {} times in a row, its \
@@ -132,12 +144,20 @@ pub(crate) fn park(
     recorder.record(Activity::Delegation {
         tool: "wait".into(),
         branch: record.info.name.clone(),
-        outcome: format!(
-            "its turn ended while {} still run; it waits on them, and its next turn starts \
-             when they settle (automatic wake {} of at most {max_wakes})",
-            on.join(", "),
-            record.wakes + 1
-        ),
+        outcome: match running.is_empty() {
+            false => format!(
+                "its turn ended while {} still run; it waits on them, and its next turn starts \
+                 when they settle (automatic wake {} of at most {max_wakes})",
+                on.join(", "),
+                record.wakes + 1
+            ),
+            true => format!(
+                "its turn's hold was cut after {} settled, which its answer did not see; its \
+                 next turn starts with what they did (automatic wake {} of at most {max_wakes})",
+                on.join(", "),
+                record.wakes + 1
+            ),
+        },
         refused: false,
     })?;
     record.parked = Some(Parked {

@@ -2095,6 +2095,12 @@ pub struct Budget {
     /// hold is cut and the turn ends with the outcome it was held with.
     /// `None` is 30 minutes.
     pub hold_cap: Option<Duration>,
+    /// How long a held turn may wait for its harness to start the cycle on
+    /// the notification of background tasks that ended, with none running
+    /// ([`branchyard_harness::Driver::awaiting_follow_up`]), before the
+    /// hold ends and the turn keeps the outcome it was held with. `None`
+    /// is 10 seconds.
+    pub follow_up_grace: Option<Duration>,
 }
 
 impl Budget {
@@ -2130,6 +2136,13 @@ impl Budget {
     /// Cut a held turn's hold after this long; see [`Budget::hold_cap`].
     pub fn hold_cap(mut self, cap: Duration) -> Self {
         self.hold_cap = Some(cap);
+        self
+    }
+
+    /// End a hold that waits for a follow-up cycle none started after
+    /// this long; see [`Budget::follow_up_grace`].
+    pub fn follow_up_grace(mut self, grace: Duration) -> Self {
+        self.follow_up_grace = Some(grace);
         self
     }
 }

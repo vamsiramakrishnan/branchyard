@@ -636,6 +636,12 @@ impl Session {
         self.driver.held()
     }
 
+    /// Whether the held turn waits only for the harness to start a cycle
+    /// on its ended tasks' notification; see [`Driver::awaiting_follow_up`].
+    pub fn awaiting_follow_up(&self) -> bool {
+        self.driver.awaiting_follow_up()
+    }
+
     /// The outcome a held turn keeps when its hold is cut; see
     /// [`Driver::held_outcome`].
     pub fn held_outcome(&self) -> Option<TurnOutcome> {

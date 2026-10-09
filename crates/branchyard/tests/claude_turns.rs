@@ -458,6 +458,115 @@ fn a_hold_cut_at_its_cap_parks_a_branch_whose_children_still_run() {
     assert_cut_kept_the_outcome(&events, "held open 1s for the harness's background tasks");
 }
 
+/// The rest of a turn after its frames: the stand-in answers control
+/// requests and prints nothing more until asked to end its session, so
+/// it reports no task of its own running.
+const QUIET: &str = r#"while read -r line; do
+  case "$line" in
+    *end_session*) reply "$line"; exit 0;;
+    *control_request*) reply "$line";;
+  esac
+done
+exit 0"#;
+
+/// A background task ends, and the turn's answer comes with no cycle on
+/// its notification after, as when round 5's `compete` meta stopped its
+/// `by wait`: then `wait` more seconds of quiet.
+fn ended_with_no_follow_up(wait: u32) -> String {
+    format!(
+        r#"echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[{{"task_id":"w1","task_type":"local_bash","description":"by wait"}}]}}'
+echo '{{"type":"assistant","message":{{"id":"m1","content":[{{"type":"text","text":"I will be woken."}}]}}}}'
+{result}
+sleep {wait}
+echo '{{"type":"system","subtype":"task_notification","task_id":"w1","status":"completed"}}'
+echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[]}}'
+{QUIET}"#,
+        result = result(0.01),
+    )
+}
+
+/// A held turn whose ended task's notification gets no cycle ends once
+/// none has started within the grace, with the outcome it was held with,
+/// not at the hold's cap.
+#[test]
+fn a_hold_with_no_follow_up_ends_after_the_grace() {
+    let f = Fixture::new();
+    let options = TaskOptions {
+        budget: Budget::default()
+            .hold_cap(Duration::from_secs(30))
+            .follow_up_grace(Duration::from_secs(1)),
+        ..stand_in(&f, &ended_with_no_follow_up(0))
+    };
+    let started = Instant::now();
+    let branch = f
+        .yard
+        .task("go")
+        .options(options)
+        .name("graced")
+        .run()
+        .unwrap();
+    let took = started.elapsed();
+    assert!(took >= Duration::from_secs(1), "{took:?}");
+    assert!(took < Duration::from_secs(10), "{took:?}");
+    assert_eq!(branch.info().status, BranchStatus::NoChanges);
+    let events = branch.events().unwrap();
+    assert_cut_kept_the_outcome(&events, "started no cycle");
+}
+
+/// A delegating branch whose children all settle while its turn is held,
+/// and whose hold is then cut, never saw them: it is woken with what they
+/// did, as if it had parked for them.
+#[test]
+fn a_cut_hold_wakes_a_branch_whose_children_settled_during_it() {
+    let f = Fixture::new();
+    let slow = format!(
+        "case \"$prompt\" in *SLOW*) sleep 1;; esac\n{}",
+        result(0.01)
+    );
+    let first = TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        ..stand_in(&f, &slow)
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(first.clone())
+        .name("meta")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(first).unwrap();
+    delegate
+        .spawn(Spawn {
+            prompt: "SLOW".into(),
+            name: Some("kid".into()),
+            ..Spawn::default()
+        })
+        .unwrap();
+    let held = TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        budget: Budget::default().follow_up_grace(Duration::from_secs(1)),
+        ..stand_in(&f, &ended_with_no_follow_up(3))
+    };
+    root.send("wait for kid", held).unwrap();
+    wait::until("meta's wake to settle", || {
+        let info = f.yard.branch("meta").unwrap().info().clone();
+        (info.turns == 3
+            && !matches!(
+                info.status,
+                BranchStatus::Running | BranchStatus::WaitingOnChildren
+            ))
+        .then_some(())
+    });
+    let events = f.yard.branch("meta").unwrap().events().unwrap();
+    assert!(
+        events.iter().any(|e| matches!(&e.activity,
+            Activity::Delegation { outcome, .. } if outcome.contains("kid settled, which its answer did not see"))),
+        "{events:?}"
+    );
+}
+
 /// The usage that crosses the cost limit arrives with the turn's end, in
 /// one `result`: the turn ends over budget, with no failed interrupt and
 /// no killed harness.

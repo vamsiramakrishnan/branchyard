@@ -1395,6 +1395,7 @@ pub(crate) fn effective_budget(record: &Record, budget: &Budget) -> Budget {
         stall_after: budget.stall_after,
         stall_action: budget.stall_action,
         hold_cap: budget.hold_cap,
+        follow_up_grace: budget.follow_up_grace,
     }
 }
 
@@ -3580,6 +3581,7 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
         stall_after: asked.stall_after,
         stall_action: asked.stall_action,
         hold_cap: asked.hold_cap,
+        follow_up_grace: asked.follow_up_grace,
     };
     let envelope = below.envelope();
     let mut deny = seat.deny.clone();

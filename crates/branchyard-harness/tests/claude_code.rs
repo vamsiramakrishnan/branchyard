@@ -1686,6 +1686,86 @@ fn holding_is_reported_while_the_held_turns_tasks_run() {
     assert!(!driver.held());
 }
 
+/// A background task the model stops with `TaskStop`, in the frames
+/// Claude Code 2.1.293 prints for a task it stops (`task_updated` with
+/// `killed`, `task_notification` with `stopped`, as recorded in
+/// `claude-code-2.1.293-background-task.jsonl`; the `TaskStop` call's
+/// shape is reconstructed from round 5's `compete` log), before the turn's
+/// result. Claude Code runs no cycle on its notification, so the turn ends
+/// at its result, not held until the hold's cap.
+fn stopped_by_the_model(driver: &mut ClaudeCode, status: &str) -> Vec<Event> {
+    let uuid = submit(driver, "go");
+    feed(driver, &background_tasks(&[("bs2o6zs3k", "by wait")]));
+    let stop = json!({"type": "assistant", "user_message_uuid": uuid, "message": {"id": "m1", "content": [
+        {"type": "tool_use", "id": "toolu_1", "name": "TaskStop", "input": {"task_id": "bs2o6zs3k"}}]}});
+    feed(driver, &stop);
+    let updated = json!({"type": "system", "subtype": "task_updated", "task_id": "bs2o6zs3k", "patch": {"status": status}});
+    feed(driver, &updated);
+    let notified = json!({"type": "system", "subtype": "task_notification", "task_id": "bs2o6zs3k", "status": if status == "killed" { "stopped" } else { status }});
+    feed(driver, &notified);
+    feed(driver, &background_tasks(&[]));
+    let text = json!({"type": "assistant", "message": {"id": "m2", "content": [{"type": "text", "text": "I stopped that wait."}]}});
+    feed(driver, &text);
+    let own = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": [uuid]});
+    feed(driver, &own).0
+}
+
+#[test]
+fn a_task_the_model_stopped_does_not_hold_the_turn() {
+    let mut driver = ready(SessionMode::Fresh);
+    let events = stopped_by_the_model(&mut driver, "killed");
+    assert_eq!(turn_ends(&events), [&TurnOutcome::Completed], "{events:?}");
+    assert!(!driver.held());
+}
+
+/// The model's `TaskStop` call alone is enough, however the CLI reports
+/// the task's end.
+#[test]
+fn a_task_the_model_stopped_owes_no_follow_up_whatever_its_status() {
+    let mut driver = ready(SessionMode::Fresh);
+    let events = stopped_by_the_model(&mut driver, "completed");
+    assert_eq!(turn_ends(&events), [&TurnOutcome::Completed], "{events:?}");
+}
+
+/// A task the CLI reports stopped with no `TaskStop` from the model, as
+/// one stopped another way, owes no follow-up either.
+#[test]
+fn a_task_reported_stopped_does_not_hold_the_turn() {
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "go");
+    feed(&mut driver, &background_tasks(&[("b1", "by wait")]));
+    let notified = json!({"type": "system", "subtype": "task_notification", "task_id": "b1", "status": "stopped"});
+    feed(&mut driver, &notified);
+    feed(&mut driver, &background_tasks(&[]));
+    let own = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": [uuid]});
+    let (events, _) = feed(&mut driver, &own);
+    assert_eq!(turn_ends(&events), [&TurnOutcome::Completed], "{events:?}");
+}
+
+/// The engine is told the held turn waits only for a follow-up cycle while
+/// no task runs and no cycle has started since the hold began, so it can
+/// end a hold whose notification never comes.
+#[test]
+fn awaiting_a_follow_up_is_reported_until_its_cycle_starts() {
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "go");
+    feed(&mut driver, &background_tasks(&[("b1", "by check")]));
+    let own = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": [uuid]});
+    feed(&mut driver, &own);
+    assert!(driver.held() && !driver.awaiting_follow_up(), "a task runs");
+    let notified = json!({"type": "system", "subtype": "task_notification", "task_id": "b1", "status": "completed"});
+    feed(&mut driver, &notified);
+    feed(&mut driver, &background_tasks(&[]));
+    assert!(driver.awaiting_follow_up());
+    let echoed = json!({"type": "user", "uuid": "n1", "message": {"role": "user", "content": "<task-notification><task-id>b1</task-id></task-notification>"}});
+    feed(&mut driver, &echoed);
+    assert!(!driver.awaiting_follow_up(), "its cycle started");
+    let follow_up = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": ["n1"]});
+    let (events, _) = feed(&mut driver, &follow_up);
+    assert_eq!(turn_ends(&events), [&TurnOutcome::Completed], "{events:?}");
+    assert!(!driver.awaiting_follow_up());
+}
+
 const HOLD_PROMPT: &str = "Use the Bash tool with run_in_background set to true twice, to run: \
      sleep 40; echo done, and then: sleep 45; echo later. Do not wait for them or check on them. \
      Immediately reply with the single word started and end your turn.";

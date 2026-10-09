@@ -223,6 +223,12 @@ pub struct ClaudeCode {
     /// Background tasks whose notification a cycle's result has answered,
     /// so a later report of their ending waits for nothing.
     answered: HashSet<String>,
+    /// Background tasks the model asked to stop (`TaskStop`, `KillShell`):
+    /// their ending owes no cycle on a notification.
+    stopping: HashSet<String>,
+    /// A cycle has started since the hold began or since the last result
+    /// during it: the CLI echoed a notification or the model answered.
+    cycle_started: bool,
     /// The outcome the held turn had when Branchyard interrupted it: the
     /// turn ends with it, not as interrupted.
     cut: Option<TurnOutcome>,
@@ -269,6 +275,8 @@ impl ClaudeCode {
             ended: Vec::new(),
             notifications: HashMap::new(),
             answered: HashSet::new(),
+            stopping: HashSet::new(),
+            cycle_started: false,
             cut: None,
             ending: false,
         }
@@ -445,13 +453,32 @@ impl ClaudeCode {
     /// reports it: the CLI runs its notification, in the cycle running
     /// then if it reaches a tool boundary, else in a cycle of its own
     /// after, which the turn waits for, even when the task ended before
-    /// the turn's result.
-    fn task_ended(&mut self, task_id: &str) {
+    /// the turn's result. A task the model stopped, or the CLI reports
+    /// `killed` or `stopped`, gets no such cycle: Claude Code 2.1.293 runs
+    /// none for a task `TaskStop` ended (round 5's `compete` meta waited
+    /// for one until the hold's cap), so it is answered as it ends.
+    fn task_ended(&mut self, task_id: &str, status: &str) {
+        if self.stopping.remove(task_id) || matches!(status, "killed" | "stopped") {
+            self.ended.retain(|id| id != task_id);
+            self.answered.insert(task_id.to_owned());
+            return;
+        }
         let known = self.ended.iter().any(|id| id == task_id) || self.answered.contains(task_id);
         let running = self.background.iter().any(|t| t.task_id == task_id);
         if self.turns.active.is_some() && !known && running {
             self.ended.push(task_id.to_owned());
         }
+    }
+
+    /// Whether the held turn waits only for the cycle on the notification
+    /// of tasks that ended: none runs, and no cycle has started since the
+    /// hold began or the last cycle's result.
+    fn awaiting_cycle(&self) -> bool {
+        self.held
+            && self.background.is_empty()
+            && !self.ended.is_empty()
+            && !self.cycle_started
+            && !self.cycle_running()
     }
 
     /// Forget the turn that just ended.
@@ -466,6 +493,8 @@ impl ClaudeCode {
         self.ended.clear();
         self.notifications.clear();
         self.answered.clear();
+        self.stopping.clear();
+        self.cycle_started = false;
         self.cut = None;
     }
 
@@ -623,7 +652,7 @@ impl ClaudeCode {
                 background: message["is_backgrounded"] == true,
             }),
             "task_notification" => {
-                self.task_ended(&text("task_id"));
+                self.task_ended(&text("task_id"), &text("status"));
                 Output::event(Event::HarnessTaskEnded {
                     task_id: text("task_id"),
                     status: text("status"),
@@ -653,12 +682,9 @@ impl ClaudeCode {
             // ends a background task during the hold says a cycle on its
             // notification is coming.
             "task_updated" => {
-                let ended = matches!(
-                    message["patch"]["status"].as_str(),
-                    Some("completed" | "failed" | "killed" | "stopped")
-                );
-                if ended {
-                    self.task_ended(&text("task_id"));
+                let status = message["patch"]["status"].as_str().unwrap_or_default();
+                if matches!(status, "completed" | "failed" | "killed" | "stopped") {
+                    self.task_ended(&text("task_id"), status);
                 }
                 Output::default()
             }
@@ -835,6 +861,7 @@ impl ClaudeCode {
     fn assistant(&mut self, message: &Value) -> Output {
         let named = message["user_message_uuid"].as_str();
         let mut events: Vec<_> = self.acknowledge(named).into_iter().collect();
+        self.cycle_started |= self.held;
         if let Some(uuid) = named {
             self.turn_started |= self.turn_uuid.as_ref().is_some_and(|(own, _)| own == uuid);
             self.answering = Some(uuid.to_owned());
@@ -869,6 +896,7 @@ impl ClaudeCode {
                 }
                 Some("tool_use") => {
                     self.after_text = false;
+                    self.stop_requested(block);
                     events.push(Event::ToolStarted {
                         turn,
                         call_id: block["id"].as_str().unwrap_or_default().to_owned(),
@@ -901,6 +929,7 @@ impl ClaudeCode {
         // the hold, it is the cycle on a notification the hold waited for,
         // or one the CLI ran on a message of ours first.
         self.answering = None;
+        self.cycle_started = false;
         // Every message this result answered: several when steered
         // messages joined the turn. None named is a result from before
         // the CLI listed them, taken as the turn's, unless the CLI
@@ -1013,7 +1042,22 @@ impl ClaudeCode {
         };
         let tasks: Vec<String> = texts.into_iter().flat_map(notified_tasks).collect();
         if !tasks.is_empty() {
+            self.cycle_started |= self.held;
             self.notifications.insert(uuid.to_owned(), tasks);
+        }
+    }
+
+    /// A tool call that stops a background task of the CLI's own:
+    /// `TaskStop` (`task_id`) or the older `KillShell` (`shell_id`).
+    fn stop_requested(&mut self, block: &Value) {
+        let input = &block["input"];
+        let task = match block["name"].as_str() {
+            Some("TaskStop") => input["task_id"].as_str().or(input["shell_id"].as_str()),
+            Some("KillShell") => input["shell_id"].as_str(),
+            _ => None,
+        };
+        if let Some(task) = task {
+            self.stopping.insert(task.to_owned());
         }
     }
 
@@ -1427,6 +1471,10 @@ impl Driver for ClaudeCode {
 
     fn held(&self) -> bool {
         self.held
+    }
+
+    fn awaiting_follow_up(&self) -> bool {
+        self.awaiting_cycle()
     }
 
     fn held_outcome(&self) -> Option<TurnOutcome> {
