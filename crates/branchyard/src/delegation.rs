@@ -3920,7 +3920,7 @@ fn nest_budget(mut spawn: Value) -> Result<Value, Error> {
 }
 
 /// A graph proposal's `edits` (a JSON array of [`GraphEdit`]s) with each
-/// spawn's flat limits moved into its `budget`, as [`nest_budget`] does for
+/// spawn's flat limits moved into its `budget`, as `nest_budget` does for
 /// a spawn: `by graph apply` and the `apply_graph` tool read the same
 /// edits. Anything that is not an array is left for the parse to refuse.
 pub fn nest_graph_budgets(edits: &mut Value) -> Result<(), Error> {
