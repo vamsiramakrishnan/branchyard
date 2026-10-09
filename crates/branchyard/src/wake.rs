@@ -81,6 +81,17 @@ pub(crate) fn unsettled(status: &BranchStatus) -> bool {
     )
 }
 
+/// Whether a held-on descendant that settled in `status` still waits for
+/// its parent: one already merged or discarded was dealt with during the
+/// hold, so a cut hold does not wake its parent for it.
+pub(crate) fn awaits_parent(status: &BranchStatus) -> bool {
+    !unsettled(status)
+        && !matches!(
+            status,
+            BranchStatus::Merged { .. } | BranchStatus::Discarded { .. }
+        )
+}
+
 pub(crate) fn is_parked(status: &BranchStatus) -> bool {
     *status == BranchStatus::WaitingOnChildren
 }
@@ -93,8 +104,8 @@ pub(crate) fn is_parked(status: &BranchStatus) -> bool {
 /// `budget` is the turn's own, stored for a wake started elsewhere.
 /// `held_on` are the descendants that ran when the turn's hold began, if
 /// the engine cut the hold: those that settled since, its answer never
-/// saw, so it parks for them too, and the look after the turn wakes it at
-/// once if nothing still runs.
+/// saw, so it parks for those still waiting for it ([`awaits_parent`]),
+/// and the look after the turn wakes it at once if nothing still runs.
 pub(crate) fn park(
     yard: &Yard,
     record: &mut Record,
@@ -124,7 +135,7 @@ pub(crate) fn park(
         .collect();
     let unseen: Vec<String> = below
         .iter()
-        .filter(|info| !unsettled(&info.status) && held_on.contains(&info.name))
+        .filter(|info| awaits_parent(&info.status) && held_on.contains(&info.name))
         .map(|info| info.name.clone())
         .collect();
     if running.is_empty() && unseen.is_empty() {
@@ -546,6 +557,32 @@ mod tests {
             BranchStatus::Discarded { reason: "x".into() },
         ] {
             assert!(!unsettled(&settled), "{settled:?}");
+        }
+    }
+
+    #[test]
+    fn a_cut_hold_wakes_only_for_children_still_waiting_for_their_parent() {
+        for owed in [
+            BranchStatus::Ready,
+            BranchStatus::NoChanges,
+            BranchStatus::Interrupted,
+            BranchStatus::BudgetExceeded {
+                limit: "max_usd".into(),
+            },
+            BranchStatus::Failed { reason: "x".into() },
+        ] {
+            assert!(awaits_parent(&owed), "{owed:?}");
+        }
+        for dealt_with in [
+            BranchStatus::Running,
+            BranchStatus::WaitingOnChildren,
+            BranchStatus::Merged {
+                target: "meta".into(),
+                commit: "abc".into(),
+            },
+            BranchStatus::Discarded { reason: "x".into() },
+        ] {
+            assert!(!awaits_parent(&dealt_with), "{dealt_with:?}");
         }
     }
 }

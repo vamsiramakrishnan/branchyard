@@ -567,6 +567,65 @@ fn a_cut_hold_wakes_a_branch_whose_children_settled_during_it() {
     );
 }
 
+/// A child the held turn dealt with during the hold (here discarded once
+/// it settled) is not news: the cut hold does not wake its parent for it.
+#[test]
+fn a_cut_hold_does_not_wake_for_children_dealt_with_during_it() {
+    let f = Fixture::new();
+    let slow = format!(
+        "case \"$prompt\" in *SLOW*) sleep 1;; esac\n{}",
+        result(0.01)
+    );
+    let first = TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        ..stand_in(&f, &slow)
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(first.clone())
+        .name("meta")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(first).unwrap();
+    delegate
+        .spawn(Spawn {
+            prompt: "SLOW".into(),
+            name: Some("kid".into()),
+            ..Spawn::default()
+        })
+        .unwrap();
+    let held = TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        budget: Budget::default().follow_up_grace(Duration::from_secs(1)),
+        ..stand_in(&f, &ended_with_no_follow_up(4))
+    };
+    std::thread::scope(|s| {
+        let turn = s.spawn(|| root.send("wait for kid", held).unwrap());
+        wait::until("kid to settle during meta's hold", || {
+            let info = f.yard.branch("kid").unwrap().info().clone();
+            matches!(info.status, BranchStatus::Ready | BranchStatus::NoChanges).then_some(())
+        });
+        assert_eq!(
+            f.yard.branch("meta").unwrap().info().status,
+            BranchStatus::Running
+        );
+        delegate.discard("kid", Some("seen")).unwrap();
+        turn.join().unwrap();
+    });
+    let info = f.yard.branch("meta").unwrap().info().clone();
+    assert_eq!(info.turns, 2);
+    assert_ne!(info.status, BranchStatus::WaitingOnChildren);
+    let events = f.yard.branch("meta").unwrap().events().unwrap();
+    assert!(
+        !events.iter().any(|e| matches!(&e.activity,
+            Activity::Delegation { outcome, .. } if outcome.contains("which its answer did not see"))),
+        "{events:?}"
+    );
+}
+
 /// The usage that crosses the cost limit arrives with the turn's end, in
 /// one `result`: the turn ends over budget, with no failed interrupt and
 /// no killed harness.
