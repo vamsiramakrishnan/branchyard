@@ -96,6 +96,12 @@
 //! the `result` of the cycle that ran it lists that uuid in
 //! `user_message_uuids`: that marks the task answered, whichever cycle it
 //! started or joined (`tests/fixtures/claude-code-2.1.293-hold-*.jsonl`).
+//! A task that ended before the turn's result holds it the same way until
+//! a result lists its notification: the CLI runs it in a cycle after the
+//! result, unless it joined the turn's own cycle at a tool boundary, whose
+//! result then lists it
+//! (`tests/fixtures/claude-code-2.1.293-hold-ended-task.jsonl`,
+//! `tests/fixtures/claude-code-2.1.293-ended-task-joined.jsonl`).
 //! An interrupt ends the hold and the turn keeps the outcome it was held
 //! with: the CLI's answer ends it when no cycle runs, else the result of
 //! the cycle it stopped does; the CLI agreeing to end its session ends it
@@ -208,8 +214,8 @@ pub struct ClaudeCode {
     /// open, and every cycle the CLI runs is the turn's, until they have
     /// finished and the cycle on their notification has its result.
     held: bool,
-    /// Background tasks that ended during the hold, in order, whose
-    /// notification no cycle's result has answered yet.
+    /// Background tasks that ended during the turn or its hold, in order,
+    /// whose notification no cycle's result has answered yet.
     ended: Vec<String>,
     /// The notifications the CLI echoed as `user` frames this turn: each
     /// message's uuid and the tasks it reports.
@@ -362,14 +368,20 @@ impl ClaudeCode {
             if std::mem::replace(&mut self.held, true) {
                 return Vec::new();
             }
-            return vec![Event::Warning {
-                message: format!(
+            let message = match self.background.is_empty() {
+                false => format!(
                     "Claude Code answered the turn with background tasks still running ({}); \
                      the turn is held open until they finish and Claude Code has answered \
                      their notification",
                     tasks(&self.background)
                 ),
-            }];
+                true => format!(
+                    "Claude Code answered the turn before answering the notification of \
+                     background tasks that ended ({}); the turn is held open until it has",
+                    self.ended.join(", ")
+                ),
+            };
+            return vec![Event::Warning { message }];
         }
         let Some((outcome, warning)) = self.turn_done.take() else {
             return Vec::new();
@@ -405,7 +417,8 @@ impl ClaudeCode {
 
     /// Whether the turn, which the CLI is done with, is held open for its
     /// background work: while background tasks run, or a cycle on the
-    /// notification of one that ended is still to come. Not once
+    /// notification of one that ended, during the hold or before the
+    /// turn's result, is still to come. Not once
     /// Branchyard has asked for an interrupt (a cancel, or the turn's
     /// limits), nor once the CLI agreed to end its session, nor when the
     /// turn hit a limit of the CLI's own or was interrupted.
@@ -429,11 +442,14 @@ impl ClaudeCode {
     }
 
     /// A background task ended, as `task_updated` or `task_notification`
-    /// reports it: during the hold, the CLI runs a cycle on its
-    /// notification, which the turn waits for.
+    /// reports it: the CLI runs its notification, in the cycle running
+    /// then if it reaches a tool boundary, else in a cycle of its own
+    /// after, which the turn waits for, even when the task ended before
+    /// the turn's result.
     fn task_ended(&mut self, task_id: &str) {
         let known = self.ended.iter().any(|id| id == task_id) || self.answered.contains(task_id);
-        if self.held && !known && self.background.iter().any(|t| t.task_id == task_id) {
+        let running = self.background.iter().any(|t| t.task_id == task_id);
+        if self.turns.active.is_some() && !known && running {
             self.ended.push(task_id.to_owned());
         }
     }
@@ -954,18 +970,16 @@ impl ClaudeCode {
     /// CLI's echo of each message it lists reported. A listed message that
     /// is neither ours nor an echoed notification answers the task that
     /// ended first, for a CLI that does not echo them; a result naming no
-    /// message during the hold, every task that ended.
+    /// message, every task that ended, as nothing tells which it answered.
     fn notifications_answered(&mut self, answered: Option<&[&str]>) {
         let Some(answered) = answered else {
-            if self.held {
-                self.answered.extend(self.ended.drain(..));
-            }
+            self.answered.extend(self.ended.drain(..));
             return;
         };
         for uuid in answered {
             let tasks = match self.notifications.remove(*uuid) {
                 Some(tasks) => tasks,
-                None if self.held && !self.sent.contains(*uuid) && !self.ended.is_empty() => {
+                None if !self.sent.contains(*uuid) && !self.ended.is_empty() => {
                     vec![self.ended[0].clone()]
                 }
                 None => continue,

@@ -222,6 +222,82 @@ echo '{{"type":"assistant","message":{{"id":"m2","content":[{{"type":"text","tex
     assert!(check_ended < ended);
 }
 
+/// `result` answering the messages whose quoted uuids the shell variable
+/// `answers` lists, as Claude Code 2.1.293 names them.
+fn answering(result: String) -> String {
+    result.replace(
+        r#""is_error":false,"#,
+        r#""is_error":false,"user_message_uuids":['"$answers"'],"#,
+    )
+}
+
+/// A background command that crashed before the turn's result, as one
+/// did in round 5's dogfood battery: no task runs at the result, but
+/// Claude Code still runs a cycle on its notification after it. The turn
+/// is held for that cycle, whose text and cost are the turn's, instead of
+/// the session's close interrupting it unseen.
+#[test]
+fn a_turn_is_held_for_a_task_that_ended_before_its_result() {
+    let f = Fixture::new();
+    let turn = format!(
+        r#"answers="\"$(printf '%s' "$prompt" | sed -n 's/.*"uuid":"\([^"]*\)".*/\1/p')\""
+echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[{{"task_id":"c1","task_type":"local_bash","description":"orchestrate"}}]}}'
+echo '{{"type":"system","subtype":"task_notification","task_id":"c1","status":"failed"}}'
+echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[]}}'
+echo '{{"type":"assistant","message":{{"id":"m1","content":[{{"type":"text","text":"I will be notified when it completes."}}]}}}}'
+{first}
+sleep 0.5
+echo '{{"type":"user","uuid":"n1","message":{{"role":"user","content":"<task-notification><task-id>c1</task-id><status>failed</status></task-notification>"}}}}'
+echo '{{"type":"assistant","user_message_uuid":"n1","message":{{"id":"m2","content":[{{"type":"text","text":"The script crashed."}}]}}}}'
+answers='"n1"'
+{second}"#,
+        first = answering(result(0.01)),
+        second = answering(result(0.02)),
+    );
+    let branch = f
+        .yard
+        .task("go")
+        .options(stand_in(&f, &turn))
+        .name("crashed")
+        .run()
+        .unwrap();
+    assert_eq!(branch.info().status, BranchStatus::NoChanges);
+    let cost = branch.info().cost_usd.unwrap();
+    assert!((cost - 0.03).abs() < 1e-9, "the follow-up's cost: {cost}");
+    let events = branch.events().unwrap();
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match &e.activity {
+            Activity::Harness(branchyard::Event::MessageDelta { turn: 1, text }) => {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "I will be notified when it completes.",
+            "\n\nThe script crashed."
+        ],
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            e.activity,
+            Activity::Harness(branchyard::Event::ProtocolViolation { .. })
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !harness_warnings(&f, "crashed")
+            .iter()
+            .any(|w| w.contains("a turn of its own")),
+        "{:?}",
+        harness_warnings(&f, "crashed")
+    );
+}
+
 /// The turn's limits bound the hold: at `max_duration` the engine
 /// interrupts, Claude Code answers, and the turn ends with the outcome it
 /// was held with, not over its limit, with a warning naming the task still

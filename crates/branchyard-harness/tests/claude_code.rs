@@ -1694,6 +1694,12 @@ const HOLD_PROMPT: &str = "Use the Bash tool with run_in_background set to true 
 /// where it ends the session, which would end a turn still held: the
 /// turn's events.
 fn replay_hold(name: &str) -> Vec<Event> {
+    replay_until_end_session(name, HOLD_PROMPT)
+}
+
+/// Replay a reconstructed 2.1.293 session up to where it ends the
+/// session: the turn's events.
+fn replay_until_end_session(name: &str, prompt: &str) -> Vec<Event> {
     let mut recorded = fixture_2_1_293(name);
     let end_session = recorded.rows.len() - 2;
     assert_eq!(
@@ -1706,7 +1712,7 @@ fn replay_hold(name: &str) -> Vec<Event> {
         .alias("/request_id")
         .alias("/uuid")
         .answer_permissions(PermissionDecision::Allow)
-        .prompt(HOLD_PROMPT)
+        .prompt(prompt)
         .run(&mut driver, &opened);
     assert!(replayed.unsent.is_empty(), "{:?}", replayed.unsent);
     let events = replayed.events;
@@ -1769,6 +1775,63 @@ fn a_notification_joining_a_held_cycle_is_answered_by_its_result() {
     assert!(
         matches!(&events[ended - 1], Event::UsageObserved { usage, .. } if usage.cost_usd == Some(0.00342817)),
         "ended at the joined cycle's result: {events:?}"
+    );
+}
+
+/// A background command that ends before the turn's result, with no tool
+/// boundary after for its notification to join, is answered by a cycle the
+/// CLI runs after the result: the turn is held for that cycle, whose text
+/// and cost are the turn's, though no task runs at the result.
+#[test]
+fn a_task_ending_before_the_result_holds_the_turn_for_its_follow_up() {
+    let events = replay_until_end_session("hold-ended-task", BACKGROUND_PROMPT);
+    let (texts, ends) = texts_and_end(&events);
+    assert_eq!(
+        texts,
+        [
+            "started",
+            "\n\nThe background command finished. Checking what it printed.",
+            "It printed done."
+        ],
+        "{events:?}"
+    );
+    assert_eq!(ends, [&TurnOutcome::Completed]);
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Warning { message }
+            if message.contains("held open") && message.contains("bs73ajn7n"))),
+        "{events:?}"
+    );
+    let ended = events
+        .iter()
+        .position(|e| matches!(e, Event::TurnEnded { .. }))
+        .unwrap();
+    assert!(
+        matches!(&events[ended - 1], Event::UsageObserved { turn: Some(1), usage } if usage.cost_usd == Some(0.00342817)),
+        "ended at the follow-up's result: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::Warning { message } if message.contains("of its own"))),
+        "{events:?}"
+    );
+}
+
+/// A background command that ends before a tool boundary of the turn's
+/// own cycle has its notification joined to that cycle, whose result
+/// lists it: the turn ends at that result, not held for a cycle that
+/// never comes.
+#[test]
+fn a_task_answered_within_the_turns_cycle_does_not_hold_it() {
+    let events = replay_until_end_session("ended-task-joined", BACKGROUND_PROMPT);
+    let (texts, ends) = texts_and_end(&events);
+    assert_eq!(texts, ["It printed done."], "{events:?}");
+    assert_eq!(ends, [&TurnOutcome::Completed]);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::Warning { message } if message.contains("held open"))),
+        "{events:?}"
     );
 }
 
