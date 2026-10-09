@@ -126,11 +126,14 @@ class SteerRefusedError(BranchyardError):
 class CheckFailedError(BranchyardError):
     """A branch's check failed on its merge; nothing was integrated.
 
-    When siblings left out of the integration share the check (a parent's
-    whole-suite check passes only with all of them), `integrate_together`
-    names the branches to integrate at once, `integrate(*e.integrate_together)`,
-    and `unsettled` those of them still to wait for. Both are empty
-    otherwise: the check failed on its own.
+    When siblings left out of the integration share the check and could
+    change the result (a parent's whole-suite check may pass only with all
+    of them, and a branch integrated failed its `by check` alone too),
+    `integrate_together` names the branches to integrate at once,
+    `integrate(*e.integrate_together)`, and `unsettled` those of them still
+    to wait for. Both are empty otherwise: the check failed on its own, and
+    when siblings share it, `own_work` names the branches integrated, on
+    whose own work it failed.
 
     `checks` names every check of the branches integrated, in the order
     they ran, as dicts `{check, branches, outcome}`: `outcome` is "passed",
@@ -149,6 +152,10 @@ class CheckFailedError(BranchyardError):
     @property
     def unsettled(self) -> List[str]:
         return list((self.detail or {}).get("unsettled", []))
+
+    @property
+    def own_work(self) -> List[str]:
+        return list((self.detail or {}).get("own_work", []))
 
 
 class CheckTimedOutError(BranchyardError):
@@ -286,7 +293,8 @@ class Inspection:
     reserving_children: Optional[int] = None
     settled_children_usd: Optional[float] = None
     # What its children may run, as harness= names it: the envelope's list,
-    # or its own profile when that list is empty ("its own only").
+    # or its own profile when that list is empty ("its own only"). The
+    # envelope's "harnesses" here is the same list.
     allowed_harnesses: Optional[List[str]] = None
     # The check its merge must pass, whether it is its parent's, and the
     # siblings sharing it, which are integrated together with it.
@@ -729,8 +737,9 @@ def check(branch: Optional[str] = None) -> CheckReport:
     """Run a branch's check (its own, or the one it inherited) on its
     current work the way integrate would, and integrate nothing: your own
     when `branch` is None, or a descendant's. Its files as they are,
-    uncommitted ones included, are merged into its parent's branch in a
-    private worktree. A check that fails is a CheckReport whose `passed` is
+    uncommitted ones included, are merged into its parent's work (its
+    uncommitted files too, as integrating snapshots them) in a private
+    worktree. A check that fails is a CheckReport whose `passed` is
     False, not an error. Run it on yourself before you finish."""
     value = _run(["check"] + ([branch] if branch else []), result_on_failure=True)
     report = _make(CheckReport, value)

@@ -2469,7 +2469,7 @@ impl GraphBackend for Postgres {
     fn settle_if(
         &self,
         record: &Record,
-        event: &RecordedEvent,
+        events: &[RecordedEvent],
         from: fn(&BranchStatus) -> bool,
     ) -> Result<bool, Error> {
         let name = &record.info.name;
@@ -2481,7 +2481,9 @@ impl GraphBackend for Postgres {
                 return Ok(false);
             }
             self.put(tx, record)?;
-            self.insert_event(tx, name, event)?;
+            for event in events {
+                self.insert_event(tx, name, event)?;
+            }
             Ok(true)
         })
     }

@@ -81,22 +81,41 @@ pub(crate) fn unsettled(status: &BranchStatus) -> bool {
     )
 }
 
+/// Whether a held-on descendant that settled in `status` still waits for
+/// its parent: one already merged or discarded was dealt with during the
+/// hold, so a cut hold does not wake its parent for it.
+pub(crate) fn awaits_parent(status: &BranchStatus) -> bool {
+    !unsettled(status)
+        && !matches!(
+            status,
+            BranchStatus::Merged { .. } | BranchStatus::Discarded { .. }
+        )
+}
+
 pub(crate) fn is_parked(status: &BranchStatus) -> bool {
     *status == BranchStatus::WaitingOnChildren
 }
 
 /// After a turn of `record` ended: park it when it may delegate, may be
-/// woken, ended `ready` or `no_changes`, and a descendant still runs.
+/// woken, ended `ready`, `no_changes` or `merged` (a turn that changed
+/// nothing on a merged branch), and a descendant still runs. A merged
+/// branch is merged again when it settles: its status is restored from
+/// [`Parked::ended`], and its wake keeps it ([`crate::run`]).
 /// `budget` is the turn's own, stored for a wake started elsewhere.
+/// `held_on` are the descendants the turn's latest answer cannot have
+/// seen settle, if the engine cut its hold (see `Driven::held_on`): it
+/// parks for those that settled and still wait for it ([`awaits_parent`]),
+/// and the look after the turn wakes it at once if nothing still runs.
 pub(crate) fn park(
     yard: &Yard,
     record: &mut Record,
     recorder: &mut Recorder,
     budget: &Budget,
+    held_on: &[String],
 ) -> Result<(), Error> {
     if !matches!(
         record.info.status,
-        BranchStatus::Ready | BranchStatus::NoChanges
+        BranchStatus::Ready | BranchStatus::NoChanges | BranchStatus::Merged { .. }
     ) {
         return Ok(());
     }
@@ -108,14 +127,21 @@ pub(crate) fn park(
         return Ok(());
     }
     let store = yard.store();
-    let on: Vec<String> = delegation::descendants(&store, &record.info.name)?
-        .into_iter()
+    let below = delegation::descendants(&store, &record.info.name)?;
+    let running: Vec<String> = below
+        .iter()
         .filter(|info| unsettled(&info.status))
-        .map(|info| info.name)
+        .map(|info| info.name.clone())
         .collect();
-    if on.is_empty() {
+    let unseen: Vec<String> = below
+        .iter()
+        .filter(|info| awaits_parent(&info.status) && held_on.contains(&info.name))
+        .map(|info| info.name.clone())
+        .collect();
+    if running.is_empty() && unseen.is_empty() {
         return Ok(());
     }
+    let on: Vec<String> = running.iter().chain(&unseen).cloned().collect();
     if record.wakes >= max_wakes {
         recorder.record(Activity::Warning(format!(
             "its turn ended while {} still run, but it was woken {} times in a row, its \
@@ -129,12 +155,20 @@ pub(crate) fn park(
     recorder.record(Activity::Delegation {
         tool: "wait".into(),
         branch: record.info.name.clone(),
-        outcome: format!(
-            "its turn ended while {} still run; it waits on them, and its next turn starts \
-             when they settle (automatic wake {} of at most {max_wakes})",
-            on.join(", "),
-            record.wakes + 1
-        ),
+        outcome: match running.is_empty() {
+            false => format!(
+                "its turn ended while {} still run; it waits on them, and its next turn starts \
+                 when they settle (automatic wake {} of at most {max_wakes})",
+                on.join(", "),
+                record.wakes + 1
+            ),
+            true => format!(
+                "its turn's hold was cut after {} settled, which its answer did not see; its \
+                 next turn starts with what they did (automatic wake {} of at most {max_wakes})",
+                on.join(", "),
+                record.wakes + 1
+            ),
+        },
         refused: false,
     })?;
     record.parked = Some(Parked {
@@ -337,18 +371,21 @@ fn unpark(
     settled.info.status = parked.ended.clone();
     settled.parked = None;
     settled.wakes = 0;
-    let event = RecordedEvent {
-        at_ms: now_ms(),
-        activity: Activity::Status(settled.info.status.clone()),
-    };
-    if store.graph().settle_if(&settled, &event, is_parked)? {
+    // The warning first, with the status it explains, in one write: whoever
+    // sees the status sees why.
+    let at_ms = now_ms();
+    let events = [
+        RecordedEvent {
+            at_ms,
+            activity: Activity::Warning(why),
+        },
+        RecordedEvent {
+            at_ms,
+            activity: Activity::Status(settled.info.status.clone()),
+        },
+    ];
+    if store.graph().settle_if(&settled, &events, is_parked)? {
         store.notify();
-        if let Ok(mut recorder) = Recorder::open(store, &record.info.name, None) {
-            best_effort(
-                "record the activity",
-                recorder.record(Activity::Warning(why)),
-            );
-        }
         crate::graph::settled(yard, &record.info.name, options);
     }
     Ok(())
@@ -420,6 +457,18 @@ pub(crate) fn summary(
             };
             text.push_str(&format!("  last message: {}", quoted.replace('\n', "\n  ")));
             text.push('\n');
+        }
+        let cut = delegation::background_at_end(&events);
+        if !cut.is_empty() {
+            let tasks: Vec<String> = cut
+                .iter()
+                .map(|t| format!("{:?} ({})", t.description, t.task_id))
+                .collect();
+            text.push_str(&format!(
+                "  warning: its turn ended with background tasks still running, which ending its \
+                 session stopped: {}\n",
+                tasks.join(", ")
+            ));
         }
     }
     if !others.is_empty() {
@@ -508,6 +557,32 @@ mod tests {
             BranchStatus::Discarded { reason: "x".into() },
         ] {
             assert!(!unsettled(&settled), "{settled:?}");
+        }
+    }
+
+    #[test]
+    fn a_cut_hold_wakes_only_for_children_still_waiting_for_their_parent() {
+        for owed in [
+            BranchStatus::Ready,
+            BranchStatus::NoChanges,
+            BranchStatus::Interrupted,
+            BranchStatus::BudgetExceeded {
+                limit: "max_usd".into(),
+            },
+            BranchStatus::Failed { reason: "x".into() },
+        ] {
+            assert!(awaits_parent(&owed), "{owed:?}");
+        }
+        for dealt_with in [
+            BranchStatus::Running,
+            BranchStatus::WaitingOnChildren,
+            BranchStatus::Merged {
+                target: "meta".into(),
+                commit: "abc".into(),
+            },
+            BranchStatus::Discarded { reason: "x".into() },
+        ] {
+            assert!(!awaits_parent(&dealt_with), "{dealt_with:?}");
         }
     }
 }

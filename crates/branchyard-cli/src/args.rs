@@ -783,7 +783,13 @@ see docs/fleet.md.";
 const SEND_EXAMPLES: &str = "\
 Examples:
   by send fix-the-flaky-test \"now add a regression test\"
-  by send fix-the-flaky-test \"also cover Windows\" --steer";
+  by send fix-the-flaky-test \"also cover Windows\" --steer
+  by send fix-the-flaky-test --prompt-file review.md     # a long prompt, from a file (- for stdin)";
+
+const STEER_EXAMPLES: &str = "\
+Examples:
+  by steer fix-the-flaky-test \"also cover Windows\"
+  by steer fix-the-flaky-test --prompt-file note.md     # from a file (- for stdin)";
 
 const REVIEW_EXAMPLES: &str = "\
 Opens the branch's diff in your editor. Write a comment on its own line
@@ -876,9 +882,10 @@ array alone. Each edit is an object tagged by \"kind\":
 
   {\"kind\": \"spawn\", \"prompt\": \"...\", ...}   a new child; it takes what by spawn
       does, by the MCP tool's names: name, harness, base, budget {max_usd,
-      max_turns, max_minutes}, check [argv], max_depth, max_children,
-      harnesses [ids], deny [tools], seat, depends_on [names], after
-      (settled or integrated), bindings [{scratch, access}], connectors
+      max_turns, max_minutes}, check [\"cmd\", \"arg\", ...] (a literal argv
+      array, not a string to shell-split like by spawn --check), max_depth,
+      max_children, harnesses [ids], deny [tools], seat, depends_on [names],
+      after (settled or integrated), bindings [{scratch, access}], connectors
       [grants], plan, model
   {\"kind\": \"add_dependency\", \"dependent\": \"B\", \"prerequisite\": \"A\",
    \"after\": \"settled\"}   B waits for A; B must not have started
@@ -1163,18 +1170,22 @@ pub enum Command {
         branch: String,
         /// The next prompt; quote it
         #[arg(
-            required_unless_present = "retry",
+            required_unless_present_any = ["retry", "prompt_file"],
             default_value = "",
             hide_default_value = true
         )]
         prompt: String,
+        /// Read the prompt from this file instead, `-` for standard input: for a long prompt,
+        /// or one a shell would mangle
+        #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
+        prompt_file: Option<String>,
         /// Add the prompt to the branch's running turn without interrupting it, instead of
         /// starting a new turn; refused when no turn runs or the harness cannot take it
         #[arg(long)]
         steer: bool,
         /// Submit again the prompt of the branch's last turn that was cut off when the engine
         /// running it stopped (the recovery note names it), instead of a new prompt
-        #[arg(long, conflicts_with_all = ["steer", "prompt"])]
+        #[arg(long, conflicts_with_all = ["steer", "prompt", "prompt_file"])]
         retry: bool,
         /// Wait for the turn to end and show it (outside a harness, send always waits)
         #[arg(long)]
@@ -1184,6 +1195,25 @@ pub enum Command {
         json: bool,
         #[command(flatten)]
         task: Checked<SendFlags>,
+    },
+    /// Add to a branch's running turn without interrupting it, as `by send --steer` does
+    #[command(display_order = 102, after_help = STEER_EXAMPLES)]
+    Steer {
+        branch: String,
+        /// What to add; quote it
+        #[arg(
+            required_unless_present = "prompt_file",
+            default_value = "",
+            hide_default_value = true
+        )]
+        prompt: String,
+        /// Read it from this file instead, `-` for standard input: for a long text, or one a
+        /// shell would mangle
+        #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
+        prompt_file: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Comment on a branch's diff in your editor, then send every comment as one prompt
     #[command(display_order = 111, after_help = REVIEW_EXAMPLES)]
@@ -1619,7 +1649,8 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Wait for delegated branches to settle: all of them, or the first with --any
+    /// Wait for delegated branches to settle: all of them, or the first with --any. Each is
+    /// printed as it settles (with --json, as a JSON line on stderr), then the result
     #[command(display_order = 303)]
     Wait {
         /// Default, inside a harness: its children still running
@@ -1631,7 +1662,9 @@ pub enum Command {
         /// Return when all of them have settled (the default)
         #[arg(long)]
         all: bool,
-        /// Give up after S seconds; the result says timed_out, and by exits 1
+        /// Give up after S seconds; the result says timed_out, and by exits 1. Keep S under any
+        /// limit of your own (a shell `timeout`, a tool call's time limit): a wait stopped from
+        /// outside prints no result, only the branches that settled before
         #[arg(long, value_name = "S")]
         timeout: Option<f64>,
         /// Print JSON
@@ -3416,14 +3449,14 @@ pub struct RunFlags {
     perms: Perms,
     /// Tools the harness is denied outright, before any permission answer, --yes included; a
     /// trailing * matches a prefix. Stored with the branch: later sends and every child it
-    /// delegates to keep them, as with by spawn --deny
+    /// delegates to keep them, as with by spawn --deny. Repeatable
     #[arg(
         long,
         value_name = "TOOL,TOOL,...",
         value_parser = harness_list,
         help_heading = "Permissions"
     )]
-    deny: Option<List>,
+    deny: Vec<List>,
     #[command(flatten)]
     launch: Launch,
     #[command(flatten)]
@@ -3453,7 +3486,7 @@ impl Flags for RunFlags {
         };
         self.limits.apply(&mut task);
         self.perms.apply(&mut task);
-        task.deny = self.deny.map(|list| list.0).unwrap_or_default();
+        task.deny = self.deny.into_iter().flat_map(|list| list.0).collect();
         self.launch.apply(&mut task)?;
         self.delegation.apply(&mut task);
         self.provision.apply(&mut task)?;
@@ -3569,7 +3602,7 @@ impl Flags for FanFlags {
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: self.plan_goal,
-            deny: None,
+            deny: Vec::new(),
         }
         .check()
     }
@@ -3822,7 +3855,7 @@ impl Flags for MapFlags {
             delegation: Delegation::default(),
             provision: self.provision,
             plan_goal: PlanGoal::default(),
-            deny: None,
+            deny: Vec::new(),
         }
         .check()
     }
@@ -3908,7 +3941,7 @@ impl Flags for ForkFlags {
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: PlanGoal::default(),
-            deny: None,
+            deny: Vec::new(),
         }
         .check()
     }
@@ -3951,7 +3984,7 @@ impl Flags for ReincarnateFlags {
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: PlanGoal::default(),
-            deny: None,
+            deny: Vec::new(),
         }
         .check()
     }
@@ -4014,9 +4047,9 @@ pub struct SpawnGraph {
     /// the parent's)
     #[arg(long, value_name = "ID,ID,...", value_parser = harness_list)]
     harnesses: Option<List>,
-    /// Tools the child is denied outright; a trailing * matches a prefix
+    /// Tools the child is denied outright; a trailing * matches a prefix. Repeatable
     #[arg(long, value_name = "TOOL,TOOL,...", value_parser = harness_list)]
-    deny: Option<List>,
+    deny: Vec<List>,
     /// Siblings the child waits for: it is created waiting and starts once they have settled
     #[arg(long, value_name = "BRANCH,BRANCH,...", value_parser = harness_list)]
     depends_on: Option<List>,
@@ -4056,7 +4089,12 @@ impl Flags for SpawnFlags {
             max_depth: self.graph.max_depth,
             max_children: self.graph.max_children,
             harnesses: self.graph.harnesses.map(|list| list.0),
-            deny: self.graph.deny.map(|list| list.0).unwrap_or_default(),
+            deny: self
+                .graph
+                .deny
+                .into_iter()
+                .flat_map(|list| list.0)
+                .collect(),
             seat: self.seat,
             depends_on: self.graph.depends_on.map(|list| list.0).unwrap_or_default(),
             after: self.graph.after.map(Into::into).unwrap_or_default(),
@@ -5281,6 +5319,39 @@ mod tests {
     }
 
     #[test]
+    fn send_and_steer_take_a_prompt_file() {
+        let Command::Send {
+            steer, prompt_file, ..
+        } = parse_str("send b --steer --prompt-file note.md").unwrap()
+        else {
+            panic!("not send")
+        };
+        assert!(steer);
+        assert_eq!(prompt_file.as_deref(), Some("note.md"));
+        let Command::Send { prompt_file, .. } = parse_str("send b --prompt-file -").unwrap() else {
+            panic!("not send")
+        };
+        assert_eq!(prompt_file.as_deref(), Some("-"));
+        assert!(err("send b go --prompt-file f").contains("cannot be used with"));
+        assert!(err("send b --retry --prompt-file f").contains("cannot be used with"));
+        assert_eq!(
+            parse_str("steer b also --json").unwrap(),
+            Command::Steer {
+                branch: "b".into(),
+                prompt: "also".into(),
+                prompt_file: None,
+                json: true
+            }
+        );
+        let Command::Steer { prompt_file, .. } = parse_str("steer b --prompt-file f").unwrap()
+        else {
+            panic!("not steer")
+        };
+        assert_eq!(prompt_file.as_deref(), Some("f"));
+        assert_eq!(kind("steer b"), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
     fn mcp_needs_a_root_and_a_branch() {
         assert_eq!(
             parse_str("mcp --root /r --branch b").unwrap(),
@@ -5291,6 +5362,23 @@ mod tests {
         );
         assert_eq!(kind("mcp --root /r"), ErrorKind::MissingRequiredArgument);
         assert!(err("mcp --root /r").contains("--branch <NAME>"));
+    }
+
+    /// `--deny` takes a comma list and repeats, on every command that has
+    /// it; a repeat failed with "cannot be used multiple times".
+    #[test]
+    fn deny_repeats_as_well_as_a_comma_list() {
+        let Command::Spawn { spawn, .. } =
+            parse_str("spawn go --parent p --deny Edit --deny Write,Bash").unwrap()
+        else {
+            panic!("not spawn")
+        };
+        assert_eq!(spawn.deny, ["Edit", "Write", "Bash"]);
+        assert_eq!(
+            task("run go --deny Edit --deny Write,Bash").deny,
+            ["Edit", "Write", "Bash"]
+        );
+        assert_eq!(task("run go --deny Edit,Write").deny, ["Edit", "Write"]);
     }
 
     #[test]
@@ -5344,6 +5432,7 @@ mod tests {
         let Command::Send {
             branch,
             prompt,
+            prompt_file,
             task,
             steer,
             retry,
@@ -5364,7 +5453,7 @@ mod tests {
                 ..TaskArgs::default()
             }
         );
-        assert!(!steer && !retry && !wait && !json);
+        assert!(!steer && !retry && !wait && !json && prompt_file.is_none());
         // --retry takes the cut-off turn's prompt, so none is given with it.
         let Command::Send { retry, prompt, .. } = parse_str("send flaky --retry").unwrap() else {
             panic!("not send")

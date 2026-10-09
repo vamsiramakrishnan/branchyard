@@ -16,9 +16,9 @@
 //! `ready` children whenever the parent's branch moves, however it moved
 //! (an integration, a merge its harness ran itself, a turn's checkpoint).
 //!
-//! [`check_work`] runs a branch's check the way [`merge_many`] would, on
-//! its uncommitted work merged into its parent's branch, and moves nothing:
-//! what `by check` reports.
+//! [`check_work`] runs a branch's check the way integrating it would, on
+//! its uncommitted work merged into its parent's (uncommitted work
+//! included), and moves nothing: what `by check` reports.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -280,10 +280,17 @@ pub(crate) fn merge_many(yard: &Yard, names: &[String], target: &str) -> Result<
 
 /// Run `record`'s check (its own or inherited) on its current work as
 /// [`merge_many`] would run it, integrating nothing: the worktree's files
-/// as they are, committed nowhere, merged into its parent's git branch in
-/// a temporary worktree. The git lock is held to create and remove that
-/// worktree, not while the check runs.
-pub(crate) fn check_work(yard: &Yard, record: &Record) -> Result<CheckReport, Error> {
+/// as they are, committed nowhere, merged in a temporary worktree into its
+/// parent's work as integrating would snapshot it ([`parent_work`]). The
+/// git lock is held to create and remove that worktree, not while the
+/// check runs. Once `abandoned` says nobody waits for the report, the
+/// check is killed and this fails. Returns the report and the commit the
+/// work was merged into.
+pub(crate) fn check_work(
+    yard: &Yard,
+    record: &Record,
+    abandoned: &dyn Fn() -> bool,
+) -> Result<(CheckReport, String), Error> {
     let info = &record.info;
     let branch = names::validate(&info.name)?;
     let workspace = yard.repo.workspace(&branch).map_err(git::error)?;
@@ -307,9 +314,7 @@ pub(crate) fn check_work(yard: &Yard, record: &Record) -> Result<CheckReport, Er
     let (target, onto) = match &parent {
         Some(parent) => {
             let target = parent.info.git_branch.clone();
-            let onto = git::local_branch(&yard.root, &target)?
-                .ok_or_else(|| Error::Git(format!("{target} is missing")))?;
-            (Some(target), onto)
+            (Some(target), parent_work(yard, parent)?)
         }
         None => (None, work.clone()),
     };
@@ -330,14 +335,14 @@ pub(crate) fn check_work(yard: &Yard, record: &Record) -> Result<CheckReport, Er
             &branch,
             &Commit(work),
             target.as_deref().unwrap_or(&info.git_branch),
-            &Commit(onto),
+            &Commit(onto.clone()),
         )
     };
     let merged = match merged {
         Ok(merged) => merged,
         Err(IntegrationError::Conflict { files }) => {
             report.conflicts = files;
-            return Ok(report);
+            return Ok((report, onto));
         }
         Err(error) => {
             return Err(ops::integration_error(
@@ -349,12 +354,15 @@ pub(crate) fn check_work(yard: &Yard, record: &Record) -> Result<CheckReport, Er
     let Some(argv) = record.check.clone() else {
         let _lock = git::lock();
         drop(merged);
-        return Ok(report);
+        return Ok((report, onto));
     };
-    let verified = merged.check(&Check {
-        argv,
-        timeout: CHECK_TIMEOUT,
-    });
+    let verified = merged.check_until(
+        &Check {
+            argv,
+            timeout: CHECK_TIMEOUT,
+        },
+        abandoned,
+    );
     report.checked = Some(merged.commit().0.clone());
     {
         let _lock = git::lock();
@@ -373,6 +381,12 @@ pub(crate) fn check_work(yard: &Yard, record: &Record) -> Result<CheckReport, Er
             report.outcome = CheckVerdict::NotStarted;
             report.output_tail = error.to_string();
         }
+        Err(IntegrationError::CheckAbandoned) => {
+            return Err(Error::State(format!(
+                "{}'s check was stopped: its caller disconnected",
+                info.name
+            )))
+        }
         Err(error) => {
             return Err(ops::integration_error(
                 error,
@@ -380,7 +394,30 @@ pub(crate) fn check_work(yard: &Yard, record: &Record) -> Result<CheckReport, Er
             ))
         }
     }
-    Ok(report)
+    Ok((report, onto))
+}
+
+/// What integrating into `parent` merges into: the files of its worktree
+/// as they are, minus its excluded files, as a commit made nowhere, as
+/// integrating snapshots them first; its git branch's head when it has no
+/// worktree.
+fn parent_work(yard: &Yard, parent: &Record) -> Result<String, Error> {
+    let target = &parent.info.git_branch;
+    let workspace = match names::validate(&parent.info.name) {
+        Ok(branch) => yard.repo.workspace(&branch).map_err(git::error)?,
+        Err(_) => None,
+    };
+    match workspace.filter(|w| w.path.exists()) {
+        Some(workspace) => Ok(workspace
+            .excluding(crate::workspace::excluded(parent))
+            .working_commit(&format!(
+                "{target}: work integrated into, checked by by check"
+            ))
+            .map_err(git::error)?
+            .0),
+        None => git::local_branch(&yard.root, target)?
+            .ok_or_else(|| Error::Git(format!("{target} is missing"))),
+    }
 }
 
 /// Each check in `owners`, with its branches: those before `stopped`
@@ -448,6 +485,7 @@ fn many_error(
                 output_tail,
                 checks: verdicts(owners, index, CheckVerdict::Failed),
                 shared: None,
+                own_work: Vec::new(),
             },
             IntegrationError::CheckTimedOut {
                 timeout,

@@ -8,6 +8,13 @@
 //!   descendant that stays in the group. `teardown` names them first.
 //! - The process's environment is exactly [`ExecSpec::env`]: nothing is
 //!   inherited from this process.
+//! - With [`LocalProvider::spawn_tied`] (and `spawn_confined_tied`), on
+//!   Linux, the launched process is killed (SIGKILL) when the thread that
+//!   spawned it exits, as it does when this process dies, however it dies
+//!   (`PR_SET_PDEATHSIG`). Only that process: the rest of its group is
+//!   what [`Process::teardown`] reaches, and nothing does once this
+//!   process is gone. A harness so killed stops its model calls; a
+//!   command it left running in its group outlives it.
 //!
 //! - With [`LocalProvider::spawn_confined`] (and `exec_confined`), on Linux
 //!   where unprivileged user and network namespaces are allowed, the
@@ -90,15 +97,41 @@ impl LocalProvider {
     /// `127.0.0.1:port` inside it: Linux only, where unprivileged user and
     /// network namespaces are allowed ([`LocalProvider::confinement`]).
     pub fn spawn_confined(spec: &ExecSpec, port: u16) -> io::Result<(LocalProcess, TcpListener)> {
+        LocalProvider::confined(spec, port, false)
+    }
+
+    /// Like [`LocalProvider::spawn`], but on Linux the process is killed
+    /// when the thread that calls this exits, as it does when this process
+    /// dies (see the module documentation): keep it on that thread. Not
+    /// for a process meant to outlive its caller.
+    pub fn spawn_tied(spec: &ExecSpec) -> io::Result<LocalProcess> {
+        let mut command = LocalProvider::command(spec)?;
+        tie(&mut command);
+        LocalProcess::new(command.spawn()?)
+    }
+
+    /// [`LocalProvider::spawn_confined`], tied to the calling thread as
+    /// [`LocalProvider::spawn_tied`] is.
+    pub fn spawn_confined_tied(
+        spec: &ExecSpec,
+        port: u16,
+    ) -> io::Result<(LocalProcess, TcpListener)> {
+        LocalProvider::confined(spec, port, true)
+    }
+
+    fn confined(spec: &ExecSpec, port: u16, tied: bool) -> io::Result<(LocalProcess, TcpListener)> {
         #[cfg(target_os = "linux")]
         {
             let mut command = LocalProvider::command(spec)?;
+            if tied {
+                tie(&mut command);
+            }
             let (child, listener) = crate::netns::spawn(&mut command, port)?;
             Ok((LocalProcess::new(child)?, listener))
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (spec, port);
+            let _ = (spec, port, tied);
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 LocalProvider::confinement().unwrap_err(),
@@ -430,6 +463,34 @@ fn group_members(pgid: u32) -> Vec<String> {
                 (group == pgid && !stat.starts_with('Z') && !name.is_empty()).then_some(name)
             })
             .collect()
+    }
+}
+
+/// Have the kernel SIGKILL the process `command` launches when the thread
+/// spawning it exits, as when this process dies (`PR_SET_PDEATHSIG`):
+/// Linux only; elsewhere nothing.
+fn tie(command: &mut Command) {
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::process::{getpid, getppid, set_parent_process_death_signal, Signal};
+        let parent = getpid();
+        // SAFETY: the hook makes only system calls; it allocates nothing
+        // and takes no lock, as code between fork and exec must not.
+        unsafe {
+            command.pre_exec(move || {
+                set_parent_process_death_signal(Some(Signal::KILL))?;
+                // A parent that died before the signal was set would never
+                // send it.
+                match getppid() == Some(parent) {
+                    true => Ok(()),
+                    false => Err(rustix::io::Errno::SRCH.into()),
+                }
+            });
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = command;
     }
 }
 

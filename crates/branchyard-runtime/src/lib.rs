@@ -331,6 +331,12 @@ impl Session {
     /// Open the driver, spawn the launch argument vector (no shell) as a
     /// local process in its own process group, and write the open frames.
     /// Does not wait for the handshake; see [`Session::wait_ready`].
+    ///
+    /// On Linux the harness is killed when the calling thread exits
+    /// ([`LocalProvider::spawn_tied`]), so a caller that dies mid-turn
+    /// does not leave it running on its own: keep the session on that
+    /// thread. [`Session::start_in`] (a sandbox, Agent Substrate) is not
+    /// tied: its process belongs to the provider, which stops it.
     pub fn start(
         driver: Box<dyn Driver>,
         open: Open,
@@ -338,13 +344,13 @@ impl Session {
         transcript: Option<&Path>,
     ) -> Result<Session, RuntimeError> {
         Session::launch(driver, open, env.resolve(), transcript, |spec| {
-            LocalProvider::spawn(spec).map(|p| Box::new(p) as Box<dyn Process>)
+            LocalProvider::spawn_tied(spec).map(|p| Box::new(p) as Box<dyn Process>)
         })
     }
 
     /// Like [`Session::start`], but confined to its own network namespace
     /// with one listener on `127.0.0.1:port` inside it, which is returned
-    /// for the caller to serve ([`LocalProvider::spawn_confined`]).
+    /// for the caller to serve ([`LocalProvider::spawn_confined_tied`]).
     pub fn start_confined(
         driver: Box<dyn Driver>,
         open: Open,
@@ -354,7 +360,7 @@ impl Session {
     ) -> Result<(Session, std::net::TcpListener), RuntimeError> {
         let mut listener = None;
         let session = Session::launch(driver, open, env.resolve(), transcript, |spec| {
-            let (process, bound) = LocalProvider::spawn_confined(spec, port)?;
+            let (process, bound) = LocalProvider::spawn_confined_tied(spec, port)?;
             listener = Some(bound);
             Ok(Box::new(process) as Box<dyn Process>)
         })?;
@@ -615,6 +621,37 @@ impl Session {
     /// The driver's capabilities before negotiation.
     pub fn capabilities(&self) -> Capabilities {
         self.driver.capabilities()
+    }
+
+    /// Whether the turn in flight is held open for the harness's
+    /// background tasks; see [`Driver::holding`].
+    pub fn holding(&self) -> bool {
+        self.driver.holding()
+    }
+
+    /// Whether the turn in flight is held open at all, including the wait
+    /// for the harness's answer to its tasks' notification; see
+    /// [`Driver::held`].
+    pub fn held(&self) -> bool {
+        self.driver.held()
+    }
+
+    /// Whether the held turn waits only for the harness to start a cycle
+    /// on its ended tasks' notification; see [`Driver::awaiting_follow_up`].
+    pub fn awaiting_follow_up(&self) -> bool {
+        self.driver.awaiting_follow_up()
+    }
+
+    /// How many cycles the harness answered during the turn's hold; see
+    /// [`Driver::held_answers`].
+    pub fn held_answers(&self) -> u32 {
+        self.driver.held_answers()
+    }
+
+    /// The outcome a held turn keeps when its hold is cut; see
+    /// [`Driver::held_outcome`].
+    pub fn held_outcome(&self) -> Option<TurnOutcome> {
+        self.driver.held_outcome()
     }
 
     /// The last few hundred bytes of the harness's stderr.

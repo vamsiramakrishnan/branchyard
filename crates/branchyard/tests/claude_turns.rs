@@ -2,8 +2,9 @@
 //! stand-in that prints the frames Claude Code 2.1.293 prints: how a
 //! session is closed, a cost limit crossed by the turn's last message, the
 //! cost of a turn while it runs, the spending limit the harness is given
-//! and stops at itself (none on the model gateway), and the harness's
-//! private temporary directory. No
+//! and stops at itself (none on the model gateway), the cost of a fresh
+//! session after spending, and the harness's private temporary
+//! directory. No
 //! model is called.
 
 #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
@@ -12,22 +13,34 @@ mod common;
 use std::os::unix::fs::PermissionsExt as _;
 use std::time::{Duration, Instant};
 
-use branchyard::{models, Activity, BranchStatus, Budget, Policy, Provisioning, TaskOptions};
+use branchyard::{
+    models, Activity, BranchStatus, Budget, Envelope, Policy, Provisioning, RecordedEvent, Spawn,
+    StallAction, TaskOptions,
+};
 use branchyard_testkit::wait;
-use common::Fixture;
+use common::{fake_agent, Fixture};
 use serde_json::json;
 
 /// Answers every control request it reads; `$1` is what it does once it
 /// has the prompt. Like Claude Code with a background task, it does not
-/// exit when its input closes, only when asked to end its session.
+/// exit when its input closes, only when asked to end its session. It
+/// continues the session `--resume` names, and otherwise starts a new one,
+/// numbered in the branch's temporary directory.
 const STAND_IN: &str = r#"
 reply() {
   id=$(printf '%s' "$1" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
   printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{}}}\n' "$id"
 }
+session=; previous=
+for a in "$@"; do [ "$previous" = --resume ] && session=$a; previous=$a; done
+if [ -z "$session" ]; then
+  n=$(( $(cat "$TMPDIR/sessions" 2>/dev/null || echo 0) + 1 ))
+  printf '%s' "$n" > "$TMPDIR/sessions"
+  session=stand-in-session-$n
+fi
 read -r line; reply "$line"
 read -r prompt
-echo '{"type":"system","subtype":"init","session_id":"stand-in-session"}'
+printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$session"
 echo '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour"}}'
 eval "$1"
 echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","task_type":"local_bash","description":"sleep"}]}'
@@ -43,11 +56,14 @@ exec sleep 30
 /// A turn's `result` after it spends `cost`. Like Claude Code, whose
 /// `total_cost_usd` is the session's across `--resume` (2.1.293 reported
 /// $0.0261, $0.0454 and $0.0649 for one session's three turns), it reports
-/// the session's running total, kept in the branch's temporary directory.
+/// the session's running total, kept in the branch's temporary directory
+/// for each session. A session that is not resumed (no `--resume`) starts
+/// its total again; one resumed continues its own.
 fn result(cost: f64) -> String {
     format!(
-        r#"total=$(awk -v spent={cost} -v before="$(cat "$TMPDIR/session-cost" 2>/dev/null || echo 0)" 'BEGIN {{ print before + spent }}')
-printf '%s' "$total" > "$TMPDIR/session-cost"
+        r#"before=$(cat "$TMPDIR/session-cost-$session" 2>/dev/null || echo 0)
+total=$(awk -v spent={cost} -v before="$before" 'BEGIN {{ print before + spent }}')
+printf '%s' "$total" > "$TMPDIR/session-cost-$session"
 printf '{{"type":"result","subtype":"success","is_error":false,"total_cost_usd":%s,"modelUsage":{{"claude-sonnet-4-5":{{"inputTokens":10,"outputTokens":5}}}}}}\n' "$total""#
     )
 }
@@ -110,6 +126,640 @@ fn a_harness_with_background_work_is_closed_quietly() {
         &e.activity,
         Activity::Harness(branchyard::Event::Unrecognized { .. })
     )));
+}
+
+/// `by check` started in the background, as a child does before it ends
+/// its turn ("I'll wait for its notification").
+const CHECK_RUNNING: &str = r#"echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"c1","task_type":"local_bash","description":"by check"}]}'
+echo '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"I will wait for the check to finish."}]}}'"#;
+
+/// The harness's warnings, as `by events` shows them.
+fn harness_warnings(f: &Fixture, name: &str) -> Vec<String> {
+    f.yard
+        .branch(name)
+        .unwrap()
+        .events()
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.activity {
+            Activity::Harness(branchyard::Event::Warning { message }) => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A child once ended its turn while `by check` ran in the background, and
+/// the session's close killed the check. Now the turn is held open, quiet
+/// as it is, without counting as a stall, until the task ends and Claude
+/// Code has answered its notification; that answer is the turn's.
+#[test]
+fn a_turn_is_held_open_while_its_background_work_runs() {
+    let f = Fixture::new();
+    let turn = format!(
+        r#"{CHECK_RUNNING}
+{first}
+sleep 1.5
+echo '{{"type":"system","subtype":"task_notification","task_id":"c1","status":"completed"}}'
+echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[]}}'
+echo '{{"type":"assistant","message":{{"id":"m2","content":[{{"type":"text","text":"The check passed."}}]}}}}'
+{second}"#,
+        first = result(0.01),
+        second = result(0.02),
+    );
+    let options = TaskOptions {
+        budget: Budget::default()
+            .stall_after(Duration::from_millis(300))
+            .stall_action(StallAction::Interrupt),
+        ..stand_in(&f, &turn)
+    };
+    let started = Instant::now();
+    let branch = f
+        .yard
+        .task("go")
+        .options(options)
+        .name("held")
+        .run()
+        .unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(1500));
+    assert_eq!(branch.info().status, BranchStatus::NoChanges);
+    let cost = branch.info().cost_usd.unwrap();
+    assert!((cost - 0.03).abs() < 1e-9, "the follow-up's cost: {cost}");
+    let events = branch.events().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.activity, Activity::Stalled { .. })),
+        "{events:?}"
+    );
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match &e.activity {
+            Activity::Harness(branchyard::Event::MessageDelta { text, .. }) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "I will wait for the check to finish.",
+            "\n\nThe check passed."
+        ]
+    );
+    let ended = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e.activity,
+                Activity::Harness(branchyard::Event::TurnEnded { .. })
+            )
+        })
+        .unwrap();
+    let check_ended = events
+        .iter()
+        .position(|e| matches!(&e.activity,
+            Activity::Harness(branchyard::Event::HarnessTaskEnded { task_id, .. }) if task_id == "c1"))
+        .unwrap();
+    assert!(check_ended < ended);
+}
+
+/// `result` answering the messages whose quoted uuids the shell variable
+/// `answers` lists, as Claude Code 2.1.293 names them.
+fn answering(result: String) -> String {
+    result.replace(
+        r#""is_error":false,"#,
+        r#""is_error":false,"user_message_uuids":['"$answers"'],"#,
+    )
+}
+
+/// A background command that crashed before the turn's result, as one
+/// did in round 5's dogfood battery: no task runs at the result, but
+/// Claude Code still runs a cycle on its notification after it. The turn
+/// is held for that cycle, whose text and cost are the turn's, instead of
+/// the session's close interrupting it unseen.
+#[test]
+fn a_turn_is_held_for_a_task_that_ended_before_its_result() {
+    let f = Fixture::new();
+    let turn = format!(
+        r#"answers="\"$(printf '%s' "$prompt" | sed -n 's/.*"uuid":"\([^"]*\)".*/\1/p')\""
+echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[{{"task_id":"c1","task_type":"local_bash","description":"orchestrate"}}]}}'
+echo '{{"type":"system","subtype":"task_notification","task_id":"c1","status":"failed"}}'
+echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[]}}'
+echo '{{"type":"assistant","message":{{"id":"m1","content":[{{"type":"text","text":"I will be notified when it completes."}}]}}}}'
+{first}
+sleep 0.5
+echo '{{"type":"user","uuid":"n1","message":{{"role":"user","content":"<task-notification><task-id>c1</task-id><status>failed</status></task-notification>"}}}}'
+echo '{{"type":"assistant","user_message_uuid":"n1","message":{{"id":"m2","content":[{{"type":"text","text":"The script crashed."}}]}}}}'
+answers='"n1"'
+{second}"#,
+        first = answering(result(0.01)),
+        second = answering(result(0.02)),
+    );
+    let branch = f
+        .yard
+        .task("go")
+        .options(stand_in(&f, &turn))
+        .name("crashed")
+        .run()
+        .unwrap();
+    assert_eq!(branch.info().status, BranchStatus::NoChanges);
+    let cost = branch.info().cost_usd.unwrap();
+    assert!((cost - 0.03).abs() < 1e-9, "the follow-up's cost: {cost}");
+    let events = branch.events().unwrap();
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match &e.activity {
+            Activity::Harness(branchyard::Event::MessageDelta { turn: 1, text }) => {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "I will be notified when it completes.",
+            "\n\nThe script crashed."
+        ],
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            e.activity,
+            Activity::Harness(branchyard::Event::ProtocolViolation { .. })
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !harness_warnings(&f, "crashed")
+            .iter()
+            .any(|w| w.contains("a turn of its own")),
+        "{:?}",
+        harness_warnings(&f, "crashed")
+    );
+}
+
+/// The turn's limits bound the hold: at `max_duration` the engine
+/// interrupts, Claude Code answers, and the turn ends with the outcome it
+/// was held with, not over its limit, with a warning naming the task still
+/// running.
+#[test]
+fn a_limit_ends_the_hold_with_a_warning_naming_the_running_tasks() {
+    let f = Fixture::new();
+    let turn = format!("{CHECK_RUNNING}\n{}", result(0.01));
+    let options = TaskOptions {
+        budget: Budget::default().duration(Duration::from_secs(1)),
+        ..stand_in(&f, &turn)
+    };
+    let started = Instant::now();
+    let branch = f
+        .yard
+        .task("go")
+        .options(options)
+        .name("cut")
+        .run()
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(branch.info().status, BranchStatus::NoChanges);
+    assert!(
+        warnings(&f, "cut")
+            .iter()
+            .any(|w| w.contains("duration limit while held open")),
+        "{:?}",
+        warnings(&f, "cut")
+    );
+    let cut: Vec<String> = harness_warnings(&f, "cut")
+        .into_iter()
+        .filter(|w| w.contains("ended with Claude Code's background tasks still running"))
+        .collect();
+    assert_eq!(cut.len(), 1, "{:?}", harness_warnings(&f, "cut"));
+    // The stand-in reports its own `sleep` running once its turn's frames
+    // are out, so that is the set the limit cut off.
+    assert!(cut[0].contains("(b1)"), "{cut:?}");
+}
+
+/// Given the prompt `HANG`, the stand-in works until it is interrupted,
+/// as a child that is still running does.
+const HANG: &str = r#"case "$prompt" in *HANG*)
+  while read -r line; do
+    reply "$line"
+    case "$line" in *interrupt*) echo '{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_streaming"}';; esac
+  done
+  exit 0;;
+esac"#;
+
+/// A delegating branch `meta` that ends its turn holding for a background
+/// `by wait` on its child `kid`, which works until it is interrupted, under
+/// `budget`, whose limit or cap cuts the hold while `kid` still runs:
+/// `meta`'s status after the turn, and its log. `kid` is cancelled after.
+fn cut_while_a_child_runs(budget: Budget) -> (BranchStatus, Vec<RecordedEvent>) {
+    let f = Fixture::new();
+    // Its child runs the stand-in it was started with.
+    let first = TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        ..stand_in(&f, &format!("{HANG}\n{}", result(0.01)))
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(first.clone())
+        .name("meta")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(first).unwrap();
+    delegate
+        .spawn(Spawn {
+            prompt: "HANG".into(),
+            name: Some("kid".into()),
+            ..Spawn::default()
+        })
+        .unwrap();
+    let waiting = format!(
+        r#"echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[{{"task_id":"w1","task_type":"local_bash","description":"by wait"}}]}}'
+echo '{{"type":"assistant","message":{{"id":"m1","content":[{{"type":"text","text":"I will wait for kid."}}]}}}}'
+{}"#,
+        result(0.01)
+    );
+    let held = TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        budget,
+        ..stand_in(&f, &waiting)
+    };
+    let status = root
+        .send("wait for kid", held)
+        .unwrap()
+        .info()
+        .status
+        .clone();
+    let events = f.yard.branch("meta").unwrap().events().unwrap();
+    delegate.cancel("kid").unwrap();
+    wait::until("meta to settle", || {
+        !matches!(
+            f.yard.branch("meta").unwrap().info().status,
+            BranchStatus::Running | BranchStatus::WaitingOnChildren
+        )
+    });
+    (status, events)
+}
+
+/// The turn's harness answer, not interrupted, and the warning the hold's
+/// cut left.
+fn assert_cut_kept_the_outcome(events: &[RecordedEvent], warning: &str) {
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.activity,
+            Activity::Harness(branchyard::Event::TurnEnded {
+                outcome: branchyard::TurnOutcome::Completed,
+                ..
+            })
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.activity == Activity::Status(BranchStatus::Interrupted)),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.activity, Activity::Warning(w) if w.contains(warning))),
+        "{events:?}"
+    );
+}
+
+/// A delegating branch that ends its turn holding for a background
+/// command, such as `by wait` on its children, and whose hold is cut by its
+/// limit while a child still runs, keeps the outcome it was held with: it
+/// parks, to be woken when the child settles, rather than ending
+/// interrupted and never woken.
+#[test]
+fn a_cut_hold_parks_a_branch_whose_children_still_run() {
+    let (status, events) =
+        cut_while_a_child_runs(Budget::default().duration(Duration::from_secs(1)));
+    assert_eq!(status, BranchStatus::WaitingOnChildren, "{events:?}");
+    assert_cut_kept_the_outcome(&events, "duration limit while held open");
+}
+
+/// With no duration limit, the hold's cap (30 minutes unless the budget
+/// says otherwise) cuts it the same way: the branch keeps the outcome it
+/// was held with and parks.
+#[test]
+fn a_hold_cut_at_its_cap_parks_a_branch_whose_children_still_run() {
+    let (status, events) =
+        cut_while_a_child_runs(Budget::default().hold_cap(Duration::from_secs(1)));
+    assert_eq!(status, BranchStatus::WaitingOnChildren, "{events:?}");
+    assert_cut_kept_the_outcome(&events, "held open 1s for the harness's background tasks");
+}
+
+/// The rest of a turn after its frames: the stand-in answers control
+/// requests and prints nothing more until asked to end its session, so
+/// it reports no task of its own running.
+const QUIET: &str = r#"while read -r line; do
+  case "$line" in
+    *end_session*) reply "$line"; exit 0;;
+    *control_request*) reply "$line";;
+  esac
+done
+exit 0"#;
+
+/// A background task ends, and the turn's answer comes with no cycle on
+/// its notification after, as when round 5's `compete` meta stopped its
+/// `by wait`: then `wait` more seconds of quiet.
+fn ended_with_no_follow_up(wait: u32) -> String {
+    format!(
+        r#"echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[{{"task_id":"w1","task_type":"local_bash","description":"by wait"}}]}}'
+echo '{{"type":"assistant","message":{{"id":"m1","content":[{{"type":"text","text":"I will be woken."}}]}}}}'
+{result}
+sleep {wait}
+echo '{{"type":"system","subtype":"task_notification","task_id":"w1","status":"completed"}}'
+echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[]}}'
+{QUIET}"#,
+        result = result(0.01),
+    )
+}
+
+/// A held turn whose ended task's notification gets no cycle ends once
+/// none has started within the grace, with the outcome it was held with,
+/// not at the hold's cap.
+#[test]
+fn a_hold_with_no_follow_up_ends_after_the_grace() {
+    let f = Fixture::new();
+    let options = TaskOptions {
+        budget: Budget::default()
+            .hold_cap(Duration::from_secs(30))
+            .follow_up_grace(Duration::from_secs(1)),
+        ..stand_in(&f, &ended_with_no_follow_up(0))
+    };
+    let started = Instant::now();
+    let branch = f
+        .yard
+        .task("go")
+        .options(options)
+        .name("graced")
+        .run()
+        .unwrap();
+    let took = started.elapsed();
+    assert!(took >= Duration::from_secs(1), "{took:?}");
+    assert!(took < Duration::from_secs(10), "{took:?}");
+    assert_eq!(branch.info().status, BranchStatus::NoChanges);
+    let events = branch.events().unwrap();
+    assert_cut_kept_the_outcome(&events, "started no cycle");
+}
+
+/// A delegating branch whose children all settle while its turn is held,
+/// and whose hold is then cut, never saw them: it is woken with what they
+/// did, as if it had parked for them.
+#[test]
+fn a_cut_hold_wakes_a_branch_whose_children_settled_during_it() {
+    let f = Fixture::new();
+    let slow = format!(
+        "case \"$prompt\" in *SLOW*) sleep 1;; esac\n{}",
+        result(0.01)
+    );
+    let first = TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        ..stand_in(&f, &slow)
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(first.clone())
+        .name("meta")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(first).unwrap();
+    delegate
+        .spawn(Spawn {
+            prompt: "SLOW".into(),
+            name: Some("kid".into()),
+            ..Spawn::default()
+        })
+        .unwrap();
+    let held = TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        budget: Budget::default().follow_up_grace(Duration::from_secs(1)),
+        ..stand_in(&f, &ended_with_no_follow_up(3))
+    };
+    root.send("wait for kid", held).unwrap();
+    wait::until("meta's wake to settle", || {
+        let info = f.yard.branch("meta").unwrap().info().clone();
+        (info.turns == 3
+            && !matches!(
+                info.status,
+                BranchStatus::Running | BranchStatus::WaitingOnChildren
+            ))
+        .then_some(())
+    });
+    let events = f.yard.branch("meta").unwrap().events().unwrap();
+    assert!(
+        events.iter().any(|e| matches!(&e.activity,
+            Activity::Delegation { outcome, .. } if outcome.contains("kid settled, which its answer did not see"))),
+        "{events:?}"
+    );
+}
+
+/// A child the held turn dealt with during the hold (here discarded once
+/// it settled) is not news: the cut hold does not wake its parent for it.
+#[test]
+fn a_cut_hold_does_not_wake_for_children_dealt_with_during_it() {
+    let f = Fixture::new();
+    let slow = format!(
+        "case \"$prompt\" in *SLOW*) sleep 1;; esac\n{}",
+        result(0.01)
+    );
+    let first = TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        ..stand_in(&f, &slow)
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(first.clone())
+        .name("meta")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(first).unwrap();
+    delegate
+        .spawn(Spawn {
+            prompt: "SLOW".into(),
+            name: Some("kid".into()),
+            ..Spawn::default()
+        })
+        .unwrap();
+    let held = TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        budget: Budget::default().follow_up_grace(Duration::from_secs(1)),
+        ..stand_in(&f, &ended_with_no_follow_up(4))
+    };
+    std::thread::scope(|s| {
+        let turn = s.spawn(|| root.send("wait for kid", held).unwrap());
+        wait::until("kid to settle during meta's hold", || {
+            let info = f.yard.branch("kid").unwrap().info().clone();
+            matches!(info.status, BranchStatus::Ready | BranchStatus::NoChanges).then_some(())
+        });
+        assert_eq!(
+            f.yard.branch("meta").unwrap().info().status,
+            BranchStatus::Running
+        );
+        delegate.discard("kid", Some("seen")).unwrap();
+        turn.join().unwrap();
+    });
+    let info = f.yard.branch("meta").unwrap().info().clone();
+    assert_eq!(info.turns, 2);
+    assert_ne!(info.status, BranchStatus::WaitingOnChildren);
+    let events = f.yard.branch("meta").unwrap().events().unwrap();
+    assert!(
+        !events.iter().any(|e| matches!(&e.activity,
+            Activity::Delegation { outcome, .. } if outcome.contains("which its answer did not see"))),
+        "{events:?}"
+    );
+}
+
+/// `meta`, a delegating branch, after a first turn, and its delegate.
+fn delegating_meta(f: &Fixture) -> (branchyard::Branch, branchyard::Delegate) {
+    let slow = format!(
+        "case \"$prompt\" in *SLOW*) sleep 1;; esac\n{}",
+        result(0.01)
+    );
+    let first = TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        ..stand_in(f, &slow)
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(first.clone())
+        .name("meta")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(first).unwrap();
+    (root, delegate)
+}
+
+/// The options of `meta`'s turn `turn`, held with a one-second grace for
+/// a follow-up.
+fn held_turn(f: &Fixture, turn: &str) -> TaskOptions {
+    TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        budget: Budget::default().follow_up_grace(Duration::from_secs(1)),
+        ..stand_in(f, turn)
+    }
+}
+
+fn spawn_slow_kid(delegate: &branchyard::Delegate) {
+    delegate
+        .spawn(Spawn {
+            prompt: "SLOW".into(),
+            name: Some("kid".into()),
+            ..Spawn::default()
+        })
+        .unwrap();
+}
+
+fn woken_unseen(events: &[RecordedEvent]) -> bool {
+    events.iter().any(|e| {
+        matches!(&e.activity,
+        Activity::Delegation { outcome, .. } if outcome.contains("which its answer did not see"))
+    })
+}
+
+/// A child spawned during the hold, after the turn's answer (as by a cycle
+/// the cut cuts short), that settles before the hold is cut was never seen
+/// either: the cut hold wakes its parent for it, though it was not running
+/// when the hold began.
+#[test]
+fn a_cut_hold_wakes_for_a_child_spawned_during_it() {
+    let f = Fixture::new();
+    let (root, delegate) = delegating_meta(&f);
+    // The kid, spawned while the held turn runs, runs its script too.
+    let turn = format!(
+        "case \"$prompt\" in *SLOW*) sleep 1\n{}\n;; *)\n{}\n;; esac",
+        result(0.01),
+        ended_with_no_follow_up(4)
+    );
+    let held = held_turn(&f, &turn);
+    std::thread::scope(|s| {
+        let turn = s.spawn(|| root.send("spawn kid", held).unwrap());
+        wait::until("meta's turn to be held after its answer", || {
+            let events = f.yard.branch("meta").unwrap().events().unwrap();
+            events
+                .iter()
+                .any(|e| matches!(&e.activity,
+                    Activity::Harness(branchyard::Event::Warning { message }) if message.contains("the turn is held open")))
+                .then_some(())
+        });
+        spawn_slow_kid(&delegate);
+        turn.join().unwrap();
+    });
+    wait::until("meta's wake to settle", || {
+        let info = f.yard.branch("meta").unwrap().info().clone();
+        (info.turns == 3
+            && !matches!(
+                info.status,
+                BranchStatus::Running | BranchStatus::WaitingOnChildren
+            ))
+        .then_some(())
+    });
+    let events = f.yard.branch("meta").unwrap().events().unwrap();
+    assert!(
+        events.iter().any(|e| matches!(&e.activity,
+            Activity::Delegation { outcome, .. } if outcome.contains("kid settled, which its answer did not see"))),
+        "{events:?}"
+    );
+}
+
+/// A child that settled before a cycle the held turn ran on a task's
+/// notification is that answer's to have seen, as one that settled before
+/// the turn's own answer is: when the hold is then cut, waiting on another
+/// task, its parent is not woken for it.
+#[test]
+fn a_cut_hold_does_not_wake_for_children_settled_before_a_held_cycle() {
+    let f = Fixture::new();
+    let (root, delegate) = delegating_meta(&f);
+    spawn_slow_kid(&delegate);
+    let turn = format!(
+        r#"echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[{{"task_id":"w1","task_type":"local_bash","description":"by wait"}},{{"task_id":"w2","task_type":"local_bash","description":"by check"}}]}}'
+echo '{{"type":"assistant","message":{{"id":"m1","content":[{{"type":"text","text":"I will be woken."}}]}}}}'
+{first}
+sleep 3
+echo '{{"type":"system","subtype":"task_notification","task_id":"w1","status":"completed"}}'
+echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[{{"task_id":"w2","task_type":"local_bash","description":"by check"}}]}}'
+echo '{{"type":"user","uuid":"n1","message":{{"role":"user","content":"<task-notification><task-id>w1</task-id></task-notification>"}}}}'
+echo '{{"type":"assistant","user_message_uuid":"n1","message":{{"id":"m2","content":[{{"type":"text","text":"kid is ready."}}]}}}}'
+answers='"n1"'
+{second}
+sleep 1
+echo '{{"type":"system","subtype":"task_notification","task_id":"w2","status":"completed"}}'
+echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[]}}'
+{QUIET}"#,
+        first = result(0.01),
+        second = answering(result(0.01)),
+    );
+    let held = held_turn(&f, &turn);
+    root.send("wait for kid", held).unwrap();
+    let info = f.yard.branch("meta").unwrap().info().clone();
+    assert_eq!(info.turns, 2);
+    assert_ne!(info.status, BranchStatus::WaitingOnChildren);
+    let events = f.yard.branch("meta").unwrap().events().unwrap();
+    assert!(
+        events.iter().any(|e| matches!(&e.activity,
+            Activity::Harness(branchyard::Event::MessageDelta { text, .. }) if text.contains("kid is ready."))),
+        "the held cycle ran: {events:?}"
+    );
+    assert!(!woken_unseen(&events), "{events:?}");
 }
 
 /// The usage that crosses the cost limit arrives with the turn's end, in
@@ -311,6 +961,118 @@ fn the_harness_is_given_what_is_left_of_the_budget() {
         .run()
         .unwrap();
     assert_eq!(harness_budget(&f, "unlimited"), None);
+}
+
+/// A fresh session's total starts again from nothing (here after a rewind
+/// to the base), so the branch's cost is what it had spent before plus the
+/// session's total: its recorded cost does not fall, and the next turn is
+/// not given more than is left.
+#[test]
+fn a_fresh_session_adds_to_what_the_branch_spent() {
+    let f = Fixture::new();
+    let args = "printf '%s\\n' \"$@\" > args.txt\n";
+    let options = |cost: f64| TaskOptions {
+        budget: Budget::usd(0.1),
+        ..stand_in(&f, &format!("{args}{}", result(cost)))
+    };
+    let branch = f
+        .yard
+        .task("go")
+        .options(options(0.04))
+        .name("refreshed")
+        .run()
+        .unwrap();
+    assert_eq!(branch.info().cost_usd, Some(0.04));
+    branch.rewind(0).unwrap();
+    let fresh = branch.send("again", options(0.03)).unwrap();
+    let argv = std::fs::read_to_string(fresh.info().worktree.join("args.txt")).unwrap();
+    assert!(!argv.lines().any(|a| a == "--resume"), "{argv}");
+    let spent = fresh.info().cost_usd.unwrap();
+    assert!(
+        (spent - 0.07).abs() < 1e-9,
+        "before plus the session's: {spent}"
+    );
+
+    // The fresh session resumed: its total counts both its turns.
+    let next = fresh.send("more", options(0.01)).unwrap();
+    let argv = std::fs::read_to_string(next.info().worktree.join("args.txt")).unwrap();
+    assert!(argv.lines().any(|a| a == "--resume"), "{argv}");
+    let left = harness_budget(&f, "refreshed").unwrap();
+    assert!((left - 0.03).abs() < 1e-9, "{left}");
+    let spent = next.info().cost_usd.unwrap();
+    assert!((spent - 0.08).abs() < 1e-9, "{spent}");
+}
+
+/// A rewind can resume an older session, whose total is lower than the
+/// latest one's: the turn counts only what it adds to that session's own
+/// total, so the branch's recorded cost does not fall.
+#[test]
+fn resuming_an_older_session_adds_to_what_the_branch_spent() {
+    let f = Fixture::new();
+    let args = "printf '%s\\n' \"$@\" > args.txt\n";
+    let options = |cost: f64| stand_in(&f, &format!("{args}{}", result(cost)));
+    let branch = f
+        .yard
+        .task("go")
+        .options(options(0.01))
+        .name("older")
+        .run()
+        .unwrap();
+    let first = branch.info().session.clone().unwrap();
+    branch.rewind(0).unwrap();
+    let fresh = branch.send("again", options(0.10)).unwrap();
+    assert_ne!(fresh.info().session.as_deref(), Some(first.as_str()));
+    let spent = fresh.info().cost_usd.unwrap();
+    assert!((spent - 0.11).abs() < 1e-9, "{spent}");
+
+    // Back to turn 1, which ended the first session: it resumes, at its
+    // own total of $0.01.
+    branch.rewind(1).unwrap();
+    let resumed = branch.send("more", options(0.01)).unwrap();
+    let argv = std::fs::read_to_string(resumed.info().worktree.join("args.txt")).unwrap();
+    assert!(argv.contains(&format!("--resume\n{first}\n")), "{argv}");
+    let spent = resumed.info().cost_usd.unwrap();
+    assert!((spent - 0.12).abs() < 1e-9, "the cost fell: {spent}");
+
+    // And the latest session, resumed again, still adds only its own.
+    let next = resumed.send("and more", options(0.02)).unwrap();
+    let spent = next.info().cost_usd.unwrap();
+    assert!((spent - 0.14).abs() < 1e-9, "{spent}");
+}
+
+/// A turn cut off before its harness reported a total leaves the branch's
+/// cost at its live estimate, which the session's own total counts too:
+/// the turn that resumes the session counts that spending once.
+#[test]
+fn a_cut_off_turns_spending_is_counted_once_when_its_session_resumes() {
+    let f = Fixture::new();
+    let args = "printf '%s\\n' \"$@\" > args.txt\n";
+    let options = |turn: &str| stand_in(&f, &format!("{args}{turn}"));
+    let branch = f
+        .yard
+        .task("go")
+        .options(options(&result(0.01)))
+        .name("cut")
+        .run()
+        .unwrap();
+    let session = branch.info().session.clone().unwrap();
+    // 1000 input and 2000 output tokens of Sonnet 4.5, $0.033 by the
+    // catalog, then the harness exits with no result; its session's total
+    // counts them.
+    let cut_off = r#"echo '{"type":"assistant","message":{"id":"m1","model":"claude-sonnet-4-5","content":[{"type":"text","text":"working"}],"usage":{"input_tokens":1000,"output_tokens":2000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}'
+before=$(cat "$TMPDIR/session-cost-$session")
+awk -v before="$before" 'BEGIN { print before + 0.033 }' > "$TMPDIR/session-cost-$session"
+exit 3"#;
+    let cut = branch.send("more", options(cut_off)).unwrap();
+    assert_ne!(cut.info().status, BranchStatus::Ready);
+    let live = cut.info().cost_usd.unwrap();
+    assert!((live - 0.043).abs() < 1e-9, "the live estimate: {live}");
+
+    let next = branch.send("again", options(&result(0.01))).unwrap();
+    let argv = std::fs::read_to_string(next.info().worktree.join("args.txt")).unwrap();
+    assert!(argv.contains(&format!("--resume\n{session}\n")), "{argv}");
+    let spent = next.info().cost_usd.unwrap();
+    assert!((spent - 0.053).abs() < 1e-9, "counted twice: {spent}");
 }
 
 /// A branch on the model gateway is given no spending limit of its own:

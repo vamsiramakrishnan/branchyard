@@ -189,8 +189,8 @@ pub use checkpoint::{
 };
 pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, AttemptCheck};
 pub use delegation::{
-    Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inbox, Inspection,
-    Sent, Spawn, Spawned, Waited, DEFAULT_MAX_WAKES,
+    nest_graph_budgets, Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage,
+    Inbox, Inspection, Sent, Spawn, Spawned, Waited, DEFAULT_MAX_WAKES,
 };
 pub use egress::{EgressActivity, Enforcement as EgressEnforcement};
 pub use environments::{
@@ -2090,6 +2090,17 @@ pub struct Budget {
     /// What a detected stall does. Ignored when [`Budget::stall_after`] is
     /// `None`.
     pub stall_action: StallAction,
+    /// How long a turn with no duration limit may be held open after its
+    /// harness answered it, for the harness's background tasks, before the
+    /// hold is cut and the turn ends with the outcome it was held with.
+    /// `None` is 30 minutes.
+    pub hold_cap: Option<Duration>,
+    /// How long a held turn may wait for its harness to start the cycle on
+    /// the notification of background tasks that ended, with none running
+    /// ([`branchyard_harness::Driver::awaiting_follow_up`]), before the
+    /// hold ends and the turn keeps the outcome it was held with. `None`
+    /// is 10 seconds.
+    pub follow_up_grace: Option<Duration>,
 }
 
 impl Budget {
@@ -2119,6 +2130,19 @@ impl Budget {
     /// What a stall does; see [`Budget::stall_after`].
     pub fn stall_action(mut self, action: StallAction) -> Self {
         self.stall_action = action;
+        self
+    }
+
+    /// Cut a held turn's hold after this long; see [`Budget::hold_cap`].
+    pub fn hold_cap(mut self, cap: Duration) -> Self {
+        self.hold_cap = Some(cap);
+        self
+    }
+
+    /// End a hold that waits for a follow-up cycle none started after
+    /// this long; see [`Budget::follow_up_grace`].
+    pub fn follow_up_grace(mut self, grace: Duration) -> Self {
+        self.follow_up_grace = Some(grace);
         self
     }
 }
@@ -2922,10 +2946,17 @@ pub enum Error {
         /// them. Empty for a merge of no delegated branch (`by merge`).
         checks: Vec<IntegrationCheck>,
         /// When the branches integrated left out siblings that share their
-        /// check: who they are, and the integration that runs it on all of
-        /// them. A child under its parent's whole-suite check passes it
-        /// only together with its siblings.
+        /// check and could change the result: who they are, and the
+        /// integration that runs it on all of them. A child under its
+        /// parent's whole-suite check may pass it only together with its
+        /// siblings.
         shared: Option<Box<SharedCheck>>,
+        /// When siblings left out share the failed check but nothing says
+        /// they are needed (the branches integrated passed it alone in
+        /// their last `by check` of the same work, or none is recorded):
+        /// the branches integrated, on whose own work it failed. Empty
+        /// otherwise.
+        own_work: Vec<String>,
     },
     CheckTimedOut {
         timeout: Duration,
@@ -3040,9 +3071,19 @@ impl fmt::Display for Error {
                 output_tail,
                 checks,
                 shared,
+                own_work,
             } => {
                 write!(f, "check failed:\n{output_tail}")?;
                 write_checks(f, checks)?;
+                if !own_work.is_empty() {
+                    write!(
+                        f,
+                        "\nNothing was integrated. The check failed on the integrated branches' \
+                         own work ({}): no `by check` of that work says it needs a sibling's. \
+                         Fix it there, and `by check` before integrating again",
+                        own_work.join(", ")
+                    )?;
+                }
                 match shared {
                     Some(shared) => write!(f, "\n{shared}"),
                     None => Ok(()),
@@ -3141,13 +3182,21 @@ impl Error {
     /// error with nothing more to say.
     pub fn detail(&self) -> Option<serde_json::Value> {
         match self {
-            Error::CheckFailed { checks, shared, .. } => {
+            Error::CheckFailed {
+                checks,
+                shared,
+                own_work,
+                ..
+            } => {
                 let mut detail = shared
                     .as_ref()
                     .and_then(|shared| serde_json::to_value(shared).ok())
                     .unwrap_or_else(|| serde_json::json!({}));
                 if !checks.is_empty() {
                     detail["checks"] = serde_json::to_value(checks).ok()?;
+                }
+                if !own_work.is_empty() {
+                    detail["own_work"] = serde_json::to_value(own_work).ok()?;
                 }
                 detail
                     .as_object()
@@ -3291,6 +3340,10 @@ pub struct SharedCheck {
     pub unsettled: Vec<String>,
     /// The branches to integrate together: those named, then `siblings`.
     pub integrate_together: Vec<String>,
+    /// Those named whose last `by check` of the same work failed it alone
+    /// too: why the siblings may be what it misses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_alone: Vec<String>,
 }
 
 impl fmt::Display for SharedCheck {
@@ -3299,10 +3352,20 @@ impl fmt::Display for SharedCheck {
             Some(parent) => format!("{parent}'s check, which they inherited"),
             None => "the same check".to_owned(),
         };
+        if !self.failed_alone.is_empty() {
+            write!(
+                f,
+                "Nothing was integrated. {} failed it alone too (`by check`), so it may need \
+                 siblings' work. ",
+                self.failed_alone.join(", ")
+            )?;
+        } else {
+            write!(f, "Nothing was integrated. ")?;
+        }
         write!(
             f,
-            "Nothing was integrated. Siblings {} share {whose}, which may pass only with all \
-             of them: integrate them together, `by integrate {}`",
+            "Siblings {} share {whose}, which may pass only with all of them: if so, \
+             integrate them together, `by integrate {}`",
             self.siblings.join(", "),
             self.integrate_together.join(" ")
         )?;

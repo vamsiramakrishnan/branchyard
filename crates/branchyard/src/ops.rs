@@ -317,6 +317,7 @@ pub(crate) fn integration_error(error: IntegrationError, target: &str) -> Error 
             output_tail,
             checks: Vec::new(),
             shared: None,
+            own_work: Vec::new(),
         },
         IntegrationError::CheckTimedOut {
             timeout,

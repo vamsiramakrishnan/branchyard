@@ -55,8 +55,8 @@ use crate::seats::{Seat, Seats};
 use crate::state::{Record, Store};
 use crate::{
     git, harness, inbox, integrate, names, Activity, BranchInfo, BranchStatus, Budget,
-    CandidateInfo, CheckReport, Error, Event, Merged, MergedAll, Message, MessageKind, Policy,
-    RecordedEvent, Rule, SharedCheck, Steer, SteerState, TaskOptions, Yard,
+    CandidateInfo, CheckReport, CheckVerdict, Error, Event, Merged, MergedAll, Message,
+    MessageKind, Policy, RecordedEvent, Rule, SharedCheck, Steer, SteerState, TaskOptions, Yard,
 };
 
 /// How long `steer` waits for the input to be delivered.
@@ -303,7 +303,8 @@ pub struct Spawn {
     pub plan: bool,
     /// The model the child's harness runs, or a size alias (`small`,
     /// `medium`, `large`, `extra-large`) where its harness defines one.
-    /// Unset: its seat's, else its parent's. A harness whose driver cannot
+    /// Unset: its seat's, else its parent's when it runs its parent's
+    /// harness, else its harness's default. A harness whose driver cannot
     /// choose a model refuses it.
     pub model: Option<String>,
 }
@@ -1296,6 +1297,7 @@ pub(crate) fn local_by_token(yard: &Yard, token: &str) -> Result<Local, Error> {
             branch: branch.clone(),
             options: context.options.clone(),
             cost: Some(context.cost.clone()),
+            abandoned: None,
         }),
         None => Err(Error::Denied(
             "this delegation token is not valid; tokens are issued for a running turn and \
@@ -1331,6 +1333,7 @@ pub(crate) fn trusted(yard: &Yard, branch: &str, options: TaskOptions) -> Result
             branch: branch.to_owned(),
             options,
             cost: None,
+            abandoned: None,
         })),
     })
 }
@@ -1386,11 +1389,13 @@ pub(crate) fn effective_budget(record: &Record, budget: &Budget) -> Budget {
             budget.max_duration,
             limits.max_duration_ms.map(Duration::from_millis),
         ),
-        // Stall detection is not part of a delegation envelope: a parent
-        // narrows cost, turns and duration, but a stall window is the
-        // caller's own choice for this turn.
+        // Stall detection and the hold's cap are not part of a delegation
+        // envelope: a parent narrows cost, turns and duration, but these
+        // are the caller's own choice for this turn.
         stall_after: budget.stall_after,
         stall_action: budget.stall_action,
+        hold_cap: budget.hold_cap,
+        follow_up_grace: budget.follow_up_grace,
     }
 }
 
@@ -1592,10 +1597,11 @@ pub(crate) fn cancel_tree(yard: &Yard, name: &str, by: &str) -> Result<Vec<Strin
                     at_ms: branchyard_support::time::now_ms(),
                     activity: Activity::Status(BranchStatus::Interrupted),
                 };
-                if store
-                    .graph()
-                    .settle_if(&ended, &event, crate::wake::is_parked)?
-                {
+                if store.graph().settle_if(
+                    &ended,
+                    std::slice::from_ref(&event),
+                    crate::wake::is_parked,
+                )? {
                     store.notify();
                     // What waits for it is looked at, as every settle does.
                     graph::settled(yard, &info.name, None);
@@ -1885,23 +1891,48 @@ fn sharing_check(store: &Store, record: &Record) -> Vec<Record> {
         .collect()
 }
 
-/// A failed check of an integration of `branches` that left out siblings
-/// sharing it: say who they are and the integration that runs it on all
-/// of them. Any other error is returned as it is.
-fn with_shared_check(store: &Store, error: Error, branches: &[String]) -> Error {
+/// A failed check of an integration of `branches` into `caller` that left
+/// out siblings sharing it. Integrating them together could change the
+/// result only when the failed check is theirs, some branch integrated
+/// failed it alone too (its last `by check` of the same work, onto the
+/// same parent's work), and a sibling has a candidate or is still
+/// running, to wait for: then say who they are and the integration that
+/// runs it on all of them. Otherwise the check failed on the integrated
+/// branches' own work: say so, naming no sibling. Any other error is
+/// returned as it is.
+fn with_shared_check(yard: &Yard, caller: &str, error: Error, branches: &[String]) -> Error {
     let Error::CheckFailed {
         output_tail,
         checks,
         shared: None,
+        own_work,
     } = error
     else {
         return error;
     };
+    let store = yard.store();
+    let failed = checks
+        .iter()
+        .find(|c| c.outcome == CheckVerdict::Failed)
+        .map(|c| c.check.clone());
+    let parent_tree = store
+        .read(caller)
+        .ok()
+        .and_then(|r| {
+            git::local_branch(&yard.root, &r.info.git_branch)
+                .ok()
+                .flatten()
+        })
+        .and_then(|head| tree_of(yard, &head));
     let mut shared: Option<SharedCheck> = None;
+    let mut any_candidate = false;
     for record in branches.iter().filter_map(|b| store.read(b).ok()) {
-        let (Some(check), siblings) = (record.check.clone(), sharing_check(store, &record)) else {
+        let (Some(check), siblings) = (record.check.clone(), sharing_check(&store, &record)) else {
             continue;
         };
+        if failed.as_ref().is_some_and(|failed| *failed != check) {
+            continue;
+        }
         let into = shared.get_or_insert_with(|| SharedCheck {
             check,
             inherited_from: record
@@ -1912,12 +1943,17 @@ fn with_shared_check(store: &Store, error: Error, branches: &[String]) -> Error 
             siblings: Vec::new(),
             unsettled: Vec::new(),
             integrate_together: branches.to_vec(),
+            failed_alone: Vec::new(),
         });
+        if checked_alone(yard, caller, &record, parent_tree.as_deref()) == Some(false) {
+            into.failed_alone.push(record.info.name.clone());
+        }
         for sibling in siblings {
             let name = sibling.info.name;
             if branches.contains(&name) || into.siblings.contains(&name) {
                 continue;
             }
+            any_candidate |= sibling.info.candidate.is_some();
             if is_live(&sibling.info.status) {
                 into.unsettled.push(name.clone());
             }
@@ -1925,11 +1961,101 @@ fn with_shared_check(store: &Store, error: Error, branches: &[String]) -> Error 
             into.siblings.push(name);
         }
     }
+    let shared = shared.filter(|s| !s.siblings.is_empty());
+    let (shared, own_work) = match shared {
+        // A sibling with work to bring in, or still to finish, could change
+        // the result.
+        Some(s) if !s.failed_alone.is_empty() && (any_candidate || !s.unsettled.is_empty()) => {
+            (Some(Box::new(s)), own_work)
+        }
+        Some(_) => (None, branches.to_vec()),
+        None => (None, own_work),
+    };
     Error::CheckFailed {
         output_tail,
         checks,
-        shared: shared.filter(|s| !s.siblings.is_empty()).map(Box::new),
+        shared,
+        own_work,
     }
+}
+
+/// `commit`'s tree.
+fn tree_of(yard: &Yard, commit: &str) -> Option<String> {
+    git::run(
+        &yard.root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{commit}^{{tree}}"),
+        ],
+    )
+    .ok()
+    .map(|tree| tree.trim().to_owned())
+    .filter(|tree| !tree.is_empty())
+}
+
+/// What a `by check` found, for the checking branch's event log: how it
+/// ended, on which work, merged into which of its parent's ([`checked_on`]
+/// reads it back).
+fn check_outcome(yard: &Yard, report: &CheckReport, onto: &str) -> String {
+    let verdict = serde_json::to_value(report.outcome)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    match (tree_of(yard, &report.work), tree_of(yard, onto)) {
+        (Some(work), Some(onto)) => format!("{verdict} on work tree {work} onto tree {onto}"),
+        _ => verdict,
+    }
+}
+
+/// From a [`check_outcome`]: whether the check passed (`Some(true)`) or
+/// failed or timed out (`Some(false)`) on work tree `work` onto `onto`.
+/// `None` for another verdict or other trees.
+fn checked_on(outcome: &str, work: &str, onto: &str) -> Option<bool> {
+    let (verdict, trees) = outcome.split_once(" on work tree ")?;
+    if trees != format!("{work} onto tree {onto}") {
+        return None;
+    }
+    match verdict {
+        "passed" => Some(true),
+        "failed" | "timed_out" => Some(false),
+        _ => None,
+    }
+}
+
+/// How `record`'s check last ended alone on the work its candidate holds,
+/// merged into its parent's work with tree `parent_tree`, as a `by check`
+/// it or `caller` ran recorded it: `Some(true)` passed, `Some(false)`
+/// failed. `None` when none ran on that work, or it ended otherwise.
+fn checked_alone(
+    yard: &Yard,
+    caller: &str,
+    record: &Record,
+    parent_tree: Option<&str>,
+) -> Option<bool> {
+    let work = tree_of(yard, &record.info.candidate.as_ref()?.commit)?;
+    let onto = parent_tree?;
+    let store = yard.store();
+    let name = &record.info.name;
+    let mut last: Option<(u64, Option<bool>)> = None;
+    let events = [name.as_str(), caller]
+        .into_iter()
+        .flat_map(|log| record::read(&store, log).unwrap_or_default());
+    for event in events {
+        if let Activity::Delegation {
+            tool,
+            branch,
+            outcome,
+            refused: false,
+        } = &event.activity
+        {
+            if tool == "check" && branch == name && last.is_none_or(|(at, _)| event.at_ms >= at) {
+                last = Some((event.at_ms, checked_on(outcome, &work, onto)));
+            }
+        }
+    }
+    last.and_then(|(_, passed)| passed)
 }
 
 /// What became of an integrated branch, for its parent's event log.
@@ -1964,9 +2090,23 @@ pub(crate) struct Local {
     options: TaskOptions,
     /// The acting branch's live spend, while its turn runs.
     cost: Option<Arc<Mutex<Option<f64>>>>,
+    /// Whether the caller stopped waiting for the answer, as the broker
+    /// sees a client that disconnected: a check it ran is killed then.
+    abandoned: Option<Abandoned>,
 }
 
+/// Says whether the caller of an operation stopped waiting for its answer.
+pub(crate) type Abandoned = Arc<dyn Fn() -> bool + Send + Sync>;
+
 impl Local {
+    /// This, with `abandoned` saying when its caller stopped waiting.
+    pub(crate) fn abandoned_when(self, abandoned: Abandoned) -> Local {
+        Local {
+            abandoned: Some(abandoned),
+            ..self
+        }
+    }
+
     fn store(&self) -> Store {
         self.yard.store()
     }
@@ -2462,17 +2602,17 @@ impl Local {
         let seat = seated.as_ref().map(|(_, seat, _)| seat);
         let isolated =
             caller.home.is_some() || self.options.isolated || seat.is_some_and(|s| s.isolated);
-        let mut provision = match seat.and_then(|s| s.provision.clone()) {
-            Some(own) => Some(own),
-            None => caller.provision.clone(),
-        };
-        // A seat's provisioning replaces its parent's, but a seat without a
-        // model on its parent's harness keeps its parent's model; another
-        // harness's model would mean nothing to it.
-        if let (Some(spec), Some(_)) = (&mut provision, seat) {
-            if spec.model.is_none() && profile.harness == own.harness {
-                spec.model = caller.provision.as_ref().and_then(|p| p.model.clone());
-            }
+        let seated_provision = seat.and_then(|s| s.provision.as_ref());
+        let model = child_model(
+            request.model.as_deref(),
+            seated_provision,
+            caller.provision.as_ref(),
+            profile.harness == own.harness,
+        )?;
+        // A seat's provisioning replaces its parent's.
+        let mut provision = seated_provision.or(caller.provision.as_ref()).cloned();
+        if model.is_some() || provision.is_some() {
+            provision.get_or_insert_with(Default::default).model = model;
         }
         // Connectors: what the request asks for, else its seat's, else the
         // parent's; always within the parent's grant.
@@ -2531,15 +2671,7 @@ impl Local {
                 })
             }
         }
-        // Its model: what the request asks for, else its seat's (or what it
-        // inherited), where its profile can deliver one.
-        if let Some(model) = &request.model {
-            let model = model.trim();
-            if model.is_empty() {
-                return Err(Error::Denied("a child's model may not be blank".into()));
-            }
-            provision.get_or_insert_with(Default::default).model = Some(model.to_owned());
-        }
+        // Its model, where its profile can deliver one.
         if let Some(model) = provision.as_ref().and_then(|p| p.model.as_deref()) {
             harness::check_model(
                 profile,
@@ -2883,11 +3015,17 @@ impl Local {
             reserved_usd: held.live_usd,
             reserving_children: held.live,
             settled_children_usd: held.settled_usd,
-            allowed_harnesses,
             check: record.check.clone(),
             check_inherited: record.check_inherited,
             check_shared_with,
-            envelope: record.grant.map(|g| g.envelope),
+            // The envelope's harnesses as enforced, as `allowed_harnesses`
+            // says them: a stored empty list means "its own profile only",
+            // and shown as `[]` it read as "no harness".
+            envelope: record.grant.map(|g| Envelope {
+                harnesses: allowed_harnesses.clone(),
+                ..g.envelope
+            }),
+            allowed_harnesses,
             last_message: last_message(&events),
             seat,
             seats: may_spawn,
@@ -3104,7 +3242,7 @@ impl Local {
             &format!("snapshot before integrating {}", branches.join(", ")),
         )?;
         let merged = integrate::merge_many(&self.yard, branches, &caller.info.git_branch)
-            .map_err(|error| with_shared_check(&store, error, branches))?;
+            .map_err(|error| with_shared_check(&self.yard, &self.branch, error, branches))?;
         // A sibling waiting for these to be integrated may start now, and
         // any other child this branch now contains is merged too.
         for branch in branches {
@@ -3117,7 +3255,14 @@ impl Local {
     fn check(&self, branch: &str) -> Result<CheckReport, Error> {
         self.require_descendant(branch, true)?;
         let record = self.store().read(branch)?;
-        integrate::check_work(&self.yard, &record)
+        let abandoned = self.abandoned.clone();
+        let result = integrate::check_work(&self.yard, &record, &move || {
+            abandoned.as_ref().is_some_and(|abandoned| abandoned())
+        });
+        self.note("check", branch, &result, |(report, onto)| {
+            check_outcome(&self.yard, report, onto)
+        });
+        result.map(|(report, _)| report)
     }
 
     fn steer(&self, branch: &str, text: &str) -> Result<Steer, Error> {
@@ -3435,6 +3580,8 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
         )?,
         stall_after: asked.stall_after,
         stall_action: asked.stall_action,
+        hold_cap: asked.hold_cap,
+        follow_up_grace: asked.follow_up_grace,
     };
     let envelope = below.envelope();
     let mut deny = seat.deny.clone();
@@ -3523,6 +3670,33 @@ pub(crate) fn last_message(events: &[RecordedEvent]) -> String {
         .find(|m| !m.trim().is_empty())
         .map_or("", |m| m.trim());
     elide(last, LAST_MESSAGE_MAX)
+}
+
+/// The harness's background tasks still running when the branch's last
+/// turn ended: the last set it reported before that turn's end. A driver
+/// that holds a turn open for its background work (Claude Code's) ends it
+/// with tasks running only when a limit, a cancel or the end of its
+/// session cut the hold short, and closing the session stops them.
+pub(crate) fn background_at_end(events: &[RecordedEvent]) -> Vec<crate::HarnessTask> {
+    let start = events
+        .iter()
+        .rposition(|e| matches!(e.activity, Activity::Prompt(_)))
+        .map_or(0, |i| i + 1);
+    let turn = &events[start..];
+    let Some(end) = turn
+        .iter()
+        .rposition(|e| matches!(e.activity, Activity::Harness(Event::TurnEnded { .. })))
+    else {
+        return Vec::new();
+    };
+    turn[..end]
+        .iter()
+        .rev()
+        .find_map(|e| match &e.activity {
+            Activity::Harness(Event::BackgroundTasks { running }) => Some(running.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// `text` in at most `max` characters: whole when it fits, else its start
@@ -3708,6 +3882,58 @@ fn parse<T: DeserializeOwned>(tool: &str, arguments: Value) -> Result<T, Error> 
         .map_err(|e| Error::Denied(format!("invalid arguments for {tool}: {e}")))
 }
 
+/// The flat limits a spawn's arguments may give in place of `budget`,
+/// with the name each has inside it.
+const FLAT_BUDGET: &[(&str, &str)] = &[
+    ("budget_usd", "max_usd"),
+    ("max_turns", "max_turns"),
+    ("max_minutes", "max_minutes"),
+];
+
+/// A spawn's arguments with its flat limits (`budget_usd`, as the CLI and
+/// Python name them) moved into `budget`. Both forms at once are refused.
+fn nest_budget(mut spawn: Value) -> Result<Value, Error> {
+    let Some(fields) = spawn.as_object_mut() else {
+        return Ok(spawn);
+    };
+    let mut budget = serde_json::Map::new();
+    for (flat, nested) in FLAT_BUDGET {
+        match fields.remove(*flat) {
+            None | Some(Value::Null) => {}
+            Some(value) => {
+                budget.insert((*nested).to_owned(), value);
+            }
+        }
+    }
+    if budget.is_empty() {
+        return Ok(spawn);
+    }
+    if fields.get("budget").is_some_and(|b| !b.is_null()) {
+        return Err(Error::Denied(
+            "give a child's limits either as budget {max_usd, max_turns, max_minutes} or as \
+             budget_usd, max_turns and max_minutes, not both"
+                .into(),
+        ));
+    }
+    fields.insert("budget".into(), Value::Object(budget));
+    Ok(spawn)
+}
+
+/// A graph proposal's `edits` (a JSON array of [`GraphEdit`]s) with each
+/// spawn's flat limits moved into its `budget`, as `nest_budget` does for
+/// a spawn: `by graph apply` and the `apply_graph` tool read the same
+/// edits. Anything that is not an array is left for the parse to refuse.
+pub fn nest_graph_budgets(edits: &mut Value) -> Result<(), Error> {
+    if let Some(edits) = edits.as_array_mut() {
+        for edit in edits {
+            if edit.get("kind") == Some(&json!("spawn")) {
+                *edit = nest_budget(edit.take())?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn required(tool: &str, branch: Option<String>) -> Result<String, Error> {
     branch.ok_or_else(|| Error::Denied(format!("{tool} needs a branch")))
 }
@@ -3724,10 +3950,14 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
     local.require(operation.capability, operation.name)?;
     match tool {
         "spawn" => {
-            let spec: SpawnSpec = parse(tool, arguments)?;
+            let spec: SpawnSpec = parse(tool, nest_budget(arguments)?)?;
             to_json(&local.spawn(&spec.to_spawn()?)?)
         }
         "apply_graph" => {
+            let mut arguments = arguments;
+            if let Some(edits) = arguments.get_mut("edits") {
+                nest_graph_budgets(edits)?;
+            }
             let args: ApplyGraphArgs = parse(tool, arguments)?;
             to_json(&local.apply_graph(&args.edits, args.expected_revision)?)
         }
@@ -3903,6 +4133,32 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
     }
 }
 
+/// A child's model: what its spawn asks for, else its seat's, else its
+/// parent's when it runs its parent's harness (another harness's model
+/// would mean nothing to it), else none, its harness's default. `seat` is
+/// its seat's provisioning, `parent` its parent's.
+fn child_model(
+    asked: Option<&str>,
+    seat: Option<&crate::Provisioning>,
+    parent: Option<&crate::Provisioning>,
+    same_harness: bool,
+) -> Result<Option<String>, Error> {
+    if let Some(model) = asked {
+        let model = model.trim();
+        if model.is_empty() {
+            return Err(Error::Denied("a child's model may not be blank".into()));
+        }
+        return Ok(Some(model.to_owned()));
+    }
+    if let Some(model) = seat.and_then(|s| s.model.clone()) {
+        return Ok(Some(model));
+    }
+    Ok(match same_harness {
+        true => parent.and_then(|p| p.model.clone()),
+        false => None,
+    })
+}
+
 #[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
@@ -3963,11 +4219,14 @@ mod tests {
                 siblings: vec!["b".into(), "c".into()],
                 unsettled: vec!["c".into()],
                 integrate_together: vec!["a".into(), "b".into(), "c".into()],
+                failed_alone: vec!["a".into()],
             })),
+            own_work: Vec::new(),
         };
         let text = error.to_string();
         for needed in [
             "check failed:\n2 failed\n",
+            "a failed it alone too (`by check`), so it may need siblings' work",
             "Siblings b, c share the same check",
             "`by integrate a b c`, once c settles (`by wait c`)",
             "needs a check of its own (`by spawn --check`)",
@@ -3977,15 +4236,57 @@ mod tests {
         let detail = error.detail().unwrap();
         assert_eq!(detail["unsettled"], json!(["c"]));
         assert!(detail.get("inherited_from").is_none());
+        assert_eq!(detail["failed_alone"], json!(["a"]));
         let plain = Error::CheckFailed {
             output_tail: "x".into(),
             checks: Vec::new(),
             shared: None,
+            own_work: Vec::new(),
         };
         assert_eq!(
             (plain.to_string(), plain.detail()),
             ("check failed:\nx".into(), None)
         );
+    }
+
+    /// A check that failed on the integrated branches' own work says so,
+    /// and names no sibling to integrate with them.
+    #[test]
+    fn a_check_failed_on_own_work_names_no_sibling() {
+        let error = Error::CheckFailed {
+            output_tail: "1 failed".into(),
+            checks: Vec::new(),
+            shared: None,
+            own_work: vec!["a".into(), "b".into()],
+        };
+        let text = error.to_string();
+        assert!(
+            text.contains("failed on the integrated branches' own work (a, b)"),
+            "{text}"
+        );
+        assert!(!text.contains("Siblings"), "{text}");
+        let detail = error.detail().unwrap();
+        assert_eq!(detail["own_work"], json!(["a", "b"]));
+        assert!(detail.get("integrate_together").is_none(), "{detail}");
+    }
+
+    /// `by check` notes how it ended on which work and parent, and only
+    /// that work onto that parent reads back as its verdict.
+    #[test]
+    fn a_check_note_reads_back_only_on_the_same_trees() {
+        let note = "failed on work tree w1 onto tree p1";
+        assert_eq!(checked_on(note, "w1", "p1"), Some(false));
+        assert_eq!(checked_on(note, "w2", "p1"), None);
+        assert_eq!(checked_on(note, "w1", "p2"), None);
+        assert_eq!(
+            checked_on("passed on work tree w1 onto tree p1", "w1", "p1"),
+            Some(true)
+        );
+        assert_eq!(
+            checked_on("not_run on work tree w1 onto tree p1", "w1", "p1"),
+            None
+        );
+        assert_eq!(checked_on("passed", "w1", "p1"), None);
     }
 
     /// A failed check of an integration whose branches' checks differ
@@ -4007,6 +4308,7 @@ mod tests {
             output_tail: "2 failed".into(),
             checks: checks.clone(),
             shared: None,
+            own_work: Vec::new(),
         };
         assert_eq!(
             error.to_string(),
@@ -4029,7 +4331,9 @@ mod tests {
                 siblings: vec!["e".into()],
                 unsettled: Vec::new(),
                 integrate_together: vec!["b".into(), "e".into()],
+                failed_alone: Vec::new(),
             })),
+            own_work: Vec::new(),
         };
         let text = shared.to_string();
         assert!(
@@ -4136,6 +4440,8 @@ Checks on the merged result: \
             command: None,
             home: None,
             cost_baseline: None,
+            cost_session: None,
+            session_costs: Default::default(),
             provider: None,
             provision: None,
             grant: Some(Grant {
@@ -4156,6 +4462,7 @@ Checks on the merged result: \
             wakes: 0,
             lost: None,
             sandbox_seed: None,
+            merged: None,
             actor: None,
             plan: None,
             goal: None,
@@ -4223,6 +4530,94 @@ Checks on the merged result: \
         assert_eq!(cut.chars().count(), LAST_MESSAGE_MAX);
         assert!(cut.starts_with("BEGIN") && cut.ends_with("END"), "{cut}");
         assert!(cut.contains("\n…\n"));
+    }
+
+    /// What still ran at the last turn's end is the last set reported
+    /// before it ended, not one an earlier turn or the close reported.
+    #[test]
+    fn background_work_at_the_end_is_the_last_set_before_the_turn_ended() {
+        let at = |activity: Activity| RecordedEvent { at_ms: 0, activity };
+        let running = |ids: &[&str]| {
+            at(Activity::Harness(Event::BackgroundTasks {
+                running: ids
+                    .iter()
+                    .map(|id| crate::HarnessTask {
+                        task_id: (*id).into(),
+                        kind: None,
+                        description: "by check".into(),
+                    })
+                    .collect(),
+            }))
+        };
+        let ended = at(Activity::Harness(Event::TurnEnded {
+            turn: 1,
+            outcome: crate::TurnOutcome::Interrupted,
+        }));
+        let ids = |events: &[RecordedEvent]| -> Vec<String> {
+            background_at_end(events)
+                .into_iter()
+                .map(|t| t.task_id)
+                .collect()
+        };
+        let events = vec![
+            at(Activity::Prompt("earlier".into())),
+            running(&["old"]),
+            ended.clone(),
+            at(Activity::Prompt("do it".into())),
+            running(&["b1", "b2"]),
+            running(&["b1"]),
+            ended.clone(),
+            running(&[]),
+        ];
+        assert_eq!(ids(&events), ["b1"]);
+        assert_eq!(ids(&events[..3]), ["old"]);
+        assert!(ids(&events[..6]).is_empty(), "no end yet");
+        let finished = [&events[3..5], &[running(&[]), ended]].concat();
+        assert!(ids(&finished).is_empty());
+    }
+
+    /// A parent woken when its children settle reads which of a child's
+    /// background tasks its turn's end cut off.
+    #[test]
+    fn the_wake_names_background_work_a_childs_turn_cut_off() {
+        let (_temp, store) = temp_store();
+        let parent = record("root", &["kid", "calm"], None, None);
+        store.write(&parent).unwrap();
+        for name in ["kid", "calm"] {
+            store.write(&record(name, &[], None, None)).unwrap();
+        }
+        let mut kid = Recorder::open(&store, "kid", None).unwrap();
+        kid.record(Activity::Prompt("check it".into())).unwrap();
+        kid.record(Activity::Harness(Event::BackgroundTasks {
+            running: vec![crate::HarnessTask {
+                task_id: "b1".into(),
+                kind: Some("local_bash".into()),
+                description: "by check".into(),
+            }],
+        }))
+        .unwrap();
+        kid.record(Activity::Harness(Event::TurnEnded {
+            turn: 1,
+            outcome: crate::TurnOutcome::Interrupted,
+        }))
+        .unwrap();
+        let parked = crate::wake::Parked {
+            since_ms: 0,
+            ended: BranchStatus::NoChanges,
+            on: vec!["kid".into(), "calm".into()],
+            budget: Limits::default(),
+        };
+        let wake = crate::wake::summary(&store, &parent, &parked, 8).unwrap();
+        let warned: Vec<&str> = wake
+            .lines()
+            .filter(|l| l.contains("background tasks still running"))
+            .collect();
+        assert_eq!(warned.len(), 1, "{wake}");
+        assert!(warned[0].contains("\"by check\" (b1)"), "{wake}");
+        let kid_at = wake.find("- kid:").unwrap();
+        let calm_at = wake.find("- calm:").unwrap();
+        let warned_at = wake.find(warned[0]).unwrap();
+        assert!(kid_at < warned_at && warned_at < calm_at, "{wake}");
     }
 
     #[test]
@@ -4483,5 +4878,43 @@ Checks on the merged result: \
         let own_only = Envelope::default();
         assert!(own_only.allows(own, own));
         assert!(!own_only.allows(profiles::by_id("qwen-code-acp").unwrap(), own));
+    }
+
+    /// A child naming no model keeps its parent's on its parent's harness
+    /// only: a goose-acp child of a parent run with a model gets none, and
+    /// so is not refused, while a model its spawn asks for still is.
+    #[test]
+    fn a_child_keeps_its_parents_model_only_on_its_parents_harness() {
+        let with = |model: &str| crate::Provisioning {
+            model: Some(model.into()),
+            ..crate::Provisioning::default()
+        };
+        let parent = with("opus");
+        let model = |asked, seat, same| child_model(asked, seat, Some(&parent), same).unwrap();
+        assert_eq!(model(None, None, true).as_deref(), Some("opus"));
+        assert_eq!(model(None, None, false), None);
+        // A seat's provisioning without a model, and a seat's model.
+        let bare = crate::Provisioning::default();
+        assert_eq!(model(None, Some(&bare), true).as_deref(), Some("opus"));
+        assert_eq!(model(None, Some(&bare), false), None);
+        let haiku = with("haiku");
+        assert_eq!(model(None, Some(&haiku), false).as_deref(), Some("haiku"));
+        assert_eq!(
+            model(Some(" sonnet "), Some(&haiku), true).as_deref(),
+            Some("sonnet")
+        );
+        assert!(matches!(
+            child_model(Some(" "), None, Some(&parent), true),
+            Err(Error::Denied(_))
+        ));
+
+        let goose = profiles::by_id("goose-acp").unwrap();
+        assert_eq!(model(None, None, goose.harness == "claude-code"), None);
+        match harness::check_model(goose, "opus", false) {
+            Err(Error::Unsupported(why)) => {
+                assert!(why.contains("goose-acp cannot be given a model"), "{why}");
+            }
+            other => panic!("expected the model refused, got {other:?}"),
+        }
     }
 }

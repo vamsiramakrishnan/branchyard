@@ -222,10 +222,23 @@ fn send_resumes_the_session_in_the_same_worktree() {
         .collect();
     assert_eq!(prompts, ["WHOAMI", "WHOAMI WRITE notes.txt=more"]);
 
-    // A third turn without changes keeps the candidate.
+    // A third turn without changes keeps the candidate, and the branch
+    // stays ready with it: the turn's own events say it changed nothing.
     let third = second.send("WHOAMI", f.options()).unwrap();
-    assert_eq!(third.info().status, BranchStatus::NoChanges);
+    assert_eq!(third.info().status, BranchStatus::Ready);
     assert_eq!(third.info().candidate, info.candidate);
+    let events = third.events().unwrap();
+    let notes = events
+        .iter()
+        .filter(|e| {
+            matches!(&e.activity, Activity::Warning(w) if w.contains("the turn changed no file"))
+        })
+        .count();
+    assert_eq!(notes, 1, "only the third turn said so: {events:?}");
+    assert_eq!(
+        events.last().unwrap().activity,
+        Activity::Status(BranchStatus::Ready)
+    );
 }
 
 #[test]
@@ -405,6 +418,23 @@ fn merge_lands_a_merge_commit_on_main() {
         f.yard.merge("feature", "nope"),
         Err(Error::Git(_))
     ));
+}
+
+/// A merged branch sent a turn that changes nothing still holds only the
+/// candidate already integrated: it stays merged, not `ready` to integrate
+/// again. A turn that changes something makes it ready.
+#[test]
+fn a_merged_branch_whose_turn_changes_nothing_stays_merged() {
+    let f = Fixture::new();
+    let branch = f.task("WRITE kept.txt=1").name("kept").run().unwrap();
+    f.yard.merge("kept", "main").unwrap();
+    let merged = status_of(&f, "kept");
+    assert!(matches!(merged, BranchStatus::Merged { .. }), "{merged:?}");
+    let idle = branch.send("WHOAMI", f.options()).unwrap();
+    assert_eq!(idle.info().status, merged);
+    assert_eq!(status_of(&f, "kept"), merged);
+    let changed = branch.send("WRITE kept.txt=2", f.options()).unwrap();
+    assert_eq!(changed.info().status, BranchStatus::Ready);
 }
 
 #[test]

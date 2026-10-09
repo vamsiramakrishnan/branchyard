@@ -51,6 +51,21 @@ const CLOSE_GRACE: Duration = Duration::from_secs(10);
 const INTERRUPT_GRACE: Duration = Duration::from_secs(30);
 /// How often limits are checked while the harness is quiet.
 const TICK: Duration = Duration::from_millis(100);
+/// How long a turn with no duration limit may be held open after the
+/// harness answered it, for its background tasks and the harness's answer
+/// to their notification ([`branchyard_harness::Driver::held`]), before
+/// the hold is cut, unless [`Budget::hold_cap`] says otherwise. The turn
+/// then ends with the outcome it was held with
+/// ([`branchyard_harness::Driver::held_outcome`]), as it does at its
+/// duration limit.
+const HOLD_CAP: Duration = Duration::from_secs(30 * 60);
+/// How long a held turn waits, with no background task running, for the
+/// harness to start the cycle on an ended task's notification
+/// ([`branchyard_harness::Driver::awaiting_follow_up`]) before the hold
+/// ends, unless [`Budget::follow_up_grace`] says otherwise. Claude Code
+/// starts one within about 2 seconds of the result, or never (a task the
+/// model stopped, a notification it already read).
+const FOLLOW_UP_GRACE: Duration = Duration::from_secs(10);
 /// Events drained without waiting once the turn has ended.
 const DRAIN_MAX: usize = 10_000;
 /// The variables that name a temporary directory: POSIX's, and the two
@@ -149,6 +164,12 @@ pub(crate) struct Driven {
     /// harness's per-call usage; its cost when the harness never reported
     /// a cumulative one.
     pub live_cost: Option<f64>,
+    /// If the engine cut the turn's hold, the descendants the turn's
+    /// latest answer cannot have seen settle: those still running when
+    /// the harness last answered (the hold's start, or a cycle's result
+    /// during it), and those spawned since. Its branch is woken for those
+    /// that settled ([`crate::wake::park`]).
+    pub held_on: Vec<String>,
 }
 
 /// A running turn's spend: the branch's spend when the turn started, or
@@ -221,6 +242,22 @@ enum Stop {
     /// Stopping after a stall, with [`Budget::stall_action`]
     /// [`StallAction::Interrupt`].
     Stall,
+    /// Cutting the hold of a turn held open for background tasks after its
+    /// answer, at [`HOLD_CAP`] or its duration limit: it ends with the
+    /// outcome it is held with, not as interrupted or over a limit.
+    Hold(TurnOutcome),
+}
+
+/// Whether a turn held open since `since` for background tasks has been
+/// held too long: only without a duration limit (`deadline`), which bounds
+/// the hold itself, after `cap`.
+fn hold_cut(
+    since: Option<Instant>,
+    now: Instant,
+    deadline: Option<Instant>,
+    cap: Duration,
+) -> bool {
+    deadline.is_none() && since.is_some_and(|since| now.duration_since(since) >= cap)
 }
 
 /// Run the turn under `lease` and record its result. Harness failures
@@ -279,17 +316,26 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
         } else {
             let driven = drive(&mut recorder, &turn, &mut record, &bounds, &lease);
             graph::unbind(turn.yard, &record);
+            let driven = driven?;
+            let driven_held_on = driven.held_on.clone();
             conclude(
                 turn.yard,
                 turn.prompt,
                 &fence,
                 &mut record,
                 &mut recorder,
-                driven?,
+                driven,
             )?;
-            // A delegating turn that ended while its children still run
-            // waits on them; see `crate::wake`.
-            crate::wake::park(turn.yard, &mut record, &mut recorder, &bounds.budget)?;
+            // A delegating turn that ended while its children still run,
+            // or whose cut hold they settled in, waits on them; see
+            // `crate::wake`.
+            crate::wake::park(
+                turn.yard,
+                &mut record,
+                &mut recorder,
+                &bounds.budget,
+                &driven_held_on,
+            )?;
         }
         Ok(())
     })();
@@ -401,7 +447,8 @@ fn stop(session: &mut Session) -> Result<(), RuntimeError> {
     }
 }
 
-/// The branch's own share of a cumulative estimate.
+/// The branch's cost from its session's cumulative estimate: see
+/// `Record::cost_baseline`.
 fn spent(reported: f64, baseline: Option<f64>) -> f64 {
     (reported - baseline.unwrap_or(0.0)).max(0.0)
 }
@@ -457,6 +504,7 @@ fn run(
         cost: None,
         metered: None,
         live_cost: None,
+        held_on: Vec::new(),
     };
     let sandboxed = crate::placement::sandboxed(record.provider.as_ref());
     // Revoked when this function returns, after the harness and its
@@ -638,6 +686,38 @@ fn run(
             driven.end = end;
             return Ok(driven);
         }
+    }
+    // A fresh session's cumulative cost starts again from nothing (after a
+    // rewind, or a lost session), and a resumed one other than the
+    // baseline's from its own total when it was left, lower than the
+    // latest session's when a rewind went back to an older one: the
+    // branch's cost is what it had spent before, and what the session's
+    // total adds to it. The session left keeps its total, what the branch
+    // has counted of it. A turn that resumes the baseline's own session,
+    // and a fork's first (its baseline was set when it was forked), keep
+    // the baseline. Written at once, so a turn cut off and resumed reads
+    // the session's total the same way.
+    let resumed = match &turn.mode {
+        SessionMode::Fresh => None,
+        SessionMode::Resume(session) => Some(session.as_str().to_owned()),
+        SessionMode::Fork(_) => record.cost_session.clone(),
+    };
+    let leaving = turn.mode == SessionMode::Fresh || resumed != record.cost_session;
+    if leaving {
+        let before = record.info.cost_usd.unwrap_or(0.0);
+        if let Some(left) = record.cost_session.take() {
+            let total = before + record.cost_baseline.unwrap_or(0.0);
+            record.session_costs.insert(left, total);
+        }
+        record.cost_baseline = match &resumed {
+            None => record.info.cost_usd.map(|cost| -cost),
+            Some(session) => match record.session_costs.get(session) {
+                Some(total) => Some(total - before),
+                None => record.cost_baseline,
+            },
+        };
+        record.cost_session = resumed;
+        store.write_fenced(record, fence)?;
     }
     let record: &Record = record;
     // Every local harness learns which branch it is on, so `by` inside it
@@ -843,9 +923,23 @@ fn run(
     // stops the loop from ticking at all), while a child branch is running
     // (`delegation::any_child_running`), or while the harness is blocked in
     // `ask --wait` for an answer (`inbox::waiting_for_answer`, recorded in
-    // the store by whichever process runs the wait).
+    // the store by whichever process runs the wait), nor while the driver
+    // holds the turn open after its answer for background tasks the
+    // harness still reports running (a long command in the background says
+    // nothing); that hold is bounded by the turn's duration limit, or else
+    // by `HOLD_CAP`.
     let mut last_activity = started;
     let mut stalled = false;
+    let mut held_since: Option<Instant> = None;
+    let hold_cap = bounds.budget.hold_cap.unwrap_or(HOLD_CAP);
+    let mut awaiting_since: Option<Instant> = None;
+    // What the turn's latest answer saw of its descendants: those still
+    // running, and every one it knew of.
+    let mut held_on: Vec<String> = Vec::new();
+    let mut held_known: Vec<String> = Vec::new();
+    let mut held_answers = 0;
+    let mut cut_hold = false;
+    let follow_up_grace = bounds.budget.follow_up_grace.unwrap_or(FOLLOW_UP_GRACE);
     // What the branch has spent, while the turn runs: see `LiveCost`.
     // Written to its record as it changes, so a parent inspecting it, or
     // the branch inspecting itself, sees a figure and not "unknown".
@@ -917,6 +1011,24 @@ fn run(
             _ => {}
         }
         steering.poll(recorder, &mut session, &store, fence, &phase)?;
+        let holding = session.holding();
+        // The cap covers the whole hold, the wait for the follow-up included.
+        // The answer is brought up to date when the hold begins and at each
+        // cycle's result during it.
+        if session.held() && (held_since.is_none() || session.held_answers() != held_answers) {
+            held_answers = session.held_answers();
+            let below = delegation::descendants(&store, &record.info.name).unwrap_or_default();
+            held_known = below.iter().map(|info| info.name.clone()).collect();
+            held_on = below
+                .into_iter()
+                .filter(|info| crate::wake::unsettled(&info.status))
+                .map(|info| info.name)
+                .collect();
+        }
+        held_since = session.held().then(|| held_since.unwrap_or(now));
+        awaiting_since = session
+            .awaiting_follow_up()
+            .then(|| awaiting_since.unwrap_or(now));
         // A turn on the model gateway is metered exactly; its limit is
         // held here as a harness's own estimate is below.
         if let Some(gateway) = &model_gateway {
@@ -951,6 +1063,7 @@ fn run(
             let idle = now.duration_since(last_activity);
             if !stalled
                 && idle >= window
+                && !holding
                 && !delegation::any_child_running(&store, &record.info.name)
                 && !crate::inbox::waiting_for_answer(&store, &record.info.name)
             {
@@ -986,14 +1099,75 @@ fn run(
             }
             Phase::Running(n) if late => {
                 let n = *n;
+                // A held turn has its answer: the limit cuts the hold, and
+                // the turn keeps the outcome it is held with.
+                let why = match session.held_outcome() {
+                    Some(outcome) => {
+                        recorder.record(Activity::Warning(
+                            "the turn reached its duration limit while held open for the \
+                             harness's background tasks; ending the hold, the turn keeps its \
+                             outcome"
+                                .into(),
+                        ))?;
+                        Stop::Hold(outcome)
+                    }
+                    None => Stop::Limit("max_duration"),
+                };
+                cut_hold = matches!(why, Stop::Hold(_));
                 if let Err(error) = stop(&mut session) {
                     recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
                     kill = true;
-                    break End::budget("max_duration");
+                    break match why {
+                        Stop::Hold(outcome) => End::Outcome { outcome },
+                        _ => End::budget("max_duration"),
+                    };
                 }
                 phase = Phase::Stopping {
                     turn: n,
-                    why: Stop::Limit("max_duration"),
+                    why,
+                    since: now,
+                };
+            }
+            Phase::Running(n) if hold_cut(held_since, now, deadline, hold_cap) => {
+                let n = *n;
+                recorder.record(Activity::Warning(format!(
+                    "the turn was held open {} for the harness's background tasks, with no \
+                     duration limit; ending the hold, the turn keeps its outcome",
+                    branchyard_support::time::human_duration(hold_cap)
+                )))?;
+                let outcome = session.held_outcome().unwrap_or(TurnOutcome::Interrupted);
+                cut_hold = true;
+                if let Err(error) = stop(&mut session) {
+                    recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
+                    kill = true;
+                    break End::Outcome { outcome };
+                }
+                phase = Phase::Stopping {
+                    turn: n,
+                    why: Stop::Hold(outcome),
+                    since: now,
+                };
+            }
+            Phase::Running(n)
+                if awaiting_since
+                    .is_some_and(|since| now.duration_since(since) >= follow_up_grace) =>
+            {
+                let n = *n;
+                recorder.record(Activity::Warning(format!(
+                    "the harness started no cycle on its ended background tasks' notification \
+                     within {} of the turn's hold; ending the hold, the turn keeps its outcome",
+                    branchyard_support::time::human_duration(follow_up_grace)
+                )))?;
+                let outcome = session.held_outcome().unwrap_or(TurnOutcome::Interrupted);
+                cut_hold = true;
+                if let Err(error) = stop(&mut session) {
+                    recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
+                    kill = true;
+                    break End::Outcome { outcome };
+                }
+                phase = Phase::Stopping {
+                    turn: n,
+                    why: Stop::Hold(outcome),
                     since: now,
                 };
             }
@@ -1008,6 +1182,9 @@ fn run(
                     Stop::Cancelled(by) => End::cancelled(by.clone()),
                     Stop::Failure(reason) => End::failed(reason.clone()),
                     Stop::Stall => End::Stalled,
+                    Stop::Hold(outcome) => End::Outcome {
+                        outcome: outcome.clone(),
+                    },
                 };
             }
             _ => {}
@@ -1210,6 +1387,13 @@ fn run(
                     Phase::Stopping {
                         why: Stop::Stall, ..
                     } => End::Stalled,
+                    // The hold was cut: the turn keeps the outcome it was
+                    // held with, whatever the cycle the interrupt stopped
+                    // ended with.
+                    Phase::Stopping {
+                        why: Stop::Hold(held),
+                        ..
+                    } => End::Outcome { outcome: held },
                     _ => End::Outcome { outcome },
                 };
             }
@@ -1224,6 +1408,16 @@ fn run(
     };
     driven.end = end;
     driven.live_cost = shown.get();
+    if cut_hold {
+        // Spawned since the latest answer, by a cycle cut short: unseen too.
+        let spawned = delegation::descendants(&store, &record.info.name)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|info| info.name)
+            .filter(|name| !held_known.contains(name));
+        held_on.extend(spawned);
+        driven.held_on = held_on;
+    }
 
     if !kill {
         // Whatever the harness already sent after the turn ended.
@@ -1673,12 +1867,14 @@ pub(crate) fn conclude(
 ) -> Result<(), Error> {
     let store = yard.store();
     let excluded = crate::workspace::excluded(record);
+    let merged = record.merged.take();
     let info = &mut record.info;
     if driven.submitted {
         info.turns += 1;
     }
     if let Some(session) = &driven.session {
         info.session = Some(session.to_string());
+        record.cost_session = Some(session.to_string());
     }
     match (driven.metered, driven.cost) {
         (Some(metered), _) => info.cost_usd = Some(info.cost_usd.unwrap_or(0.0) + metered),
@@ -1746,17 +1942,38 @@ pub(crate) fn conclude(
         if let (true, false, Some(candidate)) = (changed, replayed, &candidate) {
             recorder.record(Activity::Snapshot(candidate.clone()))?;
         }
+        // The branch's status says what it holds; that this turn changed
+        // nothing is the turn's own to say, in its events.
+        let completed = matches!(
+            driven.end,
+            End::Outcome {
+                outcome: TurnOutcome::Completed
+            }
+        );
+        if completed && !changed && !replayed && candidate.is_some() {
+            recorder.record(Activity::Warning(
+                "the turn changed no file; the branch keeps its candidate from an earlier turn"
+                    .into(),
+            ))?;
+        }
         info.candidate = candidate;
     }
+    // A merged branch whose turn changed nothing still holds the candidate
+    // already integrated. Only a completed turn keeps it: a failed or lost
+    // one says so instead, as the reason its parent and `--retry` act on.
+    let merged = merged.filter(|_| snapshotted.error.is_none() && !changed);
     if !replayed {
         store
             .backend()
             .finish_step(fence, fence.turn, STEP_SNAPSHOT, &to_value(&snapshotted))?;
     }
     info.status = match driven.end {
+        // `ready` while the branch has a candidate, whichever turn made it
+        // (still `merged` when it is the one already integrated);
+        // `no_changes` only when it has none.
         End::Outcome {
             outcome: TurnOutcome::Completed,
-        } if changed && info.candidate.is_some() => BranchStatus::Ready,
+        } if info.candidate.is_some() => merged.unwrap_or(BranchStatus::Ready),
         End::Outcome {
             outcome: TurnOutcome::Completed,
         } => BranchStatus::NoChanges,
@@ -1857,5 +2074,26 @@ mod tests {
         assert_eq!(spent(0.5, None), 0.5);
         assert_eq!(spent(0.75, Some(0.5)), 0.25);
         assert_eq!(spent(0.25, Some(0.5)), 0.0);
+    }
+
+    /// A hold is cut after the cap only when the turn has no duration
+    /// limit, which bounds the hold itself, and only while it lasts.
+    #[test]
+    fn a_hold_without_a_duration_limit_is_cut_at_the_cap() {
+        let cap = Duration::from_secs(60);
+        let since = Instant::now();
+        let later = since + cap;
+        assert!(hold_cut(Some(since), later, None, cap));
+        assert!(!hold_cut(
+            Some(since),
+            later - Duration::from_secs(1),
+            None,
+            cap
+        ));
+        assert!(!hold_cut(None, later, None, cap), "not held");
+        assert!(
+            !hold_cut(Some(since), later, Some(later + cap), cap),
+            "the duration limit bounds it"
+        );
     }
 }

@@ -123,6 +123,17 @@ impl Param {
         }
     }
 
+    /// An argument only the MCP tool has, with the reason.
+    const fn tool(tool: &'static str, why: &'static str) -> Param {
+        Param {
+            cli: None,
+            tool: Some(tool),
+            python: None,
+            why,
+            inside: None,
+        }
+    }
+
     /// A flag only a person outside a harness may pass, with the reason.
     const fn outside(cli: &'static str, why: &'static str) -> Param {
         Param {
@@ -155,6 +166,15 @@ const ACTING_BRANCH: Param = Param::outside(
     "inside a harness the acting branch is always the harness's own, from its token",
 );
 const TARGET: Param = Param::all("<BRANCH>", "branch", "branch");
+const PROMPT_FILE: Param = Param::cli(
+    "--prompt-file",
+    "a tool call and a Python string carry a prompt of any length; only a shell command line \
+     needs a file (Python passes its prompt to by on stdin)",
+);
+/// The tool's flat limits, beside its nested `budget`.
+const FLAT_BUDGET: &str = "the tool also takes the flat limits the CLI and Python name \
+                           (budget_usd, max_turns, max_minutes) in place of budget; given both, \
+                           it is refused";
 const PERMISSIONS: &str = "a child runs under its parent's policy, and only a person answers \
                            permission requests";
 
@@ -168,6 +188,9 @@ pub struct Operation {
     /// A flag that selects this operation within a shared subcommand, such
     /// as `--steer` on `by send`.
     pub selector: Option<&'static str>,
+    /// Another `by` subcommand that runs this operation alone, such as
+    /// `by steer` for `by send --steer`. It takes the same `params`.
+    pub alias: Option<&'static [&'static str]>,
     /// The MCP tool, or `None` with [`Operation::why`].
     pub tool: Option<&'static str>,
     /// The Python function, or `None` with [`Operation::why`].
@@ -201,6 +224,7 @@ const fn op(
         name,
         cli,
         selector: None,
+        alias: None,
         tool: Some(tool),
         python: Some(python),
         rust: Some(rust),
@@ -220,6 +244,11 @@ impl Operation {
 
     const fn selector(mut self, flag: &'static str) -> Operation {
         self.selector = Some(flag);
+        self
+    }
+
+    const fn alias(mut self, cli: &'static [&'static str]) -> Operation {
+        self.alias = Some(cli);
         self
     }
 
@@ -276,6 +305,9 @@ pub const OPERATIONS: &[Operation] = &[
             Param::all("--budget-usd", "budget.max_usd", "budget_usd"),
             Param::all("--max-turns", "budget.max_turns", "max_turns"),
             Param::all("--max-minutes", "budget.max_minutes", "max_minutes"),
+            Param::tool("budget_usd", FLAT_BUDGET),
+            Param::tool("max_turns", FLAT_BUDGET),
+            Param::tool("max_minutes", FLAT_BUDGET),
             Param::all("--check", "check", "check"),
             Param::all("--max-depth", "max_depth", "max_depth"),
             Param::all("--max-children", "max_children", "max_children"),
@@ -288,11 +320,7 @@ pub const OPERATIONS: &[Operation] = &[
             Param::all("--connector", "connectors", "connectors"),
             Param::all("--plan", "plan", "plan"),
             Param::all("--model", "model", "model"),
-            Param::cli(
-                "--prompt-file",
-                "a tool call and a Python string carry a prompt of any length; only a shell \
-                 command line needs a file (Python passes its prompt to by on stdin)",
-            ),
+            PROMPT_FILE,
             Param::cli(
                 "--issue",
                 "reads the issue with gh on the caller's machine; elsewhere, put it in the prompt",
@@ -356,6 +384,7 @@ pub const OPERATIONS: &[Operation] = &[
         &[
             TARGET,
             Param::all("<PROMPT>", "prompt", "prompt"),
+            PROMPT_FILE,
             Param::all("--retry", "retry", "retry"),
             Param::cli(
                 "--wait",
@@ -375,9 +404,15 @@ pub const OPERATIONS: &[Operation] = &[
         "steer",
         "steer",
         Capability::Delegate,
-        &[TARGET, Param::all("<PROMPT>", "text", "text")],
+        &[
+            TARGET,
+            Param::all("<PROMPT>", "text", "text"),
+            PROMPT_FILE,
+            JSON,
+        ],
     )
-    .selector("--steer"),
+    .selector("--steer")
+    .alias(&["steer"]),
     op(
         "integrate",
         &["integrate"],
@@ -786,13 +821,12 @@ pub fn by_tool(tool: &str) -> Option<&'static Operation> {
 /// operation a harness may run on its own branch: what
 /// [`crate::Policy::allow_delegation_commands`] allows.
 pub fn is_harness_command(words: &[String]) -> bool {
+    let starts = |cli: &[&str]| {
+        words.len() >= cli.len() && words.iter().zip(cli).all(|(word, cli)| word == cli)
+    };
     OPERATIONS.iter().any(|operation| {
         operation.contexts.inside == Context::Yes
-            && words.len() >= operation.cli.len()
-            && words
-                .iter()
-                .zip(operation.cli)
-                .all(|(word, cli)| word == cli)
+            && (starts(operation.cli) || operation.alias.is_some_and(starts))
     })
 }
 
@@ -986,6 +1020,17 @@ mod tests {
                 "dispatch lacks {tool}"
             );
         }
+    }
+
+    /// `by steer` is `by send --steer`, and a harness may run either.
+    #[test]
+    fn steer_has_its_own_command() {
+        let steer = by_name("steer").unwrap();
+        assert_eq!(steer.alias, Some(&["steer"][..]));
+        let words = |line: &str| line.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert!(is_harness_command(&words("steer child go")));
+        assert!(is_harness_command(&words("send child go --steer")));
+        assert!(!is_harness_command(&words("steering child")));
     }
 
     #[test]

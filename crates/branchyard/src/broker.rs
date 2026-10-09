@@ -130,7 +130,7 @@ fn serve(yard: &Yard, stream: UnixStream) {
             }
             Ok(_) => {}
         }
-        let response = match handle(yard, &line) {
+        let response = match handle(yard, &line, &writer) {
             Ok(result) => json!({ "ok": result }),
             Err(error) => json!({ "error": describe(&error) }),
         };
@@ -148,7 +148,7 @@ fn describe(error: &Error) -> Value {
     described
 }
 
-fn handle(yard: &Yard, line: &str) -> Result<Value, Error> {
+fn handle(yard: &Yard, line: &str, stream: &UnixStream) -> Result<Value, Error> {
     let request: Value =
         serde_json::from_str(line).map_err(|e| Error::State(format!("unreadable request: {e}")))?;
     let field = |name: &str| {
@@ -156,8 +156,25 @@ fn handle(yard: &Yard, line: &str) -> Result<Value, Error> {
             .as_str()
             .ok_or_else(|| Error::State(format!("request without {name}")))
     };
-    let local = delegation::local_by_token(yard, field("token")?)?;
+    let mut local = delegation::local_by_token(yard, field("token")?)?;
+    // A client that hung up (a `by check` its harness's tool timeout
+    // killed) waits for nothing: a check it started is stopped.
+    if let Ok(watched) = stream.try_clone() {
+        local = local.abandoned_when(Arc::new(move || hung_up(&watched)));
+    }
     delegation::dispatch(&local, field("tool")?, request["arguments"].clone())
+}
+
+/// Whether the client at the other end of `stream` closed it. A client
+/// waits for each answer without writing, so a read that would find the
+/// end of the stream, peeked without waiting, means it is gone.
+fn hung_up(stream: &UnixStream) -> bool {
+    use rustix::net::{recv, RecvFlags};
+    let mut byte = [0u8; 1];
+    matches!(
+        recv(stream, &mut byte, RecvFlags::PEEK | RecvFlags::DONTWAIT),
+        Ok((0, _)) | Err(rustix::io::Errno::CONNRESET)
+    )
 }
 
 /// Why a delegation call could not reach the engine running `branch`'s

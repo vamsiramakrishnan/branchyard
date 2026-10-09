@@ -678,11 +678,13 @@ fn a_harness_is_named_by_the_id_typed_and_its_profile_everywhere() {
         "{said}"
     );
     let (_, me) = sh_json(&said, 2);
-    assert_eq!(me["envelope"]["harnesses"], serde_json::json!([]));
+    // One answer: the envelope's harnesses are those enforced, not a
+    // stored `[]` that read as "none".
     assert_eq!(
         me["allowed_harnesses"],
         serde_json::json!(["gemini-cli-acp"])
     );
+    assert_eq!(me["envelope"]["harnesses"], me["allowed_harnesses"]);
     let events = stdout(&repo.by(&["log", "root"]));
     assert!(
         events.contains("started on gemini-cli (gemini-cli-acp)"),
@@ -693,8 +695,9 @@ fn a_harness_is_named_by_the_id_typed_and_its_profile_everywhere() {
 /// The battery's inherited whole-suite check: each child inherits its
 /// parent's, which passes only once every sibling is in, and integrating
 /// one alone failed with nothing but the check's output. `by inspect`
-/// shows the check and who shares it, and the failure names the siblings
-/// and the command, in text, JSON and Python.
+/// shows the check and who shares it, and when its `by check` failed
+/// alone too, the failure names the siblings and the command, in text,
+/// JSON and Python.
 #[test]
 fn a_failed_shared_check_names_the_siblings_to_integrate_together() {
     let repo = Repo::new();
@@ -706,6 +709,7 @@ fn a_failed_shared_check_names_the_siblings_to_integrate_together() {
     let prompt = [
         "SH by spawn 'WRITE a.txt=a' --name a --wait --json".to_owned(),
         "SH by spawn 'WRITE b.txt=b' --name b --wait --json".to_owned(),
+        "SH by check a --json".to_owned(),
         "SH by inspect a".to_owned(),
         "SH by integrate a".to_owned(),
         "SH by integrate a --json".to_owned(),
@@ -729,8 +733,9 @@ fn a_failed_shared_check_names_the_siblings_to_integrate_together() {
     for expected in [
         "test -f a.txt -a -f b.txt (inherited from root); shared with b, so they are \
          integrated together: by integrate a b",
-        "Siblings b share root's check, which they inherited, which may pass only with all \
-         of them: integrate them together, `by integrate a b`",
+        "a failed it alone too (`by check`), so it may need siblings' work. Siblings b \
+         share root's check, which they inherited, which may pass only with all of them: if \
+         so, integrate them together, `by integrate a b`",
         "python check_failed ['a', 'b']",
         "merged a into by/root",
         ", after `test -f a.txt -a -f b.txt` (a, b) passed once on the result",
@@ -754,20 +759,131 @@ fn a_failed_shared_check_names_the_siblings_to_integrate_together() {
         .find(|l| l.starts_with("by/root moved once: "))
         .unwrap();
     assert!(moved.contains(&format!("{a_from}..{b_to}")), "{said}");
-    let (code, failed) = sh_json(&said, 4);
+    let (code, failed) = sh_json(&said, 5);
     assert_eq!(code, 1, "{said}");
     assert_eq!(failed["error"]["kind"], "check_failed");
     let detail = &failed["error"]["detail"];
     assert_eq!(detail["integrate_together"], serde_json::json!(["a", "b"]));
     assert_eq!(detail["siblings"], serde_json::json!(["b"]));
+    assert_eq!(detail["failed_alone"], serde_json::json!(["a"]));
     assert_eq!(detail["inherited_from"], "root");
-    let (_, a) = sh_json(&said, 6);
+    let (_, a) = sh_json(&said, 7);
     assert_eq!(
         a["check"],
         serde_json::json!(["test", "-f", "a.txt", "-a", "-f", "b.txt"])
     );
     assert_eq!(a["check_inherited"], true);
     assert_eq!(a["check_shared_with"], serde_json::json!(["b"]));
+}
+
+/// A dogfood integration whose check failed on a child's own code still
+/// advised integrating it with the siblings sharing its check. With no
+/// `by check` saying a branch fails alone, or one saying it passed alone
+/// on the same work, the failure is the integrated branches' own: said
+/// so, naming no sibling.
+#[test]
+fn a_check_that_fails_on_the_integrated_work_names_no_sibling() {
+    let repo = Repo::new();
+    let flag = repo.dir.join("break-the-check");
+    let script = repo.dir.join("own-work.py");
+    fs::write(
+        &script,
+        "import branchyard as b\n\
+         try:\n    b.integrate('b')\n\
+         except b.CheckFailedError as e:\n    \
+         print('python', e.own_work, e.integrate_together)\n",
+    )
+    .unwrap();
+    let prompt = [
+        "SH by spawn 'WRITE a.txt=a' --name a --wait --json".to_owned(),
+        "SH by spawn 'WRITE b.txt=b' --name b --wait --json".to_owned(),
+        "SH by check a --json".to_owned(),
+        format!("SH touch '{}'", flag.display()),
+        "SH by integrate a".to_owned(),
+        "SH by integrate a --json".to_owned(),
+        "SH by integrate b --json".to_owned(),
+        format!("SH python3 {}", script.display()),
+    ]
+    .join("\n");
+    let check = format!("test ! -f {}", flag.display());
+    let out = repo.by_agent(&[
+        "run",
+        &prompt,
+        "--name",
+        "root",
+        "--delegate",
+        "--yes",
+        "--check",
+        &check,
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    let (code, checked) = sh_json(&said, 2);
+    assert_eq!(
+        (code, &checked["outcome"]),
+        (0, &serde_json::json!("passed"))
+    );
+    // a passed alone, on the work it would integrate.
+    assert!(
+        said.contains("failed on the integrated branches' own work (a)"),
+        "{said}"
+    );
+    assert!(!said.contains("Siblings"), "{said}");
+    let (code, failed) = sh_json(&said, 5);
+    assert_eq!(code, 1, "{said}");
+    let detail = &failed["error"]["detail"];
+    assert_eq!(detail["own_work"], serde_json::json!(["a"]), "{said}");
+    assert!(detail.get("integrate_together").is_none(), "{said}");
+    // Nothing recorded for b: nothing says it needs a sibling.
+    let (code, failed) = sh_json(&said, 6);
+    assert_eq!(code, 1, "{said}");
+    let detail = &failed["error"]["detail"];
+    assert_eq!(detail["own_work"], serde_json::json!(["b"]), "{said}");
+    assert!(detail.get("siblings").is_none(), "{said}");
+    assert!(said.contains("python ['b'] []"), "{said}");
+}
+
+/// A branch that failed its `by check` alone, integrated while a sibling
+/// sharing the check is still in its first turn with no candidate yet:
+/// the sibling may yet bring what the check needs, so the failure names it
+/// and says to wait for it, not that the work is the branch's own to fix.
+#[test]
+fn a_failed_shared_check_waits_for_a_sibling_still_in_its_first_turn() {
+    let repo = Repo::new();
+    let prompt = [
+        "SH by spawn 'WRITE a.txt=a' --name a --wait --json".to_owned(),
+        "SH by spawn HANG --name b --json".to_owned(),
+        "SH by check a --json".to_owned(),
+        "SH by integrate a --json".to_owned(),
+        "SH by cancel b".to_owned(),
+    ]
+    .join("\n");
+    let out = repo.by_agent(&[
+        "run",
+        &prompt,
+        "--name",
+        "root",
+        "--delegate",
+        "--yes",
+        "--check",
+        "test -f a.txt -a -f b.txt",
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    let (code, checked) = sh_json(&said, 2);
+    assert_eq!(
+        (code, &checked["outcome"]),
+        (1, &serde_json::json!("failed")),
+        "{said}"
+    );
+    let (code, failed) = sh_json(&said, 3);
+    assert_eq!(code, 1, "{said}");
+    let detail = &failed["error"]["detail"];
+    assert_eq!(detail["unsettled"], serde_json::json!(["b"]), "{said}");
+    assert_eq!(detail["integrate_together"], serde_json::json!(["a", "b"]));
+    assert!(detail.get("own_work").is_none(), "{said}");
+    let message = failed["error"]["message"].as_str().unwrap();
+    assert!(message.contains("(`by wait b`)"), "{message}");
 }
 
 /// Integrating branches whose checks differ ran each distinct check once
@@ -1004,6 +1120,47 @@ fn spawn_reads_its_prompt_from_a_file_or_stdin() {
     assert!(said.contains("cannot be used with"), "{said}");
 }
 
+/// The battery's metas inlined long follow-ups in a shell argument, where
+/// backticks ran as command substitution: `by send` and `by steer` read
+/// their text from a file, or from standard input with `-`, as `by spawn`
+/// does.
+#[test]
+fn send_and_steer_read_their_text_from_a_file_or_stdin() {
+    let repo = Repo::new();
+    let follow_up = repo.dir.join("follow-up.md");
+    fs::write(&follow_up, "WRITE b.txt=`two`\n").unwrap();
+    let note = repo.dir.join("note.md");
+    fs::write(&note, "mind the `edge` case\n").unwrap();
+    let prompt = [
+        "SH by spawn 'WRITE a.txt=1' --name kid --wait --json".to_owned(),
+        format!(
+            "SH by send kid --prompt-file {} --wait --json",
+            follow_up.display()
+        ),
+        "SH printf 'WRITE c.txt=3' | by send kid --prompt-file - --wait --json".to_owned(),
+        "SH by spawn AWAIT_STEER --name live --json".to_owned(),
+        format!("SH by steer live --prompt-file {} --json", note.display()),
+        format!("SH by send kid inline --prompt-file {}", note.display()),
+    ]
+    .join("\n");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    for n in 0..5 {
+        let (code, _) = sh_json(&said, n);
+        assert_eq!(code, 0, "command {n}: {said}");
+    }
+    let (_, steered) = sh_json(&said, 4);
+    assert_eq!(steered["branch"], "live", "{said}");
+    assert!(said.contains("cannot be used with"), "{said}");
+    let log = repo.json(&["log", "kid", "--json"]).to_string();
+    for prompt in ["WRITE b.txt=`two`", "WRITE c.txt=3"] {
+        assert!(log.contains(prompt), "{prompt:?} missing from {log}");
+    }
+    let live = reply(&repo, "live");
+    assert!(live.contains("steered: mind the `edge` case"), "{live}");
+}
+
 #[test]
 fn a_harness_steers_its_running_children_with_by_and_python() {
     let repo = Repo::new();
@@ -1088,6 +1245,64 @@ fn send_steer_reaches_a_turn_another_process_runs() {
     assert!(!late.status.success());
     let error: Value = serde_json::from_slice(&late.stdout).unwrap();
     assert_eq!(error["error"]["kind"], "not_running");
+}
+
+/// `by send --steer --prompt-file FILE` and `by steer --prompt-file -`
+/// end to end, into turns another process runs: the turn reads the file's
+/// text (or stdin's), and the log names the command that steered it, `by
+/// steer` as itself (it said "by send --steer").
+#[test]
+fn steering_takes_a_prompt_file_and_names_its_command() {
+    let repo = Repo::new();
+    let agent = fake_agent!().display().to_string();
+    let note = repo.dir.join("note.md");
+    fs::write(&note, "from the file").unwrap();
+    let note = note.display().to_string();
+    for (name, args, stdin, sender, text) in [
+        (
+            "by-send",
+            vec!["send", "by-send", "--steer", "--prompt-file", note.as_str()],
+            "",
+            "by send --steer",
+            "from the file",
+        ),
+        (
+            "by-steer",
+            vec!["steer", "by-steer", "--prompt-file", "-"],
+            "from stdin",
+            "by steer",
+            "from stdin",
+        ),
+    ] {
+        let mut running = Background {
+            child: Some(
+                repo.command(env!("CARGO_BIN_EXE_by"))
+                    .args(["run", "AWAIT_STEER", "--name", name, "--yes"])
+                    .args(["--harness", "gemini-cli", "--command", &agent])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            ),
+            go: repo.dir.join("unused"),
+        };
+        wait::until("the turn to wait for steering", || {
+            let log = repo.by(&["log", name, "--json"]);
+            log.status.success() && stdout(&log).contains("waiting for steering")
+        });
+        let out = repo.by_with_stdin(&args, stdin);
+        assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+        let status = wait::until("the turn to end", || {
+            running.child.as_mut().unwrap().try_wait().unwrap()
+        });
+        assert!(status.success(), "{status}");
+        assert!(reply(&repo, name).contains(&format!("steered: {text}")));
+        let log = stdout(&repo.by(&["log", name]));
+        assert!(
+            log.contains(&format!("steered by {sender}: {text}")),
+            "{log}"
+        );
+    }
 }
 
 #[test]
@@ -1358,6 +1573,95 @@ fn the_same_commands_act_with_your_authority_outside_a_harness() {
         "{inspect}"
     );
     let _ = agent;
+}
+
+/// A turn that changes nothing on a branch with a candidate leaves it
+/// `ready` with that candidate on every surface that shows its status; the
+/// turn's own events say it changed nothing.
+#[test]
+fn a_turn_that_changes_nothing_leaves_a_branch_with_a_candidate_ready() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&["run", "say hi", "--name", "root", "--delegate=2", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let spawned = repo.json(&[
+        "spawn",
+        "WRITE kid.txt=k",
+        "--parent",
+        "root",
+        "--name",
+        "kid",
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(spawned["status"]["state"], "ready", "{spawned}");
+    let candidate = spawned["candidate"].clone();
+    assert_eq!(candidate["files_changed"], 1, "{spawned}");
+
+    // The second turn only reads.
+    let sent = repo.json(&["send", "kid", "WHOAMI", "--wait", "--json"]);
+    assert_eq!(sent["status"]["state"], "ready", "{sent}");
+
+    let inspected = repo.json(&["inspect", "kid", "--json"]);
+    assert_eq!(inspected["status"]["state"], "ready", "{inspected}");
+    assert_eq!(inspected["candidate"], candidate, "{inspected}");
+    let children = repo.json(&["children", "root", "--json"]);
+    let kid = &children["descendants"][0];
+    assert_eq!(kid["name"], "kid", "{children}");
+    assert_eq!(kid["status"]["state"], "ready", "{children}");
+    let listed = repo.json(&["ls", "--json"]);
+    let kid = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["name"] == "kid")
+        .unwrap();
+    assert_eq!(kid["status"]["state"], "ready", "{listed}");
+    assert_eq!(kid["candidate"], candidate, "{listed}");
+    let shown = repo.json(&["show", "kid", "--json"]);
+    assert_eq!(shown["status"]["state"], "ready", "{shown}");
+
+    for args in [&["inspect", "kid"][..], &["show", "kid"]] {
+        let text = stdout(&repo.by(args));
+        assert!(
+            text.contains("ready") && !text.contains("no changes"),
+            "{args:?}:\n{text}"
+        );
+    }
+    // The lists show root too, which did end with no changes.
+    for args in [&["children", "root"][..], &["ls"]] {
+        let text = stdout(&repo.by(args));
+        let line = text
+            .lines()
+            .find(|l| l.contains("kid"))
+            .unwrap_or_else(|| panic!("{args:?} does not list kid:\n{text}"));
+        assert!(
+            line.contains("ready") && !line.contains("no changes"),
+            "{args:?}:\n{text}"
+        );
+    }
+
+    // The turn says it changed nothing, once, in its own events.
+    let log = stdout(&repo.by(&["log", "kid"]));
+    assert_eq!(log.matches("the turn changed no file").count(), 1, "{log}");
+    let events = repo.json(&["log", "kid", "--json"]);
+    let events = events.as_array().unwrap();
+    let note = events
+        .iter()
+        .position(|e| {
+            e["activity"] == "warning"
+                && e["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("the turn changed no file"))
+        })
+        .unwrap();
+    let last_prompt = events
+        .iter()
+        .rposition(|e| e["activity"] == "prompt")
+        .unwrap();
+    assert!(
+        note > last_prompt,
+        "the note is the second turn's: {events:?}"
+    );
 }
 
 #[test]
@@ -1859,6 +2163,69 @@ fn a_person_applies_a_graph_and_spawns_dependents() {
     assert_eq!(usage.status.code(), Some(2));
     let usage = repo.by(&["spawn", "x", "--parent", "root", "--after", "soon"]);
     assert_eq!(usage.status.code(), Some(2));
+}
+
+/// `by graph apply` reads a spawn's limits as the `apply_graph` tool does:
+/// flat (`budget_usd`, `max_turns`, `max_minutes`) as well as nested in
+/// `budget`, from a file and from --edits. It refused the flat names as
+/// unknown fields, though MCP accepted them; both forms at once are still
+/// refused.
+#[test]
+fn by_graph_apply_takes_flat_limits_as_apply_graph_does() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&["run", "say hi", "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let proposal = repo.dir.join("proposal.json");
+    fs::write(
+        &proposal,
+        r#"{"expected_revision": 0, "edits": [
+            {"kind": "spawn", "prompt": "say f", "name": "flat", "budget_usd": 0.5,
+             "max_turns": 3, "max_minutes": 9}
+        ]}"#,
+    )
+    .unwrap();
+    let file = proposal.to_str().unwrap();
+    repo.json(&[
+        "graph", "apply", file, "--parent", "root", "--yes", "--json",
+    ]);
+    let edits = r#"[{"kind": "spawn", "prompt": "say e", "name": "edits", "budget_usd": 0.25}]"#;
+    repo.json(&[
+        "graph",
+        "apply",
+        "--edits",
+        edits,
+        "--expected-revision",
+        "1",
+        "--parent",
+        "root",
+        "--yes",
+        "--json",
+    ]);
+    let flat = repo.json(&["inspect", "flat", "--json"]);
+    assert_eq!(flat["max_usd"], 0.5, "{flat}");
+    assert_eq!(repo.json(&["inspect", "edits", "--json"])["max_usd"], 0.25);
+    let both = r#"[{"kind": "spawn", "prompt": "x", "name": "both", "budget_usd": 1,
+        "budget": {"max_usd": 1}}]"#;
+    let refused = repo.by(&[
+        "graph",
+        "apply",
+        "--edits",
+        both,
+        "--expected-revision",
+        "2",
+        "--parent",
+        "root",
+        "--json",
+    ]);
+    assert_eq!(refused.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not both"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -2784,11 +3151,14 @@ fn sh_line_json(reply: &str, n: usize) -> (i32, Value) {
 }
 
 /// A child's prompt that runs until `go` exists, then writes `file`: a
-/// child still running when its parent's turn ends, until released.
+/// child still running when its parent's turn ends, until released. It
+/// also ends once `go`'s directory is gone, so a test that ends without
+/// releasing it leaves nothing waiting.
 fn held_child(go: &Path, file: &str) -> String {
     format!(
-        "SH until [ -f {} ]; do sleep 0.05; done; echo k > {file}",
-        go.display()
+        "SH until [ -f {} ] || [ ! -d {} ]; do sleep 0.05; done; echo k > {file}",
+        go.display(),
+        go.parent().unwrap().display()
     )
 }
 
@@ -2878,11 +3248,6 @@ fn a_parked_branch_settled_without_a_wake_starts_its_dependents() {
     let repo = Repo::new();
     let go = repo.dir.join("go");
     let hold = repo.dir.join("hold");
-    // Releases `other` however the test ends.
-    let _other = Background {
-        child: None,
-        go: hold.clone(),
-    };
     let grandchild = repo.dir.join("gk.prompt");
     fs::write(&grandchild, held_child(&go, "gk.txt")).unwrap();
     let lead = repo.dir.join("lead.prompt");
@@ -2910,7 +3275,7 @@ fn a_parked_branch_settled_without_a_wake_starts_its_dependents() {
     ]
     .join("\n");
     let agent = fake_agent!().display().to_string();
-    let _running = Background {
+    let mut running = Background {
         child: Some(
             repo.command(env!("CARGO_BIN_EXE_by"))
                 .args(["run", &prompt, "--name", "root", "--delegate=2", "--yes"])
@@ -2921,6 +3286,12 @@ fn a_parked_branch_settled_without_a_wake_starts_its_dependents() {
                 .unwrap(),
         ),
         go: go.clone(),
+    };
+    // Releases `other` however the test ends, before `running` is stopped
+    // (locals drop in reverse order).
+    let _other = Background {
+        child: None,
+        go: hold.clone(),
     };
     wait::until("sib to start once lead settles", || {
         let out = repo.by(&["show", "sib", "--json"]);
@@ -2940,6 +3311,84 @@ fn a_parked_branch_settled_without_a_wake_starts_its_dependents() {
         log.contains("max_turns is spent; it was not woken"),
         "{log}"
     );
+    // Release `other` and let `by run` finish it, rather than kill `by run`
+    // under a running harness. Bounded, so a regression fails rather than
+    // hangs (`running` stops it on the way out).
+    fs::write(&hold, "").unwrap();
+    let status = wait::until("by run to finish", || {
+        running.child.as_mut().unwrap().try_wait().unwrap()
+    });
+    assert!(status.success(), "{status}");
+    assert_eq!(
+        repo.json(&["show", "other", "--json"])["status"]["state"],
+        "ready"
+    );
+}
+
+/// A merged branch sent a turn that delegates and changes nothing parks
+/// while its child runs, as any delegating turn does: it was left
+/// `merged`, so `by wait` on it returned at once and it was never woken.
+/// Once the child settles it is woken and, its wake changing nothing,
+/// merged again.
+#[test]
+fn a_merged_branch_whose_turn_delegates_waits_on_its_children() {
+    let repo = Repo::new();
+    let go = repo.dir.join("go");
+    let out = repo.by_agent(&[
+        "run",
+        "WRITE r.txt=r",
+        "--name",
+        "root",
+        "--delegate",
+        "--yes",
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    repo.ok(&["merge", "root"]);
+    let merged = repo.json(&["show", "root", "--json"])["status"].clone();
+    assert_eq!(merged["state"], "merged", "{merged}");
+    let prompt = format!(
+        "SH by spawn '{}' --name kid --json",
+        held_child(&go, "kid.txt")
+    );
+    let agent = fake_agent!().display().to_string();
+    let mut running = Background {
+        child: Some(
+            repo.command(env!("CARGO_BIN_EXE_by"))
+                .args(["send", "root", &prompt, "--command", &agent])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        ),
+        go: go.clone(),
+    };
+    wait::until("root to spawn kid", || {
+        repo.by(&["show", "kid", "--json"]).status.success()
+    });
+    let state = wait::until("root's delegating turn to end", || {
+        let out = repo.by(&["show", "root", "--json"]);
+        let shown: Value = serde_json::from_slice(&out.stdout).ok()?;
+        let state = shown["status"]["state"].as_str()?.to_owned();
+        (state != "running").then_some(state)
+    });
+    assert_eq!(state, "waiting_on_children");
+    let waited = repo.by(&["wait", "root", "--timeout", "0.3", "--json"]);
+    assert!(!waited.status.success(), "{}", stdout(&waited));
+    assert!(
+        stdout(&waited).contains(r#""timed_out": true"#),
+        "{}",
+        stdout(&waited)
+    );
+    fs::write(&go, "").unwrap();
+    let status = wait::until("by send to finish", || {
+        running.child.as_mut().unwrap().try_wait().unwrap()
+    });
+    assert!(status.success(), "{status}");
+    let root = repo.json(&["show", "root", "--json"]);
+    assert_eq!(root["turns"], 3, "woken once: {root}");
+    assert_eq!(root["status"], merged, "{root}");
+    let log = stdout(&repo.by(&["log", "root"]));
+    assert!(log.contains("<branchyard-wake>"), "{log}");
 }
 
 /// `by wait` blocks until children settle, inside a harness and outside
@@ -2989,6 +3438,104 @@ fn by_wait_blocks_until_children_settle() {
         help.contains("--any") && help.contains("--timeout"),
         "{help}"
     );
+}
+
+/// The dogfood's F3: an outer `timeout` that stopped `by wait` left it
+/// printing nothing, though a branch had settled long before. Each branch
+/// is printed as it settles (as text on stdout; with --json, as a line on
+/// stderr, stdout keeping the one result), so what settled survives a wait
+/// stopped from outside.
+#[test]
+fn by_wait_prints_each_branch_as_it_settles() {
+    let repo = Repo::new();
+    let go = repo.dir.join("go");
+    let prompt = [
+        "SH by spawn 'WRITE a.txt=a' --name a --json".to_owned(),
+        format!("SH by spawn '{}' --name b --json", held_child(&go, "b.txt")),
+    ]
+    .join("\n");
+    let agent = fake_agent!().display().to_string();
+    let mut running = Background {
+        child: Some(
+            repo.command(env!("CARGO_BIN_EXE_by"))
+                .args(["run", &prompt, "--name", "root", "--delegate", "--yes"])
+                .args(["--harness", "gemini-cli", "--command", &agent])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        ),
+        go: go.clone(),
+    };
+    wait::until("a to settle while b runs", || {
+        let out = repo.by(&["show", "a", "--json"]);
+        let shown: Value = serde_json::from_slice(&out.stdout).ok()?;
+        (shown["status"]["state"] == "ready").then_some(())
+    });
+    for json in [true, false] {
+        let out = repo.dir.join("wait.out");
+        let err = repo.dir.join("wait.err");
+        let mut args = vec!["wait", "a", "b"];
+        if json {
+            args.push("--json");
+        }
+        let mut waiting = repo
+            .command(env!("CARGO_BIN_EXE_by"))
+            .args(&args)
+            .stdout(fs::File::create(&out).unwrap())
+            .stderr(fs::File::create(&err).unwrap())
+            .spawn()
+            .unwrap();
+        let shown = wait::until("by wait to print a", || {
+            let shown = fs::read_to_string(if json { &err } else { &out }).ok()?;
+            shown.contains("\n").then_some(shown)
+        });
+        // Stopped from outside, as an outer `timeout` would.
+        waiting.kill().unwrap();
+        waiting.wait().unwrap();
+        match json {
+            true => {
+                let line: Value = serde_json::from_str(shown.lines().next().unwrap()).unwrap();
+                assert_eq!(line["event"], "settled", "{shown}");
+                assert_eq!(line["name"], "a", "{shown}");
+                assert_eq!(line["status"]["state"], "ready", "{shown}");
+                // Only what settled: the inspection is in the result on stdout.
+                assert!(line.get("inspection").is_none(), "{shown}");
+                assert!(!shown.contains("a.txt"), "{shown}");
+                assert_eq!(fs::read_to_string(&out).unwrap(), "", "no result yet");
+            }
+            false => {
+                assert!(
+                    shown.contains("branch") && shown.contains(" a\n"),
+                    "{shown}"
+                );
+                assert!(
+                    !shown.contains("b.txt") && !shown.contains(" b\n"),
+                    "{shown}"
+                );
+            }
+        }
+    }
+    let help = stdout(&repo.by(&["wait", "--help"]));
+    assert!(
+        help.contains("Keep S under any limit of your own"),
+        "{help}"
+    );
+    fs::write(&go, "").unwrap();
+    // The final result is as it was: every branch, once.
+    let waited = repo.json(&["wait", "a", "b", "--json"]);
+    let names: Vec<&str> = waited["settled"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["a", "b"], "{waited}");
+    assert_eq!(waited["pending"], serde_json::json!([]));
+    let status = wait::until("by run to finish", || {
+        running.child.as_mut().unwrap().try_wait().unwrap()
+    });
+    assert!(status.success(), "{status}");
 }
 
 /// The battery's wait-since scenario: after `by send kid ...`, `by wait
@@ -3160,6 +3707,96 @@ fn by_check_runs_a_childs_check_on_its_current_work() {
     assert!(text.contains("inherited from root"), "{text}");
     let out = repo.by(&["check"]);
     assert!(stderr(&out).contains("outside a harness, by check needs a branch"));
+}
+
+/// `by check` merged into the parent's committed head while integrating
+/// first snapshots the parent's uncommitted work: a parent whose edit
+/// broke the check saw its child pass `by check` and fail integration.
+/// Both now see the parent's work as it is.
+#[test]
+fn by_check_merges_into_the_parents_uncommitted_work_as_integrate_does() {
+    let repo = Repo::new();
+    let prompt = [
+        "SH by spawn 'WRITE kid.txt=k' --name kid --wait --json",
+        "SH by check kid --json",
+        "SH echo x > broken",
+        "SH by check kid --json",
+        "SH by integrate kid --json",
+    ]
+    .join("\n");
+    let out = repo.by_agent(&[
+        "run",
+        &prompt,
+        "--name",
+        "root",
+        "--delegate",
+        "--yes",
+        "--check",
+        "test ! -f broken",
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    let (code, before) = sh_json(&said, 1);
+    assert_eq!(
+        (code, &before["outcome"]),
+        (0, &serde_json::json!("passed")),
+        "{said}"
+    );
+    let (code, after) = sh_json(&said, 3);
+    assert_eq!(
+        (code, &after["outcome"]),
+        (1, &serde_json::json!("failed")),
+        "{said}"
+    );
+    assert_eq!(after["target"], "by/root", "{said}");
+    let (code, integrated) = sh_json(&said, 4);
+    assert_eq!(
+        (code, &integrated["error"]["kind"]),
+        (1, &serde_json::json!("check_failed")),
+        "{said}"
+    );
+}
+
+/// A harness's tool timeout killed `by check` long before a whole-suite
+/// check ended, and the check ran on in the engine for nobody. The broker
+/// notices its caller is gone and kills the check's process group.
+#[test]
+fn a_by_check_whose_caller_is_killed_stops_its_check() {
+    let repo = Repo::new();
+    let pid = repo.dir.join("check.pid");
+    // The caller is killed only once the check has started (written its
+    // pid), as a tool timeout would kill it: killed earlier, the probe read
+    // no pid and saw `/proc/` alive.
+    let prompt = [
+        format!(
+            "SH by check & c=$!; n=0; until [ -s '{0}' ] || [ $n -ge 600 ]; do sleep 0.05; \
+             n=$((n+1)); done; kill $c; wait $c; echo caller=$?",
+            pid.display()
+        ),
+        format!(
+            "SH s=$(cat '{}'); [ -n \"$s\" ] || echo no-pid; sleep 1; \
+             if [ -d /proc/$s ] && ! grep -q ') Z ' /proc/$s/stat; \
+             then echo check-alive; else echo check-gone; fi",
+            pid.display()
+        ),
+    ]
+    .join("\n");
+    let check = format!("sh -c 'echo $$ > {}; sleep 60'", pid.display());
+    let out = repo.by_agent(&[
+        "run",
+        &prompt,
+        "--name",
+        "root",
+        "--delegate",
+        "--yes",
+        "--check",
+        &check,
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    assert!(said.contains("caller=143\n"), "{said}");
+    assert!(!said.contains("no-pid"), "{said}");
+    assert!(said.contains("check-gone"), "{said}");
 }
 
 /// The battery's conflict3, envelope, depth2 and recovery scenarios (M3):
@@ -3356,6 +3993,69 @@ fn spawn_gives_a_child_its_model() {
             .unwrap()
             .contains("gemini-cli-acp cannot be given a model: Gemini CLI's settings.json"),
         "{refused}"
+    );
+}
+
+/// A child naming no model keeps its parent's on its parent's harness
+/// only, through `by spawn` end to end: a goose child of a lead run with a
+/// model gets none, and so is not refused (goose cannot be given one),
+/// while a gemini-cli child gets the lead's.
+#[test]
+fn a_spawned_child_keeps_its_parents_model_only_on_its_parents_harness() {
+    let mut repo = Repo::new();
+    let agent = fake_agent!().display().to_string();
+    // `goose`, the goose-acp profile's command, is the fake agent too.
+    let bin = repo.dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&agent, bin.join("goose")).unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    repo.0.set_env("PATH", &format!("{}:{path}", bin.display()));
+    let spec = repo.dir.join("models.toml");
+    fs::write(
+        &spec,
+        r#"
+version = 1
+name = "models"
+root = "lead"
+
+[seats.lead]
+harness = "gemini-cli"
+model = "gemini-2.5-pro"
+isolated = true
+delegates_to = ["same", "other"]
+policy = { default = "allow" }
+
+[seats.same]
+description = "On the lead's harness."
+
+[seats.other]
+description = "On another harness."
+harness = "goose"
+"#,
+    )
+    .unwrap();
+    let prompt = [
+        "SH by spawn --seat same 'say same' --json",
+        "SH by spawn --seat other 'say other' --json",
+    ]
+    .join("\n");
+    let spec = spec.display().to_string();
+    let out = repo.by(&["rig", "run", &spec, &prompt, "--command", &agent, "--json"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "models");
+    let (code, same) = sh_json(&said, 0);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(same["profile"], "gemini-cli-acp", "{same}");
+    assert_eq!(same["model"], "gemini-2.5-pro", "{same}");
+    let (code, other) = sh_json(&said, 1);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(other["profile"], "goose-acp", "{other}");
+    assert!(other.get("model").is_none(), "{other}");
+    let shown = repo.json(&["inspect", "models-other", "--json"]);
+    assert!(shown.get("model").is_none(), "{shown}");
+    assert_eq!(
+        repo.json(&["inspect", "models-same", "--json"])["model"],
+        "gemini-2.5-pro"
     );
 }
 

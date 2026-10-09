@@ -2220,7 +2220,7 @@ impl GraphBackend for Sqlite {
     fn settle_if(
         &self,
         record: &Record,
-        event: &RecordedEvent,
+        events: &[RecordedEvent],
         from: fn(&BranchStatus) -> bool,
     ) -> Result<bool, Error> {
         let name = &record.info.name;
@@ -2230,7 +2230,9 @@ impl GraphBackend for Sqlite {
                 return Ok(false);
             }
             put(tx, record)?;
-            insert_event(tx, name, event)?;
+            for event in events {
+                insert_event(tx, name, event)?;
+            }
             Ok(true)
         })
     }

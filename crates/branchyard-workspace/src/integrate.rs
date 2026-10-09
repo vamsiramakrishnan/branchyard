@@ -121,6 +121,9 @@ pub enum IntegrationError {
     },
     /// The check could not be started (empty argv, program not found, ...).
     CheckNotStarted(io::Error),
+    /// The check was killed before it ended because nobody waited for its
+    /// result any more ([`MergedWorktree::check_until`]).
+    CheckAbandoned,
     /// In a [`Repository::integrate_many`], the check at `index` in the
     /// checks given stopped the integration with `error`: an
     /// [`IntegrationError::CheckFailed`], [`IntegrationError::CheckTimedOut`]
@@ -173,6 +176,7 @@ impl fmt::Display for IntegrationError {
             Self::CheckFailed { status, .. } => write!(f, "check failed: {status}"),
             Self::CheckTimedOut { timeout, .. } => write!(f, "check timed out after {timeout:?}"),
             Self::CheckNotStarted(e) => write!(f, "check could not start: {e}"),
+            Self::CheckAbandoned => write!(f, "check abandoned: nobody waited for its result"),
             Self::CheckStopped { index, error } => write!(f, "check {}: {error}", index + 1),
             Self::DirtyTarget { worktree } => write!(
                 f,
@@ -217,6 +221,9 @@ impl Repository {
     ///    `git merge --no-ff <head>` there, with hooks and rerere disabled and
     ///    a fallback identity if none is configured. On conflict, collect
     ///    the unmerged paths, abort, and return [`IntegrationError::Conflict`].
+    ///    Then refuse with `DirtyTarget` if such a worktree has a file where
+    ///    the merge adds one, so nothing the promotion would refuse is found
+    ///    only after the check.
     /// 3. Run `check` in that worktree, on the exact merge commit.
     /// 4. Re-read the target and re-check checked-out worktrees, then promote
     ///    with `git update-ref refs/heads/<target> <merged> <expected>`, an
@@ -260,14 +267,13 @@ impl Repository {
             });
         }
         self.validate_candidate(candidate, expected)?;
-        for worktree in self.checkouts_of(&target_ref)? {
-            if blocks_update(&worktree, expected, None)? {
-                return Err(IntegrationError::DirtyTarget { worktree });
-            }
-        }
+        self.refuse_dirty_checkouts(&target_ref, expected, None)?;
 
         let scratch = TempWorktree::create(self, expected)?;
         let merged = merge(&scratch.path, candidate, target, expected)?;
+        // Every precondition of the promotion before the check, which may
+        // run for many minutes: a file in the way of the merge too.
+        self.refuse_dirty_checkouts(&target_ref, expected, Some(&merged))?;
 
         let check_output_tail = match check {
             None => None,
@@ -365,11 +371,7 @@ impl Repository {
                 stale_checkouts: Vec::new(),
             });
         }
-        for worktree in self.checkouts_of(&target_ref)? {
-            if blocks_update(&worktree, expected, None)? {
-                return Err(IntegrationError::DirtyTarget { worktree });
-            }
-        }
+        self.refuse_dirty_checkouts(&target_ref, expected, None)?;
 
         let scratch = TempWorktree::create(self, expected)?;
         let mut head = expected.clone();
@@ -422,6 +424,8 @@ impl Repository {
                 stale_checkouts: Vec::new(),
             });
         }
+        // As in `integrate`: refused before the checks, not after them.
+        self.refuse_dirty_checkouts(&target_ref, expected, Some(&merged))?;
 
         let mut check_output_tails = Vec::new();
         for (index, check) in checks.iter().enumerate() {
@@ -477,14 +481,8 @@ impl Repository {
                 actual,
             });
         }
-        let checkouts = self.checkouts_of(target_ref)?;
-        for worktree in &checkouts {
-            if blocks_update(worktree, expected, Some(merged))? {
-                return Err(IntegrationError::DirtyTarget {
-                    worktree: worktree.clone(),
-                });
-            }
-        }
+        // Again: a checkout may have changed while the check ran.
+        let checkouts = self.refuse_dirty_checkouts(target_ref, expected, Some(merged))?;
         let (out, args) = Git::new(&self.root)
             .args(["update-ref", "-m", reason, target_ref])
             .args([merged.as_str(), expected.as_str()])
@@ -676,6 +674,26 @@ impl Repository {
         Ok(())
     }
 
+    /// The worktrees with `target_ref` checked out, or
+    /// [`IntegrationError::DirtyTarget`] for the first one that moving from
+    /// `expected` (to `merged`, when given) could lose work in.
+    fn refuse_dirty_checkouts(
+        &self,
+        target_ref: &str,
+        expected: &Commit,
+        merged: Option<&Commit>,
+    ) -> Result<Vec<PathBuf>, IntegrationError> {
+        let checkouts = self.checkouts_of(target_ref)?;
+        for worktree in &checkouts {
+            if blocks_update(worktree, expected, merged)? {
+                return Err(IntegrationError::DirtyTarget {
+                    worktree: worktree.clone(),
+                });
+            }
+        }
+        Ok(checkouts)
+    }
+
     /// Worktrees (with a directory present) that have `full_ref` checked out.
     fn checkouts_of(&self, full_ref: &str) -> Result<Vec<PathBuf>, GitError> {
         Ok(git::worktrees(&self.root)?
@@ -704,6 +722,21 @@ impl MergedWorktree {
     pub fn check(&self, check: &Check) -> Result<Verified, IntegrationError> {
         verified(check, &self.scratch.path, self.commit.clone())
     }
+
+    /// [`MergedWorktree::check`], asking `abandoned` while the check runs:
+    /// once it says nobody waits for the result, the check's process group
+    /// is killed and this fails with [`IntegrationError::CheckAbandoned`].
+    pub fn check_until(
+        &self,
+        check: &Check,
+        abandoned: &dyn Fn() -> bool,
+    ) -> Result<Verified, IntegrationError> {
+        match check::run_until(check, &self.scratch.path, abandoned) {
+            Ok(None) => Err(IntegrationError::CheckAbandoned),
+            Ok(Some(ran)) => Ok(verdict(ran, self.commit.clone())),
+            Err(e) => Err(IntegrationError::CheckNotStarted(e)),
+        }
+    }
 }
 
 impl fmt::Debug for MergedWorktree {
@@ -719,18 +752,25 @@ impl fmt::Debug for MergedWorktree {
 fn verified(check: &Check, dir: &Path, commit: Commit) -> Result<Verified, IntegrationError> {
     match check::run(check, dir) {
         Err(e) => Err(IntegrationError::CheckNotStarted(e)),
-        Ok((CheckOutcome::Exited(status), output_tail)) => Ok(Verified {
+        Ok(ran) => Ok(verdict(ran, commit)),
+    }
+}
+
+/// How a check that ran on `commit` ended, as a [`Verified`].
+fn verdict((outcome, output_tail): (CheckOutcome, String), commit: Commit) -> Verified {
+    match outcome {
+        CheckOutcome::Exited(status) => Verified {
             commit,
             passed: status.success(),
             timed_out: false,
             output_tail,
-        }),
-        Ok((CheckOutcome::TimedOut, output_tail)) => Ok(Verified {
+        },
+        CheckOutcome::TimedOut => Verified {
             commit,
             passed: false,
             timed_out: true,
             output_tail,
-        }),
+        },
     }
 }
 

@@ -259,6 +259,8 @@ impl Live {
                 max_duration: task.max_duration,
                 stall_after: task.stall_after,
                 stall_action: task.stall_action,
+                hold_cap: None,
+                follow_up_grace: None,
             },
             policy,
             check: task.check.clone(),
@@ -682,8 +684,16 @@ const STEER_WAIT: Duration = Duration::from_secs(10);
 
 /// `by send --steer`: add `prompt` to `branch`'s running turn. Inside a
 /// harness, as that harness's branch and only to a descendant; outside, with
-/// your authority. Waits for delivery; a refusal exits with failure.
-pub fn steer(target: &Target, branch: &str, prompt: &str, task: &TaskArgs, json: bool) -> Outcome {
+/// your authority, recorded as from `sender` (the command that steered).
+/// Waits for delivery; a refusal exits with failure.
+pub fn steer(
+    target: &Target,
+    branch: &str,
+    prompt: &str,
+    task: &TaskArgs,
+    sender: &str,
+    json: bool,
+) -> Outcome {
     if *task != TaskArgs::default() {
         return fail(
             json,
@@ -707,7 +717,7 @@ pub fn steer(target: &Target, branch: &str, prompt: &str, task: &TaskArgs, json:
                 })
         }
         (None, Target::Local) => open_yard().and_then(|yard| {
-            let steer = yard.steer_as(branch, prompt, "by send --steer")?;
+            let steer = yard.steer_as(branch, prompt, sender)?;
             yard.wait_steer(branch, steer.id, STEER_WAIT)
         }),
     };
@@ -1410,6 +1420,8 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
             max_duration: task.max_duration,
             stall_after: task.stall_after,
             stall_action: task.stall_action,
+            hold_cap: None,
+            follow_up_grace: None,
         },
         check: task.check.clone(),
         max_depth: args.max_depth,
@@ -1712,35 +1724,93 @@ pub fn wait(
             return fail(json, &error);
         }
     };
-    let names: Vec<&str> = branches.iter().map(String::as_str).collect();
-    let result = match (harness_delegate(json)?, target) {
-        (Some(delegate), _) => delegate.wait_for(&names, any, timeout),
+    let delegate = harness_delegate(json)?;
+    let wait_for = |names: &[&str], any: bool, timeout: Option<Duration>| match (&delegate, target)
+    {
+        (Some(delegate), _) => delegate.wait_for(names, any, timeout),
         (None, _) if names.is_empty() => Err(branchyard::Error::Denied(
             "outside a harness, by wait needs the branches to wait for".into(),
         )),
         (None, Target::Remote(remote)) => remote
             .repo
-            .wait_for(&names, any, timeout)
+            .wait_for(names, any, timeout)
             .map_err(remote::sdk_error),
-        (None, Target::Local) => open_yard().and_then(|yard| yard.wait_for(&names, any, timeout)),
+        (None, Target::Local) => open_yard().and_then(|yard| yard.wait_for(names, any, timeout)),
     };
+    let deadline = timeout.and_then(|t| std::time::Instant::now().checked_add(t));
+    let left = || deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()));
+    // Each branch is reported as it settles, so what settled survives a
+    // caller that stops `by wait` before it returns: as text on stdout,
+    // with --json as a line on stderr naming the branch and its status
+    // (stdout keeps the one result, and a harness that reads both
+    // streams does not see each inspection twice).
+    let mut reported = std::collections::BTreeSet::new();
+    let mut report = |inspection: &branchyard::Inspection| -> Outcome {
+        if !reported.insert(inspection.name.clone()) {
+            return Ok(());
+        }
+        match json {
+            true => {
+                let line = serde_json::json!({
+                    "event": "settled",
+                    "name": inspection.name,
+                    "status": inspection.status,
+                });
+                eprintln!("{line}");
+                Ok(())
+            }
+            false => print(&render::inspection(inspection, env.style())),
+        }
+    };
+    let mut names: Vec<String> = branches.to_vec();
+    let mut pending = names.clone();
+    let result = loop {
+        let asked: Vec<&str> = pending.iter().map(String::as_str).collect();
+        let step = match wait_for(&asked, true, left()) {
+            Ok(step) => step,
+            Err(error) => break Err(error),
+        };
+        if names.is_empty() {
+            // Inside a harness with no branches named: the children it
+            // resolved to, waited for from here on by name.
+            names = step.settled.iter().map(|i| i.name.clone()).collect();
+            names.extend(step.pending.iter().cloned());
+        }
+        for inspection in &step.settled {
+            report(inspection)?;
+        }
+        if any || step.timed_out || step.pending.is_empty() {
+            let asked: Vec<&str> = names.iter().map(String::as_str).collect();
+            break match (any, step.timed_out) {
+                (true, _) => Ok(step),
+                (false, timed_out) => wait_for(
+                    &asked,
+                    false,
+                    match timed_out {
+                        true => Some(Duration::ZERO),
+                        false => left(),
+                    },
+                ),
+            };
+        }
+        pending = step.pending;
+    };
+    if let Ok(waited) = &result {
+        for inspection in &waited.settled {
+            report(inspection)?;
+        }
+    }
     let timed_out = result.as_ref().is_ok_and(|w| w.timed_out);
-    emit(json, result, |w| {
-        let mut text = String::new();
-        for inspection in &w.settled {
-            text.push_str(&render::inspection(inspection, env.style()));
-        }
-        if !w.pending.is_empty() {
-            text.push_str(&format!(
-                "{}: {}\n",
-                match w.timed_out {
-                    true => "timed out; still running",
-                    false => "still running",
-                },
-                w.pending.join(", ")
-            ));
-        }
-        text
+    emit(json, result, |w| match w.pending.is_empty() {
+        true => String::new(),
+        false => format!(
+            "{}: {}\n",
+            match w.timed_out {
+                true => "timed out; still running",
+                false => "still running",
+            },
+            w.pending.join(", ")
+        ),
     })?;
     match timed_out {
         true => Err(Failure::Reported),
@@ -2091,11 +2161,20 @@ pub fn graph(env: &Env, target: &Target, args: &GraphArgs) -> Outcome {
 /// `--expected-revision`, which also overrides a file's revision.
 fn proposal(args: &GraphArgs) -> Result<branchyard::GraphProposal, branchyard::Error> {
     let invalid = |why: String| branchyard::Error::Denied(format!("invalid graph proposal: {why}"));
+    // Read as the `apply_graph` tool reads its arguments: a spawn may give
+    // its limits flat (`budget_usd`, `max_turns`, `max_minutes`).
+    let read = |text: &str| -> Result<serde_json::Value, branchyard::Error> {
+        serde_json::from_str(text).map_err(|e| invalid(e.to_string()))
+    };
     let mut proposal = match (&args.edits, args.arg.as_deref()) {
-        (Some(edits), _) => branchyard::GraphProposal {
-            expected_revision: args.expected_revision.unwrap_or_default(),
-            edits: serde_json::from_str(edits).map_err(|e| invalid(e.to_string()))?,
-        },
+        (Some(edits), _) => {
+            let mut edits = read(edits)?;
+            branchyard::nest_graph_budgets(&mut edits)?;
+            branchyard::GraphProposal {
+                expected_revision: args.expected_revision.unwrap_or_default(),
+                edits: serde_json::from_value(edits).map_err(|e| invalid(e.to_string()))?,
+            }
+        }
         (None, Some(path)) => {
             let text = match path {
                 "-" => {
@@ -2105,7 +2184,11 @@ fn proposal(args: &GraphArgs) -> Result<branchyard::GraphProposal, branchyard::E
                 }
                 path => std::fs::read_to_string(path)?,
             };
-            serde_json::from_str(&text).map_err(|e| invalid(e.to_string()))?
+            let mut proposal = read(&text)?;
+            if let Some(edits) = proposal.get_mut("edits") {
+                branchyard::nest_graph_budgets(edits)?;
+            }
+            serde_json::from_value(proposal).map_err(|e| invalid(e.to_string()))?
         }
         (None, None) => return Err(invalid("give a FILE or --edits".into())),
     };

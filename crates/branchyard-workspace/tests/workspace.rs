@@ -539,6 +539,42 @@ fn check_timeout_kills_process_group() {
     fixture.assert_no_integration_worktrees();
 }
 
+/// A `by check` whose caller was killed kept its check running for its
+/// whole timeout. A check nobody waits for any more is killed, its
+/// process group with it, long before its timeout.
+#[test]
+fn an_abandoned_check_kills_its_process_group() {
+    let fixture = Fixture::new();
+    let main = fixture.head("main");
+    let candidate = fixture.candidate("slow", "feature.txt", "feature\n");
+    let pid = fixture.dir.join("abandoned-check.pid");
+    let check = sh(
+        &format!("sleep 30 & echo $! > '{}'; sleep 30", pid.display()),
+        Duration::from_secs(60),
+    );
+    let name: BranchName = "slow".parse().unwrap();
+    let merged = fixture
+        .repo
+        .merged_worktree(&name, &candidate.head, "main", &main)
+        .unwrap();
+    let started = Instant::now();
+    let abandoned = || pid.exists() && started.elapsed() > Duration::from_millis(200);
+    assert!(matches!(
+        merged.check_until(&check, &abandoned),
+        Err(IntegrationError::CheckAbandoned)
+    ));
+    assert!(started.elapsed() < Duration::from_secs(10));
+    // The background sleep, in the check's group, was killed too.
+    let background = fs::read_to_string(&pid).unwrap();
+    let proc = PathBuf::from("/proc").join(background.trim());
+    wait::until("the check's background sleep to be killed", || {
+        !proc.exists() || fs::read_to_string(proc.join("stat")).is_ok_and(|s| s.contains(") Z "))
+    });
+    drop(merged);
+    fs::remove_file(&pid).unwrap();
+    fixture.assert_no_integration_worktrees();
+}
+
 #[test]
 fn conflict_returns_files_and_aborts_cleanly() {
     let fixture = Fixture::new();
@@ -1016,6 +1052,43 @@ fn dirty_checked_out_target_is_refused() {
         fixture.repo.integrate(&candidate, "main", &expected, None),
         Err(IntegrationError::DirtyTarget { .. })
     ));
+    assert_eq!(fixture.head("main"), expected);
+    assert_eq!(
+        fs::read_to_string(fixture.root().join("feature.txt")).unwrap(),
+        "mine\n"
+    );
+    fixture.assert_no_integration_worktrees();
+}
+
+/// A file in the way of the merge is refused before the check runs, not
+/// after it: the check may take many minutes.
+#[test]
+fn a_file_in_the_way_is_refused_before_the_check_runs() {
+    let fixture = Fixture::new();
+    let expected = fixture.head("main");
+    let a = fixture.candidate("a", "feature.txt", "feature\n");
+    let b = fixture.candidate("b", "b-part.txt", "b\n");
+    fs::write(fixture.root().join("feature.txt"), "mine\n").unwrap();
+    // Outside the repository, so the check's own mark is never in the way.
+    let ran = fixture.dir.join("check-ran");
+    let check = sh(
+        &format!("touch '{}'", ran.display()),
+        Duration::from_secs(30),
+    );
+
+    match fixture.repo.integrate(&a, "main", &expected, Some(&check)) {
+        Err(IntegrationError::DirtyTarget { worktree }) => assert_eq!(worktree, fixture.root()),
+        other => panic!("{other:?}"),
+    }
+    assert!(!ran.exists(), "the check ran before the refusal");
+    match fixture
+        .repo
+        .integrate_many(&[b, a], "main", &expected, std::slice::from_ref(&check))
+    {
+        Err(IntegrationError::DirtyTarget { worktree }) => assert_eq!(worktree, fixture.root()),
+        other => panic!("{other:?}"),
+    }
+    assert!(!ran.exists(), "the checks ran before the refusal");
     assert_eq!(fixture.head("main"), expected);
     assert_eq!(
         fs::read_to_string(fixture.root().join("feature.txt")).unwrap(),

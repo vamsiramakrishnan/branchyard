@@ -727,7 +727,7 @@ Every connector call that changes the world is decided, written to a ledger befo
 | `by spawn --max-children`, `--harnesses`; `SpawnRequest::max_children`, `harnesses`, `plan`; Python `spawn(max_children=, harnesses=, plan=)` | SDK and MCP only | every surface |
 | MCP `spawn`'s `connectors`, `inbox`'s `unread` | not in the schema; `by inbox --unread --json` returned every message | in the schema; `--unread` filters the JSON too |
 | `by artifact publish --media-type`, `Delegate::publish_artifact(path, name, media_type, labels)`, Python `publish(media_type=)` | ignored on the CLI (always `application/octet-stream`) | recorded; the printed line names the media type and that the digest is blake3 |
-| `by inspect` text | `harnesses: its own` | the harness and profile, as `harnesses: <harness> (<profile>) only (its own)`; `Inspection::allowed_harnesses` lists the same in JSON, where the envelope's empty `harnesses` would read as "none" |
+| `by inspect` text | `harnesses: its own` | the harness and profile, as `harnesses: <harness> (<profile>) only (its own)`; `Inspection::allowed_harnesses` lists the same in JSON, and so does the inspection's `envelope.harnesses`, which showed the stored empty list (`[]`, read as "none") |
 | A harness's name in `by spawn`, `by inspect`, `by show`, a spawn's event and an envelope refusal | the profile alone (`spawned x on claude-code-stream-json`), though the person typed `--harness claude-code` | one label everywhere, `branchyard_harness::profiles::label`: `claude-code (claude-code-stream-json)`, the harness typed and the profile it resolved to |
 | A cost refusal, `over budget:` | `max_usd` | `max_usd (--budget-usd)` |
 | `by graph apply --help` | no edit format | the edit JSON with an example |
@@ -746,6 +746,6 @@ Every connector call that changes the world is decided, written to a ledger befo
 
 | Surface | Before | Now |
 |---|---|---|
-| `by check [BRANCH]`, `Delegate::check` → `CheckReport`, Python `check(branch=None)`, the MCP `check` tool | none: a child learned whether its work passed its check only when its parent integrated it | the branch's check (its own or inherited) run on its current work, uncommitted files included, merged into its parent's branch in a private temporary worktree; nothing is committed or integrated; a leaf may run it on itself; exits 1 when the work would not get past its check |
+| `by check [BRANCH]`, `Delegate::check` → `CheckReport`, Python `check(branch=None)`, the MCP `check` tool | none: a child learned whether its work passed its check only when its parent integrated it | the branch's check (its own or inherited) run on its current work, uncommitted files included, merged into its parent's work as integrating would snapshot it (the parent's uncommitted files included, its excluded files not) in a private temporary worktree; nothing is committed or integrated; a leaf may run it on itself; exits 1 when the work would not get past its check |
 | `branchyard_workspace::Workspace::working_commit`, `Repository::check_merged`, `Repository::merged_worktree` (`MergedWorktree`) | none | a worktree's files as a commit reachable from nothing; a check on a head merged into a target as integrating it would, moving no ref |
 | The delegate skill and the leaf note | | tell a child to run `by check` before it finishes |

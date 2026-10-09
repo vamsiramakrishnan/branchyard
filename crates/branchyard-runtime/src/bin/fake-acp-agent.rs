@@ -70,6 +70,11 @@
 //! With `FAKE_ACP_SILENT=1` in its environment it never answers
 //! `initialize`, so no prompt is ever submitted to it.
 //!
+//! Once the directory it was started in is gone (its test ended and dropped
+//! its temporary directory), it exits whatever it is doing, and, as the
+//! leader of its process group, kills that group first: a test leaves no
+//! agent, and no command one of its `SH` lines started, behind.
+//!
 //! Started as `fake-acp-agent --record-launch FILE ARG...`, standing in for
 //! a harness a driver launches with its own arguments, it writes to `FILE`
 //! as JSON what another process could see of it and exits: its command
@@ -160,6 +165,7 @@ fn main() {
         record_launch(args.get(2).expect("--record-launch FILE"));
         return;
     }
+    exit_with_directory();
     let mut instructed = false;
     // The last instructions preamble, for SHOW_INSTRUCTIONS.
     let mut preamble = String::new();
@@ -346,6 +352,26 @@ fn main() {
     if stubborn {
         std::thread::sleep(Duration::from_secs(60));
     }
+}
+
+/// Watch the directory this process started in, on a thread; once it is
+/// gone, kill this process group if this process leads it, and exit.
+fn exit_with_directory() {
+    let Ok(dir) = std::env::current_dir() else {
+        return;
+    };
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(100));
+        if dir.exists() {
+            continue;
+        }
+        eprintln!("fake-acp-agent: {} is gone; exiting", dir.display());
+        #[cfg(unix)]
+        if rustix::process::getpgrp() == rustix::process::getpid() {
+            branchyard_support::kill_group(std::process::id());
+        }
+        std::process::exit(4);
+    });
 }
 
 /// For `REPLY_SEQUENCE`: the first file in `dir` by name, removed.

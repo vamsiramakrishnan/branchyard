@@ -1,0 +1,133 @@
+{
+  "scenarios": {
+    "artifacts": {
+      "pass": true,
+      "cost_usd": 0.6954,
+      "wall_s": 219,
+      "branches": 3,
+      "meta_turns": 1,
+      "protocol_violations": 0,
+      "refusals": 0,
+      "friction": 0
+    },
+    "calc4": {
+      "pass": true,
+      "cost_usd": 1.2706,
+      "wall_s": 300,
+      "branches": 5,
+      "meta_turns": 1,
+      "protocol_violations": 0,
+      "refusals": 1,
+      "friction": 2
+    },
+    "compete": {
+      "pass": true,
+      "cost_usd": 0.8636,
+      "wall_s": 196,
+      "branches": 4,
+      "meta_turns": 1,
+      "protocol_violations": 0,
+      "refusals": 0,
+      "friction": 0
+    },
+    "conflict3": {
+      "pass": true,
+      "cost_usd": 1.1116,
+      "wall_s": 196,
+      "branches": 4,
+      "meta_turns": 1,
+      "protocol_violations": 0,
+      "refusals": 2,
+      "friction": 1
+    },
+    "crash": {
+      "pass": true,
+      "cost_usd": 0.51,
+      "wall_s": 170,
+      "branches": 5,
+      "meta_turns": 2,
+      "protocol_violations": 0,
+      "refusals": 0,
+      "friction": 2
+    },
+    "depth2": {
+      "pass": true,
+      "cost_usd": 2.7935,
+      "wall_s": 580,
+      "branches": 15,
+      "meta_turns": 1,
+      "protocol_violations": 0,
+      "refusals": 5,
+      "friction": 2
+    },
+    "envelope": {
+      "pass": true,
+      "cost_usd": 0.6367,
+      "wall_s": 77,
+      "branches": 5,
+      "meta_turns": 2,
+      "protocol_violations": 0,
+      "refusals": 3,
+      "friction": 3
+    },
+    "graph": {
+      "pass": true,
+      "cost_usd": 0.8905,
+      "wall_s": 193,
+      "branches": 5,
+      "meta_turns": 1,
+      "protocol_violations": 0,
+      "refusals": 0,
+      "friction": 0
+    },
+    "mcponly": {
+      "pass": true,
+      "cost_usd": 0.4521,
+      "wall_s": 93,
+      "branches": 3,
+      "meta_turns": 1,
+      "protocol_violations": 0,
+      "refusals": 0,
+      "friction": 3
+    },
+    "pysdk": {
+      "pass": false,
+      "cost_usd": 0.2975,
+      "wall_s": 81,
+      "branches": 1,
+      "meta_turns": 1,
+      "protocol_violations": 0,
+      "refusals": 0,
+      "friction": 0
+    },
+    "recovery": {
+      "pass": true,
+      "cost_usd": 0.5617,
+      "wall_s": 93,
+      "branches": 5,
+      "meta_turns": 1,
+      "protocol_violations": 0,
+      "refusals": 0,
+      "friction": 3
+    },
+    "steer": {
+      "pass": true,
+      "cost_usd": 0.441,
+      "wall_s": 99,
+      "branches": 2,
+      "meta_turns": 1,
+      "protocol_violations": 0,
+      "refusals": 0,
+      "friction": 3
+    }
+  },
+  "totals": {
+    "scenarios": 12,
+    "passed": 11,
+    "cost_usd": 10.52,
+    "median_wall_s": 193,
+    "protocol_violations": 0,
+    "refusals": 11,
+    "friction": 19
+  }
+}

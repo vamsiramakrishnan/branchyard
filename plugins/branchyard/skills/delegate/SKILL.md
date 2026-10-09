@@ -43,15 +43,33 @@ session, and merging overlapping edits produces conflicts.
      you delegated has settled, Branchyard starts your next turn by itself
      with a summary of each child (status, diffstat, cost, last message,
      why it failed) and what you can do next. Do not leave a background
-     task or monitor polling for them; it is stopped when your turn ends.
+     task or monitor polling for them. A turn with background work still
+     running is held until it finishes (within your turn's limits, and
+     at most 30 minutes without a duration limit), so a poll that never
+     ends keeps your turn open until that bound stops it. A bound that
+     cuts the hold does not cut your answer: the turn still ends
+     completed, with a warning naming the background tasks still running
+     (those are stopped), so you are parked and woken as usual. Never run `by wait` or an
+     orchestration script as a backgrounded shell command and end your
+     turn to wait for it: a backgrounded shell command belongs to your own
+     session, and once your turn's limits end the hold it dies with the
+     session, unlike your children. Either wait with `by wait` in the
+     foreground, or just end your turn; Branchyard itself wakes you.
    - **Wait in this turn.** `by wait` blocks until your running children
      have settled (`by wait a b`, `--any` for the first, `--timeout S`);
-     it is woken by Branchyard, not a poll. `by spawn ... --wait` waits
-     for one child.
+     it is woken by Branchyard, not a poll. It prints each child as it
+     settles (with `--json`, a JSON line on stderr; stdout keeps the one
+     result). Keep `--timeout S` under any limit of your own (a shell
+     `timeout`, your tool call's time limit): a wait stopped from outside
+     prints no result, only the children that settled before. `by spawn
+     ... --wait` waits for one child.
    `by inspect <child>` shows status, diffstat, cost and its last message;
    `by events <child>` shows its activity. To correct a child that is still
-   running, `by send <child> --steer "<text>"` adds to its running turn
-   without stopping it. Its answer starts with `accepted:` once the running
+   running, `by steer <child> "<text>"` (the same as
+   `by send <child> --steer "<text>"`) adds to its running turn
+   without stopping it. For long text, or text with backticks or quotes a
+   shell would mangle, write it to a file and pass `--prompt-file <path>`
+   (`-` for standard input) to `by send` or `by steer` instead. Its answer starts with `accepted:` once the running
    turn took it, and says when the child reads it (for Claude Code, before
    its next model call; never in a later turn), or with `written:` if the
    harness has not confirmed it yet. Some harnesses cannot
@@ -72,11 +90,30 @@ session, and merging overlapping edits produces conflicts.
    command (`by integrate a b c`). Never `git merge` children yourself: that
    bypasses the check, and Branchyard records them as merged only after the
    fact. A child your branch already contains is recorded as merged, not
-   refused. A conflict names the child and the files, and a failed check
-   shows its output and names every check that ran, the children it
-   belongs to and whether it passed, so you know whose to fix: send the child a fix with `by send <child>
-   "<prompt>"`, or do it yourself. `by check <child>` runs a child's check
-   on its current work, as integrating it would, without integrating it.
+   refused. A failed check shows its output and names every check that
+   ran, the children it belongs to and whether it passed, so you know whose
+   to fix: send the child a fix with `by send <child> "<prompt>"`, or do it
+   yourself. `by check <child>` runs a child's check on its current work,
+   as integrating it would, without integrating it.
+   - **A conflict between siblings** names the child, the siblings merged
+     before it and the files (`b conflicts with by/me plus a in calc.py;
+     nothing was integrated`), and nothing moves. Resolve it in the
+     conflicting child's branch, then integrate again. Its worktree shares
+     the repository's branches, so it can merge the sibling's branch
+     (`by/<sibling>`):
+
+     ```sh
+     by send b "Run git merge by/a in your worktree, resolve the conflicts in calc.py keeping both changes, commit the merge, run by check, then end your turn."
+     by wait b
+     by integrate a b
+     ```
+
+     b's candidate now contains a, so its merge onto a is clean, and
+     siblings that share your check still integrate together. A child
+     with a check of its own can land alone instead: `by integrate a`,
+     then have b merge your branch (`git merge by/<you>`) and `by
+     integrate b`. `by check b` says whether it still conflicts. Do not
+     merge them yourself in your own worktree.
 5. Clean up. `by cancel <child>` stops a running child and everything
    below it. A child that already finished is not running, so cancel
    changes nothing; set a finished child you will not use aside with
@@ -122,7 +159,9 @@ integration will; nothing is committed or integrated. What fails here
 fails your integration: a repository rule you never saw is in its output.
 Fix it and run `by check` again until it passes. It exits 1 when the check
 fails, times out or your work conflicts with your parent's branch, and
-says so when you have no check to run.
+says so when you have no check to run. For a conflict, merge your
+parent's branch into your work (`git merge by/<parent>`), resolve the
+files it names, commit the merge, and run `by check` again.
 
 ## With `by`
 
@@ -139,9 +178,10 @@ by children
 by inspect parser-flake
 by events parser-flake --cursor 0
 by spawn "Add a regression test for issue 42" --name issue-42 --budget-usd 0.30 --wait
-by send parser-flake --steer "Use the fixture in tests/data, not a new one."
+by steer parser-flake "Use the fixture in tests/data, not a new one."
 by wait parser-flake retry-docs --timeout 600
 by send parser-flake "The seed must come from the test name, not the clock."
+by send parser-flake --prompt-file "$TMPDIR/review.md"   # a long or quoted follow-up
 by integrate parser-flake retry-docs
 by cancel retry-docs
 by discard retry-docs --reason "superseded by parser-flake"
@@ -219,7 +259,12 @@ by answer 12 "Yes, accept tabs"
 ```
 
 Artifacts you publish are readable by your ancestors and descendants; a
-sibling needs `by artifact share ID --to BRANCH`. An artifact's `digest`
+sibling needs `by artifact share ID --to BRANCH`. Whoever can already
+read the artifact may run that share, not only its publisher: the
+publishing sibling itself, or a common ancestor of both. The receiving
+sibling cannot, since it cannot read the artifact yet. `BRANCH`
+must already exist: spawn the consumer first, or have it `by artifact
+get` a copy a common ancestor republished to it. An artifact's `digest`
 is the blake3 hash of its bytes.
 
 ## With Python

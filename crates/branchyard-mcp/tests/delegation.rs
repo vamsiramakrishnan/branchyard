@@ -116,6 +116,52 @@ fn a_harness_spawns_a_child_and_integrates_it_into_its_own_branch() {
     assert!(root.wait_subtree().unwrap().len() == 1);
 }
 
+/// A child's turn that changes nothing leaves it `ready` with the
+/// candidate an earlier turn made, as `wait`, `inspect` and `children` show.
+#[test]
+fn a_childs_turn_that_changes_nothing_leaves_it_ready() {
+    let f = Fixture::new();
+    let prompt = [
+        r#"MCP spawn {"prompt": "WRITE child.txt=hello", "name": "kid"}"#,
+        "MCP wait kid",
+        r#"MCP send {"branch": "kid", "prompt": "WHOAMI"}"#,
+        "MCP wait kid",
+        r#"MCP inspect {"branch": "kid"}"#,
+        "MCP children",
+    ]
+    .join("\n");
+    f.yard
+        .task(prompt)
+        .options(f.delegating(Envelope::default()))
+        .name("root")
+        .run()
+        .unwrap()
+        .wait_subtree()
+        .unwrap();
+    let said = reply(&f, "root");
+    assert_eq!(said.matches("mcp wait: ready").count(), 2, "{said}");
+    let inspected = result(&said, "inspect");
+    assert_eq!(inspected["status"], json!({"state": "ready"}), "{said}");
+    assert_eq!(inspected["candidate"]["files_changed"], 1, "{said}");
+    let children = result(&said, "children");
+    assert_eq!(
+        children["descendants"][0]["status"],
+        json!({"state": "ready"}),
+        "{said}"
+    );
+    let kid = f.yard.branch("kid").unwrap();
+    assert_eq!(kid.info().turns, 2);
+    assert_eq!(kid.info().status, BranchStatus::Ready);
+    let events = kid.events().unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.activity,
+            Activity::Warning(w) if w.contains("the turn changed no file")
+        )),
+        "{events:?}"
+    );
+}
+
 #[test]
 fn refusals_reach_the_harness_as_tool_errors() {
     let f = Fixture::new();
@@ -186,6 +232,53 @@ fn refusals_reach_the_harness_as_tool_errors() {
     assert_eq!(me["reserving_children"], 0);
     // The other branch was never touched.
     assert!(f.yard.branch("other").unwrap().info().children.is_empty());
+}
+
+/// The spawn tool and a graph's spawn edit take the flat limits the CLI and
+/// Python name (`budget_usd`), as a model first tries them, or the nested
+/// `budget`; not both.
+#[test]
+fn spawn_takes_flat_limits_or_a_budget_but_not_both() {
+    let f = Fixture::new();
+    let options = TaskOptions {
+        budget: Budget::usd(2.0),
+        ..f.delegating(Envelope::default())
+    };
+    let graph = json!({"expected_revision": 1, "edits": [
+        {"kind": "spawn", "name": "graphed", "prompt": "say g", "budget_usd": 0.25, "max_minutes": 5},
+    ]});
+    let prompt = [
+        r#"MCP spawn {"prompt": "say a", "name": "flat", "budget_usd": 0.5, "max_turns": 2}"#
+            .to_owned(),
+        r#"MCP spawn {"prompt": "say b", "budget_usd": 0.5, "budget": {"max_usd": 0.5}}"#
+            .to_owned(),
+        format!("MCP apply_graph {graph}"),
+        r#"MCP wait {"branches": ["flat", "graphed"]}"#.to_owned(),
+    ]
+    .join("\n");
+    f.yard
+        .task(prompt)
+        .options(options)
+        .name("root")
+        .run()
+        .unwrap()
+        .wait_subtree()
+        .unwrap();
+    let said = reply(&f, "root");
+    let spawned = result(&said, "spawn");
+    assert_eq!(spawned["name"], "flat", "{said}");
+    assert_eq!(spawned["budget"]["max_usd"], 0.5, "{said}");
+    assert_eq!(spawned["budget"]["max_turns"], 2, "{said}");
+    assert!(
+        said.contains("mcp spawn error: denied: give a child's limits either as budget"),
+        "{said}"
+    );
+    assert_eq!(
+        result(&said, "apply_graph")["spawned"][0]["budget"]["max_usd"],
+        0.25,
+        "{said}"
+    );
+    assert_eq!(f.yard.branches().unwrap().len(), 3);
 }
 
 #[test]

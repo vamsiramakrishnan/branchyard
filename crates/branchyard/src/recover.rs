@@ -272,6 +272,7 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         metered: metered_turn(yard, &row.branch),
         // What the turn spent as it ran is in the record it wrote.
         live_cost: None,
+        held_on: Vec::new(),
     };
     if let Err(error) = engine::conclude(yard, &prompt, &fence, &mut record, &mut recorder, driven)
     {

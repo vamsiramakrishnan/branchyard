@@ -69,4 +69,5 @@ rcgen = { workspace = true }
 tempfile = { workspace = true }
 
 [target."cfg(unix)".dependencies]
-rustix = { workspace = true }
+# `net`: the broker peeks at a client's connection to see it closed.
+rustix = { workspace = true, features = ["net"] }

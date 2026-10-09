@@ -868,6 +868,49 @@ pub trait Driver {
     /// The harness's stdout closed or the process exited.
     fn transport_closed(&mut self) -> Vec<Event>;
 
+    /// Whether the turn in flight is held open after the harness answered
+    /// it, for background tasks of the harness's own it still reports
+    /// running (Claude Code's; see its module). The engine counts no stall
+    /// meanwhile, and bounds the hold when the turn has no duration limit.
+    /// The default holds nothing.
+    fn holding(&self) -> bool {
+        false
+    }
+
+    /// Whether the turn in flight is held open after the harness answered
+    /// it, for the whole hold: while its background tasks run, and while
+    /// it waits for the harness to answer their notification once they
+    /// ended. The engine bounds this whole hold when the turn has no
+    /// duration limit. The default holds nothing.
+    fn held(&self) -> bool {
+        false
+    }
+
+    /// Whether the held turn waits only for the harness to start a cycle
+    /// on the notification of background tasks that ended: none runs and
+    /// no cycle has started since the hold began or the last one ended.
+    /// The engine ends the hold when none starts within a grace, as a
+    /// notification may never come. The default holds nothing.
+    fn awaiting_follow_up(&self) -> bool {
+        false
+    }
+
+    /// How many cycles the harness answered while the turn in flight was
+    /// held: each brings the turn's answer up to date, so what settled
+    /// before the latest the answer may have seen. The engine takes what
+    /// the answer cannot have seen from the latest. The default holds
+    /// nothing.
+    fn held_answers(&self) -> u32 {
+        0
+    }
+
+    /// The outcome a held turn ends with when the engine cuts its hold:
+    /// the harness's answer, which the hold only kept open. `None` when
+    /// the turn is not held. The default holds nothing.
+    fn held_outcome(&self) -> Option<TurnOutcome> {
+        None
+    }
+
     /// Frames that ask the harness to end its session, written just before
     /// its input is closed, for a protocol that has such a request. A
     /// harness may otherwise outlive the end of its input, waiting on work

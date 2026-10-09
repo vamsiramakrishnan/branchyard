@@ -168,6 +168,8 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
             .home
             .or_else(|| placement::private_home(new.provider.as_ref(), store, new.name)),
         cost_baseline: new.cost_baseline,
+        cost_session: None,
+        session_costs: Default::default(),
         provider: new.provider,
         grant: new.grant,
         provision: new.provision,
@@ -177,6 +179,7 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
         context: None,
         workspace: new.workspace.map(crate::workspace::WorkspaceState::new),
         sandbox_seed: new.seed,
+        merged: None,
         actor: new.actor,
         plan: None,
         goal: None,
@@ -1252,6 +1255,15 @@ fn prepare(
             false => crate::wake::recovered_note(&store, &record, &reason),
         });
     }
+    // A wake of a branch parked merged keeps merged too, when it changes
+    // nothing.
+    let held = match &record.info.status {
+        BranchStatus::WaitingOnChildren => record.parked.as_ref().map(|p| &p.ended),
+        status => Some(status),
+    };
+    record.merged = held
+        .filter(|status| matches!(status, BranchStatus::Merged { .. }))
+        .cloned();
     record.info.status = BranchStatus::Running;
     // Written with the lease below.
     crate::delegation::remember_limits(&mut record, &options.budget);

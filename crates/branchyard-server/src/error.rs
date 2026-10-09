@@ -128,10 +128,14 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
             output_tail,
             checks,
             shared,
+            own_work,
         } => {
             let mut detail = json!({ "output_tail": output_tail });
             if !checks.is_empty() {
                 detail["checks"] = json!(checks);
+            }
+            if !own_work.is_empty() {
+                detail["own_work"] = json!(own_work);
             }
             if let Some(shared) = shared.as_ref().and_then(|s| serde_json::to_value(s).ok()) {
                 detail["shared"] = shared;
@@ -195,6 +199,7 @@ mod tests {
                 },
             ],
             shared: None,
+            own_work: Vec::new(),
         });
         assert_eq!(
             (e.status, e.body.code.as_str()),

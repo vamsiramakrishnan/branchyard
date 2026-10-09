@@ -286,26 +286,57 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         Command::Send {
             branch,
             prompt,
+            prompt_file,
             task,
             steer: true,
             wait: _,
             json,
             ..
-        } => commands::steer(target, &branch, &prompt, &task, json),
+        } => {
+            let prompt = match prompt_file {
+                Some(path) => commands::read_prompt_file(&path)?,
+                None => prompt,
+            };
+            commands::steer(target, &branch, &prompt, &task, "by send --steer", json)
+        }
         Command::Send {
             branch,
             prompt,
+            prompt_file,
             task,
             steer: false,
             retry,
             wait,
             json,
         } => {
+            let prompt = match prompt_file {
+                Some(path) => commands::read_prompt_file(&path)?,
+                None => prompt,
+            };
             let prompt = match retry {
                 true => commands::Prompt::Retry,
                 false => commands::Prompt::Text(&prompt),
             };
             commands::send(env, target, &branch, prompt, &task, wait, json)
+        }
+        Command::Steer {
+            branch,
+            prompt,
+            prompt_file,
+            json,
+        } => {
+            let prompt = match prompt_file {
+                Some(path) => commands::read_prompt_file(&path)?,
+                None => prompt,
+            };
+            commands::steer(
+                target,
+                &branch,
+                &prompt,
+                &args::TaskArgs::default(),
+                "by steer",
+                json,
+            )
         }
         Command::Fork {
             branch,
