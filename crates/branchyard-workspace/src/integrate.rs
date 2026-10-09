@@ -221,6 +221,9 @@ impl Repository {
     ///    `git merge --no-ff <head>` there, with hooks and rerere disabled and
     ///    a fallback identity if none is configured. On conflict, collect
     ///    the unmerged paths, abort, and return [`IntegrationError::Conflict`].
+    ///    Then refuse with `DirtyTarget` if such a worktree has a file where
+    ///    the merge adds one, so nothing the promotion would refuse is found
+    ///    only after the check.
     /// 3. Run `check` in that worktree, on the exact merge commit.
     /// 4. Re-read the target and re-check checked-out worktrees, then promote
     ///    with `git update-ref refs/heads/<target> <merged> <expected>`, an
@@ -264,14 +267,13 @@ impl Repository {
             });
         }
         self.validate_candidate(candidate, expected)?;
-        for worktree in self.checkouts_of(&target_ref)? {
-            if blocks_update(&worktree, expected, None)? {
-                return Err(IntegrationError::DirtyTarget { worktree });
-            }
-        }
+        self.refuse_dirty_checkouts(&target_ref, expected, None)?;
 
         let scratch = TempWorktree::create(self, expected)?;
         let merged = merge(&scratch.path, candidate, target, expected)?;
+        // Every precondition of the promotion before the check, which may
+        // run for many minutes: a file in the way of the merge too.
+        self.refuse_dirty_checkouts(&target_ref, expected, Some(&merged))?;
 
         let check_output_tail = match check {
             None => None,
@@ -369,11 +371,7 @@ impl Repository {
                 stale_checkouts: Vec::new(),
             });
         }
-        for worktree in self.checkouts_of(&target_ref)? {
-            if blocks_update(&worktree, expected, None)? {
-                return Err(IntegrationError::DirtyTarget { worktree });
-            }
-        }
+        self.refuse_dirty_checkouts(&target_ref, expected, None)?;
 
         let scratch = TempWorktree::create(self, expected)?;
         let mut head = expected.clone();
@@ -426,6 +424,8 @@ impl Repository {
                 stale_checkouts: Vec::new(),
             });
         }
+        // As in `integrate`: refused before the checks, not after them.
+        self.refuse_dirty_checkouts(&target_ref, expected, Some(&merged))?;
 
         let mut check_output_tails = Vec::new();
         for (index, check) in checks.iter().enumerate() {
@@ -481,14 +481,8 @@ impl Repository {
                 actual,
             });
         }
-        let checkouts = self.checkouts_of(target_ref)?;
-        for worktree in &checkouts {
-            if blocks_update(worktree, expected, Some(merged))? {
-                return Err(IntegrationError::DirtyTarget {
-                    worktree: worktree.clone(),
-                });
-            }
-        }
+        // Again: a checkout may have changed while the check ran.
+        let checkouts = self.refuse_dirty_checkouts(target_ref, expected, Some(merged))?;
         let (out, args) = Git::new(&self.root)
             .args(["update-ref", "-m", reason, target_ref])
             .args([merged.as_str(), expected.as_str()])
@@ -678,6 +672,26 @@ impl Repository {
             return Err(IntegrationError::AlreadyIntegrated);
         }
         Ok(())
+    }
+
+    /// The worktrees with `target_ref` checked out, or
+    /// [`IntegrationError::DirtyTarget`] for the first one that moving from
+    /// `expected` (to `merged`, when given) could lose work in.
+    fn refuse_dirty_checkouts(
+        &self,
+        target_ref: &str,
+        expected: &Commit,
+        merged: Option<&Commit>,
+    ) -> Result<Vec<PathBuf>, IntegrationError> {
+        let checkouts = self.checkouts_of(target_ref)?;
+        for worktree in &checkouts {
+            if blocks_update(worktree, expected, merged)? {
+                return Err(IntegrationError::DirtyTarget {
+                    worktree: worktree.clone(),
+                });
+            }
+        }
+        Ok(checkouts)
     }
 
     /// Worktrees (with a directory present) that have `full_ref` checked out.

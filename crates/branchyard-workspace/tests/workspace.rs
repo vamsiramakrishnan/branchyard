@@ -1060,6 +1060,43 @@ fn dirty_checked_out_target_is_refused() {
     fixture.assert_no_integration_worktrees();
 }
 
+/// A file in the way of the merge is refused before the check runs, not
+/// after it: the check may take many minutes.
+#[test]
+fn a_file_in_the_way_is_refused_before_the_check_runs() {
+    let fixture = Fixture::new();
+    let expected = fixture.head("main");
+    let a = fixture.candidate("a", "feature.txt", "feature\n");
+    let b = fixture.candidate("b", "b-part.txt", "b\n");
+    fs::write(fixture.root().join("feature.txt"), "mine\n").unwrap();
+    // Outside the repository, so the check's own mark is never in the way.
+    let ran = fixture.dir.join("check-ran");
+    let check = sh(
+        &format!("touch '{}'", ran.display()),
+        Duration::from_secs(30),
+    );
+
+    match fixture.repo.integrate(&a, "main", &expected, Some(&check)) {
+        Err(IntegrationError::DirtyTarget { worktree }) => assert_eq!(worktree, fixture.root()),
+        other => panic!("{other:?}"),
+    }
+    assert!(!ran.exists(), "the check ran before the refusal");
+    match fixture
+        .repo
+        .integrate_many(&[b, a], "main", &expected, std::slice::from_ref(&check))
+    {
+        Err(IntegrationError::DirtyTarget { worktree }) => assert_eq!(worktree, fixture.root()),
+        other => panic!("{other:?}"),
+    }
+    assert!(!ran.exists(), "the checks ran before the refusal");
+    assert_eq!(fixture.head("main"), expected);
+    assert_eq!(
+        fs::read_to_string(fixture.root().join("feature.txt")).unwrap(),
+        "mine\n"
+    );
+    fixture.assert_no_integration_worktrees();
+}
+
 #[test]
 fn invalid_inputs_are_rejected() {
     let fixture = Fixture::new();
