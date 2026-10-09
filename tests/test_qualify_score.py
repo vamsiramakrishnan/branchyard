@@ -21,7 +21,8 @@ REFUSAL = 'refused: spawn task-A: "task-A" is not a usable branch name; try "tas
 
 
 def delegation(refused):
-    return {"at_ms": 1, "activity": {"delegation": {"tool": "spawn", "branch": "x", "outcome": "o", "refused": refused}}}
+    delegated = {"tool": "spawn", "branch": "x", "outcome": "o", "refused": refused}
+    return {"at_ms": 1, "activity": {"delegation": delegated}}
 
 
 class Score(unittest.TestCase):

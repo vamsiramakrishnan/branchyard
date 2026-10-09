@@ -168,8 +168,9 @@ def main(argv):
         base = json.loads(args.compare.read_text())["totals"]
         now = result["totals"]
         print("\nchange against", args.compare)
-        if base.get("refusals_from", "logs") != now["refusals_from"]:
-            print(f"  refusals counted from {base.get('refusals_from', 'logs')} then, {now['refusals_from']} now: not comparable")
+        then = base.get("refusals_from", "logs")
+        if then != now["refusals_from"]:
+            print(f"  refusals counted from {then} then, {now['refusals_from']} now: not comparable")
         for key in now:
             if isinstance(now[key], (int, float)) and isinstance(base.get(key), (int, float)):
                 print(f"  {key}: {base[key]} -> {now[key]} ({now[key] - base[key]:+g})")
