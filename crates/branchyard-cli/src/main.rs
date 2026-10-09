@@ -297,7 +297,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
                 Some(path) => commands::read_prompt_file(&path)?,
                 None => prompt,
             };
-            commands::steer(target, &branch, &prompt, &task, json)
+            commands::steer(target, &branch, &prompt, &task, "by send --steer", json)
         }
         Command::Send {
             branch,
@@ -329,7 +329,14 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
                 Some(path) => commands::read_prompt_file(&path)?,
                 None => prompt,
             };
-            commands::steer(target, &branch, &prompt, &args::TaskArgs::default(), json)
+            commands::steer(
+                target,
+                &branch,
+                &prompt,
+                &args::TaskArgs::default(),
+                "by steer",
+                json,
+            )
         }
         Command::Fork {
             branch,

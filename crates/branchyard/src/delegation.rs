@@ -3014,11 +3014,17 @@ impl Local {
             reserved_usd: held.live_usd,
             reserving_children: held.live,
             settled_children_usd: held.settled_usd,
-            allowed_harnesses,
             check: record.check.clone(),
             check_inherited: record.check_inherited,
             check_shared_with,
-            envelope: record.grant.map(|g| g.envelope),
+            // The envelope's harnesses as enforced, as `allowed_harnesses`
+            // says them: a stored empty list means "its own profile only",
+            // and shown as `[]` it read as "no harness".
+            envelope: record.grant.map(|g| Envelope {
+                harnesses: allowed_harnesses.clone(),
+                ..g.envelope
+            }),
+            allowed_harnesses,
             last_message: last_message(&events),
             seat,
             seats: may_spawn,
@@ -3911,6 +3917,21 @@ fn nest_budget(mut spawn: Value) -> Result<Value, Error> {
     Ok(spawn)
 }
 
+/// A graph proposal's `edits` (a JSON array of [`GraphEdit`]s) with each
+/// spawn's flat limits moved into its `budget`, as [`nest_budget`] does for
+/// a spawn: `by graph apply` and the `apply_graph` tool read the same
+/// edits. Anything that is not an array is left for the parse to refuse.
+pub fn nest_graph_budgets(edits: &mut Value) -> Result<(), Error> {
+    if let Some(edits) = edits.as_array_mut() {
+        for edit in edits {
+            if edit.get("kind") == Some(&json!("spawn")) {
+                *edit = nest_budget(edit.take())?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn required(tool: &str, branch: Option<String>) -> Result<String, Error> {
     branch.ok_or_else(|| Error::Denied(format!("{tool} needs a branch")))
 }
@@ -3932,12 +3953,8 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
         }
         "apply_graph" => {
             let mut arguments = arguments;
-            if let Some(edits) = arguments.get_mut("edits").and_then(Value::as_array_mut) {
-                for edit in edits {
-                    if edit.get("kind") == Some(&json!("spawn")) {
-                        *edit = nest_budget(edit.take())?;
-                    }
-                }
+            if let Some(edits) = arguments.get_mut("edits") {
+                nest_graph_budgets(edits)?;
             }
             let args: ApplyGraphArgs = parse(tool, arguments)?;
             to_json(&local.apply_graph(&args.edits, args.expected_revision)?)

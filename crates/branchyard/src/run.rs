@@ -1255,8 +1255,15 @@ fn prepare(
             false => crate::wake::recovered_note(&store, &record, &reason),
         });
     }
-    record.merged = matches!(record.info.status, BranchStatus::Merged { .. })
-        .then(|| record.info.status.clone());
+    // A wake of a branch parked merged keeps merged too, when it changes
+    // nothing.
+    let held = match &record.info.status {
+        BranchStatus::WaitingOnChildren => record.parked.as_ref().map(|p| &p.ended),
+        status => Some(status),
+    };
+    record.merged = held
+        .filter(|status| matches!(status, BranchStatus::Merged { .. }))
+        .cloned();
     record.info.status = BranchStatus::Running;
     // Written with the lease below.
     crate::delegation::remember_limits(&mut record, &options.budget);

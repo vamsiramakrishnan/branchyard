@@ -189,8 +189,8 @@ pub use checkpoint::{
 };
 pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, AttemptCheck};
 pub use delegation::{
-    Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage, Inbox, Inspection,
-    Sent, Spawn, Spawned, Waited, DEFAULT_MAX_WAKES,
+    nest_graph_budgets, Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage,
+    Inbox, Inspection, Sent, Spawn, Spawned, Waited, DEFAULT_MAX_WAKES,
 };
 pub use egress::{EgressActivity, Enforcement as EgressEnforcement};
 pub use environments::{

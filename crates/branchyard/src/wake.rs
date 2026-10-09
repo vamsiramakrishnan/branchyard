@@ -86,7 +86,10 @@ pub(crate) fn is_parked(status: &BranchStatus) -> bool {
 }
 
 /// After a turn of `record` ended: park it when it may delegate, may be
-/// woken, ended `ready` or `no_changes`, and a descendant still runs.
+/// woken, ended `ready`, `no_changes` or `merged` (a turn that changed
+/// nothing on a merged branch), and a descendant still runs. A merged
+/// branch is merged again when it settles: its status is restored from
+/// [`Parked::ended`], and its wake keeps it ([`crate::run`]).
 /// `budget` is the turn's own, stored for a wake started elsewhere.
 pub(crate) fn park(
     yard: &Yard,
@@ -96,7 +99,7 @@ pub(crate) fn park(
 ) -> Result<(), Error> {
     if !matches!(
         record.info.status,
-        BranchStatus::Ready | BranchStatus::NoChanges
+        BranchStatus::Ready | BranchStatus::NoChanges | BranchStatus::Merged { .. }
     ) {
         return Ok(());
     }

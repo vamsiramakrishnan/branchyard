@@ -1649,7 +1649,8 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Wait for delegated branches to settle: all of them, or the first with --any
+    /// Wait for delegated branches to settle: all of them, or the first with --any. Each is
+    /// printed as it settles (with --json, as a JSON line on stderr), then the result
     #[command(display_order = 303)]
     Wait {
         /// Default, inside a harness: its children still running
@@ -1661,7 +1662,9 @@ pub enum Command {
         /// Return when all of them have settled (the default)
         #[arg(long)]
         all: bool,
-        /// Give up after S seconds; the result says timed_out, and by exits 1
+        /// Give up after S seconds; the result says timed_out, and by exits 1. Keep S under any
+        /// limit of your own (a shell `timeout`, a tool call's time limit): a wait stopped from
+        /// outside prints no result, only the branches that settled before
         #[arg(long, value_name = "S")]
         timeout: Option<f64>,
         /// Print JSON
@@ -3446,14 +3449,14 @@ pub struct RunFlags {
     perms: Perms,
     /// Tools the harness is denied outright, before any permission answer, --yes included; a
     /// trailing * matches a prefix. Stored with the branch: later sends and every child it
-    /// delegates to keep them, as with by spawn --deny
+    /// delegates to keep them, as with by spawn --deny. Repeatable
     #[arg(
         long,
         value_name = "TOOL,TOOL,...",
         value_parser = harness_list,
         help_heading = "Permissions"
     )]
-    deny: Option<List>,
+    deny: Vec<List>,
     #[command(flatten)]
     launch: Launch,
     #[command(flatten)]
@@ -3483,7 +3486,7 @@ impl Flags for RunFlags {
         };
         self.limits.apply(&mut task);
         self.perms.apply(&mut task);
-        task.deny = self.deny.map(|list| list.0).unwrap_or_default();
+        task.deny = self.deny.into_iter().flat_map(|list| list.0).collect();
         self.launch.apply(&mut task)?;
         self.delegation.apply(&mut task);
         self.provision.apply(&mut task)?;
@@ -3599,7 +3602,7 @@ impl Flags for FanFlags {
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: self.plan_goal,
-            deny: None,
+            deny: Vec::new(),
         }
         .check()
     }
@@ -3852,7 +3855,7 @@ impl Flags for MapFlags {
             delegation: Delegation::default(),
             provision: self.provision,
             plan_goal: PlanGoal::default(),
-            deny: None,
+            deny: Vec::new(),
         }
         .check()
     }
@@ -3938,7 +3941,7 @@ impl Flags for ForkFlags {
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: PlanGoal::default(),
-            deny: None,
+            deny: Vec::new(),
         }
         .check()
     }
@@ -3981,7 +3984,7 @@ impl Flags for ReincarnateFlags {
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: PlanGoal::default(),
-            deny: None,
+            deny: Vec::new(),
         }
         .check()
     }
@@ -4044,9 +4047,9 @@ pub struct SpawnGraph {
     /// the parent's)
     #[arg(long, value_name = "ID,ID,...", value_parser = harness_list)]
     harnesses: Option<List>,
-    /// Tools the child is denied outright; a trailing * matches a prefix
+    /// Tools the child is denied outright; a trailing * matches a prefix. Repeatable
     #[arg(long, value_name = "TOOL,TOOL,...", value_parser = harness_list)]
-    deny: Option<List>,
+    deny: Vec<List>,
     /// Siblings the child waits for: it is created waiting and starts once they have settled
     #[arg(long, value_name = "BRANCH,BRANCH,...", value_parser = harness_list)]
     depends_on: Option<List>,
@@ -4086,7 +4089,12 @@ impl Flags for SpawnFlags {
             max_depth: self.graph.max_depth,
             max_children: self.graph.max_children,
             harnesses: self.graph.harnesses.map(|list| list.0),
-            deny: self.graph.deny.map(|list| list.0).unwrap_or_default(),
+            deny: self
+                .graph
+                .deny
+                .into_iter()
+                .flat_map(|list| list.0)
+                .collect(),
             seat: self.seat,
             depends_on: self.graph.depends_on.map(|list| list.0).unwrap_or_default(),
             after: self.graph.after.map(Into::into).unwrap_or_default(),
@@ -5354,6 +5362,23 @@ mod tests {
         );
         assert_eq!(kind("mcp --root /r"), ErrorKind::MissingRequiredArgument);
         assert!(err("mcp --root /r").contains("--branch <NAME>"));
+    }
+
+    /// `--deny` takes a comma list and repeats, on every command that has
+    /// it; a repeat failed with "cannot be used multiple times".
+    #[test]
+    fn deny_repeats_as_well_as_a_comma_list() {
+        let Command::Spawn { spawn, .. } =
+            parse_str("spawn go --parent p --deny Edit --deny Write,Bash").unwrap()
+        else {
+            panic!("not spawn")
+        };
+        assert_eq!(spawn.deny, ["Edit", "Write", "Bash"]);
+        assert_eq!(
+            task("run go --deny Edit --deny Write,Bash").deny,
+            ["Edit", "Write", "Bash"]
+        );
+        assert_eq!(task("run go --deny Edit,Write").deny, ["Edit", "Write"]);
     }
 
     #[test]

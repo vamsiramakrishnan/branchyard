@@ -293,7 +293,8 @@ class Inspection:
     reserving_children: Optional[int] = None
     settled_children_usd: Optional[float] = None
     # What its children may run, as harness= names it: the envelope's list,
-    # or its own profile when that list is empty ("its own only").
+    # or its own profile when that list is empty ("its own only"). The
+    # envelope's "harnesses" here is the same list.
     allowed_harnesses: Optional[List[str]] = None
     # The check its merge must pass, whether it is its parent's, and the
     # siblings sharing it, which are integrated together with it.
