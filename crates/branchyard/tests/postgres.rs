@@ -264,8 +264,12 @@ fn a_killed_engine_is_recovered_from_postgres_and_nothing_resubmitted() {
         "{}",
         recovered[0].0
     );
+    // On Linux the harness died with its engine (its parent-death signal),
+    // so recovery kills only what it started in its process group.
+    let (agent, sleeper) = (pids[0], pids[1]);
     assert!(
-        pids.iter().all(|p| recovered[0].1.contains(p)),
+        recovered[0].1.contains(&sleeper)
+            && (cfg!(target_os = "linux") || recovered[0].1.contains(&agent)),
         "{recovered:?} {pids:?}"
     );
     assert_eq!(prompts(&yard, "crashy"), 1);
