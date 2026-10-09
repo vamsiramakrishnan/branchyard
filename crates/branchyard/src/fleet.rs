@@ -1060,6 +1060,7 @@ fn budget_for(task: &Budget, entry: &Budget) -> Budget {
         max_duration: task.max_duration.or(entry.max_duration),
         stall_after: task.stall_after.or(entry.stall_after),
         stall_action: task.stall_action,
+        hold_cap: task.hold_cap.or(entry.hold_cap),
     }
 }
 

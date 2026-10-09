@@ -139,14 +139,21 @@ fn a_killed_engine_is_recovered_its_harness_killed_and_nothing_resubmitted() {
     let (agent, sleeper) = (pids[0], pids[1]);
     assert!(running(agent) && running(sleeper));
 
-    // The engine dies; the harness ignores its closed stdin and lives on.
+    // The engine dies. The harness ignores its closed stdin, but on Linux
+    // it dies with its engine (its parent-death signal); elsewhere it lives
+    // on. The command it started in its process group lives on either way.
     child.kill().unwrap();
     child.wait().unwrap();
-    wait::settle(
-        "a harness that was going to die with its engine would have by now",
-        Duration::from_millis(200),
-    );
-    assert!(running(agent), "the harness outlived its engine");
+    if cfg!(target_os = "linux") {
+        wait::until("the harness to die with its engine", || !running(agent));
+    } else {
+        wait::settle(
+            "a harness that was going to die with its engine would have by now",
+            Duration::from_millis(200),
+        );
+        assert!(running(agent), "the harness outlived its engine");
+    }
+    assert!(running(sleeper), "its group outlived its engine");
     assert_eq!(
         f.yard.branch("crashy").unwrap().info().status,
         BranchStatus::Running
@@ -168,7 +175,7 @@ fn a_killed_engine_is_recovered_its_harness_killed_and_nothing_resubmitted() {
         "{reason}"
     );
     assert!(
-        killed.contains(&agent) && killed.contains(&sleeper),
+        killed.contains(&sleeper) && (cfg!(target_os = "linux") || killed.contains(&agent)),
         "{killed:?}"
     );
     wait::until("the harness's process group to die", || {
@@ -791,7 +798,14 @@ fn a_harness_started_just_before_its_engine_stopped_is_found_by_its_marker() {
     let (agent, sleeper) = (pids[0], pids[1]);
     child.kill().unwrap();
     child.wait().unwrap();
-    assert!(running(agent) && running(sleeper));
+    // On Linux the harness dies with its engine; what it started in its
+    // group does not.
+    if cfg!(target_os = "linux") {
+        wait::until("the harness to die with its engine", || !running(agent));
+    } else {
+        assert!(running(agent));
+    }
+    assert!(running(sleeper));
     // Leave the journal as an engine that stopped between spawning the
     // harness and recording it would have: the start's intent and nothing
     // after it.
@@ -817,7 +831,7 @@ fn a_harness_started_just_before_its_engine_stopped_is_found_by_its_marker() {
         "{reason}"
     );
     assert!(
-        killed.contains(&agent) && killed.contains(&sleeper),
+        killed.contains(&sleeper) && (cfg!(target_os = "linux") || killed.contains(&agent)),
         "{killed:?}"
     );
     wait::until("the unrecorded harness to die", || {

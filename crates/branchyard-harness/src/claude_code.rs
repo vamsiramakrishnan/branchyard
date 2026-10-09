@@ -88,14 +88,20 @@
 //! [`Event::Warning`] saying so: ending it would close the session, which
 //! stops them. Claude Code runs a cycle of its own on each task's
 //! notification once it ends; during the hold every cycle is the turn's,
-//! its text, tool calls and cost included, and the turn ends at the result
-//! of the cycle after the last task ended
+//! its text, tool calls and cost included, and the turn ends once every
+//! task that ended has had its notification answered
 //! (`tests/fixtures/claude-code-2.1.293-background-hold.jsonl`, rebuilt
-//! from the recorded frames). An interrupt ends the hold: the CLI's answer
-//! ends the turn interrupted when no cycle runs, as does the CLI agreeing
-//! to end its session, keeping the outcome it had. A turn that ends with
-//! background tasks still running says which in a warning. A turn that hit
-//! a limit of the CLI's own, or was interrupted, is not held.
+//! from the recorded frames). The CLI echoes each notification it runs as
+//! a `user` frame with a `uuid` of its own and the task's `<task-id>`, and
+//! the `result` of the cycle that ran it lists that uuid in
+//! `user_message_uuids`: that marks the task answered, whichever cycle it
+//! started or joined (`tests/fixtures/claude-code-2.1.293-hold-*.jsonl`).
+//! An interrupt ends the hold and the turn keeps the outcome it was held
+//! with: the CLI's answer ends it when no cycle runs, else the result of
+//! the cycle it stopped does; the CLI agreeing to end its session ends it
+//! the same way. A turn that ends with background tasks still running
+//! says which in a warning. A turn that hit a limit of the CLI's own, or
+//! was interrupted, is not held.
 //!
 //! Closing the session sends the `end_session` control request before the
 //! input closes. Claude Code 2.1.293 does not exit when its input closes
@@ -205,13 +211,15 @@ pub struct ClaudeCode {
     /// Background tasks that ended during the hold, in order, whose
     /// notification no cycle's result has answered yet.
     ended: Vec<String>,
-    /// How many of `ended` had ended when the cycle running now started:
-    /// those its result answers. A task that ends during the cycle waits
-    /// for a cycle of its own.
-    cycle_ended: Option<usize>,
-    /// Background tasks whose notification a cycle during the hold has
-    /// answered, so a later report of their ending waits for nothing.
+    /// The notifications the CLI echoed as `user` frames this turn: each
+    /// message's uuid and the tasks it reports.
+    notifications: HashMap<String, Vec<String>>,
+    /// Background tasks whose notification a cycle's result has answered,
+    /// so a later report of their ending waits for nothing.
     answered: HashSet<String>,
+    /// The outcome the held turn had when Branchyard interrupted it: the
+    /// turn ends with it, not as interrupted.
+    cut: Option<TurnOutcome>,
     /// The CLI agreed to end its session: a held turn ends with it.
     ending: bool,
 }
@@ -253,8 +261,9 @@ impl ClaudeCode {
             background: Vec::new(),
             held: false,
             ended: Vec::new(),
-            cycle_ended: None,
+            notifications: HashMap::new(),
             answered: HashSet::new(),
+            cut: None,
             ending: false,
         }
     }
@@ -368,10 +377,14 @@ impl ClaudeCode {
         let Some(turn) = self.turns.end() else {
             return Vec::new();
         };
+        let cut = self.cut.take();
         self.end_turn();
-        let outcome = match std::mem::take(&mut self.interrupting) {
-            true => TurnOutcome::Interrupted,
-            false => outcome,
+        // An interrupt that cut a hold keeps the outcome the turn was held
+        // with, whatever the cycle it stopped ended with.
+        let outcome = match (std::mem::take(&mut self.interrupting), cut) {
+            (true, Some(held)) => held,
+            (true, None) => TurnOutcome::Interrupted,
+            (false, _) => outcome,
         };
         let mut events: Vec<Event> = warning
             .into_iter()
@@ -435,8 +448,9 @@ impl ClaudeCode {
         self.after_text = false;
         self.held = false;
         self.ended.clear();
-        self.cycle_ended = None;
+        self.notifications.clear();
         self.answered.clear();
+        self.cut = None;
     }
 
     /// `command_lifecycle` for a steered message: queued is its
@@ -510,7 +524,8 @@ impl ClaudeCode {
                     },
                 }];
                 // A held turn with no cycle running has nothing for the
-                // interrupt to stop: its answer ends the hold.
+                // interrupt to stop: its answer ends the hold, with the
+                // outcome the turn was held with.
                 if self.held && self.turns.active == Some(turn) {
                     events.extend(self.settle());
                 }
@@ -803,11 +818,6 @@ impl ClaudeCode {
 
     fn assistant(&mut self, message: &Value) -> Output {
         let named = message["user_message_uuid"].as_str();
-        // A cycle during the hold answers the tasks that had ended when it
-        // started.
-        if self.held && self.cycle_ended.is_none() {
-            self.cycle_ended = Some(self.ended.len());
-        }
         let mut events: Vec<_> = self.acknowledge(named).into_iter().collect();
         if let Some(uuid) = named {
             self.turn_started |= self.turn_uuid.as_ref().is_some_and(|(own, _)| own == uuid);
@@ -872,13 +882,9 @@ impl ClaudeCode {
     fn result(&mut self, message: &Value) -> Output {
         let mut events = Vec::new();
         // The turn cycle is over: the next names its message anew. During
-        // the hold, it is the cycle on the notification the hold waited
-        // for, or one the CLI ran on a message of ours first.
+        // the hold, it is the cycle on a notification the hold waited for,
+        // or one the CLI ran on a message of ours first.
         self.answering = None;
-        if self.held {
-            let answered = self.cycle_ended.take().unwrap_or(self.ended.len());
-            self.answered.extend(self.ended.drain(..answered));
-        }
         // Every message this result answered: several when steered
         // messages joined the turn. None named is a result from before
         // the CLI listed them, taken as the turn's, unless the CLI
@@ -890,6 +896,7 @@ impl ClaudeCode {
             None => message["user_message_uuid"].as_str().map(|uuid| vec![uuid]),
         };
         self.names_messages |= answered.is_some();
+        self.notifications_answered(answered.as_deref());
         // With no turn in flight, a result is a turn the CLI ran of its
         // own, such as one on a background task's notification after the
         // turn ended, unless it answers a message of ours, or names none
@@ -940,6 +947,59 @@ impl ClaudeCode {
         Output {
             events,
             frames: Vec::new(),
+        }
+    }
+
+    /// Mark the tasks whose notification a `result` answered: those the
+    /// CLI's echo of each message it lists reported. A listed message that
+    /// is neither ours nor an echoed notification answers the task that
+    /// ended first, for a CLI that does not echo them; a result naming no
+    /// message during the hold, every task that ended.
+    fn notifications_answered(&mut self, answered: Option<&[&str]>) {
+        let Some(answered) = answered else {
+            if self.held {
+                self.answered.extend(self.ended.drain(..));
+            }
+            return;
+        };
+        for uuid in answered {
+            let tasks = match self.notifications.remove(*uuid) {
+                Some(tasks) => tasks,
+                None if self.held && !self.sent.contains(*uuid) && !self.ended.is_empty() => {
+                    vec![self.ended[0].clone()]
+                }
+                None => continue,
+            };
+            self.ended.retain(|id| !tasks.contains(id));
+            self.answered.extend(tasks);
+        }
+    }
+
+    /// A `user` frame from the CLI. A background task's notification it
+    /// runs is echoed as one, under a uuid of its own that the result of
+    /// the cycle running it lists, with the task's `<task-id>`: it is kept
+    /// to mark the task answered then. Tool results, the other `user`
+    /// frames, the assistant frames already account for.
+    fn user(&mut self, message: &Value) {
+        let Some(uuid) = message["uuid"].as_str() else {
+            return;
+        };
+        if self.sent.contains(uuid) {
+            return;
+        }
+        let content = &message["message"]["content"];
+        let texts: Vec<&str> = match content.as_str() {
+            Some(text) => vec![text],
+            None => content
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|block| block["text"].as_str())
+                .collect(),
+        };
+        let tasks: Vec<String> = texts.into_iter().flat_map(notified_tasks).collect();
+        if !tasks.is_empty() {
+            self.notifications.insert(uuid.to_owned(), tasks);
         }
     }
 
@@ -1003,6 +1063,18 @@ fn usage(message: &Value) -> Usage {
         cache_write_tokens: sum("cacheCreationInputTokens"),
         ..Usage::default()
     }
+}
+
+/// The `<task-id>` of each `<task-notification>` in `text`.
+fn notified_tasks(text: &str) -> Vec<String> {
+    text.split("<task-notification>")
+        .skip(1)
+        .filter_map(|notification| {
+            let (_, rest) = notification.split_once("<task-id>")?;
+            let (id, _) = rest.split_once("</task-id>")?;
+            Some(id.trim().to_owned()).filter(|id| !id.is_empty())
+        })
+        .collect()
 }
 
 /// `tasks` in a sentence: each one's description and ID.
@@ -1237,14 +1309,19 @@ impl Driver for ClaudeCode {
                     Output::default()
                 }
             }
+            // The notifications of background tasks the CLI runs; see
+            // `user`.
+            "user" => {
+                self.user(&message);
+                Output::default()
+            }
             // Ignored on purpose: keep_alive is the transport's heartbeat,
             // which comes while the CLI waits as much as while it works,
-            // so it is not progress; user echoes tool results the
-            // assistant frames already account for; stream_event is
-            // partial-message streaming, which this launch does not ask
-            // for; active_goal and autocompact_state describe the
-            // session's settings as it opens.
-            "keep_alive" | "user" | "stream_event" | "active_goal" | "autocompact_state" => {
+            // so it is not progress; stream_event is partial-message
+            // streaming, which this launch does not ask for; active_goal
+            // and autocompact_state describe the session's settings as it
+            // opens.
+            "keep_alive" | "stream_event" | "active_goal" | "autocompact_state" => {
                 Output::default()
             }
             // A tool call still running reports its elapsed time.
@@ -1313,6 +1390,11 @@ impl Driver for ClaudeCode {
     fn interrupt(&mut self) -> Result<Vec<Frame>, Rejected> {
         let turn = self.turns.active.ok_or(Rejected::NoTurn)?;
         self.interrupting = true;
+        // Cutting a hold stops what runs after the turn's answer, not the
+        // answer: the turn keeps the outcome it is held with.
+        if self.cut.is_none() {
+            self.cut = self.held_outcome();
+        }
         // Messages still queued would otherwise run after the interrupt, as
         // a turn of their own: steered ones, and on resume the turn's own,
         // which the CLI acknowledged but queued behind a notification it
@@ -1331,6 +1413,13 @@ impl Driver for ClaudeCode {
 
     fn held(&self) -> bool {
         self.held
+    }
+
+    fn held_outcome(&self) -> Option<TurnOutcome> {
+        match self.held {
+            true => self.turn_done.as_ref().map(|(outcome, _)| outcome.clone()),
+            false => None,
+        }
     }
 
     fn steer_boundary(&self) -> &'static str {

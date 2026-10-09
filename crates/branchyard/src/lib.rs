@@ -2090,6 +2090,11 @@ pub struct Budget {
     /// What a detected stall does. Ignored when [`Budget::stall_after`] is
     /// `None`.
     pub stall_action: StallAction,
+    /// How long a turn with no duration limit may be held open after its
+    /// harness answered it, for the harness's background tasks, before the
+    /// hold is cut and the turn ends with the outcome it was held with.
+    /// `None` is 30 minutes.
+    pub hold_cap: Option<Duration>,
 }
 
 impl Budget {
@@ -2119,6 +2124,12 @@ impl Budget {
     /// What a stall does; see [`Budget::stall_after`].
     pub fn stall_action(mut self, action: StallAction) -> Self {
         self.stall_action = action;
+        self
+    }
+
+    /// Cut a held turn's hold after this long; see [`Budget::hold_cap`].
+    pub fn hold_cap(mut self, cap: Duration) -> Self {
+        self.hold_cap = Some(cap);
         self
     }
 }

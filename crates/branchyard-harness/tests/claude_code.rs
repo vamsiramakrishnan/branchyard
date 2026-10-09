@@ -1479,11 +1479,11 @@ fn held_turn() -> (ClaudeCode, String) {
 }
 
 /// A steer during the hold runs as a cycle of its own and keeps the turn
-/// held; an interrupt then ends the hold when the CLI answers it, as an
-/// interrupted turn with a warning naming the task still running. The
-/// task's notification turn after it is the CLI's own.
+/// held; an interrupt then ends the hold when the CLI answers it, keeping
+/// the outcome the turn was held with, with a warning naming the task
+/// still running. The task's notification turn after it is the CLI's own.
 #[test]
-fn an_interrupt_ends_a_held_turn_naming_its_running_tasks() {
+fn an_interrupt_ends_a_held_turn_with_its_outcome_naming_its_running_tasks() {
     let (mut driver, _) = held_turn();
     let steered = decode(&driver.steer("status?").unwrap()[0]);
     let steer = steered["uuid"].as_str().unwrap().to_owned();
@@ -1506,7 +1506,7 @@ fn an_interrupt_ends_a_held_turn_naming_its_running_tasks() {
         matches!(&events[..], [
             Event::InterruptAcknowledged { turn: 1 },
             Event::Warning { message },
-            Event::TurnEnded { turn: 1, outcome: TurnOutcome::Interrupted },
+            Event::TurnEnded { turn: 1, outcome: TurnOutcome::Completed },
         ] if message.contains("\"by check\" (b1)")),
         "{events:?}"
     );
@@ -1520,13 +1520,58 @@ fn an_interrupt_ends_a_held_turn_naming_its_running_tasks() {
 }
 
 /// An interrupt the CLI refuses still ends the hold, which has no cycle
-/// for it to stop.
+/// for it to stop, with the turn's outcome.
 #[test]
 fn a_refused_interrupt_still_ends_a_held_turn() {
     let (mut driver, _) = held_turn();
     let frame = decode(&driver.interrupt().unwrap()[0]);
     let refused = json!({"type": "control_response", "response": {"subtype": "error", "request_id": frame["request_id"], "error": "idle"}});
     let (events, _) = feed(&mut driver, &refused);
+    assert_eq!(turn_ends(&events), [&TurnOutcome::Completed], "{events:?}");
+}
+
+/// An interrupt that stops a cycle running during the hold ends the turn
+/// at that cycle's result, aborted as it is, with the outcome the turn was
+/// held with: the cut stops the work after the turn's answer, not the
+/// answer.
+#[test]
+fn an_interrupt_stopping_a_held_cycle_keeps_the_held_outcome() {
+    let (mut driver, _) = held_turn();
+    feed(
+        &mut driver,
+        &background_tasks(&[("b1", "by check"), ("b2", "npm run dev")]),
+    );
+    let notified = json!({"type": "system", "subtype": "task_notification", "task_id": "b1", "status": "completed"});
+    feed(&mut driver, &notified);
+    feed(&mut driver, &background_tasks(&[("b2", "npm run dev")]));
+    let cycle = json!({"type": "assistant", "user_message_uuid": "n1", "message": {"id": "m3", "content": [{"type": "text", "text": "the check passed"}]}});
+    feed(&mut driver, &cycle);
+    let frame = decode(&driver.interrupt().unwrap()[0]);
+    let acknowledged = json!({"type": "control_response", "response": {"subtype": "success", "request_id": frame["request_id"]}});
+    let (events, _) = feed(&mut driver, &acknowledged);
+    assert!(turn_ends(&events).is_empty(), "the cycle runs: {events:?}");
+    let aborted = json!({"type": "result", "subtype": "error_during_execution", "is_error": true, "terminal_reason": "aborted_streaming", "user_message_uuids": ["n1"]});
+    let (events, _) = feed(&mut driver, &aborted);
+    assert!(
+        matches!(&events[..], [
+            Event::UsageObserved { turn: Some(1), .. },
+            Event::Warning { message },
+            Event::TurnEnded { turn: 1, outcome: TurnOutcome::Completed },
+        ] if message.contains("\"npm run dev\" (b2)")),
+        "{events:?}"
+    );
+}
+
+/// An interrupt of a turn that is not held still ends it interrupted.
+#[test]
+fn an_interrupt_before_the_hold_ends_the_turn_interrupted() {
+    let mut driver = ready(SessionMode::Fresh);
+    let uuid = submit(&mut driver, "go");
+    feed(&mut driver, &lifecycle(&uuid, "started"));
+    feed(&mut driver, &background_tasks(&[("b1", "by check")]));
+    driver.interrupt().unwrap();
+    let aborted = json!({"type": "result", "subtype": "error_during_execution", "is_error": true, "terminal_reason": "aborted_streaming", "user_message_uuids": [uuid]});
+    let (events, _) = feed(&mut driver, &aborted);
     assert_eq!(
         turn_ends(&events),
         [&TurnOutcome::Interrupted],
@@ -1639,6 +1684,92 @@ fn holding_is_reported_while_the_held_turns_tasks_run() {
     let follow_up = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": ["notification"]});
     feed(&mut driver, &follow_up);
     assert!(!driver.held());
+}
+
+const HOLD_PROMPT: &str = "Use the Bash tool with run_in_background set to true twice, to run: \
+     sleep 40; echo done, and then: sleep 45; echo later. Do not wait for them or check on them. \
+     Immediately reply with the single word started and end your turn.";
+
+/// Replay a reconstructed 2.1.293 hold over two background tasks up to
+/// where it ends the session, which would end a turn still held: the
+/// turn's events.
+fn replay_hold(name: &str) -> Vec<Event> {
+    let mut recorded = fixture_2_1_293(name);
+    let end_session = recorded.rows.len() - 2;
+    assert_eq!(
+        recorded.rows[end_session].frame["request"]["subtype"],
+        "end_session"
+    );
+    recorded.rows.truncate(end_session);
+    let (mut driver, opened) = open_with(SessionMode::Fresh);
+    let replayed = Replay::new(&recorded)
+        .alias("/request_id")
+        .alias("/uuid")
+        .answer_permissions(PermissionDecision::Allow)
+        .prompt(HOLD_PROMPT)
+        .run(&mut driver, &opened);
+    assert!(replayed.unsent.is_empty(), "{:?}", replayed.unsent);
+    let events = replayed.events;
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            Event::ProtocolViolation { .. } | Event::Unrecognized { .. }
+        )),
+        "{events:?}"
+    );
+    events
+}
+
+/// The turn's text, in order, and where it ended.
+fn texts_and_end(events: &[Event]) -> (Vec<&str>, Vec<&TurnOutcome>) {
+    let mut texts = Vec::new();
+    for event in events {
+        match event {
+            Event::MessageDelta { turn: 1, text } => texts.push(text.as_str()),
+            Event::TurnEnded { .. } => break,
+            _ => {}
+        }
+    }
+    (texts, turn_ends(events))
+}
+
+/// A task that ends after the CLI started the cycle on another's
+/// notification (its echo), but before that cycle's first assistant
+/// frame, is not answered by that cycle: the result lists only the other
+/// notification, and the turn waits for the cycle on its own.
+#[test]
+fn a_task_ending_before_a_held_cycles_first_frame_gets_its_own_follow_up() {
+    let events = replay_hold("hold-late-task");
+    let (texts, ends) = texts_and_end(&events);
+    assert_eq!(
+        texts,
+        [
+            "started",
+            "\n\nThe first command finished.",
+            "\n\nThe second command finished."
+        ],
+        "{events:?}"
+    );
+    assert_eq!(ends, [&TurnOutcome::Completed]);
+}
+
+/// A notification that joins a cycle running during the hold, at its tool
+/// boundary, is answered by that cycle's result, which lists it: the turn
+/// ends there rather than waiting for a cycle that never comes.
+#[test]
+fn a_notification_joining_a_held_cycle_is_answered_by_its_result() {
+    let events = replay_hold("hold-joined-notification");
+    let (texts, ends) = texts_and_end(&events);
+    assert_eq!(texts, ["started", "Both commands finished."], "{events:?}");
+    assert_eq!(ends, [&TurnOutcome::Completed]);
+    let ended = events
+        .iter()
+        .position(|e| matches!(e, Event::TurnEnded { .. }))
+        .unwrap();
+    assert!(
+        matches!(&events[ended - 1], Event::UsageObserved { usage, .. } if usage.cost_usd == Some(0.00342817)),
+        "ended at the joined cycle's result: {events:?}"
+    );
 }
 
 /// A turn that hit a limit of the CLI's own is not held: it ends at once,

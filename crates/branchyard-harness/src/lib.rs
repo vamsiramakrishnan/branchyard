@@ -886,6 +886,13 @@ pub trait Driver {
         false
     }
 
+    /// The outcome a held turn ends with when the engine cuts its hold:
+    /// the harness's answer, which the hold only kept open. `None` when
+    /// the turn is not held. The default holds nothing.
+    fn held_outcome(&self) -> Option<TurnOutcome> {
+        None
+    }
+
     /// Frames that ask the harness to end its session, written just before
     /// its input is closed, for a protocol that has such a request. A
     /// harness may otherwise outlive the end of its input, waiting on work

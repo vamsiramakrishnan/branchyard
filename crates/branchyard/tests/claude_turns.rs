@@ -14,10 +14,11 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::time::{Duration, Instant};
 
 use branchyard::{
-    models, Activity, BranchStatus, Budget, Policy, Provisioning, StallAction, TaskOptions,
+    models, Activity, BranchStatus, Budget, Envelope, Policy, Provisioning, RecordedEvent, Spawn,
+    StallAction, TaskOptions,
 };
 use branchyard_testkit::wait;
-use common::Fixture;
+use common::{fake_agent, Fixture};
 use serde_json::json;
 
 /// Answers every control request it reads; `$1` is what it does once it
@@ -222,8 +223,9 @@ echo '{{"type":"assistant","message":{{"id":"m2","content":[{{"type":"text","tex
 }
 
 /// The turn's limits bound the hold: at `max_duration` the engine
-/// interrupts, Claude Code answers, and the turn ends over its limit with
-/// a warning naming the task still running.
+/// interrupts, Claude Code answers, and the turn ends with the outcome it
+/// was held with, not over its limit, with a warning naming the task still
+/// running.
 #[test]
 fn a_limit_ends_the_hold_with_a_warning_naming_the_running_tasks() {
     let f = Fixture::new();
@@ -245,11 +247,13 @@ fn a_limit_ends_the_hold_with_a_warning_naming_the_running_tasks() {
         "{:?}",
         started.elapsed()
     );
-    assert_eq!(
-        branch.info().status,
-        BranchStatus::BudgetExceeded {
-            limit: "max_duration".into()
-        }
+    assert_eq!(branch.info().status, BranchStatus::NoChanges);
+    assert!(
+        warnings(&f, "cut")
+            .iter()
+            .any(|w| w.contains("duration limit while held open")),
+        "{:?}",
+        warnings(&f, "cut")
     );
     let cut: Vec<String> = harness_warnings(&f, "cut")
         .into_iter()
@@ -259,6 +263,123 @@ fn a_limit_ends_the_hold_with_a_warning_naming_the_running_tasks() {
     // The stand-in reports its own `sleep` running once its turn's frames
     // are out, so that is the set the limit cut off.
     assert!(cut[0].contains("(b1)"), "{cut:?}");
+}
+
+/// Given the prompt `HANG`, the stand-in works until it is interrupted,
+/// as a child that is still running does.
+const HANG: &str = r#"case "$prompt" in *HANG*)
+  while read -r line; do
+    reply "$line"
+    case "$line" in *interrupt*) echo '{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_streaming"}';; esac
+  done
+  exit 0;;
+esac"#;
+
+/// A delegating branch `meta` that ends its turn holding for a background
+/// `by wait` on its child `kid`, which works until it is interrupted, under
+/// `budget`, whose limit or cap cuts the hold while `kid` still runs:
+/// `meta`'s status after the turn, and its log. `kid` is cancelled after.
+fn cut_while_a_child_runs(budget: Budget) -> (BranchStatus, Vec<RecordedEvent>) {
+    let f = Fixture::new();
+    // Its child runs the stand-in it was started with.
+    let first = TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        ..stand_in(&f, &format!("{HANG}\n{}", result(0.01)))
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(first.clone())
+        .name("meta")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(first).unwrap();
+    delegate
+        .spawn(Spawn {
+            prompt: "HANG".into(),
+            name: Some("kid".into()),
+            ..Spawn::default()
+        })
+        .unwrap();
+    let waiting = format!(
+        r#"echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[{{"task_id":"w1","task_type":"local_bash","description":"by wait"}}]}}'
+echo '{{"type":"assistant","message":{{"id":"m1","content":[{{"type":"text","text":"I will wait for kid."}}]}}}}'
+{}"#,
+        result(0.01)
+    );
+    let held = TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        budget,
+        ..stand_in(&f, &waiting)
+    };
+    let status = root
+        .send("wait for kid", held)
+        .unwrap()
+        .info()
+        .status
+        .clone();
+    let events = f.yard.branch("meta").unwrap().events().unwrap();
+    delegate.cancel("kid").unwrap();
+    wait::until("meta to settle", || {
+        !matches!(
+            f.yard.branch("meta").unwrap().info().status,
+            BranchStatus::Running | BranchStatus::WaitingOnChildren
+        )
+    });
+    (status, events)
+}
+
+/// The turn's harness answer, not interrupted, and the warning the hold's
+/// cut left.
+fn assert_cut_kept_the_outcome(events: &[RecordedEvent], warning: &str) {
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.activity,
+            Activity::Harness(branchyard::Event::TurnEnded {
+                outcome: branchyard::TurnOutcome::Completed,
+                ..
+            })
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.activity == Activity::Status(BranchStatus::Interrupted)),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.activity, Activity::Warning(w) if w.contains(warning))),
+        "{events:?}"
+    );
+}
+
+/// A delegating branch that ends its turn holding for a background
+/// command, such as `by wait` on its children, and whose hold is cut by its
+/// limit while a child still runs, keeps the outcome it was held with: it
+/// parks, to be woken when the child settles, rather than ending
+/// interrupted and never woken.
+#[test]
+fn a_cut_hold_parks_a_branch_whose_children_still_run() {
+    let (status, events) =
+        cut_while_a_child_runs(Budget::default().duration(Duration::from_secs(1)));
+    assert_eq!(status, BranchStatus::WaitingOnChildren, "{events:?}");
+    assert_cut_kept_the_outcome(&events, "duration limit while held open");
+}
+
+/// With no duration limit, the hold's cap (30 minutes unless the budget
+/// says otherwise) cuts it the same way: the branch keeps the outcome it
+/// was held with and parks.
+#[test]
+fn a_hold_cut_at_its_cap_parks_a_branch_whose_children_still_run() {
+    let (status, events) =
+        cut_while_a_child_runs(Budget::default().hold_cap(Duration::from_secs(1)));
+    assert_eq!(status, BranchStatus::WaitingOnChildren, "{events:?}");
+    assert_cut_kept_the_outcome(&events, "held open 1s for the harness's background tasks");
 }
 
 /// The usage that crosses the cost limit arrives with the turn's end, in

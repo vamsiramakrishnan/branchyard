@@ -206,6 +206,24 @@ fn dropping_a_session_kills_its_process_group() {
     wait::gone(pid);
 }
 
+/// A harness is tied to the thread that started it: a caller that dies
+/// mid-turn without closing or dropping its session (an engine killed while
+/// a turn is held) does not leave the harness running on its own.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_harness_dies_with_the_thread_that_started_it() {
+    let pid = std::thread::spawn(|| {
+        let (session, _) = start("tied");
+        let pid: u32 = session.process_id().parse().unwrap();
+        // Neither closed nor dropped, as when the caller dies.
+        std::mem::forget(session);
+        pid
+    })
+    .join()
+    .unwrap();
+    wait::gone(pid);
+}
+
 /// A test that ended while a child's `SH` line still waited left the fake
 /// agent and its shell running for good: the agent now exits with its
 /// directory, and takes its process group with it.

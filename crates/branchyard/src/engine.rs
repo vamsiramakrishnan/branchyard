@@ -53,8 +53,11 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(30);
 const TICK: Duration = Duration::from_millis(100);
 /// How long a turn with no duration limit may be held open after the
 /// harness answered it, for its background tasks and the harness's answer
-/// to their notification ([`branchyard_harness::Driver::held`]), before it
-/// is interrupted.
+/// to their notification ([`branchyard_harness::Driver::held`]), before
+/// the hold is cut, unless [`Budget::hold_cap`] says otherwise. The turn
+/// then ends with the outcome it was held with
+/// ([`branchyard_harness::Driver::held_outcome`]), as it does at its
+/// duration limit.
 const HOLD_CAP: Duration = Duration::from_secs(30 * 60);
 /// Events drained without waiting once the turn has ended.
 const DRAIN_MAX: usize = 10_000;
@@ -226,9 +229,10 @@ enum Stop {
     /// Stopping after a stall, with [`Budget::stall_action`]
     /// [`StallAction::Interrupt`].
     Stall,
-    /// Stopping a turn held open past [`HOLD_CAP`] for background tasks,
-    /// with no duration limit of its own.
-    Hold,
+    /// Cutting the hold of a turn held open for background tasks after its
+    /// answer, at [`HOLD_CAP`] or its duration limit: it ends with the
+    /// outcome it is held with, not as interrupted or over a limit.
+    Hold(TurnOutcome),
 }
 
 /// Whether a turn held open since `since` for background tasks has been
@@ -904,6 +908,7 @@ fn run(
     let mut last_activity = started;
     let mut stalled = false;
     let mut held_since: Option<Instant> = None;
+    let hold_cap = bounds.budget.hold_cap.unwrap_or(HOLD_CAP);
     // What the branch has spent, while the turn runs: see `LiveCost`.
     // Written to its record as it changes, so a parent inspecting it, or
     // the branch inspecting itself, sees a figure and not "unknown".
@@ -1048,34 +1053,50 @@ fn run(
             }
             Phase::Running(n) if late => {
                 let n = *n;
-                if let Err(error) = stop(&mut session) {
-                    recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
-                    kill = true;
-                    break End::budget("max_duration");
-                }
-                phase = Phase::Stopping {
-                    turn: n,
-                    why: Stop::Limit("max_duration"),
-                    since: now,
+                // A held turn has its answer: the limit cuts the hold, and
+                // the turn keeps the outcome it is held with.
+                let why = match session.held_outcome() {
+                    Some(outcome) => {
+                        recorder.record(Activity::Warning(
+                            "the turn reached its duration limit while held open for the \
+                             harness's background tasks; ending the hold, the turn keeps its \
+                             outcome"
+                                .into(),
+                        ))?;
+                        Stop::Hold(outcome)
+                    }
+                    None => Stop::Limit("max_duration"),
                 };
-            }
-            Phase::Running(n) if hold_cut(held_since, now, deadline, HOLD_CAP) => {
-                let n = *n;
-                recorder.record(Activity::Warning(format!(
-                    "the turn was held open {} minutes for the harness's background tasks, with \
-                     no duration limit; interrupting it",
-                    HOLD_CAP.as_secs() / 60
-                )))?;
                 if let Err(error) = stop(&mut session) {
                     recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
                     kill = true;
-                    break End::Outcome {
-                        outcome: TurnOutcome::Interrupted,
+                    break match why {
+                        Stop::Hold(outcome) => End::Outcome { outcome },
+                        _ => End::budget("max_duration"),
                     };
                 }
                 phase = Phase::Stopping {
                     turn: n,
-                    why: Stop::Hold,
+                    why,
+                    since: now,
+                };
+            }
+            Phase::Running(n) if hold_cut(held_since, now, deadline, hold_cap) => {
+                let n = *n;
+                recorder.record(Activity::Warning(format!(
+                    "the turn was held open {} for the harness's background tasks, with no \
+                     duration limit; ending the hold, the turn keeps its outcome",
+                    branchyard_support::time::human_duration(hold_cap)
+                )))?;
+                let outcome = session.held_outcome().unwrap_or(TurnOutcome::Interrupted);
+                if let Err(error) = stop(&mut session) {
+                    recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
+                    kill = true;
+                    break End::Outcome { outcome };
+                }
+                phase = Phase::Stopping {
+                    turn: n,
+                    why: Stop::Hold(outcome),
                     since: now,
                 };
             }
@@ -1090,8 +1111,8 @@ fn run(
                     Stop::Cancelled(by) => End::cancelled(by.clone()),
                     Stop::Failure(reason) => End::failed(reason.clone()),
                     Stop::Stall => End::Stalled,
-                    Stop::Hold => End::Outcome {
-                        outcome: TurnOutcome::Interrupted,
+                    Stop::Hold(outcome) => End::Outcome {
+                        outcome: outcome.clone(),
                     },
                 };
             }
@@ -1295,6 +1316,13 @@ fn run(
                     Phase::Stopping {
                         why: Stop::Stall, ..
                     } => End::Stalled,
+                    // The hold was cut: the turn keeps the outcome it was
+                    // held with, whatever the cycle the interrupt stopped
+                    // ended with.
+                    Phase::Stopping {
+                        why: Stop::Hold(held),
+                        ..
+                    } => End::Outcome { outcome: held },
                     _ => End::Outcome { outcome },
                 };
             }

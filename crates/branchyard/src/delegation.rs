@@ -1389,11 +1389,12 @@ pub(crate) fn effective_budget(record: &Record, budget: &Budget) -> Budget {
             budget.max_duration,
             limits.max_duration_ms.map(Duration::from_millis),
         ),
-        // Stall detection is not part of a delegation envelope: a parent
-        // narrows cost, turns and duration, but a stall window is the
-        // caller's own choice for this turn.
+        // Stall detection and the hold's cap are not part of a delegation
+        // envelope: a parent narrows cost, turns and duration, but these
+        // are the caller's own choice for this turn.
         stall_after: budget.stall_after,
         stall_action: budget.stall_action,
+        hold_cap: budget.hold_cap,
     }
 }
 
@@ -3572,6 +3573,7 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
         )?,
         stall_after: asked.stall_after,
         stall_action: asked.stall_action,
+        hold_cap: asked.hold_cap,
     };
     let envelope = below.envelope();
     let mut deny = seat.deny.clone();
