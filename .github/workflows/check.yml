@@ -43,6 +43,8 @@ jobs:
       # Dependency versions are declared once, in [workspace.dependencies].
       - run: python tools/check_workspace_deps.py
       - run: python tests/test_check_workspace_deps.py
+      # The delegation battery's evaluator.
+      - run: python tests/test_qualify_score.py
       - run: python tools/test_scion.py --qualified
       - name: Verify the recorded upstream Claude compatibility
         run: python tools/check_scion_compatibility.py

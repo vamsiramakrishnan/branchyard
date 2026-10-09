@@ -626,6 +626,142 @@ fn a_cut_hold_does_not_wake_for_children_dealt_with_during_it() {
     );
 }
 
+/// `meta`, a delegating branch, after a first turn, and its delegate.
+fn delegating_meta(f: &Fixture) -> (branchyard::Branch, branchyard::Delegate) {
+    let slow = format!(
+        "case \"$prompt\" in *SLOW*) sleep 1;; esac\n{}",
+        result(0.01)
+    );
+    let first = TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        ..stand_in(f, &slow)
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(first.clone())
+        .name("meta")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(first).unwrap();
+    (root, delegate)
+}
+
+/// The options of `meta`'s turn `turn`, held with a one-second grace for
+/// a follow-up.
+fn held_turn(f: &Fixture, turn: &str) -> TaskOptions {
+    TaskOptions {
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        budget: Budget::default().follow_up_grace(Duration::from_secs(1)),
+        ..stand_in(f, turn)
+    }
+}
+
+fn spawn_slow_kid(delegate: &branchyard::Delegate) {
+    delegate
+        .spawn(Spawn {
+            prompt: "SLOW".into(),
+            name: Some("kid".into()),
+            ..Spawn::default()
+        })
+        .unwrap();
+}
+
+fn woken_unseen(events: &[RecordedEvent]) -> bool {
+    events.iter().any(|e| {
+        matches!(&e.activity,
+        Activity::Delegation { outcome, .. } if outcome.contains("which its answer did not see"))
+    })
+}
+
+/// A child spawned during the hold, after the turn's answer (as by a cycle
+/// the cut cuts short), that settles before the hold is cut was never seen
+/// either: the cut hold wakes its parent for it, though it was not running
+/// when the hold began.
+#[test]
+fn a_cut_hold_wakes_for_a_child_spawned_during_it() {
+    let f = Fixture::new();
+    let (root, delegate) = delegating_meta(&f);
+    // The kid, spawned while the held turn runs, runs its script too.
+    let turn = format!(
+        "case \"$prompt\" in *SLOW*) sleep 1\n{}\n;; *)\n{}\n;; esac",
+        result(0.01),
+        ended_with_no_follow_up(4)
+    );
+    let held = held_turn(&f, &turn);
+    std::thread::scope(|s| {
+        let turn = s.spawn(|| root.send("spawn kid", held).unwrap());
+        wait::until("meta's turn to be held after its answer", || {
+            let events = f.yard.branch("meta").unwrap().events().unwrap();
+            events
+                .iter()
+                .any(|e| matches!(&e.activity,
+                    Activity::Harness(branchyard::Event::Warning { message }) if message.contains("the turn is held open")))
+                .then_some(())
+        });
+        spawn_slow_kid(&delegate);
+        turn.join().unwrap();
+    });
+    wait::until("meta's wake to settle", || {
+        let info = f.yard.branch("meta").unwrap().info().clone();
+        (info.turns == 3
+            && !matches!(
+                info.status,
+                BranchStatus::Running | BranchStatus::WaitingOnChildren
+            ))
+        .then_some(())
+    });
+    let events = f.yard.branch("meta").unwrap().events().unwrap();
+    assert!(
+        events.iter().any(|e| matches!(&e.activity,
+            Activity::Delegation { outcome, .. } if outcome.contains("kid settled, which its answer did not see"))),
+        "{events:?}"
+    );
+}
+
+/// A child that settled before a cycle the held turn ran on a task's
+/// notification is that answer's to have seen, as one that settled before
+/// the turn's own answer is: when the hold is then cut, waiting on another
+/// task, its parent is not woken for it.
+#[test]
+fn a_cut_hold_does_not_wake_for_children_settled_before_a_held_cycle() {
+    let f = Fixture::new();
+    let (root, delegate) = delegating_meta(&f);
+    spawn_slow_kid(&delegate);
+    let turn = format!(
+        r#"echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[{{"task_id":"w1","task_type":"local_bash","description":"by wait"}},{{"task_id":"w2","task_type":"local_bash","description":"by check"}}]}}'
+echo '{{"type":"assistant","message":{{"id":"m1","content":[{{"type":"text","text":"I will be woken."}}]}}}}'
+{first}
+sleep 3
+echo '{{"type":"system","subtype":"task_notification","task_id":"w1","status":"completed"}}'
+echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[{{"task_id":"w2","task_type":"local_bash","description":"by check"}}]}}'
+echo '{{"type":"user","uuid":"n1","message":{{"role":"user","content":"<task-notification><task-id>w1</task-id></task-notification>"}}}}'
+echo '{{"type":"assistant","user_message_uuid":"n1","message":{{"id":"m2","content":[{{"type":"text","text":"kid is ready."}}]}}}}'
+answers='"n1"'
+{second}
+sleep 1
+echo '{{"type":"system","subtype":"task_notification","task_id":"w2","status":"completed"}}'
+echo '{{"type":"system","subtype":"background_tasks_changed","tasks":[]}}'
+{QUIET}"#,
+        first = result(0.01),
+        second = answering(result(0.01)),
+    );
+    let held = held_turn(&f, &turn);
+    root.send("wait for kid", held).unwrap();
+    let info = f.yard.branch("meta").unwrap().info().clone();
+    assert_eq!(info.turns, 2);
+    assert_ne!(info.status, BranchStatus::WaitingOnChildren);
+    let events = f.yard.branch("meta").unwrap().events().unwrap();
+    assert!(
+        events.iter().any(|e| matches!(&e.activity,
+            Activity::Harness(branchyard::Event::MessageDelta { text, .. }) if text.contains("kid is ready."))),
+        "the held cycle ran: {events:?}"
+    );
+    assert!(!woken_unseen(&events), "{events:?}");
+}
+
 /// The usage that crosses the cost limit arrives with the turn's end, in
 /// one `result`: the turn ends over budget, with no failed interrupt and
 /// no killed harness.

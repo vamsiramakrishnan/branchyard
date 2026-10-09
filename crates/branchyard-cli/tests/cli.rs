@@ -3497,8 +3497,11 @@ fn by_wait_prints_each_branch_as_it_settles() {
             true => {
                 let line: Value = serde_json::from_str(shown.lines().next().unwrap()).unwrap();
                 assert_eq!(line["event"], "settled", "{shown}");
-                assert_eq!(line["inspection"]["name"], "a", "{shown}");
-                assert_eq!(line["inspection"]["status"]["state"], "ready", "{shown}");
+                assert_eq!(line["name"], "a", "{shown}");
+                assert_eq!(line["status"]["state"], "ready", "{shown}");
+                // Only what settled: the inspection is in the result on stdout.
+                assert!(line.get("inspection").is_none(), "{shown}");
+                assert!(!shown.contains("a.txt"), "{shown}");
                 assert_eq!(fs::read_to_string(&out).unwrap(), "", "no result yet");
             }
             false => {

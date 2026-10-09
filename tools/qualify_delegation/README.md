@@ -38,7 +38,8 @@ tools/qualify_delegation/run-repo.sh calc4               # one; run several at o
 
 For each scenario, `$QUALIFY_OUT/out/<name>/` holds:
 - `run.log`: the whole run, including the meta's final report and its friction list;
-- `ls.txt`, plus `inspect.*.json` and `log.*.txt` for each branch;
+- `ls.txt`, plus `inspect.*.json`, `log.*.txt` and `events.*.jsonl` (every event the branch recorded,
+  one JSON object per line, from `events.py`) for each branch;
 - `git.txt`;
 - `verify.txt`: the scenario's tests, run on `by/meta` checked out separately.
 
@@ -59,7 +60,10 @@ python3 tools/qualify_delegation/score.py /tmp/q2 --compare /tmp/q1/scores.json
 - the tree's cost and the run's wall time;
 - the branches and the meta's turns;
 - protocol violations across every branch;
-- the refusals the meta hit;
+- the Branchyard calls refused across every branch: the refused `delegation` events, each counted
+  once however often the meta quotes it. Runs from before `events.*.jsonl` was saved count
+  `refused:` in `run.log` and `resume.log` instead, and `--compare` says when two runs were
+  counted differently;
 - the items in the meta's friction list.
 
 These are the fixed evaluator for a delegation change. A change holds the pass count and lowers

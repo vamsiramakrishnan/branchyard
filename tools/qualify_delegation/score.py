@@ -11,7 +11,11 @@ reports, per scenario:
 - `wall_s`: the scenario's run, from `started` to `ended` (else the meta's first to last logged event)
 - `branches` and `meta_turns`
 - `protocol_violations`: harness frames Branchyard could not place, across every branch
-- `refusals`: Branchyard refusals the meta hit (`refused:` in its run log)
+- `refusals`: Branchyard calls refused, across every branch: the
+  `delegation` events marked `refused` in the events `run-repo.sh` saves
+  (`events.<branch>.jsonl`), each counted once however often the meta
+  quotes it. A run from before those were saved counts `refused:` in its
+  run and resume logs instead (`refusals_from` says which).
 - `friction`: items in the meta's "## Branchyard friction" section
 
 `--compare` prints each metric's change against an earlier `--json` file.
@@ -74,6 +78,28 @@ def friction(lines):
     return count
 
 
+def refused(event):
+    activity = event.get("activity") if isinstance(event, dict) else None
+    delegation = activity.get("delegation") if isinstance(activity, dict) else None
+    return isinstance(delegation, dict) and delegation.get("refused") is True
+
+
+def refusals(out):
+    """Refused Branchyard calls, and where they were counted from."""
+    saved = sorted(out.glob("events.*.jsonl"))
+    if saved:
+        count = 0
+        for path in saved:
+            for line in path.read_text(errors="replace").splitlines():
+                try:
+                    count += refused(json.loads(line))
+                except ValueError:
+                    continue
+        return count, "events"
+    logs = [out / "run.log", out / "resume.log"]
+    return sum(p.read_text(errors="replace").count("refused:") for p in logs if p.exists()), "logs"
+
+
 def score(out):
     verify = out / "verify.txt"
     meta_log = out / "log.meta.txt"
@@ -88,7 +114,7 @@ def score(out):
     lines = text_lines(meta_log) if meta_log.exists() else []
     stamps = [s for s, _ in lines if s]
     logs = list(out.glob("log.*.txt"))
-    run_log = (out / "run.log").read_text(errors="replace") if (out / "run.log").exists() else ""
+    refusal_count, refusals_from = refusals(out)
     return {
         "pass": verify.exists() and "verify exit=0" in verify.read_text(errors="replace"),
         "cost_usd": round(sum(b.get("cost_usd") or 0 for b in branches), 4),
@@ -96,7 +122,8 @@ def score(out):
         "branches": len(branches),
         "meta_turns": meta.get("turns"),
         "protocol_violations": sum(p.read_text(errors="replace").count("protocol violation") for p in logs),
-        "refusals": run_log.count("refused:"),
+        "refusals": refusal_count,
+        "refusals_from": refusals_from,
         "friction": friction(lines),
     }
 
@@ -119,6 +146,7 @@ def totals(scores):
         "protocol_violations": sum(s["protocol_violations"] for s in scores.values()),
         "refusals": sum(s["refusals"] for s in scores.values()),
         "friction": sum(s["friction"] for s in scores.values()),
+        "refusals_from": "+".join(sorted({s["refusals_from"] for s in scores.values()})),
     }
 
 
@@ -140,6 +168,8 @@ def main(argv):
         base = json.loads(args.compare.read_text())["totals"]
         now = result["totals"]
         print("\nchange against", args.compare)
+        if base.get("refusals_from", "logs") != now["refusals_from"]:
+            print(f"  refusals counted from {base.get('refusals_from', 'logs')} then, {now['refusals_from']} now: not comparable")
         for key in now:
             if isinstance(now[key], (int, float)) and isinstance(base.get(key), (int, float)):
                 print(f"  {key}: {base[key]} -> {now[key]} ({now[key] - base[key]:+g})")

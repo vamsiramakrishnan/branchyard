@@ -223,12 +223,18 @@ pub struct ClaudeCode {
     /// Background tasks whose notification a cycle's result has answered,
     /// so a later report of their ending waits for nothing.
     answered: HashSet<String>,
-    /// Background tasks the model asked to stop (`TaskStop`, `KillShell`):
-    /// their ending owes no cycle on a notification.
+    /// Background tasks the model stopped (`TaskStop`, `KillShell`, whose
+    /// call succeeded): their ending owes no cycle on a notification.
     stopping: HashSet<String>,
+    /// The model's calls to stop a background task whose result has not
+    /// come back: each call's id and the task it names. A call that fails
+    /// (denied, or naming no such task) stops nothing.
+    stop_calls: HashMap<String, String>,
     /// A cycle has started since the hold began or since the last result
     /// during it: the CLI echoed a notification or the model answered.
     cycle_started: bool,
+    /// The results of cycles run while the turn was held.
+    held_answers: u32,
     /// The outcome the held turn had when Branchyard interrupted it: the
     /// turn ends with it, not as interrupted.
     cut: Option<TurnOutcome>,
@@ -276,6 +282,8 @@ impl ClaudeCode {
             notifications: HashMap::new(),
             answered: HashSet::new(),
             stopping: HashSet::new(),
+            stop_calls: HashMap::new(),
+            held_answers: 0,
             cycle_started: false,
             cut: None,
             ending: false,
@@ -494,7 +502,9 @@ impl ClaudeCode {
         self.notifications.clear();
         self.answered.clear();
         self.stopping.clear();
+        self.stop_calls.clear();
         self.cycle_started = false;
+        self.held_answers = 0;
         self.cut = None;
     }
 
@@ -970,6 +980,9 @@ impl ClaudeCode {
                 detail: "result without a turn in flight".into(),
             });
         };
+        if self.held {
+            self.held_answers += 1;
+        }
         let answered = answered.unwrap_or_default();
         self.steers.retain(|s| !answered.contains(&s.uuid.as_str()));
         events.push(Event::UsageObserved {
@@ -1022,8 +1035,18 @@ impl ClaudeCode {
     /// runs is echoed as one, under a uuid of its own that the result of
     /// the cycle running it lists, with the task's `<task-id>`: it is kept
     /// to mark the task answered then. Tool results, the other `user`
-    /// frames, the assistant frames already account for.
+    /// frames, the assistant frames already account for, except whether
+    /// a call to stop a background task succeeded.
     fn user(&mut self, message: &Value) {
+        for block in message["message"]["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if block["type"] == "tool_result" {
+                self.stop_answered(block);
+            }
+        }
         let Some(uuid) = message["uuid"].as_str() else {
             return;
         };
@@ -1048,7 +1071,8 @@ impl ClaudeCode {
     }
 
     /// A tool call that stops a background task of the CLI's own:
-    /// `TaskStop` (`task_id`) or the older `KillShell` (`shell_id`).
+    /// `TaskStop` (`task_id`) or the older `KillShell` (`shell_id`). It is
+    /// trusted only once its result says it succeeded; see `stop_answered`.
     fn stop_requested(&mut self, block: &Value) {
         let input = &block["input"];
         let task = match block["name"].as_str() {
@@ -1056,8 +1080,30 @@ impl ClaudeCode {
             Some("KillShell") => input["shell_id"].as_str(),
             _ => None,
         };
-        if let Some(task) = task {
-            self.stopping.insert(task.to_owned());
+        if let (Some(call), Some(task)) = (block["id"].as_str(), task) {
+            self.stop_calls.insert(call.to_owned(), task.to_owned());
+        }
+    }
+
+    /// The result of a call to stop a background task. A stop that
+    /// succeeded makes the task's ending owe no cycle, whether the CLI
+    /// reported that ending before the result or reports it after; one
+    /// that failed leaves the task running, its notification still owed.
+    fn stop_answered(&mut self, block: &Value) {
+        let Some(task) = block["tool_use_id"]
+            .as_str()
+            .and_then(|call| self.stop_calls.remove(call))
+        else {
+            return;
+        };
+        if block["is_error"] == true {
+            return;
+        }
+        if self.ended.contains(&task) {
+            self.ended.retain(|id| *id != task);
+            self.answered.insert(task);
+        } else {
+            self.stopping.insert(task);
         }
     }
 
@@ -1475,6 +1521,10 @@ impl Driver for ClaudeCode {
 
     fn awaiting_follow_up(&self) -> bool {
         self.awaiting_cycle()
+    }
+
+    fn held_answers(&self) -> u32 {
+        self.held_answers
     }
 
     fn held_outcome(&self) -> Option<TurnOutcome> {

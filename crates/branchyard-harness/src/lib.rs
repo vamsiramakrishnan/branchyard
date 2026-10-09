@@ -895,6 +895,15 @@ pub trait Driver {
         false
     }
 
+    /// How many cycles the harness answered while the turn in flight was
+    /// held: each brings the turn's answer up to date, so what settled
+    /// before the latest the answer may have seen. The engine takes what
+    /// the answer cannot have seen from the latest. The default holds
+    /// nothing.
+    fn held_answers(&self) -> u32 {
+        0
+    }
+
     /// The outcome a held turn ends with when the engine cuts its hold:
     /// the harness's answer, which the hold only kept open. `None` when
     /// the turn is not held. The default holds nothing.

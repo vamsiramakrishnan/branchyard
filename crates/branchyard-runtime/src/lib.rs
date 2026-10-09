@@ -642,6 +642,12 @@ impl Session {
         self.driver.awaiting_follow_up()
     }
 
+    /// How many cycles the harness answered during the turn's hold; see
+    /// [`Driver::held_answers`].
+    pub fn held_answers(&self) -> u32 {
+        self.driver.held_answers()
+    }
+
     /// The outcome a held turn keeps when its hold is cut; see
     /// [`Driver::held_outcome`].
     pub fn held_outcome(&self) -> Option<TurnOutcome> {

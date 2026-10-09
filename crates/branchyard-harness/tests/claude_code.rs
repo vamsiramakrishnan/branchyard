@@ -1692,17 +1692,33 @@ fn holding_is_reported_while_the_held_turns_tasks_run() {
 /// `claude-code-2.1.293-background-task.jsonl`; the `TaskStop` call's
 /// shape is reconstructed from round 5's `compete` log), before the turn's
 /// result. Claude Code runs no cycle on its notification, so the turn ends
-/// at its result, not held until the hold's cap.
-fn stopped_by_the_model(driver: &mut ClaudeCode, status: &str) -> Vec<Event> {
+/// at its result, not held until the hold's cap. The call's result comes
+/// back before the task's end is reported or after it (`result_first`),
+/// and says whether the stop succeeded (`stop_failed`).
+fn stopped_by_the_model(
+    driver: &mut ClaudeCode,
+    status: &str,
+    result_first: bool,
+    stop_failed: bool,
+) -> Vec<Event> {
     let uuid = submit(driver, "go");
     feed(driver, &background_tasks(&[("bs2o6zs3k", "by wait")]));
     let stop = json!({"type": "assistant", "user_message_uuid": uuid, "message": {"id": "m1", "content": [
         {"type": "tool_use", "id": "toolu_1", "name": "TaskStop", "input": {"task_id": "bs2o6zs3k"}}]}});
     feed(driver, &stop);
+    let stopped = json!({"type": "user", "uuid": "r1", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "toolu_1", "is_error": stop_failed,
+         "content": if stop_failed { "No task found with ID: bs2o6zs3k" } else { "Successfully stopped task: bs2o6zs3k" }}]}});
+    if result_first {
+        feed(driver, &stopped);
+    }
     let updated = json!({"type": "system", "subtype": "task_updated", "task_id": "bs2o6zs3k", "patch": {"status": status}});
     feed(driver, &updated);
     let notified = json!({"type": "system", "subtype": "task_notification", "task_id": "bs2o6zs3k", "status": if status == "killed" { "stopped" } else { status }});
     feed(driver, &notified);
+    if !result_first {
+        feed(driver, &stopped);
+    }
     feed(driver, &background_tasks(&[]));
     let text = json!({"type": "assistant", "message": {"id": "m2", "content": [{"type": "text", "text": "I stopped that wait."}]}});
     feed(driver, &text);
@@ -1713,18 +1729,45 @@ fn stopped_by_the_model(driver: &mut ClaudeCode, status: &str) -> Vec<Event> {
 #[test]
 fn a_task_the_model_stopped_does_not_hold_the_turn() {
     let mut driver = ready(SessionMode::Fresh);
-    let events = stopped_by_the_model(&mut driver, "killed");
+    let events = stopped_by_the_model(&mut driver, "killed", true, false);
     assert_eq!(turn_ends(&events), [&TurnOutcome::Completed], "{events:?}");
     assert!(!driver.held());
 }
 
-/// The model's `TaskStop` call alone is enough, however the CLI reports
-/// the task's end.
+/// The model's `TaskStop` call, once it succeeded, is enough, however the
+/// CLI reports the task's end and whichever it reports first.
 #[test]
 fn a_task_the_model_stopped_owes_no_follow_up_whatever_its_status() {
-    let mut driver = ready(SessionMode::Fresh);
-    let events = stopped_by_the_model(&mut driver, "completed");
-    assert_eq!(turn_ends(&events), [&TurnOutcome::Completed], "{events:?}");
+    for result_first in [true, false] {
+        let mut driver = ready(SessionMode::Fresh);
+        let events = stopped_by_the_model(&mut driver, "completed", result_first, false);
+        assert_eq!(
+            turn_ends(&events),
+            [&TurnOutcome::Completed],
+            "result first: {result_first} {events:?}"
+        );
+    }
+}
+
+/// A `TaskStop` that failed (denied, or naming no such task) stopped
+/// nothing: a task that then ends of itself still owes the cycle on its
+/// notification, which the turn is held for.
+#[test]
+fn a_failed_stop_still_holds_the_turn_for_the_tasks_notification() {
+    for result_first in [true, false] {
+        let mut driver = ready(SessionMode::Fresh);
+        let events = stopped_by_the_model(&mut driver, "completed", result_first, true);
+        assert!(
+            turn_ends(&events).is_empty(),
+            "result first: {result_first} {events:?}"
+        );
+        assert!(driver.held() && driver.awaiting_follow_up());
+        let echoed = json!({"type": "user", "uuid": "n1", "message": {"role": "user", "content": "<task-notification><task-id>bs2o6zs3k</task-id></task-notification>"}});
+        feed(&mut driver, &echoed);
+        let follow_up = json!({"type": "result", "subtype": "success", "is_error": false, "user_message_uuids": ["n1"]});
+        let (events, _) = feed(&mut driver, &follow_up);
+        assert_eq!(turn_ends(&events), [&TurnOutcome::Completed], "{events:?}");
+    }
 }
 
 /// A task the CLI reports stopped with no `TaskStop` from the model, as

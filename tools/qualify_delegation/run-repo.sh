@@ -3,6 +3,7 @@
 # usage: run-repo.sh NAME    (QUALIFY_OUT, BY override the output directory and the by binary)
 set -u
 NAME=$1
+HERE=$(cd "$(dirname "$0")" && pwd)
 # Run from inside a Branchyard turn, the inherited variables name the outer
 # yard, and `by` refuses to act on it from another repository. Each scenario
 # is a yard of its own.
@@ -59,6 +60,7 @@ items=d if isinstance(d,list) else d.get("branches",[])
 [print(x["name"]) for x in items]'); do
   "$BY" log "$b" > "$OUT/log.$b.txt" 2>&1
   "$BY" inspect "$b" --json > "$OUT/inspect.$b.json" 2>&1
+  python3 "$HERE/events.py" "$BY" "$b" > "$OUT/events.$b.jsonl" 2>>"$OUT/events.err"
 done
 "$BY" graph show meta --json > "$OUT/graph.json" 2>&1
 git -C "$REPO" log --all --oneline --graph > "$OUT/git.txt" 2>&1

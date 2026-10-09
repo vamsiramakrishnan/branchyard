@@ -1741,7 +1741,9 @@ pub fn wait(
     let left = || deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()));
     // Each branch is reported as it settles, so what settled survives a
     // caller that stops `by wait` before it returns: as text on stdout,
-    // with --json as a line on stderr (stdout keeps the one result).
+    // with --json as a line on stderr naming the branch and its status
+    // (stdout keeps the one result, and a harness that reads both
+    // streams does not see each inspection twice).
     let mut reported = std::collections::BTreeSet::new();
     let mut report = |inspection: &branchyard::Inspection| -> Outcome {
         if !reported.insert(inspection.name.clone()) {
@@ -1749,7 +1751,11 @@ pub fn wait(
         }
         match json {
             true => {
-                let line = serde_json::json!({"event": "settled", "inspection": inspection});
+                let line = serde_json::json!({
+                    "event": "settled",
+                    "name": inspection.name,
+                    "status": inspection.status,
+                });
                 eprintln!("{line}");
                 Ok(())
             }

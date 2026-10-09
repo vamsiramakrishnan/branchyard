@@ -102,9 +102,9 @@ pub(crate) fn is_parked(status: &BranchStatus) -> bool {
 /// branch is merged again when it settles: its status is restored from
 /// [`Parked::ended`], and its wake keeps it ([`crate::run`]).
 /// `budget` is the turn's own, stored for a wake started elsewhere.
-/// `held_on` are the descendants that ran when the turn's hold began, if
-/// the engine cut the hold: those that settled since, its answer never
-/// saw, so it parks for those still waiting for it ([`awaits_parent`]),
+/// `held_on` are the descendants the turn's latest answer cannot have
+/// seen settle, if the engine cut its hold (see `Driven::held_on`): it
+/// parks for those that settled and still wait for it ([`awaits_parent`]),
 /// and the look after the turn wakes it at once if nothing still runs.
 pub(crate) fn park(
     yard: &Yard,

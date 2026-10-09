@@ -164,9 +164,11 @@ pub(crate) struct Driven {
     /// harness's per-call usage; its cost when the harness never reported
     /// a cumulative one.
     pub live_cost: Option<f64>,
-    /// The descendants still running when the turn's hold began, if the
-    /// engine cut the hold: what the turn's answer cannot have seen
-    /// settle, which its branch is woken for ([`crate::wake::park`]).
+    /// If the engine cut the turn's hold, the descendants the turn's
+    /// latest answer cannot have seen settle: those still running when
+    /// the harness last answered (the hold's start, or a cycle's result
+    /// during it), and those spawned since. Its branch is woken for those
+    /// that settled ([`crate::wake::park`]).
     pub held_on: Vec<String>,
 }
 
@@ -931,7 +933,11 @@ fn run(
     let mut held_since: Option<Instant> = None;
     let hold_cap = bounds.budget.hold_cap.unwrap_or(HOLD_CAP);
     let mut awaiting_since: Option<Instant> = None;
+    // What the turn's latest answer saw of its descendants: those still
+    // running, and every one it knew of.
     let mut held_on: Vec<String> = Vec::new();
+    let mut held_known: Vec<String> = Vec::new();
+    let mut held_answers = 0;
     let mut cut_hold = false;
     let follow_up_grace = bounds.budget.follow_up_grace.unwrap_or(FOLLOW_UP_GRACE);
     // What the branch has spent, while the turn runs: see `LiveCost`.
@@ -1007,9 +1013,13 @@ fn run(
         steering.poll(recorder, &mut session, &store, fence, &phase)?;
         let holding = session.holding();
         // The cap covers the whole hold, the wait for the follow-up included.
-        if session.held() && held_since.is_none() {
-            held_on = delegation::descendants(&store, &record.info.name)
-                .unwrap_or_default()
+        // The answer is brought up to date when the hold begins and at each
+        // cycle's result during it.
+        if session.held() && (held_since.is_none() || session.held_answers() != held_answers) {
+            held_answers = session.held_answers();
+            let below = delegation::descendants(&store, &record.info.name).unwrap_or_default();
+            held_known = below.iter().map(|info| info.name.clone()).collect();
+            held_on = below
                 .into_iter()
                 .filter(|info| crate::wake::unsettled(&info.status))
                 .map(|info| info.name)
@@ -1399,6 +1409,13 @@ fn run(
     driven.end = end;
     driven.live_cost = shown.get();
     if cut_hold {
+        // Spawned since the latest answer, by a cycle cut short: unseen too.
+        let spawned = delegation::descendants(&store, &record.info.name)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|info| info.name)
+            .filter(|name| !held_known.contains(name));
+        held_on.extend(spawned);
         driven.held_on = held_on;
     }
 
