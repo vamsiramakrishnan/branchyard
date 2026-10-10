@@ -345,6 +345,7 @@ pub struct Trigger {
     pub task: TaskRequest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<RouteSpec>,
+    /// The branch its runs continue, when they continue one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deliver: Option<Deliver>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

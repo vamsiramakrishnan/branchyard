@@ -39008,7 +39008,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "The branch its runs continue, when they continue one."
         },
         "precheck": {
           "anyOf": [
@@ -40746,7 +40747,8 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "The branch its runs continue, when they continue one."
             },
             "precheck": {
               "anyOf": [
@@ -42478,7 +42480,8 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "The branch its runs continue, when they continue one."
             },
             "precheck": {
               "anyOf": [
