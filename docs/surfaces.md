@@ -749,3 +749,15 @@ Every connector call that changes the world is decided, written to a ledger befo
 | `by check [BRANCH]`, `Delegate::check` → `CheckReport`, Python `check(branch=None)`, the MCP `check` tool | none: a child learned whether its work passed its check only when its parent integrated it | the branch's check (its own or inherited) run on its current work, uncommitted files included, merged into its parent's work as integrating would snapshot it (the parent's uncommitted files included, its excluded files not) in a private temporary worktree; nothing is committed or integrated; a leaf may run it on itself; exits 1 when the work would not get past its check |
 | `branchyard_workspace::Workspace::working_commit`, `Repository::check_merged`, `Repository::merged_worktree` (`MergedWorktree`) | none | a worktree's files as a commit reachable from nothing; a check on a head merged into a target as integrating it would, moving no ref |
 | The delegate skill and the leaf note | | tell a child to run `by check` before it finishes |
+
+## Added with the HTTP client
+
+A third-party surface (a Slack or Discord bot, a web app, a scheduler) drives `by serve` through [`sdk/python/branchyard_client.py`](../sdk/python/branchyard_client.py); see [SDKs](sdk.md). The engine changes that came with it are about connector grants: what a send keeps, what the wire accepts and what inspection shows.
+
+| Surface | Before | Now |
+|---|---|---|
+| `GrantEntry` on the wire (`provision.connectors`, `Spawn::connectors`, `SpawnSpec::connectors`, `SpawnRequest::connectors`) | the object only; the MCP `spawn` tool's schema promised strings its handler could not read | the object or the `--connector` string (`"github:write:issues.*"`), on every surface; always written back as the object; `schema/contract.json` says so (`anyOf`) |
+| A `send` whose provisioning names no `connectors` | the branch's grant was dropped, so a send that only changed the effort or the model took a delegated child's connectors away | the branch's grant is kept; a send that names one replaces it, narrowed for a delegated child |
+| `Inspection::grants` (`by inspect --json`, `by inspect`'s `connectors` line, the HTTP inspection, Python `Inspection.grants`) | none: what a child was given had to be inferred from the narrowing rules | the branch's grant as stored, what its turns' tokens carry and the most a child of its can be given; left out when it has none |
+| `sdk/python/branchyard_client.py`: `Client`, `Repo`, `Operation`, `EventStream`, `Grant`, `Surface`, `Conversation`, `Reply`, errors by code | the Rust `branchyard-client` crate and raw HTTP | a standard-library Python client over the whole API: idempotent operations, typed errors, the event stream with resumption, one branch per conversation with `queue`, `steer` and `skip` while busy, a reply's text by the operation's cursors, grants given and inspected |
+| `ruff.toml`, the `python` CI job | `tools/` and `tests/` | the client module too, at a Python 3.9 target (`per-file-target-version`); `tests/test_sdk_client.py` in the controls job |

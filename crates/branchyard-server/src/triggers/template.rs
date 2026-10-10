@@ -170,8 +170,20 @@ fn event_value(e: &TriggerEvent, field: &str) -> String {
     }
 }
 
-/// `template` with each placeholder replaced; one [`check`] accepted.
+/// `template` with each placeholder replaced; one [`check`] accepted. A
+/// placeholder the event has no value for renders empty.
 pub fn render(template: &str, cx: &Context<'_>) -> Result<String, String> {
+    render_with(template, cx, false)
+}
+
+/// [`render`], refusing a placeholder that would render empty: for a
+/// value that must be determined by the event, such as the branch a
+/// trigger delivers to, where an empty field would pool unrelated events.
+pub fn render_filled(template: &str, cx: &Context<'_>) -> Result<String, String> {
+    render_with(template, cx, true)
+}
+
+fn render_with(template: &str, cx: &Context<'_>, filled: bool) -> Result<String, String> {
     let mut out = String::new();
     let mut at = 0;
     for (start, end, name) in placeholders(template)? {
@@ -187,6 +199,9 @@ pub fn render(template: &str, cx: &Context<'_>) -> Result<String, String> {
             }
             _ => return Err(format!("{{{{{name}}}}} is not a placeholder")),
         };
+        if filled && value.is_empty() {
+            return Err(format!("{{{{{name}}}}} is empty for this event"));
+        }
         out.push_str(&value);
         at = end;
     }

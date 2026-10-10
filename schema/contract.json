@@ -1115,44 +1115,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -2554,44 +2559,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -5958,44 +5968,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -6702,44 +6717,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -11834,44 +11854,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -12905,44 +12930,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -13964,44 +13994,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -14487,44 +14522,49 @@
           "description": "How a branch uses a scratch area it is bound to."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -14837,44 +14877,49 @@
           "description": "How a branch uses a scratch area it is bound to."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -15893,6 +15938,13 @@
                 }
               ]
             },
+            "grants": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GrantEntry"
+              },
+              "description": "Its connector grant as stored: what its turns' tokens carry, and\nthe most a child of its can be given (`docs/connectors.md`). Empty\nfor a branch with none."
+            },
             "check": {
               "type": [
                 "array",
@@ -16223,6 +16275,67 @@
             "harnesses"
           ],
           "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "GrantEntry": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
+              },
+              "required": [
+                "connector"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Dependency": {
           "type": "object",
@@ -17072,6 +17185,13 @@
                 }
               ]
             },
+            "grants": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GrantEntry"
+              },
+              "description": "Its connector grant as stored: what its turns' tokens carry, and\nthe most a child of its can be given (`docs/connectors.md`). Empty\nfor a branch with none."
+            },
             "check": {
               "type": [
                 "array",
@@ -17192,6 +17312,67 @@
             "harnesses"
           ],
           "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "GrantEntry": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
+              },
+              "required": [
+                "connector"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Dependency": {
           "type": "object",
@@ -18289,6 +18470,13 @@
                 }
               ]
             },
+            "grants": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GrantEntry"
+              },
+              "description": "Its connector grant as stored: what its turns' tokens carry, and\nthe most a child of its can be given (`docs/connectors.md`). Empty\nfor a branch with none."
+            },
             "check": {
               "type": [
                 "array",
@@ -18409,6 +18597,67 @@
             "harnesses"
           ],
           "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "GrantEntry": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
+              },
+              "required": [
+                "connector"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Dependency": {
           "type": "object",
@@ -29301,6 +29550,13 @@
                 }
               ]
             },
+            "grants": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GrantEntry"
+              },
+              "description": "Its connector grant as stored: what its turns' tokens carry, and\nthe most a child of its can be given (`docs/connectors.md`). Empty\nfor a branch with none."
+            },
             "check": {
               "type": [
                 "array",
@@ -29421,6 +29677,67 @@
             "harnesses"
           ],
           "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "GrantEntry": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
+              },
+              "required": [
+                "connector"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Dependency": {
           "type": "object",
@@ -30870,6 +31187,13 @@
             }
           ]
         },
+        "grants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GrantEntry"
+          },
+          "description": "Its connector grant as stored: what its turns' tokens carry, and\nthe most a child of its can be given (`docs/connectors.md`). Empty\nfor a branch with none."
+        },
         "check": {
           "type": [
             "array",
@@ -31202,6 +31526,67 @@
             "harnesses"
           ],
           "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "GrantEntry": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
+              },
+              "required": [
+                "connector"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Dependency": {
           "type": "object",
@@ -37320,6 +37705,17 @@
           ],
           "description": "Route through the fleet table instead of naming a harness."
         },
+        "deliver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Deliver"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Continue one branch run after run instead of creating a branch per\nrun; `task.name` is then not given."
+        },
         "precheck": {
           "anyOf": [
             {
@@ -38470,44 +38866,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -38869,6 +39270,45 @@
           },
           "description": "Route the task through the repository's fleet table at fire time, as\n`by run --auto` does (without failover)."
         },
+        "Deliver": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch, with placeholders as `task.name` takes them; reduced\nto a branch name when rendered."
+            },
+            "busy": {
+              "$ref": "#/$defs/Busy",
+              "description": "What a run does while the branch is running a turn.",
+              "default": "queue"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "description": "A branch that lives on: each run continues it (a `send`) instead of\ncreating a branch of its own. The first run that finds it missing\ncreates it from the task. `branch` may hold placeholders, so one\ntrigger keeps a branch per Slack channel or sender\n(`slack-{{event.channel}}`), as a chat assistant keeps a session per\nconversation."
+        },
+        "Busy": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "queue",
+              "description": "Run after the turn ends: the run stays pending, with the reason,\nand sends once the branch is free. Nothing is lost, nothing\ninterrupts."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Add the prompt to the running turn as steered input (`by send\n--steer`); queued instead when the harness cannot take input\nmid-turn or refuses it."
+            },
+            {
+              "type": "string",
+              "const": "skip",
+              "description": "Fire nothing: the run is `skipped_busy`, not a failure. For a\nheartbeat, whose next time comes anyway."
+            }
+          ],
+          "description": "What a run does when the branch it delivers to is running a turn."
+        },
         "Precheck": {
           "type": "object",
           "additionalProperties": false,
@@ -38949,6 +39389,17 @@
               "type": "null"
             }
           ]
+        },
+        "deliver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Deliver"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The branch its runs continue, when they continue one."
         },
         "precheck": {
           "anyOf": [
@@ -40138,44 +40589,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -40536,6 +40992,45 @@
             }
           },
           "description": "Route the task through the repository's fleet table at fire time, as\n`by run --auto` does (without failover)."
+        },
+        "Deliver": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch, with placeholders as `task.name` takes them; reduced\nto a branch name when rendered."
+            },
+            "busy": {
+              "$ref": "#/$defs/Busy",
+              "description": "What a run does while the branch is running a turn.",
+              "default": "queue"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "description": "A branch that lives on: each run continues it (a `send`) instead of\ncreating a branch of its own. The first run that finds it missing\ncreates it from the task. `branch` may hold placeholders, so one\ntrigger keeps a branch per Slack channel or sender\n(`slack-{{event.channel}}`), as a chat assistant keeps a session per\nconversation."
+        },
+        "Busy": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "queue",
+              "description": "Run after the turn ends: the run stays pending, with the reason,\nand sends once the branch is free. Nothing is lost, nothing\ninterrupts."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Add the prompt to the running turn as steered input (`by send\n--steer`); queued instead when the harness cannot take input\nmid-turn or refuses it."
+            },
+            {
+              "type": "string",
+              "const": "skip",
+              "description": "Fire nothing: the run is `skipped_busy`, not a failure. For a\nheartbeat, whose next time comes anyway."
+            }
+          ],
+          "description": "What a run does when the branch it delivers to is running a turn."
         },
         "Precheck": {
           "type": "object",
@@ -40639,6 +41134,17 @@
                 }
               ]
             },
+            "deliver": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Deliver"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch its runs continue, when they continue one."
+            },
             "precheck": {
               "anyOf": [
                 {
@@ -41825,44 +42331,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -42223,6 +42734,45 @@
             }
           },
           "description": "Route the task through the repository's fleet table at fire time, as\n`by run --auto` does (without failover)."
+        },
+        "Deliver": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch, with placeholders as `task.name` takes them; reduced\nto a branch name when rendered."
+            },
+            "busy": {
+              "$ref": "#/$defs/Busy",
+              "description": "What a run does while the branch is running a turn.",
+              "default": "queue"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "description": "A branch that lives on: each run continues it (a `send`) instead of\ncreating a branch of its own. The first run that finds it missing\ncreates it from the task. `branch` may hold placeholders, so one\ntrigger keeps a branch per Slack channel or sender\n(`slack-{{event.channel}}`), as a chat assistant keeps a session per\nconversation."
+        },
+        "Busy": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "queue",
+              "description": "Run after the turn ends: the run stays pending, with the reason,\nand sends once the branch is free. Nothing is lost, nothing\ninterrupts."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Add the prompt to the running turn as steered input (`by send\n--steer`); queued instead when the harness cannot take input\nmid-turn or refuses it."
+            },
+            {
+              "type": "string",
+              "const": "skip",
+              "description": "Fire nothing: the run is `skipped_busy`, not a failure. For a\nheartbeat, whose next time comes anyway."
+            }
+          ],
+          "description": "What a run does when the branch it delivers to is running a turn."
         },
         "Precheck": {
           "type": "object",
@@ -42322,6 +42872,17 @@
                 }
               ]
             },
+            "deliver": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Deliver"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch its runs continue, when they continue one."
+            },
             "precheck": {
               "anyOf": [
                 {
@@ -43508,44 +44069,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -43906,6 +44472,45 @@
             }
           },
           "description": "Route the task through the repository's fleet table at fire time, as\n`by run --auto` does (without failover)."
+        },
+        "Deliver": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch, with placeholders as `task.name` takes them; reduced\nto a branch name when rendered."
+            },
+            "busy": {
+              "$ref": "#/$defs/Busy",
+              "description": "What a run does while the branch is running a turn.",
+              "default": "queue"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "description": "A branch that lives on: each run continues it (a `send`) instead of\ncreating a branch of its own. The first run that finds it missing\ncreates it from the task. `branch` may hold placeholders, so one\ntrigger keeps a branch per Slack channel or sender\n(`slack-{{event.channel}}`), as a chat assistant keeps a session per\nconversation."
+        },
+        "Busy": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "queue",
+              "description": "Run after the turn ends: the run stays pending, with the reason,\nand sends once the branch is free. Nothing is lost, nothing\ninterrupts."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Add the prompt to the running turn as steered input (`by send\n--steer`); queued instead when the harness cannot take input\nmid-turn or refuses it."
+            },
+            {
+              "type": "string",
+              "const": "skip",
+              "description": "Fire nothing: the run is `skipped_busy`, not a failure. For a\nheartbeat, whose next time comes anyway."
+            }
+          ],
+          "description": "What a run does when the branch it delivers to is running a turn."
         },
         "Precheck": {
           "type": "object",
@@ -44327,7 +44932,18 @@
               "type": "null"
             }
           ],
-          "description": "The task it would create, rendered."
+          "description": "The task it would create, rendered; with `deliver`, the task's\n`name` is the branch it would continue, created if missing."
+        },
+        "deliver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Deliver"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The branch it delivers to, rendered, and its busy policy."
         },
         "route": {
           "anyOf": [
@@ -45556,44 +46172,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -45941,6 +46562,45 @@
           ],
           "description": "A task's goal: its text, the follow-up turns it may get, and the judge\nharness (one of the server's) that verifies it; without one, the\nbranch's check and a non-empty diff decide."
         },
+        "Deliver": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch, with placeholders as `task.name` takes them; reduced\nto a branch name when rendered."
+            },
+            "busy": {
+              "$ref": "#/$defs/Busy",
+              "description": "What a run does while the branch is running a turn.",
+              "default": "queue"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "description": "A branch that lives on: each run continues it (a `send`) instead of\ncreating a branch of its own. The first run that finds it missing\ncreates it from the task. `branch` may hold placeholders, so one\ntrigger keeps a branch per Slack channel or sender\n(`slack-{{event.channel}}`), as a chat assistant keeps a session per\nconversation."
+        },
+        "Busy": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "queue",
+              "description": "Run after the turn ends: the run stays pending, with the reason,\nand sends once the branch is free. Nothing is lost, nothing\ninterrupts."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Add the prompt to the running turn as steered input (`by send\n--steer`); queued instead when the harness cannot take input\nmid-turn or refuses it."
+            },
+            {
+              "type": "string",
+              "const": "skip",
+              "description": "Fire nothing: the run is `skipped_busy`, not a failure. For a\nheartbeat, whose next time comes anyway."
+            }
+          ],
+          "description": "What a run does when the branch it delivers to is running a turn."
+        },
         "RouteSpec": {
           "type": "object",
           "additionalProperties": false,
@@ -45967,7 +46627,7 @@
         {
           "type": "string",
           "const": "fired",
-          "description": "A task was admitted; `operation` names it."
+          "description": "A task was admitted, or a send to the branch it delivers to;\n`operation` names it. Steered into a running turn instead, the run\nhas no operation and its `outcome` is recorded at once."
         },
         {
           "type": "string",
@@ -45983,6 +46643,11 @@
           "type": "string",
           "const": "skipped_disabled",
           "description": "The trigger was disabled or removed before it fired."
+        },
+        {
+          "type": "string",
+          "const": "skipped_busy",
+          "description": "The branch it delivers to was running a turn, and its `busy`\npolicy is `skip`."
         },
         {
           "type": "string",
@@ -46144,7 +46809,7 @@
             {
               "type": "string",
               "const": "fired",
-              "description": "A task was admitted; `operation` names it."
+              "description": "A task was admitted, or a send to the branch it delivers to;\n`operation` names it. Steered into a running turn instead, the run\nhas no operation and its `outcome` is recorded at once."
             },
             {
               "type": "string",
@@ -46160,6 +46825,11 @@
               "type": "string",
               "const": "skipped_disabled",
               "description": "The trigger was disabled or removed before it fired."
+            },
+            {
+              "type": "string",
+              "const": "skipped_busy",
+              "description": "The branch it delivers to was running a turn, and its `busy`\npolicy is `skip`."
             },
             {
               "type": "string",
@@ -46599,7 +47269,7 @@
             {
               "type": "string",
               "const": "fired",
-              "description": "A task was admitted; `operation` names it."
+              "description": "A task was admitted, or a send to the branch it delivers to;\n`operation` names it. Steered into a running turn instead, the run\nhas no operation and its `outcome` is recorded at once."
             },
             {
               "type": "string",
@@ -46615,6 +47285,11 @@
               "type": "string",
               "const": "skipped_disabled",
               "description": "The trigger was disabled or removed before it fired."
+            },
+            {
+              "type": "string",
+              "const": "skipped_busy",
+              "description": "The branch it delivers to was running a turn, and its `busy`\npolicy is `skip`."
             },
             {
               "type": "string",
@@ -47067,7 +47742,7 @@
             {
               "type": "string",
               "const": "fired",
-              "description": "A task was admitted; `operation` names it."
+              "description": "A task was admitted, or a send to the branch it delivers to;\n`operation` names it. Steered into a running turn instead, the run\nhas no operation and its `outcome` is recorded at once."
             },
             {
               "type": "string",
@@ -47083,6 +47758,11 @@
               "type": "string",
               "const": "skipped_disabled",
               "description": "The trigger was disabled or removed before it fired."
+            },
+            {
+              "type": "string",
+              "const": "skipped_busy",
+              "description": "The branch it delivers to was running a turn, and its `busy`\npolicy is `skip`."
             },
             {
               "type": "string",

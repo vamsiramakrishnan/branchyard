@@ -296,6 +296,10 @@ class Inspection:
     # or its own profile when that list is empty ("its own only"). The
     # envelope's "harnesses" here is the same list.
     allowed_harnesses: Optional[List[str]] = None
+    # Its connector grant, as stored: the entries its turns' tokens carry
+    # ({"connector", "operations", "mode", "confirm"?, "account"?}), and the
+    # most a child of its can be given; see docs/connectors.md.
+    grants: Optional[List[Dict[str, Any]]] = None
     # The check its merge must pass, whether it is its parent's, and the
     # siblings sharing it, which are integrated together with it.
     check: Optional[List[str]] = None

@@ -112,7 +112,7 @@ pub trait TriggerStore: Send + Sync {
     ) -> io::Result<Option<(TriggerRun, i64)>>;
     /// Hold a claimed, still pending run only until `until_ms` while
     /// `fence` holds: any dispatcher may claim it after.
-    fn defer_run(&self, run_id: &str, fence: i64, until_ms: u64) -> io::Result<bool>;
+    fn defer_run(&self, run: &TriggerRun, fence: i64, until_ms: u64) -> io::Result<bool>;
     /// Give back every pending run's claim: only for a store no other
     /// process dispatches from (a data directory's SQLite, which one
     /// server holds), whose claims were its predecessor's.
@@ -454,9 +454,13 @@ fn sqlite_account(
     Ok(Some(why))
 }
 
-fn failure_of(run: &TriggerRun) -> Option<String> {
-    match run.state {
-        RunState::Failed => Some(run.reason.clone().unwrap_or_else(|| "failed".into())),
+/// What a run finished at its firing says to the trigger's failure count:
+/// `Some(Some(why))` a failure, `Some(None)` a success settled as it fired
+/// (its prompt steered into a running turn), `None` nothing yet.
+fn accounted_at_fire(run: &TriggerRun) -> Option<Option<String>> {
+    match (run.state, &run.outcome) {
+        (RunState::Failed, _) => Some(Some(run.reason.clone().unwrap_or_else(|| "failed".into()))),
+        (RunState::Fired, Some(outcome)) => Some((!outcome.ok).then(|| outcome.detail.clone())),
         _ => None,
     }
 }
@@ -678,13 +682,13 @@ impl TriggerStore for SqliteTriggers {
         })
     }
 
-    fn defer_run(&self, run_id: &str, fence: i64, until_ms: u64) -> io::Result<bool> {
+    fn defer_run(&self, run: &TriggerRun, fence: i64, until_ms: u64) -> io::Result<bool> {
         self.immediate(|tx| {
             let rows = tx
                 .execute(
-                    "UPDATE trigger_runs SET claimed_until = ?3 \
+                    "UPDATE trigger_runs SET claimed_until = ?3, body = ?4 \
                      WHERE id = ?1 AND attempt = ?2 AND state = 'pending'",
-                    rusqlite::params![run_id, fence, to_db("until_ms", until_ms)?],
+                    rusqlite::params![run.id, fence, to_db("until_ms", until_ms)?, body(run)?],
                 )
                 .map_err(sql)?;
             Ok((rows == 1, true))
@@ -721,8 +725,8 @@ impl TriggerStore for SqliteTriggers {
             if rows != 1 {
                 return Ok((Accounted::default(), false));
             }
-            let paused = match failure_of(run) {
-                Some(reason) => sqlite_account(tx, &run.trigger, Some(&reason), pause_after)?,
+            let paused = match accounted_at_fire(run) {
+                Some(failure) => sqlite_account(tx, &run.trigger, failure.as_deref(), pause_after)?,
                 None => None,
             };
             Ok((
@@ -1302,14 +1306,15 @@ impl TriggerStore for PostgresTriggers {
         .transpose()
     }
 
-    fn defer_run(&self, run_id: &str, fence: i64, until_ms: u64) -> io::Result<bool> {
-        let id = run_id.to_owned();
+    fn defer_run(&self, run: &TriggerRun, fence: i64, until_ms: u64) -> io::Result<bool> {
+        let id = run.id.clone();
+        let text = body(run)?;
         let until_ms_db = to_db("until_ms", until_ms)?;
         self.with(move |c| {
             let rows = c.execute(
-                "UPDATE by_trigger_runs SET claimed_until = $3 \
+                "UPDATE by_trigger_runs SET claimed_until = $3, body = $4 \
                  WHERE id = $1 AND attempt = $2 AND state = 'pending'",
-                &[&id, &fence, &until_ms_db],
+                &[&id, &fence, &until_ms_db, &text],
             )?;
             Ok(rows == 1)
         })
@@ -1346,8 +1351,10 @@ impl TriggerStore for PostgresTriggers {
                 tx.rollback()?;
                 return Ok(Accounted::default());
             }
-            let paused = match failure_of(&run) {
-                Some(reason) => pg_account(&mut tx, &run.trigger, Some(&reason), pause_after)?,
+            let paused = match accounted_at_fire(&run) {
+                Some(failure) => {
+                    pg_account(&mut tx, &run.trigger, failure.as_deref(), pause_after)?
+                }
                 None => None,
             };
             tx.commit()?;
@@ -1489,6 +1496,7 @@ pub mod conformance {
                     ..TaskRequest::default()
                 },
                 route: None,
+                deliver: None,
                 precheck: None,
                 enabled: true,
                 policy: TriggerPolicy::default(),
@@ -1660,8 +1668,17 @@ pub mod conformance {
         assert_eq!((taken.id.as_str(), fence), (pending.id.as_str(), 2));
         // Deferred, it is claimable once the deferral passes, under the
         // next fence; a stale fence defers nothing.
-        assert!(!store.defer_run(&taken.id, 1, 0).unwrap());
-        assert!(store.defer_run(&taken.id, fence, 96_000).unwrap());
+        assert!(!store.defer_run(&taken, 1, 0).unwrap());
+        let mut waiting = taken.clone();
+        waiting.reason = Some("assistant is running a turn; the send waits for it".into());
+        assert!(store.defer_run(&waiting, fence, 96_000).unwrap());
+        // What it waits for is on the run while it waits.
+        let shown = store.runs(&t.id, 10).unwrap();
+        let shown = shown.iter().find(|r| r.id == taken.id).unwrap();
+        assert_eq!(
+            (shown.state, shown.reason.as_deref()),
+            (RunState::Pending, waiting.reason.as_deref())
+        );
         assert!(store
             .claim_run(&repos(), "w3", 95_500, 200_000)
             .unwrap()
@@ -1766,6 +1783,21 @@ pub mod conformance {
         };
         store.settle(&claimed.id, &ok, 3).unwrap();
         assert_eq!(store.get(&t.id).unwrap().unwrap().failures, 0);
+        // So does one settled as it fired: its prompt steered into a
+        // running turn, with no operation to wait for.
+        assert_eq!(fail("event:steer-a").paused, None);
+        assert_eq!(store.get(&t.id).unwrap().unwrap().failures, 1);
+        let r = run(&t.id, "event:steer-b", RunState::Pending);
+        store.record(&r).unwrap();
+        let (mut claimed, fence) = store.claim_run(&repos(), "w", 0, 10).unwrap().unwrap();
+        claimed.state = RunState::Fired;
+        claimed.outcome = Some(RunOutcome {
+            ok: true,
+            detail: "steered into assistant's running turn".into(),
+        });
+        store.finish_run(&claimed, fence, 3).unwrap();
+        assert_eq!(store.get(&t.id).unwrap().unwrap().failures, 0);
+        assert!(store.unsettled(&repos()).unwrap().is_empty());
         assert_eq!(fail("event:4").paused, None);
         assert_eq!(fail("event:5").paused, None);
         let paused = fail("event:6").paused.expect("paused at the third");

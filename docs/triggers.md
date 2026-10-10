@@ -1,6 +1,6 @@
 # Triggers and schedules
 
-A **trigger** starts an ordinary Branchyard task on its own: on a cron schedule, at an interval, when a signed webhook from GitHub, Slack, Linear or any JSON sender arrives, or when an email arrives through Postmark's, Mailgun's or SendGrid's inbound webhook. It is a durable object in the server's store, beside the operation registry, and every firing goes through the same admission path as `POST /v1/repos/{repo}/tasks`: quotas, branch locks, worker labels and an idempotency key, so a redelivered webhook or a restarted scheduler never starts a second task. This is the *triggers and schedules* track of the [roadmap](roadmap.md#wave-2), learned from Manus automations (validated conditions, test runs, pausing after repeated failures), Devin automations, Claude Code routines and Cursor's and Jules's scheduled tasks; the precheck is ported from Orca.
+A **trigger** starts an ordinary Branchyard task on its own: on a cron schedule, at an interval, when a signed webhook from GitHub, Slack, Linear or any JSON sender arrives, or when an email arrives through Postmark's, Mailgun's or SendGrid's inbound webhook. It creates a branch per run, or, with [`deliver`](#a-branch-that-lives-on), continues one branch run after run, the way a chat assistant keeps a session. It is a durable object in the server's store, beside the operation registry, and every firing goes through the same admission path as `POST /v1/repos/{repo}/tasks`: quotas, branch locks, worker labels and an idempotency key, so a redelivered webhook or a restarted scheduler never starts a second task. This is the *triggers and schedules* track of the [roadmap](roadmap.md#wave-2), learned from Manus automations (validated conditions, test runs, pausing after repeated failures), Devin automations, Claude Code routines and Cursor's and Jules's scheduled tasks; the precheck is ported from Orca.
 
 > **Status.** Implemented and tested hermetically: the cron parser, every adapter's signature check and normalization, the store's conformance suite on SQLite and PostgreSQL 16, two to four dispatchers racing for one schedule time, a dispatcher that dies mid-fire, the HTTP API over loopback with the fake ACP agent and a manual clock, and `by trigger` locally, through `by serve`, and with `--remote`. **Nothing has received a delivery from the real GitHub, Slack, Linear, Postmark, Mailgun or SendGrid**: the payloads are built from their documentation, and the signatures from their documented schemes. Email arrives only through a provider's inbound webhook; nothing polls a mailbox ([email](#email)).
 
@@ -27,6 +27,15 @@ by trigger add triage --on github --if kind=issues.labeled --if label=agent \
 # webhook URL: https://by.example.com/v1/triggers/trg_…/fire
 # webhook secret (shown once; give it to the sender): …
 
+# An assistant that lives on: every mention in Slack continues one branch per channel, and a
+# heartbeat looks in every 30 minutes, skipping while it is busy.
+by trigger add chat --on slack --if author=alice --if author=bob \
+    --prompt '{{event.author}} in {{event.channel}}: {{event.text}}' \
+    --to 'slack-{{event.channel}}' --busy steer --harness claude-code --budget-usd 20 --yes
+by trigger add heartbeat --every 30m --to assistant --busy skip \
+    --prompt 'Look at what changed since your last turn and act on anything that needs you' \
+    --harness claude-code --budget-usd 20 --yes
+
 by trigger test triage --event issue.json     # conditions, precheck and the rendered task; creates nothing
 by trigger list                               # name, schedule or source, repository, state, next time or URL
 by trigger runs triage                        # fired (branch, operation, outcome), skipped and why, failed, missed
@@ -37,7 +46,7 @@ by trigger rm triage
 
 | Command | Does |
 |---|---|
-| `by trigger add NAME (--cron EXPR [--tz ZONE] \| --every DURATION \| --on SOURCE) --prompt TEXT` | Create a trigger. Task: `--harness H` or `--auto [--kind K]`, `--branch-name TEMPLATE`, `--base REF`, `--check CMD`, `--budget-usd X`, `--max-turns N`, `--max-minutes N`, `--connector GRANT` (repeatable), `--require-label L` (repeatable), `--yes` (allow every tool request; otherwise each is denied). When: `--if FIELD=VALUE` (repeatable), `--precheck CMD [--precheck-timeout SECS]`. Policy: `--pause-after N`, `--catch-up DURATION`, `--secret-file FILE`, `--disabled` |
+| `by trigger add NAME (--cron EXPR [--tz ZONE] \| --every DURATION \| --on SOURCE) --prompt TEXT` | Create a trigger. Task: `--harness H` or `--auto [--kind K]`, `--branch-name TEMPLATE` or `--to TEMPLATE [--busy queue\|steer\|skip]` ([a branch that lives on](#a-branch-that-lives-on)), `--base REF`, `--check CMD`, `--budget-usd X`, `--max-turns N`, `--max-minutes N`, `--connector GRANT` (repeatable), `--require-label L` (repeatable), `--yes` (allow every tool request; otherwise each is denied). When: `--if FIELD=VALUE` (repeatable), `--precheck CMD [--precheck-timeout SECS]`. Policy: `--pause-after N`, `--catch-up DURATION`, `--secret-file FILE`, `--disabled` |
 | `by trigger list` (`ls`) | Every trigger |
 | `by trigger show NAME` | One in full |
 | `by trigger test NAME [--event FILE] [--event-type TYPE] [--precheck]` | What it would do, creating nothing ([test runs](#test-runs)) |
@@ -121,6 +130,22 @@ An unknown placeholder, an unclosed `{{`, or an `event.*` one on a schedule is r
 
 **Routing.** `"route": {"kind": "bugfix"}` (`--auto [--kind K]`) names no harness: when the trigger fires, the server routes the rendered prompt through the repository's `[fleet]` table in `branchyard.toml` as `by run --auto` does ([fleet](fleet.md)), seeded from the run's key so a run fired again picks the same, and sets the chosen harness, model and effort on the task. A candidate's `command` is not used (the server's `harness_commands` are). There is no failover: the server does not fail a routed branch over to the next candidate, as it does not for any remote task.
 
+## A branch that lives on
+
+`"deliver": {"branch": "assistant", "busy": "skip"}` (`--to assistant --busy skip`) makes the trigger continue **one branch run after run** instead of creating a branch per run. The first run that finds the branch missing creates it from the task, under that name; every later run is a **send** to it: the same prompt, budget, policy and check as the task, in the branch's own harness and session, as `by send` would. The branch keeps its worktree, its history and its harness's context between runs, so it can be an assistant that lives on: a heartbeat that looks in on a schedule, or a conversation that goes on where it left off. `branch` takes the same placeholders as `task.name`, so one trigger keeps one branch per conversation: `slack-{{event.channel}}` continues a branch per Slack channel, `mail-{{event.from}}` one per correspondent. A `task.name` is not given with `deliver`; a placeholder that renders to nothing fails the run rather than pooling such events in one branch.
+
+`busy` says what a run does while the branch is **running a turn**:
+
+| `busy` | Does | For |
+|---|---|---|
+| `queue` (default) | The run stays `pending`, with the reason, until the turn ends (the dispatcher looks again every 30 seconds), then sends: the prompt runs as the next turn, runs in their order. Nothing is lost, nothing interrupts | Messages: each is answered in turn |
+| `steer` | The prompt joins the running turn as steered input ([`by send --steer`](delegation.md)): the model reads it at the harness's next boundary, within this turn. When the harness takes no input mid-turn, or refuses it, the run queues a send instead. The run is settled as it fires, `fired` with `ok`, and has no operation | A conversation whose next message should reach the model now |
+| `skip` | Nothing fires: the run is `skipped_busy`, which is not a failure | A heartbeat, whose next time comes anyway; nothing piles up behind a long turn |
+
+A run that creates the branch, or sends to it, is `fired` with its operation as any run, and its outcome is the operation's. The server admits one operation on a branch at a time (`409 branch_busy` to a second), so two runs never drive the branch at once, and a `queue` run that finds the branch taken by any other send waits the same way; the trigger's `pause_after_failures` applies to the sends as to tasks. The branch is an ordinary branch: `by inspect`, `by send`, `by rewind` and `by discard` work on it, a discarded branch is not recreated (a run to it fails as any send to a settled branch does), and the harness's session grows with every turn, so a long-lived branch is worth a `reincarnate` now and then ([lifecycle](lifecycle.md)).
+
+**Heartbeats cost a full turn each.** A heartbeat whose prompt asks the model to look around makes model calls whether or not anything happened; set its budget, and prefer the longest interval that serves. Restrict a chat trigger's `conditions.author` (`--if author=`) to the people who may drive the branch: every message that matches runs as a prompt, with the trigger's budget and policy.
+
 ## Prechecks
 
 `"precheck": {"command": "…", "timeout_seconds": 60}` (`--precheck CMD`) runs a shell command before the trigger fires, in a **fresh detached worktree** of the repository at the task's `base` (default `HEAD`), removed afterwards. Ported from Orca's automation precheck ([`precheck-runner.ts`, `automation-precheck.ts`](../vendor/orca/src/main/automations/precheck-runner.ts)):
@@ -143,10 +168,11 @@ Every firing is a **run**: a delivery, a scheduled time, or a block of missed ti
 | State | Meaning |
 |---|---|
 | `pending` | Recorded, not fired yet; a dispatcher serving the repository fires it |
-| `fired` | A task was admitted: `operation` and `branches` name it. Once the operation ends, its `outcome` is recorded: `ok` when it succeeded and none of its branches ended `failed` or `interrupted` |
+| `fired` | A task was admitted, or a send to the branch it delivers to: `operation` and `branches` name it. Once the operation ends, its `outcome` is recorded: `ok` when it succeeded and none of its branches ended `failed` or `interrupted`. A run steered into a running turn has no operation; its `outcome` is `ok` as it fires |
 | `skipped_condition` | The event did not match |
 | `skipped_precheck` | The precheck did not pass |
 | `skipped_disabled` | The trigger was disabled or removed between recording and firing |
+| `skipped_busy` | The branch it [delivers to](#a-branch-that-lives-on) was running a turn, and its `busy` policy is `skip` |
 | `failed` | No task could be admitted: a quota, a branch that exists, a refused option, a repository not served, a routing error |
 | `missed` | Scheduled times older than the catch-up window |
 
@@ -199,6 +225,23 @@ POST /v1/triggers
   "precheck": { "command": "test -f Cargo.toml", "timeout_seconds": 30 },
   "policy": { "pause_after_failures": 3, "catch_up_seconds": 3600, "replay_window_seconds": 300 },
   "secret": "the secret you will paste into GitHub"
+}
+```
+
+```json
+POST /v1/triggers (a branch that lives on)
+{
+  "name": "chat",
+  "repo": "app",
+  "when": { "kind": "event", "source": "slack" },
+  "conditions": { "author": ["alice", "bob"] },
+  "task": {
+    "prompt": "{{event.author}} in {{event.channel}}: {{event.text}}",
+    "harness": "claude-code",
+    "budget": { "max_usd": 20.0 },
+    "policy": { "mode": "allow" }
+  },
+  "deliver": { "branch": "slack-{{event.channel}}", "busy": "steer" }
 }
 ```
 
@@ -304,12 +347,16 @@ The PostgreSQL tables are created like the registry's: a dispatcher opening the 
 
 ## Not yet
 
-- Polling a mailbox (IMAP); SendGrid's signed (ECDSA) or OAuth-verified Inbound Parse; attachment contents in the event; a message's raw MIME (SendGrid's raw mode, Mailgun's `mime` URLs); character sets other than UTF-8 are read lossily. GitHub `push`, `release` and other events; Linear comments; Slack messages other than mentions; replying to the sender.
+- Polling a mailbox (IMAP); SendGrid's signed (ECDSA) or OAuth-verified Inbound Parse; attachment contents in the event; a message's raw MIME (SendGrid's raw mode, Mailgun's `mime` URLs); character sets other than UTF-8 are read lossily. GitHub `push`, `release` and other events; Linear comments; Slack messages other than mentions; replying to the sender (a branch that lives on answers in its own log and events, not in the channel).
 - A GitHub App installation (one webhook for many repositories): each trigger has its own URL and secret.
 - Editing a trigger in place: remove it and add it again (its runs go with it).
 - Failover for a routed trigger's branch, as for any remote task; a limit on a trigger's concurrently running tasks beyond its tenant's `max_running`.
 - Runs and missed blocks are kept until the trigger is removed.
 - Real deliveries from GitHub, Slack, Linear, Postmark, Mailgun and SendGrid: see the status note above.
+
+## Learned from OpenClaw
+
+A branch that lives on is Branchyard's form of what [OpenClaw](https://docs.openclaw.ai) calls a session: one per conversation (`agent:<id>:main`, or per channel and peer with `dmScope`), a heartbeat turn every 30 minutes, and a queue mode for a message that arrives mid-run (`steer`, the default there; `followup`; `interrupt`). Branchyard keeps its own shape: the session is a branch with a worktree and a git history, every run is an operation under the branch's lock and the trigger's idempotency key, the cost is the branch's budget, and the model never picks where a reply goes. What is not taken: a sandbox off by default, a public skill registry (341 of ClawHub's 2,857 skills were found malicious in February 2026), and a heartbeat that is a full turn by default with no budget.
 
 ## Code
 

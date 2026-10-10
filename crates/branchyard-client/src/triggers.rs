@@ -200,6 +200,54 @@ pub struct RouteSpec {
     pub kind: Option<String>,
 }
 
+/// A branch that lives on: each run continues it (a `send`) instead of
+/// creating a branch of its own. The first run that finds it missing
+/// creates it from the task. `branch` may hold placeholders, so one
+/// trigger keeps a branch per Slack channel or sender
+/// (`slack-{{event.channel}}`), as a chat assistant keeps a session per
+/// conversation.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Deliver {
+    /// The branch, with placeholders as `task.name` takes them; reduced
+    /// to a branch name when rendered.
+    pub branch: String,
+    /// What a run does while the branch is running a turn.
+    #[serde(default)]
+    pub busy: Busy,
+}
+
+/// What a run does when the branch it delivers to is running a turn.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Busy {
+    /// Run after the turn ends: the run stays pending, with the reason,
+    /// and sends once the branch is free. Nothing is lost, nothing
+    /// interrupts.
+    #[default]
+    Queue,
+    /// Add the prompt to the running turn as steered input (`by send
+    /// --steer`); queued instead when the harness cannot take input
+    /// mid-turn or refuses it.
+    Steer,
+    /// Fire nothing: the run is `skipped_busy`, not a failure. For a
+    /// heartbeat, whose next time comes anyway.
+    Skip,
+}
+
+impl Busy {
+    /// The wire name: `queue`, `steer` or `skip`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Busy::Queue => "queue",
+            Busy::Steer => "steer",
+            Busy::Skip => "skip",
+        }
+    }
+}
+
 /// How a trigger behaves over time.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,6 +315,10 @@ pub struct TriggerSpec {
     /// Route through the fleet table instead of naming a harness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<RouteSpec>,
+    /// Continue one branch run after run instead of creating a branch per
+    /// run; `task.name` is then not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver: Option<Deliver>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub precheck: Option<Precheck>,
     #[serde(default = "yes", skip_serializing_if = "is_true")]
@@ -293,6 +345,9 @@ pub struct Trigger {
     pub task: TaskRequest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<RouteSpec>,
+    /// The branch its runs continue, when they continue one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver: Option<Deliver>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub precheck: Option<Precheck>,
     pub policy: TriggerPolicy,
@@ -510,9 +565,13 @@ pub struct TriggerTest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub precheck: Option<PrecheckResult>,
     pub would_fire: bool,
-    /// The task it would create, rendered.
+    /// The task it would create, rendered; with `deliver`, the task's
+    /// `name` is the branch it would continue, created if missing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<TaskRequest>,
+    /// The branch it delivers to, rendered, and its busy policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver: Option<Deliver>,
     /// Routed at fire time, through the fleet table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<RouteSpec>,
@@ -527,7 +586,9 @@ pub struct TriggerTest {
 pub enum RunState {
     /// Recorded, not yet fired: a worker serving the repository fires it.
     Pending,
-    /// A task was admitted; `operation` names it.
+    /// A task was admitted, or a send to the branch it delivers to;
+    /// `operation` names it. Steered into a running turn instead, the run
+    /// has no operation and its `outcome` is recorded at once.
     Fired,
     /// The event did not match the conditions.
     SkippedCondition,
@@ -535,6 +596,9 @@ pub enum RunState {
     SkippedPrecheck,
     /// The trigger was disabled or removed before it fired.
     SkippedDisabled,
+    /// The branch it delivers to was running a turn, and its `busy`
+    /// policy is `skip`.
+    SkippedBusy,
     /// No task could be admitted; counts toward pausing.
     Failed,
     /// Scheduled times older than the catch-up window, never fired.
@@ -549,6 +613,7 @@ impl RunState {
             RunState::SkippedCondition => "skipped_condition",
             RunState::SkippedPrecheck => "skipped_precheck",
             RunState::SkippedDisabled => "skipped_disabled",
+            RunState::SkippedBusy => "skipped_busy",
             RunState::Failed => "failed",
             RunState::Missed => "missed",
         }
@@ -561,6 +626,7 @@ impl RunState {
             RunState::SkippedCondition,
             RunState::SkippedPrecheck,
             RunState::SkippedDisabled,
+            RunState::SkippedBusy,
             RunState::Failed,
             RunState::Missed,
         ]
