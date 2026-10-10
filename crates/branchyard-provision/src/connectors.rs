@@ -25,9 +25,11 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// One entry of a grant, as the token's `by_grants` carries it:
-/// `{"connector", "operations", "mode", "confirm", "account"}`.
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// `{"connector", "operations", "mode", "confirm", "account"}`. It also
+/// deserializes from the `--connector` string (`github:write:issues.*`),
+/// which is what the MCP `spawn` tool and the SDKs take; it always
+/// serializes as the object.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantEntry {
     /// The bundle id the gateway serves, such as `github`.
@@ -185,6 +187,56 @@ impl GrantEntry {
     }
 }
 
+impl<'de> Deserialize<'de> for GrantEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<GrantEntry, D::Error> {
+        /// The object form, field for field.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            connector: String,
+            #[serde(default = "every_operation")]
+            operations: Vec<String>,
+            #[serde(default)]
+            mode: GrantMode,
+            #[serde(default)]
+            confirm: Confirm,
+            #[serde(default)]
+            account: Option<String>,
+        }
+
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = GrantEntry;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a connector grant: `github:write:issues.*` or {\"connector\", ...}")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<GrantEntry, E> {
+                GrantEntry::parse(text).map_err(E::custom)
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<GrantEntry, A::Error> {
+                let fields =
+                    Fields::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(GrantEntry {
+                    connector: fields.connector,
+                    operations: fields.operations,
+                    mode: fields.mode,
+                    confirm: fields.confirm,
+                    account: fields.account,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 impl fmt::Display for GrantEntry {
     /// The `--connector` form, which [`GrantEntry::parse`] reads back.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -202,6 +254,54 @@ impl fmt::Display for GrantEntry {
             write!(f, ":{}", self.operations.join(","))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for GrantEntry {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "GrantEntry".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // Either wire form: the `--connector` string, or the object the
+        // token carries (what `Serialize` writes).
+        schemars::json_schema!({
+            "description": "One entry of a connector grant (docs/connectors.md#grants): the \
+                            flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] \
+                            such as \"github:write:issues.*\", or the object \
+                            {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; \
+                            always written back as the object.",
+            "anyOf": [
+                {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "connector": {
+                            "type": "string",
+                            "description": "The bundle id the gateway serves, such as `github`."
+                        },
+                        "operations": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "default": ["*"],
+                            "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                        },
+                        "mode": generator.subschema_for::<GrantMode>(),
+                        "confirm": generator.subschema_for::<Confirm>(),
+                        "account": {
+                            "type": ["string", "null"],
+                            "description": "One of the person's connected accounts for the connector; unset is their default."
+                        }
+                    },
+                    "required": ["connector"],
+                    "additionalProperties": false
+                }
+            ]
+        })
     }
 }
 
@@ -488,6 +588,35 @@ mod tests {
         assert!(write.allows("github", None, "issues.create", true, false));
         assert!(!write.allows("github", None, "repos.delete", true, true));
         assert!(e("github:write+confirm").allows("github", None, "repos.delete", true, true));
+    }
+
+    /// The wire takes the object or the `--connector` string, and writes
+    /// the object; a bad string fails with the parser's reason.
+    #[test]
+    fn an_entry_deserializes_from_the_object_or_the_flag() {
+        let object: GrantEntry = serde_json::from_str(
+            r#"{"connector": "github", "operations": ["issues.*"], "mode": "write", "account": "work"}"#,
+        )
+        .unwrap();
+        let flag: GrantEntry = serde_json::from_str(r#""github@work:write:issues.*""#).unwrap();
+        assert_eq!(object, flag);
+        assert_eq!(
+            serde_json::to_string(&flag).unwrap(),
+            r#"{"connector":"github","operations":["issues.*"],"mode":"write","account":"work"}"#
+        );
+        let list: Vec<GrantEntry> =
+            serde_json::from_str(r#"["github:read", {"connector": "linear"}]"#).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[1].to_string(), "linear:read");
+        let bad = serde_json::from_str::<GrantEntry>(r#""github:admin""#).unwrap_err();
+        assert!(
+            bad.to_string().contains("not read, write or write+confirm"),
+            "{bad}"
+        );
+        let unknown =
+            serde_json::from_str::<GrantEntry>(r#"{"connector": "github", "scope": "x"}"#)
+                .unwrap_err();
+        assert!(unknown.to_string().contains("unknown field"), "{unknown}");
     }
 
     #[test]

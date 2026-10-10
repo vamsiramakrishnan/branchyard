@@ -71,6 +71,7 @@ jobs:
       - run: cargo clippy -p branchyard-cli --all-targets --locked --offline --features schema -- -D warnings
       - run: python tests/test_distribution.py
       - run: python tests/test_schema_validation.py
+      - run: python tests/test_sdk_client.py
   postgres:
     # The PostgreSQL store: the shared backend conformance suite, the engine
     # and the server against a real database. The job above stays offline
@@ -188,7 +189,8 @@ jobs:
             lcov.info
             unit.lcov
   python:
-    # Lint, format and type-check the Python in tools/ and tests/ (ruff.toml).
+    # Lint, format and type-check the Python in tools/, tests/ and the
+    # shipped HTTP client, sdk/python/branchyard_client.py (ruff.toml).
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -197,8 +199,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install ruff==0.15.8 mypy==2.4.0
-      - run: ruff check tools tests
-      - run: ruff format --check tools tests
-      - run: mypy --python-version 3.12 --ignore-missing-imports --explicit-package-bases tools tests
+      - run: ruff check tools tests sdk/python/branchyard_client.py
+      - run: ruff format --check tools tests sdk/python/branchyard_client.py
+      - run: mypy --python-version 3.12 --ignore-missing-imports --explicit-package-bases tools tests sdk/python/branchyard_client.py
       - run: python tests/test_install_ci_tool.py
       - run: python tests/test_check_coverage.py

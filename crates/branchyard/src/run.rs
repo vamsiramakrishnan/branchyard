@@ -1329,6 +1329,12 @@ fn same_model(name: &str, record: &Record, mut asked: Provisioning) -> Result<Pr
     if asked.approvals.is_none() {
         asked.approvals = had.and_then(|p| p.approvals.clone());
     }
+    // And its connector grant: a send that names none keeps it, so a
+    // provisioning that only changes the effort does not take a child's
+    // connectors away.
+    if asked.connectors.is_empty() {
+        asked.connectors = had.map(|p| p.connectors.clone()).unwrap_or_default();
+    }
     Ok(asked)
 }
 

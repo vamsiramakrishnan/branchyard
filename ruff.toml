@@ -2,3 +2,9 @@ line-length = 120
 target-version = "py311"
 [lint]
 select = ["E", "F", "W", "I", "B", "UP", "C4", "SIM", "RUF"]
+
+# The shipped Python SDK keeps running on Python 3.9, the oldest a host or
+# a harness image is likely to have, so `X | None` and the like are refused
+# there while tools/ and tests/ use 3.11's syntax.
+[per-file-target-version]
+"sdk/python/*.py" = "py39"

@@ -1282,6 +1282,10 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
         ));
     }
     pairs.push(("check", check_text(i)));
+    if !i.grants.is_empty() {
+        let grants: Vec<String> = i.grants.iter().map(|g| g.to_string()).collect();
+        pairs.push(("connectors", grants.join(", ")));
+    }
     if let Some(envelope) = &i.envelope {
         // Its own profile only (stored empty): name it.
         let own = envelope.harnesses.is_empty() || envelope.harnesses == [i.profile.as_str()];

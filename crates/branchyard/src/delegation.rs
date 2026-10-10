@@ -575,6 +575,11 @@ pub struct Inspection {
     #[serde(default)]
     pub settled_children_usd: f64,
     pub envelope: Option<Envelope>,
+    /// Its connector grant as stored: what its turns' tokens carry, and
+    /// the most a child of its can be given (`docs/connectors.md`). Empty
+    /// for a branch with none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<crate::connectors::GrantEntry>,
     /// The check its merge must pass when it is integrated. Omitted when
     /// it has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3018,6 +3023,11 @@ impl Local {
             check: record.check.clone(),
             check_inherited: record.check_inherited,
             check_shared_with,
+            grants: record
+                .provision
+                .as_ref()
+                .map(|p| p.connectors.clone())
+                .unwrap_or_default(),
             // The envelope's harnesses as enforced, as `allowed_harnesses`
             // says them: a stored empty list means "its own profile only",
             // and shown as `[]` it read as "no harness".

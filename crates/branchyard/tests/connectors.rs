@@ -599,6 +599,31 @@ fn a_delegated_childs_grant_is_only_ever_narrower() {
     );
     denied(widened, "slack:read");
     assert_eq!(child_grant(&f, "narrower"), ["github:read:issues.list"]);
+    // A send whose provisioning names no connectors keeps the grant: it
+    // changes the effort, not what the child may reach.
+    f.yard
+        .branch("narrower")
+        .unwrap()
+        .send(
+            "say hi",
+            TaskOptions {
+                provision: Some(Provisioning {
+                    effort: Some(branchyard::Effort::Low),
+                    ..Provisioning::default()
+                }),
+                policy: Policy::allow_all(),
+                ..TaskOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(child_grant(&f, "narrower"), ["github:read:issues.list"]);
+    // The inspection says what a branch may reach, as its parent sees it.
+    let shown = delegate.inspect("narrower").unwrap();
+    assert_eq!(
+        shown.grants,
+        [GrantEntry::parse("github:read:issues.list").unwrap()]
+    );
+    assert!(delegate.inspect("inherits").unwrap().grants.len() == 2);
 }
 
 #[test]

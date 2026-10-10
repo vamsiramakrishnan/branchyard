@@ -45,7 +45,7 @@ Produces four ZIP archives in `dist/`, each named `branchyard-<kind>-<version>.z
 | `branchyard-plugin-<version>.zip` | `plugins/branchyard/`, including both skills, the `/branchyard:setup` command, both manifests, `LICENSE`, and a `MANIFEST.sha256.json` of every file's digest |
 | `branchyard-skill-<version>.zip` | The standalone delegate skill alone, `plugins/branchyard/skills/delegate/`, for a host with no plugin loader |
 | `branchyard-setup-skill-<version>.zip` | The standalone setup skill alone, `plugins/branchyard/skills/setup/` |
-| `branchyard-sdk-<version>.zip` | `sdk/python/`: the Python module that wraps `by --json` (`docs/sdk.md`) |
+| `branchyard-sdk-<version>.zip` | `sdk/python/`: the Python modules, `branchyard.py` wrapping `by --json` for code inside a harness and `branchyard_client.py` speaking to `by serve` for a service outside ([SDKs](sdk.md)) |
 
 Building refuses to proceed if either plugin manifest's `name` or `version` does not match the workspace's own `Cargo.toml` version, so a stale manifest cannot ship silently.
 
