@@ -794,9 +794,11 @@ impl Connectors {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkConfig {
-    /// HOST[:PORT] rules a new branch's harness may reach, such as
-    /// `"github.com"` or `"*.npmjs.org:443"`; `[]` allows nothing. Unset:
-    /// every host (open). A connector grant adds the gateway.
+    /// `[METHOD|METHOD ]HOST[:PORT][/PATH]` rules a new branch's harness may
+    /// reach, such as `"github.com"`, `"*.npmjs.org:443"` or
+    /// `"GET api.github.com/repos/*"` (held to inside the connection); `[]`
+    /// allows nothing. Unset: every host (open). A connector grant adds the
+    /// gateway.
     // The doc comment is the schema description; `[:PORT]` is not a link.
     #[allow(rustdoc::broken_intra_doc_links)]
     #[serde(default, skip_serializing_if = "Option::is_none")]

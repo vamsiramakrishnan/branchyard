@@ -1016,6 +1016,7 @@ pub(crate) fn egress_summary(
         allow,
         enforcement,
         reason,
+        ..
     } = applied.as_ref()
     else {
         return None;

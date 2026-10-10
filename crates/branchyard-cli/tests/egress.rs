@@ -191,13 +191,13 @@ fn an_enforced_policy_is_shown_by_show_and_log() {
     let log = stdout(&repo.by(&["log", "enforced"]));
     assert!(
         log.contains(&format!(
-            "egress allowed: GET 127.0.0.1:{allowed} by {rule}"
+            "egress allowed: GET 127.0.0.1:{allowed}/x by {rule}"
         )),
         "{log}"
     );
     assert!(
         log.contains(&format!(
-            "egress denied: GET 127.0.0.1:{denied} (no rule allows it)"
+            "egress denied: GET 127.0.0.1:{denied}/x (no rule allows it)"
         )),
         "{log}"
     );

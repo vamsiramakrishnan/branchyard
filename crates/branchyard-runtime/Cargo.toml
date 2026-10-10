@@ -14,10 +14,18 @@ workspace = true
 branchyard-support = { path = "../branchyard-support" }
 branchyard-harness = { path = "../branchyard-harness" }
 branchyard-sandbox = { path = "../branchyard-sandbox" }
+branchyard-wire = { path = "../branchyard-wire" }
+# The egress proxy's TLS interception: a certificate authority per branch
+# (rcgen), termination toward the harness and re-encryption toward the
+# origin (rustls with the Mozilla roots).
+rcgen = { workspace = true }
+rustls = { workspace = true }
 serde_json = { workspace = true }
+webpki-roots = { workspace = true }
 
 [target."cfg(unix)".dependencies]
 rustix = { workspace = true, features = ["thread", "net", "fs"] }
 
 [dev-dependencies]
 branchyard-testkit = { path = "../branchyard-testkit" }
+tempfile = { workspace = true }

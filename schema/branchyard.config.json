@@ -898,7 +898,7 @@
           "items": {
             "type": "string"
           },
-          "description": "HOST[:PORT] rules a new branch's harness may reach, such as\n`\"github.com\"` or `\"*.npmjs.org:443\"`; `[]` allows nothing. Unset:\nevery host (open). A connector grant adds the gateway."
+          "description": "`[METHOD|METHOD ]HOST[:PORT][/PATH]` rules a new branch's harness may\nreach, such as `\"github.com\"`, `\"*.npmjs.org:443\"` or\n`\"GET api.github.com/repos/*\"` (held to inside the connection); `[]`\nallows nothing. Unset: every host (open). A connector grant adds the\ngateway."
         },
         "enforce": {
           "anyOf": [

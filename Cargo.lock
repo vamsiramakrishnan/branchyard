@@ -847,8 +847,13 @@ dependencies = [
  "branchyard-sandbox",
  "branchyard-support",
  "branchyard-testkit",
+ "branchyard-wire",
+ "rcgen",
  "rustix",
+ "rustls",
  "serde_json",
+ "tempfile",
+ "webpki-roots",
 ]
 
 [[package]]

@@ -396,8 +396,10 @@ pub(crate) fn remove(
         remove_credentials(&store, &record)?;
     }
     remove_home(&store, &record)?;
-    // Its private temporary directory, which nothing else uses.
+    // Its private temporary directory, which nothing else uses, and its
+    // egress proxy's certificate authority.
     branchyard_support::cleanup_dir(store.tmp(name));
+    branchyard_support::cleanup_dir(store.egress(name));
     Ok(teardown)
 }
 

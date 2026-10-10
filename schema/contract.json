@@ -1176,7 +1176,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -1192,7 +1192,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -2620,7 +2620,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -2636,7 +2636,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -6029,7 +6029,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -6045,7 +6045,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -6778,7 +6778,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -6794,7 +6794,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -11915,7 +11915,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -11931,7 +11931,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -12991,7 +12991,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -13007,7 +13007,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -14055,7 +14055,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -14071,7 +14071,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -22557,6 +22557,13 @@
                   ],
                   "description": "Why it is not enforced, when it is not."
                 },
+                "ca_bundle": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The certificate bundle the harness is told to trust, when a\nrule inspects a host: the system's roots and the branch's own\nauthority, under `.branchyard/egress/<branch>/`."
+                },
                 "kind": {
                   "type": "string",
                   "const": "applied"
@@ -22575,7 +22582,7 @@
               "properties": {
                 "method": {
                   "type": "string",
-                  "description": "`CONNECT`, or the plain HTTP request's method."
+                  "description": "`CONNECT`, or the method of a request the proxy saw: a plain\nHTTP request, or one inside an inspected connection."
                 },
                 "host": {
                   "type": "string"
@@ -22585,6 +22592,13 @@
                   "format": "uint16",
                   "minimum": 0,
                   "maximum": 65535
+                },
+                "path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The request's path and query, when the proxy saw one."
                 },
                 "allowed": {
                   "type": "boolean"
@@ -22601,7 +22615,7 @@
                     "string",
                     "null"
                   ],
-                  "description": "Why it was refused, or why an allowed one failed."
+                  "description": "Why it was refused, or why an allowed one failed; `inspected`\nfor a `CONNECT` the proxy looked inside."
                 },
                 "kind": {
                   "type": "string",
@@ -22615,7 +22629,7 @@
                 "port",
                 "allowed"
               ],
-              "description": "One destination the proxy decided."
+              "description": "One destination or request the proxy decided."
             }
           ],
           "description": "What the egress proxy did, recorded on the branch."
@@ -27243,6 +27257,13 @@
                   ],
                   "description": "Why it is not enforced, when it is not."
                 },
+                "ca_bundle": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The certificate bundle the harness is told to trust, when a\nrule inspects a host: the system's roots and the branch's own\nauthority, under `.branchyard/egress/<branch>/`."
+                },
                 "kind": {
                   "type": "string",
                   "const": "applied"
@@ -27261,7 +27282,7 @@
               "properties": {
                 "method": {
                   "type": "string",
-                  "description": "`CONNECT`, or the plain HTTP request's method."
+                  "description": "`CONNECT`, or the method of a request the proxy saw: a plain\nHTTP request, or one inside an inspected connection."
                 },
                 "host": {
                   "type": "string"
@@ -27271,6 +27292,13 @@
                   "format": "uint16",
                   "minimum": 0,
                   "maximum": 65535
+                },
+                "path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The request's path and query, when the proxy saw one."
                 },
                 "allowed": {
                   "type": "boolean"
@@ -27287,7 +27315,7 @@
                     "string",
                     "null"
                   ],
-                  "description": "Why it was refused, or why an allowed one failed."
+                  "description": "Why it was refused, or why an allowed one failed; `inspected`\nfor a `CONNECT` the proxy looked inside."
                 },
                 "kind": {
                   "type": "string",
@@ -27301,7 +27329,7 @@
                 "port",
                 "allowed"
               ],
-              "description": "One destination the proxy decided."
+              "description": "One destination or request the proxy decided."
             }
           ],
           "description": "What the egress proxy did, recorded on the branch."
@@ -35586,6 +35614,13 @@
                   ],
                   "description": "Why it is not enforced, when it is not."
                 },
+                "ca_bundle": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The certificate bundle the harness is told to trust, when a\nrule inspects a host: the system's roots and the branch's own\nauthority, under `.branchyard/egress/<branch>/`."
+                },
                 "kind": {
                   "type": "string",
                   "const": "applied"
@@ -35604,7 +35639,7 @@
               "properties": {
                 "method": {
                   "type": "string",
-                  "description": "`CONNECT`, or the plain HTTP request's method."
+                  "description": "`CONNECT`, or the method of a request the proxy saw: a plain\nHTTP request, or one inside an inspected connection."
                 },
                 "host": {
                   "type": "string"
@@ -35614,6 +35649,13 @@
                   "format": "uint16",
                   "minimum": 0,
                   "maximum": 65535
+                },
+                "path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The request's path and query, when the proxy saw one."
                 },
                 "allowed": {
                   "type": "boolean"
@@ -35630,7 +35672,7 @@
                     "string",
                     "null"
                   ],
-                  "description": "Why it was refused, or why an allowed one failed."
+                  "description": "Why it was refused, or why an allowed one failed; `inspected`\nfor a `CONNECT` the proxy looked inside."
                 },
                 "kind": {
                   "type": "string",
@@ -35644,7 +35686,7 @@
                 "port",
                 "allowed"
               ],
-              "description": "One destination the proxy decided."
+              "description": "One destination or request the proxy decided."
             }
           ],
           "description": "What the egress proxy did, recorded on the branch."
@@ -38927,7 +38969,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -38943,7 +38985,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -40650,7 +40692,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -40666,7 +40708,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -42392,7 +42434,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -42408,7 +42450,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -44130,7 +44172,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -44146,7 +44188,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -46233,7 +46275,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -46249,7 +46291,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {

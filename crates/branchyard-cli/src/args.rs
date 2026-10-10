@@ -3286,8 +3286,10 @@ pub struct Provision {
     /// 'github:write:issues.*'; only into its private home (--isolated or a sandbox). Repeatable
     #[arg(long = "connector", value_name = "GRANT", value_parser = branchyard::connectors::GrantEntry::parse)]
     connectors: Vec<branchyard::connectors::GrantEntry>,
-    /// The hosts the harness may reach (docs/egress.md): open, none, or HOST[:PORT] rules
-    /// separated by commas, such as 'github.com,*.npmjs.org:443'
+    /// The hosts the harness may reach (docs/egress.md): open, none, or rules
+    /// '[METHOD|METHOD ]HOST[:PORT][/PATH]' separated by commas, such as
+    /// 'github.com,*.npmjs.org:443' or 'GET|HEAD api.github.com/repos/*' (a rule naming a
+    /// method or path is held to inside the connection)
     #[arg(long, value_name = "open|none|HOSTS", value_parser = branchyard::Network::parse_flag)]
     network: Option<branchyard::Network>,
     /// Refuse to run where the network policy cannot be enforced (required), or run with the

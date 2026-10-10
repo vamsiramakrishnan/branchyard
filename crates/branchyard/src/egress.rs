@@ -11,6 +11,15 @@
 //! it too. Every destination the proxy decides is recorded on the branch as
 //! an [`EgressActivity::Decision`].
 //!
+//! A rule that names methods or a path (`GET api.github.com/repos/*`) is
+//! held to inside the connection: the proxy terminates TLS to that host
+//! with a certificate signed by the branch's own authority, kept under
+//! `.branchyard/egress/<branch>/`, and the harness is told to trust it
+//! through the variables the common TLS stacks read (`SSL_CERT_FILE`,
+//! `NODE_EXTRA_CA_CERTS`, ...), pointing at a bundle of the system's roots
+//! and that authority. A host-only rule stays a tunnel the proxy does not
+//! look inside.
+//!
 //! How much that holds depends on where the harness runs, and the turn
 //! records which it got ([`EgressActivity::Applied`]):
 //!
@@ -31,19 +40,47 @@
 
 use branchyard_support::best_effort;
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 
 use branchyard_provision::network::{Enforce, HostRule, Network};
-use branchyard_runtime::egress::{Decision, Proxy, Verdict};
+use branchyard_runtime::egress::{Authority, Decision, Interceptor, Proxy, Verdict};
 use branchyard_runtime::LocalProvider;
 use serde::{Deserialize, Serialize};
 
-use crate::state::Record;
+use crate::state::{Record, Store};
 use crate::{Activity, Provider, RecordedEvent, Yard};
 use branchyard_support::time::now_ms;
 
 /// The port the proxy's listener takes inside a confined harness's own
 /// network namespace.
 pub const CONFINED_PORT: u16 = 3128;
+
+/// The variables that make the tools a harness runs trust the branch's
+/// certificate authority, set only when its policy inspects a host:
+/// OpenSSL's and Go's, curl's, Python requests', Node's, Deno's, cargo's
+/// and git's. Each names the bundle of the system's roots and the
+/// authority, so nothing the harness trusted before stops being trusted.
+pub const TRUST_VARIABLES: [&str; 7] = [
+    "SSL_CERT_FILE",
+    "CURL_CA_BUNDLE",
+    "REQUESTS_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+    "DENO_CERT",
+    "CARGO_HTTP_CAINFO",
+    "GIT_SSL_CAINFO",
+];
+
+/// Where a system keeps its root certificates, by distribution; the first
+/// that exists is the bundle's base, after the engine's own
+/// `SSL_CERT_FILE`.
+const SYSTEM_ROOTS: [&str; 6] = [
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/ca-bundle.pem",
+    "/etc/pki/tls/cacert.pem",
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    "/etc/ssl/cert.pem",
+];
 
 /// How a turn's egress policy was applied.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -85,18 +122,28 @@ pub enum EgressActivity {
         /// Why it is not enforced, when it is not.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        /// The certificate bundle the harness is told to trust, when a
+        /// rule inspects a host: the system's roots and the branch's own
+        /// authority, under `.branchyard/egress/<branch>/`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ca_bundle: Option<String>,
     },
-    /// One destination the proxy decided.
+    /// One destination or request the proxy decided.
     Decision {
-        /// `CONNECT`, or the plain HTTP request's method.
+        /// `CONNECT`, or the method of a request the proxy saw: a plain
+        /// HTTP request, or one inside an inspected connection.
         method: String,
         host: String,
         port: u16,
+        /// The request's path and query, when the proxy saw one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
         allowed: bool,
         /// The rule that allowed it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rule: Option<String>,
-        /// Why it was refused, or why an allowed one failed.
+        /// Why it was refused, or why an allowed one failed; `inspected`
+        /// for a `CONNECT` the proxy looked inside.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
@@ -122,6 +169,7 @@ impl EgressActivity {
                 method,
                 host,
                 port,
+                path,
                 allowed,
                 rule,
                 reason,
@@ -134,11 +182,13 @@ impl EgressActivity {
                     true => format!("[{host}]"),
                     false => host.clone(),
                 };
-                let mut text = format!("egress {verdict}: {method} {host}:{port}");
-                match (allowed, rule, reason) {
-                    (true, Some(rule), None) => text.push_str(&format!(" by {rule}")),
-                    (_, _, Some(reason)) => text.push_str(&format!(" ({reason})")),
-                    _ => {}
+                let path = path.as_deref().unwrap_or_default();
+                let mut text = format!("egress {verdict}: {method} {host}:{port}{path}");
+                if let (true, Some(rule)) = (allowed, rule) {
+                    text.push_str(&format!(" by {rule}"));
+                }
+                if let Some(reason) = reason {
+                    text.push_str(&format!(" ({reason})"));
                 }
                 text
             }
@@ -275,11 +325,14 @@ pub(crate) fn prepare(
         .fold(network, |network, rule| network.with_rule(rule));
     let policy = network.to_string();
     let required = network.enforce == Enforce::Required;
-    let applied = |enforcement: Enforcement, reason: Option<String>| EgressActivity::Applied {
-        policy: policy.clone(),
-        allow: network.rules(),
-        enforcement,
-        reason,
+    let applied = |enforcement: Enforcement, reason: Option<String>, ca_bundle: Option<PathBuf>| {
+        EgressActivity::Applied {
+            policy: policy.clone(),
+            allow: network.rules(),
+            enforcement,
+            reason,
+            ca_bundle: ca_bundle.map(|p| p.display().to_string()),
+        }
     };
     let kind = crate::providers::of(record.provider.as_ref());
     if !kind.confines_egress() {
@@ -297,7 +350,7 @@ pub(crate) fn prepare(
             proxy: None,
             confined: false,
             env: Vec::new(),
-            applied: applied(Enforcement::NotApplied, Some(why)),
+            applied: applied(Enforcement::NotApplied, Some(why), None),
             _service: None,
         }));
     }
@@ -310,6 +363,20 @@ pub(crate) fn prepare(
     }
     let proxy = proxy(yard, &record.info.name, network.clone());
     let branch = &record.info.name;
+    // A rule that inspects needs the branch's authority, and the harness
+    // told to trust it.
+    let mut ca_bundle = None;
+    let mut trust = Vec::new();
+    if network.has_inspected_rules() {
+        let (authority, bundle) = authority(&yard.store(), branch)?;
+        let interceptor = Interceptor::new(authority, system_roots().as_deref())
+            .map_err(|e| format!("could not prepare TLS interception: {e}"))?;
+        proxy
+            .intercept(interceptor)
+            .map_err(|e| format!("could not prepare TLS interception: {e}"))?;
+        trust = trust_env(&bundle);
+        ca_bundle = Some(bundle);
+    }
     let (confined, env, enforcement, reason, endpoint) = match confinement {
         Ok(()) => (
             true,
@@ -348,13 +415,86 @@ pub(crate) fn prepare(
             crate::services::DEFAULT_TTL,
         )
         .ok();
+    let env = env.into_iter().chain(trust).collect();
     Ok(Some(Egress {
         proxy: Some(proxy),
         confined,
         env,
-        applied: applied(enforcement, reason),
+        applied: applied(enforcement, reason, ca_bundle),
         _service: service,
     }))
+}
+
+/// The branch's certificate authority, made on first use and kept under
+/// `.branchyard/egress/<branch>/` (`ca.key`, readable by its owner only,
+/// and `ca.pem`), and its bundle `ca-bundle.pem`, rewritten each turn: the
+/// system's roots, then the authority. An authority whose files cannot be
+/// read back is made anew.
+fn authority(store: &Store, branch: &str) -> Result<(Authority, PathBuf), String> {
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+    let dir = store.egress(branch);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    let key_path = dir.join("ca.key");
+    let cert_path = dir.join("ca.pem");
+    let kept = match (
+        std::fs::read_to_string(&cert_path),
+        std::fs::read_to_string(&key_path),
+    ) {
+        (Ok(cert), Ok(key)) => Authority::from_pem(branch, &cert, &key).ok(),
+        _ => None,
+    };
+    let authority = match kept {
+        Some(authority) => authority,
+        None => {
+            let authority = Authority::generate(branch)?;
+            let mut key = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&key_path)
+                .map_err(|e| format!("could not write {}: {e}", key_path.display()))?;
+            std::io::Write::write_all(&mut key, authority.key_pem().as_bytes())
+                .map_err(|e| format!("could not write {}: {e}", key_path.display()))?;
+            std::fs::write(&cert_path, authority.cert_pem())
+                .map_err(|e| format!("could not write {}: {e}", cert_path.display()))?;
+            authority
+        }
+    };
+    let bundle = dir.join("ca-bundle.pem");
+    let mut text = system_roots().unwrap_or_default();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(authority.cert_pem());
+    std::fs::write(&bundle, text)
+        .map_err(|e| format!("could not write {}: {e}", bundle.display()))?;
+    Ok((authority, bundle))
+}
+
+/// The system's root certificates, PEM: the engine's own `SSL_CERT_FILE`
+/// when it names a readable file, else the first of the usual bundles
+/// present. `None` on a system with neither; the harness then trusts the
+/// authority alone through the variables, and the proxy the Mozilla roots.
+fn system_roots() -> Option<String> {
+    std::env::var_os("SSL_CERT_FILE")
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(SYSTEM_ROOTS.iter().map(PathBuf::from))
+        .find_map(|path| std::fs::read_to_string(path).ok())
+}
+
+/// The trust variables, each naming `bundle`.
+fn trust_env(bundle: &Path) -> Vec<(String, String)> {
+    let value = bundle.display().to_string();
+    TRUST_VARIABLES
+        .iter()
+        .map(|name| ((*name).to_owned(), value.clone()))
+        .collect()
 }
 
 /// A proxy deciding by `network` and recording each decision on `branch`.
@@ -362,13 +502,23 @@ fn proxy(yard: &Yard, branch: &str, network: Network) -> Proxy {
     let yard = yard.clone();
     let branch = branch.to_owned();
     Proxy::new(
-        move |host, port| match network.rule_for(host, port) {
-            Some(rule) => Verdict {
-                allowed: true,
-                rule: Some(rule.to_string()),
-                loopback: rule.names_address(),
-            },
-            None => Verdict::default(),
+        move |host, port, request| {
+            // A request the proxy sees is held to the whole rule; a CONNECT
+            // it has not looked inside is allowed by any rule for the host,
+            // and looked inside when every such rule asks for it.
+            let rule = match request {
+                Some((method, path)) => network.rule_for_request(host, port, method, path),
+                None => network.rule_for(host, port),
+            };
+            match rule {
+                Some(rule) => Verdict {
+                    allowed: true,
+                    rule: Some(rule.to_string()),
+                    loopback: rule.names_address(),
+                    inspect: request.is_none() && network.inspects(host, port),
+                },
+                None => Verdict::default(),
+            }
         },
         move |decision: &Decision| {
             let event = RecordedEvent {
@@ -377,6 +527,7 @@ fn proxy(yard: &Yard, branch: &str, network: Network) -> Proxy {
                     method: decision.method.clone(),
                     host: decision.host.clone(),
                     port: decision.port,
+                    path: decision.path.clone(),
                     allowed: decision.allowed,
                     rule: decision.rule.clone(),
                     reason: decision.reason.clone(),
@@ -471,6 +622,7 @@ mod tests {
             method: "CONNECT".into(),
             host: "github.com".into(),
             port: 443,
+            path: None,
             allowed: true,
             rule: Some("github.com".into()),
             reason: None,
@@ -483,6 +635,7 @@ mod tests {
             method: "GET".into(),
             host: "::1".into(),
             port: 80,
+            path: None,
             allowed: false,
             rule: None,
             reason: Some("no rule allows it".into()),
@@ -491,12 +644,87 @@ mod tests {
             denied.describe(),
             "egress denied: GET [::1]:80 (no rule allows it)"
         );
+        let inspected = EgressActivity::Decision {
+            method: "CONNECT".into(),
+            host: "api.github.com".into(),
+            port: 443,
+            path: None,
+            allowed: true,
+            rule: Some("GET api.github.com/repos/*".into()),
+            reason: Some("inspected".into()),
+        };
+        assert_eq!(
+            inspected.describe(),
+            "egress allowed: CONNECT api.github.com:443 by GET api.github.com/repos/* (inspected)"
+        );
+        let inside = EgressActivity::Decision {
+            method: "POST".into(),
+            host: "api.github.com".into(),
+            port: 443,
+            path: Some("/repos/x/issues?a=1".into()),
+            allowed: false,
+            rule: None,
+            reason: Some("no rule allows it".into()),
+        };
+        assert_eq!(
+            inside.describe(),
+            "egress denied: POST api.github.com:443/repos/x/issues?a=1 (no rule allows it)"
+        );
         let applied = EgressActivity::Applied {
             policy: "none".into(),
             allow: Vec::new(),
             enforcement: Enforcement::Advisory,
             reason: Some("macOS".into()),
+            ca_bundle: None,
         };
         assert_eq!(applied.describe(), "egress advisory: none (macOS)");
+    }
+
+    #[test]
+    fn the_trust_variables_name_the_bundle_and_the_decision_follows_the_rule() {
+        let env = trust_env(Path::new("/r/.branchyard/egress/b/ca-bundle.pem"));
+        let names: Vec<_> = env.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, TRUST_VARIABLES);
+        assert!(env
+            .iter()
+            .all(|(_, v)| v == "/r/.branchyard/egress/b/ca-bundle.pem"));
+        // What the proxy's decision says, by the policy alone.
+        let network =
+            Network::parse_flag("GET api.github.com/repos/*, github.com, 127.0.0.1:9").unwrap();
+        let decide = |host: &str, port: u16, request: Option<(&str, &str)>| {
+            let rule = match request {
+                Some((method, path)) => network.rule_for_request(host, port, method, path),
+                None => network.rule_for(host, port),
+            };
+            rule.map(|rule| {
+                (
+                    rule.to_string(),
+                    rule.names_address(),
+                    request.is_none() && network.inspects(host, port),
+                )
+            })
+        };
+        assert_eq!(
+            decide("api.github.com", 443, None),
+            Some(("GET api.github.com/repos/*".to_owned(), false, true))
+        );
+        assert_eq!(
+            decide("api.github.com", 443, Some(("GET", "/repos/a/b"))),
+            Some(("GET api.github.com/repos/*".to_owned(), false, false))
+        );
+        assert_eq!(
+            decide("api.github.com", 443, Some(("POST", "/repos/a"))),
+            None
+        );
+        assert_eq!(decide("api.github.com", 443, Some(("GET", "/user"))), None);
+        assert_eq!(
+            decide("github.com", 443, None),
+            Some(("github.com".to_owned(), false, false))
+        );
+        assert_eq!(
+            decide("127.0.0.1", 9, Some(("DELETE", "/x"))),
+            Some(("127.0.0.1:9".to_owned(), true, false))
+        );
+        assert_eq!(decide("nobody.example", 443, None), None);
     }
 }
