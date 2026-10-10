@@ -23336,6 +23336,13 @@
               "maximum": 65535,
               "description": "The status the harness got."
             },
+            "translated": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the backend was asked for when the request was\ntranslated for an API the harness does not speak; usage is priced\nby it."
+            },
             "tokens": {
               "anyOf": [
                 {
@@ -28035,6 +28042,13 @@
               "minimum": 0,
               "maximum": 65535,
               "description": "The status the harness got."
+            },
+            "translated": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the backend was asked for when the request was\ntranslated for an API the harness does not speak; usage is priced\nby it."
             },
             "tokens": {
               "anyOf": [
@@ -36392,6 +36406,13 @@
               "minimum": 0,
               "maximum": 65535,
               "description": "The status the harness got."
+            },
+            "translated": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the backend was asked for when the request was\ntranslated for an API the harness does not speak; usage is priced\nby it."
             },
             "tokens": {
               "anyOf": [

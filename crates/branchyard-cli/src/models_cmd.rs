@@ -195,6 +195,9 @@ fn route_line(route: &models::Route) -> String {
     if let Some(rpm) = route.requests_per_minute {
         line.push_str(&format!("; {rpm} requests a minute"));
     }
+    if let Some(as_model) = &route.backend_model {
+        line.push_str(&format!("; translated as {as_model}"));
+    }
     line
 }
 
@@ -299,6 +302,7 @@ fn routes_json(gateway: &Gateway) -> Value {
                     "backends": r.backends.iter().map(|(n, w)| json!({"backend": n, "weight": w})).collect::<Vec<_>>(),
                     "fallbacks": r.fallbacks,
                     "requests_per_minute": r.requests_per_minute,
+                    "backend_model": r.backend_model,
                 })
             })
             .collect(),

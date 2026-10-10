@@ -754,6 +754,13 @@
           ],
           "format": "uint32",
           "minimum": 0
+        },
+        "backend_model": {
+          "description": "The model to ask a backend of another API for: a request for a\nClaude model translated for an OpenAI backend asks it for this\nmodel. Without it a route never crosses APIs.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,

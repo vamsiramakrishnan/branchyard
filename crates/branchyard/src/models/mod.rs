@@ -32,6 +32,7 @@
 
 pub(crate) mod gateway;
 pub mod pricing;
+mod translate;
 pub(crate) mod upstream;
 
 /// A backend's or server's base URL, parsed: scheme, host, port and path
@@ -78,6 +79,13 @@ pub enum Api {
 impl Api {
     pub fn as_str(&self) -> &'static str {
         self.into()
+    }
+
+    /// Whether a request to this API can be translated for a backend
+    /// speaking `backend`: Anthropic's Messages API onto OpenAI's chat
+    /// completions, nothing else (`translate`).
+    pub(crate) fn translates_to(self, backend: Api) -> bool {
+        self == Api::Anthropic && backend == Api::Openai
     }
 
     /// The provider's public API, for a backend that names no URL.
@@ -198,6 +206,13 @@ pub struct RouteConfig {
     /// process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requests_per_minute: Option<u32>,
+    /// The model the route's backends are asked for, when a backend
+    /// speaks another API than the request: a request for a Claude model
+    /// translated for an OpenAI backend asks it for this model
+    /// (`docs/model-gateway.md`, "Translation"). Without it, a route never
+    /// crosses APIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_model: Option<String>,
 }
 
 /// Daily and monthly limits (UTC), over every branch of the yard.
@@ -247,6 +262,25 @@ pub struct Route {
     pub backends: Vec<(String, u32)>,
     pub fallbacks: Vec<String>,
     pub requests_per_minute: Option<u32>,
+    /// The model a backend of another API is asked for; `None`: this
+    /// route never translates.
+    pub backend_model: Option<String>,
+}
+
+impl Route {
+    /// Whether a request to `api` may be translated for one of this
+    /// route's backends: the route names a `backend_model` and has a
+    /// backend speaking an API the request's translates to.
+    fn bridges(&self, gateway: &Gateway, api: Api) -> bool {
+        self.backend_model.is_some()
+            && self
+                .backends
+                .iter()
+                .map(|(name, _)| name)
+                .chain(&self.fallbacks)
+                .filter_map(|name| gateway.backend(name))
+                .any(|b| api.translates_to(b.api))
+    }
 }
 
 /// Who signs the turns' tokens: the connector gateway's keys and issuer
@@ -388,6 +422,7 @@ impl Gateway {
                     .collect(),
                 fallbacks: r.fallbacks.clone(),
                 requests_per_minute: r.requests_per_minute,
+                backend_model: r.backend_model.clone(),
             });
         }
         let budget = config.budget.clone().unwrap_or_default();
@@ -441,6 +476,21 @@ impl Gateway {
         self.backends.iter().any(|b| b.api == api)
     }
 
+    /// Whether a harness speaking `api`, allowed `models` (globs; none
+    /// means any), is served: by a backend speaking `api`, or by a route
+    /// that translates for one of its models.
+    pub(crate) fn serves_for(&self, api: Api, models: &[String]) -> bool {
+        self.serves(api)
+            || self.routes.iter().any(|r| {
+                r.bridges(self, api)
+                    && (models.is_empty()
+                        || models.iter().any(|m| {
+                            branchyard_provision::connectors::glob_match(&r.model, m)
+                                || branchyard_provision::connectors::glob_match(m, &r.model)
+                        }))
+            })
+    }
+
     fn by_branch(&self, branch: &str) -> String {
         match &self.branch_scope {
             Some(scope) => format!("{scope}/{branch}"),
@@ -451,8 +501,13 @@ impl Gateway {
     /// The backends to try for `model` on `api`, in order: the route's
     /// weighted backends (one chosen by weight first, then the rest in
     /// order), then its fallbacks. Without a route, every backend of
-    /// `api` in order. Also the route's index, for its rate limit.
+    /// `api` in order. Also the route's index, for its rate limit. A
+    /// route naming a `backend_model` also offers its backends of an API
+    /// the request translates to.
     pub(crate) fn plan(&self, api: Api, model: Option<&str>) -> (Option<usize>, Vec<&Backend>) {
+        let usable = |r: &Route, b: &Backend| {
+            b.api == api || (r.backend_model.is_some() && api.translates_to(b.api))
+        };
         let route = model.and_then(|m| {
             self.routes.iter().enumerate().find(|(_, r)| {
                 branchyard_provision::connectors::glob_match(&r.model, m)
@@ -461,7 +516,7 @@ impl Gateway {
                         .map(|(name, _)| name)
                         .chain(&r.fallbacks)
                         .filter_map(|name| self.backend(name))
-                        .any(|b| b.api == api)
+                        .any(|b| usable(r, b))
             })
         });
         let Some((index, route)) = route else {
@@ -496,7 +551,7 @@ impl Gateway {
         let order = names
             .into_iter()
             .filter_map(|n| self.backend(n))
-            .filter(|b| b.api == api)
+            .filter(|b| usable(route, b))
             .collect();
         (Some(index), order)
     }
@@ -691,6 +746,11 @@ pub struct ModelCall {
     pub reason: Option<String>,
     /// The status the harness got.
     pub status: u16,
+    /// The model the backend was asked for when the request was
+    /// translated for an API the harness does not speak; usage is priced
+    /// by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translated: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Tokens>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -714,6 +774,9 @@ impl ModelCall {
         let mut out = format!("{model} {}", self.decision);
         if let Some(backend) = &self.backend {
             out.push_str(&format!(" via {backend}"));
+        }
+        if let Some(as_model) = &self.translated {
+            out.push_str(&format!(" as {as_model}"));
         }
         let mut detail = vec![self.status.to_string()];
         if let Some(reason) = &self.reason {
@@ -820,9 +883,14 @@ fn direct_reason(gateway: &Gateway, record: &Record, api: Option<Api>) -> Option
             record.info.harness
         ));
     }
+    let models = spec
+        .models
+        .as_ref()
+        .map(|m| m.allow.as_slice())
+        .unwrap_or_default();
     match api {
-        Some(api) if !gateway.serves(api) => Some(format!(
-            "no backend serves the {api} API {} speaks",
+        Some(api) if !gateway.serves_for(api, models) => Some(format!(
+            "no backend serves the {api} API {} speaks, and no route translates for it",
             record.info.harness
         )),
         None if gateway.backends.is_empty() => Some("the gateway has no backends".to_owned()),
@@ -935,7 +1003,7 @@ pub(crate) fn prepare(
         .map_or_else(|| gateway.signer.subject.clone(), |a| a.subject.clone());
     let served: Vec<Api> = [Api::Anthropic, Api::Openai]
         .into_iter()
-        .filter(|a| gateway.serves(*a))
+        .filter(|a| gateway.serves_for(*a, &access.allow))
         .collect();
     let turn = gateway::TurnState {
         yard: yard.clone(),
@@ -973,11 +1041,11 @@ pub(crate) fn prepare(
             .ok(),
     );
     let mut env = Vec::new();
-    if gateway.serves(Api::Anthropic) {
+    if served.contains(&Api::Anthropic) {
         env.push(("ANTHROPIC_BASE_URL".to_owned(), format!("{url}/anthropic")));
         env.push(("ANTHROPIC_API_KEY".to_owned(), token.clone()));
     }
-    if gateway.serves(Api::Openai) {
+    if served.contains(&Api::Openai) {
         env.push(("OPENAI_BASE_URL".to_owned(), format!("{url}/openai/v1")));
         env.push(("OPENAI_API_KEY".to_owned(), token.clone()));
     }
@@ -1218,6 +1286,99 @@ mod tests {
             ]
         );
         assert!(hosts("gemini-cli").is_empty());
+    }
+
+    #[test]
+    fn a_route_naming_a_backend_model_translates_for_an_openai_backend() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "backends": {
+                "o": {"api": "openai", "url": "http://127.0.0.1:4"},
+                "g": {"api": "generic", "url": "http://127.0.0.1:5"}
+            },
+            "routes": [
+                {"model": "claude-*", "backends": ["o"], "backend_model": "gpt-5"},
+                {"model": "mistral-*", "backends": ["g"], "backend_model": "mistral"},
+                {"model": "gpt-*", "backends": ["o"]}
+            ]
+        }))
+        .unwrap();
+        let gateway = Gateway::new(&config, signer(), |n| KeySource::Env(n.into())).unwrap();
+        // The route's OpenAI backend serves the Anthropic request, asked for
+        // the route's model.
+        let (route, order) = gateway.plan(Api::Anthropic, Some("claude-sonnet-4-6"));
+        assert_eq!(route, Some(0));
+        assert_eq!(
+            order.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+            ["o"]
+        );
+        assert_eq!(gateway.routes[0].backend_model.as_deref(), Some("gpt-5"));
+        // A generic backend is never translated to; without a route,
+        // nothing crosses APIs.
+        assert!(gateway
+            .plan(Api::Anthropic, Some("mistral-large"))
+            .1
+            .is_empty());
+        assert!(gateway.plan(Api::Anthropic, Some("llama-3")).1.is_empty());
+        assert!(gateway.plan(Api::Anthropic, None).1.is_empty());
+        // A harness stays on the gateway for the models the route covers,
+        // and runs direct for others.
+        for allow in [["claude-*"], ["*"], ["claude-opus-*"]] {
+            let record = record(
+                "claude-code",
+                serde_json::json!({"models": {"allow": allow}}),
+            );
+            assert_eq!(
+                direct_reason(&gateway, &record, harness_api("claude-code")),
+                None,
+                "{allow:?}"
+            );
+        }
+        let mistral = record(
+            "claude-code",
+            serde_json::json!({"models": {"allow": ["mistral-*"]}}),
+        );
+        let why = direct_reason(&gateway, &mistral, harness_api("claude-code")).unwrap();
+        assert!(why.contains("no route translates"), "{why}");
+        assert!(gateway.serves_for(Api::Anthropic, &["claude-*".into()]));
+        assert!(!gateway.serves_for(Api::Anthropic, &["mistral-*".into()]));
+        assert!(gateway.serves_for(Api::Openai, &[]));
+        assert!(!gateway.serves(Api::Anthropic));
+        // Without a backend model, a route never bridges.
+        let plain: Config = serde_json::from_value(serde_json::json!({
+            "backends": {"o": {"api": "openai", "url": "http://127.0.0.1:4"}},
+            "routes": [{"model": "claude-*", "backends": ["o"]}]
+        }))
+        .unwrap();
+        let gateway = Gateway::new(&plain, signer(), |n| KeySource::Env(n.into())).unwrap();
+        assert!(gateway
+            .plan(Api::Anthropic, Some("claude-sonnet-4-6"))
+            .1
+            .is_empty());
+        assert!(!gateway.serves_for(Api::Anthropic, &["claude-*".into()]));
+        let claude = record(
+            "claude-code",
+            serde_json::json!({"models": {"allow": ["claude-*"]}}),
+        );
+        assert!(direct_reason(&gateway, &claude, harness_api("claude-code")).is_some());
+        // The call says what the backend was asked for.
+        let call = ModelCall {
+            model: "claude-sonnet-4-6".into(),
+            api: Api::Anthropic,
+            decision: "allowed".into(),
+            backend: Some("o".into()),
+            reason: None,
+            status: 200,
+            translated: Some("gpt-5".into()),
+            tokens: None,
+            cost_usd: None,
+            latency_ms: 12,
+            streamed: false,
+            failed_over: Vec::new(),
+        };
+        assert_eq!(
+            call.describe(),
+            "claude-sonnet-4-6 allowed via o as gpt-5 (200, 12 ms)"
+        );
     }
 
     #[test]

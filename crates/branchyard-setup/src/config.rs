@@ -920,6 +920,11 @@ pub struct ModelRouteConfig {
     /// process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requests_per_minute: Option<u32>,
+    /// The model to ask a backend of another API for: a request for a
+    /// Claude model translated for an OpenAI backend asks it for this
+    /// model. Without it a route never crosses APIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_model: Option<String>,
 }
 
 /// `[models.budget]`.

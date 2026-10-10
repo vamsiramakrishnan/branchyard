@@ -264,6 +264,11 @@ for spec in sys.argv[2:]:
             line += " ?"
     if retry:
         line += f" retry={retry}"
+    if status == 200 and kind == "json" and api == "anthropic":
+        try:
+            line += " text=" + json.loads(data)["content"][0]["text"]
+        except Exception:
+            line += " text=?"
     print(line)
 "#,
     )
@@ -999,4 +1004,126 @@ fn a_delegated_child_stays_on_the_gateway_within_its_parents_models() {
             "{name} ran off the gateway"
         );
     }
+}
+
+/// A route naming a `backend_model` carries a Claude Code request to an
+/// OpenAI backend: the request translated to a chat completion for that
+/// model, the answer (streamed or not) translated back to Anthropic's
+/// shape, usage read from the backend's and priced by its model.
+#[test]
+fn a_claude_request_is_translated_for_an_openai_backend() {
+    let f = Fixture::new();
+    let openai = mock(Behavior::Answer);
+    use_gateway(
+        &f,
+        json!({
+            "backends": {"openai": {"api": "openai", "url": openai.url(), "key": "openai"}},
+            "routes": [{"model": "claude-*", "backends": ["openai"], "backend_model": "gpt-5"}]
+        }),
+    );
+    let script = harness(&f.dir);
+    let branch = f
+        .task(&prompt(
+            &script,
+            "direct",
+            &[
+                "anthropic,/v1/messages,claude-sonnet-4-6,json",
+                "anthropic,/v1/messages,claude-sonnet-4-6,stream",
+                "anthropic,/v1/messages/count_tokens,claude-sonnet-4-6,json",
+            ],
+        ))
+        .options(options(&f, on_gateway(&["claude-sonnet-*"])))
+        .name("translated")
+        .run()
+        .unwrap();
+    let events = branch.events().unwrap();
+    said(
+        &events,
+        &[
+            "real keys in env: none",
+            "call claude-sonnet-4-6 json: 200 events=0 text=hello",
+            "call claude-sonnet-4-6 stream: 200 events=6",
+            "call claude-sonnet-4-6 json: 502 events=0",
+        ],
+    );
+    // The gateway says it serves Anthropic's API, through the route.
+    let served = events
+        .iter()
+        .find_map(|e| match &e.activity {
+            Activity::Model(m) => match m.as_ref() {
+                ModelActivity::Gateway { apis, .. } => Some(apis.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap();
+    assert!(served.contains(&models::Api::Anthropic), "{served:?}");
+    // The backend saw chat completions for its model, with the real key
+    // and none of Anthropic's headers; the stream asked for its usage.
+    let seen = openai.seen();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    for request in &seen {
+        assert_eq!(request.path, "/v1/chat/completions");
+        let bearer = format!("Bearer {OPENAI_KEY}");
+        assert_eq!(request.header("authorization"), Some(bearer.as_str()));
+        assert_eq!(request.header("anthropic-version"), None);
+        assert_eq!(request.body["model"], "gpt-5");
+        assert_eq!(
+            request.body["messages"],
+            json!([{"role": "user", "content": "hi"}])
+        );
+        assert_eq!(request.body["max_completion_tokens"], 16);
+    }
+    assert_eq!(seen[0].body.get("stream"), None);
+    assert_eq!(seen[1].body["stream"], true);
+    assert_eq!(seen[1].body["stream_options"]["include_usage"], true);
+    // Recorded as the harness's model, translated, with the backend's
+    // usage (cached prompt tokens as cache reads) priced as gpt-5.
+    let recorded = calls(&events);
+    assert_eq!(recorded.len(), 3, "{recorded:?}");
+    for call in &recorded[..2] {
+        assert_eq!(
+            (call.decision.as_str(), call.status, call.api),
+            ("allowed", 200, models::Api::Anthropic)
+        );
+        assert_eq!(call.model, "claude-sonnet-4-6");
+        assert_eq!(call.backend.as_deref(), Some("openai"));
+        assert_eq!(call.translated.as_deref(), Some("gpt-5"));
+        assert_eq!(
+            call.tokens,
+            Some(models::Tokens {
+                input: 40,
+                output: 20,
+                cache_read: 60,
+                ..models::Tokens::default()
+            })
+        );
+        assert!(call.cost_usd.is_some_and(|c| c > 0.0), "{call:?}");
+    }
+    assert_eq!(
+        recorded.iter().map(|c| c.streamed).collect::<Vec<_>>(),
+        [false, true, false]
+    );
+    // What the route cannot translate is refused, not sent anywhere.
+    let refused = &recorded[2];
+    assert_eq!((refused.decision.as_str(), refused.status), ("failed", 502));
+    assert!(
+        refused
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains("count_tokens is not translated")),
+        "{refused:?}"
+    );
+    // Usage rows carry the model the money went to.
+    let rows = f.yard.model_usage(0).unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows
+        .iter()
+        .all(|r| r.model == "gpt-5" && r.api == models::Api::Openai && r.backend == "openai"));
+    assert!(
+        (branch.info().cost_usd.unwrap_or(0.0)
+            - recorded.iter().filter_map(|c| c.cost_usd).sum::<f64>())
+        .abs()
+            < 1e-9
+    );
 }

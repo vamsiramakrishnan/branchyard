@@ -4,7 +4,7 @@ A harness normally calls its model provider itself, with a key in its environmen
 
 The same token carries the turn's other scopes: its connector grant, its network policy and what it may delegate. What a turn may reach is the intersection of its seat's ceiling, its person's ceiling and what the person approved. See [one scope](#one-scope).
 
-Status, 1 October 2026: built and tested hermetically against mock Anthropic and OpenAI servers on loopback, with a fake harness (a Python script the fake ACP agent runs). No real provider was called and no real harness has used it.
+Status, 10 October 2026: built and tested hermetically against mock Anthropic and OpenAI servers on loopback, with a fake harness (a Python script the fake ACP agent runs), including a Claude request translated for an OpenAI backend both ways. No real provider was called and no real harness has used it.
 
 ## Turning it on
 
@@ -61,6 +61,11 @@ weights = [3, 1]
 fallbacks = []                           # tried in order after the weighted ones
 requests_per_minute = 120                # per route, in this process
 
+[[models.routes]]
+model = "claude-haiku-*"                 # a Claude request served by an OpenAI backend:
+backends = ["openai"]                    # translated, and asked for this model
+backend_model = "gpt-5-mini"
+
 [models.budget]                          # over every branch of the repository, UTC
 daily_usd = 20.0
 monthly_usd = 300.0
@@ -107,15 +112,49 @@ The rest of the path and the query follow the backend's base URL. A request's mo
 1. **The token.** Sent as `x-api-key` or `Authorization: Bearer`, as the harness's SDK sends its key. It must be this turn's token, verify against the yard's public keys, be unexpired, and carry `by_models`. Otherwise `401`.
 2. **The scope.** A model outside `by_models` is refused `403` and never forwarded. A body that says it is JSON and is not is refused `400`. A request that names no model, such as listing models, is forwarded without this check.
 3. **Budgets.** The branch's (`--budget-usd`: what the branch had spent, with what its children reserved, plus this turn's calls) and the repository's daily and monthly cost and tokens, from the stored usage. Over any: `403`, and nothing is forwarded.
-4. **The route.** The first route whose `model` glob matches and that has a backend of the request's API. Its `requests_per_minute` is held over a sliding minute in this process: over it, `429` with `Retry-After`. Without a matching route, every backend of that API, in name order.
+4. **The route.** The first route whose `model` glob matches and that has a backend of the request's API, or, when the route names a `backend_model`, a backend of an API the request [translates](#translation) to. Its `requests_per_minute` is held over a sliding minute in this process: over it, `429` with `Retry-After`. Without a matching route, every backend of that API, in name order.
 5. **The backend.** One of the route's backends chosen by weight (seeded by `[models] seed`, else at random), then its other backends in order, then its fallbacks. The next is tried when a backend refuses the connection, has no key, or answers `5xx` or `429`. When every one fails, the harness gets the last one's answer, as it would from the provider. A connection that breaks after the request was sent is not retried: the request may have been billed.
-6. **The request.** The harness's headers, without its credentials, hop-by-hop headers and `Accept-Encoding`, plus the backend's key (`x-api-key` for Anthropic, `Authorization: Bearer` for OpenAI, the configured header for a generic backend) and `Accept-Encoding: identity`, so usage can be read. An OpenAI chat completion that streams is asked for its usage (`stream_options.include_usage`) unless it already says. Nothing else in the body changes.
-7. **The response.** Streamed to the harness as it arrives (`Transfer-Encoding: chunked`, `Connection: close`), server-sent events included, while its usage is read as it passes.
+6. **The request.** The harness's headers, without its credentials, hop-by-hop headers and `Accept-Encoding`, plus the backend's key (`x-api-key` for Anthropic, `Authorization: Bearer` for OpenAI, the configured header for a generic backend) and `Accept-Encoding: identity`, so usage can be read. An OpenAI chat completion that streams is asked for its usage (`stream_options.include_usage`) unless it already says. Nothing else in the body changes, unless the backend speaks another API than the harness: then the body is [translated](#translation).
+7. **The response.** Streamed to the harness as it arrives (`Transfer-Encoding: chunked`, `Connection: close`), server-sent events included, while its usage is read as it passes; a translated response is turned back into the harness's API on the way.
 8. **The record.** Before the response's last chunk reaches the harness, the call is metered, stored as a usage record, and recorded on the branch as a `model` event, so the next call is held to what this one cost.
 
 The gateway reads the harness's request and each backend's response with the workspace's one HTTP/1.1 codec, [`branchyard-wire`](../crates/branchyard-wire), which refuses what it cannot frame instead of guessing. A request with both `Content-Length` and `Transfer-Encoding`, a duplicate or non-decimal `Content-Length`, a transfer coding that does not end in `chunked`, a chunk size that is not hexadecimal digits (or overflows), a chunk not followed by CRLF, a body shorter than it said, or a head over 64 KiB is refused `400` and never forwarded. A backend's response broken the same way, or cut off partway through its body, fails the call (`502` before the response starts, a broken-off stream after) rather than passing a short body to the harness. A response with both lengths follows `Transfer-Encoding`, as RFC 9112 says a client must. The corpus of valid and malformed messages in `crates/branchyard-wire/src/corpus.rs` runs against the gateway's request reader, the backend response reader, the SDK client and the sync mock server.
 
 Refusals are in the provider's own error shape (`permission_error`, `rate_limit_error`, `authentication_error`), with `X-Branchyard-Gateway` naming the decision.
+
+### Translation
+
+A route that names a `backend_model` may carry a request to a backend speaking another API: today, Anthropic's Messages API (what Claude Code speaks) onto OpenAI's chat completions (what OpenAI, and the servers that imitate it, speak: vLLM, Ollama, LiteLLM, OpenRouter, each an `openai` backend with its own `url`). So a Claude Code branch can be routed to any such backend:
+
+```toml
+[models.backends.local]
+api = "openai"
+url = "http://127.0.0.1:8000"
+key = "LOCAL_KEY"
+
+[[models.routes]]
+model = "claude-*"
+backends = ["local"]
+backend_model = "qwen3-coder"            # what the backend is asked for
+```
+
+Coder's anyclaude (MIT, vendored under `vendor/anyclaude`) is the reference for what maps to what; `crates/branchyard/src/models/translate.rs` is the port. What maps:
+
+| Anthropic | OpenAI chat |
+|---|---|
+| `system` (text or text blocks) | a `system` message |
+| `messages`: text, `image` (base64 or URL), `tool_use`, `tool_result` | `content` (string, or text and `image_url` parts), `tool_calls`, `tool` messages placed before the rest of their user turn, as OpenAI requires |
+| `tools` with an `input_schema`; `tool_choice` `auto`, `any`, `none`, `tool`; `disable_parallel_tool_use` | functions; `auto`, `required`, `none`, that function; `parallel_tool_calls: false` |
+| `max_tokens`, `stop_sequences`, `temperature`, `top_p`, `metadata.user_id`, `stream` | `max_completion_tokens`, `stop`, the same, `user`, `stream` with `stream_options.include_usage` |
+| `thinking` (by `budget_tokens`) | `reasoning_effort` `low` under 4096, `medium` under 16384, else `high` |
+| a completion's `content`, `tool_calls`, `reasoning_content`; `finish_reason` `stop`, `length`, `tool_calls`, `content_filter` | text, `tool_use` (arguments parsed) and `thinking` blocks; `stop_reason` `end_turn`, `max_tokens`, `tool_use`, `refusal` |
+| a stream's chunks | `message_start`, a `content_block_start`/`delta`/`stop` per text, thinking or tool block, `message_delta` with the stop reason and usage, `message_stop` |
+| `usage`: `prompt_tokens`, `completion_tokens`, `prompt_tokens_details.cached_tokens` | `input_tokens` (uncached), `output_tokens`, `cache_read_input_tokens` |
+| an error body | `{"type": "error", "error": {"type", "message"}}`, the type by the status, the status kept |
+
+Dropped: `thinking` blocks on the way out (the backend never saw them), `top_k`, server tools (no `input_schema`), Anthropic's own headers (`anthropic-version`, `anthropic-beta`). Refused `400`: a `document` block, an unknown block type, a message with a role other than `user` or `assistant`. Not translated, so a route with only such a backend answers `502` for them: `/v1/messages/count_tokens` and the rest of Anthropic's API. A `thinking` block comes back without a signature, so it cannot be sent back to Anthropic in a later turn. The response's `model` is the one the harness asked for; the call's `translated` names the one the backend served, and usage is priced by that model (the usage row records it).
+
+A route without `backend_model` never crosses APIs: a request's API must match the backend's, as before. A harness speaking an API no backend speaks runs [direct](#subscription-logins-and-direct-mode) unless a translating route covers one of its allowed models.
 
 ### Usage and cost
 
@@ -194,7 +233,7 @@ What turns share is shared through the store, not a process: usage records, so p
 
 | Where | What |
 |---|---|
-| `by log` | `models through the gateway at http://127.0.0.1:41203 (claude-*)`, then `model: claude-sonnet-4-6 allowed via anthropic (200, 1210 in / 80 out, $0.0048, 812 ms)` per call, refusals with their reason, budget alerts, `models direct: …`, and `access narrowed …` |
+| `by log` | `models through the gateway at http://127.0.0.1:41203 (claude-*)`, then `model: claude-sonnet-4-6 allowed via anthropic (200, 1210 in / 80 out, $0.0048, 812 ms)` per call (`via local as qwen3-coder` when translated), refusals with their reason, budget alerts, `models direct: …`, and `access narrowed …` |
 | `by log --json`, event streams | `{"activity": "model", "model": {"kind": "gateway"\|"direct"\|"call"\|"alert", ...}, "text"}`; `{"activity": "access", ...}` |
 | `by show` | `models  gateway (claude-*); 3 calls, 4.2k in / 310 out tokens, $0.0123; refused 1 denied`, or `models  direct (…)` |
 | `by show --json` | `models: {mode, models, reason, calls, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, unpriced, refused}`; `cost_usd` is the metered cost |
@@ -210,7 +249,7 @@ What turns share is shared through the store, not a process: usage records, so p
 
 - **No real provider or harness.** Every test uses mock upstreams on loopback. Whether Claude Code, Codex or any other harness honors the base URL variables for everything it does, and with which paths, is untested.
 - **Subscription logins** cannot go through the gateway (above). A login Branchyard does not see is not detected.
-- **Provider features not proxied.** The gateway passes the body through unchanged except for `stream_options.include_usage`; it does not translate between APIs, rewrite models per backend, or pass batch, file, realtime or WebSocket APIs anything special. A backend must speak the same API as the request (a route never sends an Anthropic request to an OpenAI backend). Coder's anyclaude (MIT), which runs Claude Code on OpenAI, Google and xAI models by translating the Messages API, is vendored as the reference for adding that ([comparison](comparison.md#coder)).
+- **Provider features not proxied.** The gateway passes the body through unchanged except for `stream_options.include_usage`, and [translation](#translation) when a route asks for it; it does not pass batch, file, realtime or WebSocket APIs anything special. Translation goes one way, Anthropic's Messages API onto OpenAI's chat completions: an OpenAI request is never translated for an Anthropic backend, and the `/v1/responses` API is not a translation target. No real Claude Code has run through it; what Claude Code sends that the table above does not cover (a `document` block, `count_tokens`) is refused rather than guessed.
 - **Prompt caching** passes through: the harness's `cache_control` blocks and headers go to the backend as they are, and cache reads and writes are metered and priced. A weighted choice can send a conversation's next call to another backend, whose cache is cold; give a route one backend (and fallbacks) to keep caches warm. No responses are cached by the gateway.
 - **Rate limits** are per process; several `by` processes or servers each hold their own window. Tokens per minute are not limited.
 - **Budget alerts** are recorded once per period in each process, as events; nothing is sent.
@@ -223,8 +262,8 @@ What turns share is shared through the store, not a process: usage records, so p
 ## Tests
 
 - `branchyard-provision` (3): model access flags, globs and the wire form; narrowing for children and ceiling intersection; network ceiling intersection.
-- `branchyard` (15 unit, and 1 conformance check): usage from each provider's fields, streamed across chunk boundaries; catalog pricing; the seeded weighted order and its 3:1 share over 400 calls; the route rules; rate windows freeing a slot after a minute; direct mode for subscription logins and unserved APIs and the hosts it allows; path routing; the usage request for OpenAI chat streams; errors in each provider's shape; base URL parsing; refused configurations; UTC day and month starts; the network digest; token claims (the contract's unchanged without the new scopes, old claims parsed, the new ones signed and verified). The storage conformance suite's `usage` check runs on SQLite and on PostgreSQL.
-- `branchyard` engine (`tests/models.rs`, 7, mock upstreams and the fake ACP agent running a Python harness): both APIs, streamed and not, through the gateway with the real key injected, the token never upstream, the key nowhere in the harness's environment or the event log, exact tokens and costs, one usage row per call and the branch's cost equal to their sum, and the token's claims; scope, wrong-token and unreadable-body refusals with nothing forwarded; fallback over a refused connection, a 503 and a 429, and every backend failing; a rate limit with `Retry-After`, a daily budget refusal with one alert, and the branch's own budget; a person's ceiling narrowing the token; a required egress policy under network-namespace confinement reaching the gateway and not the upstream; a delegated child staying on the gateway within its parent's models, and refused outside them.
+- `branchyard` (19 unit, and 1 conformance check): usage from each provider's fields, streamed across chunk boundaries; catalog pricing; the seeded weighted order and its 3:1 share over 400 calls; the route rules; a route with a `backend_model` offering its OpenAI backend to an Anthropic request, keeping the harness on the gateway for the models it covers and no other, and never bridging without one; rate windows freeing a slot after a minute; direct mode for subscription logins and unserved APIs and the hosts it allows; path routing; the usage request for OpenAI chat streams; errors in each provider's shape; base URL parsing; refused configurations; UTC day and month starts; the network digest; token claims (the contract's unchanged without the new scopes, old claims parsed, the new ones signed and verified); translation of a Messages request (system, text, image, tool use and result ordering, tools and server tools, every tool choice, sampling, thinking, streaming; documents and other roles refused), of a completion (text, tool calls with parsed and unparsable arguments, reasoning, every finish reason, usage) and of a chat stream into Anthropic's events, identical whole, byte by byte and in uneven pieces, with reasoning, an error chunk and a stream that ends without `[DONE]`. The storage conformance suite's `usage` check runs on SQLite and on PostgreSQL.
+- `branchyard` engine (`tests/models.rs`, 8, mock upstreams and the fake ACP agent running a Python harness): both APIs, streamed and not, through the gateway with the real key injected, the token never upstream, the key nowhere in the harness's environment or the event log, exact tokens and costs, one usage row per call and the branch's cost equal to their sum, and the token's claims; scope, wrong-token and unreadable-body refusals with nothing forwarded; fallback over a refused connection, a 503 and a 429, and every backend failing; a rate limit with `Retry-After`, a daily budget refusal with one alert, and the branch's own budget; a person's ceiling narrowing the token; a required egress policy under network-namespace confinement reaching the gateway and not the upstream; a delegated child staying on the gateway within its parent's models, and refused outside them; a Claude request on a route to an OpenAI backend, translated both ways (the harness reads `hello` from the message and six events from the stream, the backend sees chat completions for `gpt-5` with the real key and none of Anthropic's headers, the stream asked for its usage), recorded as the harness's model translated as `gpt-5`, the backend's usage priced by that model and its rows naming it, and `count_tokens` refused `502` as not translated.
 - `by` (4 unit, 1 with the built `by`): `--model-gateway` and `by models` parsing; `[models]` defaults and provider keys kept from the harness; key sources through `[secrets]`; rig seats' models; then `[models]` putting a branch on the gateway, `by show`, `by show --json`, `by log`, `by log --json`, `by models`, `by models --json`, `by stats --json`, a flag narrowing a branch, and a bad `[models]` refused by `by config validate`.
 - `branchyard-setup` (1): `[models]` parsed, refused and rendered back.
 - `branchyard-server` (2): `models` and `ceilings` loaded, the repository's gateway built with keys from the server's secrets, bad ones refused; model calls as metrics.
