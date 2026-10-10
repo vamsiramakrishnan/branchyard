@@ -16,11 +16,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
-use branchyard_client::api::{OperationState, PolicySpec, TaskRequest};
+use branchyard_client::api::{OperationKind, OperationState, PolicySpec, SendRequest, TaskRequest};
 use branchyard_client::new_key;
 use branchyard_client::triggers::{
-    Conditions, EventSource, Precheck, RunState, TriggerPolicy, TriggerRun, TriggerSpec,
-    TriggerTestRequest, When,
+    Busy, Conditions, Deliver, EventSource, Precheck, RunState, TriggerPolicy, TriggerRun,
+    TriggerSpec, TriggerTestRequest, When,
 };
 use branchyard_client::Client;
 use branchyard_server::config::WorkspaceScripts;
@@ -53,6 +53,7 @@ fn spec(name: &str, when: When, prompt: &str) -> TriggerSpec {
             ..TaskRequest::default()
         },
         route: None,
+        deliver: None,
         precheck: None,
         enabled: true,
         policy: TriggerPolicy::default(),
@@ -165,6 +166,184 @@ fn a_schedule_fires_once_when_the_clock_reaches_it_and_its_outcome_is_recorded()
     assert_eq!(client.trigger_runs("nightly", 10).unwrap().len(), 1);
     let prompt = client.repo("app").branch("nightly-20260921-1513").unwrap();
     assert_eq!(prompt.name, "nightly-20260921-1513");
+}
+
+/// A trigger that delivers to a branch keeps one branch alive run after
+/// run, as a chat assistant keeps a session: the first run creates it from
+/// the task, later runs continue it, and while it runs a turn the
+/// trigger's busy policy decides: skip (a heartbeat), steer, or queue.
+#[test]
+fn a_trigger_that_delivers_to_a_branch_continues_it_run_after_run() {
+    let f = Fixture::new();
+    let mut config = f.config();
+    let clock = with_clock(&mut config);
+    let server = Server::start(config);
+    let client = server.client();
+    let app = client.repo("app");
+    let mut s = spec(
+        "heartbeat",
+        When::Interval { seconds: 60 },
+        "WRITE beat.txt={{scheduled_at}}",
+    );
+    s.deliver = Some(Deliver {
+        branch: "assistant".into(),
+        busy: Busy::Skip,
+    });
+    client.create_trigger(&s, &new_key()).unwrap();
+    // The first run creates the branch, under the delivered name.
+    clock.store(T0 + 60_000 + 5_000, Ordering::SeqCst);
+    let runs = runs_when(&client, "heartbeat", "the first run to fire", |runs| {
+        runs.iter().any(|r| r.state == RunState::Fired)
+    });
+    assert_eq!(runs[0].branches, ["assistant"], "{runs:?}");
+    let op = await_operation(&client, runs[0].operation.as_ref().unwrap());
+    assert_eq!(
+        (op.kind, op.state),
+        (OperationKind::Task, OperationState::Succeeded),
+        "{op:?}"
+    );
+    assert_eq!(app.branch("assistant").unwrap().turns, 1);
+    // The second continues it: a send, one more turn, no second branch.
+    clock.store(T0 + 120_000 + 5_000, Ordering::SeqCst);
+    let runs = runs_when(&client, "heartbeat", "the second run to fire", |runs| {
+        runs.len() == 2 && runs[0].state == RunState::Fired
+    });
+    assert_eq!(runs[0].branches, ["assistant"]);
+    let op = await_operation(&client, runs[0].operation.as_ref().unwrap());
+    assert_eq!(
+        (op.kind, op.state),
+        (OperationKind::Send, OperationState::Succeeded),
+        "{op:?}"
+    );
+    assert_eq!(app.branch("assistant").unwrap().turns, 2);
+    assert_eq!(app.branches().unwrap().len(), 1);
+    let runs = runs_when(&client, "heartbeat", "both runs to settle", |runs| {
+        runs.iter().all(|r| r.outcome.is_some())
+    });
+    assert!(
+        runs.iter().all(|r| r.outcome.as_ref().unwrap().ok),
+        "{runs:?}"
+    );
+
+    // A turn that waits to be steered keeps the branch running.
+    let waiting = |prompt: &str| {
+        let op = app
+            .send(
+                "assistant",
+                &SendRequest {
+                    prompt: prompt.into(),
+                    policy: PolicySpec::allow_all(),
+                    ..SendRequest::default()
+                },
+                &new_key(),
+            )
+            .unwrap();
+        wait::until("the turn to run", || {
+            app.branch("assistant").unwrap().status == branchyard::BranchStatus::Running
+        });
+        op
+    };
+    let held = waiting("AWAIT_STEER");
+    // Skip: the run is recorded, fires nothing, and is no failure.
+    clock.store(T0 + 180_000 + 5_000, Ordering::SeqCst);
+    let runs = runs_when(
+        &client,
+        "heartbeat",
+        "the third run to be skipped",
+        |runs| runs.len() == 3 && runs[0].state != RunState::Pending,
+    );
+    assert_eq!(runs[0].state, RunState::SkippedBusy, "{runs:?}");
+    assert!(runs[0]
+        .reason
+        .as_deref()
+        .unwrap()
+        .contains("running a turn"));
+    assert_eq!(runs[0].branches, ["assistant"]);
+    assert_eq!(client.trigger("heartbeat").unwrap().consecutive_failures, 0);
+    client.disable_trigger("heartbeat", &new_key()).unwrap();
+
+    // Steer: the prompt joins the running turn, which ends on it (the fake
+    // agent's AWAIT_STEER); the run is settled as it fires.
+    let mut s = spec("nudge", When::Interval { seconds: 60 }, "carry on");
+    s.deliver = Some(Deliver {
+        branch: "assistant".into(),
+        busy: Busy::Steer,
+    });
+    client.create_trigger(&s, &new_key()).unwrap();
+    clock.store(T0 + 240_000 + 10_000, Ordering::SeqCst);
+    let runs = runs_when(&client, "nudge", "the steering run to fire", |runs| {
+        runs.iter().any(|r| r.state == RunState::Fired)
+    });
+    assert!(runs[0].operation.is_none(), "{runs:?}");
+    let outcome = runs[0].outcome.as_ref().unwrap();
+    assert!(
+        outcome.ok && outcome.detail.contains("steered"),
+        "{outcome:?}"
+    );
+    let op = await_operation(&client, &held.id);
+    assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
+    assert_eq!(
+        app.branch("assistant").unwrap().turns,
+        3,
+        "a steer adds no turn"
+    );
+    client.disable_trigger("nudge", &new_key()).unwrap();
+
+    // Queue: the send waits for the turn, then runs as the next one.
+    let mut s = spec(
+        "followup",
+        When::Interval { seconds: 60 },
+        "WRITE later.txt=1",
+    );
+    s.deliver = Some(Deliver {
+        branch: "assistant".into(),
+        busy: Busy::Queue,
+    });
+    client.create_trigger(&s, &new_key()).unwrap();
+    let held = waiting("AWAIT_STEER");
+    clock.store(T0 + 300_000 + 15_000, Ordering::SeqCst);
+    // The run waits, pending and saying so, while the turn runs.
+    let runs = runs_when(
+        &client,
+        "followup",
+        "the run to wait for the turn",
+        |runs| runs.iter().any(|r| r.reason.is_some()),
+    );
+    assert_eq!(runs[0].state, RunState::Pending, "{runs:?}");
+    assert!(runs[0].reason.as_deref().unwrap().contains("waits for it"));
+    assert_eq!(runs[0].operation, None);
+    assert_eq!(runs[0].branches, ["assistant"]);
+    app.steer("assistant", "go on").unwrap();
+    assert_eq!(
+        await_operation(&client, &held.id).state,
+        OperationState::Succeeded
+    );
+    // Looked at again once the deferral passes, it sends.
+    clock.store(T0 + 300_000 + 15_000 + 31_000, Ordering::SeqCst);
+    let runs = runs_when(&client, "followup", "the waiting run to send", |runs| {
+        runs.iter().any(|r| r.state == RunState::Fired)
+    });
+    let sent = runs.iter().find(|r| r.state == RunState::Fired).unwrap();
+    let op = await_operation(&client, sent.operation.as_ref().unwrap());
+    assert_eq!(
+        (op.kind, op.state),
+        (OperationKind::Send, OperationState::Succeeded),
+        "{op:?}"
+    );
+    assert_eq!(app.branch("assistant").unwrap().turns, 5);
+    assert_eq!(app.branches().unwrap().len(), 1, "still one branch");
+    // `by trigger test` shows the branch it would continue.
+    let test = client
+        .test_trigger("followup", &TriggerTestRequest::default(), &new_key())
+        .unwrap();
+    assert_eq!(
+        test.deliver,
+        Some(Deliver {
+            branch: "assistant".into(),
+            busy: Busy::Queue
+        })
+    );
+    assert_eq!(test.task.unwrap().name.as_deref(), Some("assistant"));
 }
 
 #[test]

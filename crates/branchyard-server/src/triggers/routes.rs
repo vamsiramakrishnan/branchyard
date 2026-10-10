@@ -18,8 +18,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use branchyard_client::triggers::{
-    FireAck, RunState, SecretRequest, SecretSet, TriggerCreated, TriggerList, TriggerRemoved,
-    TriggerRun, TriggerRuns, TriggerSpec, TriggerTest, TriggerTestRequest, TriggerToggle, When,
+    Deliver, FireAck, RunState, SecretRequest, SecretSet, TriggerCreated, TriggerList,
+    TriggerRemoved, TriggerRun, TriggerRuns, TriggerSpec, TriggerTest, TriggerTestRequest,
+    TriggerToggle, When,
 };
 
 use super::email;
@@ -374,6 +375,7 @@ pub fn evaluate(
         precheck: None,
         would_fire: false,
         task: None,
+        deliver: None,
         route: trigger.spec.route.clone(),
         key: String::new(),
     };
@@ -423,7 +425,14 @@ pub fn evaluate(
     }
     test.key = run.key.clone();
     test.event = run.event.clone();
-    test.task = Some(Engine::render(trigger, &run)?);
+    let task = Engine::render(trigger, &run)?;
+    if let Some(deliver) = &trigger.spec.deliver {
+        test.deliver = Some(Deliver {
+            branch: task.name.clone().unwrap_or_default(),
+            busy: deliver.busy,
+        });
+    }
+    test.task = Some(task);
     if !test.matched {
         return Ok(test);
     }

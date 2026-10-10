@@ -15,7 +15,10 @@
 //!    in a fresh worktree, and admits the task through the server's
 //!    admission path with the idempotency key `trigger:<id>` /
 //!    `<run key>`, so a run fired twice (its dispatcher died after
-//!    admitting, before recording) is the same operation;
+//!    admitting, before recording) is the same operation; a trigger that
+//!    delivers to a branch instead continues that branch (a send under
+//!    the same key), creating it from the task when it is missing, and
+//!    while it runs a turn does what its `busy` policy says;
 //! 4. settles fired runs whose task ended ([`Engine::settle`]), counting a
 //!    failure toward pausing the trigger.
 
@@ -24,7 +27,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use branchyard_client::api::{Operation, OperationState, TaskRequest};
-use branchyard_client::triggers::{RunOutcome, RunState, TriggerRun};
+use branchyard_client::triggers::{Busy, RunOutcome, RunState, TriggerRun};
 
 use sha2::Digest;
 
@@ -63,6 +66,19 @@ pub struct Admitted {
     pub branches: Vec<String>,
 }
 
+/// What a run that delivers to a branch did.
+#[derive(Debug)]
+pub enum Delivered {
+    /// The branch was missing and the task creates it, or a send to it
+    /// was admitted: the operation, either way.
+    Admitted(Admitted),
+    /// The prompt joined the branch's running turn as steered input;
+    /// there is no operation to wait for.
+    Steered,
+    /// The branch is running a turn, and the policy is `skip`.
+    Busy,
+}
+
 /// What firing needs from the server it runs in.
 pub trait Sink: Send + Sync {
     /// The repositories this process serves: (name, root).
@@ -75,6 +91,17 @@ pub trait Sink: Send + Sync {
         key: &str,
         request: TaskRequest,
     ) -> Result<Admitted, Refusal>;
+    /// Deliver `request` to the branch its `name` names, as `trigger`'s
+    /// principal with the idempotency key `key`: admit the task when the
+    /// branch is missing, else a send of its prompt, or while the branch
+    /// runs a turn what `busy` says.
+    fn deliver(
+        &self,
+        trigger: &StoredTrigger,
+        key: &str,
+        request: TaskRequest,
+        busy: Busy,
+    ) -> Result<Delivered, Refusal>;
     /// An operation as the registry has it now.
     fn operation(&self, id: &str) -> Option<Operation>;
     /// Whether the operator lets `repo`'s triggers run prechecks.
@@ -295,7 +322,7 @@ impl Engine {
         if run.state == RunState::Pending {
             // Not now: any dispatcher may fire it a little later.
             let until = self.clock.now() + DEFER_MS;
-            self.store.defer_run(&run.id, fence, until)?;
+            self.store.defer_run(&run, fence, until)?;
             return Ok(run);
         }
         run.finished_at_ms = Some(self.clock.now());
@@ -309,7 +336,8 @@ impl Engine {
         Ok(run)
     }
 
-    /// The task `run` of `trigger` creates, rendered, with its branch name.
+    /// The task `run` of `trigger` creates, rendered, with its branch
+    /// name: the branch it delivers to, when it delivers to one.
     pub fn render(trigger: &StoredTrigger, run: &TriggerRun) -> Result<TaskRequest, String> {
         let spec = &trigger.spec;
         let cx = Context {
@@ -322,11 +350,17 @@ impl Engine {
         };
         let mut request = spec.task.clone();
         request.prompt = template::render(&spec.task.prompt, &cx)?;
-        let name = match &spec.task.name {
-            Some(name) => template::render(name, &cx)?,
-            None => default_name(trigger, run),
+        let name = match (&spec.deliver, &spec.task.name) {
+            (Some(deliver), _) => template::render_filled(&deliver.branch, &cx)
+                .map_err(|e| format!("deliver.branch: {e}"))?,
+            (None, Some(name)) => template::render(name, &cx)?,
+            (None, None) => default_name(trigger, run),
         };
-        request.name = Some(template::branch_name(&name));
+        let name = template::branch_name(&name);
+        if spec.deliver.is_some() && name.is_empty() {
+            return Err("deliver.branch rendered to no branch name".into());
+        }
+        request.name = Some(name);
         Ok(request)
     }
 
@@ -380,7 +414,40 @@ impl Engine {
                 }
             }
         }
-        match self.sink.admit(trigger, &run.key, request) {
+        let admitted = match &trigger.spec.deliver {
+            None => self.sink.admit(trigger, &run.key, request),
+            Some(deliver) => {
+                let branch = request.name.clone().unwrap_or_default();
+                match self.sink.deliver(trigger, &run.key, request, deliver.busy) {
+                    Ok(Delivered::Admitted(admitted)) => Ok(admitted),
+                    // Settled as it fires: nothing is left to wait for.
+                    Ok(Delivered::Steered) => {
+                        run.state = RunState::Fired;
+                        run.branches = vec![branch.clone()];
+                        run.reason = None;
+                        run.outcome = Some(RunOutcome {
+                            ok: true,
+                            detail: format!("steered into {branch}'s running turn"),
+                        });
+                        return;
+                    }
+                    Ok(Delivered::Busy) => {
+                        run.state = RunState::SkippedBusy;
+                        run.branches = vec![branch.clone()];
+                        run.reason = Some(format!(
+                            "{branch} is running a turn, and the trigger skips while it does"
+                        ));
+                        return;
+                    }
+                    // Waiting for the branch, or refused: it still says which.
+                    Err(refusal) => {
+                        run.branches = vec![branch];
+                        Err(refusal)
+                    }
+                }
+            }
+        };
+        match admitted {
             Ok(admitted) => {
                 run.state = RunState::Fired;
                 run.operation = Some(admitted.operation);
@@ -570,23 +637,28 @@ fn state(state: OperationState) -> &'static str {
 #[allow(clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
-    use branchyard_client::triggers::{TriggerEvent, When};
+    use branchyard_client::triggers::{Deliver, TriggerEvent, When};
 
     use super::*;
     use crate::triggers::store::{conformance, SqliteTriggers};
 
     /// Records admissions; admits with the idempotency key as the store's
-    /// unique index would.
+    /// unique index would. For a trigger that delivers to a branch, the
+    /// branches in `existing` exist and those in `running` run a turn;
+    /// what each run did is in `delivered`.
     #[derive(Default)]
     struct FakeSink {
         root: PathBuf,
         admitted: Mutex<BTreeMap<String, TaskRequest>>,
         refuse: Mutex<Option<String>>,
         ops: Mutex<BTreeMap<String, Operation>>,
+        existing: Mutex<BTreeSet<String>>,
+        running: Mutex<BTreeSet<String>>,
+        delivered: Mutex<Vec<(String, String)>>,
     }
 
     impl Sink for FakeSink {
@@ -606,6 +678,7 @@ mod tests {
                 });
             }
             let id = format!("op:{}:{key}", t.id);
+            let branch = request.name.clone().unwrap_or_else(|| "b".into());
             self.admitted
                 .lock()
                 .unwrap()
@@ -613,8 +686,45 @@ mod tests {
                 .or_insert(request);
             Ok(Admitted {
                 operation: id,
-                branches: vec!["b".into()],
+                branches: vec![branch],
             })
+        }
+        fn deliver(
+            &self,
+            t: &StoredTrigger,
+            key: &str,
+            request: TaskRequest,
+            busy: Busy,
+        ) -> Result<Delivered, Refusal> {
+            let branch = request.name.clone().unwrap_or_default();
+            if !self.existing.lock().unwrap().contains(&branch) {
+                self.existing.lock().unwrap().insert(branch.clone());
+                self.delivered
+                    .lock()
+                    .unwrap()
+                    .push((branch, "created".into()));
+                return self.admit(t, key, request).map(Delivered::Admitted);
+            }
+            let running = self.running.lock().unwrap().contains(&branch);
+            let what = match (running, busy) {
+                (true, Busy::Skip) => return Ok(Delivered::Busy),
+                (true, Busy::Steer) => {
+                    self.delivered
+                        .lock()
+                        .unwrap()
+                        .push((branch, "steered".into()));
+                    return Ok(Delivered::Steered);
+                }
+                // Queued: not now; the run waits, pending, for the turn.
+                (true, Busy::Queue) => {
+                    return Err(Refusal::Later(format!(
+                        "{branch} is running a turn; the send waits for it"
+                    )))
+                }
+                (false, _) => "sent",
+            };
+            self.delivered.lock().unwrap().push((branch, what.into()));
+            self.admit(t, key, request).map(Delivered::Admitted)
         }
         fn operation(&self, id: &str) -> Option<Operation> {
             self.ops.lock().unwrap().get(id).cloned()
@@ -713,6 +823,178 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(task.name.as_deref(), Some("nightly-19700101-0010"));
+    }
+
+    /// The run's prompt is an event of one `author`, its key the event's.
+    fn event_run(t: &StoredTrigger, store: &SqliteTriggers, n: u32, author: &str) {
+        let mut run = new_run(&t.id, format!("event:d-{n}"), RunState::Pending, MINUTE);
+        run.event = Some(TriggerEvent {
+            source: "slack".into(),
+            kind: "app_mention".into(),
+            id: format!("d-{n}"),
+            author: Some(author.into()),
+            text: Some(format!("message {n}")),
+            ..TriggerEvent::default()
+        });
+        store.record(&run).unwrap();
+    }
+
+    /// A trigger that delivers to a branch creates it on the first run
+    /// and continues it on every later one, under the one name.
+    #[test]
+    fn a_trigger_that_delivers_creates_its_branch_once_and_then_continues_it() {
+        let clock = Arc::new(AtomicU64::new(10 * MINUTE));
+        let (engines, sink, store) = engines(1, &clock);
+        let mut t = conformance::trigger("default", "heartbeat", true);
+        t.spec.when = When::Interval { seconds: 60 };
+        t.spec.deliver = Some(Deliver {
+            branch: "Assistant".into(),
+            busy: Busy::Queue,
+        });
+        t.next_due_ms = Some(10 * MINUTE);
+        assert!(store.create(&t).unwrap());
+        let fired = engines[0].tick().unwrap().fired;
+        assert_eq!(fired[0].state, RunState::Fired);
+        assert_eq!(fired[0].branches, ["assistant"], "{fired:?}");
+        clock.store(11 * MINUTE, Ordering::SeqCst);
+        let fired = engines[0].tick().unwrap().fired;
+        assert_eq!(fired[0].state, RunState::Fired);
+        assert_eq!(fired[0].branches, ["assistant"]);
+        assert_eq!(
+            *sink.delivered.lock().unwrap(),
+            [
+                ("assistant".to_owned(), "created".to_owned()),
+                ("assistant".to_owned(), "sent".to_owned())
+            ]
+        );
+        let names: Vec<Option<String>> = sink
+            .admitted
+            .lock()
+            .unwrap()
+            .values()
+            .map(|r| r.name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            [Some("assistant".to_owned()), Some("assistant".to_owned())]
+        );
+    }
+
+    /// While the branch runs a turn, a run does what the trigger's busy
+    /// policy says: skips, and is no failure; steers, and is settled as it
+    /// fires with nothing to wait for; or queues a send.
+    #[test]
+    fn a_busy_branch_is_skipped_steered_or_queued_as_the_trigger_says() {
+        for (busy, expect) in [
+            (Busy::Skip, "skipped"),
+            (Busy::Steer, "steered"),
+            (Busy::Queue, "waits"),
+        ] {
+            let clock = Arc::new(AtomicU64::new(10 * MINUTE));
+            let (engines, sink, store) = engines(1, &clock);
+            let mut t = conformance::trigger("default", "nudge", true);
+            t.spec.when = When::Interval { seconds: 60 };
+            t.spec.deliver = Some(Deliver {
+                branch: "assistant".into(),
+                busy,
+            });
+            t.next_due_ms = Some(10 * MINUTE);
+            assert!(store.create(&t).unwrap());
+            sink.existing.lock().unwrap().insert("assistant".into());
+            sink.running.lock().unwrap().insert("assistant".into());
+            let fired = engines[0].tick().unwrap().fired;
+            let run = &fired[0];
+            assert_eq!(run.branches, ["assistant"], "{busy:?} {run:?}");
+            match expect {
+                "skipped" => {
+                    assert_eq!(run.state, RunState::SkippedBusy);
+                    assert!(run.reason.as_deref().unwrap().contains("running a turn"));
+                    assert!(run.operation.is_none());
+                    assert!(sink.admitted.lock().unwrap().is_empty());
+                }
+                "steered" => {
+                    assert_eq!(run.state, RunState::Fired);
+                    assert!(run.operation.is_none());
+                    assert!(run.outcome.as_ref().unwrap().ok, "{run:?}");
+                    assert!(sink.admitted.lock().unwrap().is_empty());
+                }
+                _ => {
+                    // Pending, with what it waits for, until the turn ends;
+                    // then the deferral passes and it sends.
+                    assert_eq!(run.state, RunState::Pending);
+                    assert!(run.reason.as_deref().unwrap().contains("waits for it"));
+                    assert!(sink.admitted.lock().unwrap().is_empty());
+                    let stored = store.runs(&t.id, 10).unwrap();
+                    assert_eq!(stored[0].reason, run.reason, "{stored:?}");
+                    sink.running.lock().unwrap().clear();
+                    clock.store(10 * MINUTE + DEFER_MS + 1_000, Ordering::SeqCst);
+                    let fired = engines[0].tick().unwrap().fired;
+                    assert_eq!(fired.len(), 1, "{fired:?}");
+                    assert_eq!(fired[0].state, RunState::Fired, "{fired:?}");
+                    assert_eq!(fired[0].key, run.key, "the same run, not a new one");
+                    assert_eq!(sink.delivered.lock().unwrap()[0].1, "sent");
+                }
+            }
+            // None of these counts against the trigger, and a skip or a
+            // steer leaves nothing to settle.
+            let stored = store.get(&t.id).unwrap().unwrap();
+            assert_eq!(stored.failures, 0);
+            assert!(stored.enabled);
+            if expect != "waits" {
+                assert!(store.unsettled(&["app".into()]).unwrap().is_empty());
+            }
+        }
+    }
+
+    /// Placeholders in the delivered branch make one branch per
+    /// conversation: each sender's events continue that sender's branch.
+    #[test]
+    fn a_delivered_branch_with_placeholders_is_one_branch_per_conversation() {
+        let clock = Arc::new(AtomicU64::new(MINUTE));
+        let (engines, sink, store) = engines(1, &clock);
+        let mut t = conformance::trigger("default", "chat", false);
+        t.spec.task.prompt = "{{event.text}}".into();
+        t.spec.deliver = Some(Deliver {
+            branch: "slack-{{event.author}}".into(),
+            busy: Busy::Queue,
+        });
+        assert!(store.create(&t).unwrap());
+        event_run(&t, &store, 1, "Alice");
+        event_run(&t, &store, 2, "bob");
+        event_run(&t, &store, 3, "Alice");
+        let fired = engines[0].tick().unwrap().fired;
+        let branches: Vec<&str> = fired.iter().map(|r| r.branches[0].as_str()).collect();
+        assert_eq!(branches, ["slack-alice", "slack-bob", "slack-alice"]);
+        assert_eq!(
+            *sink.delivered.lock().unwrap(),
+            [
+                ("slack-alice".to_owned(), "created".to_owned()),
+                ("slack-bob".to_owned(), "created".to_owned()),
+                ("slack-alice".to_owned(), "sent".to_owned())
+            ]
+        );
+        let prompts: Vec<String> = sink
+            .admitted
+            .lock()
+            .unwrap()
+            .values()
+            .map(|r| r.prompt.clone())
+            .collect();
+        assert_eq!(prompts, ["message 1", "message 2", "message 3"]);
+        // A placeholder the event leaves empty names no branch: the run
+        // fails rather than every such event sharing one.
+        let mut bare = new_run(&t.id, "event:d-4".into(), RunState::Pending, MINUTE);
+        bare.event = Some(TriggerEvent {
+            source: "slack".into(),
+            kind: "app_mention".into(),
+            id: "d-4".into(),
+            ..TriggerEvent::default()
+        });
+        store.record(&bare).unwrap();
+        let fired = engines[0].tick().unwrap().fired;
+        assert_eq!(fired[0].state, RunState::Failed, "{fired:?}");
+        let reason = fired[0].reason.as_deref().unwrap();
+        assert!(reason.contains("{{event.author}} is empty"), "{reason}");
     }
 
     #[test]

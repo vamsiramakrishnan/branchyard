@@ -223,6 +223,14 @@ class TriggerExamplesValidate(unittest.TestCase):
     def test_the_documented_run_validates(self):
         validate_as(_trigger_example("TriggerRun"), "TriggerRun")
 
+    def test_the_documented_spec_that_delivers_to_a_branch_validates(self):
+        spec = _trigger_example("POST /v1/triggers (a branch that lives on)")
+        validate_as(spec, "TriggerSpec")
+        self.assertEqual(spec["deliver"]["busy"], "steer")
+        spec["deliver"]["busy"] = "drop"
+        with self.assertRaises(ValidationError):
+            validate_as(spec, "TriggerSpec")
+
     def test_schedules_and_acks_validate(self):
         validate_as({"kind": "cron", "expr": "0 3 * * 1-5", "timezone": "Europe/Berlin"}, "When")
         validate_as({"kind": "interval", "seconds": 3600}, "When")

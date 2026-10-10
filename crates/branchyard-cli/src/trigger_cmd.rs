@@ -15,8 +15,8 @@ use std::time::Duration;
 use branchyard_client::api::{BudgetSpec, PolicySpec, TaskRequest};
 use branchyard_client::new_key;
 use branchyard_client::triggers::{
-    Conditions, EventSource, Precheck, RouteSpec, RunState, Trigger, TriggerCreated, TriggerPolicy,
-    TriggerRun, TriggerSpec, TriggerTest, TriggerTestRequest, When,
+    Busy, Conditions, Deliver, EventSource, Precheck, RouteSpec, RunState, Trigger, TriggerCreated,
+    TriggerPolicy, TriggerRun, TriggerSpec, TriggerTest, TriggerTestRequest, When,
 };
 use branchyard_server::config::Principal;
 use branchyard_server::triggers::store::TriggerStore;
@@ -132,6 +132,20 @@ pub struct AddArgs {
     /// The branch name, with placeholders (default: <trigger>-<issue number or time>)
     #[arg(long, value_name = "TEMPLATE", help_heading = "Task")]
     pub branch_name: Option<String>,
+    /// Continue this branch run after run instead of creating one per run (placeholders
+    /// allowed: one branch per Slack channel with slack-{{event.channel}}); the first run
+    /// creates it
+    #[arg(
+        long,
+        value_name = "TEMPLATE",
+        conflicts_with = "branch_name",
+        help_heading = "Task"
+    )]
+    pub to: Option<String>,
+    /// With --to, while that branch runs a turn: queue the prompt for after it (default),
+    /// steer it into the turn, or skip the run
+    #[arg(long, value_name = "MODE", value_parser = busy, requires = "to", help_heading = "Task")]
+    pub busy: Option<Busy>,
     /// Branch from this ref
     #[arg(long, help_heading = "Task")]
     pub base: Option<String>,
@@ -168,6 +182,16 @@ pub struct AddArgs {
     /// Create it disabled
     #[arg(long, help_heading = "Policy")]
     pub disabled: bool,
+}
+
+/// `queue`, `steer` or `skip`.
+fn busy(text: &str) -> Result<Busy, String> {
+    match text.trim() {
+        "queue" => Ok(Busy::Queue),
+        "steer" => Ok(Busy::Steer),
+        "skip" => Ok(Busy::Skip),
+        other => Err(format!("{other:?} is not queue, steer or skip")),
+    }
 }
 
 /// `90s`, `30m`, `2h`, `1d`, or seconds.
@@ -296,6 +320,10 @@ fn spec(args: &AddArgs, repo: &str) -> Result<TriggerSpec, Failure> {
         },
         route: args.auto.then(|| RouteSpec {
             kind: args.kind.clone(),
+        }),
+        deliver: args.to.as_ref().map(|branch| Deliver {
+            branch: branch.clone(),
+            busy: args.busy.unwrap_or_default(),
         }),
         precheck: args.precheck.as_ref().map(|command| Precheck {
             command: command.clone(),
@@ -428,6 +456,13 @@ fn show_one(t: &Trigger, json: bool) -> Outcome {
         (None, None) => "the default harness".into(),
     };
     out.push_str(&format!("  harness:  {runs_on}\n"));
+    if let Some(d) = &t.deliver {
+        out.push_str(&format!(
+            "  deliver:  to {} run after run (created if missing; while it runs a turn: {})\n",
+            d.branch,
+            d.busy.as_str()
+        ));
+    }
     out.push_str(&format!(
         "  prompt:   {}\n",
         t.task.prompt.replace('\n', "\n            ")
@@ -526,6 +561,13 @@ fn show_test(test: &TriggerTest, json: bool) -> Outcome {
                 .map(|l| format!("  {l}"))
                 .collect::<Vec<_>>()
                 .join("\n")
+        ));
+    }
+    if let Some(d) = &test.deliver {
+        out.push_str(&format!(
+            "delivers:  to {} (created if missing; while it runs a turn: {})\n",
+            d.branch,
+            d.busy.as_str()
         ));
     }
     if let Some(route) = &test.route {
@@ -923,6 +965,8 @@ mod tests {
             auto: true,
             kind: Some("bugfix".into()),
             branch_name: None,
+            to: None,
+            busy: None,
             base: None,
             check: Some("cargo test -p x".into()),
             budget_usd: Some(2.0),
@@ -947,6 +991,24 @@ mod tests {
         let mut bad = args.clone();
         bad.conditions = vec!["colour=red".into()];
         assert!(spec(&bad, "app").is_err());
+        // --to names the branch every run continues; --busy says what a
+        // run does while it runs a turn, queue unless told otherwise.
+        let mut resident = args.clone();
+        resident.to = Some("slack-{{event.channel}}".into());
+        let s = spec(&resident, "app").unwrap();
+        assert_eq!(
+            s.deliver,
+            Some(Deliver {
+                branch: "slack-{{event.channel}}".into(),
+                busy: Busy::Queue
+            })
+        );
+        resident.busy = Some(busy("skip").unwrap());
+        assert_eq!(
+            spec(&resident, "app").unwrap().deliver.unwrap().busy,
+            Busy::Skip
+        );
+        assert!(busy("drop").is_err());
         let mut mail = args.clone();
         mail.on = Some(EventSource::Mailgun);
         mail.conditions = vec![

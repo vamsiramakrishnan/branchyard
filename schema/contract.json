@@ -37320,6 +37320,17 @@
           ],
           "description": "Route through the fleet table instead of naming a harness."
         },
+        "deliver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Deliver"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Continue one branch run after run instead of creating a branch per\nrun; `task.name` is then not given."
+        },
         "precheck": {
           "anyOf": [
             {
@@ -38869,6 +38880,45 @@
           },
           "description": "Route the task through the repository's fleet table at fire time, as\n`by run --auto` does (without failover)."
         },
+        "Deliver": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch, with placeholders as `task.name` takes them; reduced\nto a branch name when rendered."
+            },
+            "busy": {
+              "$ref": "#/$defs/Busy",
+              "description": "What a run does while the branch is running a turn.",
+              "default": "queue"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "description": "A branch that lives on: each run continues it (a `send`) instead of\ncreating a branch of its own. The first run that finds it missing\ncreates it from the task. `branch` may hold placeholders, so one\ntrigger keeps a branch per Slack channel or sender\n(`slack-{{event.channel}}`), as a chat assistant keeps a session per\nconversation."
+        },
+        "Busy": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "queue",
+              "description": "Run after the turn ends: the run stays pending, with the reason,\nand sends once the branch is free. Nothing is lost, nothing\ninterrupts."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Add the prompt to the running turn as steered input (`by send\n--steer`); queued instead when the harness cannot take input\nmid-turn or refuses it."
+            },
+            {
+              "type": "string",
+              "const": "skip",
+              "description": "Fire nothing: the run is `skipped_busy`, not a failure. For a\nheartbeat, whose next time comes anyway."
+            }
+          ],
+          "description": "What a run does when the branch it delivers to is running a turn."
+        },
         "Precheck": {
           "type": "object",
           "additionalProperties": false,
@@ -38944,6 +38994,16 @@
           "anyOf": [
             {
               "$ref": "#/$defs/RouteSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deliver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Deliver"
             },
             {
               "type": "null"
@@ -40537,6 +40597,45 @@
           },
           "description": "Route the task through the repository's fleet table at fire time, as\n`by run --auto` does (without failover)."
         },
+        "Deliver": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch, with placeholders as `task.name` takes them; reduced\nto a branch name when rendered."
+            },
+            "busy": {
+              "$ref": "#/$defs/Busy",
+              "description": "What a run does while the branch is running a turn.",
+              "default": "queue"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "description": "A branch that lives on: each run continues it (a `send`) instead of\ncreating a branch of its own. The first run that finds it missing\ncreates it from the task. `branch` may hold placeholders, so one\ntrigger keeps a branch per Slack channel or sender\n(`slack-{{event.channel}}`), as a chat assistant keeps a session per\nconversation."
+        },
+        "Busy": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "queue",
+              "description": "Run after the turn ends: the run stays pending, with the reason,\nand sends once the branch is free. Nothing is lost, nothing\ninterrupts."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Add the prompt to the running turn as steered input (`by send\n--steer`); queued instead when the harness cannot take input\nmid-turn or refuses it."
+            },
+            {
+              "type": "string",
+              "const": "skip",
+              "description": "Fire nothing: the run is `skipped_busy`, not a failure. For a\nheartbeat, whose next time comes anyway."
+            }
+          ],
+          "description": "What a run does when the branch it delivers to is running a turn."
+        },
         "Precheck": {
           "type": "object",
           "additionalProperties": false,
@@ -40639,6 +40738,16 @@
                 }
               ]
             },
+            "deliver": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Deliver"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "precheck": {
               "anyOf": [
                 {
@@ -42223,6 +42332,45 @@
             }
           },
           "description": "Route the task through the repository's fleet table at fire time, as\n`by run --auto` does (without failover)."
+        },
+        "Deliver": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch, with placeholders as `task.name` takes them; reduced\nto a branch name when rendered."
+            },
+            "busy": {
+              "$ref": "#/$defs/Busy",
+              "description": "What a run does while the branch is running a turn.",
+              "default": "queue"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "description": "A branch that lives on: each run continues it (a `send`) instead of\ncreating a branch of its own. The first run that finds it missing\ncreates it from the task. `branch` may hold placeholders, so one\ntrigger keeps a branch per Slack channel or sender\n(`slack-{{event.channel}}`), as a chat assistant keeps a session per\nconversation."
+        },
+        "Busy": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "queue",
+              "description": "Run after the turn ends: the run stays pending, with the reason,\nand sends once the branch is free. Nothing is lost, nothing\ninterrupts."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Add the prompt to the running turn as steered input (`by send\n--steer`); queued instead when the harness cannot take input\nmid-turn or refuses it."
+            },
+            {
+              "type": "string",
+              "const": "skip",
+              "description": "Fire nothing: the run is `skipped_busy`, not a failure. For a\nheartbeat, whose next time comes anyway."
+            }
+          ],
+          "description": "What a run does when the branch it delivers to is running a turn."
         },
         "Precheck": {
           "type": "object",
@@ -42322,6 +42470,16 @@
                 }
               ]
             },
+            "deliver": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Deliver"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "precheck": {
               "anyOf": [
                 {
@@ -43906,6 +44064,45 @@
             }
           },
           "description": "Route the task through the repository's fleet table at fire time, as\n`by run --auto` does (without failover)."
+        },
+        "Deliver": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch, with placeholders as `task.name` takes them; reduced\nto a branch name when rendered."
+            },
+            "busy": {
+              "$ref": "#/$defs/Busy",
+              "description": "What a run does while the branch is running a turn.",
+              "default": "queue"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "description": "A branch that lives on: each run continues it (a `send`) instead of\ncreating a branch of its own. The first run that finds it missing\ncreates it from the task. `branch` may hold placeholders, so one\ntrigger keeps a branch per Slack channel or sender\n(`slack-{{event.channel}}`), as a chat assistant keeps a session per\nconversation."
+        },
+        "Busy": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "queue",
+              "description": "Run after the turn ends: the run stays pending, with the reason,\nand sends once the branch is free. Nothing is lost, nothing\ninterrupts."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Add the prompt to the running turn as steered input (`by send\n--steer`); queued instead when the harness cannot take input\nmid-turn or refuses it."
+            },
+            {
+              "type": "string",
+              "const": "skip",
+              "description": "Fire nothing: the run is `skipped_busy`, not a failure. For a\nheartbeat, whose next time comes anyway."
+            }
+          ],
+          "description": "What a run does when the branch it delivers to is running a turn."
         },
         "Precheck": {
           "type": "object",
@@ -44327,7 +44524,18 @@
               "type": "null"
             }
           ],
-          "description": "The task it would create, rendered."
+          "description": "The task it would create, rendered; with `deliver`, the task's\n`name` is the branch it would continue, created if missing."
+        },
+        "deliver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Deliver"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The branch it delivers to, rendered, and its busy policy."
         },
         "route": {
           "anyOf": [
@@ -45941,6 +46149,45 @@
           ],
           "description": "A task's goal: its text, the follow-up turns it may get, and the judge\nharness (one of the server's) that verifies it; without one, the\nbranch's check and a non-empty diff decide."
         },
+        "Deliver": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch, with placeholders as `task.name` takes them; reduced\nto a branch name when rendered."
+            },
+            "busy": {
+              "$ref": "#/$defs/Busy",
+              "description": "What a run does while the branch is running a turn.",
+              "default": "queue"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "description": "A branch that lives on: each run continues it (a `send`) instead of\ncreating a branch of its own. The first run that finds it missing\ncreates it from the task. `branch` may hold placeholders, so one\ntrigger keeps a branch per Slack channel or sender\n(`slack-{{event.channel}}`), as a chat assistant keeps a session per\nconversation."
+        },
+        "Busy": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "queue",
+              "description": "Run after the turn ends: the run stays pending, with the reason,\nand sends once the branch is free. Nothing is lost, nothing\ninterrupts."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Add the prompt to the running turn as steered input (`by send\n--steer`); queued instead when the harness cannot take input\nmid-turn or refuses it."
+            },
+            {
+              "type": "string",
+              "const": "skip",
+              "description": "Fire nothing: the run is `skipped_busy`, not a failure. For a\nheartbeat, whose next time comes anyway."
+            }
+          ],
+          "description": "What a run does when the branch it delivers to is running a turn."
+        },
         "RouteSpec": {
           "type": "object",
           "additionalProperties": false,
@@ -45967,7 +46214,7 @@
         {
           "type": "string",
           "const": "fired",
-          "description": "A task was admitted; `operation` names it."
+          "description": "A task was admitted, or a send to the branch it delivers to;\n`operation` names it. Steered into a running turn instead, the run\nhas no operation and its `outcome` is recorded at once."
         },
         {
           "type": "string",
@@ -45983,6 +46230,11 @@
           "type": "string",
           "const": "skipped_disabled",
           "description": "The trigger was disabled or removed before it fired."
+        },
+        {
+          "type": "string",
+          "const": "skipped_busy",
+          "description": "The branch it delivers to was running a turn, and its `busy`\npolicy is `skip`."
         },
         {
           "type": "string",
@@ -46144,7 +46396,7 @@
             {
               "type": "string",
               "const": "fired",
-              "description": "A task was admitted; `operation` names it."
+              "description": "A task was admitted, or a send to the branch it delivers to;\n`operation` names it. Steered into a running turn instead, the run\nhas no operation and its `outcome` is recorded at once."
             },
             {
               "type": "string",
@@ -46160,6 +46412,11 @@
               "type": "string",
               "const": "skipped_disabled",
               "description": "The trigger was disabled or removed before it fired."
+            },
+            {
+              "type": "string",
+              "const": "skipped_busy",
+              "description": "The branch it delivers to was running a turn, and its `busy`\npolicy is `skip`."
             },
             {
               "type": "string",
@@ -46599,7 +46856,7 @@
             {
               "type": "string",
               "const": "fired",
-              "description": "A task was admitted; `operation` names it."
+              "description": "A task was admitted, or a send to the branch it delivers to;\n`operation` names it. Steered into a running turn instead, the run\nhas no operation and its `outcome` is recorded at once."
             },
             {
               "type": "string",
@@ -46615,6 +46872,11 @@
               "type": "string",
               "const": "skipped_disabled",
               "description": "The trigger was disabled or removed before it fired."
+            },
+            {
+              "type": "string",
+              "const": "skipped_busy",
+              "description": "The branch it delivers to was running a turn, and its `busy`\npolicy is `skip`."
             },
             {
               "type": "string",
@@ -47067,7 +47329,7 @@
             {
               "type": "string",
               "const": "fired",
-              "description": "A task was admitted; `operation` names it."
+              "description": "A task was admitted, or a send to the branch it delivers to;\n`operation` names it. Steered into a running turn instead, the run\nhas no operation and its `outcome` is recorded at once."
             },
             {
               "type": "string",
@@ -47083,6 +47345,11 @@
               "type": "string",
               "const": "skipped_disabled",
               "description": "The trigger was disabled or removed before it fired."
+            },
+            {
+              "type": "string",
+              "const": "skipped_busy",
+              "description": "The branch it delivers to was running a turn, and its `busy`\npolicy is `skip`."
             },
             {
               "type": "string",

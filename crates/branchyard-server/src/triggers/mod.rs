@@ -127,6 +127,7 @@ impl StoredTrigger {
             conditions: spec.conditions.clone(),
             task: spec.task.clone(),
             route: spec.route.clone(),
+            deliver: spec.deliver.clone(),
             precheck: spec.precheck.clone(),
             policy: spec.policy.clone(),
             enabled: self.enabled,
@@ -260,6 +261,19 @@ pub fn validate(mut spec: TriggerSpec) -> Result<TriggerSpec, String> {
     template::check(&task.prompt, event, "the task's prompt")?;
     if let Some(name) = &task.name {
         template::check(name, event, "the task's name")?;
+    }
+    if let Some(deliver) = &spec.deliver {
+        if deliver.branch.trim().is_empty() {
+            return Err("deliver.branch is empty".into());
+        }
+        template::check(&deliver.branch, event, "deliver.branch")?;
+        if task.name.is_some() {
+            return Err(
+                "a trigger that delivers to a branch names it in deliver.branch; leave the \
+                        task's name out"
+                    .into(),
+            );
+        }
     }
     if task.harness.is_some() && !task.harnesses.is_empty() {
         return Err("give the task a harness or harnesses, not both".into());
@@ -497,7 +511,7 @@ pub fn matches(conditions: &Conditions, event: &TriggerEvent) -> Result<(), Stri
 mod tests {
     use super::*;
     use branchyard_client::api::TaskRequest;
-    use branchyard_client::triggers::{Precheck, RouteSpec, TriggerPolicy};
+    use branchyard_client::triggers::{Busy, Deliver, Precheck, RouteSpec, TriggerPolicy};
 
     fn spec(when: When) -> TriggerSpec {
         TriggerSpec {
@@ -510,6 +524,7 @@ mod tests {
                 ..TaskRequest::default()
             },
             route: None,
+            deliver: None,
             precheck: None,
             enabled: true,
             policy: TriggerPolicy::default(),
@@ -567,9 +582,39 @@ mod tests {
             timeout_seconds: 60,
         });
         assert!(validate(s).unwrap_err().contains("precheck"));
-        let mut s = spec(cron);
+        let mut s = spec(cron.clone());
         s.secret = Some("x".into());
         assert!(validate(s).unwrap_err().contains("no webhook secret"));
+        // A branch delivered to is named once, in deliver.branch, with
+        // placeholders the trigger's events can fill.
+        let mut s = spec(cron.clone());
+        s.deliver = Some(Deliver {
+            branch: "  ".into(),
+            busy: Busy::Queue,
+        });
+        assert!(validate(s).unwrap_err().contains("deliver.branch is empty"));
+        let mut s = spec(cron.clone());
+        s.deliver = Some(Deliver {
+            branch: "slack-{{event.channel}}".into(),
+            busy: Busy::Skip,
+        });
+        assert!(validate(s).unwrap_err().contains("deliver.branch"));
+        let mut s = spec(github());
+        s.deliver = Some(Deliver {
+            branch: "slack-{{event.channel}}".into(),
+            busy: Busy::Skip,
+        });
+        assert!(validate(s.clone()).is_ok());
+        s.task.name = Some("issue-{{event.number}}".into());
+        assert!(validate(s)
+            .unwrap_err()
+            .contains("leave the task's name out"));
+        let mut s = spec(cron);
+        s.deliver = Some(Deliver {
+            branch: "assistant".into(),
+            busy: Busy::Queue,
+        });
+        assert!(validate(s).is_ok());
         let mut s = spec(github());
         s.precheck = Some(Precheck {
             command: " make check ".into(),
