@@ -19,6 +19,12 @@ pub const EMDASH_MCP: &str =
 pub const ORCA_AGENTS: &str = "vendor/orca/src/shared/tui-agent-config.ts";
 pub const ORCA_AGENT_NAMES: &str = "vendor/orca/src/shared/tui-agent.ts";
 pub const ORCA_RESUME: &str = "vendor/orca/src/shared/agent-resume-launch-command.ts";
+/// agentapi's `AgentType` constants.
+pub const AGENTAPI_TYPES: &str = "vendor/agentapi/lib/msgfmt/msgfmt.go";
+/// agentapi's `agentTypeAliases`, the names `agentapi server` accepts.
+pub const AGENTAPI_ALIASES: &str = "vendor/agentapi/cmd/server/server.go";
+/// The vendored Coder Registry modules, one directory each.
+pub const CODER_MODULES: &str = "vendor/coder-registry/registry/coder/modules";
 
 pub fn read(relative: &str) -> String {
     fs::read_to_string(repository().join(relative)).unwrap_or_else(|e| panic!("{relative}: {e}"))
@@ -136,4 +142,104 @@ pub fn emdash_mcp() -> Vec<(String, Value)> {
         Value::Object(map) => map.into_iter().collect(),
         other => panic!("catalogData is {other}"),
     }
+}
+
+/// agentapi's `AgentType` constants (`lib/msgfmt/msgfmt.go`): each type's
+/// wire name to the names `agentapi server` accepts for it
+/// (`agentTypeAliases` in `cmd/server/server.go`), the wire name first.
+pub fn agentapi_types() -> BTreeMap<String, Vec<String>> {
+    let source = read(AGENTAPI_TYPES);
+    let mut by_ident = BTreeMap::new();
+    let mut types = BTreeMap::new();
+    for line in source.lines() {
+        // `AgentTypeClaude   AgentType = "claude"`
+        let Some(rest) = line.trim().strip_prefix("AgentType") else {
+            continue;
+        };
+        let Some((ident, value)) = rest.split_once("AgentType = \"") else {
+            continue;
+        };
+        let name = value.trim_end_matches('"').to_owned();
+        by_ident.insert(format!("AgentType{}", ident.trim()), name.clone());
+        types.insert(name.clone(), vec![name]);
+    }
+    assert!(
+        !types.is_empty(),
+        "{AGENTAPI_TYPES}: no AgentType constants"
+    );
+    let aliases = read(AGENTAPI_ALIASES);
+    for line in aliases.lines() {
+        // `"cursor-agent": AgentTypeCursor,`
+        let Some((alias, ident)) = line
+            .trim()
+            .strip_suffix(',')
+            .and_then(|l| l.split_once(':'))
+        else {
+            continue;
+        };
+        let alias = alias.trim().trim_matches('"');
+        let Some(name) = by_ident.get(ident.trim()) else {
+            continue;
+        };
+        let list = types.get_mut(name).unwrap();
+        if !list.iter().any(|a| a == alias) {
+            list.push(alias.to_owned());
+        }
+    }
+    types
+}
+
+/// One module of the Coder Registry (`registry/coder/modules/<dir>`): its
+/// README's front matter.
+pub struct CoderModule {
+    /// `display_name`, the module's name on registry.coder.com.
+    pub display_name: String,
+    /// `description`, one line.
+    pub description: String,
+    /// `tags`; `agent` marks a module that installs a coding agent.
+    pub tags: Vec<String>,
+}
+
+/// The vendored Coder Registry modules, by directory.
+pub fn coder_modules() -> BTreeMap<String, CoderModule> {
+    let mut modules = BTreeMap::new();
+    for entry in fs::read_dir(repository().join(CODER_MODULES)).unwrap() {
+        let dir = entry.unwrap().path();
+        let readme = dir.join("README.md");
+        if !readme.is_file() {
+            continue;
+        }
+        let text = fs::read_to_string(&readme).unwrap();
+        let mut parts = text.splitn(3, "---\n");
+        let (Some(_), Some(front), Some(_)) = (parts.next(), parts.next(), parts.next()) else {
+            panic!("{}: no front matter", readme.display());
+        };
+        let field = |key: &str| {
+            front
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{key}:")))
+                .map_or_else(
+                    || panic!("{}: no {key}", readme.display()),
+                    |v| v.trim().to_owned(),
+                )
+        };
+        let tags = field("tags");
+        let tags = tags
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split(',')
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        modules.insert(
+            name,
+            CoderModule {
+                display_name: field("display_name"),
+                description: field("description"),
+                tags,
+            },
+        );
+    }
+    modules
 }

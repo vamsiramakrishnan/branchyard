@@ -1,6 +1,6 @@
-# Comparison with Scion, OpenRig and Herdr
+# Comparison with Scion, OpenRig, Herdr, Warp, Straitjacket and Coder
 
-Survey date: 27 September 2026. This page compares Branchyard with three open-source projects that also run coding harnesses, and says what Branchyard should take from each. It supersedes the positioning in [strategy](strategy.md), which was built from the small fragments in `vendor/`.
+Survey date: 27 September 2026, with Coder added and OpenRig and Warp looked at again on 10 October 2026. This page compares Branchyard with open-source projects that also run coding harnesses, or run them inside development environments, and says what Branchyard should take from each. It supersedes the positioning in [strategy](strategy.md), which was built from the small fragments in `vendor/`.
 
 Every statement about an upstream project cites a path in its repository at the commit below. `path:N` is a line. "Not found" means the repository was searched for it and it is not there; it does not mean the project could not add it. Statements about Branchyard cite its documents or code at `807088e`.
 
@@ -11,8 +11,17 @@ Every statement about an upstream project cites a path in its repository at the 
 | Herdr | herdrdev/herdr | `fff6c820aa45f4eabb9b2e0456326dc74cca5a25` | 2026-09-27 |
 | Warp | warpdotdev/warp | `5af88f49f84e70025f9c19e13f6b9ae64b624627` | 2026-09-25 |
 | Straitjacket | vamsiramakrishnan/straitjacket | `35c7868ba46e5069161aec5eaf7aa5e51b344ad1` | 2026-09-17 |
+| Coder | coder/coder | `50c785cc6d750e488126d5fc1457ce150fc77e23` | 2026-10-10 |
+| httpjail | coder/httpjail | `6d476da071bb890e0d2e54b2697829b4f1ad7714` | 2026-10-10 |
+| boundary | coder/boundary | `e28c8bb476d9dbda3606184309194549bf868c6e` | 2026-10-10 |
+| agentapi | coder/agentapi | `7c468d5b25ec9d3d76c41313cf4e08904ff5968d` | 2026-10-10 |
+| Coder Registry | coder/registry | `a1600a8fd9f9274ceb0162115e44a35aa61a707e` | 2026-10-10 |
+| anyclaude | coder/anyclaude | `e7d360df887848364ccb72a8c5045809d33dd922` | 2026-10-10 |
+| envbuilder | coder/envbuilder | `a5b73298362c9774c1c00f7fca64b023fdcbe760` | 2026-10-10 |
 
-Warp's application code, where all its agent code lives (`app/`), is AGPL-3.0; only its UI framework crates are MIT. Warp is surveyed for ideas only: nothing from it is ported, and Branchyard files contain none of its code ([vendoring](vendoring.md#warp-preserve-the-license-boundary)).
+On 10 October 2026 the OpenRig pin was moved to `4b48ca21a9bd072aa05a08b3da6d9c0708e093c5` and Warp was looked at again at `c1ec372cbd3e4960661779a031172e854e7964e8`; [Coder](#coder) was added. The sections on Scion, OpenRig, Herdr, Warp and Straitjacket still cite the commits above them.
+
+Warp's application code, where all its agent code lives (`app/`), is AGPL-3.0; only its UI framework crates are MIT. Warp is surveyed for ideas only: nothing from it is ported, and Branchyard files contain none of its code ([vendoring](vendoring.md#warp-preserve-the-license-boundary)). At `c1ec372` the repository's root `LICENSE` is still the pre-publication placeholder ("Warp (https://warp.dev) is currently closed-source", pointing at discussion #400), while `README.md` ("Licensing") says the `warpui_core` and `warpui` crates are MIT (`LICENSE-MIT`) and the rest AGPL v3 (`LICENSE-AGPL`), both texts present with Denver Technologies' copyright, and `app/src/ai/` holds 625 files. The stale root file is a reason for care, not a licence: nothing new was taken.
 
 Desktop agent workbenches (emdash, Superset, Conductor) are compared for developer experience separately, in [devex](devex.md).
 
@@ -174,6 +183,49 @@ Straitjacket (`vamsiramakrishnan/straitjacket`, Apache-2.0, `LICENSE`) is a "con
 - Steering live text into a running turn for several native protocols; Straitjacket delivers at the next hook boundary, or cancels an ACP worker.
 - A server, PostgreSQL durability with fencing, lifecycle features and provisioning.
 
+## Coder
+
+Coder (`coder/coder`, AGPL-3.0, Go) is a platform for development environments: workspaces built by Terraform from templates, reached through the Coder agent over SSH, the terminal and IDEs, and stopped, started and deleted by schedule (`docs/user-guides/workspace-lifecycle.md`, "Workspace States"). Around it the `coder` organization publishes smaller tools, several under permissive licences; those are what this round vendors ([vendoring](vendoring.md#coder-egress-jails-and-translation-as-reference-agents-as-data)).
+
+**Agents.** Coder runs coding agents four ways (`docs/ai-coder/index.md`): *Coder Agents*, "a native AI coding agent built into Coder" whose "agent loop runs in the Coder control plane on your infrastructure rather than inside the workspace, so workspaces can be completely network isolated"; *Agent Relay*, where a cloud provider's hosted session (Cursor Cloud Agents, Claude Code) has its tool calls executed by a worker in a workspace (early access); agents in the IDE; and terminal agents installed by registry modules (`module "claude-code" { source = "registry.coder.com/coder/claude-code/coder" version = "~> 5.2" }`). *AI Governance* (a Premium licence, `docs/ai-coder/ai-governance.md`) adds the AI Gateway, "audit trails of prompts, token usage, and tool invocations" with central MCP management, and the Agent Firewall, "process-level policies that restrict which domains agents can reach and what actions they can perform". Workspaces have prebuilds, "an automatically-maintained pool of ready-to-use workspaces for specific parameter presets" with `instances` and an `expiration_policy { ttl }` (`docs/admin/templates/extending-templates/prebuilt-workspaces.md`), and an MCP server, `coder exp mcp server` over stdio or a remote one with OAuth2 (`docs/ai-coder/mcp-server.md`).
+
+**Licences.** Read from each repository's `LICENSE` at the commits above (the GitHub API was not reachable from this environment; `raw.githubusercontent.com` and blobless `git clone` were).
+
+| Repository | Licence | What it is | Taken |
+|---|---|---|---|
+| `coder/coder` | AGPL-3.0 | The platform | Ideas only; its documentation is cited |
+| `coder/httpjail` | CC0-1.0 (public domain) | A Rust HTTP(S) filter for processes: namespaces and nftables on Linux, proxy variables on macOS; TLS interception with a per-run CA; rules in JavaScript, a shell script or a line processor | Vendored as reference, 19 files |
+| `coder/boundary` | MIT | A Go HTTP(S) filter for processes with default deny and `method= domain= path=` rules; what Coder's Agent Firewall installs | Vendored as reference, 14 files |
+| `coder/agentapi` | MIT, archived | An HTTP API over a PTY (or ACP) for eleven terminal agents; "deprecated and no longer maintained" in favour of Coder Agents and the registry modules (`README.md`) | Vendored: its agent types and aliases as data, its API and readiness code as reference, 7 files |
+| `coder/registry` | Apache-2.0 | Terraform modules that install and start agents and tools in a workspace | Vendored: the agent modules' manifests and READMEs as data, their scripts as reference, 28 files |
+| `coder/anyclaude` | MIT | Claude Code on OpenAI, Google or xAI models through a translating proxy | Vendored as reference, 9 files |
+| `coder/envbuilder` | Apache-2.0, maintenance mode | Builds a workspace from a `devcontainer.json` or Dockerfile with Kaniko | Vendored: its `devcontainer.json` parser as reference, 5 files |
+| `coder/acp-go-sdk` | Apache-2.0 | A Go SDK for the Agent Client Protocol | Nothing: Branchyard has its own ACP driver |
+| `coder/xum` (formerly mux), `coder/aibridge` (moved into `coder/coder`), `coder/envbox`, `coder/preview`, `coder/cmux`, `coder/blink`, `coder/pulldash`, `coder/code-marketplace` | AGPL-3.0 | The agent multiplexer, the LLM gateway, workspace tooling | Ideas only |
+| `coder/code-server`, `coder/vscode-coder`, `coder/claudecode.nvim`, `coder/ghostty-web`, `coder/slog`, `coder/picopilot` | MIT | Editors, extensions, libraries | Nothing; not Branchyard's layer |
+| `coder/websocket` (ISC), `coder/wush`, `coder/serpent`, `coder/retry`, `coder/pretty`, `coder/guts`, `coder/hnsw`, `coder/aicommit` (CC0), `coder/quartz` (MIT-0) | permissive | Go libraries and tools | Nothing; Go, with no counterpart needed in Rust |
+| `coder/terraform-provider-coder` | MPL-2.0 | The Terraform provider | Nothing; a weak copyleft outside this policy |
+
+**The egress jails.** Branchyard's [egress](egress.md) proxy allows hosts and ports and never looks inside a tunnel; both of Coder's filters do. httpjail generates a CA on first run, trusts it in the child through `SSL_CERT_FILE`/`SSL_CERT_DIR`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `DENO_CERT`, `CARGO_HTTP_CAINFO` and `GIT_SSL_CAINFO`, and signs a certificate per host (`docs/advanced/tls-interception.md`); on Linux it redirects port 443 in a namespace with nftables, on macOS it relies on proxy variables (`docs/guide/platform-support.md`). Its rules are evaluated as `evaluate(method, url, requester_ip)` by a JavaScript expression, a shell script or a persistent line processor (`src/rules.rs:64`; `src/rules/`), and it logs `<timestamp> <+/-> <METHOD> <URL>` (`docs/guide/request-logging.md`), limits request bytes (`src/limited_body.rs`) and answers DNS from a dummy resolver so names cannot carry data out (`docs/advanced/dns-exfiltration.md`). Its strong mode needs `sudo` and trusted helpers at fixed paths, and refuses to run as root directly (`README.md`, "Security-related defaults"). boundary parses `--allow "method=GET,HEAD domain=api.github.com path=/api/v1/*"` by recursive descent, an exact domain matching only itself and `*.` only subdomains (`rulesengine/rules.go:11-46`), runs the child in a namespace with iptables and a dummy DNS server under `sudo` (`nsjail_manager/`), or under Landlock with proxy variables and no privileges (`landjail/`; `docs/architecture.md`, "Repository map"), and audits to stderr, a file or a socket with a session-correlation header per run (`audit/`, `config/session_correlation.go`).
+
+**agentapi and the registry.** agentapi drives Claude Code, Amazon Q, OpenCode, Goose, Aider, Gemini, Copilot, Amp, Codex, Auggie and Cursor through a pseudo-terminal, reading readiness from the screen's input box (`lib/msgfmt/agent_readiness.go`) and serving `/status`, `/messages`, `/message`, `/upload` and an `/events` stream (`lib/httpapi/server.go:388-424`); `AgentType` names and the aliases `agentapi server` accepts, `q` for Amazon Q and `cursor-agent` for Cursor among them, are in `lib/msgfmt/msgfmt.go:232-248` and `cmd/server/server.go:48-63`. The registry's `claude-code` module (v5.5.1) installs a version, adds MCP servers at user scope, writes policy to `/etc/claude-code/managed-settings.d/10-coder.json` ("Highest-precedence client config"), and authenticates against Anthropic, the AI Gateway, Bedrock, Vertex, Foundry or a custom base URL, with OpenTelemetry export (`registry/coder/modules/claude-code/main.tf`); v5 "drops support for Coder Tasks and Boundary" (its `README.md`). The `agentapi` module is the building block the `aider` and `goose` modules run their agent through, exposing `/status` for `coder_ai_task` and wrapping the agent in boundary when asked (`registry/coder/modules/agentapi/main.tf:173-230`); `agent-firewall` installs boundary "via coder subcommand, direct installation, or compilation from source" (`registry/coder/modules/agent-firewall/README.md`); `aibridge-proxy` downloads the gateway's CA certificate so tools trust it (`registry/coder/modules/aibridge-proxy/README.md`).
+
+**anyclaude and envbuilder.** anyclaude points Claude Code at a local server with `ANTHROPIC_BASE_URL` and translates the Anthropic Messages API to the Vercel AI SDK's prompt and stream types, so `/model openai/gpt-5-mini` works inside Claude Code, with `--reasoning-effort` and `--service-tier` for OpenAI (`README.md`; `src/anthropic-proxy.ts`, `src/convert-anthropic-messages.ts`, `src/convert-to-anthropic-stream.ts`). envbuilder parses `devcontainer.json` (`image`, `build`, `features`, `containerEnv`, `remoteEnv` and the lifecycle scripts; `devcontainer/devcontainer.go`) and builds it with Kaniko and a registry layer cache; Coder now recommends its built-in devcontainers integration instead (`README.md`).
+
+### Where Coder is ahead of Branchyard
+
+- Egress at the request: method and path rules behind TLS interception, a request log with the full URL, and an answer on macOS (proxy variables), where Branchyard is advisory. Branchyard allows hosts and ports and sees nothing inside a tunnel ([egress](egress.md#what-is-enforced-and-what-is-not)).
+- A platform: templates, workspaces with a lifecycle (stopped, dormant, deleted on schedule), prebuilt pools per preset with a TTL, quotas, an MCP server and a web UI people use daily.
+- A gateway that audits prompts and tool invocations across many clients (AI Gateway; AGPL and Premium), and a translating proxy that runs Claude Code on other providers (anyclaude). Branchyard's [model gateway](model-gateway.md) meters usage and cost per call but passes bodies through and does not translate between APIs.
+- An agent loop of its own (Coder Agents) beside third-party harnesses, and Agent Relay for cloud-hosted sessions.
+
+### Where Branchyard is ahead of Coder
+
+- Every tool permission of a driven harness is answered by policy per invocation; agentapi and the registry modules launch harnesses with the harness's own permission mode and read state from a screen. agentapi is archived.
+- Delegation with scoped authority, envelopes and subtree budgets; validated merges on the exact target; durable operations with fencing. Coder's unit is a workspace, not a change.
+- Egress confinement without privileges: an unprivileged user and network namespace per harness, with no DNS or route but the proxy. httpjail's strong mode and boundary's default backend need `sudo` and system helpers; the unprivileged alternatives (httpjail's weak mode, boundary's landjail) rely on the process honouring proxy variables, as Branchyard's advisory mode does.
+- A portable contract: an SDK, a CLI, an HTTP API and Python clients over one engine, rather than a Terraform provider and a control plane.
+
 ## Feature matrix
 
 Paths in a column are relative to that project's repository at its surveyed commit.
@@ -208,6 +260,18 @@ Paths in a column are relative to that project's repository at its surveyed comm
 | Scion | `54b9387` | 2026-09-16 | 318 | 34 of 44 | `claude/config.yaml`, `claude/provision.py`, `claude/provision_test.py`, `codex/config.yaml`, `codex/provision.py`, `codex/provision_test.py`, `gemini-cli/provision.py`, `grok-build/config.yaml`, `grok-build/provision.py`, `grok-build/provision_test.py` |
 | Herdr | `5f3763d` | 2026-09-16 | 69 | 20 of 25 | `src/agent_resume.rs`, `src/detect/manifest.rs`, manifests `codex`, `grok`, `kiro` |
 | OpenRig | `cc75efd` | 2026-09-14 | 49 (17 on the first-parent line) | 5 of 6 | `packages/daemon/src/domain/runtime-adapter.ts` |
+
+Re-pinned and added on 10 October 2026 ([vendoring](vendoring.md#included-material)), with `tools/vendor_pin.py`:
+
+| Project | Pinned | Files | Notes |
+|---|---|---:|---|
+| OpenRig | `4b48ca2` | 13 | Re-pinned from `cc75efd`: only `runtime-adapter.ts` changed, gaining `effort`, a `launchPosture` of `auto`, `permissionMode`, `nonInterruptive`, `kernelAuthority`, `teamPermissionDefault`, `launchGeneration`, `claudeManagedBlockFile`, a `claudeManagedLaunch` seam, `skillTargetPath()` and a `sendInteractiveText` hook on `deliverStartup`. Added: the five builtin policies (`packages/daemon/policies/builtin/*.policy.md`), `native-resume-probe.ts` and `startup-orchestrator.ts` |
+| httpjail | `6d476da` | 19 | Licence, README, the TLS-interception, DNS, rule-engine, request-logging and platform docs, the rule engine, the proxies, TLS, the jails (Linux, weak), the body limiter and the verifier |
+| boundary | `e28c8bb` | 14 | Licence, README, architecture, the rules engine and its tests, the proxy, auditing, session correlation, landjail, the dummy DNS server |
+| agentapi | `7c468d5` | 7 | Licence, README, the agent types and aliases (data), the readiness detector, the API models and events |
+| Coder Registry | `a1600a8` | 28 | Licence; the `claude-code`, `aider`, `goose`, `agentapi`, `agent-firewall`, `aibridge-proxy` and `mux` modules' manifests and READMEs (data) and scripts |
+| anyclaude | `e7d360d` | 9 | Licence, README, the proxy, the three converters, the Anthropic types, the Claude configuration, `main.ts` |
+| envbuilder | `a5b7329` | 5 | Licence, the `devcontainer.json` parser, features, lifecycle scripts and the parser's tests |
 
 What changed:
 
@@ -269,6 +333,7 @@ OpenRig's most useful contribution is the declarative layer Branchyard lacks. It
 | Activity hooks | don't, for now | — | A terminal-attached profile, if one is ever added | Protocol drivers already emit tool and turn events. OpenRig's hooks exist because it drives TUIs |
 | OpenRig as a client | client | Upstream work | Branchyard's HTTP API | OpenRig's five-method `RuntimeAdapter` could gain a Branchyard runtime whose seats are branches. That is OpenRig's decision; Branchyard needs only a stable API |
 | Queue, chat rooms, workflows, services, culture files | don't | — | — | Coordination conventions above Branchyard's contract |
+| The builtin posture policies as data; the resume probe and startup orchestrator as design input | vendored (10 October 2026) | — | — | `policies/builtin/{auto,locked,open,standard,yolo}.policy.md` state each posture's `default_posture`, `allow`, `ask`, `deny` and `destructive_class`, with the floor `acceptEdits`/`workspace-write` that Branchyard refuses to adopt; `native-resume-probe.ts` names `resumed`, `failed`, `inconclusive` and `attention_required`; `startup-orchestrator.ts` is the ten-step delivery. Read, not run |
 
 #### `by rig` (done)
 
@@ -347,6 +412,8 @@ Ideas only; nothing is ported, because Warp's application is AGPL-3.0.
 
 `vendor/warp-agpl` stays as it is: five files, at `2f0db5c5edd8134f0e858aebbc0ecd0db2f91d38`, substantively unchanged at the surveyed commit. The mailbox and the permission engine are left out of it: they are designs to reimplement, not source to keep.
 
+At `c1ec372` (10 October 2026) nothing changed for Branchyard: the application is still AGPL v3 and the UI crates MIT (`README.md`, "Licensing"), the root `LICENSE` is a stale closed-source placeholder, and the MIT crates are a GPU terminal's UI framework with no use here. Nothing new is vendored.
+
 ### Straitjacket
 
 Straitjacket is Apache-2.0; PR #1 already took its plugin, installer, task-runtime and capability lessons. What remains:
@@ -359,6 +426,26 @@ Straitjacket is Apache-2.0; PR #1 already took its plugin, installer, task-runti
 | Two-gate capability wording in the matrix | idea (done) | Done | Capability reasons | [Compatibility](compatibility.md) (`compat_matrix.rs`, freshness-tested) adds "Perm. answered" and "Steer" columns: what a driver can intercept mid-turn, each `live-tested` (a qualification report, or `docs/harness-integration.md`'s recorded evidence for steer), `contract-only` (the conformance kit's own mocked protocol test, run for every profile), `not verified`, or `—` when the driver does not offer it at all — never overstated |
 | Its sidecar mechanisms: task ledger, guard modes, redaction, code index | don't | — | — | Outside Branchyard's contract |
 
+
+### Coder
+
+Types as above. The two jails are the one thing here that Branchyard's engine lacks and could carry; the rest of Coder's value is a platform Branchyard does not try to be.
+
+| Item | Type | Effort | Depends on | Notes |
+|---|---|---|---|---|
+| Method and path rules behind TLS interception | port and idea | 3–5 days | A CA per branch in its private home; `rcgen` and `rustls` are already in `Cargo.lock` | httpjail (CC0-1.0, Rust) and boundary (MIT) are vendored as the reference. Branchyard's proxy would terminate `CONNECT` to a host whose rule names a path or method, with a leaf certificate signed by the branch's CA, refuse HTTP/2 in ALPN so HTTP/1 can be parsed, re-encrypt to the origin with the system roots, and record the full URL in the `egress` decision. Provisioning sets the seven trust variables httpjail lists. The rule grammar extends `HOST[:PORT]` with boundary's `method=` and `path=` keys; a rule without them keeps today's blind tunnel. Deliberately kept: a host-only rule stays a tunnel, so a harness's own API traffic is never read |
+| Enforcement on macOS | don't | — | — | httpjail is "env vars only" there too (`docs/guide/platform-support.md`); its strong mode is Linux. Branchyard stays advisory on macOS and says so |
+| DNS exfiltration protection | done | — | — | A confined harness has no resolver and no route but the proxy, which resolves on the host; httpjail and boundary answer with a dummy server because their namespaces route |
+| A request log with the full URL | idea | With interception | Above | `by log` already records every decision as `METHOD host:port`; the path arrives with interception |
+| Anthropic to OpenAI translation on the model gateway | port (translation) | 2–3 days | [Model gateway](model-gateway.md) | anyclaude (MIT) is vendored as the reference: the Messages API to a provider-neutral prompt and back, streaming included, with tools, system prompts and reasoning. The gateway already gives a harness `ANTHROPIC_BASE_URL`; a route could then send a Claude Code branch to an `openai` or `generic` backend, which today is refused ("a route never sends an Anthropic request to an OpenAI backend") |
+| `devcontainer.json` as a source of a prepared environment | idea | 1–2 days | [Environments](environments.md); a container runtime for `features` | envbuilder (Apache-2.0) is vendored as the reference for the parser: `onCreateCommand`, `postCreateCommand`, `containerEnv` and `remoteEnv` map onto `[workspace] prepare` and the branch's variables; `image`, `build` and `features` need Microsandbox or Substrate |
+| Coder Registry modules and agentapi agent types as naming sources | port (done) | Done | — | `branchyard_controls::harness` maps every agentapi type but `custom` and every registry module tagged `agent`, and the catalog records them as `agentapi:<type>` and `coder:<module>`; Amazon Q Developer CLI (`amazon-q`, agentapi's `amazonq`, executable `q`) is a new registry entry, names only |
+| Managed settings for Claude Code | idea | 0.5–1 day | [Provisioning](provisioning.md) | The registry's module writes `/etc/claude-code/managed-settings.d/10-coder.json`, which Claude Code reads above every user and project setting. Branchyard writes settings in the branch's private home; for a sandboxed branch a managed-settings file would put policy out of the harness's reach. Check Claude Code's precedence for the private-home case first |
+| Workspace lifecycle, dormancy and TTL for resident branches | idea | With the always-on work | [Triggers](triggers.md#a-branch-that-lives-on) | Coder stops a workspace on schedule and later marks it dormant; a branch a trigger or a surface keeps alive could pause its sandbox after idle time and reincarnate after a number of turns, as the triggers page's "Learned from OpenClaw" lists |
+| Prebuilt pools per preset with a TTL | compare | 0.5 day for a TTL | [Warm pools](pools.md) | Branchyard pools per environment key; Coder pools per parameter preset and expires unclaimed instances. A TTL on pooled sandboxes is the one addition |
+| Coder Agents, Agent Relay, the AI Gateway's audit, the platform MCP server, Tasks' `/status` app | don't | — | — | AGPL, and a platform's surface. Branchyard's statuses come from protocols, not a screen; its gateway meters calls and the effects ledger records connector calls, which is where a tool audit belongs |
+| agentapi's pseudo-terminal driving | don't | — | — | Branchyard drives protocols; Aider still has no driver and will not get one by screen |
+
 ## Surprises
 
 - Scion fixed the Claude model-alias mismatch that Branchyard documents as a known upstream incompatibility; the upstream suite passes at `d9b9e6a`.
@@ -370,3 +457,8 @@ Straitjacket is Apache-2.0; PR #1 already took its plugin, installer, task-runti
 - Warp's most relevant mechanism for Branchyard, a mailbox into a running Claude Code session, is not in the vendored files; it exists because Claude Code's protocol has no live input, so Warp delivers at a hook boundary.
 - Branchyard's [sandbox snapshots](sandbox-snapshots.md) follow the pattern the mario-never-dies probe exercises on Microsandbox: pause a sandbox, then branch it into children that keep the source's processes (the same PIDs) and write privately while the source stays paused. Branchyard puts that under its git checkpoints, forks and fans, with git and setup as the fallback; it is unqualified until it runs on KVM.
 - Straitjacket's relay reached several of the inbox's design questions independently (exactly once, never blocking the primary call) and answered the receipt question more precisely.
+- Warp's root `LICENSE` at `c1ec372` still says the project is closed-source while the README and two licence files beside it say AGPL v3 and MIT; the README governs the code, the placeholder is stale.
+- agentapi, the component Coder's Tasks ran agents through, is archived and deprecated in favour of Coder's own agent loop, and the `claude-code` module's v5 dropped Tasks and Boundary support: Coder moved from driving terminals to running an agent in the control plane, the same move away from screens Branchyard made at the start.
+- Coder's Agent Firewall is boundary, and Coder also publishes httpjail, a Rust filter in the same domain under CC0: two implementations of request-level egress, both interposing TLS, where Branchyard stopped at the host.
+- Branchyard's confinement needs no privileges where both jails' strong modes need `sudo`; the trade is that theirs see inside the tunnel and Branchyard's does not.
+- The Coder Registry is a third, maintained source of how harnesses are installed and launched, with versions, authentication variables and gateways the emdash and Orca tables do not carry; the catalog now names it, and a later round can read its install scripts the way emdash's helpers are read.

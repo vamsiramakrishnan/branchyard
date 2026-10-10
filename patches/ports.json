@@ -14,6 +14,20 @@
       "vendor": "vendor/orca",
       "license": "MIT License",
       "copyright": "Copyright (c) 2026 Lovecast Inc."
+    },
+    "agentapi": {
+      "repository": "coder/agentapi",
+      "commit": "7c468d5b25ec9d3d76c41313cf4e08904ff5968d",
+      "vendor": "vendor/agentapi",
+      "license": "MIT License",
+      "copyright": "Copyright (c) 2025 Coder Technologies, Inc."
+    },
+    "coder-registry": {
+      "repository": "coder/registry",
+      "commit": "a1600a8fd9f9274ceb0162115e44a35aa61a707e",
+      "vendor": "vendor/coder-registry",
+      "license": "Apache License, Version 2.0",
+      "copyright": "no copyright notice at the repository root"
     }
   },
   "derivatives": [
@@ -105,10 +119,32 @@
         "orca": {
           "src/shared/tui-agent-config.ts": "27cda1d19796a3a1110982543bf1e35087f53b95",
           "src/shared/tui-agent.ts": "a98c45101fd60d56bb82a283ceec947f24adc025"
+        },
+        "agentapi": {
+          "lib/msgfmt/msgfmt.go": "5695f821a405bc6cea551c44767e04d5e6027a52",
+          "cmd/server/server.go": "cc53aa174e9c370795c404b9910d5998b8c17e32"
+        },
+        "coder-registry": {
+          "registry/coder/modules/agent-firewall/README.md": "2507ec2dd0f422d4412f1ff53728554097324a82",
+          "registry/coder/modules/agent-firewall/main.tf": "df291927e330173e7b59a65fc0a772880455eb4c",
+          "registry/coder/modules/agentapi/README.md": "424c0fb8f263700550dcb867f8d0097bb4ba7c76",
+          "registry/coder/modules/agentapi/main.tf": "c90b16d5da12f40515bd3de68cd4e4440fca554c",
+          "registry/coder/modules/aibridge-proxy/README.md": "4265dd2515b7dc7579833e3aad915bb35df7a7ac",
+          "registry/coder/modules/aibridge-proxy/main.tf": "7d335718927fece84868ecaf5e4926b81cde3fdd",
+          "registry/coder/modules/aider/README.md": "ec561e765d2c82194cbf5a98588a6d5a9b0af1f8",
+          "registry/coder/modules/aider/main.tf": "90001ea1b34226c99a839aa905dbc640b8dd33d0",
+          "registry/coder/modules/claude-code/README.md": "b0bfe89879da1df0c7ae351a3d413909cab66ee8",
+          "registry/coder/modules/claude-code/main.tf": "0497139a0520d0d6b3d469c61775cb290a4ef053",
+          "registry/coder/modules/goose/README.md": "0c3c2e434f3bf51ccb9641d3854b7e9009a974b0",
+          "registry/coder/modules/goose/main.tf": "87d3cce74ec46267277ec7f49712e8bb06d1cf37",
+          "registry/coder/modules/mux/README.md": "977cbbaadd53b7dd2a6b1aa63a0439c7ab1692ee",
+          "registry/coder/modules/mux/main.tf": "787df6934a185e5710604464caf23f892a088e44"
         }
       },
       "named_as": [
-        "packages/plugins/src/agents/impl/*/index.ts"
+        "packages/plugins/src/agents/impl/*/index.ts",
+        "registry/coder/modules/*/README.md",
+        "registry/coder/modules/*/main.tf"
       ]
     },
     {

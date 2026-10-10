@@ -8,17 +8,32 @@ import type { ProjectionPlan } from "./projection-planner.js";
 export interface NodeBinding extends Binding {
   cwd: string;
   model?: string;
+  effort?: string;
   codexConfigProfile?: string;
   /** OPR.0.4.8.3 Seam B: the seat's RESOLVED launch posture from its permission_policy
    * attachment (member > rig precedence, resolved by the core resolver at materialize /
    * restore). Absent = no policy attached → the env-driven floor/YOLO decision stands.
    * Present = authoritative for this seat (overrides the env read in BOTH directions). */
-  launchPosture?: "floor" | "full_bypass";
+  launchPosture?: "floor" | "full_bypass" | "auto";
+  /** Explicit Claude native mode; checked against the bound managed executable. */
+  permissionMode?: string;
+  /** Persisted rig opt-in to per-launch warning acceptance, only at full_bypass. */
+  nonInterruptive?: boolean;
+  /** Launch-only operational default, derived from the persisted kernel rig and explicit selections. */
+  kernelAuthority?: boolean;
+  /** Derived at launch only when no authored policy, seat choice or native profile applies. */
+  teamPermissionDefault?: boolean;
+  /** Reserved successor generation; current tenure remains the input fence until commit. */
+  launchGeneration?: string;
+  /** #25: the rig's `managed_blocks.claude-code` file. Absent = CLAUDE.md. Only the Claude adapter reads it. */
+  claudeManagedBlockFile?: import("./managed-blocks.js").ClaudeManagedBlockFile;
 }
 
 // -- Resolved startup file with source-root provenance --
 
 export interface ResolvedStartupFile {
+  /** Explicit per-seat role orientation; never inferred from the filename. */
+  orientation?: "role";
   path: string;
   absolutePath: string;
   ownerRoot: string;
@@ -38,12 +53,14 @@ export interface InstalledResource {
 }
 
 export interface ProjectionResult {
+  warnings?: string[];
   projected: string[];
   skipped: string[];
   failed: Array<{ effectiveId: string; error: string }>;
 }
 
 export interface StartupDeliveryResult {
+  warnings?: string[];
   delivered: number;
   failed: Array<{ path: string; error: string }>;
 }
@@ -60,6 +77,7 @@ export const ATTENTION_REQUIRED_READINESS_CODES = new Set([
   "update_gate",
   "login_required",
   "mcp_gate",
+  "bypass_consent_gate",
   // Codex auth refusal (stored OAuth token can no longer be refreshed).
   // Defensive: row 6's verifyResumeLaunch patch propagates attention_required
   // through the launch path so the readiness fallback shouldn't see this code,
@@ -123,7 +141,13 @@ export interface ForkSource {
  * to the startup orchestrator after checkReady().
  */
 export interface RuntimeAdapter {
+  /** Claude's managed capability/launch seam, shared with seat selection. */
+  readonly claudeManagedLaunch?: import("./claude-managed-launch.js").ClaudeManagedLaunch;
   readonly runtime: string;
+  /** The file an adapter's project() writes for a skill when it lives outside
+   *  the Claude project tree, for "already in place" detection. Absent = the
+   *  instantiator's default target. */
+  skillTargetPath?(tmuxSession: string | null, effectiveId: string): string | null;
 
   /** List currently installed/projected resources for a node. */
   listInstalled(binding: NodeBinding): Promise<InstalledResource[]>;
@@ -131,8 +155,9 @@ export interface RuntimeAdapter {
   /** Project resources from a projection plan to the runtime target locations. */
   project(plan: ProjectionPlan, binding: NodeBinding): Promise<ProjectionResult>;
 
-  /** Deliver startup files to the runtime. */
-  deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult>;
+  /** Deliver startup files. Claude's post-launch path can reuse the orchestrator's checked send.
+   * The adapter still owns file reads, ordering, provisioning and required/optional errors. */
+  deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding, sendInteractiveText?: (text: string) => Promise<void>): Promise<StartupDeliveryResult>;
 
   /**
    * Launch the harness (claude/codex/terminal) inside the tmux session.

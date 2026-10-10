@@ -20,6 +20,7 @@ jobs:
           python-version: '3.12'
       - run: python tools/verify_vendor.py
       - run: python tests/test_verify_vendor.py
+      - run: python tests/test_vendor_pin.py
       - run: python tools/verify_derivatives.py
       - run: python tools/check_catalog.py
       # No hand-rolled percent/hex/base64/shell/tar codecs (tools/handrolled_banlist.toml).

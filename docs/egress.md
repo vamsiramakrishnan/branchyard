@@ -193,6 +193,7 @@ The enforced tests need a host that allows unprivileged user and network namespa
 - Microsandbox and Substrate do not apply a policy at all; routing a guest to the proxy, or using the runtime's own egress controls, is future work.
 - `by spawn` has no `--network` of its own: a child narrows through its seat or inherits its parent's.
 - A server's operator can cap a request's policy per principal (`ceilings`), but not set a default for requests that name none.
+- Rules name hosts and ports, never a method or a path, because the proxy does not look inside a tunnel. Coder's httpjail (CC0-1.0, Rust) and boundary (MIT) do, with a CA per run the process is told to trust; both are vendored as the reference for that step ([comparison](comparison.md#coder), the absorption plan).
 
 ## A private temporary directory
 

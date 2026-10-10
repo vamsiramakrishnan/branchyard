@@ -166,6 +166,8 @@ pub(crate) mod tests {
 
     const EMDASH_COMMIT: &str = "873a3e2067f4abc136272ed2b61abea3a2c07bcf";
     const ORCA_COMMIT: &str = "280733273545f0b3eeedc1be54b14d406239030e";
+    const AGENTAPI_COMMIT: &str = "7c468d5b25ec9d3d76c41313cf4e08904ff5968d";
+    const CODER_REGISTRY_COMMIT: &str = "a1600a8fd9f9274ceb0162115e44a35aa61a707e";
 
     fn text(value: &Value) -> Option<String> {
         value.as_str().filter(|s| !s.is_empty()).map(str::to_owned)
@@ -299,6 +301,8 @@ pub(crate) mod tests {
             .into_iter()
             .collect();
         sources.extend(harness.orca.iter().map(|key| format!("orca:{key}")));
+        sources.extend(harness.agentapi.map(|name| format!("agentapi:{name}")));
+        sources.extend(harness.coder_module.map(|dir| format!("coder:{dir}")));
         HarnessEntry {
             id: harness.id.to_owned(),
             name,
@@ -355,11 +359,19 @@ pub(crate) mod tests {
              # Version 2.0 (vendor/emdash/LICENSE.md),\n\
              # and stablyai/orca at {ORCA_COMMIT}\n\
              # (src/shared/tui-agent-config.ts, src/shared/tui-agent.ts), Copyright (c) 2026\n\
-             # Lovecast Inc., MIT License (vendor/orca/LICENSE).\n\
+             # Lovecast Inc., MIT License (vendor/orca/LICENSE);\n\
+             # coder/agentapi at {AGENTAPI_COMMIT}\n\
+             # (lib/msgfmt/msgfmt.go, cmd/server/server.go: its agent types and their\n\
+             # aliases), Copyright (c) 2025 Coder Technologies, Inc., MIT License\n\
+             # (vendor/agentapi/LICENSE); and coder/registry at {CODER_REGISTRY_COMMIT}\n\
+             # (registry/coder/modules/*/README.md, registry/coder/modules/*/main.tf: its\n\
+             # agent modules), Apache License, Version 2.0 (vendor/coder-registry/LICENSE;\n\
+             # no copyright notice at the repository root).\n\
              # Modified for Branchyard: the TypeScript plugin definitions were reduced to\n\
              # data (Linux install commands with npm and Homebrew helpers expanded, CLI\n\
              # login, API-key variables, model names, model and resume flags) and joined\n\
-             # with Orca's executables under Branchyard's harness IDs.\n"
+             # with Orca's executables, agentapi's type names and the registry's module\n\
+             # names under Branchyard's harness IDs.\n"
         );
         for harness in HARNESSES {
             let e = entry(harness);
@@ -708,6 +720,16 @@ pub(crate) mod tests {
         assert!(!codex.models.is_empty());
         let muse = harness("muse-code").unwrap();
         assert!(muse.install[0].starts_with("curl"), "{:?}", muse.install);
+        // Named by Coder's sources too.
+        assert!(
+            claude.sources.contains(&"agentapi:claude".to_owned()),
+            "{:?}",
+            claude.sources
+        );
+        assert!(claude.sources.contains(&"coder:claude-code".to_owned()));
+        let q = harness("amazon-q").unwrap();
+        assert_eq!(q.sources, ["agentapi:amazonq"]);
+        assert!(q.binaries.is_empty());
         // Known about, from Orca alone.
         let trae = harness("trae").unwrap();
         assert_eq!(trae.binaries, ["traecli"]);

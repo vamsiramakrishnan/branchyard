@@ -10,11 +10,19 @@
 # Version 2.0 (vendor/emdash/LICENSE.md),
 # and stablyai/orca at 280733273545f0b3eeedc1be54b14d406239030e
 # (src/shared/tui-agent-config.ts, src/shared/tui-agent.ts), Copyright (c) 2026
-# Lovecast Inc., MIT License (vendor/orca/LICENSE).
+# Lovecast Inc., MIT License (vendor/orca/LICENSE);
+# coder/agentapi at 7c468d5b25ec9d3d76c41313cf4e08904ff5968d
+# (lib/msgfmt/msgfmt.go, cmd/server/server.go: its agent types and their
+# aliases), Copyright (c) 2025 Coder Technologies, Inc., MIT License
+# (vendor/agentapi/LICENSE); and coder/registry at a1600a8fd9f9274ceb0162115e44a35aa61a707e
+# (registry/coder/modules/*/README.md, registry/coder/modules/*/main.tf: its
+# agent modules), Apache License, Version 2.0 (vendor/coder-registry/LICENSE;
+# no copyright notice at the repository root).
 # Modified for Branchyard: the TypeScript plugin definitions were reduced to
 # data (Linux install commands with npm and Homebrew helpers expanded, CLI
 # login, API-key variables, model names, model and resume flags) and joined
-# with Orca's executables under Branchyard's harness IDs.
+# with Orca's executables, agentapi's type names and the registry's module
+# names under Branchyard's harness IDs.
 
 [[harness]]
 id = "claude-code"
@@ -27,7 +35,7 @@ auth_env = ["ANTHROPIC_API_KEY"]
 models = ["claude-fable-5-1[1m]", "haiku", "opus[1m]", "sonnet"]
 model_flag = "--model"
 resume_flag = "--resume"
-sources = ["emdash:claude", "orca:claude", "orca:claude-agent-teams"]
+sources = ["emdash:claude", "orca:claude", "orca:claude-agent-teams", "agentapi:claude", "coder:claude-code"]
 
 [[harness]]
 id = "codex"
@@ -40,7 +48,7 @@ auth_env = ["OPENAI_API_KEY"]
 models = ["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol"]
 model_flag = "-m"
 resume_flag = "resume"
-sources = ["emdash:codex", "orca:codex"]
+sources = ["emdash:codex", "orca:codex", "agentapi:codex"]
 
 [[harness]]
 id = "antigravity"
@@ -82,7 +90,7 @@ binaries = ["gemini"]
 install = []
 auth_env = []
 models = []
-sources = ["orca:gemini"]
+sources = ["orca:gemini", "agentapi:gemini"]
 
 [[harness]]
 id = "opencode"
@@ -95,7 +103,7 @@ auth_env = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "ORCAROUTER
 models = []
 model_flag = "--model"
 resume_flag = "--session"
-sources = ["emdash:opencode", "orca:opencode", "orca:opencode2"]
+sources = ["emdash:opencode", "orca:opencode", "orca:opencode2", "agentapi:opencode"]
 
 [[harness]]
 id = "pi"
@@ -116,7 +124,7 @@ homepage = "https://goose-docs.ai/docs/quickstart/"
 install = ["curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | bash"]
 auth_env = []
 models = []
-sources = ["emdash:goose", "orca:goose"]
+sources = ["emdash:goose", "orca:goose", "agentapi:goose", "coder:goose"]
 
 [[harness]]
 id = "aider"
@@ -125,7 +133,7 @@ binaries = ["aider"]
 install = []
 auth_env = []
 models = []
-sources = ["orca:aider"]
+sources = ["orca:aider", "agentapi:aider", "coder:aider"]
 
 [[harness]]
 id = "cursor"
@@ -136,7 +144,7 @@ install = ["curl https://cursor.com/install -fsS | bash"]
 auth_env = []
 models = []
 resume_flag = "--resume"
-sources = ["emdash:cursor", "orca:cursor"]
+sources = ["emdash:cursor", "orca:cursor", "agentapi:cursor"]
 
 [[harness]]
 id = "github-copilot"
@@ -147,7 +155,7 @@ install = ["npm install -g @github/copilot"]
 auth_env = []
 models = []
 resume_flag = "--resume"
-sources = ["emdash:copilot", "orca:copilot"]
+sources = ["emdash:copilot", "orca:copilot", "agentapi:copilot"]
 
 [[harness]]
 id = "amp"
@@ -157,7 +165,7 @@ homepage = "https://ampcode.com/manual#install"
 install = ["npm install -g @ampcode/cli"]
 auth_env = []
 models = ["high", "low", "medium", "ultra"]
-sources = ["emdash:amp", "orca:amp"]
+sources = ["emdash:amp", "orca:amp", "agentapi:amp"]
 
 [[harness]]
 id = "qwen-code"
@@ -325,7 +333,7 @@ install = ["npm install -g @augmentcode/auggie"]
 auth_env = []
 models = []
 resume_flag = "--resume"
-sources = ["emdash:auggie", "orca:aug"]
+sources = ["emdash:auggie", "orca:aug", "agentapi:auggie"]
 
 [[harness]]
 id = "autohand"
@@ -509,3 +517,12 @@ install = ["npm install -g @gitlawb/zero"]
 auth_env = []
 models = []
 sources = ["emdash:zero"]
+
+[[harness]]
+id = "amazon-q"
+name = "amazon-q"
+binaries = []
+install = []
+auth_env = []
+models = []
+sources = ["agentapi:amazonq"]
