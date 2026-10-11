@@ -139,6 +139,7 @@ mod provisioning;
 mod pull_request;
 mod record;
 mod recover;
+pub mod reported;
 mod run;
 #[cfg(test)]
 mod schema_parity;
@@ -256,6 +257,7 @@ pub use pull_request::{
     slug, CheckRun, CiSummary, IssueLink, PullRequestActivity, PullRequestObservation,
     PullRequestRef, Pushed, ResolvedThread,
 };
+pub use reported::{Reported, ReportedState, StatusReport};
 pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
 pub use snapshots::{
@@ -2552,6 +2554,19 @@ pub enum Activity {
     /// call blocked, an entry begun, confirmed, staged, reconciled or
     /// undone. See [`effects::EffectActivity`] and `docs/effects.md`.
     Effect(Box<effects::EffectActivity>),
+    /// The harness's own account of what it is doing, from its
+    /// `report_status` tool or `by report-status`: a claim beside the
+    /// protocol's status, never a replacement for it. See
+    /// `docs/delegation.md#self-reported-status`.
+    StatusReport {
+        /// What the harness says it is doing.
+        state: ReportedState,
+        /// One line of at most 280 characters.
+        summary: String,
+        /// Where to read more, an `http` or `https` URL.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        link: Option<String>,
+    },
 }
 
 /// A turn's checkpoint: the branch's commit when the turn ended, kept as the

@@ -77,11 +77,11 @@ depend on its siblings (depends_on): it waits, and starts once they have settled
 creates several children and dependencies at once, all or nothing, against the revision graph \
 shows. You act only as your own branch and only \
 on your descendants. A branch that may not delegate (its envelope's max_depth is 0) still has \
-inspect, check, the artifact and scratch tools, and ask, report, escalate and inbox; the other tools \
+inspect, check, the artifact and scratch tools, and ask, report, escalate, report_status and inbox; the other tools \
 refuse it. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
 may spawn. You can also message: ask your parent a question (optionally waiting for its \
 answer), report to it, escalate to it or, if your rig seat allows, further up; answer a \
-descendant's message; and read your own inbox. A child spawned with plan: true writes a plan read-only and escalates it to you: approve_plan runs it (as proposed or edited), reject_plan ends it or, with replan, has it plan again. When a descendant's tool or connector call needs approval, the ask is escalated to you: answer_approval allows or denies it.";
+descendant's message; state your own status in a line with report_status (working, idle, blocked, complete or failure; blocked and failure also reach your parent's inbox), which is a claim shown beside the status Branchyard derives, not a message; and read your own inbox. A child spawned with plan: true writes a plan read-only and escalates it to you: approve_plan runs it (as proposed or edited), reject_plan ends it or, with replan, has it plan again. When a descendant's tool or connector call needs approval, the ask is escalated to you: answer_approval allows or denies it.";
 
 fn schema(value: Value) -> Arc<Map<String, Value>> {
     match value {
@@ -518,6 +518,30 @@ pub fn tools() -> Vec<Tool> {
                 "type": "object",
                 "properties": {"text": {"type": "string"}},
                 "required": ["text"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "report_status",
+            "State your own status in one line, beside the one Branchyard derives: what you \
+             are doing now (working), that you are waiting (idle), that you cannot go on \
+             without something you name (blocked), that the task is done (complete), or that \
+             you gave up (failure). Your parent and the person watching see it next to your \
+             status. Blocked and failure are also escalated to your parent's inbox. It is a \
+             claim, not a result: it changes nothing about your branch, and report is still \
+             how you send your parent a message.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "state": {
+                        "type": "string",
+                        "enum": branchyard::ReportedState::NAMES,
+                        "description": "What you are doing: working, idle, blocked, complete or failure",
+                    },
+                    "summary": {"type": "string", "maxLength": branchyard::reported::SUMMARY_MAX, "description": "One line, at most 280 characters"},
+                    "link": {"type": "string", "description": "Optional http(s) URL with more, such as a pull request or an issue"},
+                },
+                "required": ["state", "summary"],
                 "additionalProperties": false,
             })),
         ),

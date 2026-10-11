@@ -954,6 +954,11 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         if let Some((summary, _)) = egress_summary(&events) {
             value["egress"] = summary;
         }
+        // Its own account of what it is doing, beside the protocol's status
+        // (docs/delegation.md#self-reported-status).
+        if let Some((summary, _)) = reported_summary(&events, branchyard_support::time::now_ms()) {
+            value["reported"] = summary;
+        }
         // Its calls through the model gateway (docs/model-gateway.md).
         if let Some((summary, _)) = crate::models_cmd::summary(&events) {
             value["models"] = summary;
@@ -973,6 +978,9 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
     }
     if let Some((_, text)) = egress_summary(&events) {
         extra.push(("egress", text));
+    }
+    if let Some((_, text)) = reported_summary(&events, branchyard_support::time::now_ms()) {
+        extra.push(("reported", text));
     }
     if let Some((_, text)) = crate::models_cmd::summary(&events) {
         extra.push(("models", text));
@@ -995,6 +1003,24 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         env.style(),
     ));
     print(&text)
+}
+
+/// The branch's latest self-reported status, as JSON and as one line for
+/// `by show`: `blocked: waiting on the API key (https://...), 3m ago`.
+/// `None` when it never reported one. A claim of the harness's, shown
+/// beside the status the protocol gives.
+pub(crate) fn reported_summary(
+    events: &[branchyard::RecordedEvent],
+    now_ms: u64,
+) -> Option<(serde_json::Value, String)> {
+    let report = branchyard::reported::latest(events)?;
+    let age = render::age_text(now_ms.saturating_sub(report.at_ms) / 1000);
+    let mut text = render::reported_text(&report);
+    text.push_str(&match age.as_str() {
+        "now" => ", just now".to_owned(),
+        age => format!(", {age} ago"),
+    });
+    Some((serde_json::to_value(&report).ok()?, text))
 }
 
 /// How the branch's last turn with a network policy applied it, and what
@@ -1963,6 +1989,40 @@ pub fn escalate(target: &Target, as_branch: Option<String>, text: &str, json: bo
     };
     emit(json, result, |m| {
         format!("escalated #{} to {}: {}\n", m.id, m.to, m.text)
+    })
+}
+
+/// Why `by --remote report-status` is refused.
+const REPORT_STATUS_REMOTE: &str = "by report-status acts on a local repository: a harness \
+    states its own status from inside its turn, and the server has no route for it";
+
+/// `by report-status`: record the branch's own status beside the protocol's.
+pub fn report_status(
+    target: &Target,
+    as_branch: Option<String>,
+    state: &str,
+    summary: &str,
+    link: Option<&str>,
+    json: bool,
+) -> Outcome {
+    let delegate = harness_delegate(json)?;
+    let state = branchyard::ReportedState::parse(state);
+    let result = match (delegate, target) {
+        (Some(delegate), _) => as_itself(&delegate, as_branch.as_deref(), "--as")
+            .and_then(|()| delegate.report_status(state?, summary, link)),
+        (None, Target::Remote(_)) => {
+            Err(branchyard::Error::Unsupported(REPORT_STATUS_REMOTE.into()))
+        }
+        (None, Target::Local) => as_branch_required(as_branch, "report-status").and_then(|b| {
+            as_user(&b, TaskOptions::default())?.report_status(state?, summary, link)
+        }),
+    };
+    emit(json, result, |reported| {
+        let mut text = format!("{}\n", reported.report.describe());
+        if let Some(message) = &reported.escalation {
+            text.push_str(&format!("escalated #{} to {}\n", message.id, message.to));
+        }
+        text
     })
 }
 

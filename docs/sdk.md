@@ -139,6 +139,8 @@ for child in app.children("slack-c0123"):      # every branch it delegated to, d
     print(child.name, child.state)
 ```
 
+**Seeing what a branch says of itself.** `app.inspect(branch).reported` is the branch's own latest account of what it is doing, a `StatusReport` (`state`, `summary`, `link`, `at_ms`), or `None` until its harness states one with `report_status` ([self-reported status](delegation.md#self-reported-status)). It sits beside `status`, which comes from the protocol and may disagree: `inspect("kid").state` can be `running` while `reported.state` is `blocked`. It is a claim, not a result, and it is not cleared by a new turn, so `at_ms` says how old it is.
+
 ## The rest of the API
 
 `Repo` also covers what the routes cover: `branches`, `branch`, `exists`, `remove`, `diff`, `children`, `graph`, `apply_graph`, `operations`, `event_page`, `wait_for` (asks again past the server's 30 s cap), the inbox as a branch (`inbox`, `ask`, `report`, `escalate`, `answer`), plans (`plan`, `approve_plan`, `reject_plan`), artifacts and scratch areas, and `Client` covers `repos`, `harnesses`, `me`, `healthy` and triggers (`triggers`, `trigger`, `create_trigger`, `delete_trigger`, `enable_trigger`, `test_trigger`, `trigger_runs`). `client.request(method, path, body, key=...)` is the escape hatch for a route the client has no method for; it returns the parsed JSON and raises the same typed errors. The module's docstrings are the reference; `docs/server.md` is the wire's.

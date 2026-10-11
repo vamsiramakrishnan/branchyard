@@ -79,6 +79,7 @@ __all__ = [
     "RunningError",
     "ServerError",
     "Status",
+    "StatusReport",
     "Steer",
     "Surface",
     "TransportError",
@@ -452,11 +453,20 @@ class BranchInfo(Record):
         return self.state not in ("running", "waiting", "blocked", "waiting_on_children", "awaiting_plan_approval")
 
 
+class StatusReport(Record):
+    """A branch's own account of what it is doing, from its `report_status`
+    tool (`docs/delegation.md#self-reported-status`): `state` (`working`,
+    `idle`, `blocked`, `complete` or `failure`), `summary`, `link` (None
+    when none was given) and `at_ms`. A claim beside the protocol's
+    `status`, which may disagree with it."""
+
+
 class Inspection(Record):
     """`Inspection`, as `by inspect --json`: `name`, `status`, `harness`,
     `parent`, `children`, `depth`, `turns`, `cost_usd`, `subtree_cost_usd`,
     `max_usd`, `remaining_usd`, `envelope`, `allowed_harnesses`,
-    `last_message`, `check`, `model`, `grants`, ... (`docs/delegation.md`)."""
+    `last_message`, `check`, `model`, `grants`, `reported`, ...
+    (`docs/delegation.md`)."""
 
     @property
     def status(self) -> Status:
@@ -471,6 +481,14 @@ class Inspection(Record):
         """Its connector grant as stored: what its turns' tokens carry, and
         the most a child of its can be given. Empty without a grant."""
         return [Grant.from_json(g) for g in self.get("grants") or ()]
+
+    @property
+    def reported(self) -> Optional[StatusReport]:
+        """The branch's own latest account of what it is doing, or None
+        until it states one. Not cleared by a new turn: `at_ms` says how old
+        it is."""
+        value = self.get("reported")
+        return StatusReport(value) if isinstance(value, dict) else None
 
 
 class Steer(Record):

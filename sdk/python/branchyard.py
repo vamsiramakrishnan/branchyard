@@ -57,6 +57,8 @@ __all__ = [
     "ScratchArea",
     "ScratchLock",
     "Message",
+    "StatusReport",
+    "Reported",
     "Asked",
     "Inbox",
     "Graph",
@@ -88,6 +90,7 @@ __all__ = [
     "ask",
     "report",
     "escalate",
+    "report_status",
     "answer",
     "inbox",
     "approve_plan",
@@ -307,6 +310,11 @@ class Inspection:
     check_shared_with: Optional[List[str]] = None
     # The model its harness runs; None for the harness's default.
     model: Optional[str] = None
+    # Its own latest account of what it is doing, from `report_status`:
+    # {"state", "summary", "link"?, "at_ms"}. A claim beside `status`, which
+    # comes from the protocol; None until the branch reports one. See
+    # docs/delegation.md "Self-reported status".
+    reported: Optional[Dict[str, Any]] = None
 
     @property
     def state(self) -> Optional[str]:
@@ -501,6 +509,27 @@ def _message(value: Dict[str, Any]) -> Message:
         at_ms=value["at_ms"],
         delivered=value.get("delivered", False),
     )
+
+
+@dataclasses.dataclass
+class StatusReport:
+    """A branch's own account of its status, as `report_status` recorded it."""
+
+    # "working", "idle", "blocked", "complete" or "failure".
+    state: str
+    summary: str
+    # Milliseconds since the Unix epoch.
+    at_ms: int
+    link: Optional[str] = None
+
+
+@dataclasses.dataclass
+class Reported:
+    report: StatusReport
+    # The escalation a "blocked" or "failure" report sent to the parent's
+    # inbox; None for the other states, for a branch with no parent, and for
+    # a report that repeats the one before it exactly.
+    escalation: Optional[Message] = None
 
 
 @dataclasses.dataclass
@@ -799,6 +828,28 @@ def escalate(text: str) -> Message:
     """Escalate to your parent, or, if your rig seat's `escalates_to`
     allows it, an ancestor further up."""
     return _message(_run(["escalate", "--", text]))
+
+
+def report_status(state: str, summary: str, link: Optional[str] = None) -> Reported:
+    """State your own status in one line, beside the one Branchyard derives.
+
+    `state` is "working", "idle", "blocked", "complete" or "failure";
+    `summary` is at most 280 characters; `link` is an optional http(s) URL.
+    It is a claim and changes nothing about your branch, and it is not a
+    message: use `report` for that. "blocked" and "failure" are also
+    escalated to your parent's inbox, and the result's `escalation` is that
+    message. Your parent sees the latest report as `inspect(...).reported`.
+    """
+    args = ["report-status"]
+    if link is not None:
+        args += ["--link", link]
+    args += ["--", state, summary]
+    value = _run(args)
+    escalation = value.get("escalation")
+    return Reported(
+        report=_make(StatusReport, value["report"]),
+        escalation=_message(escalation) if escalation else None,
+    )
 
 
 def answer(message_id: int, text: str) -> Message:

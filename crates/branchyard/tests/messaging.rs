@@ -8,7 +8,8 @@ mod common;
 use std::time::Duration;
 
 use branchyard::{
-    Activity, BranchStatus, Budget, DeliveredVia, Envelope, Error, Policy, Spawn, TaskOptions,
+    Activity, BranchStatus, Budget, DeliveredVia, Envelope, Error, MessageKind, Policy,
+    ReportedState, Spawn, TaskOptions,
 };
 use branchyard_testkit::wait;
 use common::{fake_agent, text, Fixture};
@@ -436,4 +437,210 @@ fn a_turn_waiting_for_an_answer_is_not_stalled() {
     assert!(!f.yard.cancel("kid").unwrap().is_empty());
     let kid = turn.join().unwrap().unwrap();
     assert_eq!(kid.info().status, BranchStatus::Interrupted);
+}
+
+const PULL: &str = "https://example.com/pull/7";
+
+/// A branch's own account of itself is recorded on its log, shown to its
+/// parent in `inspect` beside the protocol's status, and changes nothing
+/// about that status.
+#[test]
+fn a_childs_own_status_is_seen_by_its_parent_beside_its_protocol_status() {
+    let f = Fixture::new();
+    let options = delegating(&f, Envelope::depth(2));
+    let root = f
+        .yard
+        .task("WRITE root.txt=r")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let parent = root.delegate(options.clone()).unwrap();
+    parent.spawn(spawn("HANG", "kid")).unwrap();
+    wait_for_own_prompt(&f, "kid");
+    let kid = f
+        .yard
+        .branch("kid")
+        .unwrap()
+        .delegate(options.clone())
+        .unwrap();
+
+    assert_eq!(parent.inspect("kid").unwrap().reported, None);
+    let first = kid
+        .report_status(
+            ReportedState::Working,
+            "  reading the failing test ",
+            Some(PULL),
+        )
+        .unwrap();
+    assert_eq!(first.report.state, ReportedState::Working);
+    assert_eq!(first.report.summary, "reading the failing test");
+    assert_eq!(first.report.link.as_deref(), Some(PULL));
+    assert!(first.report.at_ms > 0);
+    assert!(first.escalation.is_none(), "working asks for nobody");
+
+    let seen = parent.inspect("kid").unwrap();
+    assert_eq!(
+        seen.status,
+        BranchStatus::Running,
+        "the claim is not a status"
+    );
+    assert_eq!(seen.reported, Some(first.report.clone()));
+    assert_eq!(
+        kid.inspect("kid").unwrap().reported,
+        Some(first.report.clone())
+    );
+    let wire = serde_json::to_value(&seen).unwrap();
+    assert_eq!(
+        wire["reported"],
+        serde_json::json!({
+            "state": "working",
+            "summary": "reading the failing test",
+            "link": PULL,
+            "at_ms": first.report.at_ms,
+        })
+    );
+
+    // The latest report is the one shown; the log keeps both, in order.
+    let second = kid
+        .report_status(ReportedState::Complete, "done", None)
+        .unwrap();
+    assert_eq!(
+        parent.inspect("kid").unwrap().reported,
+        Some(second.report.clone())
+    );
+    let recorded: Vec<(ReportedState, String, Option<String>, u64)> = events(&f, "kid")
+        .into_iter()
+        .filter_map(|e| match e.activity {
+            Activity::StatusReport {
+                state,
+                summary,
+                link,
+            } => Some((state, summary, link, e.at_ms)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        recorded,
+        [
+            (
+                ReportedState::Working,
+                "reading the failing test".to_owned(),
+                Some(PULL.to_owned()),
+                first.report.at_ms
+            ),
+            (
+                ReportedState::Complete,
+                "done".to_owned(),
+                None,
+                second.report.at_ms
+            ),
+        ]
+    );
+    // Neither state is a call for attention: the parent's inbox is empty.
+    assert!(parent.inbox().unwrap().messages.is_empty());
+}
+
+/// `blocked` and `failure` become an escalation in the parent's inbox, as
+/// `escalate` would; the other states and an exact repeat do not.
+#[test]
+fn a_blocked_or_failed_report_is_escalated_to_the_parent_once() {
+    let f = Fixture::new();
+    let options = delegating(&f, Envelope::depth(2));
+    let kid = parent_and_child(&f, &options);
+    let parent = f
+        .yard
+        .branch("root")
+        .unwrap()
+        .delegate(options.clone())
+        .unwrap();
+
+    let blocked = kid
+        .report_status(ReportedState::Blocked, "needs the API key", Some(PULL))
+        .unwrap();
+    let message = blocked.escalation.expect("a blocked report is escalated");
+    assert_eq!(
+        (message.from.as_str(), message.to.as_str(), message.kind),
+        ("kid", "root", MessageKind::Escalation)
+    );
+    assert_eq!(
+        message.text,
+        format!("status blocked: needs the API key ({PULL})")
+    );
+    let inbox = parent.inbox().unwrap();
+    assert_eq!(
+        inbox.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+        [message.id]
+    );
+    // Both logs show it, like any message.
+    for branch in ["kid", "root"] {
+        assert!(
+            events(&f, branch)
+                .iter()
+                .any(|e| matches!(&e.activity, Activity::Message(m) if m.id == message.id)),
+            "{branch}'s log is missing the escalation"
+        );
+    }
+
+    // The same report again is recorded, and the parent is not told twice.
+    let again = kid
+        .report_status(ReportedState::Blocked, "needs the API key", Some(PULL))
+        .unwrap();
+    assert!(again.escalation.is_none());
+    assert_eq!(parent.inbox().unwrap().messages.len(), 1);
+
+    // A claim that asks for nobody, then a different one that does.
+    for state in [
+        ReportedState::Working,
+        ReportedState::Idle,
+        ReportedState::Complete,
+    ] {
+        let said = kid.report_status(state, "x", None).unwrap();
+        assert!(said.escalation.is_none(), "{state} escalated");
+    }
+    let failed = kid
+        .report_status(ReportedState::Failure, "gave up\non the parser", None)
+        .unwrap();
+    assert_eq!(
+        failed.escalation.expect("failure is escalated").text,
+        "status failure: gave up on the parser"
+    );
+    assert_eq!(parent.inbox().unwrap().messages.len(), 2);
+}
+
+/// A bad summary or link is refused with the usual denial and recorded
+/// nowhere; a branch with no parent has nobody to escalate to and is not
+/// refused for it.
+#[test]
+fn a_bad_status_report_is_refused_and_a_root_has_no_one_to_escalate_to() {
+    let f = Fixture::new();
+    let options = delegating(&f, Envelope::depth(2));
+    let kid = parent_and_child(&f, &options);
+    let refused = |summary: &str, link: Option<&str>| match kid.report_status(
+        ReportedState::Working,
+        summary,
+        link,
+    ) {
+        Err(Error::Denied(why)) => why,
+        other => panic!("expected a denial, got {other:?}"),
+    };
+    assert!(refused(&"x".repeat(281), None).contains("281 characters"));
+    assert!(refused("   ", None).contains("needs a summary"));
+    assert!(refused("ok", Some("javascript:alert(1)")).contains("http or https URL"));
+    assert!(!events(&f, "kid")
+        .iter()
+        .any(|e| matches!(e.activity, Activity::StatusReport { .. })));
+    // 280 characters is the limit, counted in characters, not bytes.
+    kid.report_status(ReportedState::Working, &"é".repeat(280), None)
+        .unwrap();
+
+    let root = f.yard.branch("root").unwrap().delegate(options).unwrap();
+    let said = root
+        .report_status(ReportedState::Blocked, "needs a decision", None)
+        .unwrap();
+    assert!(said.escalation.is_none(), "root has no parent");
+    assert_eq!(
+        root.inspect("root").unwrap().reported.unwrap().state,
+        ReportedState::Blocked
+    );
 }

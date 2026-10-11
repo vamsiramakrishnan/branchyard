@@ -1757,6 +1757,28 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// State this branch's own status in one line, beside the one Branchyard derives
+    ///
+    /// A claim the harness makes about itself, shown in `by log`, `by watch`, `by show` and
+    /// `by inspect`; it changes nothing about the branch. `blocked` and `failure` are also
+    /// escalated to the parent's inbox.
+    #[command(display_order = 312)]
+    ReportStatus {
+        /// Act as this branch (outside a harness; inside one, it is the harness's own)
+        #[arg(long = "as", value_name = "BRANCH")]
+        as_branch: Option<String>,
+        /// What the harness is doing
+        #[arg(value_parser = ["working", "idle", "blocked", "complete", "failure"])]
+        state: String,
+        /// One line, at most 280 characters
+        summary: String,
+        /// An http(s) URL with more, such as a pull request or an issue
+        #[arg(long, value_name = "URL")]
+        link: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Answer a message (usually a question) from a descendant
     #[command(display_order = 310)]
     Answer {

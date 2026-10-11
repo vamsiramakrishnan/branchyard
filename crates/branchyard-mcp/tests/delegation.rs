@@ -808,3 +808,117 @@ fn a_harness_waits_for_its_children_and_integrates_them_together() {
     }
     assert_eq!(root.info().status, BranchStatus::Ready);
 }
+
+/// A harness states its own status through `report_status`: the report is
+/// recorded on its branch, its parent sees the latest in `inspect` beside the
+/// protocol's status, a blocked one reaches the parent's inbox, and bad input
+/// comes back as tool errors like any other refusal.
+#[test]
+fn a_harness_states_its_own_status_and_its_parent_sees_it() {
+    let f = Fixture::new();
+    let kid = [
+        r#"MCP report_status {"state": "working", "summary": "reading the failing test", "link": "https://example.com/pull/7"}"#.to_owned(),
+        r#"MCP report_status {"state": "blocked", "summary": "needs the API key"}"#.to_owned(),
+        r#"MCP report_status {"state": "done", "summary": "x"}"#.to_owned(),
+        format!(
+            r#"MCP report_status {{"state": "working", "summary": "{}"}}"#,
+            "x".repeat(281)
+        ),
+        r#"MCP report_status {"state": "working", "summary": "x", "link": "ftp://example.com/"}"#
+            .to_owned(),
+        r#"MCP report_status {"state": "working", "summary": "x", "bogus": 1}"#.to_owned(),
+        r#"MCP report_status {"state": "working"}"#.to_owned(),
+    ]
+    .join("\n");
+    let prompt = [
+        format!("MCP spawn {}", json!({"prompt": kid, "name": "kid"})),
+        "MCP wait kid".to_owned(),
+        r#"MCP inspect {"branch": "kid"}"#.to_owned(),
+        "MCP inbox".to_owned(),
+    ]
+    .join("\n");
+    let root = f
+        .yard
+        .task(prompt)
+        .options(f.delegating(Envelope::default()))
+        .name("root")
+        .run()
+        .unwrap();
+    root.wait_subtree().unwrap();
+
+    // The child's calls: two recorded (the blocked one escalated), five refused.
+    let said = reply(&f, "kid");
+    let working = nth_result(&said, "report_status", 0);
+    assert_eq!(working["report"]["state"], "working");
+    assert_eq!(working["report"]["summary"], "reading the failing test");
+    assert_eq!(working["report"]["link"], "https://example.com/pull/7");
+    assert!(working.get("escalation").is_none(), "{working}");
+    let blocked = nth_result(&said, "report_status", 1);
+    assert_eq!(blocked["report"]["state"], "blocked");
+    assert_eq!(blocked["escalation"]["kind"], "escalation");
+    assert_eq!(blocked["escalation"]["from"], "kid");
+    assert_eq!(blocked["escalation"]["to"], "root");
+    assert_eq!(
+        blocked["escalation"]["text"],
+        "status blocked: needs the API key"
+    );
+    let errors: Vec<&str> = said
+        .lines()
+        .filter(|line| line.contains("mcp report_status error: "))
+        .collect();
+    assert_eq!(errors.len(), 5, "{said}");
+    assert!(
+        errors[0].contains(
+            "denied: state must be one of working, idle, blocked, complete, failure, not \"done\""
+        ),
+        "{said}"
+    );
+    assert!(
+        errors[1].contains("denied: the summary is 281 characters"),
+        "{said}"
+    );
+    assert!(errors[2].contains("http or https URL"), "{said}");
+    assert!(errors[3].contains("unknown field `bogus`"), "{said}");
+    assert!(errors[4].contains("missing field `summary`"), "{said}");
+
+    // Only the two good calls were recorded on the child's branch.
+    let recorded: Vec<(String, String)> = f
+        .yard
+        .branch("kid")
+        .unwrap()
+        .events()
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.activity {
+            Activity::StatusReport { state, summary, .. } => Some((state.to_string(), summary)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        recorded,
+        [
+            ("working".to_owned(), "reading the failing test".to_owned()),
+            ("blocked".to_owned(), "needs the API key".to_owned()),
+        ]
+    );
+
+    // The parent saw the latest report beside the protocol's status, and the
+    // escalation in its inbox.
+    let parent = reply(&f, "root");
+    let seen = result(&parent, "inspect");
+    assert_eq!(seen["reported"]["state"], "blocked");
+    assert_eq!(seen["reported"]["summary"], "needs the API key");
+    assert!(seen["reported"]["at_ms"].as_u64().unwrap() > 0);
+    assert_ne!(
+        seen["status"]["state"], "blocked",
+        "the claim is not a status"
+    );
+    let inbox = result(&parent, "inbox");
+    let texts: Vec<&str> = inbox["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(texts, ["status blocked: needs the API key"]);
+}

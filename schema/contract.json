@@ -16112,6 +16112,17 @@
               "type": "string",
               "description": "The harness's text since the branch's last prompt, truncated from\nthe front."
             },
+            "reported": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StatusReport"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
+            },
             "seat": {
               "type": [
                 "string",
@@ -16471,6 +16482,68 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "StatusReport": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ReportedState",
+              "description": "What the harness says it is doing."
+            },
+            "summary": {
+              "type": "string",
+              "description": "One line of at most 280 characters."
+            },
+            "link": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Where to read more, an `http` or `https` URL. Omitted when none was\ngiven."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch when the report was recorded."
+            }
+          },
+          "required": [
+            "state",
+            "summary",
+            "at_ms"
+          ],
+          "description": "A branch's own report of its status, as `report_status` returns it and\n`Inspection::reported` shows the latest."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
         },
         "Dependency": {
           "type": "object",
@@ -17359,6 +17432,17 @@
               "type": "string",
               "description": "The harness's text since the branch's last prompt, truncated from\nthe front."
             },
+            "reported": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StatusReport"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
+            },
             "seat": {
               "type": [
                 "string",
@@ -17508,6 +17592,68 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "StatusReport": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ReportedState",
+              "description": "What the harness says it is doing."
+            },
+            "summary": {
+              "type": "string",
+              "description": "One line of at most 280 characters."
+            },
+            "link": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Where to read more, an `http` or `https` URL. Omitted when none was\ngiven."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch when the report was recorded."
+            }
+          },
+          "required": [
+            "state",
+            "summary",
+            "at_ms"
+          ],
+          "description": "A branch's own report of its status, as `report_status` returns it and\n`Inspection::reported` shows the latest."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
         },
         "Dependency": {
           "type": "object",
@@ -18644,6 +18790,17 @@
               "type": "string",
               "description": "The harness's text since the branch's last prompt, truncated from\nthe front."
             },
+            "reported": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StatusReport"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
+            },
             "seat": {
               "type": [
                 "string",
@@ -18793,6 +18950,68 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "StatusReport": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ReportedState",
+              "description": "What the harness says it is doing."
+            },
+            "summary": {
+              "type": "string",
+              "description": "One line of at most 280 characters."
+            },
+            "link": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Where to read more, an `http` or `https` URL. Omitted when none was\ngiven."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch when the report was recorded."
+            }
+          },
+          "required": [
+            "state",
+            "summary",
+            "at_ms"
+          ],
+          "description": "A branch's own report of its status, as `report_status` returns it and\n`Inspection::reported` shows the latest."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
         },
         "Dependency": {
           "type": "object",
@@ -19788,6 +20007,40 @@
               ],
               "additionalProperties": false,
               "description": "Approvals and the effect ledger: a person asked and answering, a\ncall blocked, an entry begun, confirmed, staged, reconciled or\nundone. See [`effects::EffectActivity`] and `docs/effects.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "status_report": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "description": "What the harness says it is doing.",
+                      "$ref": "#/$defs/ReportedState"
+                    },
+                    "summary": {
+                      "description": "One line of at most 280 characters.",
+                      "type": "string"
+                    },
+                    "link": {
+                      "description": "Where to read more, an `http` or `https` URL.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "summary"
+                  ]
+                }
+              },
+              "required": [
+                "status_report"
+              ],
+              "additionalProperties": false,
+              "description": "The harness's own account of what it is doing, from its\n`report_status` tool or `by report-status`: a claim beside the\nprotocol's status, never a replacement for it. See\n`docs/delegation.md#self-reported-status`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -23917,6 +24170,36 @@
             }
           ],
           "description": "Where an entry is in its life. `staged` → `begun` → `confirmed` |\n`failed` | `unknown`; then `undone`, `compensated`, `undo_failed` or\n`expired`."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
         }
       }
     },
@@ -24577,6 +24860,40 @@
               ],
               "additionalProperties": false,
               "description": "Approvals and the effect ledger: a person asked and answering, a\ncall blocked, an entry begun, confirmed, staged, reconciled or\nundone. See [`effects::EffectActivity`] and `docs/effects.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "status_report": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "description": "What the harness says it is doing.",
+                      "$ref": "#/$defs/ReportedState"
+                    },
+                    "summary": {
+                      "description": "One line of at most 280 characters.",
+                      "type": "string"
+                    },
+                    "link": {
+                      "description": "Where to read more, an `http` or `https` URL.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "summary"
+                  ]
+                }
+              },
+              "required": [
+                "status_report"
+              ],
+              "additionalProperties": false,
+              "description": "The harness's own account of what it is doing, from its\n`report_status` tool or `by report-status`: a claim beside the\nprotocol's status, never a replacement for it. See\n`docs/delegation.md#self-reported-status`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -28706,6 +29023,36 @@
             }
           ],
           "description": "Where an entry is in its life. `staged` → `begun` → `confirmed` |\n`failed` | `unknown`; then `undone`, `compensated`, `undo_failed` or\n`expired`."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
         }
       }
     },
@@ -29930,6 +30277,17 @@
               "type": "string",
               "description": "The harness's text since the branch's last prompt, truncated from\nthe front."
             },
+            "reported": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StatusReport"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
+            },
             "seat": {
               "type": [
                 "string",
@@ -30079,6 +30437,68 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "StatusReport": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ReportedState",
+              "description": "What the harness says it is doing."
+            },
+            "summary": {
+              "type": "string",
+              "description": "One line of at most 280 characters."
+            },
+            "link": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Where to read more, an `http` or `https` URL. Omitted when none was\ngiven."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch when the report was recorded."
+            }
+          },
+          "required": [
+            "state",
+            "summary",
+            "at_ms"
+          ],
+          "description": "A branch's own report of its status, as `report_status` returns it and\n`Inspection::reported` shows the latest."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
         },
         "Dependency": {
           "type": "object",
@@ -31567,6 +31987,17 @@
           "type": "string",
           "description": "The harness's text since the branch's last prompt, truncated from\nthe front."
         },
+        "reported": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StatusReport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
+        },
         "seat": {
           "type": [
             "string",
@@ -31928,6 +32359,68 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "StatusReport": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ReportedState",
+              "description": "What the harness says it is doing."
+            },
+            "summary": {
+              "type": "string",
+              "description": "One line of at most 280 characters."
+            },
+            "link": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Where to read more, an `http` or `https` URL. Omitted when none was\ngiven."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch when the report was recorded."
+            }
+          },
+          "required": [
+            "state",
+            "summary",
+            "at_ms"
+          ],
+          "description": "A branch's own report of its status, as `report_status` returns it and\n`Inspection::reported` shows the latest."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
         },
         "Dependency": {
           "type": "object",
@@ -33023,6 +33516,40 @@
               ],
               "additionalProperties": false,
               "description": "Approvals and the effect ledger: a person asked and answering, a\ncall blocked, an entry begun, confirmed, staged, reconciled or\nundone. See [`effects::EffectActivity`] and `docs/effects.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "status_report": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "description": "What the harness says it is doing.",
+                      "$ref": "#/$defs/ReportedState"
+                    },
+                    "summary": {
+                      "description": "One line of at most 280 characters.",
+                      "type": "string"
+                    },
+                    "link": {
+                      "description": "Where to read more, an `http` or `https` URL.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "summary"
+                  ]
+                }
+              },
+              "required": [
+                "status_report"
+              ],
+              "additionalProperties": false,
+              "description": "The harness's own account of what it is doing, from its\n`report_status` tool or `by report-status`: a claim beside the\nprotocol's status, never a replacement for it. See\n`docs/delegation.md#self-reported-status`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -37152,6 +37679,36 @@
             }
           ],
           "description": "Where an entry is in its life. `staged` → `begun` → `confirmed` |\n`failed` | `unknown`; then `undone`, `compensated`, `undo_failed` or\n`expired`."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
         }
       }
     },

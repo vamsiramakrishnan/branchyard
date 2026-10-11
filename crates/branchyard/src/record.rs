@@ -43,6 +43,12 @@ impl Recorder {
 
     /// Append `activity`, then call the observer.
     pub fn record(&mut self, activity: Activity) -> Result<(), Error> {
+        self.record_stamped(activity).map(|_| ())
+    }
+
+    /// [`Recorder::record`], returning the time the event was stamped with
+    /// (milliseconds since the Unix epoch).
+    pub fn record_stamped(&mut self, activity: Activity) -> Result<u64, Error> {
         let entry = RecordedEvent {
             at_ms: now_ms(),
             activity,
@@ -55,7 +61,7 @@ impl Recorder {
                 activity: entry.activity,
             });
         }
-        Ok(())
+        Ok(entry.at_ms)
     }
 }
 

@@ -315,6 +315,31 @@ class Requests(ServerCase):
         bare = bc.Inspection({"name": "x", "status": {"state": "running"}})
         self.assertEqual(bare.grants, [])
 
+    def test_inspection_carries_the_branchs_own_reported_status(self):
+        report = {"state": "blocked", "summary": "needs the API key", "link": "https://example.com/i/1", "at_ms": 1234}
+        self.fake.always(
+            "GET",
+            f"{REPO}/branches/kid/inspection",
+            200,
+            {"name": "kid", "status": {"state": "running"}, "reported": report},
+        )
+        inspection = self.app.inspect("kid")
+        # A claim beside the protocol's status, not instead of it.
+        self.assertEqual(inspection.status, "running")
+        reported = inspection.reported
+        assert reported is not None
+        self.assertIsInstance(reported, bc.StatusReport)
+        self.assertEqual(reported.state, "blocked")
+        self.assertEqual(reported.summary, "needs the API key")
+        self.assertEqual(reported.link, "https://example.com/i/1")
+        self.assertEqual(reported.at_ms, 1234)
+        self.assertEqual(reported.raw, report)
+        # Omitted until the branch reports one, and its link when it gave none.
+        self.assertIsNone(bc.Inspection({"name": "x", "status": {"state": "running"}}).reported)
+        bare = bc.Inspection({"name": "x", "reported": {"state": "working", "summary": "s", "at_ms": 1}})
+        assert bare.reported is not None
+        self.assertIsNone(bare.reported.link)
+
     def test_the_health_check_sends_no_token(self):
         self.assertTrue(self.client.healthy())
         ((_, _, headers, _),) = self.requests("GET", "/healthz")

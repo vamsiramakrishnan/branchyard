@@ -19,6 +19,12 @@ cannot create children of your own, but `by` (on your PATH, and in
   its answer; `by report "<text>"` tells it how you are doing;
   `by escalate "<text>"` raises a problem; `by inbox` lists what was sent
   to you.
+- `by report-status <state> "<one line>" [--link URL]` states your own
+  status beside the one Branchyard derives, where your parent and the
+  person watching see it. `<state>` is `working`, `idle`, `blocked`,
+  `complete` or `failure`; `blocked` and `failure` also reach your
+  parent's inbox. It is a claim, not a message: use `by report` to tell
+  your parent something.
 
 Branchyard commits everything in your worktree when your turn ends: you
 need not commit, and your edited files are your result even when `git`

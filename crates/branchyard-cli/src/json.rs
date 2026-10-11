@@ -319,6 +319,16 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "effect": activity,
             "text": activity.describe(),
         }),
+        Activity::StatusReport {
+            state,
+            summary,
+            link,
+        } => json!({
+            "activity": "status_report",
+            "state": state,
+            "summary": summary,
+            "link": link,
+        }),
     };
     value["at_ms"] = json!(recorded.at_ms);
     value
@@ -505,5 +515,26 @@ mod tests {
             }),
             json!({ "at_ms": 7, "activity": "status", "status": { "state": "ready" } })
         );
+        let status_report = |link: Option<&str>| {
+            recorded(&RecordedEvent {
+                at_ms: 8,
+                activity: Activity::StatusReport {
+                    state: branchyard::ReportedState::Blocked,
+                    summary: "needs a key".into(),
+                    link: link.map(Into::into),
+                },
+            })
+        };
+        assert_eq!(
+            status_report(Some("https://example.com/i/1")),
+            json!({
+                "at_ms": 8,
+                "activity": "status_report",
+                "state": "blocked",
+                "summary": "needs a key",
+                "link": "https://example.com/i/1",
+            })
+        );
+        assert_eq!(status_report(None)["link"], Value::Null);
     }
 }
