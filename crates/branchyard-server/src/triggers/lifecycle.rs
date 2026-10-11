@@ -170,7 +170,8 @@ pub fn span(seconds: u64) -> String {
     }
 }
 
-/// What a branch looks like to the decision: [`Sink::standing`].
+/// What a branch looks like to the decision: what the sink's `standing`
+/// reports for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Standing {
     /// A turn runs on it or is owed to it.
