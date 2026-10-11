@@ -225,7 +225,7 @@ fn read_response(mut reader: BufReader<Stream>, head_only: bool) -> Result<Respo
 /// A response body, its transfer encoding undone.
 pub type Body = wire::Body<BufReader<Stream>>;
 
-#[allow(clippy::let_underscore_must_use, clippy::unwrap_in_result)] // tests: a panic is the failure report
+#[allow(clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,7 +265,7 @@ mod tests {
         client
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
-        let _ = backend.write_all(bytes);
+        backend.write_all(bytes).unwrap();
         drop(backend);
         let mut response = read_response(BufReader::new(Stream::Plain(client)), head_only)
             .map_err(|e| e.to_string())?;

@@ -6,7 +6,7 @@
 //! `rebuild` and `prune`, and a half-built environment removed by
 //! recovery after its engine was killed.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;
@@ -482,8 +482,7 @@ fn environment_child() {
         return;
     };
     let yard = Yard::open(root).unwrap();
-    let _ = yard
-        .task("WRITE done.txt=1")
+    yard.task("WRITE done.txt=1")
         .options(TaskOptions {
             harness: Some("gemini-cli".into()),
             command: Some(vec![agent]),
@@ -495,15 +494,16 @@ fn environment_child() {
             ..TaskOptions::default()
         })
         .name("slow")
-        .run();
+        .run()
+        .unwrap();
 }
 
 struct Killed(Child);
 
 impl Drop for Killed {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        branchyard_support::best_effort("kill the test child", self.0.kill());
+        branchyard_support::best_effort("reap the test child", self.0.wait());
     }
 }
 

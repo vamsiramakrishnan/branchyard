@@ -209,10 +209,12 @@ impl Drop for Supervisor {
     }
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn note(log: &Path, text: &str) {
     if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(log) {
-        let _ = writeln!(file, "branchyard: {text}");
+        branchyard_support::best_effort(
+            "append to the connector gateway log",
+            writeln!(file, "branchyard: {text}"),
+        );
     }
 }
 

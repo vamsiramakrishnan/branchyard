@@ -7,7 +7,7 @@
 //! confinement turned off (`BRANCHYARD_EGRESS_NETNS=off`). Requires `git`,
 //! `sh` and `python3`.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -50,10 +50,13 @@ fn upstream() -> u16 {
                     }
                 }
                 let body = format!("upstream {port}\n");
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
+                branchyard_support::best_effort(
+                    "answer the mock upstream",
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    ),
                 );
             });
         }

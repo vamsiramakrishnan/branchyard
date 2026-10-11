@@ -2,7 +2,7 @@
 //! runs, and the egress events of a branch.
 
 #![allow(dead_code)]
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -36,7 +36,10 @@ pub fn upstream() -> Upstream {
             thread::spawn(move || {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut first = String::new();
-                let _ = reader.read_line(&mut first);
+                branchyard_support::best_effort(
+                    "read the mock upstream request",
+                    reader.read_line(&mut first),
+                );
                 loop {
                     let mut line = String::new();
                     if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
@@ -44,12 +47,18 @@ pub fn upstream() -> Upstream {
                     }
                 }
                 let body = format!("upstream {port}\n");
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
+                branchyard_support::best_effort(
+                    "answer the mock upstream",
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    ),
                 );
-                let _ = sender.send(first.trim_end().to_owned());
+                branchyard_support::best_effort(
+                    "report the mock upstream request",
+                    sender.send(first.trim_end().to_owned()),
+                );
             });
         }
     });
@@ -154,7 +163,10 @@ pub fn tls_upstream() -> (Upstream, String) {
                 let mut tls = rustls::StreamOwned::new(conn, stream);
                 let mut reader = BufReader::new(&mut tls);
                 let mut first = String::new();
-                let _ = reader.read_line(&mut first);
+                branchyard_support::best_effort(
+                    "read the mock TLS upstream request",
+                    reader.read_line(&mut first),
+                );
                 loop {
                     let mut line = String::new();
                     if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
@@ -162,14 +174,20 @@ pub fn tls_upstream() -> (Upstream, String) {
                     }
                 }
                 let body = format!("upstream {port}\n");
-                let _ = write!(
-                    tls,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
+                branchyard_support::best_effort(
+                    "answer the mock TLS upstream",
+                    write!(
+                        tls,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    ),
                 );
                 tls.conn.send_close_notify();
-                let _ = tls.flush();
-                let _ = sender.send(first.trim_end().to_owned());
+                branchyard_support::best_effort("flush the mock TLS answer", tls.flush());
+                branchyard_support::best_effort(
+                    "report the mock TLS request",
+                    sender.send(first.trim_end().to_owned()),
+                );
             });
         }
     });

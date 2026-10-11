@@ -442,7 +442,6 @@ impl Drop for TempBlob {
 /// install exactly that file at its content address. Returns the digest
 /// and size. Opening `path` once and never again means the stored bytes are
 /// the bytes that were hashed, whatever happens to `path` meanwhile.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn store_blob(dir: &Path, path: &Path) -> Result<(String, u64), Error> {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let io = |what: &str, p: &Path, e: std::io::Error| {
@@ -494,7 +493,10 @@ fn store_blob(dir: &Path, path: &Path) -> Result<(String, u64), Error> {
     if let Ok(meta) = std::fs::metadata(&temp_path) {
         let mut perms = meta.permissions();
         perms.set_readonly(true);
-        let _ = std::fs::set_permissions(&temp_path, perms);
+        branchyard_support::best_effort(
+            "make the blob read-only",
+            std::fs::set_permissions(&temp_path, perms),
+        );
     }
     std::fs::rename(&temp_path, &dest).map_err(|e| io("install", &dest, e))?;
     temp.0 = None;

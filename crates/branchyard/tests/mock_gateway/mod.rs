@@ -11,7 +11,7 @@
 //! and server tests through `#[path]`.
 
 #![allow(dead_code)]
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -274,9 +274,12 @@ fn write(mut stream: &TcpStream, status: u16, headers: &[(&str, String)], body: 
         head.push_str(&format!("{name}: {value}\r\n"));
     }
     head.push_str("\r\n");
-    let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(body);
-    let _ = stream.flush();
+    branchyard_support::best_effort(
+        "write the mock answer head",
+        stream.write_all(head.as_bytes()),
+    );
+    branchyard_support::best_effort("write the mock answer body", stream.write_all(body));
+    branchyard_support::best_effort("flush the mock answer", stream.flush());
 }
 
 /// What one call did: its data or its error, and its effect report.
@@ -663,7 +666,10 @@ fn call(
     drop(state);
     if tool == "flaky__charge" {
         // The effect happened; the answer is lost.
-        let _ = stream.shutdown(std::net::Shutdown::Both);
+        branchyard_support::best_effort(
+            "close the mock connection",
+            stream.shutdown(std::net::Shutdown::Both),
+        );
         return;
     }
     answer(&stream, rpc, &tool, &outcome)

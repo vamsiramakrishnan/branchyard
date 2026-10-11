@@ -479,7 +479,6 @@ impl Client {
 
     /// `initialize` and `notifications/initialized`: the session id, if
     /// the gateway keeps sessions.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn open(&self, target: &Target) -> Result<Option<String>, String> {
         let init = json!({
             "jsonrpc": "2.0", "id": 0, "method": "initialize",
@@ -494,9 +493,12 @@ impl Client {
             .map_err(|e| e.to_string())?;
         let session = response.header("mcp-session-id").map(str::to_owned);
         let mut body = Vec::new();
-        let _ = (&mut response.body)
-            .take(MAX_ANSWER as u64)
-            .read_to_end(&mut body);
+        branchyard_support::best_effort(
+            "read the MCP initialize answer",
+            (&mut response.body)
+                .take(MAX_ANSWER as u64)
+                .read_to_end(&mut body),
+        );
         if !(200..300).contains(&response.status) {
             return Err(format!(
                 "initialize: {} {}",
@@ -506,12 +508,14 @@ impl Client {
         }
         let note = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
         if let Ok(mut response) = self.post(target, session.as_deref(), &note, &[]) {
-            let _ = std::io::copy(&mut response.body, &mut std::io::sink());
+            branchyard_support::best_effort(
+                "drain the MCP notification answer",
+                std::io::copy(&mut response.body, &mut std::io::sink()),
+            );
         }
         Ok(session)
     }
 
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn close(&self, target: &Target, session: Option<&str>) {
         if let Some(session) = session {
             let headers = vec![
@@ -519,7 +523,10 @@ impl Client {
                 ("Mcp-Session-Id".to_owned(), session.to_owned()),
             ];
             if let Ok(mut response) = upstream::send(target, "DELETE", "", &headers, &[]) {
-                let _ = std::io::copy(&mut response.body, &mut std::io::sink());
+                branchyard_support::best_effort(
+                    "drain the MCP session close answer",
+                    std::io::copy(&mut response.body, &mut std::io::sink()),
+                );
             }
         }
     }
@@ -585,7 +592,6 @@ impl Client {
     }
 
     /// Every tool the gateway lists for this token.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     pub fn list_tools(&self) -> Result<Vec<Value>, String> {
         let target = Target::parse(&self.url)?;
         let session = self.open(&target)?;
@@ -603,9 +609,12 @@ impl Client {
                 Err(e) => break Err(e.to_string()),
             };
             let mut body = Vec::new();
-            let _ = (&mut response.body)
-                .take(MAX_ANSWER as u64)
-                .read_to_end(&mut body);
+            branchyard_support::best_effort(
+                "read the MCP tools/list answer",
+                (&mut response.body)
+                    .take(MAX_ANSWER as u64)
+                    .read_to_end(&mut body),
+            );
             let content_type = response.header("content-type").map(str::to_owned);
             let Some(answer) = rpc_answer(content_type.as_deref(), &body, &json!(2)) else {
                 break Err(format!("tools/list: {} without an answer", response.status));

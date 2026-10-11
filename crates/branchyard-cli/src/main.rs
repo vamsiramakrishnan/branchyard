@@ -63,7 +63,6 @@ use std::process::ExitCode;
 use args::{Command, Globals};
 use commands::{Env, Failure, Target};
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().collect();
     args::unset_blank_env();
@@ -75,12 +74,12 @@ fn main() -> ExitCode {
         // Help and --version come this way too, to stdout with exit 0;
         // usage errors go to stderr with exit 2.
         Err(error) => {
-            let _ = error.print();
+            branchyard_support::best_effort("print the usage error", error.print());
             return ExitCode::from(error.exit_code() as u8);
         }
     };
     let Some(command) = cli.command else {
-        let _ = args::command().print_help();
+        branchyard_support::best_effort("print the help", args::command().print_help());
         return ExitCode::SUCCESS;
     };
     // branchyard.toml and the user configuration, under flags and variables.
@@ -115,12 +114,11 @@ fn main() -> ExitCode {
 
 /// `by serve`, `by worker` and their help: the server's own command line.
 /// `prefix` is `by`'s part, parsed only for its global options.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn serve(prefix: &[OsString], call: args::ServerCall) -> ExitCode {
     let globals = match args::parse_from(prefix) {
         Ok(cli) => cli.globals,
         Err(error) => {
-            let _ = error.print();
+            branchyard_support::best_effort("print the server usage error", error.print());
             return ExitCode::from(error.exit_code() as u8);
         }
     };

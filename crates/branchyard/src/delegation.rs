@@ -4547,7 +4547,6 @@ fn child_model(
     })
 }
 
-#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4775,14 +4774,13 @@ Checks on the merged result: \
     use crate::{
         CheckVerdict, IntegrationCheck, PermissionDecision, PermissionKey, PermissionRequest,
     };
-    use std::fs;
     use std::path::PathBuf;
 
     struct Temp(PathBuf);
 
     impl Drop for Temp {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            branchyard_support::cleanup_dir(&self.0);
         }
     }
 

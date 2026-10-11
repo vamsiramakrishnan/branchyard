@@ -208,7 +208,6 @@ impl Request {
 /// Read one request from the harness, through the wire codec: a head it
 /// cannot frame (both `Content-Length` and `Transfer-Encoding`, a bad chunk
 /// size, a body cut short) is an `Err`, which the caller answers with 400.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn read_request(
     reader: &mut BufReader<TcpStream>,
     out: &mut TcpStream,
@@ -221,7 +220,10 @@ pub(crate) fn read_request(
     let expects = wire::header(&head.headers, "expect")
         .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
     if expects && framing != wire::Framing::None {
-        let _ = out.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+        best_effort(
+            "send 100 Continue",
+            out.write_all(b"HTTP/1.1 100 Continue\r\n\r\n"),
+        );
     }
     let body = wire::read_body(&mut *reader, framing, MAX_BODY).map_err(bad)?;
     Ok(Some(Request {
@@ -332,7 +334,6 @@ fn reason_phrase(status: u16) -> &'static str {
 }
 
 /// Answer the harness without forwarding.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn refuse(
     out: &mut TcpStream,
     api: Api,
@@ -352,9 +353,9 @@ fn refuse(
         head.push_str(&format!("{name}: {value}\r\n"));
     }
     head.push_str("\r\n");
-    let _ = out.write_all(head.as_bytes());
-    let _ = out.write_all(body.as_bytes());
-    let _ = out.flush();
+    best_effort("send the refusal head", out.write_all(head.as_bytes()));
+    best_effort("send the refusal body", out.write_all(body.as_bytes()));
+    best_effort("flush the refusal", out.flush());
 }
 
 /// Hop-by-hop headers, and those the gateway sets itself.
@@ -435,7 +436,6 @@ fn take_request(reader: &mut BufReader<TcpStream>, out: &mut TcpStream) -> Optio
     }
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn handle(stream: TcpStream, state: &TurnState) {
     let started = Instant::now();
     let Ok(mut out) = stream.try_clone() else {
@@ -716,9 +716,12 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 call.failed_over
                     .push(format!("{}: {}", backend.name, response.status));
                 let mut kept = Vec::new();
-                let _ = (&mut response.body)
-                    .take(MAX_ERROR_BODY as u64)
-                    .read_to_end(&mut kept);
+                best_effort(
+                    "read the backend's error body",
+                    (&mut response.body)
+                        .take(MAX_ERROR_BODY as u64)
+                        .read_to_end(&mut kept),
+                );
                 last = Some((response, kept, backend.name.clone(), as_model));
             }
             Ok(response) => {
@@ -756,10 +759,16 @@ fn handle(stream: TcpStream, state: &TurnState) {
                         .into_bytes(),
                     None => kept,
                 };
-                let _ = write_head(&mut out, &response, false);
-                let _ = wire::write_chunk(&mut out, &kept);
-                let _ = out.write_all(wire::LAST_CHUNK);
-                let _ = out.flush();
+                best_effort(
+                    "send the failed response head",
+                    write_head(&mut out, &response, false),
+                );
+                best_effort(
+                    "send the failed response body",
+                    wire::write_chunk(&mut out, &kept),
+                );
+                best_effort("end the failed response", out.write_all(wire::LAST_CHUNK));
+                best_effort("flush the failed response", out.flush());
             }
             None => {
                 let why = call.failed_over.join("; ");
@@ -977,9 +986,9 @@ fn handle(stream: TcpStream, state: &TurnState) {
     done(&mut call, decision, status, reason);
     alert(state);
     if !no_body && !client_gone && broken.is_none() {
-        let _ = out.write_all(wire::LAST_CHUNK);
+        best_effort("end the streamed response", out.write_all(wire::LAST_CHUNK));
     }
-    let _ = out.flush();
+    best_effort("flush the streamed response", out.flush());
 }
 
 fn response_ok(status: u16) -> bool {
@@ -1301,7 +1310,6 @@ fn append(state: &TurnState, activity: ModelActivity) {
     );
 }
 
-#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1384,14 +1392,19 @@ mod tests {
         server
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
-        let _ = client.write_all(bytes);
+        client.write_all(bytes).unwrap();
         client.shutdown(std::net::Shutdown::Write).unwrap();
         let mut out = server.try_clone().unwrap();
         let mut reader = BufReader::new(server);
         let request = take_request(&mut reader, &mut out);
         drop((reader, out));
         let mut answer = String::new();
-        let _ = client.read_to_string(&mut answer);
+        // The gateway may reset the connection after answering a malformed
+        // request; what it sent before the reset is the answer under test.
+        branchyard_support::best_effort(
+            "read the gateway answer",
+            client.read_to_string(&mut answer),
+        );
         (request, answer)
     }
 

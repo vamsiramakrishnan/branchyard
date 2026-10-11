@@ -35,7 +35,6 @@
 
 #![allow(
     clippy::expect_used,
-    clippy::let_underscore_must_use,
     clippy::panic,
     clippy::unwrap_in_result,
     clippy::unwrap_used
@@ -132,13 +131,16 @@ struct Cleanup {
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        let _ = by(&self.root).args(["gateway", "stop"]).output();
+        branchyard_support::best_effort(
+            "stop the test gateway",
+            by(&self.root).args(["gateway", "stop"]).output(),
+        );
         if let Some(mut mock) = self.mock.take() {
-            let _ = mock.kill();
-            let _ = mock.wait();
+            branchyard_support::best_effort("kill the mock server", mock.kill());
+            branchyard_support::best_effort("reap the mock server", mock.wait());
         }
         if std::env::var_os("BY_KEEP_E2E").is_none() {
-            let _ = fs::remove_dir_all(&self.dir);
+            branchyard_support::cleanup_dir(&self.dir);
         }
     }
 }
@@ -185,7 +187,9 @@ fn start_with(name: &str, connectors: &[&str]) -> Option<Anvil> {
         }
     }
     let dir = std::env::temp_dir().join(format!("branchyard-anvil-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
+    if dir.exists() {
+        fs::remove_dir_all(&dir).unwrap();
+    }
     fs::create_dir_all(dir.join("repo")).unwrap();
     let dir = fs::canonicalize(dir).unwrap();
     let root = dir.join("repo");

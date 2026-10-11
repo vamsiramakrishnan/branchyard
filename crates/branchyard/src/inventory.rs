@@ -816,7 +816,7 @@ pub fn detect_local(options: &DetectOptions) -> Result<Inventory, String> {
 /// Run the detection script with the command `make` returns for it: the
 /// script goes on its stdin when `stdin` (`sh -s`, `ssh host sh -s`);
 /// otherwise `make` puts it in the arguments (`sh -c SCRIPT`).
-#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard
+#[allow(clippy::expect_used)] // ratchet: branchyard
 pub fn detect_with(
     options: &DetectOptions,
     stdin: bool,
@@ -839,13 +839,19 @@ pub fn detect_with(
         let mut input = child.stdin.take().expect("piped");
         let text = text.clone();
         std::thread::spawn(move || {
-            let _ = input.write_all(text.as_bytes());
+            best_effort(
+                "send the detection script",
+                input.write_all(text.as_bytes()),
+            );
         });
     }
     let mut stderr = child.stderr.take().expect("piped");
     let errors = std::thread::spawn(move || {
         let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
+        best_effort(
+            "read the detection errors",
+            stderr.read_to_string(&mut text),
+        );
         text
     });
     let mut out = String::new();

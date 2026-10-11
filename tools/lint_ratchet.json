@@ -1,8 +1,8 @@
 {
   "allows": {
-    "branchyard": 28,
+    "branchyard": 12,
     "branchyard-bridge": 12,
-    "branchyard-cli": 32,
+    "branchyard-cli": 16,
     "branchyard-client": 1,
     "branchyard-controls": 2,
     "branchyard-harness": 6,

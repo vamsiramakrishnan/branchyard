@@ -5,11 +5,7 @@
 //! worktree changed since, and deletes its actor. Hermetic; not evidence
 //! about a Substrate cluster.
 
-#![allow(
-    clippy::expect_used,
-    clippy::let_underscore_must_use,
-    clippy::unwrap_used
-)] // tests: a panic is the failure report
+#![allow(clippy::expect_used, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::path::PathBuf;
@@ -339,14 +335,14 @@ fn substrate_engine_child() {
     };
     let provider: Provider = serde_json::from_str(&provider).unwrap();
     let yard = Yard::open(root).unwrap();
-    let _ = yard
-        .task(prompt)
+    yard.task(prompt)
         .harness("gemini-cli")
         .command([agent])
         .provider(provider)
         .policy(Policy::allow_all())
         .name("crashy")
-        .run();
+        .run()
+        .unwrap();
 }
 
 /// Start a turn in an actor in another process with the ORPHAN prompt,

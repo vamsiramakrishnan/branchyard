@@ -13,7 +13,7 @@
 //!
 //! Requires `git`, `sh` and `python3`; nothing leaves loopback.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
@@ -119,7 +119,9 @@ impl Repo {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(dir.join("repo")).unwrap();
         let dir = fs::canonicalize(dir).unwrap();
         let root = dir.join("repo");
@@ -203,7 +205,7 @@ impl Drop for Repo {
     fn drop(&mut self) {
         let _ = self.by(&["gateway", "stop"]);
         let _ = self.by(&["services", "gc"]);
-        let _ = fs::remove_dir_all(&self.dir);
+        branchyard_support::cleanup_dir(&self.dir);
     }
 }
 

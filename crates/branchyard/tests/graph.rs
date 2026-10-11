@@ -5,7 +5,7 @@
 //! scratch-area bindings. The MCP tool, the CLI, the Python module and the
 //! server are tested in their own crates.
 
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::process::{Child, Command, Stdio};
@@ -593,7 +593,7 @@ struct Killed(Child);
 
 impl Drop for Killed {
     fn drop(&mut self) {
-        let _ = self.0.kill();
+        branchyard_support::best_effort("kill the test engine", self.0.kill());
     }
 }
 

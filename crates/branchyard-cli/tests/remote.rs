@@ -3,7 +3,7 @@
 //! Hermetic: the fake ACP agent stands in for every harness. Requires
 //! `git`, `sh` and `kill`.
 
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -30,7 +30,9 @@ impl Dir {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(&dir).unwrap();
         Dir(fs::canonicalize(dir).unwrap())
     }
@@ -63,7 +65,7 @@ impl Dir {
 
 impl Drop for Dir {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        branchyard_support::cleanup_dir(&self.0);
     }
 }
 
@@ -135,16 +137,19 @@ impl Served {
     }
 
     fn stop(&mut self) -> Option<i32> {
-        let _ = Command::new("kill")
-            .args(["-TERM", &self.child.id().to_string()])
-            .status();
+        branchyard_support::best_effort(
+            "send the kill signal",
+            Command::new("kill")
+                .args(["-TERM", &self.child.id().to_string()])
+                .status(),
+        );
         if let Ok(status) =
             wait::try_until_for(Duration::from_secs(20), || self.child.try_wait().unwrap())
         {
             return status.code();
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        branchyard_support::best_effort("kill the test server", self.child.kill());
+        branchyard_support::best_effort("reap the test server", self.child.wait());
         None
     }
 
@@ -1808,8 +1813,8 @@ struct Killed(Child);
 
 impl Drop for Killed {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        branchyard_support::best_effort("kill the test child", self.0.kill());
+        branchyard_support::best_effort("reap the test child", self.0.wait());
     }
 }
 

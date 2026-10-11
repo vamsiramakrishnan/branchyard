@@ -3,7 +3,7 @@
 //! the user configuration is redirected, no model is called, and every
 //! generated secret is checked to appear in no output.
 
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -27,7 +27,9 @@ impl Repo {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(dir.join("app")).unwrap();
         let root = fs::canonicalize(dir.join("app")).unwrap();
         let repo = Repo {

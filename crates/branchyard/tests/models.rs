@@ -9,7 +9,7 @@
 //! cost. Under a required egress policy the confined harness reaches the
 //! gateway and nothing else. Hermetic: nothing leaves this host.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -122,19 +122,25 @@ fn serve(stream: std::net::TcpStream, behavior: Behavior, sender: mpsc::Sender<S
     // A request that offers tools gets an answer that calls some, as a
     // model would.
     let tools = body["tools"].as_array().is_some_and(|t| !t.is_empty());
-    let _ = sender.send(Seen {
-        path: path.clone(),
-        headers,
-        body,
-        raw,
-    });
+    branchyard_support::best_effort(
+        "report the request to the test",
+        sender.send(Seen {
+            path: path.clone(),
+            headers,
+            body,
+            raw,
+        }),
+    );
     if let Behavior::Status(code) = behavior {
         let body = format!(r#"{{"error":{{"type":"upstream_{code}","message":"mock"}}}}"#);
-        let _ = write!(
-            out,
-            "HTTP/1.1 {code} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+        branchyard_support::best_effort(
+            "answer the mock request",
+            write!(
+                out,
+                "HTTP/1.1 {code} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
              Connection: close\r\n\r\n{body}",
-            body.len()
+                body.len()
+            ),
         );
         return;
     }
@@ -265,16 +271,22 @@ fn serve(stream: std::net::TcpStream, behavior: Behavior, sender: mpsc::Sender<S
     };
     if !events.is_empty() {
         // Streamed in chunks, each written on its own.
-        let _ = write!(
+        branchyard_support::best_effort(
+            "start the mock event stream",
+            write!(
             out,
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\
              Connection: close\r\n\r\n"
+        ),
         );
         for event in events {
-            let _ = write!(out, "{:x}\r\n{event}\r\n", event.len());
-            let _ = out.flush();
+            branchyard_support::best_effort(
+                "write a mock event",
+                write!(out, "{:x}\r\n{event}\r\n", event.len()),
+            );
+            branchyard_support::best_effort("flush a mock event", out.flush());
         }
-        let _ = write!(out, "0\r\n\r\n");
+        branchyard_support::best_effort("end the mock event stream", write!(out, "0\r\n\r\n"));
         return;
     }
     let body = match (path.as_str(), tools) {
@@ -311,11 +323,14 @@ fn serve(stream: std::net::TcpStream, behavior: Behavior, sender: mpsc::Sender<S
                 "prompt_tokens_details": {"cached_tokens": 60}}}),
     }
     .to_string();
-    let _ = write!(
-        out,
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+    branchyard_support::best_effort(
+        "answer the mock request",
+        write!(
+            out,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",
-        body.len()
+            body.len()
+        ),
     );
 }
 

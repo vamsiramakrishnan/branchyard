@@ -5,11 +5,7 @@
 //! moves past policy or an input changes, or they age out, and a filler
 //! killed midway leaves nothing behind once recovery runs.
 
-#![allow(
-    clippy::expect_used,
-    clippy::let_underscore_must_use,
-    clippy::unwrap_used
-)] // tests: a panic is the failure report
+#![allow(clippy::expect_used, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;
@@ -482,7 +478,7 @@ fn pool_child() {
         return;
     };
     let yard = Yard::open(root).unwrap();
-    let _ = yard.fill_pool(&WorkspaceSpec {
+    yard.fill_pool(&WorkspaceSpec {
         setup: vec![setup],
         prepare: true,
         pool: Some(PoolSpec {
@@ -490,15 +486,16 @@ fn pool_child() {
             ..PoolSpec::default()
         }),
         ..WorkspaceSpec::default()
-    });
+    })
+    .unwrap();
 }
 
 struct Killed(Child);
 
 impl Drop for Killed {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        branchyard_support::best_effort("kill the test child", self.0.kill());
+        branchyard_support::best_effort("reap the test child", self.0.wait());
     }
 }
 

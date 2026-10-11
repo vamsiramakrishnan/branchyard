@@ -1562,7 +1562,6 @@ pub(crate) struct Reincarnation {
 }
 
 /// [`reincarnate`], as a failover (`crate::fleet`) needs it.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn reincarnate_with(
     yard: &Yard,
     name: &str,
@@ -1677,7 +1676,7 @@ pub(crate) fn reincarnate_with(
     // branch the way any out-of-turn `store.write` does.
     if let Ok(mut old) = store.read(name) {
         old.info.superseded_by = Some(new_name);
-        let _ = store.write(&old);
+        branchyard_support::best_effort("mark the old branch as superseded", store.write(&old));
     }
     engine::execute(
         Turn {

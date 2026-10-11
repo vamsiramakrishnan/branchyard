@@ -2,7 +2,7 @@
 //! fake ACP agent from branchyard-runtime. Hermetic: no real harness, no
 //! network. Requires `git` and `sh`.
 
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -334,7 +334,7 @@ fn watch_prints_the_tree_once_or_logs_changes_until_q() {
     match exited {
         Ok(status) => assert!(status.success()),
         Err(_) => {
-            let _ = child.kill();
+            branchyard_support::best_effort("kill the watch process", child.kill());
             panic!("by watch did not exit on q");
         }
     }
@@ -1254,8 +1254,8 @@ fn send_steer_reaches_a_turn_another_process_runs() {
     struct Running(std::process::Child);
     impl Drop for Running {
         fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
+            branchyard_support::best_effort("kill the test engine", self.0.kill());
+            branchyard_support::best_effort("reap the test engine", self.0.wait());
         }
     }
     let mut running = Running(
@@ -3220,10 +3220,10 @@ struct Background {
 
 impl Drop for Background {
     fn drop(&mut self) {
-        let _ = fs::write(&self.go, "");
+        branchyard_support::best_effort("open the test gate", fs::write(&self.go, ""));
         if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            branchyard_support::best_effort("kill the test child", child.kill());
+            branchyard_support::best_effort("reap the test child", child.wait());
         }
     }
 }

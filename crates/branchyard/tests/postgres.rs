@@ -6,7 +6,7 @@
 //! otherwise each test says it was skipped.
 
 #![cfg(feature = "postgres")]
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::process::{Command, Stdio};
@@ -198,13 +198,13 @@ fn postgres_engine_child() {
         return;
     };
     let yard = Yard::open_postgres(root, &url, &scope).unwrap();
-    let _ = yard
-        .task("ORPHAN")
+    yard.task("ORPHAN")
         .harness("gemini-cli")
         .command([agent])
         .policy(Policy::allow_all())
         .name("crashy")
-        .run();
+        .run()
+        .unwrap();
 }
 
 #[test]
@@ -642,7 +642,7 @@ fn postgres_pool_child() {
         return;
     };
     let yard = Yard::open_postgres(root, &url, &scope).unwrap();
-    let _ = yard.fill_pool(&pool_spec(&setup));
+    yard.fill_pool(&pool_spec(&setup)).unwrap();
 }
 
 #[test]

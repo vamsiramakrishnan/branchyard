@@ -9,7 +9,7 @@
 //! an owner killed on this host is known gone at once. Requires `git`,
 //! `sh`, `sleep`, `ps` and `python3`.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;
@@ -165,7 +165,7 @@ fn owner_child() {
     println!("leaked {}", leaked.id());
     let mut line = String::new();
     // Until killed: stdin stays open.
-    let _ = std::io::stdin().read_line(&mut line);
+    std::io::stdin().read_line(&mut line).unwrap();
 }
 
 #[test]

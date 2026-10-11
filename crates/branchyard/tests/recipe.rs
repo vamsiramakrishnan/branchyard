@@ -9,7 +9,7 @@
 //! machine. Hermetic; no sshd or cloud VM. Requires `git`, `sh`, `tar`,
 //! `ps` and `python3`.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;
@@ -356,14 +356,14 @@ fn recipe_engine_child() {
     };
     let provider: Provider = serde_json::from_str(&provider).unwrap();
     let yard = Yard::open(root).unwrap();
-    let _ = yard
-        .task("ORPHAN")
+    yard.task("ORPHAN")
         .harness("gemini-cli")
         .command([agent])
         .provider(provider)
         .policy(Policy::allow_all())
         .name("crashy")
-        .run();
+        .run()
+        .unwrap();
 }
 
 #[test]

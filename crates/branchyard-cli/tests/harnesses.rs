@@ -10,12 +10,7 @@
 //! candidate. Nothing is installed from the network and no real harness
 //! runs. Requires `git`, `sh` and `python3`.
 
-#![allow(
-    clippy::let_underscore_must_use,
-    clippy::panic,
-    clippy::unwrap_in_result,
-    clippy::unwrap_used
-)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_in_result, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -899,8 +894,11 @@ fn a_server_shows_its_workers_harnesses_and_says_where_to_log_in() {
     assert!(!remote(&["harnesses", "--on", "ssh://vm.test"])
         .status
         .success());
-    let _ = Command::new("kill")
-        .args(["-TERM", &child.id().to_string()])
-        .status();
-    let _ = child.wait();
+    branchyard_support::best_effort(
+        "stop the server process",
+        Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status(),
+    );
+    branchyard_support::best_effort("reap the server process", child.wait());
 }

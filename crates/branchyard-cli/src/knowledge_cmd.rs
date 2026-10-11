@@ -448,7 +448,6 @@ fn run(env: &Env, target: &Target, action: &KnowledgeAction, json: bool) -> Outc
 
 /// Walk the proposed entries: adopt, reject, edit or skip each, reading
 /// one answer a line from stdin.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn review(store: &Store<'_>, editor: Option<&str>, json: bool, style: render::Style) -> Outcome {
     let proposed = store.list(Some(KnowledgeStatus::Proposed))?;
     if proposed.is_empty() {
@@ -462,13 +461,16 @@ fn review(store: &Store<'_>, editor: Option<&str>, json: bool, style: render::St
     let total = proposed.len();
     for (n, entry) in proposed.into_iter().enumerate() {
         let mut err = io::stderr();
-        let _ = write!(
-            err,
-            "\n[{}/{total}]\n{}[a]dopt, [r]eject, [e]dit then adopt, [s]kip, [q]uit? ",
-            n + 1,
-            render_entry(&entry, style)
+        branchyard_support::best_effort(
+            "write the review prompt",
+            write!(
+                err,
+                "\n[{}/{total}]\n{}[a]dopt, [r]eject, [e]dit then adopt, [s]kip, [q]uit? ",
+                n + 1,
+                render_entry(&entry, style)
+            ),
         );
-        let _ = err.flush();
+        branchyard_support::best_effort("flush the review prompt", err.flush());
         let Some(answer) = lines.next().transpose()? else {
             break;
         };
@@ -479,8 +481,11 @@ fn review(store: &Store<'_>, editor: Option<&str>, json: bool, style: render::St
                 Some(("adopted", adopted))
             }
             "r" | "reject" | "n" | "no" => {
-                let _ = write!(err, "reason (optional): ");
-                let _ = err.flush();
+                branchyard_support::best_effort(
+                    "write the reason prompt",
+                    write!(err, "reason (optional): "),
+                );
+                branchyard_support::best_effort("flush the reason prompt", err.flush());
                 let reason = lines.next().transpose()?.unwrap_or_default();
                 let reason = Some(reason.trim()).filter(|r| !r.is_empty());
                 Some(("rejected", store.reject(entry.id, reason)?))

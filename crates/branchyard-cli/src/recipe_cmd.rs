@@ -527,7 +527,6 @@ pub fn provider(args: &crate::args::RecipeArgs) -> Result<branchyard::RecipeOpti
     })
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn smoke_test(recipe: &Recipe, checks: &mut Vec<Check>) {
     let ssh = std::env::var("BRANCHYARD_SSH")
         .ok()
@@ -562,7 +561,10 @@ fn smoke_test(recipe: &Recipe, checks: &mut Vec<Check>) {
             drop(process.take_stdin());
             let mut out = String::new();
             if let Some(mut stdout) = process.take_stdout() {
-                let _ = std::io::Read::read_to_string(&mut stdout, &mut out);
+                branchyard_support::best_effort(
+                    "read the recipe's output",
+                    std::io::Read::read_to_string(&mut stdout, &mut out),
+                );
             }
             let status = process.wait()?;
             Ok((status, out))

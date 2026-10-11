@@ -7,7 +7,7 @@
 //! Crashes are real: a child process (this test binary, running the
 //! ignored `engine_child` test) starts a turn and is sent SIGKILL.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::fs;
@@ -45,13 +45,13 @@ fn engine_child() {
         return;
     };
     let yard = Yard::open(root).unwrap();
-    let _ = yard
-        .task(prompt)
+    yard.task(prompt)
         .harness("gemini-cli")
         .command([agent])
         .policy(Policy::allow_all())
         .name("crashy")
-        .run();
+        .run()
+        .unwrap();
 }
 
 fn start_child(f: &Fixture, prompt: &str, env: &[(&str, &str)]) -> Child {
@@ -844,8 +844,8 @@ struct Reaped(Child);
 
 impl Drop for Reaped {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        branchyard_support::best_effort("kill the test engine", self.0.kill());
+        branchyard_support::best_effort("reap the test engine", self.0.wait());
     }
 }
 

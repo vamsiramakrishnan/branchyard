@@ -3,7 +3,7 @@
 //! fake ACP agent behind a real bridge; then `by merge`. Hermetic: no real
 //! harness, no cluster. Requires `git` and `sh`.
 
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -85,7 +85,9 @@ impl Setup {
             "branchyard-cli-substrate-{}-{name}",
             std::process::id()
         ));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(dir.join("repo")).unwrap();
         let dir = fs::canonicalize(dir).unwrap();
         let root = dir.join("repo");
@@ -161,7 +163,7 @@ impl Setup {
 
 impl Drop for Setup {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+        branchyard_support::cleanup_dir(&self.dir);
     }
 }
 
@@ -259,8 +261,8 @@ impl Served {
 
 impl Drop for Served {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        branchyard_support::best_effort("kill the test child", self.child.kill());
+        branchyard_support::best_effort("reap the test child", self.child.wait());
     }
 }
 

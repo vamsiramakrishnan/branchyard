@@ -865,7 +865,6 @@ pub(crate) fn release_environment(
 /// End a turn's sandbox `name`: park it (pause and record it for the next
 /// turn) when the branch keeps its sandbox and the provider can pause, then
 /// evict beyond `max_paused`; otherwise destroy it. Returns what to record.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn park(
     yard: &Yard,
     record: &Record,
@@ -931,10 +930,12 @@ pub(crate) fn park(
         .and_then(|()| provider.pause(name).map_err(|e| e.to_string()));
     match parked {
         Ok(()) => {
-            let _ =
+            branchyard_support::best_effort(
+                "record that the sandbox was kept",
                 store
                     .backend()
-                    .finish_step(fence, fence.turn, STEP_PARK, &json!({ "kept": true }));
+                    .finish_step(fence, fence.turn, STEP_PARK, &json!({ "kept": true })),
+            );
             said.push(event(SandboxEvent::Kept {
                 provider: kind.into(),
                 sandbox: name.into(),

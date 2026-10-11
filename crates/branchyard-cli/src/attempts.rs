@@ -26,13 +26,12 @@ fn short(commit: &str) -> &str {
 
 /// Ask `question` on the terminal; true only for an explicit yes. Without a
 /// terminal nothing is asked and the answer is no.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 pub fn confirm(env: &Env, question: &str) -> bool {
     if !(env.stdin_tty && env.stderr_tty) {
         return false;
     }
     eprint!("{question} [y/N] ");
-    let _ = io::stderr().flush();
+    branchyard_support::best_effort("flush the prompt", io::stderr().flush());
     let mut line = String::new();
     if io::stdin().lock().read_line(&mut line).is_err() {
         return false;
