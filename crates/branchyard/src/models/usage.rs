@@ -115,21 +115,21 @@ pub fn from_usage(api: Api, usage: &Value) -> Option<Tokens> {
 }
 
 /// The largest body kept to read a non-streamed response's usage from.
-const MAX_BODY: usize = 16 * 1024 * 1024;
+pub(super) const MAX_BODY: usize = 16 * 1024 * 1024;
 
 /// Server-sent events from bytes in any chunking: a line ends at `\n` (a
 /// `\r` before it is dropped), a `data:` line adds to the event, and a
-/// blank line ends it. The one reader the [`Meter`] and the [`Collector`]
-/// share.
+/// blank line ends it. The one reader the [`Meter`], the [`Collector`] and
+/// Gemini's signature recorder share.
 #[derive(Default)]
-struct Events {
+pub(super) struct Events {
     line: Vec<u8>,
     data: String,
 }
 
 impl Events {
     /// More bytes of the stream: the data of each event they completed.
-    fn feed(&mut self, bytes: &[u8]) -> Vec<String> {
+    pub(super) fn feed(&mut self, bytes: &[u8]) -> Vec<String> {
         let mut done = Vec::new();
         for &byte in bytes {
             if byte == b'\n' {
@@ -161,7 +161,7 @@ impl Events {
 
     /// The stream ended: a last line without its newline and a last event
     /// without its blank line count.
-    fn finish(&mut self) -> Vec<String> {
+    pub(super) fn finish(&mut self) -> Vec<String> {
         let mut done = Vec::new();
         if !self.line.is_empty() {
             let line = std::mem::take(&mut self.line);

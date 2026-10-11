@@ -928,6 +928,14 @@ pub struct ModelBackendConfig {
     /// `Bearer <key>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<String>,
+    /// What the gateway adapts for an endpoint that imitates OpenAI's API
+    /// with differences: `gemini` for Gemini's OpenAI-compatible endpoint
+    /// (the fields it refuses stripped, the thought signatures it puts on
+    /// tool calls kept and put back when a request replays them), or
+    /// `none`. Default: `gemini` for an `openai` backend whose URL's host is
+    /// `generativelanguage.googleapis.com`, else `none`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat: Option<String>,
 }
 
 /// `[[models.routes]]`.
@@ -1036,6 +1044,22 @@ impl ModelsConfig {
                         &format!("backends.{name}.url"),
                         format!("must be an http:// or https:// URL, not {url:?}"),
                     );
+                }
+            }
+            match backend.compat.as_deref() {
+                None | Some("none") => {}
+                Some("gemini") if backend.api == "openai" => {}
+                Some("gemini") => {
+                    return fail(
+                        &format!("backends.{name}.compat"),
+                        format!("gemini is for an openai backend, not {:?}", backend.api),
+                    )
+                }
+                Some(other) => {
+                    return fail(
+                        &format!("backends.{name}.compat"),
+                        format!("{other:?} is not gemini or none"),
+                    )
                 }
             }
         }
@@ -2836,6 +2860,9 @@ classes = { compensable = "allow" }
                     allow = [\"claude-*\"]\nseed = 7\n\n\
                     [models.backends.anthropic]\napi = \"anthropic\"\nkey = \"anthropic\"\n\n\
                     [models.backends.spare]\napi = \"anthropic\"\nurl = \"https://spare.example\"\n\n\
+                    [models.backends.gemini]\napi = \"openai\"\n\
+                    url = \"https://generativelanguage.googleapis.com/v1beta/openai\"\n\
+                    key = \"GEMINI_API_KEY\"\ncompat = \"gemini\"\n\n\
                     [[models.routes]]\nmodel = \"claude-*\"\nbackends = [\"anthropic\"]\n\
                     fallbacks = [\"spare\"]\nrequests_per_minute = 60\n\n\
                     [models.budget]\ndaily_usd = 20.0\nalert_at = 0.5\n\n\
@@ -2843,6 +2870,10 @@ classes = { compensable = "allow" }
         let config = parse(text).unwrap();
         assert_eq!(config.models.access().unwrap().unwrap().allow, ["claude-*"]);
         assert_eq!(config.models.routes[0].fallbacks, ["spare"]);
+        assert_eq!(
+            config.models.backends["gemini"].compat.as_deref(),
+            Some("gemini")
+        );
         assert_eq!(config.models.budget.as_ref().unwrap().daily_usd, Some(20.0));
         assert_eq!(parse(&render(&config, "test")).unwrap(), config);
         assert_eq!(
@@ -2862,6 +2893,14 @@ classes = { compensable = "allow" }
             (
                 "[models.backends.a]\napi = \"openai\"\nkey = \"@/run/key\"\n",
                 "not a file",
+            ),
+            (
+                "[models.backends.a]\napi = \"openai\"\ncompat = \"vertex\"\n",
+                "models.backends.a.compat",
+            ),
+            (
+                "[models.backends.a]\napi = \"anthropic\"\ncompat = \"gemini\"\n",
+                "for an openai backend",
             ),
             (
                 "[[models.routes]]\nmodel = \"*\"\nbackends = [\"x\"]\n",

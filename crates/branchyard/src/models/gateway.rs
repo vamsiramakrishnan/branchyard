@@ -11,7 +11,9 @@
 //!
 //! The rest of the path and the query go to the backend after its base
 //! URL's path. Every response is streamed to the harness as it arrives,
-//! with `Transfer-Encoding: chunked` and `Connection: close`.
+//! with `Transfer-Encoding: chunked` and `Connection: close`. A backend with
+//! a compatibility layer ([`super::Compat`]) gets the request adapted, and
+//! its answer read, by that layer (`gemini`).
 
 use branchyard_support::best_effort;
 use branchyard_support::{CondvarExt as _, LockExt as _};
@@ -29,8 +31,8 @@ use super::translate;
 use super::upstream::{self, Failure, Target};
 use super::usage::{Asked, Collector, Meter, Observed};
 use super::{
-    audit, Api, Audit, Backend, Gateway, Interception, ModelActivity, ModelCall, Tokens,
-    UsageRecord,
+    audit, gemini, Api, Audit, Backend, Compat, Gateway, Interception, ModelActivity, ModelCall,
+    Tokens, UsageRecord,
 };
 use crate::connectors::keys;
 use crate::{Activity, RecordedEvent, Yard};
@@ -613,9 +615,12 @@ fn handle(stream: TcpStream, state: &TurnState) {
     let backend_model = index
         .and_then(|i| gateway.routes.get(i))
         .and_then(|r| r.backend_model.clone());
+    // The chat completion a Gemini backend is sent, made once for the call:
+    // every Gemini backend of a call is sent the same one.
+    let mut for_gemini: Option<Vec<u8>> = None;
     // Forward: the next backend on a refused connection, a 5xx or a 429.
     let mut last: Option<(upstream::Response, Vec<u8>, String, Option<String>)> = None;
-    let mut answered: Option<(upstream::Response, String, Option<String>)> = None;
+    let mut answered: Option<(upstream::Response, String, Option<String>, bool)> = None;
     for backend in order {
         let key = match &backend.key {
             Some(source) => match source.read() {
@@ -690,6 +695,24 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 }
             }
         };
+        // A backend's compatibility layer: its path, and for a chat
+        // completion, its body, and its answer read for what to keep.
+        let chat = gemini::is_chat(&send_path);
+        let (send_path, send_body) = match backend.compat {
+            Compat::Gemini => {
+                let send_body = match chat {
+                    true => for_gemini
+                        .get_or_insert_with(|| {
+                            for_gemini_backend(state, backend, &call.model, send_body)
+                        })
+                        .clone(),
+                    false => send_body,
+                };
+                (gemini::path(&send_path), send_body)
+            }
+            Compat::Off => (send_path, send_body),
+        };
+        let recording = backend.compat == Compat::Gemini && chat;
         let mut headers = upstream_headers(&request, backend, &key);
         if as_model.is_some() {
             headers.retain(|(n, _)| !n.to_ascii_lowercase().starts_with("anthropic-"));
@@ -725,12 +748,12 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 last = Some((response, kept, backend.name.clone(), as_model));
             }
             Ok(response) => {
-                answered = Some((response, backend.name.clone(), as_model));
+                answered = Some((response, backend.name.clone(), as_model, recording));
                 break;
             }
         }
     }
-    let Some((response, backend, as_model)) = answered else {
+    let Some((response, backend, as_model, recording)) = answered else {
         match last {
             // Every backend failed: the harness gets the last one's
             // answer, as it would have from the provider, in its own API.
@@ -793,7 +816,10 @@ fn handle(stream: TcpStream, state: &TurnState) {
     // Usage and tool calls are read in the backend's shape: the harness's
     // own, unless the request was translated.
     let backend_api = gateway.backend(&backend).map_or(api, |b| b.api);
-    let mut reading = Reading::new(backend_api, sse, matches!(gateway.audit, Audit::Contents));
+    let mut reading = Reading::new(backend_api, sse, matches!(gateway.audit, Audit::Contents))
+        .recording(
+            recording.then(|| gemini::Recorder::new(&gateway.signatures, &state.subject, sse)),
+        );
     let no_body = request.method == "HEAD" || matches!(response.status, 204 | 304);
     let mut response = response;
     let mut buf = vec![0u8; 16 * 1024];
@@ -991,6 +1017,22 @@ fn handle(stream: TcpStream, state: &TurnState) {
     best_effort("flush the streamed response", out.flush());
 }
 
+/// The chat completion `body` as a Gemini backend takes it (`gemini`): the
+/// fields its endpoint rejects stripped, and replayed tool calls given their
+/// thought signatures, as the turn's person's calls recorded them. A body
+/// that is not JSON goes as it is.
+fn for_gemini_backend(state: &TurnState, backend: &Backend, model: &str, body: Vec<u8>) -> Vec<u8> {
+    let Ok(mut request) = serde_json::from_slice::<Value>(&body) else {
+        return body;
+    };
+    let prepared = gemini::prepare(&mut request, &state.gateway.signatures, &state.subject);
+    gemini::log(&backend.name, model, &prepared);
+    match prepared.changed() {
+        true => serde_json::to_vec(&request).unwrap_or(body),
+        false => body,
+    }
+}
+
 fn response_ok(status: u16) -> bool {
     (200..400).contains(&status)
 }
@@ -1002,13 +1044,15 @@ fn is_sse(response: &upstream::Response) -> bool {
 }
 
 /// Reads a backend's response as its bytes pass: its usage, what it did
-/// (the tools it called, why it stopped, how long it was), and, when the
-/// call's contents are kept, the bytes themselves.
-struct Reading {
+/// (the tools it called, why it stopped, how long it was), when the
+/// call's contents are kept, the bytes themselves, and for a Gemini
+/// backend, the thought signatures to keep.
+struct Reading<'a> {
     meter: Meter,
     collector: Collector,
     kept: Option<Vec<u8>>,
     truncated: bool,
+    recorder: Option<gemini::Recorder<'a>>,
 }
 
 /// What a response came to.
@@ -1023,21 +1067,31 @@ struct Finished {
     truncated: bool,
 }
 
-impl Reading {
+impl<'a> Reading<'a> {
     /// Reads a response of `api`'s shape; keeps its bytes when `keep`.
-    fn new(api: Api, sse: bool, keep: bool) -> Reading {
+    fn new(api: Api, sse: bool, keep: bool) -> Reading<'a> {
         Reading {
             meter: Meter::new(api, sse),
             collector: Collector::new(sse),
             kept: keep.then(Vec::new),
             truncated: false,
+            recorder: None,
         }
+    }
+
+    /// Also keep the thought signatures the response carries.
+    fn recording(mut self, recorder: Option<gemini::Recorder<'a>>) -> Reading<'a> {
+        self.recorder = recorder;
+        self
     }
 
     /// Bytes of the response body, in order.
     fn feed(&mut self, bytes: &[u8]) {
         self.meter.feed(bytes);
         self.collector.feed(bytes);
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.feed(bytes);
+        }
         if let Some(kept) = self.kept.as_mut() {
             // Cut at a chunk, and keep nothing after the cut.
             if self.truncated || kept.len() + bytes.len() > audit::MAX_RESPONSE {
@@ -1049,6 +1103,9 @@ impl Reading {
     }
 
     fn finish(self) -> Finished {
+        if let Some(recorder) = self.recorder {
+            recorder.finish();
+        }
         let (tokens, model) = self.meter.finish();
         Finished {
             tokens,

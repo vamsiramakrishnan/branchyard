@@ -712,6 +712,13 @@
             "string",
             "null"
           ]
+        },
+        "compat": {
+          "description": "What the gateway adapts for an endpoint that imitates OpenAI's API\nwith differences: `gemini` for Gemini's OpenAI-compatible endpoint\n(the fields it refuses stripped, the thought signatures it puts on\ntool calls kept and put back when a request replays them), or\n`none`. Default: `gemini` for an `openai` backend whose URL's host is\n`generativelanguage.googleapis.com`, else `none`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,

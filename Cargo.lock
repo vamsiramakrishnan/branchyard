@@ -665,6 +665,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml_edit",
+ "tracing",
  "url",
  "webpki-roots",
 ]
