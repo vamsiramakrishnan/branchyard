@@ -458,7 +458,8 @@ pub struct SandboxArgs {
     pub cpus: Option<u8>,
     pub memory_mib: Option<u32>,
     pub pass_env: Vec<String>,
-    /// `--keep-sandbox`, `--sandbox-snapshots`, `--max-paused`.
+    /// `--keep-sandbox`, `--sandbox-snapshots`, `--max-paused`,
+    /// `--max-kept-minutes`.
     pub lifecycle: LifecycleArgs,
     /// `--live-branch`: declare the SDK's pause, live branch and full
     /// snapshots (unqualified).
@@ -472,6 +473,14 @@ pub struct LifecycleArgs {
     pub keep: Option<branchyard::SandboxKeep>,
     pub snapshots: Option<u32>,
     pub max_paused: Option<u32>,
+    pub max_kept_minutes: Option<u32>,
+}
+
+impl LifecycleArgs {
+    /// `--max-kept-minutes` as the engine's seconds.
+    pub fn max_kept_secs(&self) -> Option<u64> {
+        self.max_kept_minutes.map(|m| u64::from(m) * 60)
+    }
 }
 
 /// Options for `--provider substrate`.
@@ -498,7 +507,8 @@ pub struct SubstrateArgs {
     /// `--substrate-insecure`: allow `http://` or `ws://` to hosts other
     /// than loopback.
     pub insecure: bool,
-    /// `--keep-sandbox`, `--sandbox-snapshots`, `--max-paused`.
+    /// `--keep-sandbox`, `--sandbox-snapshots`, `--max-paused`,
+    /// `--max-kept-minutes`.
     pub lifecycle: LifecycleArgs,
 }
 
@@ -2979,6 +2989,10 @@ pub struct LifecycleFlags {
     /// is destroyed (default 4)
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     max_paused: Option<u32>,
+    /// Minutes a kept sandbox may go unused before it is destroyed instead of resumed
+    /// (default: never)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    max_kept_minutes: Option<u32>,
 }
 
 impl LifecycleFlags {
@@ -2987,6 +3001,7 @@ impl LifecycleFlags {
             ("keep-sandbox", self.keep_sandbox.is_some()),
             ("sandbox-snapshots", self.sandbox_snapshots.is_some()),
             ("max-paused", self.max_paused.is_some()),
+            ("max-kept-minutes", self.max_kept_minutes.is_some()),
         ]
         .into_iter()
         .find_map(|(flag, given)| given.then_some(flag))
@@ -2997,6 +3012,7 @@ impl LifecycleFlags {
             keep: self.keep_sandbox,
             snapshots: self.sandbox_snapshots,
             max_paused: self.max_paused,
+            max_kept_minutes: self.max_kept_minutes,
         }
     }
 }
@@ -5027,7 +5043,7 @@ mod tests {
         );
         let kept = self::task(
             "run go --provider microsandbox --image a --live-branch --keep-sandbox pause \
-             --sandbox-snapshots 2 --max-paused 6",
+             --sandbox-snapshots 2 --max-paused 6 --max-kept-minutes 90",
         );
         assert_eq!(
             kept.sandbox,
@@ -5037,6 +5053,7 @@ mod tests {
                     keep: Some(branchyard::SandboxKeep::Pause),
                     snapshots: Some(2),
                     max_paused: Some(6),
+                    max_kept_minutes: Some(90),
                 },
                 live_branch: true,
                 ..SandboxArgs::default()
@@ -5094,6 +5111,7 @@ mod tests {
                     keep: Some(branchyard::SandboxKeep::Pause),
                     snapshots: None,
                     max_paused: Some(2),
+                    max_kept_minutes: None,
                 },
             })
         );

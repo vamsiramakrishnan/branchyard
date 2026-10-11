@@ -1000,3 +1000,133 @@ fn a_provider_that_cannot_live_branch_keeps_no_prepared_environment() {
     assert!(used.reason.unwrap().contains("can't branch"));
     assert!(f.yard.environments().is_empty());
 }
+
+/// Make `sandbox`'s kept row look unused since the epoch.
+fn backdate(f: &Fixture, sandbox: &str) {
+    let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+    let changed = db
+        .execute(
+            "UPDATE sandboxes SET used_ms = 1 WHERE name = ?1",
+            [sandbox],
+        )
+        .unwrap();
+    assert_eq!(changed, 1, "{sandbox} has one kept row");
+}
+
+/// `(branch, sandbox, unused_secs, max_kept_secs)` of every expiry a
+/// branch recorded.
+fn expired(branch: &Branch) -> Vec<(String, String, u64, u64)> {
+    sandbox_events(&branch.events().unwrap())
+        .into_iter()
+        .filter_map(|e| match e {
+            SandboxEvent::Expired {
+                branch,
+                sandbox,
+                unused_secs,
+                max_kept_secs,
+                ..
+            } => Some((branch, sandbox, unused_secs, max_kept_secs)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_kept_sandbox_unused_past_max_kept_is_destroyed_by_the_next_turn_on_the_provider() {
+    let f = Fixture::new();
+    let fake = fake(&f, true);
+    let options = |name: &str| TaskOptions {
+        name: Some(name.into()),
+        provider: Some(Provider::Microsandbox(SandboxOptions {
+            image: "registry.example/harness:1".into(),
+            keep: SandboxKeep::Pause,
+            snapshots: Some(0),
+            max_kept_secs: Some(600),
+            ..SandboxOptions::default()
+        })),
+        ..kept(&f)
+    };
+    let a = f.yard.task("SH true").options(options("a")).run().unwrap();
+    let a_sandbox = started_names(&a)[0].clone();
+    // Within its limit, another branch's turn ending leaves it kept.
+    let b = f.yard.task("SH true").options(options("b")).run().unwrap();
+    assert!(expired(&b).is_empty(), "{:?}", expired(&b));
+    assert!(paused(&fake).contains(&a_sandbox), "{:?}", paused(&fake));
+    // Unused for far longer than its limit: the next turn ending on the
+    // provider destroys it, and says so with the limit.
+    backdate(&f, &a_sandbox);
+    let c = f.yard.task("SH true").options(options("c")).run().unwrap();
+    let gone = expired(&c);
+    assert_eq!(gone.len(), 1, "{gone:?}");
+    assert_eq!(
+        (gone[0].0.as_str(), gone[0].1.as_str()),
+        ("a", a_sandbox.as_str())
+    );
+    assert!(gone[0].2 > 600 && gone[0].3 == 600, "{gone:?}");
+    assert!(!paused(&fake).contains(&a_sandbox), "{:?}", paused(&fake));
+    let lines: Vec<String> = sandbox_events(&c.events().unwrap())
+        .iter()
+        .filter(|e| matches!(e, SandboxEvent::Expired { .. }))
+        .map(SandboxEvent::describe)
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].starts_with(&format!(
+            "sandbox: destroyed a's kept microsandbox sandbox {a_sandbox}, unused for"
+        )) && lines[0].ends_with("s, longer than its 600s limit (max_kept)"),
+        "{}",
+        lines[0]
+    );
+    // b's, within its limit, is still kept; a's next turn has nothing kept.
+    assert_eq!(paused(&fake).len(), 2, "{:?}", paused(&fake));
+    let a = a.send("SH true", options("a")).unwrap();
+    assert!(
+        matches!(origins(&a).last().unwrap(), SandboxOrigin::Fresh { .. }),
+        "{:?}",
+        origins(&a)
+    );
+}
+
+#[test]
+fn a_branch_whose_kept_sandbox_is_past_max_kept_starts_fresh_instead_of_resuming_it() {
+    let f = Fixture::new();
+    let fake = fake(&f, true);
+    let options = || TaskOptions {
+        provider: Some(Provider::Microsandbox(SandboxOptions {
+            image: "registry.example/harness:1".into(),
+            keep: SandboxKeep::Pause,
+            snapshots: Some(0),
+            max_kept_secs: Some(60),
+            ..SandboxOptions::default()
+        })),
+        ..kept(&f)
+    };
+    let branch = f
+        .yard
+        .task(mark("one"))
+        .options(options())
+        .name("stale")
+        .run()
+        .unwrap();
+    let kept_name = started_names(&branch)[0].clone();
+    assert_eq!(paused(&fake), std::slice::from_ref(&kept_name));
+    backdate(&f, &kept_name);
+    let branch = branch.send(READ_MARK, options()).unwrap();
+    match origins(&branch).last().unwrap() {
+        SandboxOrigin::Fresh {
+            reason: Some(reason),
+        } => assert!(
+            reason.contains(&format!("its kept sandbox {kept_name} was unused for"))
+                && reason.contains("longer than its 60s limit (max_kept)"),
+            "{reason}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    // The old sandbox and the marker it held are gone: a fresh root filesystem.
+    assert!(!paused(&fake).contains(&kept_name), "{:?}", paused(&fake));
+    assert!(
+        last_text(&branch).contains("No such file"),
+        "{}",
+        last_text(&branch)
+    );
+}

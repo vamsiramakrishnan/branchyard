@@ -1669,6 +1669,11 @@ pub struct Microsandbox {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub max_paused: Option<u32>,
+    /// Minutes a kept sandbox may go unused before it is destroyed instead
+    /// of resumed (default: never; it stays until `max_paused` evicts it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub max_kept_minutes: Option<u32>,
     /// Use the SDK's pause, live branching and full snapshots: unqualified
     /// until they pass on a KVM host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2100,6 +2105,9 @@ impl ProjectConfig {
             if sandbox.max_paused == Some(0) {
                 return fail("microsandbox.max_paused", "must be at least 1".into());
             }
+            if sandbox.max_kept_minutes == Some(0) {
+                return fail("microsandbox.max_kept_minutes", "must be at least 1".into());
+            }
         }
         Ok(())
     }
@@ -2484,6 +2492,9 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
         if let Some(n) = sandbox.max_paused {
             out.push_str(&format!("max_paused = {n}\n"));
         }
+        if let Some(n) = sandbox.max_kept_minutes {
+            out.push_str(&format!("max_kept_minutes = {n}\n"));
+        }
         if let Some(on) = sandbox.live_branch {
             out.push_str(&format!("live_branch = {on}\n"));
         }
@@ -2708,6 +2719,7 @@ config = ".branchyard/server.json"
 [microsandbox]
 image = "ghcr.io/you/codex:1"
 pass_env = ["OPENAI_API_KEY"]
+max_kept_minutes = 30
 [notify]
 desktop = true
 terminal = "osc777"
@@ -2951,6 +2963,10 @@ classes = { compensable = "allow" }
             ("[remote]\nurl = \"ftp://x\"", "remote.url"),
             ("version = 2", "version"),
             ("[defaults]\nprovider = \"microsandbox\"", "[microsandbox]"),
+            (
+                "[microsandbox]\nimage = \"x\"\nmax_kept_minutes = 0",
+                "microsandbox.max_kept_minutes",
+            ),
             ("[notify]\nsound = true", "unknown field `sound`"),
             ("[sync]\nremote = \"ftp://x\"", "sync.remote"),
             ("[sync]\ninterval = \"5m\"", "sync.remote: is required"),

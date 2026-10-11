@@ -266,6 +266,7 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
                     }),
                     snapshots: sandbox.snapshots,
                     max_paused: sandbox.max_paused,
+                    max_kept_minutes: sandbox.max_kept_minutes,
                 },
                 live_branch: sandbox.live_branch.unwrap_or(false),
             });

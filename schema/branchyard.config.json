@@ -391,6 +391,15 @@
           "minimum": 1,
           "description": "Kept sandboxes per repository before the least recently used is\ndestroyed (default 4)."
         },
+        "max_kept_minutes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Minutes a kept sandbox may go unused before it is destroyed instead\nof resumed (default: never; it stays until `max_paused` evicts it)."
+        },
         "live_branch": {
           "type": [
             "boolean",

@@ -2632,6 +2632,7 @@ pub(crate) fn provider(task: &TaskArgs) -> Result<Option<Provider>, Failure> {
             keep: substrate.lifecycle.keep.unwrap_or_default(),
             snapshots: substrate.lifecycle.snapshots,
             max_paused: substrate.lifecycle.max_paused,
+            max_kept_secs: substrate.lifecycle.max_kept_secs(),
         })));
     }
     Ok(match (&task.sandbox, task.local) {
@@ -2643,6 +2644,7 @@ pub(crate) fn provider(task: &TaskArgs) -> Result<Option<Provider>, Failure> {
             keep: sandbox.lifecycle.keep.unwrap_or_default(),
             snapshots: sandbox.lifecycle.snapshots,
             max_paused: sandbox.lifecycle.max_paused,
+            max_kept_secs: sandbox.lifecycle.max_kept_secs(),
             live_branch: sandbox.live_branch,
         })),
         (None, true) => Some(Provider::Local),

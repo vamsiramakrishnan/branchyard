@@ -1435,6 +1435,12 @@ pub struct SandboxOptions {
     /// Unset: 4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_paused: Option<u32>,
+    /// A kept sandbox unused for longer than this many seconds is
+    /// destroyed instead of resumed: by the branch's next turn, or by the
+    /// next turn ending on this provider. Unset: kept until `max_paused`
+    /// evicts it. See `docs/sandbox-snapshots.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_kept_secs: Option<u64>,
     /// Opt in to the Microsandbox SDK's pause, resume, live branching and
     /// full-memory snapshots, which are declared only then: unqualified
     /// until they pass on a KVM host.
@@ -1508,6 +1514,12 @@ pub struct SubstrateOptions {
     /// parking one more deletes the least recently used. Unset: 4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_paused: Option<u32>,
+    /// A kept sandbox unused for longer than this many seconds is
+    /// destroyed instead of resumed: by the branch's next turn, or by the
+    /// next turn ending on this provider. Unset: kept until `max_paused`
+    /// evicts it. See `docs/sandbox-snapshots.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_kept_secs: Option<u64>,
 }
 
 impl SubstrateOptions {
@@ -1582,6 +1594,12 @@ pub struct RecipeOptions {
     /// parking one more destroys the least recently used. Unset: 4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_paused: Option<u32>,
+    /// A kept sandbox unused for longer than this many seconds is
+    /// destroyed instead of resumed: by the branch's next turn, or by the
+    /// next turn ending on this provider. Unset: kept until `max_paused`
+    /// evicts it. See `docs/sandbox-snapshots.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_kept_secs: Option<u64>,
 }
 
 impl RecipeOptions {

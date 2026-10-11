@@ -31,7 +31,12 @@ impl ProviderKind for SubstrateOptions {
     }
 
     fn lifecycle(&self) -> Option<Lifecycle> {
-        Some(Lifecycle::of(self.keep, self.snapshots, self.max_paused))
+        Some(Lifecycle::of(
+            self.keep,
+            self.snapshots,
+            self.max_paused,
+            self.max_kept_secs,
+        ))
     }
 
     fn check(&self, _: &Yard) -> Result<(), Error> {

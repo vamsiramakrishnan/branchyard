@@ -198,6 +198,20 @@ pub enum SandboxEvent {
         sandbox: String,
         branch: String,
     },
+    /// Another branch's kept sandbox, destroyed because it went unused for
+    /// longer than that branch's `max_kept_secs`.
+    Expired {
+        /// The provider kind: `microsandbox`, `substrate`, `recipe`.
+        provider: String,
+        /// The sandbox destroyed.
+        sandbox: String,
+        /// The branch that kept it.
+        branch: String,
+        /// How long it had gone unused, in seconds.
+        unused_secs: u64,
+        /// That branch's limit, in seconds.
+        max_kept_secs: u64,
+    },
     /// A checkpoint's provider snapshot, released to keep the newest
     /// `snapshots`, or with its branch's sandbox.
     Released {
@@ -273,6 +287,16 @@ impl SandboxEvent {
             } => format!(
                 "sandbox: destroyed {branch}'s kept {provider} sandbox {sandbox}, the least \
                  recently used, to stay within max_paused"
+            ),
+            SandboxEvent::Expired {
+                provider,
+                sandbox,
+                branch,
+                unused_secs,
+                max_kept_secs,
+            } => format!(
+                "sandbox: destroyed {branch}'s kept {provider} sandbox {sandbox}, unused for \
+                 {unused_secs}s, longer than its {max_kept_secs}s limit (max_kept)"
             ),
             SandboxEvent::Released {
                 provider,
@@ -371,21 +395,35 @@ pub(crate) struct Lifecycle {
     pub keep: bool,
     pub snapshots: u32,
     pub max_paused: u32,
+    /// Seconds a kept sandbox may go unused before it is destroyed instead
+    /// of resumed; `None` keeps it until `max_paused` evicts it.
+    pub max_kept_secs: Option<u64>,
 }
 
 impl Lifecycle {
     /// What provider options with these settings ask for; `snapshots` and
-    /// `max_paused` default when unset.
+    /// `max_paused` default when unset, `max_kept_secs` stays unset.
     pub(crate) fn of(
         keep: SandboxKeep,
         snapshots: Option<u32>,
         max_paused: Option<u32>,
+        max_kept_secs: Option<u64>,
     ) -> Lifecycle {
         Lifecycle {
             keep: keep == SandboxKeep::Pause,
             snapshots: snapshots.unwrap_or(DEFAULT_SNAPSHOTS),
             max_paused: max_paused.unwrap_or(DEFAULT_MAX_PAUSED),
+            max_kept_secs,
         }
+    }
+
+    /// Whether `row`, kept since its `used_ms`, has gone unused past this
+    /// lifecycle's limit at `now_ms`: `(unused, limit)` in seconds, or
+    /// `None` while it may still be resumed.
+    pub(crate) fn expired(&self, row: &SandboxRow, now_ms: u64) -> Option<(u64, u64)> {
+        let limit = self.max_kept_secs?;
+        let unused = now_ms.saturating_sub(row.used_ms) / 1000;
+        (unused > limit).then_some((unused, limit))
     }
 }
 
@@ -517,6 +555,21 @@ pub(crate) fn acquire(
             reasons.push(format!(
                 "its kept sandbox {} is on another provider ({})",
                 row.name, row.provider
+            ));
+            continue;
+        }
+        if let Some((unused, limit)) =
+            lifecycle(record.provider.as_ref()).and_then(|policy| policy.expired(&row, now_ms()))
+        {
+            // Unused for too long: a fresh sandbox, not this one's state.
+            branchyard_support::best_effort(
+                "destroy the expired sandbox",
+                provider.destroy(&row.name),
+            );
+            reasons.push(format!(
+                "its kept sandbox {} was unused for {unused}s, longer than its {limit}s limit \
+                 (max_kept)",
+                row.name
             ));
             continue;
         }
@@ -908,6 +961,7 @@ pub(crate) fn park(
         }
     }
     said.extend(evict(yard, &key, policy.max_paused, &record.info.name));
+    said.extend(expire(yard, &key, &record.info.name, now_ms()));
     said
 }
 
@@ -936,16 +990,9 @@ pub(crate) fn evict(yard: &Yard, key: &str, max: u32, except: &str) -> Vec<Activ
             continue;
         };
         excess -= 1;
-        let destroyed = store
-            .read(&row.branch)
-            .ok()
-            .and_then(|owner| owner.provider)
-            .ok_or_else(|| format!("{} has no provider", row.branch))
-            .and_then(|p| open(yard, &p))
-            .and_then(|provider| provider.destroy(&row.name).map_err(|e| e.to_string()));
-        match destroyed {
+        match destroy_kept(yard, &store, &row) {
             Ok(()) => said.push(event(SandboxEvent::Evicted {
-                provider: key.split(':').next().unwrap_or(key).to_owned(),
+                provider: kind_of(key),
                 sandbox: row.name.clone(),
                 branch: row.branch.clone(),
             })),
@@ -956,6 +1003,70 @@ pub(crate) fn evict(yard: &Yard, key: &str, max: u32, except: &str) -> Vec<Activ
         }
     }
     said
+}
+
+/// Destroy the kept sandboxes of provider `key` that went unused for
+/// longer than their own branch's `max_kept_secs` as of `now_ms`, sparing
+/// `except`'s (just parked). Each is taken from the store first, as
+/// [`evict`] takes them. A branch without the limit keeps its sandbox.
+pub(crate) fn expire(yard: &Yard, key: &str, except: &str, now_ms: u64) -> Vec<Activity> {
+    let store = yard.store();
+    let Ok(rows) = store.sandboxes().sandboxes_of(SandboxKind::Kept, key) else {
+        return Vec::new();
+    };
+    let mut said = Vec::new();
+    for row in rows {
+        if row.branch == except {
+            continue;
+        }
+        let Some((unused, limit)) = store
+            .read(&row.branch)
+            .ok()
+            .and_then(|owner| lifecycle(owner.provider.as_ref()))
+            .and_then(|policy| policy.expired(&row, now_ms))
+        else {
+            continue;
+        };
+        let Ok(Some(row)) =
+            store
+                .sandboxes()
+                .take_sandbox(&row.branch, SandboxKind::Kept, &row.name)
+        else {
+            continue;
+        };
+        match destroy_kept(yard, &store, &row) {
+            Ok(()) => said.push(event(SandboxEvent::Expired {
+                provider: kind_of(key),
+                sandbox: row.name.clone(),
+                branch: row.branch.clone(),
+                unused_secs: unused,
+                max_kept_secs: limit,
+            })),
+            Err(error) => said.push(Activity::Warning(format!(
+                "could not destroy {}'s expired kept sandbox {}: {error}",
+                row.branch, row.name
+            ))),
+        }
+    }
+    said
+}
+
+/// Destroy the sandbox of a kept row taken from the store, through its
+/// branch's provider.
+fn destroy_kept(yard: &Yard, store: &Store, row: &SandboxRow) -> Result<(), String> {
+    store
+        .read(&row.branch)
+        .ok()
+        .and_then(|owner| owner.provider)
+        .ok_or_else(|| format!("{} has no provider", row.branch))
+        .and_then(|p| open(yard, &p))
+        .and_then(|provider| provider.destroy(&row.name).map_err(|e| e.to_string()))
+}
+
+/// The provider kind of a store key: `microsandbox` from `microsandbox`,
+/// `substrate` from `substrate:<endpoint>/...`.
+fn kind_of(key: &str) -> String {
+    key.split(':').next().unwrap_or(key).to_owned()
 }
 
 /// With the checkpoint of `turn` at `commit` just recorded: when the branch

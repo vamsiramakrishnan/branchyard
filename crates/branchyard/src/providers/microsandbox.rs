@@ -23,7 +23,12 @@ impl ProviderKind for SandboxOptions {
     }
 
     fn lifecycle(&self) -> Option<Lifecycle> {
-        Some(Lifecycle::of(self.keep, self.snapshots, self.max_paused))
+        Some(Lifecycle::of(
+            self.keep,
+            self.snapshots,
+            self.max_paused,
+            self.max_kept_secs,
+        ))
     }
 
     /// A yard given its own sandbox provider ([`Yard::use_sandbox_provider`])
