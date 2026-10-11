@@ -184,6 +184,8 @@ A preset is a named permission policy that stands for explicit rules. It is usab
 | `edit-worktree` | the same, and edits: `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `fileChange`, `write_file`, `replace` | commands (`Bash`, `commandExecution`, `run_shell_command`, `shell`, …) and the web (`WebFetch`, `WebSearch`, …) | deny |
 | `full` | everything, as `--yes` | nothing | allow |
 
+An ACP agent's request is matched by the tool name the agent gives (in the request, or in the call's earlier `tool_call` update), else by the call's kind under the names `acp:read`, `acp:search`, `acp:edit`, `acp:delete`, `acp:move`, `acp:execute` and `acp:fetch`, which the presets list; a request that carries only a title, such as Gemini CLI's "Writing to notes/x.md", used to match nothing and so was denied by every preset.
+
 `read-only` is the policy a [planning turn](plans-and-goals.md) runs under. A sandboxed Claude Code turn also writes the denials of its preset that Claude Code has names for into managed settings, which its own settings cannot override ([managed settings](provisioning.md#managed-settings)).
 
 A preset is also the last layer of [approvals](effects.md#approvals) for connector operations (`PolicyPreset::approvals`): `read-only` and `edit-worktree` block every reversible, compensable and irreversible operation, since they change nothing outside the machine; `full` keeps the class defaults (reversible allowed, compensable asked, irreversible staged, deletions asked). Approvals that name a tool only tighten what the preset allowed. Rules match tool names only: `edit-worktree` says a harness may edit, not where; the harness's own tools decide what path an edit touches.

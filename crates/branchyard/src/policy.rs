@@ -73,6 +73,11 @@ pub const EDIT_TOOLS: &[&str] = &[
     "fileChange",
     "write_file",
     "replace",
+    "edit",
+    // An ACP agent's call by its kind, when it names no tool.
+    "acp:edit",
+    "acp:delete",
+    "acp:move",
 ];
 
 /// Tools that run commands.
@@ -85,10 +90,18 @@ pub const SHELL_TOOLS: &[&str] = &[
     "run_shell_command",
     "shell",
     "exec_command",
+    "bash",
+    "acp:execute",
 ];
 
 /// Tools that fetch from or search the web.
-pub const WEB_TOOLS: &[&str] = &["WebFetch", "WebSearch", "web_fetch", "google_web_search"];
+pub const WEB_TOOLS: &[&str] = &[
+    "WebFetch",
+    "WebSearch",
+    "web_fetch",
+    "google_web_search",
+    "acp:fetch",
+];
 
 /// A named permission policy that stands for explicit rules: usable
 /// wherever explicit rules are (`by run --permissions`, a rig seat's
@@ -364,15 +377,30 @@ mod tests {
                 PermissionDecision::Allow
             )
         };
-        for tool in ["Read", "Grep", "read_file"] {
+        for tool in ["Read", "Grep", "read_file", "acp:read", "acp:search"] {
             assert!(decide(PolicyPreset::ReadOnly, tool), "{tool}");
             assert!(decide(PolicyPreset::EditWorktree, tool), "{tool}");
         }
-        for tool in ["Edit", "Write", "fileChange", "write_file"] {
+        for tool in [
+            "Edit",
+            "Write",
+            "fileChange",
+            "write_file",
+            "acp:edit",
+            "edit",
+        ] {
             assert!(!decide(PolicyPreset::ReadOnly, tool), "{tool}");
             assert!(decide(PolicyPreset::EditWorktree, tool), "{tool}");
         }
-        for tool in ["Bash", "commandExecution", "WebFetch", "mcp__anything"] {
+        for tool in [
+            "Bash",
+            "commandExecution",
+            "WebFetch",
+            "mcp__anything",
+            "acp:execute",
+            "acp:fetch",
+            "bash",
+        ] {
             assert!(!decide(PolicyPreset::ReadOnly, tool), "{tool}");
             assert!(!decide(PolicyPreset::EditWorktree, tool), "{tool}");
         }
