@@ -121,6 +121,7 @@ pub fn main(env: &Env, target: &Target, period: &str, as_json: bool) -> Outcome 
             "backends": gateway.as_ref().map(|g| backends_json(g)).unwrap_or_default(),
             "routes": gateway.as_ref().map(|g| routes_json(g)).unwrap_or_default(),
             "budget": gateway.as_ref().map(|g| budget_json(g, &today, &this_month)),
+            "audit": gateway.as_ref().map(|g| g.audit.to_string()),
             "period": period,
             "since_ms": since,
             "usage": totals,
@@ -163,6 +164,9 @@ pub fn main(env: &Env, target: &Target, period: &str, as_json: bool) -> Outcome 
                     out.push_str(&format!("  {line}\n"));
                 }
             }
+            out.push_str(&style.paint(render::Tone::Bold, "audit"));
+            out.push('\n');
+            out.push_str(&format!("  {}\n", audit_line(gateway.audit)));
         }
     }
     let label = match period {
@@ -177,6 +181,17 @@ pub fn main(env: &Env, target: &Target, period: &str, as_json: bool) -> Outcome 
         out.push_str(&format!("  {:<28} {}\n", model, totals_line(t)));
     }
     print(&out)
+}
+
+fn audit_line(audit: models::Audit) -> &'static str {
+    match audit {
+        models::Audit::Digests => {
+            "digests: sizes, a request digest, tools and stop reason per call"
+        }
+        models::Audit::Contents => {
+            "contents: also each call's request and response, in .branchyard/models/audit/"
+        }
+    }
 }
 
 fn route_line(route: &models::Route) -> String {
@@ -331,6 +346,7 @@ pub fn summary(events: &[RecordedEvent]) -> Option<(Value, String)> {
     let mut mode: Option<&ModelActivity> = None;
     let mut totals = models::UsageTotals::default();
     let mut refused: BTreeMap<String, u64> = BTreeMap::new();
+    let mut tool_uses = 0u64;
     for event in events {
         let Activity::Model(activity) = &event.activity else {
             continue;
@@ -342,6 +358,9 @@ pub fn summary(events: &[RecordedEvent]) -> Option<(Value, String)> {
             ModelActivity::Call(call) => match call.decision.as_str() {
                 "allowed" | "failed" if call.backend.is_some() => {
                     totals.calls += 1;
+                    if let Some(interception) = &call.interception {
+                        tool_uses += interception.tool_uses.len() as u64;
+                    }
                     if let Some(t) = &call.tokens {
                         totals.input_tokens += t.input;
                         totals.output_tokens += t.output;
@@ -383,6 +402,7 @@ pub fn summary(events: &[RecordedEvent]) -> Option<(Value, String)> {
         "cache_write_tokens": totals.cache_write_tokens,
         "cost_usd": totals.cost_usd,
         "unpriced": totals.unpriced,
+        "tool_uses": tool_uses,
         "refused": refused,
     });
     Some((value, text))

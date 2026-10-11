@@ -1969,7 +1969,7 @@ mod tests {
         write(
             r#"{"backends": {"anthropic": {"api": "anthropic", "key": "anthropic"}},
                 "routes": [{"model": "claude-*", "backends": ["anthropic"]}],
-                "budget": {"monthly_usd": 100}}"#,
+                "budget": {"monthly_usd": 100}, "audit": "contents"}"#,
             r#"{"ci": {"models": ["claude-haiku-*"], "network": ["api.github.com:443"],
                        "connectors": ["github:read"]}}"#,
         );
@@ -2003,6 +2003,7 @@ mod tests {
             ))
         );
         assert_eq!(gateway.budget.monthly_usd, Some(100.0));
+        assert_eq!(gateway.audit, branchyard::models::Audit::Contents);
         config.models = None;
         assert!(crate::models::gateway_for(&config, "app")
             .unwrap()
@@ -2022,6 +2023,7 @@ mod tests {
             ("{}", r#"{"ci": {"models": ["a b"]}}"#, "ceilings.ci"),
             ("{}", r#"{"ci": {"network": ["https://x"]}}"#, "ceilings.ci"),
             ("{}", r#"{"ci": {"budget": 1}}"#, "budget"),
+            (r#"{"audit": "all"}"#, "{}", "unknown variant `all`"),
         ] {
             write(models, ceilings);
             let error = load_file(&path).unwrap_err();

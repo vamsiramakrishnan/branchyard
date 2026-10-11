@@ -1047,6 +1047,17 @@ impl Store {
         self.dir.join("egress").join(name)
     }
 
+    /// The file turn `turn` of `name` has its model calls' contents
+    /// appended to when `[models] audit = "contents"`
+    /// (`docs/model-gateway.md`).
+    pub(crate) fn model_audit(&self, name: &str, turn: u32) -> PathBuf {
+        self.dir
+            .join("models")
+            .join("audit")
+            .join(name)
+            .join(format!("{turn}.jsonl"))
+    }
+
     /// Where the engine running `name` writes its delegation token and the
     /// address of its broker, while a turn runs.
     pub fn token_path(&self, name: &str) -> PathBuf {

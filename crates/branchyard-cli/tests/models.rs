@@ -33,7 +33,7 @@ for model in sys.argv[1:]:
 "#;
 
 /// A mock of Anthropic's Messages API: usage of 1000 input and 100 output
-/// tokens per call. The `x-api-key` of each request it has answered is
+/// tokens per call, and an answer that calls the tools Read and Edit. The `x-api-key` of each request it has answered is
 /// [`keys`].
 fn upstream() -> MockHttp {
     MockHttp::start(|request| {
@@ -41,7 +41,10 @@ fn upstream() -> MockHttp {
         Response::json(
             200,
             &json!({"type": "message", "model": model,
-                "content": [{"type": "text", "text": "hi"}],
+                "content": [{"type": "text", "text": "hi"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}},
+                    {"type": "tool_use", "id": "toolu_2", "name": "Edit", "input": {}}],
+                "stop_reason": "tool_use",
                 "usage": {"input_tokens": 1000, "output_tokens": 100}}),
         )
     })
@@ -71,6 +74,11 @@ impl std::ops::Deref for Repo {
 
 impl Repo {
     fn new(port: u16) -> Repo {
+        Repo::with(port, "")
+    }
+
+    /// With `extra` (lines of TOML) in `[models]`.
+    fn with(port: u16, extra: &str) -> Repo {
         let kit = branchyard_testkit::repo!();
         let repo = Repo {
             harness: kit.dir.join("harness.py"),
@@ -81,7 +89,7 @@ impl Repo {
         fs::write(
             repo.root.join("branchyard.toml"),
             format!(
-                "version = 1\n\n[secrets]\nanthropic = \"@{}\"\n\n[models]\nallow = [\"claude-*\"]\n\n\
+                "version = 1\n\n[secrets]\nanthropic = \"@{}\"\n\n[models]\nallow = [\"claude-*\"]\n{extra}\n\
                  [models.backends.anthropic]\napi = \"anthropic\"\nurl = \"http://127.0.0.1:{port}\"\n\
                  key = \"anthropic\"\n\n[[models.routes]]\nmodel = \"claude-*\"\n\
                  backends = [\"anthropic\"]\nrequests_per_minute = 100\n\n\
@@ -140,6 +148,8 @@ fn branches_use_the_gateway_by_configuration_and_every_surface_shows_it() {
     assert_eq!(shown["models"]["calls"], 1);
     assert_eq!(shown["models"]["input_tokens"], 1000);
     assert_eq!(shown["models"]["output_tokens"], 100);
+    // The answer called Read and Edit.
+    assert_eq!(shown["models"]["tool_uses"], 2);
     let metered = shown["models"]["cost_usd"].as_f64().unwrap();
     assert!((metered - cost).abs() < 1e-12, "{metered}");
     assert_eq!(shown["cost_usd"].as_f64(), Some(metered));
@@ -156,9 +166,16 @@ fn branches_use_the_gateway_by_configuration_and_every_surface_shows_it() {
         ),
         "{log}"
     );
+    assert!(
+        log.contains("$0.0045, tools: Read, Edit, stop: tool_use, "),
+        "{log}"
+    );
     assert!(!log.contains(KEY));
     let log = repo.text(&["log", "a", "--json"]);
     assert!(log.contains(r#""activity": "model""#), "{log}");
+    assert!(log.contains(r#""prompt_digest""#), "{log}");
+    assert!(log.contains(r#""stop_reason": "tool_use""#), "{log}");
+    assert!(!log.contains("audit_file"), "{log}");
     // A flag narrows what the configuration allows, for that branch.
     let out = repo.run(
         "b",
@@ -181,6 +198,7 @@ fn branches_use_the_gateway_by_configuration_and_every_surface_shows_it() {
         .unwrap()
         .ends_with("anthropic-key"));
     assert_eq!(models["routes"][0]["requests_per_minute"], 100);
+    assert_eq!(models["audit"], "digests");
     assert_eq!(models["usage"]["calls"], 1);
     assert_eq!(models["by_model"]["claude-sonnet-4-6"]["calls"], 1);
     assert_eq!(models["budget"]["monthly_usd"], 10.0);
@@ -194,6 +212,8 @@ fn branches_use_the_gateway_by_configuration_and_every_surface_shows_it() {
         "monthly $0.0045 of $10.00 (0%)",
         "usage this month",
         "1 call, 1.0k in / 100 out tokens, $0.0045",
+        "audit",
+        "digests: sizes, a request digest, tools and stop reason per call",
     ] {
         assert!(text.contains(line), "{line:?} not in {text}");
     }
@@ -214,4 +234,50 @@ fn branches_use_the_gateway_by_configuration_and_every_surface_shows_it() {
         stderr(&out).contains("no backend nowhere")
             || String::from_utf8_lossy(&out.stdout).contains("no backend nowhere")
     );
+}
+
+#[test]
+fn contents_are_kept_when_the_configuration_says_so_and_another_mode_is_refused_by_name() {
+    let upstream = upstream();
+    let repo = Repo::with(upstream.port(), "audit = \"contents\"\n");
+    let out = repo.run("c", &[], &["claude-sonnet-4-6"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    // The branch's events name the file, not the text.
+    let log = repo.text(&["log", "c", "--json"]);
+    assert!(
+        log.contains(r#""audit_file": ".branchyard/models/audit/c/1.jsonl""#),
+        "{log}"
+    );
+    assert!(!log.contains(r#""content""#), "{log}");
+    // The file holds the request and the response.
+    let text = fs::read_to_string(repo.root.join(".branchyard/models/audit/c/1.jsonl")).unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    assert_eq!(lines[0]["model"], "claude-sonnet-4-6");
+    assert_eq!(lines[0]["backend"], "anthropic");
+    assert_eq!(lines[0]["request"]["messages"][0]["content"], "hi");
+    assert_eq!(lines[0]["response"]["content"][1]["name"], "Read");
+    assert!(!text.contains(KEY));
+    let models = repo.json(&["models", "--json"]);
+    assert_eq!(models["audit"], "contents");
+    let text = repo.text(&["models"]);
+    assert!(
+        text.contains("contents: also each call's request and response"),
+        "{text}"
+    );
+    // Any other value is refused, naming it and the two there are.
+    fs::write(
+        repo.root.join("branchyard.toml"),
+        "version = 1\n\n[models]\naudit = \"full\"\n",
+    )
+    .unwrap();
+    let out = repo.by(&["config", "validate"]);
+    assert!(!out.status.success());
+    let said = format!("{}{}", stderr(&out), String::from_utf8_lossy(&out.stdout));
+    for needle in ["`full`", "`digests`", "`contents`"] {
+        assert!(said.contains(needle), "{needle} not in {said}");
+    }
 }

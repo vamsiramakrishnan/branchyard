@@ -23771,6 +23771,61 @@
           ],
           "description": "A call's tokens."
         },
+        "Interception": {
+          "type": "object",
+          "properties": {
+            "request_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Bytes of the request body the harness sent."
+            },
+            "response_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Bytes of the response body the backend sent, in the backend's own\nshape (a translated call's, before it is turned back)."
+            },
+            "prompt_digest": {
+              "type": "string",
+              "description": "The BLAKE3 hash, in lowercase hex, of the request body exactly as\nthe harness sent it: the bytes after the HTTP framing (a chunked\ncoding) is removed and before the gateway changes anything (it adds\n`stream_options.include_usage` to an OpenAI chat stream, or\ntranslates the body). The same request always has the same digest;\na request with no body has the hash of the empty input."
+            },
+            "messages": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Items in the request's `messages` (Anthropic and OpenAI chat) or\n`input` (OpenAI responses; a string counts as one)."
+            },
+            "tools_offered": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Names of the tools in the request's `tools`, in order."
+            },
+            "tool_uses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Names of the tools or functions the response called, in order, once\nper call."
+            },
+            "stop_reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why the response stopped, in the provider's own word: Anthropic's\n`stop_reason`, OpenAI's `finish_reason` (chat) or `status`\n(responses)."
+            }
+          },
+          "required": [
+            "request_bytes",
+            "response_bytes",
+            "prompt_digest",
+            "messages"
+          ],
+          "description": "The record of one call that reached a backend, for an audit: who asked\nis the call's branch and turn, and this is what it asked and what came\nback, without the text of either. See `docs/model-gateway.md`\n(\"Interception records\")."
+        },
         "ModelCall": {
           "type": "object",
           "properties": {
@@ -23845,6 +23900,24 @@
                 "type": "string"
               },
               "description": "Backends tried before the one that answered, with what each did."
+            },
+            "interception": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Interception"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What the call asked and what came back, as counts and digests, for\na call forwarded to a backend; `None` for one the gateway refused."
+            },
+            "audit_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "With `[models] audit = \"contents\"`, the file holding this call's\nrequest and response, relative to the repository root."
             }
           },
           "required": [
@@ -28624,6 +28697,61 @@
           ],
           "description": "A call's tokens."
         },
+        "Interception": {
+          "type": "object",
+          "properties": {
+            "request_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Bytes of the request body the harness sent."
+            },
+            "response_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Bytes of the response body the backend sent, in the backend's own\nshape (a translated call's, before it is turned back)."
+            },
+            "prompt_digest": {
+              "type": "string",
+              "description": "The BLAKE3 hash, in lowercase hex, of the request body exactly as\nthe harness sent it: the bytes after the HTTP framing (a chunked\ncoding) is removed and before the gateway changes anything (it adds\n`stream_options.include_usage` to an OpenAI chat stream, or\ntranslates the body). The same request always has the same digest;\na request with no body has the hash of the empty input."
+            },
+            "messages": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Items in the request's `messages` (Anthropic and OpenAI chat) or\n`input` (OpenAI responses; a string counts as one)."
+            },
+            "tools_offered": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Names of the tools in the request's `tools`, in order."
+            },
+            "tool_uses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Names of the tools or functions the response called, in order, once\nper call."
+            },
+            "stop_reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why the response stopped, in the provider's own word: Anthropic's\n`stop_reason`, OpenAI's `finish_reason` (chat) or `status`\n(responses)."
+            }
+          },
+          "required": [
+            "request_bytes",
+            "response_bytes",
+            "prompt_digest",
+            "messages"
+          ],
+          "description": "The record of one call that reached a backend, for an audit: who asked\nis the call's branch and turn, and this is what it asked and what came\nback, without the text of either. See `docs/model-gateway.md`\n(\"Interception records\")."
+        },
         "ModelCall": {
           "type": "object",
           "properties": {
@@ -28698,6 +28826,24 @@
                 "type": "string"
               },
               "description": "Backends tried before the one that answered, with what each did."
+            },
+            "interception": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Interception"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What the call asked and what came back, as counts and digests, for\na call forwarded to a backend; `None` for one the gateway refused."
+            },
+            "audit_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "With `[models] audit = \"contents\"`, the file holding this call's\nrequest and response, relative to the repository root."
             }
           },
           "required": [
@@ -37280,6 +37426,61 @@
           ],
           "description": "A call's tokens."
         },
+        "Interception": {
+          "type": "object",
+          "properties": {
+            "request_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Bytes of the request body the harness sent."
+            },
+            "response_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Bytes of the response body the backend sent, in the backend's own\nshape (a translated call's, before it is turned back)."
+            },
+            "prompt_digest": {
+              "type": "string",
+              "description": "The BLAKE3 hash, in lowercase hex, of the request body exactly as\nthe harness sent it: the bytes after the HTTP framing (a chunked\ncoding) is removed and before the gateway changes anything (it adds\n`stream_options.include_usage` to an OpenAI chat stream, or\ntranslates the body). The same request always has the same digest;\na request with no body has the hash of the empty input."
+            },
+            "messages": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Items in the request's `messages` (Anthropic and OpenAI chat) or\n`input` (OpenAI responses; a string counts as one)."
+            },
+            "tools_offered": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Names of the tools in the request's `tools`, in order."
+            },
+            "tool_uses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Names of the tools or functions the response called, in order, once\nper call."
+            },
+            "stop_reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why the response stopped, in the provider's own word: Anthropic's\n`stop_reason`, OpenAI's `finish_reason` (chat) or `status`\n(responses)."
+            }
+          },
+          "required": [
+            "request_bytes",
+            "response_bytes",
+            "prompt_digest",
+            "messages"
+          ],
+          "description": "The record of one call that reached a backend, for an audit: who asked\nis the call's branch and turn, and this is what it asked and what came\nback, without the text of either. See `docs/model-gateway.md`\n(\"Interception records\")."
+        },
         "ModelCall": {
           "type": "object",
           "properties": {
@@ -37354,6 +37555,24 @@
                 "type": "string"
               },
               "description": "Backends tried before the one that answered, with what each did."
+            },
+            "interception": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Interception"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What the call asked and what came back, as counts and digests, for\na call forwarded to a backend; `None` for one the gateway refused."
+            },
+            "audit_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "With `[models] audit = \"contents\"`, the file holding this call's\nrequest and response, relative to the repository root."
             }
           },
           "required": [

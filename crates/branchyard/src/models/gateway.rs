@@ -27,8 +27,11 @@ use serde_json::{json, Value};
 
 use super::translate;
 use super::upstream::{self, Failure, Target};
-use super::usage::Meter;
-use super::{Api, Backend, Gateway, ModelActivity, ModelCall, UsageRecord};
+use super::usage::{Asked, Collector, Meter, Observed};
+use super::{
+    audit, Api, Audit, Backend, Gateway, Interception, ModelActivity, ModelCall, Tokens,
+    UsageRecord,
+};
 use crate::connectors::keys;
 use crate::{Activity, RecordedEvent, Yard};
 use branchyard_support::time::now_ms;
@@ -467,6 +470,8 @@ fn handle(stream: TcpStream, state: &TurnState) {
         latency_ms: 0,
         streamed: false,
         failed_over: Vec::new(),
+        interception: None,
+        audit_file: None,
     };
     let mut json: Option<Value> = match request.body.is_empty() {
         true => None,
@@ -592,6 +597,8 @@ fn handle(stream: TcpStream, state: &TurnState) {
             return;
         }
     }
+    // The request as the harness sent it, before the gateway changes it.
+    let asked = Asked::new(&request.body, json.as_ref());
     let mut body = request.body.clone();
     if let Some(value) = json.as_mut() {
         if with_stream_usage(api, &path, value) {
@@ -726,8 +733,20 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 call.backend = Some(backend);
                 call.translated = as_model.clone();
                 let status = response.status;
+                // What the backend sent, before it is put in the harness's
+                // API.
+                let sse = is_sse(&response);
+                let mut collector = Collector::new(sse);
+                collector.feed(&kept);
+                call.interception = Some(Box::new(Interception::new(asked, collector.finish())));
+                let note = match gateway.audit {
+                    Audit::Contents => {
+                        keep_contents(state, &mut call, &request.body, &kept, sse, false)
+                    }
+                    Audit::Digests => None,
+                };
                 let why = (!call.failed_over.is_empty()).then(|| call.failed_over.join("; "));
-                done(&mut call, "failed", status, why);
+                done(&mut call, "failed", status, with_note(why, note));
                 let kept = match as_model {
                     Some(_) => translate::error_to_anthropic(status, &kept)
                         .to_string()
@@ -757,14 +776,12 @@ fn handle(stream: TcpStream, state: &TurnState) {
     call.backend = Some(backend.clone());
     call.translated = as_model.clone();
     call.status = response.status;
-    let sse = response
-        .header("content-type")
-        .is_some_and(|t| t.to_ascii_lowercase().starts_with("text/event-stream"));
+    let sse = is_sse(&response);
     call.streamed = sse;
-    // Usage is read in the backend's shape: the harness's own, unless the
-    // request was translated.
+    // Usage and tool calls are read in the backend's shape: the harness's
+    // own, unless the request was translated.
     let backend_api = gateway.backend(&backend).map_or(api, |b| b.api);
-    let mut meter = Meter::new(backend_api, sse);
+    let mut reading = Reading::new(backend_api, sse, matches!(gateway.audit, Audit::Contents));
     let no_body = request.method == "HEAD" || matches!(response.status, 204 | 304);
     let mut response = response;
     let mut buf = vec![0u8; 16 * 1024];
@@ -778,7 +795,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
                     match response.body.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
-                            meter.feed(&buf[..n]);
+                            reading.feed(&buf[..n]);
                             if !client_gone && wire::write_chunk(&mut out, &buf[..n]).is_err() {
                                 // The harness went away: stop, which ends the
                                 // backend's generation too.
@@ -803,7 +820,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 match response.body.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        meter.feed(&buf[..n]);
+                        reading.feed(&buf[..n]);
                         let events = translator.feed(&buf[..n]);
                         if !client_gone
                             && !events.is_empty()
@@ -841,7 +858,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 }
                 Ok(_) => {}
             }
-            meter.feed(&whole);
+            reading.feed(&whole);
             let translated = match (&broken, response_ok(response.status)) {
                 (Some(_), _) => None,
                 (None, false) => {
@@ -901,11 +918,19 @@ fn handle(stream: TcpStream, state: &TurnState) {
     // The call is metered, stored and recorded before the harness sees its
     // response end, so the next call it makes is held to what this one
     // cost. A translated call is priced by the model the backend served.
-    let (tokens, answered_model) = meter.finish();
+    let read = reading.finish();
+    let (tokens, answered_model) = (read.tokens, read.model);
     if call.model.is_empty() {
         call.model = answered_model.unwrap_or_default();
     }
     call.tokens = tokens;
+    call.interception = Some(Box::new(Interception::new(asked, read.observed)));
+    // With `audit = "contents"`, the request and the response, to a file of
+    // the turn's; never to the event log.
+    let note = match &read.kept {
+        Some(kept) => keep_contents(state, &mut call, &request.body, kept, sse, read.truncated),
+        None => None,
+    };
     let priced = as_model.clone().unwrap_or_else(|| call.model.clone());
     call.cost_usd = tokens.and_then(|t| gateway.cost(backend_api, &priced, &t));
     let reason = match (client_gone, broken.clone()) {
@@ -916,6 +941,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
         }
         _ => None,
     };
+    let reason = with_note(reason, note);
     let status = call.status;
     let decision = if response_ok(status) {
         "allowed"
@@ -955,6 +981,114 @@ fn handle(stream: TcpStream, state: &TurnState) {
 
 fn response_ok(status: u16) -> bool {
     (200..400).contains(&status)
+}
+
+fn is_sse(response: &upstream::Response) -> bool {
+    response
+        .header("content-type")
+        .is_some_and(|t| t.to_ascii_lowercase().starts_with("text/event-stream"))
+}
+
+/// Reads a backend's response as its bytes pass: its usage, what it did
+/// (the tools it called, why it stopped, how long it was), and, when the
+/// call's contents are kept, the bytes themselves.
+struct Reading {
+    meter: Meter,
+    collector: Collector,
+    kept: Option<Vec<u8>>,
+    truncated: bool,
+}
+
+/// What a response came to.
+struct Finished {
+    tokens: Option<Tokens>,
+    /// The model the provider says answered.
+    model: Option<String>,
+    observed: Observed,
+    /// The response body, when contents are kept.
+    kept: Option<Vec<u8>>,
+    /// The kept body is cut at [`audit::MAX_RESPONSE`].
+    truncated: bool,
+}
+
+impl Reading {
+    /// Reads a response of `api`'s shape; keeps its bytes when `keep`.
+    fn new(api: Api, sse: bool, keep: bool) -> Reading {
+        Reading {
+            meter: Meter::new(api, sse),
+            collector: Collector::new(sse),
+            kept: keep.then(Vec::new),
+            truncated: false,
+        }
+    }
+
+    /// Bytes of the response body, in order.
+    fn feed(&mut self, bytes: &[u8]) {
+        self.meter.feed(bytes);
+        self.collector.feed(bytes);
+        if let Some(kept) = self.kept.as_mut() {
+            // Cut at a chunk, and keep nothing after the cut.
+            if self.truncated || kept.len() + bytes.len() > audit::MAX_RESPONSE {
+                self.truncated = true;
+            } else {
+                kept.extend_from_slice(bytes);
+            }
+        }
+    }
+
+    fn finish(self) -> Finished {
+        let (tokens, model) = self.meter.finish();
+        Finished {
+            tokens,
+            model,
+            observed: self.collector.finish(),
+            kept: self.kept,
+            truncated: self.truncated,
+        }
+    }
+}
+
+/// Append the call's request and response to the turn's audit file
+/// (`[models] audit = "contents"`) and name the file on the call. `Some`
+/// says why it could not be written, for the call's reason.
+fn keep_contents(
+    state: &TurnState,
+    call: &mut ModelCall,
+    request: &[u8],
+    response: &[u8],
+    sse: bool,
+    truncated: bool,
+) -> Option<String> {
+    let path = state.yard.store().model_audit(&state.branch, state.turn);
+    let line = audit::Entry {
+        at_ms: now_ms(),
+        model: &call.model,
+        backend: call.backend.as_deref().unwrap_or(""),
+        request,
+        response,
+        sse,
+        truncated,
+    }
+    .line();
+    match audit::append(&path, &line) {
+        Ok(()) => {
+            let shown = path.strip_prefix(state.yard.root()).unwrap_or(&path);
+            call.audit_file = Some(shown.to_string_lossy().into_owned());
+            None
+        }
+        Err(e) => Some(format!(
+            "the call's contents were not written to {}: {e}",
+            path.display()
+        )),
+    }
+}
+
+/// `reason`, with `note` added to it.
+fn with_note(reason: Option<String>, note: Option<String>) -> Option<String> {
+    match (reason, note) {
+        (Some(reason), Some(note)) => Some(format!("{reason}; {note}")),
+        (reason, note) => reason.or(note),
+    }
 }
 
 fn write_head(out: &mut TcpStream, response: &upstream::Response, no_body: bool) -> io::Result<()> {
@@ -1270,6 +1404,34 @@ mod tests {
         assert!(request.is_none());
         assert!(answer.starts_with("HTTP/1.1 400 "), "{answer:?}");
         assert!(answer.contains("Transfer-Encoding"), "{answer:?}");
+    }
+
+    #[test]
+    fn a_response_is_kept_for_the_audit_only_when_asked_and_cut_once_at_a_chunk() {
+        let body = br#"{"content":[{"type":"tool_use","name":"Read"}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":2}}"#;
+        let mut plain = Reading::new(Api::Anthropic, false, false);
+        plain.feed(body);
+        let done = plain.finish();
+        assert_eq!(done.kept, None);
+        assert_eq!(done.observed.tool_uses, ["Read"]);
+        assert_eq!(done.tokens.map(|t| t.output), Some(2));
+        let mut keeping = Reading::new(Api::Anthropic, false, true);
+        keeping.feed(&body[..10]);
+        keeping.feed(&body[10..]);
+        let done = keeping.finish();
+        assert_eq!(done.kept.as_deref(), Some(&body[..]));
+        assert!(!done.truncated);
+        // A chunk that would pass the limit is dropped, and so is every
+        // chunk after it, however small: the kept bytes are a prefix.
+        let mut long = Reading::new(Api::Anthropic, true, true);
+        let first = vec![b':'; audit::MAX_RESPONSE / 2 + 1];
+        long.feed(&first);
+        long.feed(&first);
+        long.feed(b": small\n");
+        let done = long.finish();
+        assert!(done.truncated);
+        assert_eq!(done.kept.map(|k| k.len()), Some(first.len()));
+        assert_eq!(done.observed.bytes, 2 * first.len() as u64 + 8);
     }
 
     #[test]

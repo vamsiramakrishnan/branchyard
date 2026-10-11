@@ -879,6 +879,32 @@ pub struct ModelsConfig {
     /// Seeds the weighted choice of backends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+    /// What is kept of each call besides its interception record (sizes, a
+    /// digest of the request, tools offered and called, why it stopped):
+    /// `digests` (the default) keeps no text; `contents` also writes each
+    /// call's request and response to `.branchyard/models/audit/`.
+    #[serde(default, skip_serializing_if = "ModelAudit::is_default")]
+    pub audit: ModelAudit,
+}
+
+/// `[models] audit`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelAudit {
+    /// Sizes, a digest of the request, the tools offered and called, and
+    /// why the response stopped, per call. No prompt or answer text.
+    #[default]
+    Digests,
+    /// Also each call's request and response, one JSON line per call in
+    /// `.branchyard/models/audit/<branch>/<turn>.jsonl` (the directory
+    /// 0700, the file 0600), never in the event log.
+    Contents,
+}
+
+impl ModelAudit {
+    fn is_default(&self) -> bool {
+        *self == ModelAudit::default()
+    }
 }
 
 /// `[models.backends.NAME]`.
@@ -2844,6 +2870,33 @@ classes = { compensable = "allow" }
             let error = parse(text).unwrap_err().to_string();
             assert!(error.contains(needle), "{text}: {error}");
         }
+    }
+
+    #[test]
+    fn the_audit_mode_defaults_to_digests_renders_back_and_refuses_other_values() {
+        let plain = parse("version = 1\n").unwrap();
+        assert_eq!(plain.models.audit, ModelAudit::Digests);
+        // Saying the default is the same as leaving it out.
+        let digests = parse("version = 1\n\n[models]\naudit = \"digests\"\n").unwrap();
+        assert_eq!(digests.models, plain.models);
+        assert!(!render(&digests, "test").contains("audit"));
+        let config = parse("version = 1\n\n[models]\naudit = \"contents\"\n").unwrap();
+        assert_eq!(config.models.audit, ModelAudit::Contents);
+        assert!(!config.models.is_empty());
+        let rendered = render(&config, "test");
+        assert!(rendered.contains("audit = \"contents\""), "{rendered}");
+        assert_eq!(parse(&rendered).unwrap(), config);
+        // A value other than the two is refused, naming it and them.
+        for bad in ["full", "Contents", "none", ""] {
+            let error = parse(&format!("[models]\naudit = \"{bad}\"\n"))
+                .unwrap_err()
+                .to_string();
+            for needle in [format!("`{bad}`"), "`digests`".into(), "`contents`".into()] {
+                assert!(error.contains(&needle), "{bad:?}: {error}");
+            }
+        }
+        let error = parse("[models]\naudit = true\n").unwrap_err().to_string();
+        assert!(error.contains("wanted string"), "{error}");
     }
 
     #[test]

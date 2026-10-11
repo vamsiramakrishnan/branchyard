@@ -676,6 +676,10 @@
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "audit": {
+          "description": "What is kept of each call besides its interception record (sizes, a\ndigest of the request, tools offered and called, why it stopped):\n`digests` (the default) keeps no text; `contents` also writes each\ncall's request and response to `.branchyard/models/audit/`.",
+          "$ref": "#/$defs/ModelAudit"
         }
       },
       "additionalProperties": false
@@ -839,6 +843,21 @@
       "required": [
         "input",
         "output"
+      ]
+    },
+    "ModelAudit": {
+      "description": "`[models] audit`.",
+      "oneOf": [
+        {
+          "description": "Sizes, a digest of the request, the tools offered and called, and\nwhy the response stopped, per call. No prompt or answer text.",
+          "type": "string",
+          "const": "digests"
+        },
+        {
+          "description": "Also each call's request and response, one JSON line per call in\n`.branchyard/models/audit/<branch>/<turn>.jsonl` (the directory\n0700, the file 0600), never in the event log.",
+          "type": "string",
+          "const": "contents"
+        }
       ]
     },
     "FileCeiling": {

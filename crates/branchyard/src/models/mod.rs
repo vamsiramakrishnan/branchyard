@@ -30,6 +30,7 @@
 //! speaks an API no backend serves, runs **direct**, its provider's hosts
 //! added to its egress policy, and says so ([`ModelActivity::Direct`]).
 
+mod audit;
 pub(crate) mod gateway;
 pub mod pricing;
 mod translate;
@@ -168,6 +169,41 @@ pub struct Config {
     /// Seeds the weighted choice of backends, for a reproducible order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+    /// What is kept of each call beyond its [`Interception`] (default
+    /// `digests`); `contents` also writes each call's request and response
+    /// to a file under `.branchyard/models/audit/`.
+    #[serde(default, skip_serializing_if = "Audit::is_default")]
+    pub audit: Audit,
+}
+
+/// What the gateway keeps of the contents of calls (`[models] audit`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Audit {
+    /// Per call, an [`Interception`]: sizes, a digest of the request, the
+    /// tools offered and called, why it stopped. No prompt or answer text
+    /// is kept.
+    #[default]
+    Digests,
+    /// Also each call's request and response, one JSON line in
+    /// `.branchyard/models/audit/<branch>/<turn>.jsonl`, never in the event
+    /// log.
+    Contents,
+}
+
+impl Audit {
+    fn is_default(&self) -> bool {
+        *self == Audit::default()
+    }
+}
+
+impl fmt::Display for Audit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Audit::Digests => "digests",
+            Audit::Contents => "contents",
+        })
+    }
 }
 
 /// One backend.
@@ -329,6 +365,8 @@ pub struct Gateway {
     /// Prefixed to the branch in usage records and tokens, as the
     /// connector gateway's `by_branch` is, on a server.
     pub branch_scope: Option<String>,
+    /// Whether calls' contents are written to files too.
+    pub audit: Audit,
     state: Mutex<Shared>,
 }
 
@@ -459,6 +497,7 @@ impl Gateway {
             sandbox_host: config.sandbox_host.clone(),
             signer,
             branch_scope: None,
+            audit: config.audit,
             state: Mutex::new(Shared {
                 windows: HashMap::new(),
                 rng: branchyard_support::rng::SplitMix64::new(seed),
@@ -761,11 +800,71 @@ pub struct ModelCall {
     /// Backends tried before the one that answered, with what each did.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_over: Vec<String>,
+    /// What the call asked and what came back, as counts and digests, for
+    /// a call forwarded to a backend; `None` for one the gateway refused.
+    // Boxed so that `ModelActivity::Call` stays within Clippy's
+    // `large_enum_variant` of the other variants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interception: Option<Box<Interception>>,
+    /// With `[models] audit = "contents"`, the file holding this call's
+    /// request and response, relative to the repository root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_file: Option<String>,
+}
+
+/// The record of one call that reached a backend, for an audit: who asked
+/// is the call's branch and turn, and this is what it asked and what came
+/// back, without the text of either. See `docs/model-gateway.md`
+/// ("Interception records").
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Interception {
+    /// Bytes of the request body the harness sent.
+    pub request_bytes: u64,
+    /// Bytes of the response body the backend sent, in the backend's own
+    /// shape (a translated call's, before it is turned back).
+    pub response_bytes: u64,
+    /// The BLAKE3 hash, in lowercase hex, of the request body exactly as
+    /// the harness sent it: the bytes after the HTTP framing (a chunked
+    /// coding) is removed and before the gateway changes anything (it adds
+    /// `stream_options.include_usage` to an OpenAI chat stream, or
+    /// translates the body). The same request always has the same digest;
+    /// a request with no body has the hash of the empty input.
+    pub prompt_digest: String,
+    /// Items in the request's `messages` (Anthropic and OpenAI chat) or
+    /// `input` (OpenAI responses; a string counts as one).
+    pub messages: u32,
+    /// Names of the tools in the request's `tools`, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools_offered: Vec<String>,
+    /// Names of the tools or functions the response called, in order, once
+    /// per call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_uses: Vec<String>,
+    /// Why the response stopped, in the provider's own word: Anthropic's
+    /// `stop_reason`, OpenAI's `finish_reason` (chat) or `status`
+    /// (responses).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+}
+
+impl Interception {
+    pub(crate) fn new(asked: usage::Asked, seen: usage::Observed) -> Interception {
+        Interception {
+            request_bytes: asked.bytes,
+            response_bytes: seen.bytes,
+            prompt_digest: asked.digest,
+            messages: asked.messages,
+            tools_offered: asked.tools_offered,
+            tool_uses: seen.tool_uses,
+            stop_reason: seen.stop_reason,
+        }
+    }
 }
 
 impl ModelCall {
     /// `claude-sonnet-4-6 allowed via anthropic (200, 1200 in / 80 out,
-    /// $0.0048, 812 ms)`.
+    /// $0.0048, tools: Read, Edit, stop: tool_use, 812 ms)`.
     pub fn describe(&self) -> String {
         let model = match self.model.is_empty() {
             true => "(no model)",
@@ -791,6 +890,21 @@ impl ModelCall {
         }
         if let Some(cost) = self.cost_usd {
             detail.push(format!("${cost:.4}"));
+        }
+        if let Some(interception) = &self.interception {
+            // Each tool once, in the order first called.
+            let mut used: Vec<&str> = Vec::new();
+            for tool in &interception.tool_uses {
+                if !used.contains(&tool.as_str()) {
+                    used.push(tool);
+                }
+            }
+            if !used.is_empty() {
+                detail.push(format!("tools: {}", used.join(", ")));
+            }
+            if let Some(stop) = &interception.stop_reason {
+                detail.push(format!("stop: {stop}"));
+            }
         }
         detail.push(format!("{} ms", self.latency_ms));
         out.push_str(&format!(" ({})", detail.join(", ")));
@@ -1374,11 +1488,136 @@ mod tests {
             latency_ms: 12,
             streamed: false,
             failed_over: Vec::new(),
+            interception: None,
+            audit_file: None,
         };
         assert_eq!(
             call.describe(),
             "claude-sonnet-4-6 allowed via o as gpt-5 (200, 12 ms)"
         );
+    }
+
+    fn answered() -> ModelCall {
+        ModelCall {
+            model: "claude-sonnet-4-6".into(),
+            api: Api::Anthropic,
+            decision: "allowed".into(),
+            backend: Some("anthropic".into()),
+            reason: None,
+            status: 200,
+            translated: None,
+            tokens: Some(Tokens {
+                input: 1000,
+                output: 80,
+                ..Tokens::default()
+            }),
+            cost_usd: Some(0.0048),
+            latency_ms: 812,
+            streamed: false,
+            failed_over: Vec::new(),
+            interception: Some(Box::new(Interception {
+                request_bytes: 321,
+                response_bytes: 654,
+                prompt_digest: "0".repeat(64),
+                messages: 3,
+                tools_offered: vec!["Read".into(), "Edit".into(), "Bash".into()],
+                tool_uses: vec!["Read".into(), "Edit".into(), "Read".into()],
+                stop_reason: Some("tool_use".into()),
+            })),
+            audit_file: None,
+        }
+    }
+
+    #[test]
+    fn a_call_describes_the_tools_it_used_and_why_it_stopped() {
+        let mut call = answered();
+        assert_eq!(
+            call.describe(),
+            "claude-sonnet-4-6 allowed via anthropic \
+             (200, 1000 in / 80 out, $0.0048, tools: Read, Edit, stop: tool_use, 812 ms)"
+        );
+        // Nothing used and no reason: the line is what it was without an
+        // interception.
+        if let Some(interception) = call.interception.as_mut() {
+            interception.tool_uses.clear();
+            interception.stop_reason = None;
+        }
+        let plain = ModelCall {
+            interception: None,
+            ..call.clone()
+        };
+        assert_eq!(call.describe(), plain.describe());
+        assert_eq!(
+            plain.describe(),
+            "claude-sonnet-4-6 allowed via anthropic (200, 1000 in / 80 out, $0.0048, 812 ms)"
+        );
+    }
+
+    #[test]
+    fn an_interception_round_trips_and_an_old_event_still_reads() {
+        let call = answered();
+        let text = serde_json::to_string(&call).unwrap();
+        assert_eq!(serde_json::from_str::<ModelCall>(&text).unwrap(), call);
+        // Absent fields are not written, and an event recorded before
+        // interceptions existed reads with none.
+        let mut value = serde_json::to_value(&call).unwrap();
+        assert_eq!(value.get("audit_file"), None);
+        value.as_object_mut().unwrap().remove("interception");
+        let old: ModelCall = serde_json::from_value(value).unwrap();
+        assert_eq!(old.interception, None);
+        let bare = ModelCall {
+            interception: Some(Box::new(Interception {
+                tools_offered: Vec::new(),
+                tool_uses: Vec::new(),
+                stop_reason: None,
+                ..*call.interception.clone().unwrap()
+            })),
+            ..call
+        };
+        let value = serde_json::to_value(&bare).unwrap();
+        let written = value["interception"].as_object().unwrap();
+        let mut keys: Vec<&str> = written.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "messages",
+                "prompt_digest",
+                "request_bytes",
+                "response_bytes"
+            ]
+        );
+    }
+
+    #[test]
+    fn audit_defaults_to_digests_and_refuses_other_values_by_name() {
+        let config: Config = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(config.audit, Audit::Digests);
+        // The default is not written back.
+        assert_eq!(
+            serde_json::to_value(&config).unwrap(),
+            serde_json::json!({})
+        );
+        let config: Config =
+            serde_json::from_value(serde_json::json!({"audit": "contents"})).unwrap();
+        assert_eq!(config.audit, Audit::Contents);
+        assert_eq!(
+            serde_json::to_value(&config).unwrap(),
+            serde_json::json!({"audit": "contents"})
+        );
+        let gateway = Gateway::new(&config, signer(), |n| KeySource::Env(n.into())).unwrap();
+        assert_eq!(gateway.audit, Audit::Contents);
+        for bad in ["full", "Contents", ""] {
+            let error = serde_json::from_value::<Config>(serde_json::json!({"audit": bad}))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("`{bad}`"))
+                    && error.contains("`digests`")
+                    && error.contains("`contents`"),
+                "{bad:?}: {error}"
+            );
+        }
     }
 
     #[test]
