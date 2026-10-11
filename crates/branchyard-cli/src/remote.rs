@@ -849,6 +849,7 @@ pub fn spawn(
     parent: &str,
     prompt: &str,
     args: &SpawnArgs,
+    contract: Option<branchyard::ResultContract>,
 ) -> Result<Inspection, branchyard::Error> {
     let task = &args.task;
     let (policy, notice) = permissions(task)?;
@@ -874,6 +875,7 @@ pub fn spawn(
         harnesses: args.harnesses.clone(),
         plan: args.plan,
         model: args.model.clone(),
+        result: contract,
     };
     let op = remote
         .repo

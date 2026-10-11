@@ -8,8 +8,8 @@ mod common;
 use std::time::Duration;
 
 use branchyard::{
-    BranchStatus, CheckVerdict, Envelope, Provider, RecipeOptions, ReportedState, SubstrateOptions,
-    TaskOptions, Yard,
+    BranchStatus, CheckVerdict, Envelope, Provider, RecipeOptions, ReportedState, ResultContract,
+    SubstrateOptions, TaskOptions, Yard,
 };
 use branchyard_client::api::{
     BudgetSpec, ForkRequest, OperationKind, OperationState, PolicySpec, SendRequest, SpawnRequest,
@@ -18,7 +18,7 @@ use branchyard_client::api::{
 use branchyard_client::{new_key, Client};
 use branchyard_testkit::wait;
 use common::{await_operation, get, post, raw, run, task, Fixture, Server, TOKEN};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 fn json(body: &str) -> Value {
     serde_json::from_str(body).unwrap_or_else(|e| panic!("{e}: {body:?}"))
@@ -846,4 +846,102 @@ fn a_branchs_check_runs_over_http_as_an_operation() {
     );
     assert_eq!(status, 400, "{body}");
     assert_eq!(json(&body)["error"]["code"], "invalid_request");
+}
+
+/// A result contract goes through the server like the rest of delegation:
+/// `POST …/spawn` carries it (and refuses a schema outside the subset at
+/// once), `POST …/report` carries the result and is checked against it, and
+/// the child's inspection reads it back.
+#[test]
+fn a_result_contract_is_set_at_spawn_and_reported_against_through_the_server() {
+    let f = Fixture::new();
+    let mut config = f.config();
+    config.by_path = Some("/bin/true".into());
+    config.allow_delegation = true;
+    let server = Server::start(config);
+    let client = server.client();
+    let repo = client.repo("app");
+    let root = run(
+        &client,
+        &TaskRequest {
+            delegation: Some(Envelope::depth(2)),
+            ..task("say hi", "root")
+        },
+    );
+    assert_eq!(root.state, OperationState::Succeeded, "{root:?}");
+    let spawn = |name: &str, result: ResultContract| SpawnRequest {
+        prompt: "say hi".into(),
+        name: Some(name.into()),
+        policy: PolicySpec::allow_all(),
+        result: Some(result),
+        ..SpawnRequest::default()
+    };
+
+    // A schema outside the subset is refused when it is asked for.
+    let outside = ResultContract {
+        schema: json!({"type": "string", "pattern": "^a"}),
+        required: false,
+    };
+    let error = repo
+        .spawn("root", &spawn("bad", outside), &new_key())
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("result.schema uses `pattern`, which the contract does not support"),
+        "{error}"
+    );
+    assert!(repo.branch("bad").is_err(), "no child was made");
+
+    let wanted = ResultContract::new(
+        json!({"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}}),
+        true,
+    )
+    .unwrap();
+    let op = repo
+        .spawn("root", &spawn("kid", wanted.clone()), &new_key())
+        .unwrap();
+    let op = await_operation(&client, &op.id);
+    assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
+    let inspection = op.result.unwrap().inspection.unwrap();
+    assert_eq!(inspection.result_contract, Some(wanted.clone()));
+    assert_eq!(inspection.result, None);
+
+    // The child ended its turn without the result it owes: noted to root.
+    wait::until("the missing result to be noted in root's log", || {
+        repo.events("root", 0).unwrap().events.iter().any(|e| {
+            matches!(&e.activity, branchyard::Activity::Warning(w)
+                if w.starts_with("kid ended its turn without the result its contract requires"))
+        })
+    });
+
+    // A result is checked against the contract; a report without one is refused.
+    let refused = |result: Option<Value>| match repo.report_result("kid", "done", result) {
+        Err(error) => (error.code().map(str::to_owned), error.to_string()),
+        Ok(message) => panic!("accepted: {message:?}"),
+    };
+    let (code, why) = refused(Some(json!({"ok": "yes"})));
+    assert_eq!(code.as_deref(), Some("denied"));
+    assert!(
+        why.contains("result.ok: expected boolean, got string"),
+        "{why}"
+    );
+    let (_, why) = refused(None);
+    assert!(why.contains("requires a result"), "{why}");
+    assert!(repo.inbox("root").unwrap().messages.is_empty());
+
+    let good = json!({"ok": true});
+    let message = repo
+        .report_result("kid", "done", Some(good.clone()))
+        .unwrap();
+    assert_eq!(message.kind, branchyard::MessageKind::Report);
+    assert_eq!(repo.inspect("kid").unwrap().result, Some(good));
+    // The same value the SDK gives in the server's repository.
+    let yard = Yard::open(&f.root).unwrap();
+    let local = yard
+        .branch("root")
+        .unwrap()
+        .delegate(TaskOptions::default())
+        .unwrap();
+    assert_eq!(repo.inspect("kid").unwrap(), local.inspect("kid").unwrap());
 }

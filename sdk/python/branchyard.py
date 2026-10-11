@@ -323,6 +323,13 @@ class Inspection:
     # comes from the protocol; None until the branch reports one. See
     # docs/delegation.md "Self-reported status".
     reported: Optional[Dict[str, Any]] = None
+    # What its parent asked of the answer it reports, as the spawn gave it:
+    # {"schema": {...}, "required": bool}; None when none was asked.
+    result_contract: Optional[Dict[str, Any]] = None
+    # The latest result it reported with `report(text, result=...)`: a JSON
+    # value that matched `result_contract` when it has one; None until it
+    # reports one. See docs/delegation.md "Result contract".
+    result: Optional[Any] = None
 
     @property
     def state(self) -> Optional[str]:
@@ -625,6 +632,7 @@ def spawn(
     connectors: Optional[List[str]] = None,
     plan: bool = False,
     model: Optional[str] = None,
+    result: Optional[Dict[str, Any]] = None,
 ) -> Spawned:
     """Create a child branch and start it; returns once it has started.
 
@@ -650,6 +658,17 @@ def spawn(
     ("small", "medium", "large", "extra-large") where it defines one: a
     cheaper one suits mechanical work. Unset, it is the seat's or yours. A
     harness whose driver cannot choose a model refuses it.
+
+    `result` says what shape the child's answer must take:
+    `{"schema": {...}, "required": True}`, the schema a JSON Schema using
+    only type, properties, required, additionalProperties (False), items,
+    enum, minimum, maximum, minLength, maxLength and description (anything
+    else is refused, naming it). The child answers with `report(text,
+    result=...)`, which is refused when the value does not match; you read
+    it as `inspect(child).result`, or on each `wait(...)`ed child.
+    `required` (default False) refuses a `report` without a result and
+    notes in your log a child that ends its turn with none. See
+    docs/delegation.md "Result contract".
     """
     options = {
         "--seat": seat,
@@ -678,6 +697,12 @@ def spawn(
         flags += ["--bind", f"{scratch}:{access}"]
     if plan:
         flags.append("--plan")
+    if result is not None:
+        if not isinstance(result, dict) or "schema" not in result or not set(result) <= {"schema", "required"}:
+            raise ValueError('result must be {"schema": {...}, "required": bool}')
+        flags += ["--result-schema", json.dumps(result["schema"])]
+        if result.get("required"):
+            flags.append("--result-required")
     # On stdin, so a prompt of any length fits: a command-line argument is
     # limited to 128 KiB on Linux.
     return _make(Spawned, _run(["spawn", *flags, "--prompt-file", "-"], stdin=prompt))
@@ -827,9 +852,21 @@ def ask(text: str, wait: Optional[float] = None) -> Asked:
     )
 
 
-def report(text: str) -> Message:
-    """Report to your parent; no answer is expected."""
-    return _message(_run(["report", "--", text]))
+def report(text: str, result: Optional[Any] = None) -> Message:
+    """Report to your parent; no answer is expected.
+
+    `result` is your answer as a JSON value (a dict, list, string, number or
+    bool). When your parent gave you a result contract (`inspect().result_contract`)
+    it is checked against its schema: a value that does not match raises
+    DeniedError naming the path and the rule (`result.files[2]: expected
+    string, got number`) and nothing is recorded, and when the contract is
+    required a report without one is refused. Your parent reads the latest
+    result as `inspect(you).result`.
+    """
+    args = ["report"]
+    if result is not None:
+        args += ["--result", json.dumps(result)]
+    return _message(_run([*args, "--", text]))
 
 
 def escalate(text: str) -> Message:

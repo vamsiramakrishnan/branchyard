@@ -75,8 +75,9 @@ use api::{
     AnswerRequest, AskRequest, BranchEvents, BranchList, CancelRequest, CancelResult, CheckRequest,
     Diff, DiscardRequest, ErrorBody, ErrorResponse, FeedEntry, ForkRequest, GraphRequest,
     HarnessList, IntegrateRequest, InventoryReport, MapList, MapRequest, MapResumeRequest,
-    MergeRequest, Operation, ReincarnateRequest, Removed, RepoEntry, RepoList, ReportStatusRequest,
-    SendRequest, SpawnRequest, SteerRequest, TaskList, TaskRequest, TextRequest, WaitRequest,
+    MergeRequest, Operation, ReincarnateRequest, Removed, RepoEntry, RepoList, ReportRequest,
+    ReportStatusRequest, SendRequest, SpawnRequest, SteerRequest, TaskList, TaskRequest,
+    TextRequest, WaitRequest,
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
@@ -718,10 +719,22 @@ impl Repo {
 
     /// Report to `branch`'s parent; like `by report`.
     pub fn report(&self, branch: &str, text: &str) -> Result<Message, Error> {
+        self.report_result(branch, text, None)
+    }
+
+    /// [`Repo::report`] with `branch`'s `result`, checked against its
+    /// result contract; like `by report --result`.
+    pub fn report_result(
+        &self,
+        branch: &str,
+        text: &str,
+        result: Option<serde_json::Value>,
+    ) -> Result<Message, Error> {
         self.client.post(
             &self.branch_path(branch, "/report"),
-            &TextRequest {
+            &ReportRequest {
                 text: text.to_owned(),
+                result,
             },
             &new_key(),
         )

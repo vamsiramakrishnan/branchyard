@@ -14463,6 +14463,17 @@
             "null"
           ],
           "description": "The child's model, like [`branchyard::Spawn::model`]; unset is its\nseat's or its parent's."
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResultContract"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The shape of the answer the child must report, like\n[`branchyard::Spawn::result`]: a schema in the contract's subset\nand whether a result is required. A keyword outside the subset is\nrefused. See `docs/delegation.md#result-contract`."
         }
       },
       "required": [
@@ -14716,6 +14727,24 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
         }
       }
     },
@@ -14873,6 +14902,17 @@
                     "null"
                   ],
                   "description": "The child's model; unset is its seat's or its parent's."
+                },
+                "result": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ResultContract"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The shape of the answer the child must report: a schema in the\nsubset `crate::contract` supports, and whether a result is\nrequired. See `docs/delegation.md#result-contract`."
                 },
                 "kind": {
                   "type": "string",
@@ -15071,6 +15111,24 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
         },
         "PolicySpec": {
           "type": "object",
@@ -16425,6 +16483,20 @@
               ],
               "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
             },
+            "result_contract": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
+            },
+            "result": {
+              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
+            },
             "seat": {
               "type": [
                 "string",
@@ -16847,6 +16919,24 @@
           ],
           "description": "What a harness says it is doing."
         },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
         "Dependency": {
           "type": "object",
           "additionalProperties": false,
@@ -16950,8 +17040,27 @@
       "required": [
         "text"
       ],
-      "description": "`POST /v1/repos/{repo}/branches/{branch}/report` or `/escalate`: a\nmessage with no answer expected, like `by report` and `by escalate`.",
+      "description": "`POST /v1/repos/{repo}/branches/{branch}/escalate`: a message with no\nanswer expected, like `by escalate`.",
       "title": "TextRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "ReportRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "What to tell the parent."
+        },
+        "result": {
+          "description": "The branch's result, a JSON value checked against its result\ncontract and recorded when it matches; see\n`docs/delegation.md#result-contract`. A `null` counts as none."
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "description": "`POST /v1/repos/{repo}/branches/{branch}/report`: a message to the\nbranch's parent with no answer expected, like `by report`, and\noptionally the branch's result.",
+      "title": "ReportRequest",
       "$schema": "https://json-schema.org/draft/2020-12/schema"
     },
     "AnswerRequest": {
@@ -17776,6 +17885,20 @@
               ],
               "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
             },
+            "result_contract": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
+            },
+            "result": {
+              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
+            },
             "seat": {
               "type": [
                 "string",
@@ -17987,6 +18110,24 @@
             }
           ],
           "description": "What a harness says it is doing."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
         },
         "Dependency": {
           "type": "object",
@@ -19231,6 +19372,20 @@
               ],
               "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
             },
+            "result_contract": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
+            },
+            "result": {
+              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
+            },
             "seat": {
               "type": [
                 "string",
@@ -19442,6 +19597,24 @@
             }
           ],
           "description": "What a harness says it is doing."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
         },
         "Dependency": {
           "type": "object",
@@ -20537,6 +20710,27 @@
               ],
               "additionalProperties": false,
               "description": "The harness's own account of what it is doing, from its\n`report_status` tool or `by report-status`: a claim beside the\nprotocol's status, never a replacement for it. See\n`docs/delegation.md#self-reported-status`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "result": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "description": "The result, as the child gave it."
+                    }
+                  },
+                  "required": [
+                    "value"
+                  ]
+                }
+              },
+              "required": [
+                "result"
+              ],
+              "additionalProperties": false,
+              "description": "The result the branch reported with `report`, a JSON value that\nmatched its parent's [`contract::ResultContract`] when it had one:\nthe latest is the branch's [`Inspection::result`]. See\n`docs/delegation.md#result-contract`."
             },
             {
               "type": "object",
@@ -25522,6 +25716,27 @@
               ],
               "additionalProperties": false,
               "description": "The harness's own account of what it is doing, from its\n`report_status` tool or `by report-status`: a claim beside the\nprotocol's status, never a replacement for it. See\n`docs/delegation.md#self-reported-status`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "result": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "description": "The result, as the child gave it."
+                    }
+                  },
+                  "required": [
+                    "value"
+                  ]
+                }
+              },
+              "required": [
+                "result"
+              ],
+              "additionalProperties": false,
+              "description": "The result the branch reported with `report`, a JSON value that\nmatched its parent's [`contract::ResultContract`] when it had one:\nthe latest is the branch's [`Inspection::result`]. See\n`docs/delegation.md#result-contract`."
             },
             {
               "type": "object",
@@ -31079,6 +31294,20 @@
               ],
               "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
             },
+            "result_contract": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
+            },
+            "result": {
+              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
+            },
             "seat": {
               "type": [
                 "string",
@@ -31290,6 +31519,24 @@
             }
           ],
           "description": "What a harness says it is doing."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
         },
         "Dependency": {
           "type": "object",
@@ -32870,6 +33117,20 @@
           ],
           "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
         },
+        "result_contract": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResultContract"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
+        },
+        "result": {
+          "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
+        },
         "seat": {
           "type": [
             "string",
@@ -33293,6 +33554,24 @@
             }
           ],
           "description": "What a harness says it is doing."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
         },
         "Dependency": {
           "type": "object",
@@ -34422,6 +34701,27 @@
               ],
               "additionalProperties": false,
               "description": "The harness's own account of what it is doing, from its\n`report_status` tool or `by report-status`: a claim beside the\nprotocol's status, never a replacement for it. See\n`docs/delegation.md#self-reported-status`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "result": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "description": "The result, as the child gave it."
+                    }
+                  },
+                  "required": [
+                    "value"
+                  ]
+                }
+              },
+              "required": [
+                "result"
+              ],
+              "additionalProperties": false,
+              "description": "The result the branch reported with `report`, a JSON value that\nmatched its parent's [`contract::ResultContract`] when it had one:\nthe latest is the branch's [`Inspection::result`]. See\n`docs/delegation.md#result-contract`."
             },
             {
               "type": "object",

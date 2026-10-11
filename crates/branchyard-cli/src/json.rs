@@ -329,6 +329,10 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "summary": summary,
             "link": link,
         }),
+        Activity::Result { value } => json!({
+            "activity": "result",
+            "value": value,
+        }),
         Activity::Lifecycle {
             state,
             reason,
@@ -546,6 +550,20 @@ mod tests {
             })
         );
         assert_eq!(status_report(None)["link"], Value::Null);
+        // A reported result is its value, whole.
+        assert_eq!(
+            recorded(&RecordedEvent {
+                at_ms: 9,
+                activity: Activity::Result {
+                    value: json!({"files": ["a.rs"], "ok": true})
+                },
+            }),
+            json!({
+                "at_ms": 9,
+                "activity": "result",
+                "value": {"files": ["a.rs"], "ok": true},
+            })
+        );
         assert_eq!(
             recorded(&RecordedEvent {
                 at_ms: 8,

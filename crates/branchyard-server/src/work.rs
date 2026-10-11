@@ -1015,6 +1015,10 @@ pub(crate) fn spawn_parts(
             "a child needs a prompt".into(),
         )));
     }
+    // A contract outside the subset is refused now, not by the worker.
+    if let Some(result) = &request.result {
+        result.check().map_err(|e| error::sdk(&e))?;
+    }
     let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
     let options = app.options(
         repo,
@@ -1044,6 +1048,7 @@ pub(crate) fn spawn_parts(
         harnesses: request.harnesses.clone(),
         plan: request.plan,
         model: request.model.clone(),
+        result: request.result.clone(),
     };
     Ok((options, spawn))
 }

@@ -186,6 +186,11 @@ pub(crate) struct Record {
     /// A delegated child's own come from its parent, in its grant.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
+    /// What the branch's parent asked of the answer it reports with
+    /// `report`, given at spawn: a schema and whether a result is required.
+    /// Kept for the branch's life; see `crate::contract`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_contract: Option<crate::contract::ResultContract>,
     /// Delegated children that were removed, with what each one's subtree
     /// had spent: the ledger that keeps a removed child's spend in this
     /// branch's subtree cost and budget. Appended by the store as it

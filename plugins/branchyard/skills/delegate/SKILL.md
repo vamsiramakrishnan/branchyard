@@ -178,6 +178,10 @@ by children
 by inspect parser-flake
 by events parser-flake --cursor 0
 by spawn "Add a regression test for issue 42" --name issue-42 --budget-usd 0.30 --wait
+# Ask for the answer as JSON, in a shape (see "Asking for a result" below)
+by spawn "List the files that call parse_opts" --name callers \
+  --result-schema '{"type":"object","required":["files"],"properties":{"files":{"type":"array","items":{"type":"string"}}}}' \
+  --result-required
 by steer parser-flake "Use the fixture in tests/data, not a new one."
 by wait parser-flake retry-docs --timeout 600
 by send parser-flake "The seed must come from the test name, not the clock."
@@ -243,6 +247,24 @@ The seat sets the child's harness, budget, check and instructions; you
 may pass a smaller budget, never a larger one. In Python, pass `seat=`;
 the MCP `spawn` tool takes `seat`.
 
+## Asking for a result
+
+Read a child's answer as JSON instead of prose by saying its shape at spawn:
+`--result-schema '<JSON Schema>'` (or `--result-schema-file PATH`), with
+`--result-required` when it must answer. The schema may use only `type`,
+`properties`, `required`, `additionalProperties` (`false`), `items`, `enum`,
+`minimum`, `maximum`, `minLength`, `maxLength` and `description`; anything
+else, such as `pattern`, is refused by name. The child reports with
+`by report "<text>" --result '<JSON>'`, which is refused, naming the path
+(`result.files[2]: expected string, got number`), when the JSON does not
+match. You read it as `result` in `by inspect <child> --json` and in each
+settled child of `by wait --json`; a child that ends its turn without a
+required result leaves a warning in your log. In Python,
+`branchyard.spawn(..., result={"schema": {...}, "required": True})` and
+`branchyard.inspect(child).result`; the MCP `spawn` tool takes `result`.
+The result is the child's claim: `by check` and `by integrate` still decide
+what merges.
+
 ## Sharing results and asking your parent
 
 Every child, even one that cannot delegate further, can publish files and
@@ -254,6 +276,7 @@ by artifact list
 by artifact get 3 --out data/results.json
 by ask "Should the parser accept tabs?" --wait 300
 by report "Tokenizer done; formatter next"
+by report "Found two files" --result '{"files": ["a.rs", "b.rs"]}'   # when your parent set a result_contract
 by report-status working "Porting the tokenizer's tests"
 by inbox --unread
 by answer 12 "Yes, accept tabs"
@@ -305,8 +328,8 @@ that timed out), `NotFoundError`, or `BranchyardError` with a `kind`.
 ## Without a shell
 
 If you cannot run commands, the same operations are MCP tools on the
-`branchyard` server: `spawn` (with `depends_on`), `inspect`, `events`, `send`,
+`branchyard` server: `spawn` (with `depends_on` and `result`), `inspect`, `events`, `send`,
 `steer`, `propose_integration` (`branch`, or `branches` to integrate several
 together), `check` (your own work before you finish, or a child's), `wait` (`branches`, `any`, `timeout_seconds`), `cancel`, `discard`,
 `children`, `graph`, `apply_graph`, the artifact and scratch tools, and `ask`,
-`report`, `escalate`, `report_status`, `answer` and `inbox`.
+`report` (with `result`), `escalate`, `report_status`, `answer` and `inbox`.

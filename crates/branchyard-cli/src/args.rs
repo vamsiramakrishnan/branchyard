@@ -555,6 +555,14 @@ pub struct SpawnArgs {
     pub plan: bool,
     /// `--model`: the child's model. Unset: its seat's or its parent's.
     pub model: Option<String>,
+    /// `--result-schema`: the child's result contract's schema, as JSON
+    /// text.
+    pub result_schema: Option<String>,
+    /// `--result-schema-file`: the same, in a file (`-` for standard
+    /// input).
+    pub result_schema_file: Option<String>,
+    /// `--result-required`: the child must report a result.
+    pub result_required: bool,
     pub json: bool,
 }
 
@@ -871,6 +879,7 @@ Examples (inside a harness, the parent is the harness's own branch):
   by spawn \"write the parser\" --depends-on tokenizer --after integrated
   by spawn \"fix it\" --parent root --yes            # outside a harness
   by spawn --prompt-file task.md --name parser       # a long task, from a file (- for stdin)
+  by spawn \"list the unsafe blocks\" --result-schema '{\"type\":\"object\",\"required\":[\"files\"],\"properties\":{\"files\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}' --result-required
 
 The child's check (--check) defaults to its parent's, and the spawn says which it
 inherits. It runs on the merge when the child is integrated, so siblings that share
@@ -1762,13 +1771,23 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Report to this branch's parent
+    /// Report to this branch's parent, optionally with a JSON result
+    ///
+    /// A result is checked against the contract the parent gave at spawn (`by inspect` shows it
+    /// as result_contract); a mismatch is refused naming the path and the rule, and nothing is
+    /// recorded. The parent reads the latest result in `by inspect` and `by wait`.
     #[command(display_order = 308)]
     Report {
         /// Act as this branch (outside a harness; inside one, it is the harness's own)
         #[arg(long = "as", value_name = "BRANCH")]
         as_branch: Option<String>,
         text: String,
+        /// The branch's result, as JSON text
+        #[arg(long, value_name = "JSON", value_parser = non_blank, conflicts_with = "result_file")]
+        result: Option<String>,
+        /// Read the result from this file instead, `-` for standard input
+        #[arg(long, value_name = "PATH", value_parser = non_blank)]
+        result_file: Option<String>,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -4145,11 +4164,34 @@ pub struct SpawnGraph {
     /// parent's inbox; it changes nothing until `by plan approve`
     #[arg(long)]
     plan: bool,
+    /// The shape of the answer the child must report with `by report --result`, as a JSON Schema
+    /// using only type, properties, required, additionalProperties (false), items, enum,
+    /// minimum, maximum, minLength, maxLength and description; anything else is refused. You
+    /// read the result in `by inspect` and `by wait`
+    #[arg(long, value_name = "JSON", value_parser = non_blank, conflicts_with = "result_schema_file")]
+    result_schema: Option<String>,
+    /// Read the result schema from this file instead, `-` for standard input
+    #[arg(long, value_name = "PATH", value_parser = non_blank)]
+    result_schema_file: Option<String>,
+    /// The child must report a result: its `by report` without --result is refused, and its
+    /// ending a turn without one is noted in your log
+    #[arg(long)]
+    result_required: bool,
 }
 
 impl Flags for SpawnFlags {
     type Output = SpawnArgs;
     fn check(self) -> Result<SpawnArgs, String> {
+        if self.graph.result_required
+            && self.graph.result_schema.is_none()
+            && self.graph.result_schema_file.is_none()
+        {
+            return Err(
+                "--result-required needs the schema it applies to: --result-schema or \
+                 --result-schema-file"
+                    .into(),
+            );
+        }
         let mut task = TaskArgs {
             harness: self.harness,
             name: self.name,
@@ -4179,6 +4221,9 @@ impl Flags for SpawnFlags {
             connectors: self.graph.connectors,
             plan: self.graph.plan,
             model: self.model,
+            result_schema: self.graph.result_schema,
+            result_schema_file: self.graph.result_schema_file,
+            result_required: self.graph.result_required,
             json: self.json,
         })
     }

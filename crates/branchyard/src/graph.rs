@@ -190,6 +190,11 @@ pub struct SpawnSpec {
     /// The child's model; unset is its seat's or its parent's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The shape of the answer the child must report: a schema in the
+    /// subset `crate::contract` supports, and whether a result is
+    /// required. See `docs/delegation.md#result-contract`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<crate::contract::ResultContract>,
 }
 
 impl SpawnSpec {
@@ -212,6 +217,7 @@ impl SpawnSpec {
             connectors: self.connectors.clone(),
             plan: self.plan,
             model: self.model.clone(),
+            result: self.result.clone(),
         })
     }
 
@@ -235,6 +241,7 @@ impl SpawnSpec {
             connectors: spawn.connectors.clone(),
             plan: spawn.plan,
             model: spawn.model.clone(),
+            result: spawn.result.clone(),
         }
     }
 }

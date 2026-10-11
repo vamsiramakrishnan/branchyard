@@ -2257,14 +2257,22 @@ async fn post_report(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
     Extension(caller): Extension<Caller>,
-    JsonBody(request, _): JsonBody<branchyard_client::api::TextRequest>,
+    JsonBody(request, _): JsonBody<branchyard_client::api::ReportRequest>,
 ) -> Result<Json<branchyard::Message>, ApiError> {
     if request.text.trim().is_empty() {
         return Err(ApiError::bad_request("text is empty"));
     }
-    as_person(&app, &caller, &repo, branch, "run", move |d, _| {
-        d.report(&request.text)
-    })
+    as_person(
+        &app,
+        &caller,
+        &repo,
+        branch,
+        "run",
+        move |d, _| match &request.result {
+            Some(result) => d.report_result(&request.text, result),
+            None => d.report(&request.text),
+        },
+    )
     .await
     .map(Json)
 }

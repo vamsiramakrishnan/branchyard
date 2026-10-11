@@ -593,6 +593,13 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             reported_tone(*state),
             &branchyard::reported::describe(*state, summary, link.as_deref()),
         ),
+        Activity::Result { value } => style.paint(
+            Tone::Green,
+            &format!(
+                "result {}",
+                branchyard::contract::one_line(value, RESULT_LINE)
+            ),
+        ),
         Activity::Message(message) => {
             let reply = match message.in_reply_to {
                 Some(id) => format!(" (re #{id})"),
@@ -1412,10 +1419,38 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
             style.paint(reported_tone(report.state), &reported_text(report)),
         ));
     }
+    if let Some(wanted) = &i.result_contract {
+        pairs.push(("result contract", result_contract_text(wanted)));
+    }
+    if let Some(result) = &i.result {
+        pairs.push((
+            "result",
+            style.paint(
+                Tone::Green,
+                &branchyard::contract::one_line(result, RESULT_LINE),
+            ),
+        ));
+    }
     if !i.last_message.is_empty() {
         pairs.push(("last message", i.last_message.trim_end().to_owned()));
     }
     key_values(&pairs, style)
+}
+
+/// Characters of a result `by log` and `by inspect` show on their line;
+/// `--json` has all of it.
+const RESULT_LINE: usize = 400;
+
+/// A result contract on one line: whether it is required, and its schema.
+fn result_contract_text(contract: &branchyard::ResultContract) -> String {
+    format!(
+        "{}; schema {}",
+        match contract.required {
+            true => "required",
+            false => "optional",
+        },
+        branchyard::contract::one_line(&contract.schema, RESULT_LINE)
+    )
 }
 
 /// `by check`: how the branch's check ended on its current work, and its
@@ -2133,6 +2168,74 @@ mod tests {
         assert_eq!(
             r.activity("b", &said(ReportedState::Complete, "done", None)),
             "status complete: done\n"
+        );
+    }
+
+    /// A reported result is one line of compact JSON in `by log`, green,
+    /// cut to a length so a large one does not flood the log; `--json` has
+    /// all of it.
+    #[test]
+    fn a_reported_result_is_a_compact_log_line() {
+        let result = |value: serde_json::Value| Activity::Result { value };
+        assert_eq!(
+            activity_line(&result(json!({"files": ["a.rs"], "ok": true})), PLAIN).as_deref(),
+            Some(r#"result {"files":["a.rs"],"ok":true}"#)
+        );
+        let long = activity_line(&result(json!("x".repeat(1000))), PLAIN).unwrap();
+        assert_eq!(long.chars().count(), "result ".len() + RESULT_LINE + 1);
+        assert!(long.ends_with('…'));
+        let green = activity_line(&result(json!(1)), Style { color: true }).unwrap();
+        assert!(green.starts_with("\x1b[32m"), "{green:?}");
+        let mut r = Renderer::new(PLAIN, false);
+        assert_eq!(r.activity("b", &result(json!([1, 2]))), "result [1,2]\n");
+    }
+
+    /// `by inspect` shows the contract a branch was spawned with, and the
+    /// result it reported, only once there is one.
+    #[test]
+    fn inspect_shows_the_result_contract_and_the_result() {
+        let mut i: branchyard::Inspection = serde_json::from_value(serde_json::json!({
+            "name": "kid", "status": {"state": "ready"}, "harness": "claude-code",
+            "profile": "claude-code-stream-json", "parent": "root", "children": [],
+            "depth": 1, "turns": 1, "candidate": null, "cost_usd": null,
+            "subtree_cost_usd": 0.0, "max_usd": null, "remaining_usd": null,
+            "envelope": null, "last_message": "",
+        }))
+        .unwrap();
+        let value_of = |text: &str, key: &str| {
+            text.lines()
+                .find(|l| l.starts_with(key))
+                .map(|l| l[key.len()..].trim().to_owned())
+        };
+        let plain = inspection(&i, Style::PLAIN);
+        assert_eq!(value_of(&plain, "result"), None, "{plain}");
+        i.result_contract =
+            Some(branchyard::ResultContract::new(json!({"type": "object"}), true).unwrap());
+        let text = inspection(&i, Style::PLAIN);
+        assert_eq!(
+            value_of(&text, "result contract").as_deref(),
+            Some(r#"required; schema {"type":"object"}"#)
+        );
+        assert_eq!(value_of(&text, "result  "), None, "no result yet: {text}");
+        i.result = Some(json!({"files": ["a.rs"]}));
+        i.result_contract = i.result_contract.map(|c| branchyard::ResultContract {
+            required: false,
+            ..c
+        });
+        let text = inspection(&i, Style::PLAIN);
+        assert!(
+            value_of(&text, "result contract")
+                .unwrap()
+                .starts_with("optional; schema "),
+            "{text}"
+        );
+        let result_line = text
+            .lines()
+            .find(|l| l.starts_with("result ") && !l.starts_with("result contract"))
+            .unwrap();
+        assert_eq!(
+            result_line.split_whitespace().skip(1).collect::<String>(),
+            r#"{"files":["a.rs"]}"#
         );
     }
 

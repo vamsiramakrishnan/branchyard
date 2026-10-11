@@ -541,8 +541,16 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         Command::Report {
             as_branch,
             text,
+            result,
+            result_file,
             json,
-        } => commands::report(target, as_branch, &text, json),
+        } => commands::report(
+            target,
+            as_branch,
+            &text,
+            (result.as_deref(), result_file.as_deref()),
+            json,
+        ),
         Command::Escalate {
             as_branch,
             text,

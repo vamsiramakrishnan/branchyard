@@ -535,6 +535,21 @@ class Inspection(Record):
         value = self.get("reported")
         return StatusReport(value) if isinstance(value, dict) else None
 
+    @property
+    def result_contract(self) -> Optional[JSON]:
+        """What the branch's parent asked of its answer, as the spawn gave
+        it: `{"schema": {...}, "required": bool}`; None when none was
+        asked."""
+        value = self.get("result_contract")
+        return value if isinstance(value, dict) else None
+
+    @property
+    def result(self) -> Any:
+        """The latest result the branch reported with `report`, a JSON
+        value that matched `result_contract` when it has one; None until it
+        reports one (`docs/delegation.md#result-contract`)."""
+        return self.get("result")
+
 
 class Steer(Record):
     """`Steer`: `id`, `branch`, `by`, `text`, `requested_at_ms`, `state`
@@ -1085,13 +1100,17 @@ class Repo:
         plan: bool = False,
         model: Optional[str] = None,
         priority: Optional[int] = None,
+        result: Optional[JSON] = None,
         key: Optional[str] = None,
         **extra: Any,
     ) -> Operation:
         """`POST .../spawn`: a child of `parent`, as `by spawn --parent`
         makes one; the server must allow delegation. `connectors` asks for
         the child's grant, which is narrowed to `parent`'s: the result's
-        `inspection.grants` is what it got."""
+        `inspection.grants` is what it got. `result` is the child's result
+        contract, `{"schema": {...}, "required": bool}`: the child reports a
+        JSON value matching the schema, and `inspection.result` reads it
+        back; a schema keyword outside the contract's subset is refused."""
         body: JSON = {
             "prompt": prompt,
             "harness": harness,
@@ -1112,6 +1131,7 @@ class Repo:
             "plan": plan,
             "model": model,
             "priority": priority,
+            "result": result,
         }
         body.update(extra)
         return self.client._operation(self._branch(parent, "/spawn"), body, key)
@@ -1224,8 +1244,15 @@ class Repo:
             self.client.post(self._branch(branch, "/ask"), _drop_none({"text": text, "wait_seconds": wait_seconds}))
         )
 
-    def report(self, branch: str, text: str) -> Message:
-        return Message(self.client.post(self._branch(branch, "/report"), {"text": text}))
+    def report(self, branch: str, text: str, result: Optional[Any] = None) -> Message:
+        """Report to `branch`'s parent. `result` is `branch`'s answer, a JSON
+        value checked against its result contract (a mismatch is refused,
+        naming the path and the rule) and read back as `inspect(branch)`'s
+        `result`."""
+        body: JSON = {"text": text}
+        if result is not None:  # `{}`, `[]` and `False` are results too
+            body["result"] = result
+        return Message(self.client.post(self._branch(branch, "/report"), body))
 
     def escalate(self, branch: str, text: str) -> Message:
         return Message(self.client.post(self._branch(branch, "/escalate"), {"text": text}))

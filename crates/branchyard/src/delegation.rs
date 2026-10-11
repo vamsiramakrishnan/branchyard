@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::broker::Remote;
+use crate::contract::{self, ResultContract};
 use crate::engine::{self, Turn};
 use crate::graph::{
     self, After, Binding, Dependency, DependencyRef, Graph, GraphApplied, GraphCommit, GraphEdit,
@@ -313,6 +314,12 @@ pub struct Spawn {
     /// harness, else its harness's default. A harness whose driver cannot
     /// choose a model refuses it.
     pub model: Option<String>,
+    /// The shape of the answer the child must report with `report`: a JSON
+    /// Schema in the subset [`crate::contract`] supports, and whether a
+    /// result is required. Refused when the schema uses a keyword outside
+    /// the subset. The parent reads the result as
+    /// [`Inspection::result`]. See `docs/delegation.md#result-contract`.
+    pub result: Option<ResultContract>,
 }
 
 impl Spawn {
@@ -624,6 +631,16 @@ pub struct Inspection {
     /// `at_ms` says how old it is. Omitted until the branch reports one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported: Option<StatusReport>,
+    /// What its parent asked of the answer it reports: the schema and
+    /// whether a result is required, as the spawn gave them. Omitted when
+    /// the spawn gave none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_contract: Option<ResultContract>,
+    /// The latest result the branch reported with `report`, a JSON value
+    /// that matched `result_contract` when it has one. Omitted until it
+    /// reports one; a result of JSON `null` counts as none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
     /// The rig seat the branch occupies, if it is in a rig.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seat: Option<String>,
@@ -1140,6 +1157,16 @@ impl Delegate {
     /// Report to this branch's parent; no answer is expected.
     pub fn report(&self, text: &str) -> Result<Message, Error> {
         self.typed("report", json!({"text": text}))
+    }
+
+    /// [`Delegate::report`] with a `result`: a JSON value that must match
+    /// the branch's result contract when its parent gave one (a mismatch
+    /// is refused naming the place and the rule, and nothing is
+    /// recorded). It is recorded on this branch as [`Activity::Result`]
+    /// and is its parent's [`Inspection::result`]. A branch whose
+    /// contract requires a result must report with one.
+    pub fn report_result(&self, text: &str, result: &Value) -> Result<Message, Error> {
+        self.typed("report", json!({"text": text, "result": result}))
     }
 
     /// Escalate to this branch's parent, or, when its rig seat's
@@ -2755,6 +2782,9 @@ impl Local {
         if request.prompt.trim().is_empty() {
             return Err(Error::Denied("a child needs a prompt".into()));
         }
+        if let Some(result) = &request.result {
+            result.check()?;
+        }
         let seated = self.seat(caller, grant, request, planned)?;
         let filled;
         let request = match &seated {
@@ -2947,6 +2977,7 @@ impl Local {
         record.info.status = BranchStatus::Waiting;
         record.check_inherited = request.check.is_none() && record.check.is_some();
         record.bindings = request.bindings.clone();
+        record.result_contract = request.result.clone();
         record.start_base = base;
         if request.plan {
             crate::plan::check_profile(profile)?;
@@ -3290,6 +3321,8 @@ impl Local {
             allowed_harnesses,
             last_message: last_message(&events),
             reported: reported::latest(&events),
+            result_contract: record.result_contract,
+            result: contract::latest(&events),
             seat,
             seats: may_spawn,
             stalled: info.stalled,
@@ -3694,13 +3727,40 @@ impl Local {
     /// Send `kind` from this branch to its parent (`question`, `report` or
     /// `escalation`).
     fn send_to_parent(&self, kind: MessageKind, text: &str) -> Result<Message, Error> {
-        let parent = self
-            .store()
-            .read(&self.branch)?
+        let record = self.store().read(&self.branch)?;
+        let parent = self.parent_to(&record, kind)?;
+        self.send_message(kind, &parent, text, None)
+    }
+
+    /// `record`'s parent, or why there is none to send `kind` to.
+    fn parent_to(&self, record: &Record, kind: MessageKind) -> Result<String, Error> {
+        record
             .info
             .parent
-            .ok_or_else(|| Error::Denied(format!("{} has no parent to {kind}", self.branch)))?;
-        self.send_message(kind, &parent, text, None)
+            .clone()
+            .ok_or_else(|| Error::Denied(format!("{} has no parent to {kind}", self.branch)))
+    }
+
+    /// Report to this branch's parent. With a `result`, it is checked
+    /// against the branch's result contract first (a branch whose contract
+    /// requires one must give it), then recorded on this branch before the
+    /// message is sent, so a parent woken by the message finds it in
+    /// `inspect`. Nothing is recorded or sent when either is refused.
+    fn report(&self, text: &str, result: Option<Value>) -> Result<Message, Error> {
+        let store = self.store();
+        let record = store.read(&self.branch)?;
+        let Some(value) = contract::accept(record.result_contract.as_ref(), result)? else {
+            let parent = self.parent_to(&record, MessageKind::Report)?;
+            return self.send_message(MessageKind::Report, &parent, text, None);
+        };
+        let parent = self.parent_to(&record, MessageKind::Report)?;
+        if text.trim().is_empty() {
+            return Err(Error::Denied("a report needs text".into()));
+        }
+        inbox::authorize(&store, &self.branch, MessageKind::Report, &parent)?;
+        Recorder::open(&store, &self.branch, self.options.observer.clone())?
+            .record(Activity::Result { value })?;
+        self.send_message(MessageKind::Report, &parent, text, None)
     }
 
     /// Record this branch's own status report, and escalate a `blocked` or
@@ -3932,6 +3992,7 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
         connectors: request.connectors.clone(),
         plan: request.plan,
         model: request.model.clone(),
+        result: request.result.clone(),
     })
 }
 
@@ -4128,6 +4189,16 @@ struct PublishArtifactArgs {
 #[serde(deny_unknown_fields)]
 struct TextArgs {
     text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReportArgs {
+    text: String,
+    /// The branch's result: a JSON value, checked against its contract.
+    /// `null` counts as none.
+    #[serde(default)]
+    result: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -4422,8 +4493,8 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
             to_json(&Asked { message, answer })
         }
         "report" => {
-            let args: TextArgs = parse(tool, arguments)?;
-            to_json(&local.send_to_parent(MessageKind::Report, &args.text)?)
+            let args: ReportArgs = parse(tool, arguments)?;
+            to_json(&local.report(&args.text, args.result)?)
         }
         "escalate" => {
             let args: TextArgs = parse(tool, arguments)?;
@@ -4786,6 +4857,8 @@ Checks on the merged result: \
             deny: Vec::new(),
             removed: Vec::new(),
             metered_from: None,
+
+            result_contract: None,
         }
     }
 

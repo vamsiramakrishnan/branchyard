@@ -186,6 +186,8 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
         deny: new.deny,
         removed: Vec::new(),
         metered_from: None,
+
+        result_contract: None,
         parked: None,
         wakes: 0,
         lost: None,

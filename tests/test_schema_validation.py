@@ -296,6 +296,80 @@ def _graph_proposal() -> dict:
     return json.loads(re.findall(r"```json\n(.*?)\n```", text, re.S)[0])
 
 
+class ResultContractsValidate(unittest.TestCase):
+    """A result contract is a spawn's `result`, a report's `result`, and
+    what an inspection and a result event show back
+    (`docs/delegation.md#result-contract`)."""
+
+    CONTRACT = {  # noqa: RUF012
+        "schema": {"type": "object", "required": ["files"], "properties": {"files": {"type": "array"}}},
+        "required": True,
+    }
+
+    def test_a_spawn_may_ask_for_a_result_in_a_shape(self):
+        validate_as({"prompt": "p", "result": self.CONTRACT}, "SpawnRequest")
+        validate_as({"prompt": "p", "result": {"schema": {"type": "string"}}}, "SpawnRequest")
+        validate_as({"prompt": "p"}, "SpawnRequest")
+
+    def test_a_contract_names_only_its_schema_and_whether_it_is_required(self):
+        for bad in [{"required": True}, {"schema": {}, "requried": True}, {"schema": {}, "required": "yes"}]:
+            with self.assertRaises(ValidationError, msg=repr(bad)):
+                validate_as({"prompt": "p", "result": bad}, "SpawnRequest")
+
+    def test_a_graph_proposals_spawn_edit_takes_the_same_contract(self):
+        proposal = {
+            "expected_revision": 0,
+            "edits": [{"kind": "spawn", "prompt": "p", "name": "a", "result": self.CONTRACT}],
+        }
+        validate_as(proposal, "GraphRequest")
+        proposal["edits"][0]["result"] = {"schema": {}, "bogus": 1}
+        with self.assertRaises(ValidationError):
+            validate_as(proposal, "GraphRequest")
+
+    def test_a_report_may_carry_a_result_of_any_shape(self):
+        validate_as({"text": "done"}, "ReportRequest")
+        for result in [{"files": ["a.rs"]}, ["a.rs"], "a.rs", 3, True, {}]:
+            validate_as({"text": "done", "result": result}, "ReportRequest")
+        with self.assertRaises(ValidationError):
+            validate_as({"text": "done", "results": {}}, "ReportRequest")
+        with self.assertRaises(ValidationError):
+            validate_as({"result": {}}, "ReportRequest")
+
+    def test_a_settled_child_in_a_wait_carries_its_contract_and_result(self):
+        inspection = {
+            "name": "kid",
+            "status": {"state": "ready"},
+            "harness": "claude-code",
+            "profile": "claude-code-stream-json",
+            "parent": "root",
+            "children": [],
+            "depth": 1,
+            "turns": 1,
+            "candidate": None,
+            "cost_usd": None,
+            "subtree_cost_usd": 0.0,
+            "max_usd": None,
+            "remaining_usd": None,
+            "envelope": None,
+            "last_message": "",
+            "result_contract": self.CONTRACT,
+            "result": {"files": ["a.rs"]},
+        }
+        validate_as({"settled": [inspection], "pending": []}, "Waited")
+        inspection["result_contract"] = {"schema": {}, "required": "yes"}
+        with self.assertRaises(ValidationError):
+            validate_as({"settled": [inspection], "pending": []}, "Waited")
+
+    def test_a_result_is_an_event_on_the_branch_that_reported_it(self):
+        def events(activity):
+            return {"events": [{"at_ms": 6, "activity": activity}], "cursor": 1}
+
+        validate_as(events({"result": {"value": {"files": ["a.rs"]}}}), "BranchEvents")
+        validate_as(events({"result": {"value": [1, 2]}}), "BranchEvents")
+        with self.assertRaises(ValidationError):
+            validate_as(events({"result": {"values": []}}), "BranchEvents")
+
+
 class GraphTypesValidate(unittest.TestCase):
     def test_the_documented_graph_proposal_validates_as_a_graph_request(self):
         validate_as(_graph_proposal(), "GraphRequest")

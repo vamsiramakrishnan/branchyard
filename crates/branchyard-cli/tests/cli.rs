@@ -4326,3 +4326,179 @@ fn a_harness_states_its_own_status_and_by_shows_it_beside_the_protocols() {
     assert_eq!(bad.status.code(), Some(2), "{}", stderr(&bad));
     assert!(stderr(&bad).contains("working"), "{}", stderr(&bad));
 }
+
+/// A parent gives `by spawn` a result contract; the child answers from its
+/// shell and from Python, a result that does not match or a report with
+/// none is refused, and every surface shows the parent the accepted result
+/// as JSON: `by inspect`, `by wait`, `by log`.
+#[test]
+fn a_child_answers_in_the_shape_its_parent_asked_for_and_by_shows_it() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&[
+        "run",
+        "WRITE root.txt=r",
+        "--name",
+        "root",
+        "--delegate=2",
+        "--yes",
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+
+    let schema = r#"{"type":"object","required":["files"],"properties":{"files":{"type":"array","items":{"type":"string"}}}}"#;
+    let python = "import branchyard as b; c = b.inspect().result_contract; \
+                  print('contract', c['required']); \
+                  b.report('via python', result={'files': ['b.py', 'c.py']})";
+    let kid_prompt = [
+        r#"SH by report wrong --result '{"files": [1]}' --json"#.to_owned(),
+        "SH by report none --json".to_owned(),
+        r#"SH by report found --result '{"files": ["a.rs"]}' --json"#.to_owned(),
+        format!("SH python3 -c \"{python}\""),
+    ]
+    .join("\n");
+    let kid = repo.json(&[
+        "spawn",
+        &kid_prompt,
+        "--parent",
+        "root",
+        "--name",
+        "kid",
+        "--result-schema",
+        schema,
+        "--result-required",
+        "--wait",
+        "--yes",
+        "--json",
+    ]);
+    // The latest accepted result is the child's, with its contract.
+    let answer = serde_json::json!({"files": ["b.py", "c.py"]});
+    assert_eq!(kid["result"], answer, "{kid}");
+    assert_eq!(kid["result_contract"]["required"], true, "{kid}");
+    assert_eq!(
+        kid["result_contract"]["schema"],
+        serde_json::from_str::<Value>(schema).unwrap()
+    );
+
+    // The child's shell: two refusals naming the rule, one report.
+    let said = reply(&repo, "kid");
+    assert!(
+        said.contains("result.files[0]: expected string, got number"),
+        "{said}"
+    );
+    assert!(said.contains("requires a result"), "{said}");
+    assert!(
+        said.contains("contract True"),
+        "Python reads the contract: {said}"
+    );
+
+    // `by inspect`, as JSON and as text.
+    let inspected = repo.json(&["inspect", "kid", "--json"]);
+    assert_eq!(inspected["result"], answer);
+    let text = stdout(&repo.by(&["inspect", "kid"]));
+    assert!(text.contains("result contract"), "{text}");
+    assert!(text.contains(r#"{"files":["b.py","c.py"]}"#), "{text}");
+    // `by wait`: the settled child carries its result.
+    let waited = repo.json(&["wait", "kid", "--json"]);
+    assert_eq!(waited["settled"][0]["result"], answer, "{waited}");
+    // `by log`: one compact line each; `--json` the value.
+    let log = stdout(&repo.by(&["log", "kid"]));
+    assert!(log.contains(r#"result {"files":["a.rs"]}"#), "{log}");
+    assert!(log.contains(r#"result {"files":["b.py","c.py"]}"#), "{log}");
+    let events = repo.json(&["log", "kid", "--json"]);
+    let results: Vec<&Value> = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["activity"] == "result")
+        .map(|e| &e["value"])
+        .collect();
+    assert_eq!(
+        results,
+        [&serde_json::json!({"files": ["a.rs"]}), &answer],
+        "{events}"
+    );
+    // A branch that was given no contract shows none.
+    assert!(repo
+        .json(&["inspect", "root", "--json"])
+        .get("result_contract")
+        .is_none());
+
+    // Outside a harness: `--as`, a result from a file, and the same checks.
+    let scratch = branchyard_testkit::Scratch::new("result");
+    let file = scratch.path().join("result.json");
+    fs::write(&file, r#"{"files": ["d.rs"]}"#).unwrap();
+    let file = file.to_str().unwrap();
+    let again = repo.json(&[
+        "report",
+        "again",
+        "--as",
+        "kid",
+        "--result-file",
+        file,
+        "--json",
+    ]);
+    assert_eq!(again["kind"], "report", "{again}");
+    assert_eq!(
+        repo.json(&["inspect", "kid", "--json"])["result"],
+        serde_json::json!({"files": ["d.rs"]})
+    );
+    let refused = repo.by(&[
+        "report",
+        "bad",
+        "--as",
+        "kid",
+        "--result",
+        r#"{"files": 3}"#,
+        "--json",
+    ]);
+    assert_eq!(refused.status.code(), Some(1));
+    let refused: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refused["error"]["kind"], "denied", "{refused}");
+    assert_eq!(
+        refused["error"]["message"],
+        "denied: result.files: expected array, got number"
+    );
+    let not_json = repo.by(&[
+        "report", "bad", "--as", "kid", "--result", "{nope", "--json",
+    ]);
+    let not_json: Value = serde_json::from_slice(&not_json.stdout).unwrap();
+    assert!(
+        not_json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--result is not JSON"),
+        "{not_json}"
+    );
+
+    // A schema keyword outside the subset is refused at spawn, by name, and
+    // a required flag needs its schema.
+    let outside = repo.by(&[
+        "spawn",
+        "x",
+        "--parent",
+        "root",
+        "--name",
+        "bad",
+        "--result-schema",
+        r#"{"type": "string", "pattern": "^a"}"#,
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(outside.status.code(), Some(1));
+    let outside: Value = serde_json::from_slice(&outside.stdout).unwrap();
+    assert_eq!(outside["error"]["kind"], "denied", "{outside}");
+    assert_eq!(
+        outside["error"]["message"],
+        "denied: result.schema uses `pattern`, which the contract does not support"
+    );
+    assert!(
+        !repo.json(&["ls", "--json"]).to_string().contains("\"bad\""),
+        "no child for a bad contract"
+    );
+    let lonely = repo.by(&["spawn", "x", "--parent", "root", "--result-required"]);
+    assert_eq!(lonely.status.code(), Some(2), "{}", stderr(&lonely));
+    assert!(
+        stderr(&lonely).contains("--result-schema"),
+        "{}",
+        stderr(&lonely)
+    );
+}

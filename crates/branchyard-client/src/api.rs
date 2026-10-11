@@ -578,6 +578,12 @@ pub struct SpawnRequest {
     /// seat's or its parent's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The shape of the answer the child must report, like
+    /// [`branchyard::Spawn::result`]: a schema in the contract's subset
+    /// and whether a result is required. A keyword outside the subset is
+    /// refused. See `docs/delegation.md#result-contract`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<branchyard::ResultContract>,
 }
 
 fn is_settled(after: &After) -> bool {
@@ -713,13 +719,29 @@ pub struct AskRequest {
     pub wait_seconds: Option<f64>,
 }
 
-/// `POST /v1/repos/{repo}/branches/{branch}/report` or `/escalate`: a
-/// message with no answer expected, like `by report` and `by escalate`.
+/// `POST /v1/repos/{repo}/branches/{branch}/escalate`: a message with no
+/// answer expected, like `by escalate`.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TextRequest {
     pub text: String,
+}
+
+/// `POST /v1/repos/{repo}/branches/{branch}/report`: a message to the
+/// branch's parent with no answer expected, like `by report`, and
+/// optionally the branch's result.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportRequest {
+    /// What to tell the parent.
+    pub text: String,
+    /// The branch's result, a JSON value checked against its result
+    /// contract and recorded when it matches; see
+    /// `docs/delegation.md#result-contract`. A `null` counts as none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/answer`: an answer to one of

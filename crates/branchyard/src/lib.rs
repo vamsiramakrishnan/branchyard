@@ -103,6 +103,7 @@ mod compare;
 #[cfg(test)]
 mod conformance;
 pub mod connectors;
+pub mod contract;
 mod delegation;
 pub mod doctor;
 pub mod effects;
@@ -191,6 +192,7 @@ pub use checkpoint::{
     Rewound,
 };
 pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, AttemptCheck};
+pub use contract::ResultContract;
 pub use delegation::{
     nest_graph_budgets, Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage,
     Inbox, Inspection, Sent, Spawn, Spawned, Waited, DEFAULT_MAX_WAKES,
@@ -2569,6 +2571,14 @@ pub enum Activity {
         /// Where to read more, an `http` or `https` URL.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         link: Option<String>,
+    },
+    /// The result the branch reported with `report`, a JSON value that
+    /// matched its parent's [`contract::ResultContract`] when it had one:
+    /// the latest is the branch's [`Inspection::result`]. See
+    /// `docs/delegation.md#result-contract`.
+    Result {
+        /// The result, as the child gave it.
+        value: serde_json::Value,
     },
     /// A branch that a trigger keeps alive moved through its lifecycle: it
     /// went idle (its kept sandbox released), dormant (its next run starts

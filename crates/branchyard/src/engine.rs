@@ -424,6 +424,9 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
         );
         // A delegated child's plan awaiting approval goes to its parent.
         crate::plan::settled(turn.yard, &fence.branch);
+        // A child that owed its parent a result and gave none is noted in
+        // the parent's log.
+        crate::contract::settled(turn.yard, &fence.branch, turn.options.observer.clone());
         if matches!(&result, Ok(b) if b.info.status == BranchStatus::Ready) {
             crate::knowledge::on_end(
                 turn.yard,
