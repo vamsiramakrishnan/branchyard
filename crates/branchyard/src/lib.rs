@@ -108,6 +108,7 @@ mod delegation;
 pub mod doctor;
 pub mod effects;
 mod egress;
+mod endpoint;
 mod engine;
 mod environments;
 mod fleet;
@@ -198,6 +199,7 @@ pub use delegation::{
     Inbox, Inspection, Sent, Spawn, Spawned, Waited, DEFAULT_MAX_WAKES,
 };
 pub use egress::{EgressActivity, Enforcement as EgressEnforcement};
+pub use endpoint::SandboxHost;
 pub use environments::{
     EnvironmentBuild, EnvironmentInfo, EnvironmentInput, EnvironmentOrigin, EnvironmentSnapshot,
     EnvironmentState, EnvironmentUse, Pruned as EnvironmentsPruned,
@@ -828,6 +830,31 @@ impl Yard {
     /// `branchyard_sandbox::fake::FakeProvider`.
     pub fn use_sandbox_provider(&self, provider: Arc<dyn branchyard_sandbox::SandboxProvider>) {
         *projection::lock(&self.hub.sandbox_provider) = Some(provider);
+    }
+
+    /// Tell this yard (and its clones) where its sandboxes reach this
+    /// host: a sandboxed turn that may delegate is served the delegation
+    /// tools over HTTP there, with a token of its own, for as long as the
+    /// turn runs. See `docs/delegation.md#sandboxed-harnesses`. Replaces
+    /// any set before.
+    pub fn use_sandbox_host(&self, host: SandboxHost) {
+        *projection::lock(&self.hub.sandbox_host) = Some(host);
+    }
+
+    /// Where this yard's sandboxes reach this host: what
+    /// [`Yard::use_sandbox_host`] set, else the connector gateway's
+    /// effect-ledger proxy address ([`connectors::EffectsProxy`]) when it
+    /// names a host for sandboxes; `None` when neither does.
+    pub fn sandbox_host(&self) -> Option<SandboxHost> {
+        if let Some(host) = projection::lock(&self.hub.sandbox_host).clone() {
+            return Some(host);
+        }
+        let gateway = self.connectors()?;
+        let host = gateway.effects.sandbox_host.clone()?;
+        Some(SandboxHost {
+            listen: gateway.effects.listen,
+            host,
+        })
     }
 
     /// The named branches side by side: status, turns, cost, tokens, time,

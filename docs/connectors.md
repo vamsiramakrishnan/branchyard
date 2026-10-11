@@ -157,6 +157,8 @@ bundles = "../connectors"                  # the bundle root (default: connector
 anvil = "node /opt/anvil/packages/cli/dist/bin-anvil.js"   # default: anvil
 grants = ["github:read"]                   # for new isolated or sandboxed branches that name none
 # sandbox_gateway = "http://192.168.127.1:8931/mcp"   # the gateway as a sandbox reaches it
+# effects_sandbox_host = "192.168.127.1"   # this host as a sandbox reaches it: the ledger proxy, the delegation endpoint
+# effects_listen = "0.0.0.0"               # what those bind (default 127.0.0.1)
 # listen = "0.0.0.0"                       # what by gateway start binds, when not the URL's loopback host
 # vault_key = "~/.config/branchyard/vault.key"        # default .branchyard/gateway/vault.key, made 0600
 ```
@@ -189,6 +191,8 @@ A sandboxed harness cannot reach the host's loopback, so a sandboxed branch with
 
 - **Microsandbox**: point `sandbox_gateway` at an address of the host the guest routes to, and have the gateway listen there (`listen = "0.0.0.0"` or that address). Anvil requires HTTPS for a non-loopback audience but not for the address a client dials, so the audience can stay `http://127.0.0.1:...`. Not checked on a KVM host.
 - **Substrate**: point `sandbox_gateway` at a URL the actor's egress reaches, such as the gateway exposed through the cluster's routed ingress. Not checked against a cluster.
+
+`effects_sandbox_host` and `effects_listen` are this host as a sandbox reaches it: what a per-turn service for a sandboxed harness binds (`effects_listen`, default `127.0.0.1`) and the host the harness dials (`effects_sandbox_host`). The effect-ledger proxy and a sandboxed turn's [delegation endpoint](delegation.md#sandboxed-harnesses) both use them, so one address serves both; `by` reads them whether or not a gateway is configured (a server, from `connectors`, only with one). `sandbox_gateway` stays separate because the gateway need not run on this host.
 
 The target rule is that **a sandboxed branch may reach only the gateway**. It is **not enforced** in a sandbox: Microsandbox guests get the runtime's default network, and Substrate's egress policy is not vendored, so a branch's [network policy](egress.md) is not applied there. Until it is, a sandboxed harness can reach whatever its network allows; it still holds no upstream credential, and the gateway still enforces its grant.
 

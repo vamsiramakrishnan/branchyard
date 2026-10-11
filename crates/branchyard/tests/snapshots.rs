@@ -748,8 +748,10 @@ fn a_delegated_child_starts_from_its_parents_snapshot() {
         .name("parent")
         .run()
         .unwrap();
-    // A sandboxed harness gets no delegation tools yet, so the grant comes
-    // from a send whose turn is refused before its sandbox starts.
+    // This yard names no address at which a sandbox reaches this host, so
+    // a sandboxed harness gets no delegation tools (see
+    // `sandboxed_delegation.rs`), and the grant comes from a send whose
+    // turn is refused before its sandbox starts.
     let delegating = TaskOptions {
         delegation: Some(Envelope::default()),
         delegation_server: Some(vec![common::fake_agent().display().to_string()]),

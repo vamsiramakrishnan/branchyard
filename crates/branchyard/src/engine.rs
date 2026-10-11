@@ -3,7 +3,8 @@
 //! enforce the budget, snapshot the candidate and close the harness.
 //!
 //! A delegating branch's turn also gets Branchyard's MCP server and a token
-//! that lives exactly as long as the turn. Its cost limit counts what its
+//! that lives exactly as long as the turn; a sandboxed one gets the server
+//! over HTTP from this host (`crate::endpoint`). Its cost limit counts what its
 //! children reserved, and a cancel request from an ancestor interrupts it
 //! like a budget limit does.
 //!
@@ -37,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::delegation;
+use crate::endpoint::Reach;
 use crate::graph;
 use crate::placement::{Placement, SandboxPlan};
 use crate::projection::{ENV_BRANCH, ENV_ROOT};
@@ -550,16 +552,23 @@ fn run(
         live_cost: None,
         held_on: Vec::new(),
     };
-    let sandboxed = crate::placement::sandboxed(record.provider.as_ref());
     // Revoked when this function returns, after the harness and its
-    // sandbox are gone. The delegation tools reach the engine over a host
-    // socket with the host's `by`, so a sandboxed harness does not get them
-    // yet.
-    let projection = match sandboxed {
-        true => Err(Error::Unsupported(
-            "delegation is not yet available to a sandboxed harness".into(),
-        )),
-        false => crate::projection::project(
+    // sandbox are gone. A local harness runs the delegation tools itself;
+    // a sandboxed one is served them over HTTP from this host, below, when
+    // its sandbox can reach this host (`crate::endpoint`).
+    let reach = crate::endpoint::reach(turn.yard, record);
+    let projection = match &reach {
+        Reach::Never(why) => {
+            if record.grant.is_some() {
+                recorder.record(Activity::Warning(format!(
+                    "delegation is unavailable in this sandbox: {why}, so this turn runs \
+                     without delegation tools"
+                )))?;
+            }
+            Ok(None)
+        }
+        Reach::Unset(why) => Err(Error::Unsupported(why.clone())),
+        Reach::Local | Reach::Host(_) => crate::projection::project(
             turn.yard,
             record,
             turn.options,
@@ -567,7 +576,7 @@ fn run(
             bounds.policy.clone(),
         ),
     };
-    let projection = match projection {
+    let mut projection = match projection {
         Ok(projection) => projection,
         // Asked for now: the turn cannot run as asked.
         Err(error) if turn.options.delegation.is_some() => {
@@ -596,6 +605,35 @@ fn run(
         recorder.record(Activity::Access(Box::new(narrowed)))?;
     }
     let scopes = crate::access::TokenScopes::of(&scoped);
+    // A sandboxed harness's delegation tools, served from this host for
+    // this turn with a token of its own; stopped, with each session's
+    // server, when this function returns, after the harness is gone.
+    let serving = match (&reach, projection.as_mut()) {
+        (Reach::Host(host), Some(offered)) => Some(crate::endpoint::Endpoint::start(
+            turn.yard,
+            record,
+            host,
+            offered,
+            &scopes,
+            deadline_ms,
+        )),
+        _ => None,
+    };
+    let _endpoint = match serving {
+        None => None,
+        Some(Ok(endpoint)) => Some(endpoint),
+        Some(Err(error)) if turn.options.delegation.is_some() => {
+            driven.end = End::failed(format!("could not offer delegation: {error}"));
+            return Ok(driven);
+        }
+        Some(Err(error)) => {
+            recorder.record(Activity::Warning(format!(
+                "this turn runs without delegation tools: {error}"
+            )))?;
+            projection = None;
+            None
+        }
+    };
     let mut connectors = match crate::connectors::prepare(turn.yard, &scoped, deadline_ms, &scopes)
     {
         Ok(connectors) => connectors,

@@ -304,15 +304,23 @@ pub(crate) fn prepare(
     let (workspace, home) = placement::guest_paths(record);
     let secrets = resolve(&spec.secrets)?;
     // Branchyard's own server first, then the task's, with the variables
-    // they take from secrets.
-    let mut mcp_servers: Vec<_> = projection.map(|p| p.server.clone()).into_iter().collect();
+    // they take from secrets. A sandboxed harness gets Branchyard's over
+    // HTTP, from the turn's endpoint on this host.
+    let mut mcp_servers: Vec<_> = projection
+        .filter(|p| p.remote.is_none())
+        .map(|p| p.server.clone())
+        .into_iter()
+        .collect();
     let mut mcp_secrets = Vec::new();
     for spec in &spec.mcp_servers {
         let (server, used) = spec.resolve(&secrets)?;
         mcp_servers.push(server);
         mcp_secrets.extend(used);
     }
-    let mut remote_mcp_servers = Vec::new();
+    let mut remote_mcp_servers: Vec<_> = projection
+        .and_then(|p| p.remote.clone())
+        .into_iter()
+        .collect();
     for spec in &spec.remote_mcp_servers {
         let (server, used) = spec.resolve(&secrets)?;
         remote_mcp_servers.push(server);

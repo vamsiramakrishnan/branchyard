@@ -14,7 +14,10 @@
 //!   envelope allows children (`max_depth` above 0) may spawn and act on
 //!   descendants.
 //! - The Python module's directory first on `PYTHONPATH`.
-//! - Branchyard's MCP server (`by mcp`, or `branchyard-mcp`).
+//! - Branchyard's MCP server (`by mcp`, or `branchyard-mcp`). A sandboxed
+//!   harness gets it over HTTP from this host instead
+//!   ([`crate::endpoint`]), and none of the variables above, which name
+//!   this host's paths and the broker's token.
 //! - Standing instructions: the delegation skill for a branch that may
 //!   spawn, a short note on what a leaf may do for one that may not (see
 //!   [`branchyard_harness::Instructions`]).
@@ -42,7 +45,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
-use branchyard_harness::{Instructions, McpServer};
+use branchyard_harness::{Instructions, McpServer, RemoteMcpServer};
 use serde::{Deserialize, Serialize};
 
 use crate::broker::Broker;
@@ -128,6 +131,8 @@ pub(crate) struct Hub {
     pub services: Mutex<Option<Arc<crate::services::LocalRegistry>>>,
     /// Set by [`crate::Yard::use_approvals`].
     pub approvals: Mutex<Arc<crate::effects::ApprovalSettings>>,
+    /// Set by [`crate::Yard::use_sandbox_host`].
+    pub sandbox_host: Mutex<Option<crate::SandboxHost>>,
 }
 
 impl Default for Hub {
@@ -151,6 +156,7 @@ impl Default for Hub {
             ceilings: Default::default(),
             services: Default::default(),
             approvals: Default::default(),
+            sandbox_host: Default::default(),
         }
     }
 }
@@ -334,12 +340,21 @@ pub(crate) fn tools(options: &TaskOptions) -> Result<Tools, Error> {
     Ok(Tools { by, server })
 }
 
+/// What a sandboxed delegating harness is told first: the tools it has.
+const SANDBOXED: &str = "You run in a sandbox: `by`, `$BRANCHYARD_BY` and the `branchyard` \
+Python module cannot reach Branchyard from there. Use the `branchyard` MCP server's tools \
+instead; they are the same operations, and act only as your branch.";
+
 /// What one delegating turn was given. Dropping it revokes the token.
 pub(crate) struct Projection {
     yard: Yard,
     name: String,
     token: String,
+    /// The stdio server: the harness's own, or for a sandboxed one, what
+    /// the endpoint runs for it on this host.
     pub server: McpServer,
+    /// The endpoint a sandboxed harness is given instead of `server`.
+    pub remote: Option<RemoteMcpServer>,
     /// Variables set on the harness process.
     pub env: Vec<(String, String)>,
     pub instructions: Instructions,
@@ -352,6 +367,16 @@ impl Projection {
     pub fn observe_cost(&self, spent: f64) {
         let mut cost = lock(&self.cost);
         *cost = Some(cost.map_or(spent, |c| c.max(spent)));
+    }
+
+    /// Give a sandboxed harness `server` (the turn's endpoint) instead of
+    /// the stdio server, and none of the variables or the plugin, which
+    /// name this host's paths; its instructions say so.
+    pub fn serve_remotely(&mut self, server: RemoteMcpServer) {
+        self.remote = Some(server);
+        self.env.clear();
+        self.instructions.plugin_dir = None;
+        self.instructions.text = format!("{SANDBOXED}\n\n{}", self.instructions.text);
     }
 }
 
@@ -442,6 +467,7 @@ pub(crate) fn project(
                 .collect(),
             env: vec![(ENV_TOKEN.into(), token.clone())],
         },
+        remote: None,
         env,
         instructions: match spawns {
             true => Instructions {

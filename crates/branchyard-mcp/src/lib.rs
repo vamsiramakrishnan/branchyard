@@ -13,7 +13,10 @@
 //! through [`branchyard::Delegate`] to the engine running that turn, where
 //! children run on the engine's threads. `by spawn` and its siblings, and
 //! the Python module, reach the same operations the same way; this server
-//! is for harnesses that cannot run commands.
+//! is for harnesses that cannot run commands. For a harness in a sandbox,
+//! which cannot start it, the engine runs it on the host, one process per
+//! MCP session, behind an HTTP endpoint of the turn's
+//! (`docs/delegation.md#sandboxed-harnesses`).
 //!
 //! Guarantees:
 //!

@@ -35,7 +35,13 @@
 //!   running nor waiting (for its prerequisites or on its children; `MCP
 //!   wait {...}` calls the `wait` tool instead), and `MCP started <branch>` calls `events` until the branch's prompt
 //!   has been recorded, which it is just before the prompt is submitted.
-//!   Without a server it replies `mcp: no server`.
+//!   Without a server it replies `mcp: no server`. An HTTP server
+//!   (`{"type": "http", "url", "headers"}`, which it accepts as
+//!   `mcpCapabilities.http` says) is called over MCP's Streamable HTTP with
+//!   its headers. With `MCP_BEARER <token>` on a line of its own, an HTTP
+//!   server is sent that bearer token instead of its own; with `MCP_SAVE
+//!   <path>`, the server as it was given is written to `path` first, as
+//!   JSON, so a test can read a URL or a token no event records.
 //! - `SH <command>`, one per line: runs the command with `sh -c` in its
 //!   working directory and environment, and replies `sh: <exit status>`
 //!   followed by the command's output, for each line.
@@ -83,7 +89,7 @@
 //! file, that file's mode and the servers it lists.
 
 #![allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-runtime
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -190,7 +196,11 @@ fn main() {
             (Some("initialize"), Some(id)) => {
                 let mut result = json!({
                     "protocolVersion": 1,
-                    "agentCapabilities": {"loadSession": true, "sessionCapabilities": {"resume": {}}},
+                    "agentCapabilities": {
+                        "loadSession": true,
+                        "sessionCapabilities": {"resume": {}},
+                        "mcpCapabilities": {"http": true},
+                    },
                 });
                 if steering {
                     result["_meta"] = json!({"steering": {"supported": true}});
@@ -520,43 +530,87 @@ fn prompt(
     None
 }
 
-/// A minimal MCP client over a server's stdio.
+/// How a [`McpClient`] reaches its server.
+enum Transport {
+    /// The server's stdio, a process this agent started.
+    Stdio {
+        child: Child,
+        stdin: ChildStdin,
+        stdout: BufReader<ChildStdout>,
+    },
+    /// MCP's Streamable HTTP: one POST per message, a JSON (or
+    /// server-sent event) answer, the session the server names.
+    Http {
+        url: branchyard_wire::HttpUrl,
+        headers: Vec<(String, String)>,
+        session: Option<String>,
+    },
+}
+
+/// A minimal MCP client over a server's stdio, or over HTTP for a server
+/// given as `{"type": "http", "url", "headers"}`.
 struct McpClient {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    transport: Transport,
     next: u64,
 }
 
 impl McpClient {
-    fn start(server: &Value) -> Result<McpClient, String> {
-        let command = server["command"]
-            .as_str()
-            .ok_or("the server has no command")?;
-        let mut process = Command::new(command);
-        for arg in server["args"].as_array().into_iter().flatten() {
-            process.arg(arg.as_str().unwrap_or_default());
-        }
-        for var in server["env"].as_array().into_iter().flatten() {
-            process.env(
-                var["name"].as_str().unwrap_or_default(),
-                var["value"].as_str().unwrap_or_default(),
-            );
-        }
-        let mut child = process
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("could not start {command}: {e}"))?;
-        let stdin = child.stdin.take().expect("piped");
-        let stdout = BufReader::new(child.stdout.take().expect("piped"));
-        let mut client = McpClient {
-            child,
-            stdin,
-            stdout,
-            next: 0,
+    /// `bearer`, when given, replaces an HTTP server's `Authorization`.
+    fn start(server: &Value, bearer: Option<&str>) -> Result<McpClient, String> {
+        let transport = match server["type"].as_str() {
+            Some("http") => {
+                let url = server["url"].as_str().ok_or("the server has no url")?;
+                let url = branchyard_wire::HttpUrl::parse(url).map_err(|e| e.to_string())?;
+                let mut headers: Vec<(String, String)> = server["headers"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|h| {
+                        let text = |key: &str| h[key].as_str().unwrap_or_default().to_owned();
+                        (text("name"), text("value"))
+                    })
+                    .collect();
+                if let Some(bearer) = bearer {
+                    headers.retain(|(name, _)| !name.eq_ignore_ascii_case("authorization"));
+                    headers.push(("Authorization".into(), format!("Bearer {bearer}")));
+                }
+                Transport::Http {
+                    url,
+                    headers,
+                    session: None,
+                }
+            }
+            Some(other) => return Err(format!("cannot reach a {other} MCP server")),
+            None => {
+                let command = server["command"]
+                    .as_str()
+                    .ok_or("the server has no command")?;
+                let mut process = Command::new(command);
+                for arg in server["args"].as_array().into_iter().flatten() {
+                    process.arg(arg.as_str().unwrap_or_default());
+                }
+                for var in server["env"].as_array().into_iter().flatten() {
+                    process.env(
+                        var["name"].as_str().unwrap_or_default(),
+                        var["value"].as_str().unwrap_or_default(),
+                    );
+                }
+                let mut child = process
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .map_err(|e| format!("could not start {command}: {e}"))?;
+                let stdin = child.stdin.take().expect("piped");
+                let stdout = BufReader::new(child.stdout.take().expect("piped"));
+                Transport::Stdio {
+                    child,
+                    stdin,
+                    stdout,
+                }
+            }
         };
+        let mut client = McpClient { transport, next: 0 };
         client.request(
             "initialize",
             json!({"protocolVersion": "2025-06-18", "capabilities": {},
@@ -567,40 +621,108 @@ impl McpClient {
     }
 
     fn notify(&mut self, method: &str) -> Result<(), String> {
-        writeln!(
-            self.stdin,
-            "{}",
-            json!({"jsonrpc": "2.0", "method": method})
-        )
-        .map_err(|e| e.to_string())
+        let message = json!({"jsonrpc": "2.0", "method": method});
+        match &mut self.transport {
+            Transport::Stdio { stdin, .. } => {
+                writeln!(stdin, "{message}").map_err(|e| e.to_string())
+            }
+            Transport::Http { .. } => match self.post(&message)? {
+                (202 | 200, _) => Ok(()),
+                (status, body) => Err(format!("HTTP {status}: {}", refusal(&body))),
+            },
+        }
+    }
+
+    /// POST one message; the status and the body, which an event stream's
+    /// `data:` lines become.
+    fn post(&mut self, message: &Value) -> Result<(u16, Vec<u8>), String> {
+        let Transport::Http {
+            url,
+            headers,
+            session,
+        } = &mut self.transport
+        else {
+            return Err("not an HTTP server".into());
+        };
+        let body = message.to_string();
+        let host = url.host_header();
+        let mut fields: Vec<(&str, &str)> = vec![
+            ("Host", host.as_str()),
+            ("Content-Type", "application/json"),
+            ("Accept", "application/json, text/event-stream"),
+            ("Connection", "close"),
+        ];
+        fields.extend(headers.iter().map(|(n, v)| (n.as_str(), v.as_str())));
+        if let Some(session) = session.as_deref() {
+            fields.push(("Mcp-Session-Id", session));
+        }
+        let head =
+            branchyard_wire::request_head("POST", &url.target(), fields, Some(body.len() as u64))
+                .map_err(|e| e.to_string())?;
+        let mut stream = std::net::TcpStream::connect((url.host.as_str(), url.port))
+            .map_err(|e| format!("could not connect to {}: {e}", url.origin()))?;
+        stream
+            .write_all(&head)
+            .and_then(|()| stream.write_all(body.as_bytes()))
+            .map_err(|e| e.to_string())?;
+        let mut reader = BufReader::new(stream);
+        let response = branchyard_wire::read_response_head(&mut reader, 64 * 1024)
+            .map_err(|e| e.to_string())?;
+        if let Some(named) = branchyard_wire::header(&response.headers, "mcp-session-id") {
+            *session = Some(named.to_owned());
+        }
+        let framing = branchyard_wire::response_framing(response.status, &response.headers, false)
+            .map_err(|e| e.to_string())?;
+        let mut answer = Vec::new();
+        branchyard_wire::Body::new(reader, framing)
+            .read_to_end(&mut answer)
+            .map_err(|e| e.to_string())?;
+        let sse = branchyard_wire::header(&response.headers, "content-type")
+            .is_some_and(|t| t.starts_with("text/event-stream"));
+        if sse {
+            answer = String::from_utf8_lossy(&answer)
+                .lines()
+                .filter_map(|line| line.strip_prefix("data:"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into_bytes();
+        }
+        Ok((response.status, answer))
     }
 
     fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
         self.next += 1;
         let id = self.next;
         let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        writeln!(self.stdin, "{request}").map_err(|e| e.to_string())?;
-        loop {
-            let mut line = String::new();
-            if self
-                .stdout
-                .read_line(&mut line)
-                .map_err(|e| e.to_string())?
-                == 0
-            {
-                return Err("the server closed its output".into());
+        let message = match &mut self.transport {
+            Transport::Stdio { stdin, stdout, .. } => {
+                writeln!(stdin, "{request}").map_err(|e| e.to_string())?;
+                loop {
+                    let mut line = String::new();
+                    if stdout.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
+                        return Err("the server closed its output".into());
+                    }
+                    let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                        return Err(format!("the server wrote a non-JSON line: {line:?}"));
+                    };
+                    if message["id"] == json!(id) {
+                        break message;
+                    }
+                    // A notification or a request of its own.
+                }
             }
-            let Ok(message) = serde_json::from_str::<Value>(&line) else {
-                return Err(format!("the server wrote a non-JSON line: {line:?}"));
-            };
-            if message["id"] != json!(id) {
-                continue; // a notification or a request of its own
+            Transport::Http { .. } => {
+                let (status, body) = self.post(&request)?;
+                if status != 200 {
+                    return Err(format!("HTTP {status}: {}", refusal(&body)));
+                }
+                serde_json::from_slice(&body).map_err(|e| format!("a non-JSON answer: {e}"))?
             }
-            if let Some(error) = message.get("error") {
-                return Err(format!("JSON-RPC error {error}"));
-            }
-            return Ok(message["result"].clone());
+        };
+        if let Some(error) = message.get("error") {
+            return Err(format!("JSON-RPC error {error}"));
         }
+        Ok(message["result"].clone())
     }
 
     /// `(is_error, text)` of one tool call.
@@ -611,10 +733,20 @@ impl McpClient {
     }
 }
 
+/// What an HTTP refusal says: its JSON-RPC error's message, or the body.
+fn refusal(body: &[u8]) -> String {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| String::from_utf8_lossy(body).into_owned())
+}
+
 impl Drop for McpClient {
     fn drop(&mut self) {
-        branchyard_support::best_effort("kill child", self.child.kill());
-        branchyard_support::best_effort("reap child", self.child.wait());
+        if let Transport::Stdio { child, .. } = &mut self.transport {
+            branchyard_support::best_effort("kill child", child.kill());
+            branchyard_support::best_effort("reap child", child.wait());
+        }
     }
 }
 
@@ -623,7 +755,17 @@ fn mcp(server: &Value, text: &str) -> String {
     if server.is_null() {
         return "mcp: no server\n".into();
     }
-    let mut client = match McpClient::start(server) {
+    let line = |keyword: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(keyword))
+            .map(str::trim)
+    };
+    if let Some(path) = line("MCP_SAVE ") {
+        if let Err(error) = std::fs::write(path, server.to_string()) {
+            return format!("mcp: could not save the server to {path}: {error}\n");
+        }
+    }
+    let mut client = match McpClient::start(server, line("MCP_BEARER ")) {
         Ok(client) => client,
         Err(error) => return format!("mcp: {error}\n"),
     };

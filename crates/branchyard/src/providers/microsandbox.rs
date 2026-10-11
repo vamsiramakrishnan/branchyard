@@ -54,6 +54,12 @@ impl ProviderKind for SandboxOptions {
         (WORKSPACE.into(), HOME.into())
     }
 
+    /// A guest gets the runtime's default network, which routes to this
+    /// host (at the address `[connectors] effects_sandbox_host` names).
+    fn reaches_host(&self) -> bool {
+        true
+    }
+
     fn prepare(
         &self,
         yard: &Yard,

@@ -761,12 +761,15 @@ pub struct Connectors {
     /// the ledger before it is made (docs/effects.md). Default true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effects_proxy: Option<bool>,
-    /// The address each turn's ledger proxy binds (default `127.0.0.1`).
+    /// The address each turn's ledger proxy, and a sandboxed turn's
+    /// delegation endpoint, binds (default `127.0.0.1`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effects_listen: Option<String>,
-    /// How a sandboxed harness reaches its ledger proxy: a host address
-    /// its guest routes to. Without it, a sandboxed turn calls the gateway
-    /// directly and its effects reach the ledger only from the audit log.
+    /// How a sandboxed harness reaches this host: a host address its guest
+    /// routes to, where its ledger proxy and its delegation endpoint
+    /// listen. Without it, a sandboxed turn calls the gateway directly and
+    /// its effects reach the ledger only from the audit log, and a
+    /// sandboxed harness gets no delegation tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effects_sandbox_host: Option<String>,
 }

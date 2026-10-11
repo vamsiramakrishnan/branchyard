@@ -105,6 +105,8 @@ Each turn gets a fresh microVM, destroyed when the turn ends, unless the branch 
 
 The image must contain the harness executable on its `PATH` (or pass its guest path with `--command`), `sh` for teardown, and whatever the harness needs to authenticate from the passed variables. The engine does not look for the harness on the host.
 
+A delegating turn (`--delegate`, or a delegated child) cannot use `by` or the broker's socket from the guest. Instead the engine serves the turn Branchyard's MCP tools over HTTP from the host, on `[connectors] effects_listen` at the address `effects_sandbox_host` names (the address at which the guest reaches the host, which the effect-ledger proxy uses too), with a bearer token for that turn alone; see [delegation](delegation.md#sandboxed-harnesses). Without that address, a turn asked to delegate fails naming the setting. `ProviderKind::reaches_host` says which providers' sandboxes can reach the host: Microsandbox's only. A Substrate actor or a recipe's machine runs a delegating turn without the tools and records a warning that says why. This is tested with `FakeProvider` on loopback, not in a guest on a KVM host.
+
 ### Prerequisites and the ignored tests
 
 The tests in [`crates/branchyard-microsandbox/tests/microsandbox.rs`](../crates/branchyard-microsandbox/tests/microsandbox.rs) are `#[ignore]`: the conformance checks, CPU and memory limits reaching the guest, root-disk writes staying private to each sandbox, a disk checkpoint branching into a new sandbox, and, with live branching opted in, the mario-never-dies probe: a paused source live-branched into children that keep its processes (same PIDs) and write privately while the source stays paused, and a persisted, paused sandbox resumed by a new provider. Run them on a host with:
@@ -158,7 +160,7 @@ It does not mount: a spec with a mount, an image or limits is refused, because t
 
 ## Adding a provider
 
-A branch stores a [`Provider`](../crates/branchyard/src/lib.rs): the closed, serialized enum `local`, `microsandbox`, `substrate` or `recipe`. What each variant means to the engine (its name and key, its sandbox lifecycle, whether its options can run, where the harness sees the worktree and `HOME`, how a stopped engine's sandbox is recovered and a reaped one destroyed, how its sandbox provider is opened, whether it can confine egress) is one crate-private trait, `ProviderKind` in [`providers/mod.rs`](../crates/branchyard/src/providers/mod.rs), implemented once per variant:
+A branch stores a [`Provider`](../crates/branchyard/src/lib.rs): the closed, serialized enum `local`, `microsandbox`, `substrate` or `recipe`. What each variant means to the engine (its name and key, its sandbox lifecycle, whether its options can run, where the harness sees the worktree and `HOME`, how a stopped engine's sandbox is recovered and a reaped one destroyed, how its sandbox provider is opened, whether it can confine egress, whether its sandbox can reach the engine's host) is one crate-private trait, `ProviderKind` in [`providers/mod.rs`](../crates/branchyard/src/providers/mod.rs), implemented once per variant:
 
 | Variant | File |
 |---|---|

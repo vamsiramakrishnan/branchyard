@@ -587,7 +587,7 @@
           ]
         },
         "effects_listen": {
-          "description": "The address each turn's ledger proxy binds. Default `127.0.0.1`.",
+          "description": "The address each turn's ledger proxy, and a sandboxed turn's\ndelegation endpoint, binds. Default `127.0.0.1`.",
           "type": [
             "string",
             "null"
@@ -595,7 +595,7 @@
           "format": "ip"
         },
         "effects_sandbox_host": {
-          "description": "How a sandboxed harness reaches its ledger proxy (a host address\nits guest routes to). Without it, a sandboxed turn calls the\ngateway directly and its effects reach the ledger only from the\naudit log.",
+          "description": "How a sandboxed harness reaches this host (a host address its guest\nroutes to), where its ledger proxy and its delegation endpoint\nlisten. Without it, a sandboxed turn calls the gateway directly and\nits effects reach the ledger only from the audit log, and a\nsandboxed harness gets no delegation tools.",
           "type": [
             "string",
             "null"

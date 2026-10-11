@@ -227,6 +227,9 @@ fn names_keys_and_kinds() {
         assert_eq!(kind.service_kind(), service);
         assert_eq!(kind.confines_egress(), !sandboxed);
         assert_eq!(placement::sandboxed(Some(&good)), sandboxed);
+        // Only a Microsandbox guest is served the delegation tools from
+        // this host; a local harness runs them itself.
+        assert_eq!(kind.reaches_host(), name == "microsandbox", "{name}");
     }
 }
 
