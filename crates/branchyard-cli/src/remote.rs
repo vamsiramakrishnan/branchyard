@@ -945,6 +945,21 @@ pub fn integrate_all(
         .ok_or_else(|| branchyard::Error::State("the server returned no merge".into()))
 }
 
+/// `check` on the server: the branch's check on its current work, as
+/// integrating it would run it. The check can run for as long as an
+/// integration's, so the command waits for the operation; interrupting it
+/// stops waiting, not the check.
+pub fn check(remote: &Remote, branch: &str) -> Result<branchyard::CheckReport, branchyard::Error> {
+    let op = remote.repo.check(branch, &new_key()).map_err(sdk_error)?;
+    let done = remote
+        .client
+        .wait(&op.id, Duration::from_millis(200))
+        .map_err(sdk_error)?;
+    result(done)?
+        .check_report
+        .ok_or_else(|| branchyard::Error::State("the server returned no check report".into()))
+}
+
 pub fn inspect(remote: &Remote, branch: &str) -> Result<Inspection, branchyard::Error> {
     remote.repo.inspect(branch).map_err(sdk_error)
 }

@@ -627,6 +627,34 @@ pub struct SteerRequest {
     pub text: String,
 }
 
+/// `POST /v1/repos/{repo}/branches/{branch}/check`: run the branch's check
+/// on its current work, as integrating it would, like `by check`. No
+/// fields yet. The operation's result holds the
+/// [`branchyard::CheckReport`] as `check_report`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckRequest {}
+
+/// `POST /v1/repos/{repo}/branches/{branch}/report-status`: the branch's
+/// own status beside the protocol's, like `by report-status --as`. The
+/// answer is a [`branchyard::Reported`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportStatusRequest {
+    /// One of `working`, `idle`, `blocked`, `complete` or `failure`. A
+    /// string, not an enum, so the server can refuse a bad one naming the
+    /// field (`400 invalid_request`, `detail.field` `state`).
+    pub state: String,
+    /// What the branch is doing, one line of at most 280 characters.
+    pub summary: String,
+    /// Where to read more: an `http` or `https` URL of at most 2048 bytes.
+    /// A blank one counts as none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+}
+
 /// `POST /v1/repos/{repo}/branches/{branch}/cancel`: no fields yet.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -724,6 +752,9 @@ pub enum OperationKind {
     RejectPlan,
     /// A wide map started with `POST .../maps` or `.../maps/{name}/resume`.
     Map,
+    /// A branch's check run with `POST .../check`: nothing is merged and no
+    /// turn runs.
+    Check,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -773,6 +804,12 @@ pub struct OperationResult {
     /// the branches that answered or were tried last, where they remain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub map: Option<MapReport>,
+    /// A check's report: whether the branch's work would get past its
+    /// check, the way `by check` prints it. A check that fails is a
+    /// succeeded operation whose report says `failed`; the operation
+    /// fails only when the check could not be run at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_report: Option<branchyard::CheckReport>,
 }
 
 /// A long operation, run in the background. Durable on the server from

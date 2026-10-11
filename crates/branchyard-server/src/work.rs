@@ -95,6 +95,13 @@ pub enum Work {
     /// `POST /v1/repos/{repo}/maps` or `.../maps/{name}/resume`, with the
     /// items a resume takes from the recorded map.
     Map { request: MapRequest },
+    /// `POST .../branches/{branch}/check`: the branch's check on its
+    /// current work, as `by check` runs it. Takes no branch lock and runs
+    /// no turn.
+    Check {
+        /// The branch whose check runs.
+        branch: String,
+    },
 }
 
 impl Work {
@@ -110,6 +117,7 @@ impl Work {
             Work::ApprovePlan { .. } => OperationKind::ApprovePlan,
             Work::RejectPlan { .. } => OperationKind::RejectPlan,
             Work::Map { .. } => OperationKind::Map,
+            Work::Check { .. } => OperationKind::Check,
         }
     }
 
@@ -294,6 +302,22 @@ impl Work {
                     map: Some(report),
                     ..OperationResult::default()
                 })
+            }
+            Work::Check { branch } => {
+                let run = || {
+                    let options = TaskOptions {
+                        observer: Some(crate::api::observer(&repo.wake)),
+                        ..TaskOptions::default()
+                    };
+                    let target = yard.branch(&branch)?;
+                    let report = target.delegate(options)?.check(&branch)?;
+                    Ok::<_, branchyard::Error>(OperationResult {
+                        branches: vec![target.info().clone()],
+                        check_report: Some(report),
+                        ..OperationResult::default()
+                    })
+                };
+                run().map_err(sdk)
             }
             Work::Integrate {
                 branch,
@@ -1099,6 +1123,7 @@ mod tests {
                 parent: "b".into(),
                 with: vec!["b-d".into()],
             },
+            Work::Check { branch: "b".into() },
         ];
         for work in works {
             let value = work.to_value().unwrap();

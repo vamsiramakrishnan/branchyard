@@ -5,8 +5,11 @@
 #![allow(clippy::panic)] // tests: a panic is the failure report
 mod common;
 
+use std::time::Duration;
+
 use branchyard::{
-    BranchStatus, Envelope, Provider, RecipeOptions, SubstrateOptions, TaskOptions, Yard,
+    BranchStatus, CheckVerdict, Envelope, Provider, RecipeOptions, ReportedState, SubstrateOptions,
+    TaskOptions, Yard,
 };
 use branchyard_client::api::{
     BudgetSpec, ForkRequest, OperationKind, OperationState, PolicySpec, SendRequest, SpawnRequest,
@@ -278,6 +281,130 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
     assert!(asked.answer.is_none());
     let no_parent = repo.report("root", "root has no parent").unwrap_err();
     assert_eq!(no_parent.code(), Some("denied"));
+
+    // Self-reported status: a person states kid's, under the tool's rules.
+    let working = repo
+        .report_status(
+            "kid",
+            ReportedState::Working,
+            "  reading the tests\n",
+            Some("https://example.com/pull/7"),
+        )
+        .unwrap();
+    assert_eq!(working.report.state, ReportedState::Working);
+    assert_eq!(working.report.summary, "reading the tests");
+    assert_eq!(
+        working.report.link.as_deref(),
+        Some("https://example.com/pull/7")
+    );
+    assert!(working.escalation.is_none(), "{working:?}");
+    assert_eq!(
+        repo.inspect("kid").unwrap().reported,
+        Some(working.report.clone()),
+        "the inspection route shows what was recorded"
+    );
+    // `blocked` is escalated to the parent, once.
+    let blocked = repo
+        .report_status("kid", ReportedState::Blocked, "needs the API key", None)
+        .unwrap();
+    let escalation = blocked.escalation.clone().unwrap();
+    assert_eq!(
+        (escalation.from.as_str(), escalation.to.as_str()),
+        ("kid", "root")
+    );
+    assert_eq!(escalation.kind, branchyard::MessageKind::Escalation);
+    assert_eq!(escalation.text, "status blocked: needs the API key");
+    assert_eq!(
+        repo.inspect("kid").unwrap().reported,
+        Some(blocked.report.clone())
+    );
+    assert_eq!(
+        local.inspect("kid").unwrap().reported,
+        Some(blocked.report.clone()),
+        "the same value the SDK reads in the server's repository"
+    );
+    let repeated = repo
+        .report_status("kid", ReportedState::Blocked, "needs the API key", None)
+        .unwrap();
+    assert!(repeated.escalation.is_none(), "{repeated:?}");
+    // A branch with no parent states its status with nobody to tell.
+    let alone = repo
+        .report_status("root", ReportedState::Failure, "gave up", None)
+        .unwrap();
+    assert!(alone.escalation.is_none(), "{alone:?}");
+    // A field that breaks a rule is 400 invalid_request naming it; nothing
+    // is recorded.
+    let before = repo.events("kid", 0).unwrap().events.len();
+    let report = |body: &str| {
+        let (status, _, answer) = raw(
+            server.addr,
+            &post(
+                "/v1/repos/app/branches/kid/report-status",
+                Some(TOKEN),
+                "",
+                body,
+            ),
+        );
+        (status, json(&answer))
+    };
+    for (body, field) in [
+        (r#"{"state": "done", "summary": "x"}"#.to_owned(), "state"),
+        (
+            r#"{"state": "Working", "summary": "x"}"#.to_owned(),
+            "state",
+        ),
+        (
+            r#"{"state": "working", "summary": "  "}"#.to_owned(),
+            "summary",
+        ),
+        (
+            format!(
+                r#"{{"state": "working", "summary": "{}"}}"#,
+                "x".repeat(281)
+            ),
+            "summary",
+        ),
+        (
+            r#"{"state": "working", "summary": "x", "link": "ftp://example.com/"}"#.to_owned(),
+            "link",
+        ),
+        (
+            r#"{"state": "working", "summary": "x", "link": "javascript:alert(1)"}"#.to_owned(),
+            "link",
+        ),
+    ] {
+        let (status, answer) = report(&body);
+        assert_eq!(status, 400, "{body}: {answer}");
+        assert_eq!(answer["error"]["code"], "invalid_request", "{answer}");
+        assert_eq!(answer["error"]["detail"]["field"], field, "{answer}");
+        assert!(
+            answer["error"]["message"].as_str().unwrap().contains(field),
+            "the message names the field too: {answer}"
+        );
+    }
+    let (_, answer) = report(r#"{"state": "done", "summary": "x"}"#);
+    assert!(
+        answer["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("working, idle, blocked, complete, failure"),
+        "{answer}"
+    );
+    // A request that is not the shape is refused before the fields.
+    for body in [
+        r#"{"summary": "x"}"#,
+        r#"{"state": "working"}"#,
+        r#"{"state": "working", "summary": "x", "bogus": 1}"#,
+    ] {
+        let (status, answer) = report(body);
+        assert_eq!(status, 400, "{body}: {answer}");
+        assert_eq!(answer["error"]["code"], "invalid_request");
+    }
+    assert_eq!(repo.events("kid", 0).unwrap().events.len(), before);
+    let unknown = repo
+        .report_status("nope", ReportedState::Idle, "x", None)
+        .unwrap_err();
+    assert_eq!(unknown.code(), Some("unknown_branch"));
 
     let op = await_operation(&client, &repo.integrate("kid", &new_key()).unwrap().id);
     assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
@@ -568,4 +695,155 @@ fn a_spawn_that_waits_goes_through_the_queue_and_starts_after_its_prerequisite()
     let app = repo.branch("app").unwrap();
     assert_eq!(app.turns, 1);
     assert!(app.worktree.join("lib.txt").is_file(), "built on lib");
+}
+
+/// A person runs a branch's check through the server, as `by check` does:
+/// an operation whose result is the report; a check that fails is a
+/// succeeded operation whose report says `failed`; nothing is merged; it
+/// holds no branch lock and runs no turn, so the branch takes another turn
+/// and a wait settles while it runs; and its idempotency key finds it
+/// again.
+#[test]
+fn a_branchs_check_runs_over_http_as_an_operation() {
+    let f = Fixture::new();
+    let server = Server::start(f.config());
+    let client = server.client();
+    let repo = client.repo("app");
+    let go = f.dir.join("go");
+    let wait_for_go = format!("while [ ! -f \"{}\" ]; do sleep 0.05; done", go.display());
+    let with_check = |name: &str, prompt: &str, check: &[&str]| TaskRequest {
+        check: Some(check.iter().map(|s| (*s).to_owned()).collect()),
+        ..task(prompt, name)
+    };
+    for request in [
+        with_check("good", "WRITE ok.txt=1", &["test", "-f", "ok.txt"]),
+        with_check(
+            "bad",
+            "WRITE other.txt=1",
+            &["sh", "-c", "echo tests failed >&2; exit 1"],
+        ),
+        with_check("held", "WRITE held.txt=1", &["sh", "-c", &wait_for_go]),
+        task("WRITE plain.txt=1", "plain"),
+    ] {
+        let op = run(&client, &request);
+        assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
+    }
+    let main = common::git(&f.root, &["rev-parse", "main"]);
+
+    // A check that passes.
+    let key = new_key();
+    let op = repo.check("good", &key).unwrap();
+    assert_eq!(
+        (op.kind, op.branches.as_slice()),
+        (OperationKind::Check, &["good".to_owned()][..])
+    );
+    let done = await_operation(&client, &op.id);
+    assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
+    let result = done.result.unwrap();
+    assert_eq!(result.branches[0].name, "good");
+    let report = result.check_report.unwrap();
+    assert_eq!(report.branch, "good");
+    assert_eq!(
+        report.check,
+        Some(vec!["test".into(), "-f".into(), "ok.txt".into()])
+    );
+    assert_eq!(report.outcome, CheckVerdict::Passed, "{report:?}");
+    assert!(report.passed());
+    assert!(report.checked.is_some(), "the check ran on a commit");
+    assert_eq!(report.target, None, "a root is checked alone");
+
+    // The key finds it again; another request under it is refused.
+    let replay = repo.check("good", &key).unwrap();
+    assert_eq!(replay.id, op.id);
+    assert_eq!(
+        repo.check("bad", &key).unwrap_err().code(),
+        Some("idempotency_key_reused")
+    );
+
+    // One that fails: the operation succeeded, and the report says what
+    // the local command prints.
+    let failed = await_operation(&client, &repo.check("bad", &new_key()).unwrap().id);
+    assert_eq!(failed.state, OperationState::Succeeded, "{failed:?}");
+    let report = failed.result.unwrap().check_report.unwrap();
+    assert_eq!(report.outcome, CheckVerdict::Failed, "{report:?}");
+    assert!(!report.passed());
+    assert!(report.output_tail.contains("tests failed"), "{report:?}");
+    let yard = Yard::open(&f.root).unwrap();
+    let local = yard
+        .branch("bad")
+        .unwrap()
+        .delegate(TaskOptions::default())
+        .unwrap()
+        .check("bad")
+        .unwrap();
+    assert_eq!(
+        (&local.check, local.outcome, &local.output_tail),
+        (&report.check, report.outcome, &report.output_tail),
+        "the report the SDK gives in the server's repository"
+    );
+
+    // A branch with no check: nothing ran, and integrating it runs none.
+    let plain = await_operation(&client, &repo.check("plain", &new_key()).unwrap().id);
+    let report = plain.result.unwrap().check_report.unwrap();
+    assert_eq!(
+        (&report.check, report.outcome),
+        (&None, CheckVerdict::NotRun)
+    );
+    assert!(report.passed());
+
+    // Nothing was merged.
+    assert_eq!(common::git(&f.root, &["rev-parse", "main"]), main);
+    assert_eq!(repo.branch("good").unwrap().status, BranchStatus::Ready);
+
+    // It holds no branch lock and runs no turn.
+    let held = repo.check("held", &new_key()).unwrap();
+    wait::until("the held check to run", || {
+        client.operation(&held.id).unwrap().state == OperationState::Running
+    });
+    let sent = repo
+        .send(
+            "held",
+            &SendRequest {
+                prompt: "WHOAMI".into(),
+                policy: PolicySpec::allow_all(),
+                ..SendRequest::default()
+            },
+            &new_key(),
+        )
+        .unwrap();
+    assert_eq!(
+        await_operation(&client, &sent.id).state,
+        OperationState::Succeeded
+    );
+    let waited = repo
+        .wait_for(&["held"], false, Some(Duration::from_secs(10)))
+        .unwrap();
+    assert!(!waited.timed_out, "a check is not a turn: {waited:?}");
+    let listed = repo.operations(Some("held")).unwrap();
+    assert_eq!(
+        (listed.len(), listed[0].kind, listed[0].state),
+        (1, OperationKind::Check, OperationState::Running)
+    );
+    std::fs::write(&go, "").unwrap();
+    let released = await_operation(&client, &held.id);
+    assert_eq!(released.state, OperationState::Succeeded, "{released:?}");
+    let report = released.result.unwrap().check_report.unwrap();
+    assert_eq!(report.outcome, CheckVerdict::Passed, "{report:?}");
+
+    // Refusals: no such branch, and a body that is not the shape.
+    assert_eq!(
+        repo.check("nope", &new_key()).unwrap_err().code(),
+        Some("unknown_branch")
+    );
+    let (status, _, body) = raw(
+        server.addr,
+        &post(
+            "/v1/repos/app/branches/good/check",
+            Some(TOKEN),
+            "",
+            r#"{"target": "main"}"#,
+        ),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(json(&body)["error"]["code"], "invalid_request");
 }

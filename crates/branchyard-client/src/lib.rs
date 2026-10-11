@@ -64,18 +64,19 @@ use backon::{BackoffBuilder, BlockingRetryable, ExponentialBackoff, ExponentialB
 
 use branchyard::{
     ArtifactRef, Asked, BranchInfo, Children, EventPage, Graph, GraphApplied, HarnessInfo, Inbox,
-    Inspection, MapReport, MapSummary, Message, ScratchArea, ScratchLock, Steer,
+    Inspection, MapReport, MapSummary, Message, Reported, ReportedState, ScratchArea, ScratchLock,
+    Steer,
 };
 use rustls::ClientConfig;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use api::{
-    AnswerRequest, AskRequest, BranchEvents, BranchList, CancelRequest, CancelResult, Diff,
-    DiscardRequest, ErrorBody, ErrorResponse, FeedEntry, ForkRequest, GraphRequest, HarnessList,
-    IntegrateRequest, InventoryReport, MapList, MapRequest, MapResumeRequest, MergeRequest,
-    Operation, ReincarnateRequest, Removed, RepoEntry, RepoList, SendRequest, SpawnRequest,
-    SteerRequest, TaskList, TaskRequest, TextRequest, WaitRequest,
+    AnswerRequest, AskRequest, BranchEvents, BranchList, CancelRequest, CancelResult, CheckRequest,
+    Diff, DiscardRequest, ErrorBody, ErrorResponse, FeedEntry, ForkRequest, GraphRequest,
+    HarnessList, IntegrateRequest, InventoryReport, MapList, MapRequest, MapResumeRequest,
+    MergeRequest, Operation, ReincarnateRequest, Removed, RepoEntry, RepoList, ReportStatusRequest,
+    SendRequest, SpawnRequest, SteerRequest, TaskList, TaskRequest, TextRequest, WaitRequest,
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
@@ -598,6 +599,18 @@ impl Repo {
             .post(&self.branch_path(branch, "/merge"), request, key)
     }
 
+    /// Run `branch`'s check on its current work, the way integrating it
+    /// would and with nothing integrated; like `by check`. The finished
+    /// operation's `result.check_report` says how it ended: a check that
+    /// fails is a succeeded operation whose report is not
+    /// [`branchyard::CheckReport::passed`]. The check can run for as long
+    /// as an integration's (30 minutes), so wait for the operation
+    /// ([`Client::wait`]); it holds no branch lock.
+    pub fn check(&self, branch: &str, key: &str) -> Result<Operation, Error> {
+        self.client
+            .post(&self.branch_path(branch, "/check"), &CheckRequest {}, key)
+    }
+
     /// Create a child of `parent` with the server's authority, bounded by
     /// the parent's envelope, and run its first turn; like
     /// `by spawn --parent`. The finished operation's result holds the
@@ -721,6 +734,31 @@ impl Repo {
             &self.branch_path(branch, "/escalate"),
             &TextRequest {
                 text: text.to_owned(),
+            },
+            &new_key(),
+        )
+    }
+
+    /// State `branch`'s own status beside the protocol's, as the person or
+    /// surface acting for it; like `by report-status --as`. The answer is
+    /// the report as recorded and, for `blocked` and `failure`, the
+    /// escalation sent to the parent. A summary that is blank or over 280
+    /// characters, or a link that is not an `http(s)` URL, is refused
+    /// `400 invalid_request` with `detail.field` naming it. A branch's own
+    /// harness reports through its broker, not this route.
+    pub fn report_status(
+        &self,
+        branch: &str,
+        state: ReportedState,
+        summary: &str,
+        link: Option<&str>,
+    ) -> Result<Reported, Error> {
+        self.client.post(
+            &self.branch_path(branch, "/report-status"),
+            &ReportStatusRequest {
+                state: state.to_string(),
+                summary: summary.to_owned(),
+                link: link.map(str::to_owned),
             },
             &new_key(),
         )

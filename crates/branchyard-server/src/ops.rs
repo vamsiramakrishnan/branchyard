@@ -442,8 +442,8 @@ impl Registry {
     /// Whether a queued or running operation of `repo`, of any tenant, runs
     /// a turn of `branch` or creates it: a send, a task, a spawn. Until a
     /// worker starts it the branch's status is still its last turn's, so a
-    /// wait for the branch waits for the operation too. A merge or an
-    /// integration runs no turn of it and is not counted.
+    /// wait for the branch waits for the operation too. A merge, an
+    /// integration or a check runs no turn of it and is not counted.
     pub fn turn_queued(&self, repo: &str, branch: &str) -> Result<bool, ApiError> {
         let read = |e: io::Error| ApiError::internal(format!("could not read the queue: {e}"));
         for queued in self.store.queue().map_err(read)? {
@@ -456,7 +456,7 @@ impl Registry {
             let operation = &stored.operation;
             if !matches!(
                 operation.kind,
-                OperationKind::Merge | OperationKind::Integrate
+                OperationKind::Merge | OperationKind::Integrate | OperationKind::Check
             ) && operation.branches.iter().any(|b| b == branch)
             {
                 return Ok(true);

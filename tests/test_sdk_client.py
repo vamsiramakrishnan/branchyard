@@ -366,6 +366,136 @@ class Requests(ServerCase):
         self.assertIsNone(bare.tree_remaining_usd)
         self.assertIsNone(bare.tree_capped_by)
 
+    def test_a_check_is_an_operation_whose_result_is_the_report(self):
+        failed = {
+            "branch": "b",
+            "check": ["make", "test"],
+            "work": "a1b2c3d",
+            "target": "by/root",
+            "checked": "d4e5f6a",
+            "outcome": "failed",
+            "output_tail": "2 tests failed",
+        }
+        self.fake.answer("POST", f"{REPO}/branches/b/check", (202, self.op("op3", "queued", kind="check")))
+        self.fake.answer(
+            "GET",
+            "/v1/operations/op3",
+            (200, self.op("op3", "running", kind="check")),
+            (200, self.op("op3", "succeeded", kind="check", result={"check_report": failed})),
+        )
+        op = self.app.check("b", key="k-9")
+        self.assertEqual((op.kind, op.branch), ("check", "b"))
+        self.assertIsNone(op.check_report, "nothing until the check has ended")
+        ((_, _, headers, body),) = self.requests("POST", f"{REPO}/branches/b/check")
+        self.assertEqual((headers["idempotency-key"], body), ("k-9", {}))
+        done = self.client.wait(op, poll=0.01, check=True)
+        report = done.check_report
+        assert report is not None
+        self.assertIsInstance(report, bc.CheckReport)
+        # A check that fails is a succeeded operation, not an exception.
+        self.assertEqual((report.outcome, report.output_tail), ("failed", "2 tests failed"))
+        self.assertEqual(report.check, ["make", "test"])
+        self.assertFalse(report.passed)
+        # `passed` is the engine's: the check passed, or there is none and nothing conflicted.
+        for fields, passed in [
+            ({"check": ["t"], "outcome": "passed"}, True),
+            ({"check": ["t"], "outcome": "timed_out"}, False),
+            ({"check": ["t"], "outcome": "not_run", "conflicts": ["a.txt"]}, False),
+            ({"check": None, "outcome": "not_run"}, True),
+            ({"outcome": "not_run", "conflicts": []}, True),
+            ({"outcome": "not_run", "conflicts": ["a.txt"]}, False),
+        ]:
+            self.assertIs(bc.CheckReport({"branch": "b", "work": "w", **fields}).passed, passed, fields)
+        # Without a key, one is generated.
+        self.fake.answer("POST", f"{REPO}/branches/c/check", (202, self.op("op4", "queued", "c", kind="check")))
+        self.app.check("c")
+        ((_, _, headers, _),) = self.requests("POST", f"{REPO}/branches/c/check")
+        self.assertEqual(len(headers["idempotency-key"]), 32)
+
+    def test_a_check_is_refused_with_typed_errors(self):
+        for status, body, expected in [
+            (403, _error("scope_required", "needs run", {"scope": "run"}), bc.DeniedError),
+            (404, _error("unknown_branch", "no branch named b"), bc.NotFoundError),
+            (422, _error("idempotency_key_reused", "", {"operation": "op3"}), bc.IdempotencyKeyReusedError),
+        ]:
+            self.fake.answer("POST", f"{REPO}/branches/b/check", (status, body))
+            with self.assertRaises(expected) as raised:
+                self.app.check("b")
+            self.assertEqual(type(raised.exception), expected, body)
+        # An operation that could not run the check at all fails with its error.
+        self.fake.answer("POST", f"{REPO}/branches/b/check", (202, self.op("op5", "queued", kind="check")))
+        self.fake.answer(
+            "GET",
+            "/v1/operations/op5",
+            (200, self.op("op5", "failed", kind="check", error={"code": "git_error", "message": "no worktree"})),
+        )
+        with self.assertRaises(bc.OperationFailedError) as failed:
+            self.client.wait(self.app.check("b"), poll=0.01, check=True)
+        self.assertEqual(failed.exception.code, "git_error")
+        self.assertIsNone(failed.exception.operation.check_report)
+
+    def test_report_status_posts_the_report_and_reads_what_was_recorded(self):
+        report = {"state": "blocked", "summary": "needs the API key", "link": "https://example.com/i/1", "at_ms": 7}
+        escalation = {
+            "id": 4,
+            "from": "kid",
+            "to": "root",
+            "kind": "escalation",
+            "text": "status blocked: needs the API key (https://example.com/i/1)",
+            "at_ms": 7,
+        }
+        self.fake.answer(
+            "POST",
+            f"{REPO}/branches/kid/report-status",
+            (200, {"report": report, "escalation": escalation}),
+            (200, {"report": {"state": "working", "summary": "reading", "at_ms": 8}}),
+        )
+        reported = self.app.report_status("kid", "blocked", "needs the API key", link="https://example.com/i/1")
+        self.assertIsInstance(reported, bc.Reported)
+        self.assertIsInstance(reported.report, bc.StatusReport)
+        self.assertEqual(reported.report.raw, report)
+        assert reported.escalation is not None
+        self.assertIsInstance(reported.escalation, bc.Message)
+        self.assertEqual((reported.escalation["from"], reported.escalation.to), ("kid", "root"))
+        working = self.app.report_status("kid", "working", "reading")
+        self.assertEqual(working.report.state, "working")
+        self.assertIsNone(working.report.link)
+        self.assertIsNone(working.escalation, "only blocked and failure reach the parent")
+        sent = [r[3] for r in self.requests("POST", f"{REPO}/branches/kid/report-status")]
+        self.assertEqual(
+            sent,
+            [
+                {"state": "blocked", "summary": "needs the API key", "link": "https://example.com/i/1"},
+                {"state": "working", "summary": "reading"},
+            ],
+        )
+
+    def test_a_refused_report_names_its_field(self):
+        path = f"{REPO}/branches/kid/report-status"
+        for field, message in [
+            ("state", 'state must be one of working, idle, blocked, complete, failure, not "done"'),
+            ("summary", "the summary is 281 characters; keep it to one line of at most 280"),
+            ("link", 'the link must be an http or https URL, not "ftp://x/"'),
+        ]:
+            self.fake.answer("POST", path, (400, _error("invalid_request", message, {"field": field})))
+            with self.assertRaises(bc.InvalidRequestError) as raised:
+                self.app.report_status("kid", "done", "x")
+            self.assertEqual(raised.exception.field, field)
+            self.assertEqual(raised.exception.message, message)
+            self.assertEqual(raised.exception.status, 400)
+        # A refusal that names no field has none.
+        self.fake.answer("POST", path, (400, _error("invalid_request", "invalid request body: missing field")))
+        with self.assertRaises(bc.InvalidRequestError) as raised:
+            self.app.report_status("kid", "working", "x")
+        self.assertIsNone(raised.exception.field)
+        for status, body, expected in [
+            (403, _error("scope_required", "", {"scope": "run"}), bc.DeniedError),
+            (404, _error("unknown_branch", "no branch named kid"), bc.NotFoundError),
+        ]:
+            self.fake.answer("POST", path, (status, body))
+            with self.assertRaises(expected):
+                self.app.report_status("kid", "working", "x")
+
     def test_the_health_check_sends_no_token(self):
         self.assertTrue(self.client.healthy())
         ((_, _, headers, _),) = self.requests("GET", "/healthz")

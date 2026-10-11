@@ -1603,16 +1603,17 @@ pub fn events(
 
 /// Run a branch's check on its current work as integrating it would:
 /// inside a harness, on itself or a descendant; otherwise on any branch,
-/// with yours. Exits 1 when the work would not get past its check.
+/// with yours, or the server's with `--remote`. Exits 1 when the work
+/// would not get past its check.
 pub fn check(env: &Env, target: &Target, branch: Option<String>, json: bool) -> Outcome {
     let result = match (harness_delegate(json)?, target) {
         (Some(delegate), _) => {
             let branch = branch.unwrap_or_else(|| delegate.branch().to_owned());
             delegate.check(&branch)
         }
-        (None, Target::Remote(_)) => Err(branchyard::Error::Unsupported(
-            "the server has no check route; run by check on the repository's host".into(),
-        )),
+        (None, Target::Remote(remote)) => {
+            required_outside(branch, "check").and_then(|b| remote::check(remote, &b))
+        }
         (None, Target::Local) => required_outside(branch, "check")
             .and_then(|b| as_user(&b, TaskOptions::default())?.check(&b)),
     };
@@ -2016,10 +2017,6 @@ pub fn escalate(target: &Target, as_branch: Option<String>, text: &str, json: bo
     })
 }
 
-/// Why `by --remote report-status` is refused.
-const REPORT_STATUS_REMOTE: &str = "by report-status acts on a local repository: a harness \
-    states its own status from inside its turn, and the server has no route for it";
-
 /// `by report-status`: record the branch's own status beside the protocol's.
 pub fn report_status(
     target: &Target,
@@ -2034,8 +2031,17 @@ pub fn report_status(
     let result = match (delegate, target) {
         (Some(delegate), _) => as_itself(&delegate, as_branch.as_deref(), "--as")
             .and_then(|()| delegate.report_status(state?, summary, link)),
-        (None, Target::Remote(_)) => {
-            Err(branchyard::Error::Unsupported(REPORT_STATUS_REMOTE.into()))
+        // The rules are the engine's, checked here as well so a refusal
+        // reads as a local one does; the server checks them again.
+        (None, Target::Remote(remote)) => {
+            as_branch_required(as_branch, "report-status").and_then(|b| {
+                let state = state?;
+                branchyard::reported::check(summary, link)?;
+                remote
+                    .repo
+                    .report_status(&b, state, summary, link)
+                    .map_err(remote::sdk_error)
+            })
         }
         (None, Target::Local) => as_branch_required(as_branch, "report-status").and_then(|b| {
             as_user(&b, TaskOptions::default())?.report_status(state?, summary, link)

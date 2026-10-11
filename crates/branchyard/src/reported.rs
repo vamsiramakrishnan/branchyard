@@ -78,13 +78,18 @@ impl ReportedState {
 
     /// The state `text` names, or a refusal that lists the ones there are.
     pub fn parse(text: &str) -> Result<ReportedState, Error> {
-        ReportedState::from_str(text.trim()).map_err(|_| {
-            Error::Denied(format!(
-                "state must be one of {}, not {text:?}",
-                ReportedState::NAMES.join(", ")
-            ))
-        })
+        parse_state(text).map_err(Error::Denied)
     }
+}
+
+/// [`ReportedState::parse`], with the refusal as its message.
+fn parse_state(text: &str) -> Result<ReportedState, String> {
+    ReportedState::from_str(text.trim()).map_err(|_| {
+        format!(
+            "state must be one of {}, not {text:?}",
+            ReportedState::NAMES.join(", ")
+        )
+    })
 }
 
 /// A branch's own report of its status, as `report_status` returns it and
@@ -137,41 +142,88 @@ pub fn describe(state: ReportedState, summary: &str, link: Option<&str>) -> Stri
     }
 }
 
+/// A report field the engine refused, and why: what a surface that
+/// answers with the field (an HTTP `400` with `detail.field`) needs where
+/// the tool's own refusal, [`Error::Denied`], carries only the message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    /// The field that broke a rule: `state`, `summary` or `link`.
+    pub field: &'static str,
+    /// The rule, in the words [`Error::Denied`] carries for the tool.
+    pub message: String,
+}
+
+impl Refusal {
+    fn new(field: &'static str, message: String) -> Refusal {
+        Refusal { field, message }
+    }
+}
+
 /// A report's summary and link as the engine keeps them, or why it refuses
 /// them: a summary that is blank or longer than [`SUMMARY_MAX`] characters,
 /// a link that is not an `http` or `https` URL of at most [`LINK_MAX`]
 /// bytes. A blank link counts as none.
 pub fn check(summary: &str, link: Option<&str>) -> Result<(String, Option<String>), Error> {
+    check_fields(summary, link).map_err(|refusal| Error::Denied(refusal.message))
+}
+
+/// [`check`], naming the field it refused.
+pub fn check_fields(
+    summary: &str,
+    link: Option<&str>,
+) -> Result<(String, Option<String>), Refusal> {
     let summary = summary.trim();
     if summary.is_empty() {
-        return Err(Error::Denied("a status report needs a summary".into()));
+        return Err(Refusal::new(
+            "summary",
+            "a status report needs a summary".into(),
+        ));
     }
     let length = summary.chars().count();
     if length > SUMMARY_MAX {
-        return Err(Error::Denied(format!(
-            "the summary is {length} characters; keep it to one line of at most {SUMMARY_MAX}"
-        )));
+        return Err(Refusal::new(
+            "summary",
+            format!(
+                "the summary is {length} characters; keep it to one line of at most \
+                 {SUMMARY_MAX}"
+            ),
+        ));
     }
     let link = match link.map(str::trim).filter(|l| !l.is_empty()) {
         None => None,
         Some(link) if link.len() > LINK_MAX => {
-            return Err(Error::Denied(format!(
-                "the link is {} bytes; at most {LINK_MAX}",
-                link.len()
-            )))
+            return Err(Refusal::new(
+                "link",
+                format!("the link is {} bytes; at most {LINK_MAX}", link.len()),
+            ))
         }
         Some(link) => match url::Url::parse(link) {
             Ok(parsed) if matches!(parsed.scheme(), "http" | "https") && parsed.has_host() => {
                 Some(link.to_owned())
             }
             _ => {
-                return Err(Error::Denied(format!(
-                    "the link must be an http or https URL, not {link:?}"
-                )))
+                return Err(Refusal::new(
+                    "link",
+                    format!("the link must be an http or https URL, not {link:?}"),
+                ))
             }
         },
     };
     Ok((summary.to_owned(), link))
+}
+
+/// A whole report as the `report_status` tool takes it, checked: the
+/// state, and the summary and link as [`check`] keeps them. The first
+/// field to break a rule is named in the [`Refusal`], in the order
+/// `state`, `summary`, `link`.
+pub fn validate(
+    state: &str,
+    summary: &str,
+    link: Option<&str>,
+) -> Result<(ReportedState, String, Option<String>), Refusal> {
+    let state = parse_state(state).map_err(|message| Refusal::new("state", message))?;
+    let (summary, link) = check_fields(summary, link)?;
+    Ok((state, summary, link))
 }
 
 /// The latest self-reported status in `events`, oldest first, if the
@@ -284,6 +336,53 @@ mod tests {
         }
         let long = format!("https://example.com/{}", "a".repeat(LINK_MAX));
         assert!(link(&long).is_err());
+    }
+
+    /// A refusal names the field that broke a rule, in the order state,
+    /// summary, link, and says what the tool's `denied` says.
+    #[test]
+    fn a_refusal_names_its_field() {
+        let refused = |state: &str, summary: &str, link: Option<&str>| {
+            validate(state, summary, link).unwrap_err()
+        };
+        let state = refused("done", "x", None);
+        assert_eq!(state.field, "state");
+        let Err(Error::Denied(tool)) = ReportedState::parse("done") else {
+            panic!("done is not a state");
+        };
+        assert_eq!(state.message, tool);
+        let summary = refused("working", &"x".repeat(SUMMARY_MAX + 1), None);
+        assert_eq!(summary.field, "summary");
+        assert!(summary.message.contains("281 characters"), "{summary:?}");
+        assert_eq!(refused("working", " ", None).field, "summary");
+        let link = refused("working", "x", Some("ftp://example.com/"));
+        assert_eq!(link.field, "link");
+        assert!(link.message.contains("http or https"), "{link:?}");
+        // The first to fail is named.
+        assert_eq!(
+            refused("done", "", Some("nope")).field,
+            "state",
+            "state is checked first"
+        );
+        assert_eq!(refused("idle", "", Some("nope")).field, "summary");
+        let (state, summary, link) = validate(
+            " blocked ",
+            " needs the API key\n",
+            Some(" https://example.com/i/1 "),
+        )
+        .unwrap();
+        assert_eq!(state, ReportedState::Blocked);
+        assert_eq!(summary, "needs the API key");
+        assert_eq!(link.as_deref(), Some("https://example.com/i/1"));
+        // The tool's refusal is the same text.
+        let Err(Error::Denied(tool)) = check(&"x".repeat(SUMMARY_MAX + 1), None) else {
+            panic!("too long");
+        };
+        assert_eq!(tool, summary_message(SUMMARY_MAX + 1));
+    }
+
+    fn summary_message(length: usize) -> String {
+        format!("the summary is {length} characters; keep it to one line of at most {SUMMARY_MAX}")
     }
 
     #[test]

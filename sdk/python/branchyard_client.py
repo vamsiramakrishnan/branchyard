@@ -56,6 +56,7 @@ __all__ = [
     "BranchInfo",
     "BranchyardError",
     "CheckFailedError",
+    "CheckReport",
     "Client",
     "ConflictError",
     "Conversation",
@@ -76,6 +77,7 @@ __all__ = [
     "Record",
     "Reply",
     "Repo",
+    "Reported",
     "RunningError",
     "ServerError",
     "Status",
@@ -143,7 +145,14 @@ class NotAllowedError(BranchyardError):
 
 class InvalidRequestError(BranchyardError):
     """`invalid_request`, `invalid_name`, `unknown_harness`,
-    `cursor_out_of_range`, `unsupported_media_type`, `body_too_large`."""
+    `cursor_out_of_range`, `unsupported_media_type`, `body_too_large`.
+    `field` names the request field that broke a rule when the server says
+    which (`Repo.report_status`: `state`, `summary` or `link`)."""
+
+    @property
+    def field(self) -> Optional[str]:
+        value = self.detail.get("field")
+        return value if isinstance(value, str) else None
 
 
 class BranchBusyError(BranchyardError):
@@ -461,6 +470,41 @@ class StatusReport(Record):
     `status`, which may disagree with it."""
 
 
+class Reported(Record):
+    """What `Repo.report_status` returns: `report` (a `StatusReport`, as
+    recorded) and `escalation`, the `Message` sent to the parent for a
+    `blocked` or `failure` report, or None for the other states, for a
+    branch with no parent, and for a report that repeats the one before it
+    exactly (the parent was told then)."""
+
+    @property
+    def report(self) -> StatusReport:
+        return StatusReport(self.get("report") or {})
+
+    @property
+    def escalation(self) -> Optional["Message"]:
+        value = self.get("escalation")
+        return Message(value) if isinstance(value, dict) else None
+
+
+class CheckReport(Record):
+    """A branch's check run on its current work, as `by check` prints it:
+    `branch`, `check` (its argv, None when it has none: nothing ran),
+    `inherited_from`, `work` (a commit), `target` (the parent's git branch
+    it was merged into), `checked` (the commit the check ran on),
+    `outcome` (`passed`, `failed`, `timed_out`, `not_started`, or `not_run`
+    when there is no check or `conflicts` names files), `conflicts` and
+    `output_tail`. From `Operation.check_report`."""
+
+    @property
+    def passed(self) -> bool:
+        """Whether integrating the work as it is would get past its check:
+        the check passed, or there is none and nothing conflicted."""
+        if self.get("check") is not None:
+            return self.get("outcome") == "passed"
+        return not self.get("conflicts")
+
+
 class Inspection(Record):
     """`Inspection`, as `by inspect --json`: `name`, `status`, `harness`,
     `parent`, `children`, `depth`, `turns`, `cost_usd`, `subtree_cost_usd`,
@@ -562,7 +606,7 @@ class Operation(Record):
     """An operation (`docs/server.md#operations`): `id`, `repo`, `kind`,
     `state` (`queued`, `running`, `succeeded`, `failed`, `interrupted`),
     `branches`, `cursor` and `end_cursor` (feed positions), `result`
-    (`branches`, `descendants`, `merged`, `inspection`), `error`,
+    (`branches`, `descendants`, `merged`, `inspection`, `check_report`), `error`,
     `waiting`, `priority`. `replayed` is true when the server answered a
     repeated idempotency key with the original operation."""
 
@@ -592,6 +636,16 @@ class Operation(Record):
         result = self.get("result") or {}
         value = result.get("inspection")
         return Inspection(value) if isinstance(value, dict) else None
+
+    @property
+    def check_report(self) -> Optional[CheckReport]:
+        """A check operation's report (`Repo.check`), once it succeeded. A
+        check that failed is a succeeded operation whose report is not
+        `passed`; the operation fails only when the check could not be
+        run."""
+        result = self.get("result") or {}
+        value = result.get("check_report")
+        return CheckReport(value) if isinstance(value, dict) else None
 
 
 def new_key() -> str:
@@ -997,6 +1051,16 @@ class Repo:
     def merge(self, branch: str, target: Optional[str] = None, key: Optional[str] = None) -> Operation:
         return self.client._operation(self._branch(branch, "/merge"), {"target": target}, key)
 
+    def check(self, branch: str, key: Optional[str] = None) -> Operation:
+        """`POST .../check`: run `branch`'s check on its current work, the
+        way integrating it would, and integrate nothing; as `by check`. The
+        check can run as long as an integration's (30 minutes), so this is
+        an operation: `client.wait(op, check=True).check_report` says how it
+        ended. A check that fails is a succeeded operation whose report is
+        not `passed`. It holds no branch lock and runs no turn. Needs the
+        `run` scope (`DeniedError` without it)."""
+        return self.client._operation(self._branch(branch, "/check"), {}, key)
+
     def spawn(
         self,
         parent: str,
@@ -1165,6 +1229,21 @@ class Repo:
 
     def escalate(self, branch: str, text: str) -> Message:
         return Message(self.client.post(self._branch(branch, "/escalate"), {"text": text}))
+
+    def report_status(self, branch: str, state: str, summary: str, link: Optional[str] = None) -> Reported:
+        """State `branch`'s own status beside the protocol's, as the person
+        or surface acting for it (`by report-status --as`): `state` is
+        `working`, `idle`, `blocked`, `complete` or `failure`, `summary`
+        one line of at most 280 characters, `link` an optional http(s) URL.
+        A `blocked` or `failure` report is also escalated to its parent. A
+        field that breaks a rule raises `InvalidRequestError` whose `field`
+        names it. A branch's own harness reports through its broker, not
+        this route."""
+        return Reported(
+            self.client.post(
+                self._branch(branch, "/report-status"), _drop_none({"state": state, "summary": summary, "link": link})
+            )
+        )
 
     def answer(self, branch: str, message_id: int, text: str) -> Message:
         """Answer one of `branch`'s descendants' messages, as `branch`."""
