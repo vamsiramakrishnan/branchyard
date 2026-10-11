@@ -450,4 +450,33 @@ mod tests {
         assert!(ClientTls::from_ca_pem(b"not a certificate").is_err());
         assert!(ServerTls::from_pem(cert.as_bytes(), b"no key").is_err());
     }
+
+    #[test]
+    fn a_ca_file_is_read_and_a_missing_or_malformed_one_is_named() {
+        let (ca_pem, ca) = authority();
+        let scratch = branchyard_testkit::Scratch::new("bridge-tls");
+        let path = scratch.join("ca.pem");
+        std::fs::write(&path, &ca_pem).unwrap();
+        let tls = ClientTls::from_ca_file(&path).unwrap();
+        // Debug output names the type, never the trust store.
+        assert_eq!(format!("{tls:?}"), "ClientTls { .. }");
+        let (cert, key) = identity(&ca);
+        let server_tls = ServerTls::from_pem(cert.as_bytes(), key.as_bytes()).unwrap();
+        assert_eq!(format!("{server_tls:?}"), "ServerTls { .. }");
+
+        std::fs::write(&path, "not a certificate").unwrap();
+        let error = ClientTls::from_ca_file(&path).unwrap_err();
+        assert!(error.to_string().starts_with("CA file "), "{error}");
+        assert!(error.to_string().contains("ca.pem"), "{error}");
+
+        let missing = scratch.join("absent.pem");
+        let error = ClientTls::from_ca_file(&missing).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(
+            error.to_string().starts_with("could not read the CA file "),
+            "{error}"
+        );
+        assert!(error.to_string().contains("absent.pem"), "{error}");
+        scratch.close();
+    }
 }

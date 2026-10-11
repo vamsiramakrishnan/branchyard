@@ -1067,3 +1067,51 @@ fn group_members(pgid: u32) -> Vec<String> {
     }
     members
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pump_relays_chunks_then_the_closing_frame() {
+        let data: Vec<u8> = (0..CHUNK + 10).map(|i| i as u8).collect();
+        let frames = Mutex::new(Vec::new());
+        pump(
+            io::Cursor::new(data.clone()),
+            |frame| {
+                frames.lock().unwrap().push(frame);
+                Ok(())
+            },
+            Frame::Stdout,
+            Frame::StdoutClosed,
+        );
+        let frames = frames.into_inner().unwrap();
+        assert_eq!(
+            frames,
+            [
+                Frame::Stdout(data[..CHUNK].to_vec()),
+                Frame::Stdout(data[CHUNK..].to_vec()),
+                Frame::StdoutClosed,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pump_drains_the_pipe_once_its_client_is_gone() {
+        let mut pipe = io::Cursor::new(vec![7u8; CHUNK * 3]);
+        let sends = AtomicUsize::new(0);
+        pump(
+            &mut pipe,
+            |_| {
+                sends.fetch_add(1, Ordering::Relaxed);
+                Err(io::Error::other("the client is gone"))
+            },
+            Frame::Stderr,
+            Frame::StderrClosed,
+        );
+        // One failed send and no closing frame, but the pipe is read to its
+        // end so the process behind it is never blocked on it.
+        assert_eq!(sends.load(Ordering::Relaxed), 1);
+        assert_eq!(pipe.position() as usize, CHUNK * 3);
+    }
+}

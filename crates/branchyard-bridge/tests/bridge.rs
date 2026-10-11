@@ -8,6 +8,7 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -870,4 +871,94 @@ fn status_names_the_running_execs_and_what_they_run() {
     wait::until("the exec to stop being reported", || {
         endpoint.status().unwrap().execs.is_empty()
     });
+}
+
+#[test]
+fn keygen_writes_the_key_for_its_owner_only_and_prints_the_public_key() {
+    let dir = scratch("keygen");
+    let path = dir.join("bridge.key");
+    let keygen = || {
+        branchyard_testkit::hermetic(&mut Command::new(env!("CARGO_BIN_EXE_branchyard-bridge")))
+            .args(["keygen", "--out"])
+            .arg(&path)
+            .output()
+            .unwrap()
+    };
+    let output = keygen();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let printed = String::from_utf8(output.stdout).unwrap();
+    let public_key = Signer::read(&path).unwrap().public_key();
+    assert_eq!(printed, format!("{public_key}\n"));
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // Never replacing a file: a second run fails and leaves the key alone.
+    let again = keygen();
+    assert!(!again.status.success());
+    let stderr = String::from_utf8(again.stderr).unwrap();
+    assert!(
+        stderr.starts_with("branchyard-bridge: could not write"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("bridge.key"), "{stderr}");
+    assert_eq!(Signer::read(&path).unwrap().public_key(), public_key);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_malformed_run_as_is_refused_before_the_bridge_starts() {
+    let output =
+        branchyard_testkit::hermetic(&mut Command::new(env!("CARGO_BIN_EXE_branchyard-bridge")))
+            .args(["serve", "--run-as", "nobody"])
+            .output()
+            .unwrap();
+    assert_eq!(output.status.code(), Some(2), "a usage error");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("needs numeric UID:GID such as 1000:1000"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn requests_that_are_not_bridge_upgrades_are_answered_with_http_errors() {
+    let bridge = Bridge::start();
+    let address = bridge
+        .url
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_owned();
+    let answer = |request: &str| {
+        let mut stream = TcpStream::connect(&address).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    };
+    let response = answer("GET /elsewhere HTTP/1.1\r\nHost: bridge\r\n\r\n");
+    assert!(
+        response.starts_with("HTTP/1.1 404 Not Found\r\n"),
+        "{response}"
+    );
+    assert!(
+        response.ends_with("\r\n\r\nnot a bridge endpoint\n"),
+        "{response}"
+    );
+    let response = answer(
+        "GET / HTTP/1.1\r\nHost: bridge\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+         Sec-WebSocket-Key: AQIDBAUGBwgJCgsMDQ4PEA==\r\nSec-WebSocket-Version: 8\r\n\r\n",
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 426 Upgrade Required\r\n"),
+        "{response}"
+    );
+    assert!(
+        response.contains("WebSocket 13 with subprotocol branchyard-bridge.v2"),
+        "{response}"
+    );
 }

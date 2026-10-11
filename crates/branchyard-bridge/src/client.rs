@@ -649,3 +649,72 @@ impl Drop for BridgeProcess {
         writer.abort();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn urls_are_parsed_with_their_defaults_and_bad_ones_are_named() {
+        let endpoint = Endpoint::new("https://bridge.example/actor/", "secret-token").unwrap();
+        assert_eq!(endpoint.url(), "https://bridge.example:443/actor/");
+        assert_eq!(endpoint.host(), "bridge.example");
+        assert!(endpoint.is_secure());
+        // The credential never shows in the debug output.
+        let shown = format!("{endpoint:?}");
+        assert!(
+            shown.contains("https://bridge.example:443/actor/"),
+            "{shown}"
+        );
+        assert!(!shown.contains("secret-token"), "{shown}");
+
+        let endpoint = Endpoint::new("ws://[::1]:9000", "t").unwrap();
+        assert_eq!(endpoint.url(), "ws://[::1]:9000/");
+        assert_eq!(endpoint.host(), "[::1]");
+        assert!(!endpoint.is_secure());
+        assert_eq!(
+            Endpoint::new("http://host", "t").unwrap().url(),
+            "http://host:80/"
+        );
+
+        let bad = |url: &str| Endpoint::new(url, "t").unwrap_err();
+        assert_eq!(bad("ftp://host/").kind(), io::ErrorKind::Unsupported);
+        assert!(
+            bad("ftp://host/")
+                .to_string()
+                .contains("the ftp scheme is not supported"),
+            "{}",
+            bad("ftp://host/")
+        );
+        let plain = bad("host:8080");
+        assert_eq!(plain.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            plain.to_string().contains("expected https://host"),
+            "{plain}"
+        );
+        let with_user = bad("http://user@host/");
+        assert!(
+            with_user.to_string().contains("without credentials"),
+            "{with_user}"
+        );
+        let port = bad("http://host:eighty/");
+        assert!(port.to_string().contains("bad port"), "{port}");
+        let no_host = bad("http://:8080/");
+        assert!(no_host.to_string().contains("expected a host"), "{no_host}");
+    }
+
+    #[test]
+    fn a_derived_endpoint_keeps_what_it_is_not_given() {
+        let mut endpoint = Endpoint::new("https://router.example:8443/a/", "token").unwrap();
+        endpoint.connect_timeout = Duration::from_secs(3);
+        let moved = endpoint.with_url("http://10.0.0.7:8080/").unwrap();
+        assert_eq!(moved.url(), "http://10.0.0.7:8080/");
+        assert_eq!(moved.connect_timeout, Duration::from_secs(3));
+        assert_eq!(moved.credential, "token");
+        assert!(endpoint.with_url("gopher://x").is_err());
+        let other = endpoint.with_credential("another");
+        assert_eq!(other.url(), endpoint.url());
+        assert_eq!(other.connect_timeout, Duration::from_secs(3));
+        assert_eq!(other.credential, "another");
+    }
+}
