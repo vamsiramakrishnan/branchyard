@@ -30,6 +30,7 @@ use crate::{
 
 const MCP_CONFIG: &str = ".gemini/config/mcp_config.json";
 const INSTRUCTIONS: &str = ".gemini/GEMINI.md";
+const SETTINGS: &str = ".gemini/antigravity-cli/settings.json";
 
 pub const AUTH: Spec = Spec {
     harness: "antigravity",
@@ -86,7 +87,25 @@ impl Provisioner for Antigravity {
         if let Some(resolved) = AUTH.select(&given, context.auth.as_deref())? {
             plan.auth = Some(resolved.method.to_owned());
             let key = resolved.env()?;
-            plan.secret_env(key, key, context.secret(key).unwrap_or_default(), true);
+            // agy 1.3.3 reads the key from GEMINI_API_KEY alone (a
+            // GOOGLE_API_KEY has no effect), and only with `modelProvider`
+            // set to `gemini` in its settings; otherwise it asks for a
+            // Google sign-in, which a headless run cannot give. The setting
+            // goes into the private home every secret needs.
+            plan.secret_env(
+                key,
+                "GEMINI_API_KEY",
+                context.secret(key).unwrap_or_default(),
+                true,
+            );
+            plan.edit(
+                SETTINGS,
+                false,
+                Edit::Json {
+                    edits: vec![JsonEdit::Set(path(&["modelProvider"]), json!("gemini"))],
+                    comment_lines: false,
+                },
+            );
         }
         plan.unused_secrets = unused(context, &AUTH.names());
 

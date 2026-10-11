@@ -975,3 +975,26 @@ fn plans_never_show_secret_values_in_debug_output() {
     let plan = branchyard_provision::plan(&context).unwrap();
     assert!(!format!("{plan:?} {context:?}").contains("sk-debug-secret"));
 }
+
+#[test]
+fn antigravity_takes_the_key_as_gemini_api_key_and_sets_its_model_provider() {
+    // Checked against agy 1.3.3: a GOOGLE_API_KEY has no effect, and a
+    // GEMINI_API_KEY none without `modelProvider: "gemini"` in its settings,
+    // which otherwise asks for a Google sign-in. Branchyard sets both in the
+    // private home every secret needs, and leaves the rest of the settings
+    // alone.
+    let temp = Temp::new();
+    temp.seed(
+        ".gemini/antigravity-cli/settings.json",
+        "{\"permissions\": {\"allow\": [\"Read\"]}}\n",
+    );
+    let mut context = context("antigravity", Protocol::AntigravityStreamJson);
+    context.secrets = secrets(&[("GOOGLE_API_KEY", "g-secret")]);
+    let plan = provision(&temp, &context);
+    let names: Vec<&str> = plan.env.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["GEMINI_API_KEY"]);
+    let settings: serde_json::Value =
+        serde_json::from_str(&temp.read(".gemini/antigravity-cli/settings.json")).unwrap();
+    assert_eq!(settings["modelProvider"], "gemini");
+    assert_eq!(settings["permissions"]["allow"][0], "Read");
+}
