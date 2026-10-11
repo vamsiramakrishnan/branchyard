@@ -1,7 +1,7 @@
 {
   "format": 1,
   "settle": {
-    "crates/branchyard-bridge/tests/bridge.rs": 2,
+    "crates/branchyard-bridge/tests/bridge.rs": 1,
     "crates/branchyard-server/tests/api.rs": 1,
     "crates/branchyard-server/tests/postgres.rs": 4,
     "crates/branchyard-server/tests/signals.rs": 2,

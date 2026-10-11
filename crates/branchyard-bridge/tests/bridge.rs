@@ -544,7 +544,7 @@ fn orphans_of_an_exec_are_reparented_to_the_bridge_and_reaped() {
     let mut process = endpoint
         .exec(&sh(
             &bridge.work(),
-            "sh -c 'sleep 1 >/dev/null 2>&1 & echo $!'; exit 0",
+            "sh -c 'sleep 300 >/dev/null 2>&1 & echo $!'; exit 0",
         ))
         .unwrap();
     let mut out = String::new();
@@ -556,10 +556,16 @@ fn orphans_of_an_exec_are_reparented_to_the_bridge_and_reaped() {
     assert!(process.wait().unwrap().success());
     let orphan: u32 = out.trim().parse().unwrap();
     let bridge_pid = bridge.pid();
-    if let Some((parent, _)) = stat_of(orphan) {
-        assert_eq!(parent, bridge_pid, "the orphan went elsewhere");
-    }
-    // It exits on its own and is reaped: no zombie is left.
+    // Still running, so its parent can be read: the bridge, not the shell.
+    assert_eq!(
+        stat_of(orphan).map(|(parent, _)| parent),
+        Some(bridge_pid),
+        "the orphan went elsewhere"
+    );
+    // End it from outside, rather than wait out its sleep: the bridge
+    // reaps it, and no zombie is left.
+    // SAFETY: plain syscall on a child of the exec this test started.
+    assert_eq!(unsafe { libc::kill(orphan as i32, libc::SIGTERM) }, 0);
     wait::until(&format!("orphan {orphan} to be reaped"), || {
         !Path::new(&format!("/proc/{orphan}")).exists()
     });
@@ -633,6 +639,7 @@ fn sigterm_delivers_an_execs_last_output_and_status_before_the_bridge_exits() {
              exec 3>&-; while :; do sleep 0.05; done",
         ))
         .unwrap();
+    let shell: u32 = process.id().parse().unwrap();
     let mut stdout = BufReader::new(process.take_stdout().unwrap());
     let mut stderr = process.take_stderr().unwrap();
     let mut line = String::new();
@@ -647,8 +654,9 @@ fn sigterm_delivers_an_execs_last_output_and_status_before_the_bridge_exits() {
     wait::settle("the pipes fill", Duration::from_millis(500));
     // SAFETY: plain syscall.
     assert_eq!(unsafe { libc::kill(bridge.pid() as i32, libc::SIGTERM) }, 0);
-    // The trap has run and the shell has exited well before stderr is read.
-    wait::settle("the shell exits", Duration::from_millis(300));
+    // The trap has run and the shell has exited before stderr is read. A
+    // zombie, not yet reaped by the bridge, counts as exited.
+    wait::gone(shell);
     let drained = thread::spawn(move || io::copy(&mut stderr, &mut io::sink()).unwrap());
     line.clear();
     stdout.read_line(&mut line).unwrap();
@@ -685,7 +693,7 @@ fn as_process_1_it_reaps_orphans_and_only_the_runtime_can_stop_it() {
     let mut process = endpoint
         .exec(&sh(
             &bridge.work(),
-            "sh -c 'sleep 1 >/dev/null 2>&1 & echo $!'; exit 0",
+            "sh -c 'sleep 300 >/dev/null 2>&1 & echo $!'; exit 0",
         ))
         .unwrap();
     let mut out = String::new();
@@ -702,6 +710,12 @@ fn as_process_1_it_reaps_orphans_and_only_the_runtime_can_stop_it() {
         &format!("awk '{{print $4}}' /proc/{orphan}/stat 2>/dev/null || echo 1"),
     );
     assert_eq!(parent, "1\n");
+    // End it from inside, rather than wait out its sleep: process 1 reaps
+    // it, and no zombie is left.
+    assert_eq!(
+        run(&endpoint, &bridge.work(), &format!("kill -TERM {orphan}")).0,
+        Some(0)
+    );
     let zombies =
         "for s in /proc/[0-9]*/stat; do awk '$3 == \"Z\" {print $1}' $s; done 2>/dev/null";
     wait::until(&format!("orphan {orphan} to be reaped"), || {

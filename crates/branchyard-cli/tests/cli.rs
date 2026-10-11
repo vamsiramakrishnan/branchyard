@@ -3774,7 +3774,9 @@ fn a_by_check_whose_caller_is_killed_stops_its_check() {
             pid.display()
         ),
         format!(
-            "SH s=$(cat '{}'); [ -n \"$s\" ] || echo no-pid; sleep 1; \
+            "SH s=$(cat '{}'); [ -n \"$s\" ] || echo no-pid; n=0; \
+             while [ -d /proc/$s ] && ! grep -q ') Z ' /proc/$s/stat && [ $n -lt 20 ]; \
+             do sleep 0.05; n=$((n+1)); done; \
              if [ -d /proc/$s ] && ! grep -q ') Z ' /proc/$s/stat; \
              then echo check-alive; else echo check-gone; fi",
             pid.display()

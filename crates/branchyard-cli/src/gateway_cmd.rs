@@ -541,7 +541,13 @@ fn supervise(
                 health = now;
             }
         }
-        std::thread::sleep(Duration::from_secs(1));
+        // Looked at every 100 ms until the gateway is seen listening, so a
+        // record turns healthy promptly; once a second after that.
+        let pause = match registration.is_some() && health != Health::Healthy {
+            true => Duration::from_millis(100),
+            false => Duration::from_secs(1),
+        };
+        std::thread::sleep(pause);
     }
 }
 

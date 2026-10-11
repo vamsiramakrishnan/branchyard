@@ -151,6 +151,14 @@ Run the commands in [validation](docs/validation.md). Add regression tests for b
 
 Describe each change in terms of the developer-visible behavior, the failure condition it handles, and the evidence collected. Update the support matrix only when the corresponding profile has actually passed its gate.
 
+## Parallel worktrees and the build cache
+
+Cargo keys its artifacts by package, features and profile, not by the worktree they were built from. Worktrees that share one `CARGO_TARGET_DIR` therefore overwrite each other's rlibs and `target/debug/by`, and a CLI integration test (which runs `CARGO_BIN_EXE_by`) can run against another checkout's binary. A failure that reports a missing subcommand, or behaviour your change does not have, is often this.
+
+The remedy is one `CARGO_TARGET_DIR` per worktree when the disk allows it. When it does not, touch the sources you changed and rerun the test, so that cargo rebuilds them from your tree. If cargo says "Blocking waiting for file lock", another build is using that directory: wait for it, and do not kill it.
+
+`CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_PROFILE_TEST_DEBUG=0` keep the cache small, which matters when several worktrees share one directory.
+
 ## Use a vetted crate for a codec
 
 Do not write a percent, hex, base64, shell-quoting, URL or tar codec by hand. Five copies of `percent_decode` once disagreed about `+` and all dropped a trailing `%41`. Call the crate, or the one shared helper built on it:
