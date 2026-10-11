@@ -104,7 +104,6 @@ pub fn read_head(stream: &mut impl Read) -> io::Result<Head> {
 }
 
 /// Write a complete, non-upgrade HTTP response and close the connection.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 pub fn respond(stream: &mut Stream, status: &str, body: &str) -> io::Result<()> {
     write!(
         stream,
@@ -113,7 +112,10 @@ pub fn respond(stream: &mut Stream, status: &str, body: &str) -> io::Result<()> 
         body.len()
     )?;
     stream.flush()?;
-    let _ = stream.shutdown(Shutdown::Write);
+    branchyard_support::best_effort(
+        "shut down the response's write side",
+        stream.shutdown(Shutdown::Write),
+    );
     Ok(())
 }
 
@@ -182,9 +184,11 @@ impl WsWriter {
     }
 
     /// Close the TCP connection in both directions without a close frame.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
     pub fn abort(&self) {
-        let _ = self.stream.shutdown(Shutdown::Both);
+        branchyard_support::best_effort(
+            "close a WebSocket connection",
+            self.stream.shutdown(Shutdown::Both),
+        );
     }
 }
 
@@ -199,7 +203,6 @@ pub struct WsReader {
 impl WsReader {
     /// The next binary message, or `None` once the peer closed the
     /// WebSocket or the connection.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
     pub fn recv(&mut self) -> io::Result<Option<Vec<u8>>> {
         let mut message: Option<Vec<u8>> = None;
         loop {
@@ -262,14 +265,23 @@ impl WsReader {
                 }
                 OP_PING => {
                     let mut writer = self.writer.lock_recovering("writer");
-                    let _ = writer.frame(OP_PONG, &payload);
+                    branchyard_support::best_effort(
+                        "answer a ping",
+                        writer.frame(OP_PONG, &payload),
+                    );
                 }
                 OP_PONG => {}
                 OP_CLOSE => {
                     self.closed = true;
                     let mut writer = self.writer.lock_recovering("writer");
-                    let _ = writer.frame(OP_CLOSE, &payload[..payload.len().min(2)]);
-                    let _ = writer.stream.shutdown(Shutdown::Write);
+                    branchyard_support::best_effort(
+                        "echo a close frame",
+                        writer.frame(OP_CLOSE, &payload[..payload.len().min(2)]),
+                    );
+                    branchyard_support::best_effort(
+                        "shut down the write side after a close frame",
+                        writer.stream.shutdown(Shutdown::Write),
+                    );
                     return Ok(None);
                 }
                 other => return Err(invalid(format!("unexpected WebSocket opcode {other}"))),
@@ -333,7 +345,6 @@ pub struct Refused {
 /// `protocol`, with `headers` added. A non-101 answer is returned as
 /// [`Refused`] inside the error, with kind `PermissionDenied` for 401 and
 /// 403, `NotFound` for 404 and `Other` otherwise.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 pub fn client(
     mut stream: Stream,
     host: &str,
@@ -371,7 +382,10 @@ pub fn client(
             .unwrap_or(0)
             .min(MAX_HEAD);
         let mut body = vec![0u8; length];
-        let _ = stream.read_exact(&mut body);
+        branchyard_support::best_effort(
+            "read the body of a refused upgrade",
+            stream.read_exact(&mut body),
+        );
         let body = String::from_utf8_lossy(&body).trim().to_owned();
         let kind = match status {
             401 | 403 => io::ErrorKind::PermissionDenied,

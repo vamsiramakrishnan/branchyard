@@ -241,7 +241,6 @@ fn copy_dir(source: &Path, target: &Path, method: &mut Method) -> io::Result<()>
 }
 
 /// Clone one regular file, or copy it when the filesystem cannot clone.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
 pub fn clone_file(source: &Path, target: &Path) -> io::Result<Method> {
     let method = match platform::clone(source, target) {
         Ok(()) => Method::Clone,
@@ -257,7 +256,10 @@ pub fn clone_file(source: &Path, target: &Path) -> io::Result<Method> {
     };
     if let Ok(modified) = fs::metadata(source).and_then(|m| m.modified()) {
         if let Ok(file) = fs::OpenOptions::new().write(true).open(target) {
-            let _ = file.set_modified(modified);
+            branchyard_support::best_effort(
+                "keep the modification time of a copy",
+                file.set_modified(modified),
+            );
         }
     }
     Ok(method)
@@ -328,14 +330,15 @@ mod platform {
     }
 }
 
-#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn tree(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("by-mat-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -388,7 +391,7 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o755);
-        let _ = fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -413,7 +416,7 @@ mod tests {
         assert_eq!(removed, ["node_modules"]);
         assert!(to.join("keep").is_dir());
         assert!(from.join("node_modules").is_dir());
-        let _ = fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

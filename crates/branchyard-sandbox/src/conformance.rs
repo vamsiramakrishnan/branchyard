@@ -27,12 +27,7 @@
 //! conformance::run_all(provider.as_ref(), &setup);
 //! ```
 
-#![allow(
-    clippy::expect_used,
-    clippy::let_underscore_must_use,
-    clippy::panic,
-    clippy::unwrap_used
-)] // ratchet: branchyard-sandbox
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)] // ratchet: branchyard-sandbox
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -242,7 +237,10 @@ impl Drop for Sandbox<'_> {
 fn drain(mut pipe: Box<dyn Read + Send>) -> thread::JoinHandle<String> {
     thread::spawn(move || {
         let mut text = String::new();
-        let _ = pipe.read_to_string(&mut text);
+        branchyard_support::best_effort(
+            "read a process's output to its end",
+            pipe.read_to_string(&mut text),
+        );
         text
     })
 }
@@ -520,10 +518,13 @@ pub fn egress_confinement(provider: &dyn SandboxProvider, setup: &Setup) {
     thread::spawn(move || {
         let read = listener.accept().map(|(mut stream, _)| {
             let mut text = String::new();
-            let _ = stream.read_to_string(&mut text);
+            branchyard_support::best_effort(
+                "read what reached the listener",
+                stream.read_to_string(&mut text),
+            );
             text
         });
-        let _ = sender.send(read);
+        branchyard_support::best_effort("hand the listener's read to the test", sender.send(read));
     });
     let out = drain(process.take_stdout().expect("stdout is piped"));
     let err = drain(process.take_stderr().expect("stderr is piped"));

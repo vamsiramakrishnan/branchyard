@@ -1,11 +1,7 @@
 //! Webhook notifications against a local HTTP receiver: no real network,
 //! no real harness.
 
-#![allow(
-    clippy::expect_used,
-    clippy::let_underscore_must_use,
-    clippy::unwrap_used
-)] // tests: a panic is the failure report
+#![allow(clippy::expect_used, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::collections::HashMap;
@@ -310,7 +306,7 @@ fn a_stall_notification_reaches_a_webhook() {
                 .any(|k| k == "stall")
         })
     });
-    let _ = client.repo("app").cancel("stalls");
+    client.repo("app").cancel("stalls").unwrap();
     let _ = common::await_operation(&client, &op.id);
     server.stop();
 }

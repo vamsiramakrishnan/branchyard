@@ -29,12 +29,7 @@
 //! without changing the transaction's shape. [`FileStore`], the JSON-lines
 //! file earlier versions used, is only read, to import it once.
 
-#![allow(
-    clippy::expect_used,
-    clippy::let_underscore_must_use,
-    clippy::map_unwrap_or,
-    clippy::unwrap_used
-)] // ratchet: branchyard-server
+#![allow(clippy::expect_used, clippy::map_unwrap_or, clippy::unwrap_used)] // ratchet: branchyard-server
 use branchyard_support::LockExt as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
@@ -746,7 +741,10 @@ impl FileStore {
         if let Some(parent) = path.parent() {
             // Make the rename durable.
             if let Ok(dir) = File::open(parent) {
-                let _ = dir.sync_all();
+                branchyard_support::best_effort(
+                    "sync the directory of the store file",
+                    dir.sync_all(),
+                );
             }
         }
         let file = OpenOptions::new().append(true).open(&path)?;

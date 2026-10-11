@@ -524,53 +524,73 @@ fn label_set(labels: &[(String, String)], extra: Option<(&str, &str)>) -> String
 /// `snapshot` in the text exposition format, every declared family in
 /// [`FAMILIES`] order with its `HELP` and `TYPE` lines, series sorted by
 /// labels. A family with no series is written with no samples.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 pub fn encode(snapshot: &Snapshot) -> String {
     let mut out = String::new();
     for family in FAMILIES {
-        let _ = writeln!(out, "# HELP {} {}", family.name, escape_help(family.help));
-        let _ = writeln!(out, "# TYPE {} {}", family.name, family.kind.name());
+        branchyard_support::best_effort(
+            "render a metrics line",
+            writeln!(out, "# HELP {} {}", family.name, escape_help(family.help)),
+        );
+        branchyard_support::best_effort(
+            "render a metrics line",
+            writeln!(out, "# TYPE {} {}", family.name, family.kind.name()),
+        );
         let Some(series) = snapshot.get(family.name) else {
             continue;
         };
         for (labels, value) in series {
             match value {
                 Value::Number(n) => {
-                    let _ = writeln!(
-                        out,
-                        "{}{} {}",
-                        family.name,
-                        label_set(labels, None),
-                        number(*n)
+                    branchyard_support::best_effort(
+                        "render a metrics line",
+                        writeln!(
+                            out,
+                            "{}{} {}",
+                            family.name,
+                            label_set(labels, None),
+                            number(*n)
+                        ),
                     );
                 }
                 Value::Histogram { counts, sum, count } => {
                     for (bound, n) in family.buckets.iter().zip(counts) {
-                        let _ = writeln!(
-                            out,
-                            "{}_bucket{} {n}",
-                            family.name,
-                            label_set(labels, Some(("le", &number(*bound))))
+                        branchyard_support::best_effort(
+                            "render a metrics line",
+                            writeln!(
+                                out,
+                                "{}_bucket{} {n}",
+                                family.name,
+                                label_set(labels, Some(("le", &number(*bound))))
+                            ),
                         );
                     }
-                    let _ = writeln!(
-                        out,
-                        "{}_bucket{} {count}",
-                        family.name,
-                        label_set(labels, Some(("le", "+Inf")))
+                    branchyard_support::best_effort(
+                        "render a metrics line",
+                        writeln!(
+                            out,
+                            "{}_bucket{} {count}",
+                            family.name,
+                            label_set(labels, Some(("le", "+Inf")))
+                        ),
                     );
-                    let _ = writeln!(
-                        out,
-                        "{}_sum{} {}",
-                        family.name,
-                        label_set(labels, None),
-                        number(*sum)
+                    branchyard_support::best_effort(
+                        "render a metrics line",
+                        writeln!(
+                            out,
+                            "{}_sum{} {}",
+                            family.name,
+                            label_set(labels, None),
+                            number(*sum)
+                        ),
                     );
-                    let _ = writeln!(
-                        out,
-                        "{}_count{} {count}",
-                        family.name,
-                        label_set(labels, None)
+                    branchyard_support::best_effort(
+                        "render a metrics line",
+                        writeln!(
+                            out,
+                            "{}_count{} {count}",
+                            family.name,
+                            label_set(labels, None)
+                        ),
                     );
                 }
             }

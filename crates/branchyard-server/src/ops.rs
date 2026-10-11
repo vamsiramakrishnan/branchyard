@@ -176,9 +176,13 @@ static INVENTORY_SOURCE: std::sync::OnceLock<InventorySource> = std::sync::OnceL
 /// Detect inventories with `source` in every registry this process opens
 /// from a configuration: how `by serve` and `by worker` add the usage
 /// meters `by usage` reads. Only the first call counts.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 pub fn set_inventory_source(source: InventorySource) {
-    let _ = INVENTORY_SOURCE.set(source);
+    branchyard_support::best_effort(
+        "keep the first inventory source",
+        INVENTORY_SOURCE
+            .set(source)
+            .map_err(|_| "an inventory source was already set"),
+    );
 }
 
 /// The inventory source set with [`set_inventory_source`], else
@@ -584,7 +588,6 @@ impl Registry {
 
     /// Claim and run queued operations until shutdown, renewing the
     /// claims of those running.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
     fn dispatch(self: Arc<Self>) {
         let mut renewed = Instant::now();
         let renew_every = self.options.lease / 3;
@@ -641,7 +644,7 @@ impl Registry {
             let wait = self.options.poll.min(renew_every);
             let state = self.lock();
             if !state.admitted || !free {
-                let _ = self.changed.wait_timeout_recovering(state, wait, "changed");
+                drop(self.changed.wait_timeout_recovering(state, wait, "changed"));
             }
         }
     }
@@ -922,7 +925,6 @@ impl Registry {
         self.wait(timeout, false)
     }
 
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
     fn wait(&self, timeout: Duration, queued_too: bool) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
@@ -940,11 +942,11 @@ impl Registry {
                 return false;
             }
             let state = self.lock();
-            let _ = self.changed.wait_timeout_recovering(
+            drop(self.changed.wait_timeout_recovering(
                 state,
                 (deadline - now).min(Duration::from_millis(20)),
                 "changed",
-            );
+            ));
         }
     }
 
@@ -1065,7 +1067,6 @@ impl Drop for Hold {
     }
 }
 
-#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1085,7 +1086,7 @@ mod tests {
             if work["wait"] == true {
                 let gate = self.gate.lock().unwrap().take();
                 if let Some(gate) = gate {
-                    let _ = gate.recv();
+                    gate.recv().unwrap();
                 }
             }
             if let Some(n) = work["n"].as_u64() {

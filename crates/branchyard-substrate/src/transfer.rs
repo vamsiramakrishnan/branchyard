@@ -199,12 +199,14 @@ impl<'a> Exec<'a> {
 
 /// Wait for `process`, whose stdin and stdout are already taken; its
 /// stderr joins the error. Exit 3 of [`GET_TREE`] is `NotFound`.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-substrate
 fn finish(mut process: Box<dyn Process>, what: &str) -> io::Result<()> {
     let errors = process.take_stderr().map(|mut stderr| {
         thread::spawn(move || {
             let mut text = String::new();
-            let _ = stderr.read_to_string(&mut text);
+            branchyard_support::best_effort(
+                "read a process's stderr",
+                stderr.read_to_string(&mut text),
+            );
             text
         })
     });
@@ -513,7 +515,7 @@ fn snapshot_host(dir: &Path, env: &[(OsString, OsString)], message: &str) -> Res
 }
 
 /// Run git in the actor in `cwd` and return stdout.
-#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-substrate
+#[allow(clippy::expect_used)] // ratchet: branchyard-substrate
 fn guest(
     endpoint: &dyn Guest,
     cwd: &Path,
@@ -544,14 +546,20 @@ fn guest(
     let mut stderr = process.take_stderr().expect("stderr is piped");
     let errors = thread::spawn(move || {
         let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
+        branchyard_support::best_effort(
+            "read a process's stderr",
+            stderr.read_to_string(&mut text),
+        );
         text
     });
     let mut stdout = String::new();
-    let _ = process
-        .take_stdout()
-        .expect("stdout is piped")
-        .read_to_string(&mut stdout);
+    branchyard_support::best_effort(
+        "read a process's stdout",
+        process
+            .take_stdout()
+            .expect("stdout is piped")
+            .read_to_string(&mut stdout),
+    );
     let status = process.wait()?;
     let stderr = errors.join().unwrap_or_default();
     process.teardown();
@@ -984,7 +992,7 @@ pub fn clear_previous_push(endpoint: &dyn Guest, workdir: &Path) -> Result<(), E
     clear(endpoint, &script, workdir, "")
 }
 
-#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-substrate
+#[allow(clippy::expect_used)] // ratchet: branchyard-substrate
 fn clear(endpoint: &dyn Guest, script: &str, workdir: &Path, home: &str) -> Result<(), Error> {
     let spec = ExecSpec {
         argv: vec![
@@ -1003,10 +1011,13 @@ fn clear(endpoint: &dyn Guest, script: &str, workdir: &Path, home: &str) -> Resu
         .map_err(|e| Error::Guest(format!("could not clear {}: {e}", workdir.display())))?;
     drop(process.take_stdin());
     let mut stderr = String::new();
-    let _ = process
-        .take_stderr()
-        .expect("stderr is piped")
-        .read_to_string(&mut stderr);
+    branchyard_support::best_effort(
+        "read a process's stderr",
+        process
+            .take_stderr()
+            .expect("stderr is piped")
+            .read_to_string(&mut stderr),
+    );
     let status = process.wait()?;
     process.teardown();
     match status.success() {

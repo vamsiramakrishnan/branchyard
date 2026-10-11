@@ -2,7 +2,6 @@
 //! failure was logged rather than lost. Behind the `testing` feature.
 
 use std::cell::RefCell;
-use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -31,15 +30,14 @@ pub struct Captured {
 struct Text(String);
 
 impl Visit for Text {
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-support
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         if !self.0.is_empty() {
             self.0.push(' ');
         }
         if field.name() == "message" {
-            let _ = write!(self.0, "{value:?}");
+            self.0.push_str(&format!("{value:?}"));
         } else {
-            let _ = write!(self.0, "{}={value:?}", field.name());
+            self.0.push_str(&format!("{}={value:?}", field.name()));
         }
     }
 }

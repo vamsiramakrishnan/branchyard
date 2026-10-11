@@ -1,11 +1,7 @@
 //! The kit's own tests: a helper that can pass while broken is worse than
 //! none, so each failure mode is shown to fail.
 
-#![allow(
-    clippy::expect_used,
-    clippy::let_underscore_must_use,
-    clippy::unwrap_used
-)] // tests: a panic is the failure report
+#![allow(clippy::expect_used, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -176,7 +172,10 @@ fn a_panicking_handler_fails_the_owning_test() {
         let mut stream = TcpStream::connect(mock.addr()).unwrap();
         stream.write_all(b"GET / HTTP/1.1\r\n\r\n").unwrap();
         let mut sink = String::new();
-        let _ = stream.read_to_string(&mut sink);
+        branchyard_support::best_effort(
+            "read to the close of a panicking handler's connection",
+            stream.read_to_string(&mut sink),
+        );
         mock.finish();
     });
     assert!(message.contains("the handler broke"), "{message}");

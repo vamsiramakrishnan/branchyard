@@ -584,7 +584,6 @@ impl Bridge {
     /// and not dumpable (Linux), and reaps orphans; SIGTERM and SIGINT end
     /// it as the module documentation says if [`block_signals`] was called
     /// before any thread started, and otherwise act as they would.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
     pub fn serve(self) -> io::Result<()> {
         harden();
         {
@@ -594,7 +593,10 @@ impl Bridge {
         if self.lifeline {
             let shared = self.shared.clone();
             thread::spawn(move || {
-                let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
+                branchyard_support::best_effort(
+                    "read the lifeline's stdin",
+                    io::copy(&mut io::stdin().lock(), &mut io::sink()),
+                );
                 shared.teardown(|_| true);
                 std::process::exit(0);
             });
@@ -604,7 +606,10 @@ impl Bridge {
             let shared = self.shared.clone();
             let tls = self.tls.clone();
             thread::spawn(move || {
-                let _ = stream.set_nodelay(true);
+                branchyard_support::best_effort(
+                    "set TCP_NODELAY on a connection",
+                    stream.set_nodelay(true),
+                );
                 let stream = match &tls {
                     None => Stream::Tcp(stream),
                     // A TLS client starts with a handshake record (0x16).
@@ -617,13 +622,16 @@ impl Bridge {
                             Err(_) => return,
                         },
                         Ok(false) => {
-                            let _ = health_only(stream);
+                            branchyard_support::best_effort(
+                                "answer a health check",
+                                health_only(stream),
+                            );
                             return;
                         }
                         Err(_) => return,
                     },
                 };
-                let _ = connection(&shared, stream);
+                branchyard_support::best_effort("serve a connection", connection(&shared, stream));
             });
         }
         Ok(())
@@ -741,9 +749,11 @@ fn connection(shared: &Arc<Shared>, mut stream: Stream) -> io::Result<()> {
 }
 
 /// Close the WebSocket and wait briefly for the client to close too.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 fn finish(mut reader: WsReader, writer: &Arc<Mutex<WsWriter>>) {
-    let _ = writer.lock_recovering("writer").close();
+    branchyard_support::best_effort(
+        "close the WebSocket",
+        writer.lock_recovering("writer").close(),
+    );
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         match reader.recv() {
@@ -823,7 +833,6 @@ fn wait_exited(pid: u32) {
     }
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 fn pump(
     mut pipe: impl Read,
     send: impl Fn(Frame) -> io::Result<()>,
@@ -838,7 +847,10 @@ fn pump(
                 if send(wrap(buf[..n].to_vec())).is_err() {
                     // The client is gone; keep draining so the process is
                     // never blocked on a full pipe before teardown.
-                    let _ = io::copy(&mut pipe, &mut io::sink());
+                    branchyard_support::best_effort(
+                        "drain a pipe after its client left",
+                        io::copy(&mut pipe, &mut io::sink()),
+                    );
                     return;
                 }
             }
@@ -846,10 +858,10 @@ fn pump(
             Err(_) => break,
         }
     }
-    let _ = send(closed);
+    branchyard_support::best_effort("send a pipe's closing frame", send(closed));
 }
 
-#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
+#[allow(clippy::expect_used)] // ratchet: branchyard-bridge
 fn exec(
     shared: &Arc<Shared>,
     seq: u64,
@@ -987,7 +999,7 @@ fn exec(
                 },
                 Err(error) => Frame::failed(&error),
             };
-            let _ = send(frame);
+            branchyard_support::best_effort("report an exit to the client", send(frame));
             group.undelivered.fetch_sub(1, Ordering::AcqRel);
         })
     };

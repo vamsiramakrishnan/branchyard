@@ -23,7 +23,8 @@
 //! (`http/protobuf`, the default, or `http/json`; `grpc` is not built in),
 //! `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME` and `OTEL_SDK_DISABLED`.
 
-#![allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-server
+#![allow(clippy::expect_used)] // ratchet: branchyard-server
+use branchyard_support::best_effort;
 use branchyard_support::time::now_ms;
 use branchyard_support::LockExt as _;
 use std::collections::HashMap;
@@ -322,7 +323,10 @@ impl Tracer {
     pub fn record(&self, span: SpanData) {
         if let Some(sender) = &self.0.sender {
             let sender = sender.lock_recovering("sender");
-            let _ = sender.send(Message::Span(Box::new(span)));
+            best_effort(
+                "hand a finished span to the exporter",
+                sender.send(Message::Span(Box::new(span))),
+            );
         }
     }
 
@@ -335,7 +339,7 @@ impl Tracer {
         let (done, wait) = mpsc::channel();
         let sent = sender.lock_recovering("sender").send(Message::Flush(done));
         if sent.is_ok() {
-            let _ = wait.recv_timeout(timeout);
+            best_effort("wait for the exporter to flush", wait.recv_timeout(timeout));
         }
     }
 
@@ -468,7 +472,7 @@ fn export_loop(receiver: mpsc::Receiver<Message>, exporter: Arc<dyn SpanExporter
             }
             Ok(Message::Flush(done)) => {
                 send(&mut batch);
-                let _ = done.send(());
+                best_effort("answer a flush that already timed out", done.send(()));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => send(&mut batch),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -554,7 +558,12 @@ impl OtlpExporter {
                 .unwrap_or_default(),
         )?;
         let service = var("OTEL_SERVICE_NAME").unwrap_or_else(|| "branchyard-server".into());
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        best_effort(
+            "install the default TLS crypto provider",
+            rustls::crypto::ring::default_provider()
+                .install_default()
+                .map_err(|_| "a default crypto provider is already installed"),
+        );
         let client = reqwest::Client::builder()
             .timeout(EXPORT_TIMEOUT)
             .build()
@@ -854,7 +863,6 @@ pub mod otlp {
     }
 }
 
-#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1095,8 +1103,11 @@ mod tests {
                 }
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
-                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
-                let _ = send.send((line.trim_end().to_owned(), headers, body));
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                    .unwrap();
+                send.send((line.trim_end().to_owned(), headers, body))
+                    .unwrap();
             }
         });
         (url, receive)

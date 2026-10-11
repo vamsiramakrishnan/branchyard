@@ -230,19 +230,23 @@ impl MockServer {
 }
 
 impl Drop for MockServer {
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        let _ = TcpStream::connect(("127.0.0.1", self.port));
+        branchyard_support::best_effort(
+            "wake the mock server to stop",
+            TcpStream::connect(("127.0.0.1", self.port)),
+        );
         if let Some(t) = self.thread.take() {
             branchyard_support::join_reporting("mock server", t);
         }
     }
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
 fn serve(stream: TcpStream, handler: &Handler, log: &Mutex<Vec<String>>) {
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+    branchyard_support::best_effort(
+        "set a read timeout on a mock connection",
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(30))),
+    );
     let mut reader = BufReader::new(match stream.try_clone() {
         Ok(s) => s,
         Err(_) => return,
@@ -303,6 +307,6 @@ fn serve(stream: TcpStream, handler: &Handler, log: &Mutex<Vec<String>>) {
         bytes.extend_from_slice(&response.body);
     }
     let mut stream = stream;
-    let _ = stream.write_all(&bytes);
-    let _ = stream.flush();
+    branchyard_support::best_effort("send a mock response", stream.write_all(&bytes));
+    branchyard_support::best_effort("flush a mock response", stream.flush());
 }

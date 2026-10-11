@@ -1,7 +1,7 @@
 //! The host side of the bridge: connect through a router to a sandbox's
 //! bridge and run requests, with a [`Process`] for exec.
 
-#![allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
+#![allow(clippy::expect_used)] // ratchet: branchyard-bridge
 use branchyard_support::{CondvarExt as _, LockExt as _};
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -179,7 +179,10 @@ impl Endpoint {
         for address in (host, self.port).to_socket_addrs()? {
             match TcpStream::connect_timeout(&address, self.connect_timeout) {
                 Ok(stream) => {
-                    let _ = stream.set_nodelay(true);
+                    branchyard_support::best_effort(
+                        "set TCP_NODELAY on a connection",
+                        stream.set_nodelay(true),
+                    );
                     return Ok(stream);
                 }
                 Err(error) => last = error,
@@ -392,7 +395,10 @@ impl Connection {
     }
 
     fn close(mut self) {
-        let _ = self.writer.lock_recovering("writer").close();
+        branchyard_support::best_effort(
+            "close the bridge connection",
+            self.writer.lock_recovering("writer").close(),
+        );
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             match self.reader.recv() {
@@ -499,7 +505,7 @@ impl Write for Stdin {
 
 impl Drop for Stdin {
     fn drop(&mut self) {
-        let _ = self.send(Frame::CloseStdin);
+        branchyard_support::best_effort("close the exec's stdin", self.send(Frame::CloseStdin));
     }
 }
 
@@ -635,7 +641,10 @@ impl Drop for BridgeProcess {
         drop(self.stdin.take());
         let mut writer = self.writer.lock_recovering("writer");
         if !self.torn_down {
-            let _ = writer.send(&Frame::Teardown.encode());
+            branchyard_support::best_effort(
+                "tell the bridge to tear the exec down",
+                writer.send(&Frame::Teardown.encode()),
+            );
         }
         writer.abort();
     }

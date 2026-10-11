@@ -3,7 +3,7 @@
 //! limit, scopes, revocation), and Web Push to a mock push service that
 //! checks the VAPID signature and decrypts the message as a browser would.
 
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -389,7 +389,7 @@ fn a_paired_event_stream_ends_when_its_token_is_revoked() {
         .unwrap();
     let mut rest = Vec::new();
     // The stream ends (rather than hanging until the read timeout).
-    let _ = reader.read_to_end(&mut rest);
+    reader.read_to_end(&mut rest).unwrap();
     assert!(
         started.elapsed() < Duration::from_secs(45),
         "the stream outlived its revoked token"
@@ -445,7 +445,7 @@ impl MockPush {
                             "HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                         }
                     };
-                    let _ = reader.get_mut().write_all(answer.as_bytes());
+                    reader.get_mut().write_all(answer.as_bytes()).unwrap();
                 });
             }
         });

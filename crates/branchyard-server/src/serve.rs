@@ -129,10 +129,12 @@ impl Running {
     /// supervisor's stop timeout, such as `docker stop`'s, must exceed.
     /// Operations still running after it are recorded as interrupted;
     /// their threads end with the process.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
     pub async fn wait(self) -> Stopped {
         let mut begun = self.shutdown.subscribe();
-        let _ = begun.wait_for(|stop| *stop).await;
+        best_effort(
+            "wait for the shutdown signal",
+            begun.wait_for(|stop| *stop).await,
+        );
         drop(self.pools);
         let services = self.services;
         best_effort(
@@ -223,7 +225,6 @@ fn tls_acceptor(files: &TlsFiles) -> Result<TlsAcceptor, String> {
 /// Open every repository (recovering branches whose engine stopped), the
 /// registry and the feeds, bind, and start
 /// serving. Needs a multi-threaded Tokio runtime.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 pub async fn start(config: Config) -> Result<Running, String> {
     config.validate()?;
     // Installed once per process, idempotently: our own TLS acceptor
@@ -231,7 +232,12 @@ pub async fn start(config: Config) -> Result<Running, String> {
     // (built with `rustls-no-provider`, so as never to also pull in
     // `aws-lc-rs` and leave two providers linked) needs a default
     // installed before it is built.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    best_effort(
+        "install the default TLS crypto provider",
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .map_err(|_| "a default crypto provider is already installed"),
+    );
     std::fs::create_dir_all(&config.data_dir)
         .map_err(|e| format!("data directory {}: {e}", config.data_dir.display()))?;
     // With PostgreSQL, operations, their queue and branch locks are in the
@@ -422,7 +428,10 @@ pub async fn start(config: Config) -> Result<Running, String> {
             let mut shutdown = shutdown_rx;
             tokio::spawn(async move {
                 let _app = app;
-                let _ = shutdown.wait_for(|stop| *stop).await;
+                best_effort(
+                    "wait for the shutdown signal",
+                    shutdown.wait_for(|stop| *stop).await,
+                );
             })
         }
     };
@@ -875,11 +884,13 @@ enum Accepted {
 }
 
 impl Listener {
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
     async fn accept(&self) -> std::io::Result<Accepted> {
         match self {
             Listener::Tcp(listener) => listener.accept().await.map(|(tcp, _)| {
-                let _ = tcp.set_nodelay(true);
+                best_effort(
+                    "set TCP_NODELAY on an accepted connection",
+                    tcp.set_nodelay(true),
+                );
                 Accepted::Tcp(tcp)
             }),
             #[cfg(unix)]
@@ -943,7 +954,6 @@ async fn accept_loop(
     }
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 async fn serve_connection<I>(io: I, service: TowerToHyperService<axum::Router>, watcher: Watcher)
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -953,7 +963,7 @@ where
         .timer(TokioTimer::new())
         .header_read_timeout(Duration::from_secs(30));
     let connection = builder.serve_connection(TokioIo::new(io), service);
-    let _ = watcher.watch(connection).await;
+    best_effort("serve a connection", watcher.watch(connection).await);
 }
 
 #[cfg(all(test, unix))]

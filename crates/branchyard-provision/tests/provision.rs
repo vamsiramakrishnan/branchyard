@@ -14,7 +14,7 @@
 //! diff. Cases follow Scion's provisioner tests at the pinned revision;
 //! each says which.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
@@ -39,7 +39,9 @@ impl Temp {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(dir.join("home")).unwrap();
         Temp(dir)
     }
@@ -69,7 +71,7 @@ impl Temp {
 
 impl Drop for Temp {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        branchyard_support::cleanup_dir(&self.0);
     }
 }
 
@@ -143,7 +145,9 @@ fn golden(case: &str, temp: &Temp, plan: &Plan) {
     let mut actual = files(&temp.home());
     actual.insert("env.txt".into(), env_text(plan));
     if std::env::var_os("BY_UPDATE_GOLDEN").is_some() {
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         for (relative, content) in &actual {
             let path = dir.join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();

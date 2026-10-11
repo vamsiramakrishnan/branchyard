@@ -5,12 +5,7 @@
 //! Requires `sh` and `sleep`; the tests of process 1 and of another user
 //! run only as root, and the first also needs `unshare`.
 
-#![allow(
-    clippy::expect_used,
-    clippy::let_underscore_must_use,
-    clippy::panic,
-    clippy::unwrap_used
-)] // tests: a panic is the failure report
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -55,7 +50,9 @@ impl Bridge {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(dir.join("identity")).unwrap();
         fs::create_dir_all(dir.join("work")).unwrap();
         for (file, value) in [("atespace", "tenant"), ("name", "actor"), ("uid", "uid-1")] {
@@ -167,7 +164,7 @@ impl Bridge {
 impl Drop for Bridge {
     fn drop(&mut self) {
         self.stop();
-        let _ = fs::remove_dir_all(&self.dir);
+        branchyard_support::cleanup_dir(&self.dir);
     }
 }
 
@@ -461,7 +458,9 @@ fn scratch(name: &str) -> PathBuf {
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    let _ = fs::remove_dir_all(&dir);
+    if dir.exists() {
+        fs::remove_dir_all(&dir).unwrap();
+    }
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -532,7 +531,7 @@ fn the_bridge_serves_tls_and_a_client_trusting_another_authority_is_refused() {
         public.health().unwrap_err().kind(),
         io::ErrorKind::InvalidData
     );
-    let _ = fs::remove_dir_all(pki);
+    fs::remove_dir_all(pki).unwrap();
 }
 
 #[test]

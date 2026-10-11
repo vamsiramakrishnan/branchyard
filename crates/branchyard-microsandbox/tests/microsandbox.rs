@@ -11,7 +11,7 @@
 //! it defaults to `alpine:3.20`.
 
 #![cfg(feature = "microsandbox")]
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -30,7 +30,9 @@ fn image() -> String {
 
 fn workspace(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("msb-{name}"));
-    let _ = std::fs::remove_dir_all(&dir);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
     std::fs::create_dir_all(&dir).unwrap();
     dir.canonicalize().unwrap()
 }
@@ -97,7 +99,10 @@ fn limits_reach_the_guest() {
     let setup = setup("limits");
     let provider = MicrosandboxProvider::new().unwrap();
     let name = "by-msb-limits";
-    let _ = provider.destroy(name);
+    branchyard_support::best_effort(
+        "destroy a sandbox a previous run may have left",
+        provider.destroy(name),
+    );
     provider.ensure(&spec(&setup, name)).unwrap();
     let (code, cpus) = run(&provider, name, "nproc");
     assert_eq!((code, cpus.trim()), (Some(0), "1"));
@@ -117,7 +122,10 @@ fn root_disk_writes_are_private_to_each_sandbox() {
     let provider = MicrosandboxProvider::new().unwrap();
     let (a, b) = ("by-msb-private-a", "by-msb-private-b");
     for name in [a, b] {
-        let _ = provider.destroy(name);
+        branchyard_support::best_effort(
+            "destroy a sandbox a previous run may have left",
+            provider.destroy(name),
+        );
         provider.ensure(&spec(&setup, name)).unwrap();
     }
     assert_eq!(run(&provider, a, "echo a > /root/private").0, Some(0));
@@ -135,7 +143,10 @@ fn a_disk_checkpoint_branches_into_a_new_sandbox() {
     let provider = MicrosandboxProvider::new().unwrap();
     let (source, child) = ("by-msb-branch-source", "by-msb-branch-child");
     for name in [source, child] {
-        let _ = provider.destroy(name);
+        branchyard_support::best_effort(
+            "destroy a sandbox a previous run may have left",
+            provider.destroy(name),
+        );
     }
     provider.ensure(&spec(&setup, source)).unwrap();
     assert_eq!(
@@ -185,7 +196,10 @@ fn a_live_branch_child_keeps_the_sources_processes() {
     let provider = live_provider();
     let (source, child) = ("by-msb-live-source", "by-msb-live-child");
     for name in [source, child] {
-        let _ = provider.destroy(name);
+        branchyard_support::best_effort(
+            "destroy a sandbox a previous run may have left",
+            provider.destroy(name),
+        );
     }
     provider.ensure(&spec(&setup, source).persist()).unwrap();
     let pid = start_sleeper(&provider, source);
@@ -212,7 +226,10 @@ fn a_live_branch_childs_writes_are_private_and_the_paused_source_stays_paused() 
     let source = "by-msb-live-src2";
     let children = ["by-msb-live-c1", "by-msb-live-c2"];
     for name in std::iter::once(source).chain(children) {
-        let _ = provider.destroy(name);
+        branchyard_support::best_effort(
+            "destroy a sandbox a previous run may have left",
+            provider.destroy(name),
+        );
     }
     provider.ensure(&spec(&setup, source).persist()).unwrap();
     assert_eq!(
@@ -264,7 +281,10 @@ fn a_persisted_sandbox_is_resumed_by_another_provider() {
     let name = "by-msb-persist";
     {
         let provider = live_provider();
-        let _ = provider.destroy(name);
+        branchyard_support::best_effort(
+            "destroy a sandbox a previous run may have left",
+            provider.destroy(name),
+        );
         provider.ensure(&spec(&setup, name).persist()).unwrap();
         run(&provider, name, "echo kept > /root/marker");
         provider.pause(name).unwrap();

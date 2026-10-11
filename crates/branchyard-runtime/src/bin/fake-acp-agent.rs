@@ -88,7 +88,7 @@
 //! environment, and, for an argument after `--mcp-config` that names a
 //! file, that file's mode and the servers it lists.
 
-#![allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard-runtime
+#![allow(clippy::expect_used)] // ratchet: branchyard-runtime
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -97,8 +97,11 @@ use serde_json::{json, Value};
 
 fn send(message: &Value) {
     let mut stdout = io::stdout().lock();
-    let _ = writeln!(stdout, "{message}");
-    let _ = stdout.flush();
+    branchyard_support::best_effort(
+        "write a message to the client",
+        writeln!(stdout, "{message}"),
+    );
+    branchyard_support::best_effort("flush a message to the client", stdout.flush());
 }
 
 fn reply(id: &Value, result: Value) {
@@ -437,7 +440,10 @@ fn write_files(session: &str, text: &str) {
         };
         let path = std::path::Path::new(path);
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            let _ = std::fs::create_dir_all(parent);
+            branchyard_support::best_effort(
+                "create the parent directory of a written file",
+                std::fs::create_dir_all(parent),
+            );
         }
         match std::fs::write(path, format!("{content}\n")) {
             Ok(()) => chunk(session, &format!("wrote {}\n", path.display())),

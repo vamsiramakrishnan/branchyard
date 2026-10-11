@@ -1,25 +1,21 @@
 {
   "allows": {
     "branchyard": 12,
-    "branchyard-bridge": 12,
+    "branchyard-bridge": 3,
     "branchyard-cli": 16,
     "branchyard-client": 1,
     "branchyard-controls": 2,
     "branchyard-harness": 6,
-    "branchyard-herdr": 5,
-    "branchyard-mcp": 2,
-    "branchyard-microsandbox": 4,
+    "branchyard-mcp": 1,
+    "branchyard-microsandbox": 2,
     "branchyard-provision": 5,
     "branchyard-qualify": 2,
-    "branchyard-recipe": 1,
-    "branchyard-runtime": 5,
+    "branchyard-runtime": 1,
     "branchyard-sandbox": 1,
-    "branchyard-server": 29,
+    "branchyard-server": 18,
     "branchyard-setup": 3,
-    "branchyard-substrate": 4,
-    "branchyard-support": 3,
-    "branchyard-sync": 14,
-    "branchyard-workspace": 3
+    "branchyard-substrate": 3,
+    "branchyard-sync": 10
   },
   "file_wide": [
     "crates/branchyard-bridge/src/client.rs",

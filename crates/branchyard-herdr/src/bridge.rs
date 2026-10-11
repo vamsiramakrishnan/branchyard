@@ -161,7 +161,6 @@ pub fn run(config: &Config) -> Result<(), String> {
 }
 
 /// Read the feed forever, reconnecting after the last delivered cursor.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-herdr
 fn follow(repo: Repo, tx: mpsc::Sender<Feed>) {
     let mut cursor: Option<u64> = None;
     let mut snapshot = true;
@@ -196,7 +195,10 @@ fn follow(repo: Repo, tx: mpsc::Sender<Feed>) {
                 }
                 Err(e) => {
                     if refused(&e) {
-                        let _ = tx.send(Feed::Fatal(e.to_string()));
+                        branchyard_support::best_effort(
+                            "report a fatal error to the feed",
+                            tx.send(Feed::Fatal(e.to_string())),
+                        );
                         return;
                     }
                     failures += 1;
@@ -224,7 +226,10 @@ fn follow(repo: Repo, tx: mpsc::Sender<Feed>) {
                     cursor = None;
                 }
                 Err(e) if refused(&e) => {
-                    let _ = tx.send(Feed::Fatal(e.to_string()));
+                    branchyard_support::best_effort(
+                        "report a fatal error to the feed",
+                        tx.send(Feed::Fatal(e.to_string())),
+                    );
                     return;
                 }
                 Err(e) => tracing::error!(error = %e, "event stream lost"),

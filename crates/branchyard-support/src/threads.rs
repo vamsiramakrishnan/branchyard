@@ -31,7 +31,6 @@ fn message_of(payload: &(dyn Any + Send)) -> String {
 /// thread; a panic inside it is contained. The thread then ends normally, so
 /// `join()` returns `Ok`: do not use this where a caller needs the panic to
 /// propagate through `join`.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-support
 pub fn spawn_named<F, S>(
     name: impl Into<String>,
     on_panic: S,
@@ -56,7 +55,11 @@ where
                 report.thread,
                 report.message
             );
-            let _ = catch_unwind(AssertUnwindSafe(|| on_panic(report)));
+            crate::best_effort(
+                "run the panic handler",
+                catch_unwind(AssertUnwindSafe(|| on_panic(report)))
+                    .map_err(|payload| message_of(payload.as_ref())),
+            );
         }
     })
 }

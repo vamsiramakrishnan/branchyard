@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -16,7 +16,9 @@ pub fn agent() -> Box<dyn Driver> {
 /// A fresh directory for one test, with a `home` inside it.
 pub fn workdir(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
-    let _ = std::fs::remove_dir_all(&dir);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
     std::fs::create_dir_all(dir.join("home")).unwrap();
     dir
 }

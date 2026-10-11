@@ -1064,7 +1064,6 @@ pub mod conformance {
     }
 }
 
-#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1077,7 +1076,9 @@ mod tests {
     #[test]
     fn sqlite_shares_the_registrys_file() {
         let dir = std::env::temp_dir().join(format!("by-companion-store-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
         let path = SqliteCompanion::path_in(&dir);
         let registry = crate::store::SqliteStore::open(&path, None).unwrap();
         let a = SqliteCompanion::open(&path).unwrap();
@@ -1093,6 +1094,6 @@ mod tests {
         assert!(b.redeem("x", "y", None, 1).unwrap().is_some());
         assert!(a.token("y").unwrap().is_some());
         drop(registry);
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

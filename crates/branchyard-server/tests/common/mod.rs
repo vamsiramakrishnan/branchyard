@@ -3,12 +3,7 @@
 //! loopback. Requires `git` and `sh`.
 
 #![allow(dead_code)]
-#![allow(
-    clippy::expect_used,
-    clippy::let_underscore_must_use,
-    clippy::unwrap_in_result,
-    clippy::unwrap_used
-)] // tests: a panic is the failure report
+#![allow(clippy::expect_used, clippy::unwrap_in_result, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -248,9 +243,9 @@ pub fn raw_bytes(addr: SocketAddr, request: &[u8]) -> (u16, String, String) {
         .set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
     // The server may answer and close before reading everything.
-    let _ = stream.write_all(request);
+    branchyard_support::best_effort("send a raw request", stream.write_all(request));
     let mut response = Vec::new();
-    let _ = stream.read_to_end(&mut response);
+    branchyard_support::best_effort("read a raw response", stream.read_to_end(&mut response));
     let text = String::from_utf8_lossy(&response).into_owned();
     let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
     let status = head

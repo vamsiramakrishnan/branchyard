@@ -206,7 +206,6 @@ fn drain(conn: &mut Connection, out: &mut Vec<u8>, buf: &mut [u8]) -> bool {
 
 /// Move bytes between the TLS session on `tcp` and the local end `app`
 /// until both directions have ended.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 fn pump(mut conn: Connection, mut tcp: TcpStream, mut app: UnixStream) {
     if tcp.set_nonblocking(true).is_err() || app.set_nonblocking(true).is_err() {
         return;
@@ -232,11 +231,17 @@ fn pump(mut conn: Connection, mut tcp: TcpStream, mut app: UnixStream) {
             to_app.clear();
         }
         if deliver && !peer_open && to_app.is_empty() && !app_shut {
-            let _ = app.shutdown(Shutdown::Write);
+            branchyard_support::best_effort(
+                "shut down the application's write side",
+                app.shutdown(Shutdown::Write),
+            );
             app_shut = true;
         }
         if !app_open && !tcp_shut && !conn.wants_write() {
-            let _ = tcp.shutdown(Shutdown::Write);
+            branchyard_support::best_effort(
+                "shut down the TCP write side",
+                tcp.shutdown(Shutdown::Write),
+            );
             tcp_shut = true;
         }
         if tcp_shut && !peer_open && (to_app.is_empty() || !deliver) {
@@ -302,7 +307,10 @@ fn pump(mut conn: Connection, mut tcp: TcpStream, mut app: UnixStream) {
                 Ok(_) => {
                     if conn.process_new_packets().is_err() {
                         // Send the alert rustls queued, then give up.
-                        let _ = tcp.set_nonblocking(false);
+                        branchyard_support::best_effort(
+                            "restore blocking mode to send the TLS alert",
+                            tcp.set_nonblocking(false),
+                        );
                         while conn.wants_write() && conn.write_tls(&mut tcp).is_ok() {}
                         return;
                     }

@@ -43,7 +43,6 @@ fn is_checkout(root: &Path) -> bool {
     root.join(".git").exists()
 }
 
-#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,7 +50,9 @@ mod tests {
     #[test]
     fn each_diagnosis_is_one_fixed_sentence() {
         let dir = std::env::temp_dir().join(format!("by-target-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         let served = vec![
             ("app".to_owned(), dir.clone()),
@@ -64,6 +65,6 @@ mod tests {
         if !std::env::temp_dir().join(".git").exists() {
             assert_eq!(resolve("plain", &served), Err(NOT_A_CHECKOUT));
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
