@@ -1,0 +1,69 @@
+{
+  "profile": "gemini-cli-acp",
+  "harness": "gemini-cli",
+  "harness_version": "0.63.0",
+  "driver_version": "0.0.1",
+  "command": "gemini --experimental-acp",
+  "execution": "local process with scrubbed environment and private home; not a Branchyard sandbox",
+  "host": "Linux 6.18.44-fc-v114 x86_64",
+  "date": "2026-10-11",
+  "installed_from": "npm @google/gemini-cli@0.63.0",
+  "seconds": 81.0,
+  "harness_estimated_cost_usd": "not reported by the harness; the cost cap did not apply",
+  "scenarios": [
+    {
+      "name": "fresh_turn",
+      "passed": true,
+      "detail": "session 0ecccad8-8284-4ab6-a20d-714baa8111ee; replied \"OK\"",
+      "seconds": 12.1
+    },
+    {
+      "name": "permission_denied",
+      "passed": true,
+      "detail": "1 request(s) denied; marker absent; turn Completed",
+      "seconds": 12.9
+    },
+    {
+      "name": "permission_allowed",
+      "passed": true,
+      "detail": "request allowed; command ran",
+      "seconds": 7.8
+    },
+    {
+      "name": "interrupt_during_permission",
+      "passed": true,
+      "detail": "stopped 0.0s after interrupt; acknowledged: false; pending request withdrawn by harness: false",
+      "seconds": 20.1
+    },
+    {
+      "name": "interrupt_during_tool",
+      "passed": true,
+      "detail": "stopped 0.0s after interrupt; acknowledged: false",
+      "seconds": 14.1
+    },
+    {
+      "name": "clean_close",
+      "passed": true,
+      "detail": "closed cleanly; no descendants outlived the harness; session cost $0.0000",
+      "seconds": 0.5
+    },
+    {
+      "name": "resume",
+      "passed": false,
+      "detail": "open failed: Authentication required",
+      "seconds": 1.9
+    },
+    {
+      "name": "fork",
+      "passed": true,
+      "detail": "rejected before launch as declared: unsupported: ACP session/fork is an unstable method",
+      "seconds": 0.0
+    },
+    {
+      "name": "connection_lost",
+      "passed": true,
+      "detail": "killed mid-turn; outcome reported unknown",
+      "seconds": 11.8
+    }
+  ]
+}

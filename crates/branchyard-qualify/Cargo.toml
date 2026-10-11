@@ -13,5 +13,6 @@ workspace = true
 [dependencies]
 branchyard-harness = { path = "../branchyard-harness" }
 branchyard-runtime = { path = "../branchyard-runtime" }
+branchyard-support = { path = "../branchyard-support" }
 clap = { workspace = true }
 serde_json = { workspace = true }

@@ -4,6 +4,19 @@ Live protocol qualification of harness driver profiles against real harness bina
 
 **Scope.** The runner starts the harness as a local process with a scrubbed environment, a private home and its own process group, standing in for `SandboxProvider.exec`. That qualifies protocol behavior against the real binary. It does not qualify sandbox isolation, network policy, credential handling or node recovery; those gates in [harness integration](../harness-integration.md#qualification-suite) remain open.
 
+## Results, 11 October 2026
+
+Three more profiles ran against real binaries installed that day, all on one Gemini API key; the runner provisions nothing, so each harness's private home was prepared by hand as the notes say.
+
+| Profile | Harness version | Result | Report |
+|---|---|---|---|
+| `antigravity-stream-json` | Antigravity CLI 1.3.3 (`agy`, its install script) | 4 of 9 pass: `fresh_turn`, `clean_close`, `resume`, `fork` rejected as declared. `permission_denied`, `permission_allowed`, `interrupt_during_permission` and `interrupt_during_tool` fail because the stream carries no permission requests and the CLI soft-denies shell commands headless unless `permissions.allow` rules name them; `connection_lost` fails because the driver reported the killed turn as completed | [report](antigravity-stream-json.json) |
+| `gemini-cli-acp` | Gemini CLI 0.63.0 (`npm @google/gemini-cli`) | 8 of 9 pass; `resume` fails to open with `Authentication required` although the key authenticated every other process | [report](gemini-cli-acp.json) |
+| `deepseek-harness-acp` | DeepSeek Harness 0.2.0-rc.2 (`npm @deepseek-ai/dsh`), on Gemini | 5 of 9 pass: `fresh_turn`, `clean_close`, `resume`, `fork` rejected as declared, `connection_lost`. No permission request reached the driver, and the first tool call failed `400` at Gemini: a Gemini 3 model requires a `thought_signature` on every replayed function call, which the harness's OpenAI client drops | [report](deepseek-harness-acp.json) |
+| `codex-app-server` | codex-cli 0.157.1 | Not run: the account logged in with `codex login --device-auth` (ChatGPT Pro) and the `CODEX_API_KEY` present both answer `Quota exceeded. Check your plan and billing details.` on every turn | — |
+
+What the private homes held: Antigravity's `~/.gemini/antigravity-cli/settings.json` with `"modelProvider": "gemini"` (the key alone makes `agy` ask for a Google sign-in, and `GOOGLE_API_KEY` is not read); a second Antigravity run with `command(echo)`, `command(sleep)` and `command(sh)` under `permissions.allow` changed nothing, because a prefix rule does not match a command with a redirect, while `command(*)`, `command(regex:echo .*)` and the exact line do (probed directly, not in the runner). Gemini CLI ran with `GEMINI_CLI_TRUST_WORKSPACE=true`, without which a headless run refuses an untrusted directory. DeepSeek Harness ran with `DSH_HOME` pointing at a home whose `cordis.patch.yml` adds a provider for Gemini's OpenAI-compatible endpoint (`api: openai-completions`, `apiKeyEnv: GEMINI_API_KEY`, `compat: {supportsStore: false}`, since the endpoint rejects the OpenAI-only `store` field) and routes `agent-default-model` and `acp` to it; with `gemini-3.5-flash` every tool call fails on the missing thought signature, and with `gemini-2.5-flash-lite` a tool call ran in one of two direct tries, the other ending `MALFORMED_FUNCTION_CALL`. The endpoint accepts the documented dummy signature `skip_thought_signature_validator` in `extra_content.google.thought_signature` of a replayed tool call, which is how the model gateway can front Gemini for OpenAI-speaking harnesses.
+
 ## Results, 26 September 2026
 
 | Profile | Harness version | Result | Report |
@@ -28,6 +41,11 @@ Live protocol qualification of harness driver profiles against real harness bina
 | `connection_lost` | Killing the harness mid-turn produces `OutcomeUnknown` for that turn |
 
 ## Findings
+
+- **Antigravity routes no approvals and reports a killed turn as completed.** Headless, every shell command is soft-denied until `permissions.allow` names it; the result event then carries `denied_actions` and stderr says which permission was missing. Branchyard's provisioner must therefore write rules, never pass `--dangerously-skip-permissions`. After `kill`, the driver still emitted `TurnEnded Completed` and `SessionClosed`, where the scenario expects `OutcomeUnknown`.
+- **Gemini CLI resumes under another credential path.** A fresh process with the same `GEMINI_API_KEY` opened `session/load` and failed `Authentication required`; the first process, and every other scenario, authenticated with the key.
+- **DeepSeek Harness on Gemini needs two shims.** Gemini's OpenAI-compatible endpoint rejects `store` and, on Gemini 3 models, replayed function calls without `thought_signature`; the harness's own `compat.supportsStore` covers the first, nothing on its side covers the second.
+- **No cost from any of the three.** The ACP profiles report no usage the driver consumes, and Antigravity reports tokens without a price, so the `--max-cost-usd` cap did not apply; the key's own billing is the only limit.
 
 - **claude-agent-acp leaves its Claude Code child running when it exits.** On `clean_close`, after the adapter exited, a `claude` process was still alive in its process group; the runner killed it and named it. The native profile left no survivors. Earlier reports could not have seen this: the runner's first survivor check used `ps -o comm= -g <pgid>`, which selects by session on procps. `branchyard-runtime` lists by process group and always signals it; the reports here come from that runner.
 - **Harness descendants can outlive the harness.** On an early run, Claude Code declined a foreground `sleep 60 && …`, ran it as a background task instead, and ended the turn; that task was still running after the CLI process exited. The end of a turn is not the end of its work, and harness exit is not teardown. Branchyard must terminate the sandbox or process group, and account background tasks to the attempt. The runner, now built on `branchyard-runtime`, kills each harness's process group and names survivors.
