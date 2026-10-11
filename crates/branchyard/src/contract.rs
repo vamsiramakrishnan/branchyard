@@ -28,7 +28,7 @@
 //! of JSON `null` is the same as none, so a contract whose root is `type:
 //! "null"` is refused; and nothing here stops a child from ending its turn
 //! without a result: a `required` contract only records a warning on the
-//! parent when it does ([`settled`]).
+//! parent when it does (the `settled` check at the end of a turn).
 
 use branchyard_support::best_effort;
 use serde::{Deserialize, Serialize};
