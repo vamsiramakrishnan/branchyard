@@ -43,12 +43,24 @@ pub(crate) fn is_parent_session_variable(name: &str) -> bool {
 /// this list against `docs/qualification/`.
 pub(crate) const REPORTS: &[(&str, &str)] = &[
     (
+        "antigravity-stream-json",
+        include_str!("../../../docs/qualification/antigravity-stream-json.json"),
+    ),
+    (
         "claude-code-acp",
         include_str!("../../../docs/qualification/claude-code-acp.json"),
     ),
     (
         "claude-code-stream-json",
         include_str!("../../../docs/qualification/claude-code-stream-json.json"),
+    ),
+    (
+        "deepseek-harness-acp",
+        include_str!("../../../docs/qualification/deepseek-harness-acp.json"),
+    ),
+    (
+        "gemini-cli-acp",
+        include_str!("../../../docs/qualification/gemini-cli-acp.json"),
     ),
 ];
 
@@ -289,6 +301,11 @@ mod tests {
             assert!(profiles::by_id(id).is_some(), "{id} is not a profile");
         }
         assert_eq!(qualification("claude-code-acp").unwrap(), "9/9 on 0.81.2");
+        assert_eq!(qualification("gemini-cli-acp").unwrap(), "8/9 on 0.63.0");
+        assert_eq!(
+            qualification("antigravity-stream-json").unwrap(),
+            "4/9 on 1.3.3"
+        );
         assert_eq!(qualification("codex-app-server"), None);
     }
 
