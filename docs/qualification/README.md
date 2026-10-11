@@ -49,3 +49,7 @@ cargo run -p branchyard-qualify -- --profile claude-code-stream-json \
 ```
 
 `--command` overrides the executable path. The runner strips <!-- fact:runtime.strip_prefixes -->`ANTHROPIC*`, `CLAUDE*`, `OPENAI*` and `CODEX*`<!-- /fact --> variables unless kept with `--keep-env NAME`; for example, `--keep-env OPENAI_API_KEY` for `codex-app-server`. The run stops scheduling scenarios once the harness's own cost estimates pass `--max-cost-usd`.
+
+## Scheduled workflow
+
+`.github/workflows/qualify.yml` runs the three profiles its matrix lists (`claude-code-stream-json` and `claude-code-acp` with `ANTHROPIC_API_KEY`, `codex-app-server` with `OPENAI_API_KEY`) every Monday at 06:17 UTC and on demand. A profile whose secret is not configured is recorded as `skipped: <secret> not configured`, is not run and is not qualified. The last job, `summary`, writes one table to the run's summary (profile, qualified, harness version, score) and fails the run when a profile was skipped or failed, naming the missing secrets. Set the repository variable `QUALIFY_ALLOW_SKIPS` to `true` to accept skipped profiles; it does not accept failures.

@@ -1,6 +1,16 @@
 name: Qualify drivers
-# Live protocol qualification against pinned harness releases. Each job spends
-# real model credits and runs only when its credential secret is configured.
+# Live protocol qualification against pinned harness releases. Each matrix job
+# spends real model credits and runs only when its credential secret is
+# configured. A job whose secret is missing is "skipped", and a skipped profile
+# is not qualified.
+#
+# Every matrix job records its outcome in the run's step summary and uploads it
+# as the artifact qualify-outcome-<profile>. The summary job reads those
+# artifacts, writes one table to its step summary, and fails the run when a
+# profile was skipped for a missing secret or failed. The failure names the
+# missing secrets. To accept skipped profiles, set the repository variable
+# QUALIFY_ALLOW_SKIPS to true. It accepts skips only: a profile that ran and
+# failed still fails the run.
 on:
   workflow_dispatch:
   schedule:
@@ -40,6 +50,7 @@ jobs:
         if: env.CREDENTIAL != ''
         run: npm install --global ${{ matrix.package }}
       - name: Run scenarios
+        id: run
         if: env.CREDENTIAL != ''
         run: |
           export "${{ matrix.secret }}=$CREDENTIAL"
@@ -58,3 +69,138 @@ jobs:
           name: qualification-${{ matrix.profile }}
           path: ${{ runner.temp }}/${{ matrix.profile }}.json
           if-no-files-found: warn
+      # The outcome travels as an artifact, not as a job output: the outputs of
+      # a matrix job are one value per job, and the last leg to finish overwrites
+      # the others, so a summary reading them would describe one profile for all.
+      - name: Record outcome
+        if: always()
+        env:
+          PROFILE: ${{ matrix.profile }}
+          SECRET: ${{ matrix.secret }}
+          RUN_OUTCOME: ${{ steps.run.outcome }}
+          REPORT: ${{ runner.temp }}/${{ matrix.profile }}.json
+        run: |
+          set -euo pipefail
+          outcome="$RUNNER_TEMP/outcome/$PROFILE.json"
+          mkdir -p "$(dirname "$outcome")"
+          if [ -z "$CREDENTIAL" ]; then
+            qualified="skipped: $SECRET not configured"
+            version="not installed"
+            score="not run"
+          else
+            total=0
+            passed=0
+            if [ -f "$REPORT" ]; then
+              version=$(jq -r '.harness_version' "$REPORT")
+              total=$(jq '.scenarios | length' "$REPORT")
+              passed=$(jq '[.scenarios[] | select(.passed)] | length' "$REPORT")
+              score="$passed of $total scenarios passed"
+            else
+              version="unknown (no report)"
+              score="not run"
+            fi
+            if [ "$RUN_OUTCOME" = success ] && [ "$total" -gt 0 ] && [ "$passed" = "$total" ]; then
+              qualified=yes
+            else
+              qualified=no
+            fi
+          fi
+          jq -n --arg profile "$PROFILE" --arg secret "$SECRET" --arg qualified "$qualified" \
+            --arg version "$version" --arg score "$score" \
+            '{profile: $profile, secret: $secret, qualified: $qualified, harness_version: $version, score: $score}' > "$outcome"
+          {
+            echo "| Profile | Qualified | Harness version | Score |"
+            echo "| --- | --- | --- | --- |"
+            echo "| \`$PROFILE\` | $qualified | $version | $score |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload outcome
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qualify-outcome-${{ matrix.profile }}
+          path: ${{ runner.temp }}/outcome/${{ matrix.profile }}.json
+          if-no-files-found: error
+  summary:
+    # Runs after every matrix job, including a failed one, and writes the table
+    # even when it fails the run.
+    needs: qualify
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MATRIX_RESULT: ${{ needs.qualify.result }}
+      ALLOW_SKIPS: ${{ vars.QUALIFY_ALLOW_SKIPS }}
+    steps:
+      - name: Download outcomes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: qualify-outcome-*
+          path: ${{ runner.temp }}/outcomes
+          merge-multiple: true
+      - name: Table and gate
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=("$RUNNER_TEMP/outcomes"/*.json)
+          {
+            echo "## Driver qualification"
+            echo
+            echo "| Profile | Qualified | Harness version | Score |"
+            echo "| --- | --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No qualify job uploaded an outcome." >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=No qualification outcome::no qualify job uploaded an outcome"
+            exit 1
+          fi
+          skipped=()
+          missing=()
+          failed=()
+          for file in "${files[@]}"; do
+            jq -r '"| `\(.profile)` | \(.qualified) | \(.harness_version) | \(.score) |"' "$file" >> "$GITHUB_STEP_SUMMARY"
+            profile=$(jq -r '.profile' "$file")
+            qualified=$(jq -r '.qualified' "$file")
+            case "$qualified" in
+              yes) ;;
+              skipped:*)
+                skipped+=("$profile")
+                missing+=("$(jq -r '.secret' "$file")") ;;
+              *) failed+=("$profile") ;;
+            esac
+          done
+          status=0
+          if [ "$MATRIX_RESULT" != success ]; then
+            echo "::error title=Qualify jobs $MATRIX_RESULT::the qualify matrix did not succeed; see its logs"
+            status=1
+          fi
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "::error title=Driver failed qualification::${failed[*]}"
+            status=1
+          fi
+          names=""
+          if [ "${#skipped[@]}" -gt 0 ]; then
+            names=$(printf '%s\n' "${missing[@]}" | sort -u | paste -sd' ' - | sed 's/ /, /g')
+            if [ "$ALLOW_SKIPS" = true ]; then
+              echo "::warning title=Drivers not qualified::${skipped[*]} skipped; missing $names; accepted by QUALIFY_ALLOW_SKIPS"
+            else
+              echo "::error title=Drivers not qualified::${skipped[*]} skipped; missing $names. Configure the secret, or set QUALIFY_ALLOW_SKIPS to true to accept skips."
+              status=1
+            fi
+          fi
+          {
+            echo
+            if [ "$status" -ne 0 ]; then
+              echo "**Result: not qualified.**"
+            elif [ "${#skipped[@]}" -gt 0 ]; then
+              echo "**Result: no failures; skipped profiles accepted by QUALIFY_ALLOW_SKIPS.**"
+            else
+              echo "**Result: all profiles qualified.**"
+            fi
+            if [ "${#failed[@]}" -gt 0 ]; then
+              echo "Failed: ${failed[*]}."
+            fi
+            if [ "${#skipped[@]}" -gt 0 ]; then
+              echo "Skipped, missing secrets: $names."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
