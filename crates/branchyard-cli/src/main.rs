@@ -542,6 +542,13 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             text,
             json,
         } => commands::escalate(target, as_branch, &text, json),
+        Command::ReportStatus {
+            as_branch,
+            state,
+            summary,
+            link,
+            json,
+        } => commands::report_status(target, as_branch, &state, &summary, link.as_deref(), json),
         Command::Answer {
             as_branch,
             message_id,

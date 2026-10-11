@@ -347,3 +347,95 @@ fn local_triggers_are_kept_where_by_serve_fires_them_and_remote_sees_them() {
     let gone = fake(&["trigger", "show", "remote-one"]);
     assert!(!gone.status.success());
 }
+
+/// The lifecycle of a branch a trigger delivers to, from its flags: kept
+/// as given and shown, refused without the branch it belongs to, and held
+/// to the rules with the field named.
+#[test]
+fn the_lifecycle_flags_of_a_resident_branch_are_kept_shown_and_checked() {
+    let d = Dir::new();
+    let root = d.repo("app");
+    let stderr = |o: &Output| String::from_utf8_lossy(&o.stderr).into_owned();
+    let add = |name: &str, extra: &[&str]| {
+        let mut args = vec![
+            "trigger",
+            "add",
+            name,
+            "--every",
+            "1h",
+            "--prompt",
+            "WRITE beat.txt=1",
+            "--harness",
+            "gemini-cli",
+        ];
+        args.extend_from_slice(extra);
+        by(&root, &args)
+    };
+    let made = json(&add(
+        "heartbeat",
+        &[
+            "--to",
+            "assistant",
+            "--idle-after",
+            "30m",
+            "--dormant-after",
+            "7d",
+            "--delete-after",
+            "720h",
+            "--json",
+        ],
+    ));
+    assert_eq!(
+        made["trigger"]["deliver"],
+        serde_json::json!({
+            "branch": "assistant",
+            "busy": "queue",
+            "lifecycle": {"idle_minutes": 30, "dormant_days": 7, "delete_days": 30}
+        }),
+        "{made}"
+    );
+    let shown = ok(&by(&root, &["trigger", "show", "heartbeat"]));
+    assert!(
+        shown.contains("rests:    idle after 30m, dormant after 7d, deleted after 30d"),
+        "{shown}"
+    );
+    // Only what is given is kept.
+    let made = json(&add(
+        "sweeper",
+        &["--to", "keeper", "--delete-after", "14d", "--json"],
+    ));
+    assert_eq!(
+        made["trigger"]["deliver"]["lifecycle"],
+        serde_json::json!({"delete_days": 14})
+    );
+    // Without --to there is no branch to give a lifecycle.
+    let alone = add("alone", &["--idle-after", "30m"]);
+    assert!(!alone.status.success());
+    assert!(stderr(&alone).contains("--to"), "{}", stderr(&alone));
+    // Units: whole minutes, whole days, at least one.
+    let seconds = add("secs", &["--to", "b", "--idle-after", "90s"]);
+    assert!(!seconds.status.success());
+    let message = stderr(&seconds);
+    assert!(
+        message.contains("--idle-after") && message.contains("whole number of minutes"),
+        "{message}"
+    );
+    let hours = add("hours", &["--to", "b", "--delete-after", "36h"]);
+    assert!(stderr(&hours).contains("whole number of days"));
+    // Idle, dormant and delete must rise, in absolute time; the field is named.
+    let backwards = add(
+        "backwards",
+        &["--to", "b", "--idle-after", "2d", "--dormant-after", "1d"],
+    );
+    assert!(!backwards.status.success());
+    let message = stderr(&backwards);
+    assert!(
+        message.contains("deliver.lifecycle.idle_minutes (2d) must be less than dormant_days (1d)"),
+        "{message}"
+    );
+    let listed = ok(&by(&root, &["trigger", "list"]));
+    assert!(
+        listed.contains("heartbeat") && listed.contains("sweeper") && !listed.contains("alone"),
+        "{listed}"
+    );
+}

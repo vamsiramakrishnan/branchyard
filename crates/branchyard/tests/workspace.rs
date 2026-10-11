@@ -640,3 +640,58 @@ fn a_copied_directory_the_branch_also_tracks_never_hides_the_agents_edits() {
     ]);
     assert_eq!(files.trim(), "config/tracked.txt");
 }
+
+#[test]
+fn the_workspaces_variables_reach_setup_and_the_harness_expanded() {
+    let f = Fixture::new();
+    let spec = WorkspaceSpec {
+        setup: vec![
+            "printf '%s\\n' \"$APP_MODE\" \"$APP_HOME\" \"$WHO\" \"$BRANCHYARD_BRANCH\" > env.txt"
+                .into(),
+        ],
+        env: [
+            ("APP_MODE".to_owned(), "dev".to_owned()),
+            (
+                "APP_HOME".to_owned(),
+                "${BRANCHYARD_WORKTREE}/.app".to_owned(),
+            ),
+            ("WHO".to_owned(), "${BY_TEST_NOBODY:-nobody}".to_owned()),
+            // The branch's own variables win over the spec's.
+            ("BRANCHYARD_BRANCH".to_owned(), "not-this".to_owned()),
+        ]
+        .into_iter()
+        .collect(),
+        ..WorkspaceSpec::default()
+    };
+    let branch = f
+        .yard
+        .task("ENV APP_MODE APP_HOME WHO BRANCHYARD_BRANCH")
+        .options(with(&f, spec))
+        .name("vars")
+        .run()
+        .unwrap();
+    assert_eq!(branch.info().status, BranchStatus::Ready);
+    let worktree = branch.info().worktree.clone();
+    let lines: Vec<String> = fs::read_to_string(worktree.join("env.txt"))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(lines[0], "dev");
+    assert_eq!(Path::new(&lines[1]), worktree.join(".app"));
+    assert_eq!(lines[2], "nobody");
+    assert_eq!(lines[3], "vars");
+    let said = text(&branch.events().unwrap());
+    assert_eq!(reported(&said, "APP_MODE"), Some("dev".into()));
+    assert_eq!(
+        reported(&said, "APP_HOME"),
+        Some(worktree.join(".app").display().to_string())
+    );
+    assert_eq!(reported(&said, "WHO"), Some("nobody".into()));
+    assert_eq!(reported(&said, "BRANCHYARD_BRANCH"), Some("vars".into()));
+    // `by workspace run` and the SDK see the same.
+    let env = f.yard.workspace_env("vars").unwrap();
+    let get = |name: &str| env.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone());
+    assert_eq!(get("APP_MODE"), Some("dev".into()));
+    assert_eq!(get("BRANCHYARD_BRANCH"), Some("vars".into()));
+}

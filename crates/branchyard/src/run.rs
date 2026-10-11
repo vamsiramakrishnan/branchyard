@@ -1117,9 +1117,9 @@ fn prepare(
         None if record.context.is_some() => (
             SessionMode::Fresh,
             Some(format!(
-                "{name} was rewound to a checkpoint its harness session cannot continue from; \
-                 this turn starts a fresh session whose prompt begins with a summary of the \
-                 turns before it"
+                "{name}'s harness session cannot be continued (it was rewound to a checkpoint \
+                 the session cannot continue from, or reincarnated in place); this turn starts \
+                 a fresh session whose prompt begins with a summary of the turns before it"
             )),
         ),
         None if record.checkpoint == Some(0) && record.info.turns > 0 => (
@@ -1328,6 +1328,12 @@ fn same_model(name: &str, record: &Record, mut asked: Provisioning) -> Result<Pr
     // So does a branch's approval policy, unless a send replaces it.
     if asked.approvals.is_none() {
         asked.approvals = had.and_then(|p| p.approvals.clone());
+    }
+    // And its connector grant: a send that names none keeps it, so a
+    // provisioning that only changes the effort does not take a child's
+    // connectors away.
+    if asked.connectors.is_empty() {
+        asked.connectors = had.map(|p| p.connectors.clone()).unwrap_or_default();
     }
     Ok(asked)
 }

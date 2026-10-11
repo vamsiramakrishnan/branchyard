@@ -72,6 +72,7 @@ pub use branchyard_harness::profiles::Protocol;
 pub use branchyard_harness::{Instructions, McpServer, RemoteMcpServer, RemoteTransport};
 use serde::{Deserialize, Serialize};
 
+pub use claude::{managed_settings, ManagedSettings, MANAGED_SETTINGS};
 pub use edit::{Edit, JsonEdit, TomlEdit};
 
 /// The Scion revision the translated provisioners follow.
@@ -841,6 +842,24 @@ impl fmt::Debug for McpConfigFile {
             .field("content", &"<redacted>")
             .finish()
     }
+}
+
+/// The managed settings a sandboxed Claude Code turn wrote into its sandbox,
+/// as recorded in the turn's `Provisioned` activity: names and flags, never
+/// the file's content. See `docs/provisioning.md#managed-settings`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedWritten {
+    /// Where the file is, as Claude Code in the sandbox reads it.
+    pub path: String,
+    /// The tool names the file denies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
+    /// Whether the file disables bypass mode. Every managed file does.
+    pub bypass_disabled: bool,
+    /// Whether the file pins telemetry off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub telemetry_off: bool,
 }
 
 /// How one secret reaches the harness. Names and paths only.

@@ -151,7 +151,7 @@ All three create a workspace straight from a GitHub issue, a Linear issue or a p
 - Shows statuses in `by watch`.
 - Tells no one on the desktop. **Take:** an opt-in desktop notification (and terminal bell) from `by watch` and from a waiting `by run` when a branch asks, stalls, fails or finishes.
 
-**Status:** done. `by watch` and a waiting `by run`, `by fan`, `by send` or `by fork` ring the terminal bell and write an OSC 9 or OSC 777 desktop-notification escape (chosen from the terminal, passed through tmux) when a tool waits for permission, a branch asks or escalates, a turn stalls, or a branch fails, is blocked, is interrupted or finishes; each event once, and never for the history `by watch` reads at start. `[notify] desktop = true` adds `notify-send` or `osascript`; `--no-notify` or `[notify] enabled = false` turns it off. On by default, since an escape a terminal does not know is ignored. Not done: a sound of its own, or a badge.
+**Status:** done. `by watch` and a waiting `by run`, `by fan`, `by send` or `by fork` ring the terminal bell and write an OSC 9 or OSC 777 desktop-notification escape (chosen from the terminal, passed through tmux) when a tool waits for permission, a branch asks or escalates (or [reports itself](delegation.md#self-reported-status) blocked or failed), a turn stalls, or a branch fails, is blocked, is interrupted or finishes; each event once, and never for the history `by watch` reads at start. `[notify] desktop = true` adds `notify-send` or `osascript`; `--no-notify` or `[notify] enabled = false` turns it off. On by default, since an escape a terminal does not know is ignored. Not done: a sound of its own, or a badge.
 
 ### 11. Leave for a real editor in one click
 

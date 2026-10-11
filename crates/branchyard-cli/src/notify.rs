@@ -72,6 +72,13 @@ pub struct Tracker {
     /// The status each branch was last noticed in, so a status recorded
     /// again (as recovery may) is not said twice; a new turn clears it.
     status: HashMap<String, Kind>,
+    /// The latest status each branch reported about itself, so the same
+    /// blocked or failure report is not said twice.
+    reported: HashMap<String, (branchyard::ReportedState, String)>,
+    /// The escalations a blocked or failure report sent to the parent's
+    /// inbox, as `branch\ntext`: the report was noticed, so its message is
+    /// not noticed again as a question.
+    escalated: HashSet<String>,
 }
 
 impl Tracker {
@@ -108,6 +115,14 @@ impl Tracker {
                 if !self.seen.insert(format!("message:{}", message.id)) {
                     return None;
                 }
+                // The report that raised it was said already.
+                if message.kind == MessageKind::Escalation
+                    && self
+                        .escalated
+                        .contains(&format!("{}\n{}", message.from, message.text))
+                {
+                    return None;
+                }
                 let verb = match message.kind {
                     MessageKind::Question => "asks",
                     _ => "escalates to",
@@ -119,6 +134,31 @@ impl Tracker {
                         message.from, message.to, message.text
                     )),
                 )
+            }
+            // What a branch says of itself: only a call for attention is
+            // news. A delegated child's also reaches its parent's inbox as an
+            // escalation, which is not said a second time.
+            Activity::StatusReport {
+                state,
+                summary,
+                link,
+            } => {
+                let again = self
+                    .reported
+                    .insert(branch.to_owned(), (*state, summary.clone()))
+                    .is_some_and(|(before, said)| before == *state && said == *summary);
+                if !state.needs_attention() || again {
+                    return None;
+                }
+                self.escalated.insert(format!(
+                    "{branch}\n{}",
+                    branchyard::reported::describe(*state, summary, link.as_deref())
+                ));
+                let what = match state {
+                    branchyard::ReportedState::Failure => "reports failure",
+                    _ => "reports it is blocked",
+                };
+                notice(Kind::Failed, short(&format!("{branch} {what}: {summary}")))
             }
             Activity::Stalled { since_ms } => {
                 if !self.seen.insert(format!("stall:{branch}:{since_ms}")) {
@@ -510,6 +550,70 @@ mod tests {
             kind: Kind::Finished,
             text: text.into(),
         }
+    }
+
+    fn said(state: branchyard::ReportedState, summary: &str) -> Activity {
+        Activity::StatusReport {
+            state,
+            summary: summary.into(),
+            link: None,
+        }
+    }
+
+    /// Only a call for attention is news, and each is said once; the
+    /// escalation it sent to the parent is not said again as a question,
+    /// though anyone else's escalation is.
+    #[test]
+    fn a_blocked_or_failed_report_is_noticed_once_with_its_escalation() {
+        use branchyard::ReportedState::{Blocked, Complete, Failure, Idle, Working};
+        let escalation = |id, text: &str| {
+            Activity::Message(Message {
+                id,
+                from: "impl".into(),
+                to: "lead".into(),
+                kind: MessageKind::Escalation,
+                text: text.into(),
+                in_reply_to: None,
+                at_ms: 0,
+                delivered: false,
+            })
+        };
+        let mut t = Tracker::default();
+        let events = [
+            ("impl", said(Working, "reading the test")),
+            ("impl", said(Idle, "waiting")),
+            ("impl", said(Complete, "done")),
+            ("impl", said(Blocked, "needs the\nAPI key")),
+            // The same report again: nothing new.
+            ("impl", said(Blocked, "needs the\nAPI key")),
+            // Its escalation lands on both logs: already said.
+            ("impl", escalation(1, "status blocked: needs the API key")),
+            ("lead", escalation(1, "status blocked: needs the API key")),
+            // Someone's own escalation is still a question.
+            ("impl", escalation(2, "which parser?")),
+            // Working again, then blocked again with the same words: news.
+            ("impl", said(Working, "retrying")),
+            ("impl", said(Blocked, "needs the\nAPI key")),
+            ("impl", said(Failure, "gave up")),
+            // A branch with no parent has no escalation to follow.
+            ("root", said(Blocked, "needs a decision")),
+        ];
+        assert_eq!(
+            texts(&mut t, &events),
+            [
+                "impl reports it is blocked: needs the API key",
+                "impl escalates to lead: which parser?",
+                "impl reports it is blocked: needs the API key",
+                "impl reports failure: gave up",
+                "root reports it is blocked: needs a decision",
+            ]
+        );
+        let kinds: Vec<Kind> = [said(Blocked, "other"), said(Failure, "other")]
+            .iter()
+            .filter_map(|a| t.observe("docs", a))
+            .map(|n| n.kind)
+            .collect();
+        assert_eq!(kinds, [Kind::Failed, Kind::Failed]);
     }
 
     #[test]

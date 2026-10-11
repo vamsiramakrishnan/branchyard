@@ -7,6 +7,9 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
+
+use branchyard_support::LockExt as _;
 
 use branchyard_recipe::{Recipe, RecipeProvider};
 use branchyard_sandbox::conformance::{self, Setup};
@@ -45,6 +48,15 @@ const DESTROY: &str = r#"#!/bin/sh
 cat >"$BRANCHYARD_ROOT/.vms/$BRANCHYARD_RECIPE_INSTANCE.destroyed"
 rm -rf "$BRANCHYARD_ROOT/.vms/$BRANCHYARD_RECIPE_INSTANCE"
 "#;
+
+/// The tests here run one at a time. Each writes executable scripts and
+/// then runs them, and a child another test forks meanwhile inherits the
+/// writer's open descriptor until it execs, so the script's exec fails with
+/// "Text file busy" (ETXTBSY) when the two overlap.
+fn serial() -> MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL.lock_recovering("recipe provider tests")
+}
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -133,6 +145,7 @@ fn run(provider: &dyn SandboxProvider, name: &str, argv: &[&str]) -> (Option<i32
 
 #[test]
 fn the_recipe_provider_passes_sandbox_conformance() {
+    let _serial = serial();
     let fixture = Fixture::new();
     let provider = fixture.provider(true);
     let setup = Setup::without_mounts("conf", fixture.root.join("work"));
@@ -148,6 +161,7 @@ fn the_recipe_provider_passes_sandbox_conformance() {
 
 #[test]
 fn capabilities_are_what_the_recipe_declares_and_admission_holds_to_them() {
+    let _serial = serial();
     let fixture = Fixture::new();
     let with = fixture.provider(true).capabilities();
     let without = fixture.provider(false).capabilities();
@@ -184,6 +198,7 @@ fn capabilities_are_what_the_recipe_declares_and_admission_holds_to_them() {
 
 #[test]
 fn a_machine_is_created_paused_resumed_and_destroyed_by_its_scripts() {
+    let _serial = serial();
     let fixture = Fixture::new();
     let provider = fixture.provider(true);
     let info = provider.ensure(&SandboxSpec::new("box-1")).unwrap();
@@ -252,6 +267,7 @@ fn a_machine_is_created_paused_resumed_and_destroyed_by_its_scripts() {
 
 #[test]
 fn specs_it_cannot_honor_and_failing_scripts_are_refused() {
+    let _serial = serial();
     let fixture = Fixture::new();
     let provider = fixture.provider(false);
     for spec in [
@@ -292,6 +308,7 @@ fn specs_it_cannot_honor_and_failing_scripts_are_refused() {
 
 #[test]
 fn a_state_directory_lets_another_process_find_the_machine() {
+    let _serial = serial();
     let fixture = Fixture::new();
     let state = fixture.root.join("state");
     let first = fixture.provider(true).with_state_dir(&state);

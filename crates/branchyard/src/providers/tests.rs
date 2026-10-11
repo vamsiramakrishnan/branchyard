@@ -276,6 +276,7 @@ fn lifecycle_defaults_and_overrides() {
                 let lifecycle = lifecycle.expect("a sandbox has a lifecycle");
                 assert!(!lifecycle.keep, "{good:?}");
                 assert_eq!(lifecycle.max_paused, crate::snapshots::DEFAULT_MAX_PAUSED);
+                assert_eq!(lifecycle.max_kept_secs, None, "{good:?}");
                 // A recipe's machine has no checkpoints to keep.
                 let snapshots = match index(&good) {
                     3 => 0,
@@ -290,12 +291,18 @@ fn lifecycle_defaults_and_overrides() {
         keep: crate::SandboxKeep::Pause,
         snapshots: Some(7),
         max_paused: Some(2),
+        max_kept_secs: Some(600),
         ..SandboxOptions::default()
     });
     let lifecycle = kept.kind().lifecycle().unwrap();
     assert_eq!(
-        (lifecycle.keep, lifecycle.snapshots, lifecycle.max_paused),
-        (true, 7, 2)
+        (
+            lifecycle.keep,
+            lifecycle.snapshots,
+            lifecycle.max_paused,
+            lifecycle.max_kept_secs
+        ),
+        (true, 7, 2, Some(600))
     );
     // Pausing a recipe's machine needs both of its scripts.
     let paused = |suspend: Option<&str>| {

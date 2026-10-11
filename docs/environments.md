@@ -25,7 +25,7 @@ share = ["node_modules"]                    # linked from the environment, not c
 
 ## The key
 
-An environment's **recipe** is a hash of its setup commands, its copy globs, its input globs and where it is built (`host`, or one sandbox provider: Microsandbox, or Substrate at its endpoint, atespace and template). Its **key** is the recipe with the content (BLAKE3) of every input file, read from the new branch's worktree, so from the commit it starts at. Change a lockfile, a setup command or a copy glob and the key changes; change nothing and every branch has the same key. `share` does not change the key: it changes how a result is placed, not what setup builds, so a restore links what the branch's own `share` names now, not what the environment was built with (a directory taken out of `share` is copied again). `by env show` prints a key's inputs and their digests.
+An environment's **recipe** is a hash of its setup commands, its copy globs, its input globs, its `env` variables when it has any (they change what setup builds) and where it is built (`host`, or one sandbox provider: Microsandbox, or Substrate at its endpoint, atespace and template). Its **key** is the recipe with the content (BLAKE3) of every input file, read from the new branch's worktree, so from the commit it starts at. Change a lockfile, a setup command or a copy glob and the key changes; change nothing and every branch has the same key. `share` does not change the key: it changes how a result is placed, not what setup builds, so a restore links what the branch's own `share` names now, not what the environment was built with (a directory taken out of `share` is copied again). `by env show` prints a key's inputs and their digests.
 
 ## What a branch does
 

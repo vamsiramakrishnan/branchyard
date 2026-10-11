@@ -50,6 +50,7 @@ use crate::operations::Capability;
 use crate::projection::{lock, same_token, ENV_BRANCH, ENV_ROOT, ENV_TOKEN};
 use crate::record::{self, Recorder};
 use crate::recover;
+use crate::reported::{self, Reported, ReportedState, StatusReport};
 use crate::run::{self, NewBranch, Prepared};
 use crate::seats::{Seat, Seats};
 use crate::state::{Record, Store};
@@ -575,6 +576,11 @@ pub struct Inspection {
     #[serde(default)]
     pub settled_children_usd: f64,
     pub envelope: Option<Envelope>,
+    /// Its connector grant as stored: what its turns' tokens carry, and
+    /// the most a child of its can be given (`docs/connectors.md`). Empty
+    /// for a branch with none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<crate::connectors::GrantEntry>,
     /// The check its merge must pass when it is integrated. Omitted when
     /// it has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -596,6 +602,12 @@ pub struct Inspection {
     /// The harness's text since the branch's last prompt, truncated from
     /// the front.
     pub last_message: String,
+    /// The branch's own latest account of what it is doing, from its
+    /// `report_status` tool: a claim beside `status`, which comes from the
+    /// protocol and may disagree with it. Not cleared by a new turn;
+    /// `at_ms` says how old it is. Omitted until the branch reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported: Option<StatusReport>,
     /// The rig seat the branch occupies, if it is in a rig.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seat: Option<String>,
@@ -1118,6 +1130,26 @@ impl Delegate {
     /// `escalates_to` names one, an ancestor further up.
     pub fn escalate(&self, text: &str) -> Result<Message, Error> {
         self.typed("escalate", json!({"text": text}))
+    }
+
+    /// State this branch's own status beside the one its protocol gives:
+    /// what it is doing in `summary` (one line, at most 280 characters),
+    /// with an optional `link`. A `blocked` or `failure` report is also
+    /// escalated to this branch's parent, unless it repeats the report
+    /// before it exactly.
+    pub fn report_status(
+        &self,
+        state: ReportedState,
+        summary: &str,
+        link: Option<&str>,
+    ) -> Result<Reported, Error> {
+        match &self.via {
+            Via::Local(local) => local.report_status(state, summary, link),
+            Via::Remote(_) => self.typed(
+                "report_status",
+                json!({"state": state, "summary": summary, "link": link}),
+            ),
+        }
     }
 
     /// Answer a descendant's message (usually a question) with `text`.
@@ -3018,6 +3050,11 @@ impl Local {
             check: record.check.clone(),
             check_inherited: record.check_inherited,
             check_shared_with,
+            grants: record
+                .provision
+                .as_ref()
+                .map(|p| p.connectors.clone())
+                .unwrap_or_default(),
             // The envelope's harnesses as enforced, as `allowed_harnesses`
             // says them: a stored empty list means "its own profile only",
             // and shown as `[]` it read as "no harness".
@@ -3027,6 +3064,7 @@ impl Local {
             }),
             allowed_harnesses,
             last_message: last_message(&events),
+            reported: reported::latest(&events),
             seat,
             seats: may_spawn,
             stalled: info.stalled,
@@ -3440,6 +3478,44 @@ impl Local {
         self.send_message(kind, &parent, text, None)
     }
 
+    /// Record this branch's own status report, and escalate a `blocked` or
+    /// `failure` one to its parent's inbox.
+    fn report_status(
+        &self,
+        state: ReportedState,
+        summary: &str,
+        link: Option<&str>,
+    ) -> Result<Reported, Error> {
+        let (summary, link) = reported::check(summary, link)?;
+        let store = self.store();
+        let previous = reported::latest(&record::read(&store, &self.branch)?);
+        let mut recorder = Recorder::open(&store, &self.branch, self.options.observer.clone())?;
+        let at_ms = recorder.record_stamped(Activity::StatusReport {
+            state,
+            summary: summary.clone(),
+            link: link.clone(),
+        })?;
+        let report = StatusReport {
+            state,
+            summary,
+            link,
+            at_ms,
+        };
+        // The parent was told of an identical report when it was first made.
+        let repeat = previous.is_some_and(|p| {
+            (p.state, &p.summary, &p.link) == (report.state, &report.summary, &report.link)
+        });
+        let parent = store.read(&self.branch)?.info.parent;
+        let escalation = match (state.needs_attention() && !repeat, parent) {
+            (true, Some(parent)) => branchyard_support::best_effort(
+                "escalate a self-reported status to the parent",
+                self.send_message(MessageKind::Escalation, &parent, &report.describe(), None),
+            ),
+            _ => None,
+        };
+        Ok(Reported { report, escalation })
+    }
+
     fn answer(&self, message_id: u64, text: &str) -> Result<Message, Error> {
         self.require(Capability::Delegate, "answer a descendant")?;
         let question = self
@@ -3831,6 +3907,17 @@ struct TextArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ReportStatusArgs {
+    /// One of [`ReportedState::NAMES`]; parsed by the handler so a bad one
+    /// is refused naming the good ones.
+    state: String,
+    summary: String,
+    #[serde(default)]
+    link: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AskArgs {
     text: String,
     /// Block for up to this many seconds for an answer; `None` or `0`
@@ -4116,6 +4203,11 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
         "escalate" => {
             let args: TextArgs = parse(tool, arguments)?;
             to_json(&local.send_to_parent(MessageKind::Escalation, &args.text)?)
+        }
+        "report_status" => {
+            let args: ReportStatusArgs = parse(tool, arguments)?;
+            let state = ReportedState::parse(&args.state)?;
+            to_json(&local.report_status(state, &args.summary, args.link.as_deref())?)
         }
         "answer" => {
             let args: AnswerArgs = parse(tool, arguments)?;

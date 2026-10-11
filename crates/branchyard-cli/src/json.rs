@@ -198,6 +198,7 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             unused_secrets,
             connectors,
             knowledge,
+            managed,
         } => json!({
             "activity": "provisioned",
             "auth": auth,
@@ -207,6 +208,7 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "unused_secrets": unused_secrets,
             "connectors": connectors,
             "knowledge": knowledge,
+            "managed": managed,
         }),
         Activity::Steered { id, by, text } => json!({
             "activity": "steered",
@@ -316,6 +318,26 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "activity": "effect",
             "effect": activity,
             "text": activity.describe(),
+        }),
+        Activity::StatusReport {
+            state,
+            summary,
+            link,
+        } => json!({
+            "activity": "status_report",
+            "state": state,
+            "summary": summary,
+            "link": link,
+        }),
+        Activity::Lifecycle {
+            state,
+            reason,
+            idle_since_ms,
+        } => json!({
+            "activity": "lifecycle",
+            "state": state,
+            "reason": reason,
+            "idle_since_ms": idle_since_ms,
         }),
     };
     value["at_ms"] = json!(recorded.at_ms);
@@ -502,6 +524,44 @@ mod tests {
                 activity: Activity::Status(BranchStatus::Ready)
             }),
             json!({ "at_ms": 7, "activity": "status", "status": { "state": "ready" } })
+        );
+        let status_report = |link: Option<&str>| {
+            recorded(&RecordedEvent {
+                at_ms: 8,
+                activity: Activity::StatusReport {
+                    state: branchyard::ReportedState::Blocked,
+                    summary: "needs a key".into(),
+                    link: link.map(Into::into),
+                },
+            })
+        };
+        assert_eq!(
+            status_report(Some("https://example.com/i/1")),
+            json!({
+                "at_ms": 8,
+                "activity": "status_report",
+                "state": "blocked",
+                "summary": "needs a key",
+                "link": "https://example.com/i/1",
+            })
+        );
+        assert_eq!(status_report(None)["link"], Value::Null);
+        assert_eq!(
+            recorded(&RecordedEvent {
+                at_ms: 8,
+                activity: Activity::Lifecycle {
+                    state: branchyard::LifecycleState::Dormant,
+                    reason: "no turn for 7d".into(),
+                    idle_since_ms: 3,
+                }
+            }),
+            json!({
+                "at_ms": 8,
+                "activity": "lifecycle",
+                "state": "dormant",
+                "reason": "no turn for 7d",
+                "idle_since_ms": 3,
+            })
         );
     }
 }

@@ -119,6 +119,7 @@ pub mod inventory;
 mod json_schema;
 mod judge;
 mod knowledge;
+mod lifecycle;
 mod lock;
 mod map;
 mod map_input;
@@ -139,6 +140,7 @@ mod provisioning;
 mod pull_request;
 mod record;
 mod recover;
+pub mod reported;
 mod run;
 #[cfg(test)]
 mod schema_parity;
@@ -226,6 +228,7 @@ pub use knowledge::{
     KnowledgeStatus, NewKnowledge, DEFAULT_BUDGET_TOKENS as KNOWLEDGE_DEFAULT_BUDGET_TOKENS,
     TEXT_MAX as KNOWLEDGE_TEXT_MAX,
 };
+pub use lifecycle::{Parked, Resting};
 pub use map::{
     check_spec as check_map_spec, default_name as map_default_name,
     follow_up_prompt as map_follow_up_prompt, item_prompt as map_item_prompt,
@@ -256,6 +259,7 @@ pub use pull_request::{
     slug, CheckRun, CiSummary, IssueLink, PullRequestActivity, PullRequestObservation,
     PullRequestRef, Pushed, ResolvedThread,
 };
+pub use reported::{Reported, ReportedState, StatusReport};
 pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
 pub use snapshots::{
@@ -790,12 +794,11 @@ impl Yard {
         let store = self.store();
         let record = store.read(branch)?;
         let port = workspace::reserve_port(&store, &self.root, branch)?;
-        Ok(workspace::variables(
-            self,
-            branch,
-            &record.info.worktree,
-            Some(port),
-        ))
+        let vars = workspace::variables(self, branch, &record.info.worktree, Some(port));
+        Ok(match record.workspace.as_ref() {
+            Some(state) => workspace::with_spec_env(&state.spec, vars),
+            None => vars,
+        })
     }
 
     /// Append a workspace lifecycle report to `branch`'s event log, for a
@@ -1436,6 +1439,12 @@ pub struct SandboxOptions {
     /// Unset: 4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_paused: Option<u32>,
+    /// A kept sandbox unused for longer than this many seconds is
+    /// destroyed instead of resumed: by the branch's next turn, or by the
+    /// next turn ending on this provider. Unset: kept until `max_paused`
+    /// evicts it. See `docs/sandbox-snapshots.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_kept_secs: Option<u64>,
     /// Opt in to the Microsandbox SDK's pause, resume, live branching and
     /// full-memory snapshots, which are declared only then: unqualified
     /// until they pass on a KVM host.
@@ -1509,6 +1518,12 @@ pub struct SubstrateOptions {
     /// parking one more deletes the least recently used. Unset: 4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_paused: Option<u32>,
+    /// A kept sandbox unused for longer than this many seconds is
+    /// destroyed instead of resumed: by the branch's next turn, or by the
+    /// next turn ending on this provider. Unset: kept until `max_paused`
+    /// evicts it. See `docs/sandbox-snapshots.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_kept_secs: Option<u64>,
 }
 
 impl SubstrateOptions {
@@ -1583,6 +1598,12 @@ pub struct RecipeOptions {
     /// parking one more destroys the least recently used. Unset: 4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_paused: Option<u32>,
+    /// A kept sandbox unused for longer than this many seconds is
+    /// destroyed instead of resumed: by the branch's next turn, or by the
+    /// next turn ending on this provider. Unset: kept until `max_paused`
+    /// evicts it. See `docs/sandbox-snapshots.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_kept_secs: Option<u64>,
 }
 
 impl RecipeOptions {
@@ -2424,6 +2445,12 @@ pub enum Activity {
         /// `docs/knowledge.md`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         knowledge: Vec<u64>,
+        /// The managed settings written into a sandbox for a Claude Code
+        /// turn, before the harness started, when the turn's sandbox took
+        /// them; see `docs/provisioning.md#managed-settings`. Names and
+        /// flags only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        managed: Option<branchyard_provision::ManagedWritten>,
     },
     /// Input from `by` was written into the running turn; see
     /// [`Branch::steer`]. The harness's `steer_accepted` or
@@ -2529,6 +2556,56 @@ pub enum Activity {
     /// call blocked, an entry begun, confirmed, staged, reconciled or
     /// undone. See [`effects::EffectActivity`] and `docs/effects.md`.
     Effect(Box<effects::EffectActivity>),
+    /// The harness's own account of what it is doing, from its
+    /// `report_status` tool or `by report-status`: a claim beside the
+    /// protocol's status, never a replacement for it. See
+    /// `docs/delegation.md#self-reported-status`.
+    StatusReport {
+        /// What the harness says it is doing.
+        state: ReportedState,
+        /// One line of at most 280 characters.
+        summary: String,
+        /// Where to read more, an `http` or `https` URL.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        link: Option<String>,
+    },
+    /// A branch that a trigger keeps alive moved through its lifecycle: it
+    /// went idle (its kept sandbox released), dormant (its next run starts
+    /// a fresh session), was reincarnated, or was deleted. See
+    /// [`LifecycleState`] and `docs/triggers.md#lifecycle`.
+    Lifecycle {
+        /// Where the branch stands now.
+        state: LifecycleState,
+        /// Why, and what it released.
+        reason: String,
+        /// Milliseconds since the Unix epoch when the branch last ended a
+        /// turn: where its idleness is counted from.
+        idle_since_ms: u64,
+    },
+}
+
+/// Where a branch that lives on stands in its lifecycle: the `state` of
+/// [`Activity::Lifecycle`]. Serialized in snake case.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, strum::Display, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum LifecycleState {
+    /// It has not ended a turn for its idle time and is running none: what
+    /// it held (a kept sandbox) was released. The next send continues it
+    /// as before.
+    Idle,
+    /// It has been idle for its dormant time: the next run that would send
+    /// to it starts a fresh harness session on the same worktree instead.
+    Dormant,
+    /// A fresh harness session was started on the same worktree, with a
+    /// handoff of what the old one did.
+    Reincarnated,
+    /// It had been idle for its delete time, and was removed: the next run
+    /// creates it again from the trigger's task.
+    Deleted,
 }
 
 /// A turn's checkpoint: the branch's commit when the turn ended, kept as the

@@ -597,6 +597,38 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
             }
             set!("workspace.setup", get("workspace.setup"));
             set!("workspace.teardown", get("workspace.teardown"));
+            // What a devcontainer says beyond its scripts, applied as
+            // detected for the plan to show: the variables its processes
+            // get, and the file keying the environment it is built as.
+            let detected = &facts.workspace;
+            if before.as_ref().is_none_or(|w| w.env.is_empty()) && !detected.env.is_empty() {
+                flat.insert("workspace.env".into(), json!(detected.env));
+            } else if let Some(env) = before.as_ref().map(|w| &w.env).filter(|e| !e.is_empty()) {
+                flat.insert("workspace.env".into(), json!(env));
+            }
+            let setup_kept = text(answers, "workspace.setup").is_some();
+            if detected.prepare && setup_kept && before.as_ref().is_none_or(|w| !w.prepare) {
+                flat.insert("workspace.prepare".into(), json!(true));
+                if !detected.inputs.is_empty() {
+                    let mut inputs = detected.inputs.clone();
+                    // The lockfiles present key it too, as they would by
+                    // default; naming inputs replaces that default.
+                    for lockfile in crate::probe::ENV_INPUTS {
+                        if probe.exists(lockfile) && !inputs.contains(&(*lockfile).to_owned()) {
+                            inputs.push((*lockfile).to_owned());
+                        }
+                    }
+                    flat.insert("workspace.inputs".into(), json!(inputs));
+                }
+            } else if let Some(w) = before.as_ref().filter(|w| w.prepare) {
+                flat.insert("workspace.prepare".into(), json!(true));
+                if !w.inputs.is_empty() {
+                    flat.insert("workspace.inputs".into(), json!(w.inputs));
+                }
+                if !w.share.is_empty() {
+                    flat.insert("workspace.share".into(), json!(w.share));
+                }
+            }
             // Other run scripts are kept; the asked one is the default.
             let mut runs = before.map(|w| w.run).unwrap_or_default();
             let name = runs
@@ -828,6 +860,66 @@ mod tests {
         );
         assert_eq!(workspace.teardown.commands(), ["docker compose down"]);
         assert!(plan.valid);
+    }
+
+    #[test]
+    fn a_devcontainer_is_imported_as_a_prepared_workspace_with_its_variables() {
+        let mut probe = FakeProbe::typical();
+        for file in ["package.json", "pnpm-lock.yaml"] {
+            probe.files.insert(file.into(), String::new());
+        }
+        probe.files.insert(
+            ".devcontainer/devcontainer.json".into(),
+            r#"{
+  // the team's image
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:1-20",
+  "remoteEnv": { "CI": "true", "CACHE": "${containerWorkspaceFolder}/.cache" },
+  "postCreateCommand": "pnpm install --frozen-lockfile",
+  "postStartCommand": ["pnpm", "dev", "--port", "${localEnv:PORT:3000}"],
+  "forwardPorts": [3000],
+}"#
+            .into(),
+        );
+        let facts = Facts::gather(&probe);
+        let w = &facts.workspace;
+        assert_eq!(w.setup, ["pnpm install --frozen-lockfile"]);
+        assert_eq!(w.run.as_deref(), Some("pnpm dev --port \"${PORT:-3000}\""));
+        assert_eq!(w.env["CACHE"], "${BRANCHYARD_WORKTREE}/.cache");
+        assert!(w.prepare);
+        assert_eq!(w.inputs, [".devcontainer/devcontainer.json"]);
+        assert!(
+            w.notes
+                .iter()
+                .any(|n| n.contains("needs a container runtime")),
+            "{:?}",
+            w.notes
+        );
+        assert!(w
+            .notes
+            .iter()
+            .any(|n| n.contains("forwardPorts is not imported")));
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        let plan = plan(&facts, &state.answers, &probe);
+        assert!(plan.valid);
+        let body = plan_body(&facts, &state.answers, &probe);
+        let workspace = config::parse(&body).unwrap().workspace.unwrap();
+        assert_eq!(
+            workspace.setup.commands(),
+            ["pnpm install --frozen-lockfile"]
+        );
+        assert_eq!(workspace.env["CI"], "true");
+        assert_eq!(workspace.env["CACHE"], "${BRANCHYARD_WORKTREE}/.cache");
+        assert!(workspace.prepare, "{body}");
+        // The file keys the environment, with the lockfiles present.
+        assert_eq!(
+            workspace.inputs,
+            [
+                ".devcontainer/devcontainer.json",
+                "package.json",
+                "pnpm-lock.yaml"
+            ]
+        );
+        assert!(body.contains("[workspace.env]"), "{body}");
     }
 
     fn plan_body(facts: &Facts, answers: &Answers, probe: &FakeProbe) -> String {

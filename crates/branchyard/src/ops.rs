@@ -347,6 +347,17 @@ pub(crate) fn remove(
     name: &str,
     options: &RemoveOptions,
 ) -> Result<Option<crate::WorkspaceReport>, Error> {
+    remove_noting(yard, name, options, None)
+}
+
+/// [`remove`], recording `note` first: the last thing the branch's log
+/// says, which stays in the repository's feed after the branch is gone.
+pub(crate) fn remove_noting(
+    yard: &Yard,
+    name: &str,
+    options: &RemoveOptions,
+    note: Option<Activity>,
+) -> Result<Option<crate::WorkspaceReport>, Error> {
     let store = yard.store();
     let (record, lease) = hold(yard, name)?;
     // Journaled so a removal cut short says so; repeating it finishes it.
@@ -356,6 +367,9 @@ pub(crate) fn remove(
     // Best-effort: what it did goes in the log, and the removal goes on.
     let teardown = crate::workspace::teardown(yard, &record, Some(lease.fence()))?;
     let mut recorder = Recorder::fenced(&store, lease.fence(), None);
+    if let Some(note) = note {
+        recorder.record(note)?;
+    }
     if let Some(report) = &teardown {
         recorder.record(Activity::Workspace(report.clone()))?;
     }
@@ -396,8 +410,10 @@ pub(crate) fn remove(
         remove_credentials(&store, &record)?;
     }
     remove_home(&store, &record)?;
-    // Its private temporary directory, which nothing else uses.
+    // Its private temporary directory, which nothing else uses, and its
+    // egress proxy's certificate authority.
     branchyard_support::cleanup_dir(store.tmp(name));
+    branchyard_support::cleanup_dir(store.egress(name));
     Ok(teardown)
 }
 

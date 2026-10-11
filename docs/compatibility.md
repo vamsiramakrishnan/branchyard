@@ -32,7 +32,7 @@ Capabilities are what the driver offers before negotiation. ACP resume is used o
 
 ## Known, not driven
 
-The harness registry names 47 CLIs. Beside the rows above, Branchyard knows these 32 from the vendored Herdr, Scion, emdash and Orca registries, with no profile to drive them: `aider`, `cline`, `devin`, `droid`, `grok-build`, `kilo`, `kiro`, `letta`, `maki`, `mastracode`, `muse-code`, `qodercli`, `ante`, `auggie`, `autohand`, `codebuddy`, `codebuff`, `command-code`, `continue`, `crush`, `freebuff`, `jules`, `junie`, `mimo-code`, `mistral-vibe`, `openclaude`, `openclaw`, `prime-agent`, `rovo-dev`, `trae`, `zcode`, `zero`. `by harnesses --all` lists every one with its install and login commands, API-key variables and models where upstream records them ([`catalog/harnesses.toml`](../catalog/harnesses.toml), generated from the pinned sources); knowing a CLI is not support for it.
+The harness registry names 48 CLIs. Beside the rows above, Branchyard knows these 33 from the vendored Herdr, Scion, emdash, Orca, agentapi and Coder Registry sources, with no profile to drive them: `aider`, `cline`, `devin`, `droid`, `grok-build`, `kilo`, `kiro`, `letta`, `maki`, `mastracode`, `muse-code`, `qodercli`, `ante`, `auggie`, `autohand`, `codebuddy`, `codebuff`, `command-code`, `continue`, `crush`, `freebuff`, `jules`, `junie`, `mimo-code`, `mistral-vibe`, `openclaude`, `openclaw`, `prime-agent`, `rovo-dev`, `trae`, `zcode`, `zero`, `amazon-q`. `by harnesses --all` lists every one with its install and login commands, API-key variables and models where upstream records them ([`catalog/harnesses.toml`](../catalog/harnesses.toml), generated from the pinned sources); knowing a CLI is not support for it.
 
 ## On your machines
 

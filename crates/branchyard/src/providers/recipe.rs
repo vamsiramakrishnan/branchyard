@@ -27,7 +27,12 @@ impl ProviderKind for RecipeOptions {
 
     /// A recipe's machine has no checkpoints to keep.
     fn lifecycle(&self) -> Option<Lifecycle> {
-        Some(Lifecycle::of(self.keep, Some(0), self.max_paused))
+        Some(Lifecycle::of(
+            self.keep,
+            Some(0),
+            self.max_paused,
+            self.max_kept_secs,
+        ))
     }
 
     fn service_kind(&self) -> &'static str {

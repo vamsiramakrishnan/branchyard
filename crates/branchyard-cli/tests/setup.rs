@@ -638,3 +638,53 @@ fn the_wizard_accepts_defaults_on_a_terminal_and_writes_after_review() {
     let written = fs::read_to_string(repo.root.join("branchyard.toml")).unwrap();
     assert!(written.contains("check = \"cargo test\""), "{written}");
 }
+
+/// `by init project` reads a repository's `devcontainer.json` into a
+/// prepared `[workspace]` with the variables its processes get, and the
+/// file it writes loads and validates.
+#[test]
+fn project_setup_imports_a_devcontainer_as_a_prepared_workspace() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".devcontainer")).unwrap();
+    fs::write(
+        repo.root.join(".devcontainer/devcontainer.json"),
+        r#"{
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu", // the image
+  "containerEnv": { "APP_ENV": "dev" },
+  "remoteEnv": { "TOKEN_FILE": "${localEnv:HOME}/.token" },
+  "onCreateCommand": "make deps",
+  "postCreateCommand": ["make", "generate"],
+  "postStartCommand": "make serve",
+}"#,
+    )
+    .unwrap();
+    fs::write(repo.root.join("package.json"), "{}").unwrap();
+    let out = repo.by(&["init", "project", "--defaults", "--apply"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let written = fs::read_to_string(repo.root.join("branchyard.toml")).unwrap();
+    let config: toml_edit::DocumentMut = written.parse().unwrap();
+    let workspace = &config["workspace"];
+    assert_eq!(
+        workspace["setup"].as_str(),
+        Some("make deps && make generate"),
+        "{written}"
+    );
+    assert_eq!(workspace["prepare"].as_bool(), Some(true), "{written}");
+    let inputs: Vec<&str> = workspace["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(inputs, [".devcontainer/devcontainer.json", "package.json"]);
+    assert_eq!(workspace["env"]["APP_ENV"].as_str(), Some("dev"));
+    assert_eq!(
+        workspace["env"]["TOKEN_FILE"].as_str(),
+        Some("${HOME}/.token")
+    );
+    let runs = workspace["run"].as_table_like().unwrap();
+    let (_, script) = runs.iter().next().unwrap();
+    assert_eq!(script["command"].as_str(), Some("make serve"));
+    let check = repo.by(&["config", "validate"]);
+    assert!(check.status.success(), "{}", text(&check));
+}

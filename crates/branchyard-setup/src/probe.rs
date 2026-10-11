@@ -61,6 +61,36 @@ pub const COMPOSE_FILES: &[&str] = &[
 /// two branches' stacks never collide (a project name takes no `.`).
 const COMPOSE_PROJECT: &str = "\"by-$(printf %s \"$BRANCHYARD_BRANCH\" | tr . -)\"";
 
+/// The files a prepared environment is keyed by when `inputs` names none
+/// (`branchyard::environments::DEFAULT_INPUTS`), listed here so a
+/// suggestion that names inputs keeps them.
+pub const ENV_INPUTS: &[&str] = &[
+    "package.json",
+    "pnpm-lock.yaml",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "pyproject.toml",
+    "uv.lock",
+    "poetry.lock",
+    "Pipfile.lock",
+    "requirements.txt",
+    "go.mod",
+    "go.sum",
+    "Gemfile.lock",
+    "composer.lock",
+    "mix.lock",
+    "flake.lock",
+    ".tool-versions",
+    ".nvmrc",
+    ".node-version",
+    ".python-version",
+];
+
 /// What the files at a repository root suggest for `[workspace]`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspaceFacts {
@@ -78,9 +108,22 @@ pub struct WorkspaceFacts {
     pub run: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub teardown: Vec<String>,
+    /// Variables the scripts and the harness get, from a devcontainer's
+    /// `containerEnv` and `remoteEnv`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Setup once per environment key (docs/environments.md), as a
+    /// devcontainer is built once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prepare: bool,
+    /// Files that key the environment, besides the lockfiles present:
+    /// the devcontainer file itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<String>,
     /// What another tool's committed configuration (`.emdash.json`,
-    /// `orca.yaml`, `.superset/config.json`, `.conductor/settings.toml`)
-    /// could not carry over, and why; see [`crate::import`].
+    /// `orca.yaml`, `.superset/config.json`, `.conductor/settings.toml`,
+    /// `devcontainer.json`) could not carry over, and why; see
+    /// [`crate::import`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
 }
@@ -150,19 +193,33 @@ impl WorkspaceFacts {
 
     /// Prefer what another worktree tool's committed configuration says
     /// over what the lockfiles suggest: the first file (in
-    /// [`crate::import::IMPORTERS`] order) that gives setup, a run script
-    /// or teardown decides it, and every file's copy globs are added.
+    /// [`crate::import::IMPORTERS`] order) that gives setup, a run script,
+    /// teardown or variables decides it, every file's copy globs are
+    /// added, and a file that keys a prepared environment turns `prepare`
+    /// on with its inputs.
     fn import(&mut self, probe: &dyn Probe) {
         let (imported, notes) = crate::import::detect(probe);
         self.notes = notes;
         let mut setup = None;
         let mut run = None;
         let mut teardown = None;
+        let mut env = None;
         for found in &imported {
             if found.is_empty() {
                 continue;
             }
             self.found.push(found.file.to_owned());
+            if env.is_none() && !found.env.is_empty() {
+                env = Some(found.env.clone());
+            }
+            if found.prepare {
+                self.prepare = true;
+                for input in &found.inputs {
+                    if !self.inputs.contains(input) {
+                        self.inputs.push(input.clone());
+                    }
+                }
+            }
             for glob in &found.copy {
                 let valid = crate::config::check_copy_glob(glob).is_ok();
                 if !valid {
@@ -192,6 +249,9 @@ impl WorkspaceFacts {
         }
         if let Some(teardown) = teardown {
             self.teardown = teardown;
+        }
+        if let Some(env) = env {
+            self.env = env;
         }
     }
 

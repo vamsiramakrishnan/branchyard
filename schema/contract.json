@@ -639,6 +639,15 @@
               "minimum": 0,
               "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
             },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
+            },
             "live_branch": {
               "type": "boolean",
               "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
@@ -748,6 +757,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -828,6 +846,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -1115,44 +1142,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -1171,7 +1203,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -1187,7 +1219,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -2078,6 +2110,15 @@
               "minimum": 0,
               "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
             },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
+            },
             "live_branch": {
               "type": "boolean",
               "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
@@ -2187,6 +2228,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -2267,6 +2317,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -2554,44 +2613,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -2610,7 +2674,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -2626,7 +2690,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -4485,6 +4549,15 @@
               "minimum": 0,
               "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
             },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
+            },
             "live_branch": {
               "type": "boolean",
               "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
@@ -4594,6 +4667,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -4674,6 +4756,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -5958,44 +6049,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -6014,7 +6110,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -6030,7 +6126,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -6702,44 +6798,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -6758,7 +6859,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -6774,7 +6875,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -11834,44 +11935,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -11890,7 +11996,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -11906,7 +12012,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -12429,6 +12535,15 @@
               "minimum": 0,
               "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
             },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
+            },
             "live_branch": {
               "type": "boolean",
               "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
@@ -12538,6 +12653,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -12618,6 +12742,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -12905,44 +13038,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -12961,7 +13099,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -12977,7 +13115,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -13488,6 +13626,15 @@
               "minimum": 0,
               "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
             },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
+            },
             "live_branch": {
               "type": "boolean",
               "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
@@ -13597,6 +13744,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -13677,6 +13833,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -13964,44 +14129,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -14020,7 +14190,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -14036,7 +14206,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -14487,44 +14657,49 @@
           "description": "How a branch uses a scratch area it is bound to."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -14837,44 +15012,49 @@
           "description": "How a branch uses a scratch area it is bound to."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -15893,6 +16073,13 @@
                 }
               ]
             },
+            "grants": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GrantEntry"
+              },
+              "description": "Its connector grant as stored: what its turns' tokens carry, and\nthe most a child of its can be given (`docs/connectors.md`). Empty\nfor a branch with none."
+            },
             "check": {
               "type": [
                 "array",
@@ -15924,6 +16111,17 @@
             "last_message": {
               "type": "string",
               "description": "The harness's text since the branch's last prompt, truncated from\nthe front."
+            },
+            "reported": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StatusReport"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
             },
             "seat": {
               "type": [
@@ -16223,6 +16421,129 @@
             "harnesses"
           ],
           "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "GrantEntry": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
+              },
+              "required": [
+                "connector"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "StatusReport": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ReportedState",
+              "description": "What the harness says it is doing."
+            },
+            "summary": {
+              "type": "string",
+              "description": "One line of at most 280 characters."
+            },
+            "link": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Where to read more, an `http` or `https` URL. Omitted when none was\ngiven."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch when the report was recorded."
+            }
+          },
+          "required": [
+            "state",
+            "summary",
+            "at_ms"
+          ],
+          "description": "A branch's own report of its status, as `report_status` returns it and\n`Inspection::reported` shows the latest."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
         },
         "Dependency": {
           "type": "object",
@@ -17072,6 +17393,13 @@
                 }
               ]
             },
+            "grants": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GrantEntry"
+              },
+              "description": "Its connector grant as stored: what its turns' tokens carry, and\nthe most a child of its can be given (`docs/connectors.md`). Empty\nfor a branch with none."
+            },
             "check": {
               "type": [
                 "array",
@@ -17103,6 +17431,17 @@
             "last_message": {
               "type": "string",
               "description": "The harness's text since the branch's last prompt, truncated from\nthe front."
+            },
+            "reported": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StatusReport"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
             },
             "seat": {
               "type": [
@@ -17192,6 +17531,129 @@
             "harnesses"
           ],
           "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "GrantEntry": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
+              },
+              "required": [
+                "connector"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "StatusReport": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ReportedState",
+              "description": "What the harness says it is doing."
+            },
+            "summary": {
+              "type": "string",
+              "description": "One line of at most 280 characters."
+            },
+            "link": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Where to read more, an `http` or `https` URL. Omitted when none was\ngiven."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch when the report was recorded."
+            }
+          },
+          "required": [
+            "state",
+            "summary",
+            "at_ms"
+          ],
+          "description": "A branch's own report of its status, as `report_status` returns it and\n`Inspection::reported` shows the latest."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
         },
         "Dependency": {
           "type": "object",
@@ -18289,6 +18751,13 @@
                 }
               ]
             },
+            "grants": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GrantEntry"
+              },
+              "description": "Its connector grant as stored: what its turns' tokens carry, and\nthe most a child of its can be given (`docs/connectors.md`). Empty\nfor a branch with none."
+            },
             "check": {
               "type": [
                 "array",
@@ -18320,6 +18789,17 @@
             "last_message": {
               "type": "string",
               "description": "The harness's text since the branch's last prompt, truncated from\nthe front."
+            },
+            "reported": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StatusReport"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
             },
             "seat": {
               "type": [
@@ -18409,6 +18889,129 @@
             "harnesses"
           ],
           "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "GrantEntry": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
+              },
+              "required": [
+                "connector"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "StatusReport": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ReportedState",
+              "description": "What the harness says it is doing."
+            },
+            "summary": {
+              "type": "string",
+              "description": "One line of at most 280 characters."
+            },
+            "link": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Where to read more, an `http` or `https` URL. Omitted when none was\ngiven."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch when the report was recorded."
+            }
+          },
+          "required": [
+            "state",
+            "summary",
+            "at_ms"
+          ],
+          "description": "A branch's own report of its status, as `report_status` returns it and\n`Inspection::reported` shows the latest."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
         },
         "Dependency": {
           "type": "object",
@@ -18984,6 +19587,17 @@
                         "format": "uint64",
                         "minimum": 0
                       }
+                    },
+                    "managed": {
+                      "description": "The managed settings written into a sandbox for a Claude Code\nturn, before the harness started, when the turn's sandbox took\nthem; see `docs/provisioning.md#managed-settings`. Names and\nflags only.",
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/ManagedWritten"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -19393,6 +20007,74 @@
               ],
               "additionalProperties": false,
               "description": "Approvals and the effect ledger: a person asked and answering, a\ncall blocked, an entry begun, confirmed, staged, reconciled or\nundone. See [`effects::EffectActivity`] and `docs/effects.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "status_report": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "description": "What the harness says it is doing.",
+                      "$ref": "#/$defs/ReportedState"
+                    },
+                    "summary": {
+                      "description": "One line of at most 280 characters.",
+                      "type": "string"
+                    },
+                    "link": {
+                      "description": "Where to read more, an `http` or `https` URL.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "summary"
+                  ]
+                }
+              },
+              "required": [
+                "status_report"
+              ],
+              "additionalProperties": false,
+              "description": "The harness's own account of what it is doing, from its\n`report_status` tool or `by report-status`: a claim beside the\nprotocol's status, never a replacement for it. See\n`docs/delegation.md#self-reported-status`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "lifecycle": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "description": "Where the branch stands now.",
+                      "$ref": "#/$defs/LifecycleState"
+                    },
+                    "reason": {
+                      "description": "Why, and what it released.",
+                      "type": "string"
+                    },
+                    "idle_since_ms": {
+                      "description": "Milliseconds since the Unix epoch when the branch last ended a\nturn: where its idleness is counted from.",
+                      "type": "integer",
+                      "format": "uint64",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "reason",
+                    "idle_since_ms"
+                  ]
+                }
+              },
+              "required": [
+                "lifecycle"
+              ],
+              "additionalProperties": false,
+              "description": "A branch that a trigger keeps alive moved through its lifecycle: it\nwent idle (its kept sandbox released), dormant (its next run starts\na fresh session), was reincarnated, or was deleted. See\n[`LifecycleState`] and `docs/triggers.md#lifecycle`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -20589,6 +21271,35 @@
           ],
           "description": "How one secret reaches the harness. Names and paths only."
         },
+        "ManagedWritten": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Where the file is, as Claude Code in the sandbox reads it."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The tool names the file denies."
+            },
+            "bypass_disabled": {
+              "type": "boolean",
+              "description": "Whether the file disables bypass mode. Every managed file does."
+            },
+            "telemetry_off": {
+              "type": "boolean",
+              "description": "Whether the file pins telemetry off."
+            }
+          },
+          "required": [
+            "path",
+            "bypass_disabled"
+          ],
+          "description": "The managed settings a sandboxed Claude Code turn wrote into its sandbox,\nas recorded in the turn's `Provisioned` activity: names and flags, never\nthe file's content. See `docs/provisioning.md#managed-settings`."
+        },
         "Message": {
           "type": "object",
           "properties": {
@@ -21745,6 +22456,48 @@
               "type": "object",
               "properties": {
                 "provider": {
+                  "type": "string",
+                  "description": "The provider kind: `microsandbox`, `substrate`, `recipe`."
+                },
+                "sandbox": {
+                  "type": "string",
+                  "description": "The sandbox destroyed."
+                },
+                "branch": {
+                  "type": "string",
+                  "description": "The branch that kept it."
+                },
+                "unused_secs": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "description": "How long it had gone unused, in seconds."
+                },
+                "max_kept_secs": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "description": "That branch's limit, in seconds."
+                },
+                "event": {
+                  "type": "string",
+                  "const": "expired"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "branch",
+                "unused_secs",
+                "max_kept_secs"
+              ],
+              "description": "Another branch's kept sandbox, destroyed because it went unused for\nlonger than that branch's `max_kept_secs`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
                   "type": "string"
                 },
                 "handle": {
@@ -22308,6 +23061,13 @@
                   ],
                   "description": "Why it is not enforced, when it is not."
                 },
+                "ca_bundle": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The certificate bundle the harness is told to trust, when a\nrule inspects a host: the system's roots and the branch's own\nauthority, under `.branchyard/egress/<branch>/`."
+                },
                 "kind": {
                   "type": "string",
                   "const": "applied"
@@ -22326,7 +23086,7 @@
               "properties": {
                 "method": {
                   "type": "string",
-                  "description": "`CONNECT`, or the plain HTTP request's method."
+                  "description": "`CONNECT`, or the method of a request the proxy saw: a plain\nHTTP request, or one inside an inspected connection."
                 },
                 "host": {
                   "type": "string"
@@ -22336,6 +23096,13 @@
                   "format": "uint16",
                   "minimum": 0,
                   "maximum": 65535
+                },
+                "path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The request's path and query, when the proxy saw one."
                 },
                 "allowed": {
                   "type": "boolean"
@@ -22352,7 +23119,7 @@
                     "string",
                     "null"
                   ],
-                  "description": "Why it was refused, or why an allowed one failed."
+                  "description": "Why it was refused, or why an allowed one failed; `inspected`\nfor a `CONNECT` the proxy looked inside."
                 },
                 "kind": {
                   "type": "string",
@@ -22366,7 +23133,7 @@
                 "port",
                 "allowed"
               ],
-              "description": "One destination the proxy decided."
+              "description": "One destination or request the proxy decided."
             }
           ],
           "description": "What the egress proxy did, recorded on the branch."
@@ -23038,6 +23805,61 @@
           ],
           "description": "A call's tokens."
         },
+        "Interception": {
+          "type": "object",
+          "properties": {
+            "request_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Bytes of the request body the harness sent."
+            },
+            "response_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Bytes of the response body the backend sent, in the backend's own\nshape (a translated call's, before it is turned back)."
+            },
+            "prompt_digest": {
+              "type": "string",
+              "description": "The BLAKE3 hash, in lowercase hex, of the request body exactly as\nthe harness sent it: the bytes after the HTTP framing (a chunked\ncoding) is removed and before the gateway changes anything (it adds\n`stream_options.include_usage` to an OpenAI chat stream, or\ntranslates the body). The same request always has the same digest;\na request with no body has the hash of the empty input."
+            },
+            "messages": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Items in the request's `messages` (Anthropic and OpenAI chat) or\n`input` (OpenAI responses; a string counts as one)."
+            },
+            "tools_offered": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Names of the tools in the request's `tools`, in order."
+            },
+            "tool_uses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Names of the tools or functions the response called, in order, once\nper call."
+            },
+            "stop_reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why the response stopped, in the provider's own word: Anthropic's\n`stop_reason`, OpenAI's `finish_reason` (chat) or `status`\n(responses)."
+            }
+          },
+          "required": [
+            "request_bytes",
+            "response_bytes",
+            "prompt_digest",
+            "messages"
+          ],
+          "description": "The record of one call that reached a backend, for an audit: who asked\nis the call's branch and turn, and this is what it asked and what came\nback, without the text of either. See `docs/model-gateway.md`\n(\"Interception records\")."
+        },
         "ModelCall": {
           "type": "object",
           "properties": {
@@ -23073,6 +23895,13 @@
               "maximum": 65535,
               "description": "The status the harness got."
             },
+            "translated": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the backend was asked for when the request was\ntranslated for an API the harness does not speak; usage is priced\nby it."
+            },
             "tokens": {
               "anyOf": [
                 {
@@ -23105,6 +23934,24 @@
                 "type": "string"
               },
               "description": "Backends tried before the one that answered, with what each did."
+            },
+            "interception": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Interception"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What the call asked and what came back, as counts and digests, for\na call forwarded to a backend; `None` for one the gateway refused."
+            },
+            "audit_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "With `[models] audit = \"contents\"`, the file holding this call's\nrequest and response, relative to the repository root."
             }
           },
           "required": [
@@ -23430,6 +24277,61 @@
             }
           ],
           "description": "Where an entry is in its life. `staged` → `begun` → `confirmed` |\n`failed` | `unknown`; then `undone`, `compensated`, `undo_failed` or\n`expired`."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
+        },
+        "LifecycleState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "It has not ended a turn for its idle time and is running none: what\nit held (a kept sandbox) was released. The next send continues it\nas before."
+            },
+            {
+              "type": "string",
+              "const": "dormant",
+              "description": "It has been idle for its dormant time: the next run that would send\nto it starts a fresh harness session on the same worktree instead."
+            },
+            {
+              "type": "string",
+              "const": "reincarnated",
+              "description": "A fresh harness session was started on the same worktree, with a\nhandoff of what the old one did."
+            },
+            {
+              "type": "string",
+              "const": "deleted",
+              "description": "It had been idle for its delete time, and was removed: the next run\ncreates it again from the trigger's task."
+            }
+          ],
+          "description": "Where a branch that lives on stands in its lifecycle: the `state` of\n[`Activity::Lifecycle`]. Serialized in snake case."
         }
       }
     },
@@ -23670,6 +24572,17 @@
                         "format": "uint64",
                         "minimum": 0
                       }
+                    },
+                    "managed": {
+                      "description": "The managed settings written into a sandbox for a Claude Code\nturn, before the harness started, when the turn's sandbox took\nthem; see `docs/provisioning.md#managed-settings`. Names and\nflags only.",
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/ManagedWritten"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -24079,6 +24992,74 @@
               ],
               "additionalProperties": false,
               "description": "Approvals and the effect ledger: a person asked and answering, a\ncall blocked, an entry begun, confirmed, staged, reconciled or\nundone. See [`effects::EffectActivity`] and `docs/effects.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "status_report": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "description": "What the harness says it is doing.",
+                      "$ref": "#/$defs/ReportedState"
+                    },
+                    "summary": {
+                      "description": "One line of at most 280 characters.",
+                      "type": "string"
+                    },
+                    "link": {
+                      "description": "Where to read more, an `http` or `https` URL.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "summary"
+                  ]
+                }
+              },
+              "required": [
+                "status_report"
+              ],
+              "additionalProperties": false,
+              "description": "The harness's own account of what it is doing, from its\n`report_status` tool or `by report-status`: a claim beside the\nprotocol's status, never a replacement for it. See\n`docs/delegation.md#self-reported-status`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "lifecycle": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "description": "Where the branch stands now.",
+                      "$ref": "#/$defs/LifecycleState"
+                    },
+                    "reason": {
+                      "description": "Why, and what it released.",
+                      "type": "string"
+                    },
+                    "idle_since_ms": {
+                      "description": "Milliseconds since the Unix epoch when the branch last ended a\nturn: where its idleness is counted from.",
+                      "type": "integer",
+                      "format": "uint64",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "reason",
+                    "idle_since_ms"
+                  ]
+                }
+              },
+              "required": [
+                "lifecycle"
+              ],
+              "additionalProperties": false,
+              "description": "A branch that a trigger keeps alive moved through its lifecycle: it\nwent idle (its kept sandbox released), dormant (its next run starts\na fresh session), was reincarnated, or was deleted. See\n[`LifecycleState`] and `docs/triggers.md#lifecycle`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -25275,6 +26256,35 @@
           ],
           "description": "How one secret reaches the harness. Names and paths only."
         },
+        "ManagedWritten": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Where the file is, as Claude Code in the sandbox reads it."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The tool names the file denies."
+            },
+            "bypass_disabled": {
+              "type": "boolean",
+              "description": "Whether the file disables bypass mode. Every managed file does."
+            },
+            "telemetry_off": {
+              "type": "boolean",
+              "description": "Whether the file pins telemetry off."
+            }
+          },
+          "required": [
+            "path",
+            "bypass_disabled"
+          ],
+          "description": "The managed settings a sandboxed Claude Code turn wrote into its sandbox,\nas recorded in the turn's `Provisioned` activity: names and flags, never\nthe file's content. See `docs/provisioning.md#managed-settings`."
+        },
         "Message": {
           "type": "object",
           "properties": {
@@ -26431,6 +27441,48 @@
               "type": "object",
               "properties": {
                 "provider": {
+                  "type": "string",
+                  "description": "The provider kind: `microsandbox`, `substrate`, `recipe`."
+                },
+                "sandbox": {
+                  "type": "string",
+                  "description": "The sandbox destroyed."
+                },
+                "branch": {
+                  "type": "string",
+                  "description": "The branch that kept it."
+                },
+                "unused_secs": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "description": "How long it had gone unused, in seconds."
+                },
+                "max_kept_secs": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "description": "That branch's limit, in seconds."
+                },
+                "event": {
+                  "type": "string",
+                  "const": "expired"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "branch",
+                "unused_secs",
+                "max_kept_secs"
+              ],
+              "description": "Another branch's kept sandbox, destroyed because it went unused for\nlonger than that branch's `max_kept_secs`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
                   "type": "string"
                 },
                 "handle": {
@@ -26994,6 +28046,13 @@
                   ],
                   "description": "Why it is not enforced, when it is not."
                 },
+                "ca_bundle": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The certificate bundle the harness is told to trust, when a\nrule inspects a host: the system's roots and the branch's own\nauthority, under `.branchyard/egress/<branch>/`."
+                },
                 "kind": {
                   "type": "string",
                   "const": "applied"
@@ -27012,7 +28071,7 @@
               "properties": {
                 "method": {
                   "type": "string",
-                  "description": "`CONNECT`, or the plain HTTP request's method."
+                  "description": "`CONNECT`, or the method of a request the proxy saw: a plain\nHTTP request, or one inside an inspected connection."
                 },
                 "host": {
                   "type": "string"
@@ -27022,6 +28081,13 @@
                   "format": "uint16",
                   "minimum": 0,
                   "maximum": 65535
+                },
+                "path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The request's path and query, when the proxy saw one."
                 },
                 "allowed": {
                   "type": "boolean"
@@ -27038,7 +28104,7 @@
                     "string",
                     "null"
                   ],
-                  "description": "Why it was refused, or why an allowed one failed."
+                  "description": "Why it was refused, or why an allowed one failed; `inspected`\nfor a `CONNECT` the proxy looked inside."
                 },
                 "kind": {
                   "type": "string",
@@ -27052,7 +28118,7 @@
                 "port",
                 "allowed"
               ],
-              "description": "One destination the proxy decided."
+              "description": "One destination or request the proxy decided."
             }
           ],
           "description": "What the egress proxy did, recorded on the branch."
@@ -27724,6 +28790,61 @@
           ],
           "description": "A call's tokens."
         },
+        "Interception": {
+          "type": "object",
+          "properties": {
+            "request_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Bytes of the request body the harness sent."
+            },
+            "response_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Bytes of the response body the backend sent, in the backend's own\nshape (a translated call's, before it is turned back)."
+            },
+            "prompt_digest": {
+              "type": "string",
+              "description": "The BLAKE3 hash, in lowercase hex, of the request body exactly as\nthe harness sent it: the bytes after the HTTP framing (a chunked\ncoding) is removed and before the gateway changes anything (it adds\n`stream_options.include_usage` to an OpenAI chat stream, or\ntranslates the body). The same request always has the same digest;\na request with no body has the hash of the empty input."
+            },
+            "messages": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Items in the request's `messages` (Anthropic and OpenAI chat) or\n`input` (OpenAI responses; a string counts as one)."
+            },
+            "tools_offered": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Names of the tools in the request's `tools`, in order."
+            },
+            "tool_uses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Names of the tools or functions the response called, in order, once\nper call."
+            },
+            "stop_reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why the response stopped, in the provider's own word: Anthropic's\n`stop_reason`, OpenAI's `finish_reason` (chat) or `status`\n(responses)."
+            }
+          },
+          "required": [
+            "request_bytes",
+            "response_bytes",
+            "prompt_digest",
+            "messages"
+          ],
+          "description": "The record of one call that reached a backend, for an audit: who asked\nis the call's branch and turn, and this is what it asked and what came\nback, without the text of either. See `docs/model-gateway.md`\n(\"Interception records\")."
+        },
         "ModelCall": {
           "type": "object",
           "properties": {
@@ -27759,6 +28880,13 @@
               "maximum": 65535,
               "description": "The status the harness got."
             },
+            "translated": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the backend was asked for when the request was\ntranslated for an API the harness does not speak; usage is priced\nby it."
+            },
             "tokens": {
               "anyOf": [
                 {
@@ -27791,6 +28919,24 @@
                 "type": "string"
               },
               "description": "Backends tried before the one that answered, with what each did."
+            },
+            "interception": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Interception"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What the call asked and what came back, as counts and digests, for\na call forwarded to a backend; `None` for one the gateway refused."
+            },
+            "audit_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "With `[models] audit = \"contents\"`, the file holding this call's\nrequest and response, relative to the repository root."
             }
           },
           "required": [
@@ -28116,6 +29262,61 @@
             }
           ],
           "description": "Where an entry is in its life. `staged` → `begun` → `confirmed` |\n`failed` | `unknown`; then `undone`, `compensated`, `undo_failed` or\n`expired`."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
+        },
+        "LifecycleState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "It has not ended a turn for its idle time and is running none: what\nit held (a kept sandbox) was released. The next send continues it\nas before."
+            },
+            {
+              "type": "string",
+              "const": "dormant",
+              "description": "It has been idle for its dormant time: the next run that would send\nto it starts a fresh harness session on the same worktree instead."
+            },
+            {
+              "type": "string",
+              "const": "reincarnated",
+              "description": "A fresh harness session was started on the same worktree, with a\nhandoff of what the old one did."
+            },
+            {
+              "type": "string",
+              "const": "deleted",
+              "description": "It had been idle for its delete time, and was removed: the next run\ncreates it again from the trigger's task."
+            }
+          ],
+          "description": "Where a branch that lives on stands in its lifecycle: the `state` of\n[`Activity::Lifecycle`]. Serialized in snake case."
         }
       }
     },
@@ -29301,6 +30502,13 @@
                 }
               ]
             },
+            "grants": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GrantEntry"
+              },
+              "description": "Its connector grant as stored: what its turns' tokens carry, and\nthe most a child of its can be given (`docs/connectors.md`). Empty\nfor a branch with none."
+            },
             "check": {
               "type": [
                 "array",
@@ -29332,6 +30540,17 @@
             "last_message": {
               "type": "string",
               "description": "The harness's text since the branch's last prompt, truncated from\nthe front."
+            },
+            "reported": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StatusReport"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
             },
             "seat": {
               "type": [
@@ -29421,6 +30640,129 @@
             "harnesses"
           ],
           "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "GrantEntry": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
+              },
+              "required": [
+                "connector"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "StatusReport": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ReportedState",
+              "description": "What the harness says it is doing."
+            },
+            "summary": {
+              "type": "string",
+              "description": "One line of at most 280 characters."
+            },
+            "link": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Where to read more, an `http` or `https` URL. Omitted when none was\ngiven."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch when the report was recorded."
+            }
+          },
+          "required": [
+            "state",
+            "summary",
+            "at_ms"
+          ],
+          "description": "A branch's own report of its status, as `report_status` returns it and\n`Inspection::reported` shows the latest."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
         },
         "Dependency": {
           "type": "object",
@@ -30870,6 +32212,13 @@
             }
           ]
         },
+        "grants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GrantEntry"
+          },
+          "description": "Its connector grant as stored: what its turns' tokens carry, and\nthe most a child of its can be given (`docs/connectors.md`). Empty\nfor a branch with none."
+        },
         "check": {
           "type": [
             "array",
@@ -30901,6 +32250,17 @@
         "last_message": {
           "type": "string",
           "description": "The harness's text since the branch's last prompt, truncated from\nthe front."
+        },
+        "reported": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StatusReport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
         },
         "seat": {
           "type": [
@@ -31202,6 +32562,129 @@
             "harnesses"
           ],
           "description": "What a branch may delegate. Children get an envelope at most as wide as\ntheir parent's, one level shallower."
+        },
+        "GrantEntry": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
+              },
+              "required": [
+                "connector"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "GrantMode": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "description": "What an entry lets the harness do: read, or read and write."
+        },
+        "Confirm": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "StatusReport": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ReportedState",
+              "description": "What the harness says it is doing."
+            },
+            "summary": {
+              "type": "string",
+              "description": "One line of at most 280 characters."
+            },
+            "link": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Where to read more, an `http` or `https` URL. Omitted when none was\ngiven."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch when the report was recorded."
+            }
+          },
+          "required": [
+            "state",
+            "summary",
+            "at_ms"
+          ],
+          "description": "A branch's own report of its status, as `report_status` returns it and\n`Inspection::reported` shows the latest."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
         },
         "Dependency": {
           "type": "object",
@@ -31877,6 +33360,17 @@
                         "format": "uint64",
                         "minimum": 0
                       }
+                    },
+                    "managed": {
+                      "description": "The managed settings written into a sandbox for a Claude Code\nturn, before the harness started, when the turn's sandbox took\nthem; see `docs/provisioning.md#managed-settings`. Names and\nflags only.",
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/ManagedWritten"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -32286,6 +33780,74 @@
               ],
               "additionalProperties": false,
               "description": "Approvals and the effect ledger: a person asked and answering, a\ncall blocked, an entry begun, confirmed, staged, reconciled or\nundone. See [`effects::EffectActivity`] and `docs/effects.md`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "status_report": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "description": "What the harness says it is doing.",
+                      "$ref": "#/$defs/ReportedState"
+                    },
+                    "summary": {
+                      "description": "One line of at most 280 characters.",
+                      "type": "string"
+                    },
+                    "link": {
+                      "description": "Where to read more, an `http` or `https` URL.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "summary"
+                  ]
+                }
+              },
+              "required": [
+                "status_report"
+              ],
+              "additionalProperties": false,
+              "description": "The harness's own account of what it is doing, from its\n`report_status` tool or `by report-status`: a claim beside the\nprotocol's status, never a replacement for it. See\n`docs/delegation.md#self-reported-status`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "lifecycle": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "description": "Where the branch stands now.",
+                      "$ref": "#/$defs/LifecycleState"
+                    },
+                    "reason": {
+                      "description": "Why, and what it released.",
+                      "type": "string"
+                    },
+                    "idle_since_ms": {
+                      "description": "Milliseconds since the Unix epoch when the branch last ended a\nturn: where its idleness is counted from.",
+                      "type": "integer",
+                      "format": "uint64",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "reason",
+                    "idle_since_ms"
+                  ]
+                }
+              },
+              "required": [
+                "lifecycle"
+              ],
+              "additionalProperties": false,
+              "description": "A branch that a trigger keeps alive moved through its lifecycle: it\nwent idle (its kept sandbox released), dormant (its next run starts\na fresh session), was reincarnated, or was deleted. See\n[`LifecycleState`] and `docs/triggers.md#lifecycle`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -33482,6 +35044,35 @@
           ],
           "description": "How one secret reaches the harness. Names and paths only."
         },
+        "ManagedWritten": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Where the file is, as Claude Code in the sandbox reads it."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The tool names the file denies."
+            },
+            "bypass_disabled": {
+              "type": "boolean",
+              "description": "Whether the file disables bypass mode. Every managed file does."
+            },
+            "telemetry_off": {
+              "type": "boolean",
+              "description": "Whether the file pins telemetry off."
+            }
+          },
+          "required": [
+            "path",
+            "bypass_disabled"
+          ],
+          "description": "The managed settings a sandboxed Claude Code turn wrote into its sandbox,\nas recorded in the turn's `Provisioned` activity: names and flags, never\nthe file's content. See `docs/provisioning.md#managed-settings`."
+        },
         "Message": {
           "type": "object",
           "properties": {
@@ -34638,6 +36229,48 @@
               "type": "object",
               "properties": {
                 "provider": {
+                  "type": "string",
+                  "description": "The provider kind: `microsandbox`, `substrate`, `recipe`."
+                },
+                "sandbox": {
+                  "type": "string",
+                  "description": "The sandbox destroyed."
+                },
+                "branch": {
+                  "type": "string",
+                  "description": "The branch that kept it."
+                },
+                "unused_secs": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "description": "How long it had gone unused, in seconds."
+                },
+                "max_kept_secs": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "description": "That branch's limit, in seconds."
+                },
+                "event": {
+                  "type": "string",
+                  "const": "expired"
+                }
+              },
+              "required": [
+                "event",
+                "provider",
+                "sandbox",
+                "branch",
+                "unused_secs",
+                "max_kept_secs"
+              ],
+              "description": "Another branch's kept sandbox, destroyed because it went unused for\nlonger than that branch's `max_kept_secs`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
                   "type": "string"
                 },
                 "handle": {
@@ -35201,6 +36834,13 @@
                   ],
                   "description": "Why it is not enforced, when it is not."
                 },
+                "ca_bundle": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The certificate bundle the harness is told to trust, when a\nrule inspects a host: the system's roots and the branch's own\nauthority, under `.branchyard/egress/<branch>/`."
+                },
                 "kind": {
                   "type": "string",
                   "const": "applied"
@@ -35219,7 +36859,7 @@
               "properties": {
                 "method": {
                   "type": "string",
-                  "description": "`CONNECT`, or the plain HTTP request's method."
+                  "description": "`CONNECT`, or the method of a request the proxy saw: a plain\nHTTP request, or one inside an inspected connection."
                 },
                 "host": {
                   "type": "string"
@@ -35229,6 +36869,13 @@
                   "format": "uint16",
                   "minimum": 0,
                   "maximum": 65535
+                },
+                "path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The request's path and query, when the proxy saw one."
                 },
                 "allowed": {
                   "type": "boolean"
@@ -35245,7 +36892,7 @@
                     "string",
                     "null"
                   ],
-                  "description": "Why it was refused, or why an allowed one failed."
+                  "description": "Why it was refused, or why an allowed one failed; `inspected`\nfor a `CONNECT` the proxy looked inside."
                 },
                 "kind": {
                   "type": "string",
@@ -35259,7 +36906,7 @@
                 "port",
                 "allowed"
               ],
-              "description": "One destination the proxy decided."
+              "description": "One destination or request the proxy decided."
             }
           ],
           "description": "What the egress proxy did, recorded on the branch."
@@ -35931,6 +37578,61 @@
           ],
           "description": "A call's tokens."
         },
+        "Interception": {
+          "type": "object",
+          "properties": {
+            "request_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Bytes of the request body the harness sent."
+            },
+            "response_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Bytes of the response body the backend sent, in the backend's own\nshape (a translated call's, before it is turned back)."
+            },
+            "prompt_digest": {
+              "type": "string",
+              "description": "The BLAKE3 hash, in lowercase hex, of the request body exactly as\nthe harness sent it: the bytes after the HTTP framing (a chunked\ncoding) is removed and before the gateway changes anything (it adds\n`stream_options.include_usage` to an OpenAI chat stream, or\ntranslates the body). The same request always has the same digest;\na request with no body has the hash of the empty input."
+            },
+            "messages": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Items in the request's `messages` (Anthropic and OpenAI chat) or\n`input` (OpenAI responses; a string counts as one)."
+            },
+            "tools_offered": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Names of the tools in the request's `tools`, in order."
+            },
+            "tool_uses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Names of the tools or functions the response called, in order, once\nper call."
+            },
+            "stop_reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why the response stopped, in the provider's own word: Anthropic's\n`stop_reason`, OpenAI's `finish_reason` (chat) or `status`\n(responses)."
+            }
+          },
+          "required": [
+            "request_bytes",
+            "response_bytes",
+            "prompt_digest",
+            "messages"
+          ],
+          "description": "The record of one call that reached a backend, for an audit: who asked\nis the call's branch and turn, and this is what it asked and what came\nback, without the text of either. See `docs/model-gateway.md`\n(\"Interception records\")."
+        },
         "ModelCall": {
           "type": "object",
           "properties": {
@@ -35966,6 +37668,13 @@
               "maximum": 65535,
               "description": "The status the harness got."
             },
+            "translated": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the backend was asked for when the request was\ntranslated for an API the harness does not speak; usage is priced\nby it."
+            },
             "tokens": {
               "anyOf": [
                 {
@@ -35998,6 +37707,24 @@
                 "type": "string"
               },
               "description": "Backends tried before the one that answered, with what each did."
+            },
+            "interception": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Interception"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What the call asked and what came back, as counts and digests, for\na call forwarded to a backend; `None` for one the gateway refused."
+            },
+            "audit_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "With `[models] audit = \"contents\"`, the file holding this call's\nrequest and response, relative to the repository root."
             }
           },
           "required": [
@@ -36323,6 +38050,61 @@
             }
           ],
           "description": "Where an entry is in its life. `staged` → `begun` → `confirmed` |\n`failed` | `unknown`; then `undone`, `compensated`, `undo_failed` or\n`expired`."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
+        },
+        "LifecycleState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "It has not ended a turn for its idle time and is running none: what\nit held (a kept sandbox) was released. The next send continues it\nas before."
+            },
+            {
+              "type": "string",
+              "const": "dormant",
+              "description": "It has been idle for its dormant time: the next run that would send\nto it starts a fresh harness session on the same worktree instead."
+            },
+            {
+              "type": "string",
+              "const": "reincarnated",
+              "description": "A fresh harness session was started on the same worktree, with a\nhandoff of what the old one did."
+            },
+            {
+              "type": "string",
+              "const": "deleted",
+              "description": "It had been idle for its delete time, and was removed: the next run\ncreates it again from the trigger's task."
+            }
+          ],
+          "description": "Where a branch that lives on stands in its lifecycle: the `state` of\n[`Activity::Lifecycle`]. Serialized in snake case."
         }
       }
     },
@@ -37320,6 +39102,17 @@
           ],
           "description": "Route through the fleet table instead of naming a harness."
         },
+        "deliver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Deliver"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Continue one branch run after run instead of creating a branch per\nrun; `task.name` is then not given."
+        },
         "precheck": {
           "anyOf": [
             {
@@ -37994,6 +39787,15 @@
               "minimum": 0,
               "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
             },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
+            },
             "live_branch": {
               "type": "boolean",
               "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
@@ -38103,6 +39905,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -38183,6 +39994,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -38470,44 +40290,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -38526,7 +40351,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -38542,7 +40367,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -38869,6 +40694,90 @@
           },
           "description": "Route the task through the repository's fleet table at fire time, as\n`by run --auto` does (without failover)."
         },
+        "Deliver": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch, with placeholders as `task.name` takes them; reduced\nto a branch name when rendered."
+            },
+            "busy": {
+              "$ref": "#/$defs/Busy",
+              "description": "What a run does while the branch is running a turn.",
+              "default": "queue"
+            },
+            "lifecycle": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lifecycle"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "When the branch rests: parked after it has been idle a while, made\ndormant after a long one, deleted after longer. Unset, the branch\nlives until someone removes it."
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "description": "A branch that lives on: each run continues it (a `send`) instead of\ncreating a branch of its own. The first run that finds it missing\ncreates it from the task. `branch` may hold placeholders, so one\ntrigger keeps a branch per Slack channel or sender\n(`slack-{{event.channel}}`), as a chat assistant keeps a session per\nconversation."
+        },
+        "Busy": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "queue",
+              "description": "Run after the turn ends: the run stays pending, with the reason,\nand sends once the branch is free. Nothing is lost, nothing\ninterrupts."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Add the prompt to the running turn as steered input (`by send\n--steer`); queued instead when the harness cannot take input\nmid-turn or refuses it."
+            },
+            {
+              "type": "string",
+              "const": "skip",
+              "description": "Fire nothing: the run is `skipped_busy`, not a failure. For a\nheartbeat, whose next time comes anyway."
+            }
+          ],
+          "description": "What a run does when the branch it delivers to is running a turn."
+        },
+        "Lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "idle_minutes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Park the branch once it has not ended a turn for this many minutes\nand runs none: release what it holds (a kept sandbox). The next run\ncontinues it as before."
+            },
+            "dormant_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Mark the branch dormant once it has not ended a turn for this many\ndays: the next run that would send to it starts a fresh harness\nsession on the same worktree instead (a reincarnation)."
+            },
+            "delete_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Remove the branch once it has not ended a turn for this many days:\nthe next run creates it again from the trigger's task."
+            }
+          },
+          "description": "How long a branch that lives on may rest, counted from the end of its\nlast turn, before the server acts on it. Each is optional, at least 1,\nand when several are given they rise: `idle_minutes` is less than\n`dormant_days`, which is less than `delete_days`, compared in absolute\ntime. A run that continues the branch ends its rest: it starts the\ncount over."
+        },
         "Precheck": {
           "type": "object",
           "additionalProperties": false,
@@ -38949,6 +40858,17 @@
               "type": "null"
             }
           ]
+        },
+        "deliver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Deliver"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The branch its runs continue, when they continue one."
         },
         "precheck": {
           "anyOf": [
@@ -39662,6 +41582,15 @@
               "minimum": 0,
               "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
             },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
+            },
             "live_branch": {
               "type": "boolean",
               "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
@@ -39771,6 +41700,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -39851,6 +41789,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -40138,44 +42085,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -40194,7 +42146,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -40210,7 +42162,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -40536,6 +42488,90 @@
             }
           },
           "description": "Route the task through the repository's fleet table at fire time, as\n`by run --auto` does (without failover)."
+        },
+        "Deliver": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch, with placeholders as `task.name` takes them; reduced\nto a branch name when rendered."
+            },
+            "busy": {
+              "$ref": "#/$defs/Busy",
+              "description": "What a run does while the branch is running a turn.",
+              "default": "queue"
+            },
+            "lifecycle": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lifecycle"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "When the branch rests: parked after it has been idle a while, made\ndormant after a long one, deleted after longer. Unset, the branch\nlives until someone removes it."
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "description": "A branch that lives on: each run continues it (a `send`) instead of\ncreating a branch of its own. The first run that finds it missing\ncreates it from the task. `branch` may hold placeholders, so one\ntrigger keeps a branch per Slack channel or sender\n(`slack-{{event.channel}}`), as a chat assistant keeps a session per\nconversation."
+        },
+        "Busy": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "queue",
+              "description": "Run after the turn ends: the run stays pending, with the reason,\nand sends once the branch is free. Nothing is lost, nothing\ninterrupts."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Add the prompt to the running turn as steered input (`by send\n--steer`); queued instead when the harness cannot take input\nmid-turn or refuses it."
+            },
+            {
+              "type": "string",
+              "const": "skip",
+              "description": "Fire nothing: the run is `skipped_busy`, not a failure. For a\nheartbeat, whose next time comes anyway."
+            }
+          ],
+          "description": "What a run does when the branch it delivers to is running a turn."
+        },
+        "Lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "idle_minutes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Park the branch once it has not ended a turn for this many minutes\nand runs none: release what it holds (a kept sandbox). The next run\ncontinues it as before."
+            },
+            "dormant_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Mark the branch dormant once it has not ended a turn for this many\ndays: the next run that would send to it starts a fresh harness\nsession on the same worktree instead (a reincarnation)."
+            },
+            "delete_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Remove the branch once it has not ended a turn for this many days:\nthe next run creates it again from the trigger's task."
+            }
+          },
+          "description": "How long a branch that lives on may rest, counted from the end of its\nlast turn, before the server acts on it. Each is optional, at least 1,\nand when several are given they rise: `idle_minutes` is less than\n`dormant_days`, which is less than `delete_days`, compared in absolute\ntime. A run that continues the branch ends its rest: it starts the\ncount over."
         },
         "Precheck": {
           "type": "object",
@@ -40639,6 +42675,17 @@
                 }
               ]
             },
+            "deliver": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Deliver"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch its runs continue, when they continue one."
+            },
             "precheck": {
               "anyOf": [
                 {
@@ -41349,6 +43396,15 @@
               "minimum": 0,
               "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
             },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
+            },
             "live_branch": {
               "type": "boolean",
               "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
@@ -41458,6 +43514,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -41538,6 +43603,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -41825,44 +43899,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -41881,7 +43960,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -41897,7 +43976,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -42223,6 +44302,90 @@
             }
           },
           "description": "Route the task through the repository's fleet table at fire time, as\n`by run --auto` does (without failover)."
+        },
+        "Deliver": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch, with placeholders as `task.name` takes them; reduced\nto a branch name when rendered."
+            },
+            "busy": {
+              "$ref": "#/$defs/Busy",
+              "description": "What a run does while the branch is running a turn.",
+              "default": "queue"
+            },
+            "lifecycle": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lifecycle"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "When the branch rests: parked after it has been idle a while, made\ndormant after a long one, deleted after longer. Unset, the branch\nlives until someone removes it."
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "description": "A branch that lives on: each run continues it (a `send`) instead of\ncreating a branch of its own. The first run that finds it missing\ncreates it from the task. `branch` may hold placeholders, so one\ntrigger keeps a branch per Slack channel or sender\n(`slack-{{event.channel}}`), as a chat assistant keeps a session per\nconversation."
+        },
+        "Busy": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "queue",
+              "description": "Run after the turn ends: the run stays pending, with the reason,\nand sends once the branch is free. Nothing is lost, nothing\ninterrupts."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Add the prompt to the running turn as steered input (`by send\n--steer`); queued instead when the harness cannot take input\nmid-turn or refuses it."
+            },
+            {
+              "type": "string",
+              "const": "skip",
+              "description": "Fire nothing: the run is `skipped_busy`, not a failure. For a\nheartbeat, whose next time comes anyway."
+            }
+          ],
+          "description": "What a run does when the branch it delivers to is running a turn."
+        },
+        "Lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "idle_minutes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Park the branch once it has not ended a turn for this many minutes\nand runs none: release what it holds (a kept sandbox). The next run\ncontinues it as before."
+            },
+            "dormant_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Mark the branch dormant once it has not ended a turn for this many\ndays: the next run that would send to it starts a fresh harness\nsession on the same worktree instead (a reincarnation)."
+            },
+            "delete_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Remove the branch once it has not ended a turn for this many days:\nthe next run creates it again from the trigger's task."
+            }
+          },
+          "description": "How long a branch that lives on may rest, counted from the end of its\nlast turn, before the server acts on it. Each is optional, at least 1,\nand when several are given they rise: `idle_minutes` is less than\n`dormant_days`, which is less than `delete_days`, compared in absolute\ntime. A run that continues the branch ends its rest: it starts the\ncount over."
         },
         "Precheck": {
           "type": "object",
@@ -42322,6 +44485,17 @@
                 }
               ]
             },
+            "deliver": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Deliver"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch its runs continue, when they continue one."
+            },
             "precheck": {
               "anyOf": [
                 {
@@ -43032,6 +45206,15 @@
               "minimum": 0,
               "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
             },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
+            },
             "live_branch": {
               "type": "boolean",
               "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
@@ -43141,6 +45324,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -43221,6 +45413,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -43508,44 +45709,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -43564,7 +45770,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -43580,7 +45786,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -43906,6 +46112,90 @@
             }
           },
           "description": "Route the task through the repository's fleet table at fire time, as\n`by run --auto` does (without failover)."
+        },
+        "Deliver": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch, with placeholders as `task.name` takes them; reduced\nto a branch name when rendered."
+            },
+            "busy": {
+              "$ref": "#/$defs/Busy",
+              "description": "What a run does while the branch is running a turn.",
+              "default": "queue"
+            },
+            "lifecycle": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lifecycle"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "When the branch rests: parked after it has been idle a while, made\ndormant after a long one, deleted after longer. Unset, the branch\nlives until someone removes it."
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "description": "A branch that lives on: each run continues it (a `send`) instead of\ncreating a branch of its own. The first run that finds it missing\ncreates it from the task. `branch` may hold placeholders, so one\ntrigger keeps a branch per Slack channel or sender\n(`slack-{{event.channel}}`), as a chat assistant keeps a session per\nconversation."
+        },
+        "Busy": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "queue",
+              "description": "Run after the turn ends: the run stays pending, with the reason,\nand sends once the branch is free. Nothing is lost, nothing\ninterrupts."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Add the prompt to the running turn as steered input (`by send\n--steer`); queued instead when the harness cannot take input\nmid-turn or refuses it."
+            },
+            {
+              "type": "string",
+              "const": "skip",
+              "description": "Fire nothing: the run is `skipped_busy`, not a failure. For a\nheartbeat, whose next time comes anyway."
+            }
+          ],
+          "description": "What a run does when the branch it delivers to is running a turn."
+        },
+        "Lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "idle_minutes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Park the branch once it has not ended a turn for this many minutes\nand runs none: release what it holds (a kept sandbox). The next run\ncontinues it as before."
+            },
+            "dormant_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Mark the branch dormant once it has not ended a turn for this many\ndays: the next run that would send to it starts a fresh harness\nsession on the same worktree instead (a reincarnation)."
+            },
+            "delete_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Remove the branch once it has not ended a turn for this many days:\nthe next run creates it again from the trigger's task."
+            }
+          },
+          "description": "How long a branch that lives on may rest, counted from the end of its\nlast turn, before the server acts on it. Each is optional, at least 1,\nand when several are given they rise: `idle_minutes` is less than\n`dormant_days`, which is less than `delete_days`, compared in absolute\ntime. A run that continues the branch ends its rest: it starts the\ncount over."
         },
         "Precheck": {
           "type": "object",
@@ -44327,7 +46617,18 @@
               "type": "null"
             }
           ],
-          "description": "The task it would create, rendered."
+          "description": "The task it would create, rendered; with `deliver`, the task's\n`name` is the branch it would continue, created if missing."
+        },
+        "deliver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Deliver"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The branch it delivers to, rendered, and its busy policy."
         },
         "route": {
           "anyOf": [
@@ -45080,6 +47381,15 @@
               "minimum": 0,
               "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
             },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
+            },
             "live_branch": {
               "type": "boolean",
               "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
@@ -45189,6 +47499,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -45269,6 +47588,15 @@
               "format": "uint32",
               "minimum": 0,
               "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
             }
           },
           "required": [
@@ -45556,44 +47884,49 @@
           "description": "The harness's own OpenTelemetry export."
         },
         "GrantEntry": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "connector": {
+          "description": "One entry of a connector grant (docs/connectors.md#grants): the flag string CONNECTOR[@ACCOUNT][:read|write|write+confirm[:OP,...]] such as \"github:write:issues.*\", or the object {\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}; always written back as the object.",
+          "anyOf": [
+            {
               "type": "string",
-              "description": "The bundle id the gateway serves, such as `github`."
+              "pattern": "^[A-Za-z0-9_-]{1,64}(@[A-Za-z0-9_.-]{1,64})?(:(read|write|write\\+confirm)(:[^:]+)?)?$"
             },
-            "operations": {
-              "type": "array",
-              "items": {
-                "type": "string"
+            {
+              "type": "object",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "description": "The bundle id the gateway serves, such as `github`."
+                },
+                "operations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "*"
+                  ],
+                  "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every approved operation."
+                },
+                "mode": {
+                  "$ref": "#/$defs/GrantMode"
+                },
+                "confirm": {
+                  "$ref": "#/$defs/Confirm"
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "One of the person's connected accounts for the connector; unset is their default."
+                }
               },
-              "description": "Globs over AIR operation ids; `[\"*\"]`, the default, is every\napproved operation.",
-              "default": [
-                "*"
-              ]
-            },
-            "mode": {
-              "$ref": "#/$defs/GrantMode",
-              "description": "`read`: only operations AIR classifies as reads. `write`: reads and\nmutations.",
-              "default": "read"
-            },
-            "confirm": {
-              "$ref": "#/$defs/Confirm",
-              "description": "Whether a mutation that AIR says needs confirmation may run. On the\nwire only `\"allow\"` is written; its absence is `deny`."
-            },
-            "account": {
-              "type": [
-                "string",
-                "null"
+              "required": [
+                "connector"
               ],
-              "description": "One of the person's connected accounts for the connector; unset is\ntheir default."
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connector"
-          ],
-          "description": "One entry of a grant, as the token's `by_grants` carries it:\n`{\"connector\", \"operations\", \"mode\", \"confirm\", \"account\"}`."
+          ]
         },
         "GrantMode": {
           "type": "string",
@@ -45612,7 +47945,7 @@
           "description": "Whether a mutation that needs confirmation may run under an entry."
         },
         "Network": {
-          "description": "Which hosts the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules HOST[:PORT] such as github.com or *.npmjs.org:443, with enforce best_effort (the default) or required.",
+          "description": "Which hosts, and which requests, the harness may reach (docs/egress.md): \"open\" (the default), \"none\", or allow rules [METHOD|METHOD ]HOST[:PORT][/PATH] such as github.com, *.npmjs.org:443 or GET|HEAD api.github.com/repos/*, with enforce best_effort (the default) or required.",
           "anyOf": [
             {
               "type": "string",
@@ -45628,7 +47961,7 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "pattern": "^(\\*\\.)?[A-Za-z0-9_.\\-]+(:[0-9]{1,5})?$|^\\[[0-9A-Fa-f:.]+\\](:[0-9]{1,5})?$"
+                    "pattern": "^([A-Za-z0-9_.\\-]+(\\|[A-Za-z0-9_.\\-]+)* )?((\\*\\.)?[A-Za-z0-9_.\\-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{1,5})?(/[^\\s,?#]*)?$"
                   }
                 },
                 "enforce": {
@@ -45941,6 +48274,90 @@
           ],
           "description": "A task's goal: its text, the follow-up turns it may get, and the judge\nharness (one of the server's) that verifies it; without one, the\nbranch's check and a non-empty diff decide."
         },
+        "Deliver": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch, with placeholders as `task.name` takes them; reduced\nto a branch name when rendered."
+            },
+            "busy": {
+              "$ref": "#/$defs/Busy",
+              "description": "What a run does while the branch is running a turn.",
+              "default": "queue"
+            },
+            "lifecycle": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lifecycle"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "When the branch rests: parked after it has been idle a while, made\ndormant after a long one, deleted after longer. Unset, the branch\nlives until someone removes it."
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "description": "A branch that lives on: each run continues it (a `send`) instead of\ncreating a branch of its own. The first run that finds it missing\ncreates it from the task. `branch` may hold placeholders, so one\ntrigger keeps a branch per Slack channel or sender\n(`slack-{{event.channel}}`), as a chat assistant keeps a session per\nconversation."
+        },
+        "Busy": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "queue",
+              "description": "Run after the turn ends: the run stays pending, with the reason,\nand sends once the branch is free. Nothing is lost, nothing\ninterrupts."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Add the prompt to the running turn as steered input (`by send\n--steer`); queued instead when the harness cannot take input\nmid-turn or refuses it."
+            },
+            {
+              "type": "string",
+              "const": "skip",
+              "description": "Fire nothing: the run is `skipped_busy`, not a failure. For a\nheartbeat, whose next time comes anyway."
+            }
+          ],
+          "description": "What a run does when the branch it delivers to is running a turn."
+        },
+        "Lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "idle_minutes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Park the branch once it has not ended a turn for this many minutes\nand runs none: release what it holds (a kept sandbox). The next run\ncontinues it as before."
+            },
+            "dormant_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Mark the branch dormant once it has not ended a turn for this many\ndays: the next run that would send to it starts a fresh harness\nsession on the same worktree instead (a reincarnation)."
+            },
+            "delete_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Remove the branch once it has not ended a turn for this many days:\nthe next run creates it again from the trigger's task."
+            }
+          },
+          "description": "How long a branch that lives on may rest, counted from the end of its\nlast turn, before the server acts on it. Each is optional, at least 1,\nand when several are given they rise: `idle_minutes` is less than\n`dormant_days`, which is less than `delete_days`, compared in absolute\ntime. A run that continues the branch ends its rest: it starts the\ncount over."
+        },
         "RouteSpec": {
           "type": "object",
           "additionalProperties": false,
@@ -45967,7 +48384,7 @@
         {
           "type": "string",
           "const": "fired",
-          "description": "A task was admitted; `operation` names it."
+          "description": "A task was admitted, or a send to the branch it delivers to;\n`operation` names it. Steered into a running turn instead, the run\nhas no operation and its `outcome` is recorded at once."
         },
         {
           "type": "string",
@@ -45983,6 +48400,16 @@
           "type": "string",
           "const": "skipped_disabled",
           "description": "The trigger was disabled or removed before it fired."
+        },
+        {
+          "type": "string",
+          "const": "skipped_busy",
+          "description": "The branch it delivers to was running a turn, and its `busy`\npolicy is `skip`."
+        },
+        {
+          "type": "string",
+          "const": "lifecycle",
+          "description": "Not a firing: a step of the lifecycle of a branch the trigger\ndelivers to that its own log cannot keep, such as its deletion.\n`reason` says which, and `branches` names the branch. Counts\nneither as a success nor as a failure."
         },
         {
           "type": "string",
@@ -46029,7 +48456,7 @@
         },
         "key": {
           "type": "string",
-          "description": "`event:<id>`, `schedule:<ms>` or `missed:<ms>`: unique per trigger."
+          "description": "`event:<id>`, `schedule:<ms>`, `missed:<ms>` or\n`lifecycle:deleted:<branch>:<ms>`: unique per trigger."
         },
         "state": {
           "$ref": "#/$defs/RunState"
@@ -46144,7 +48571,7 @@
             {
               "type": "string",
               "const": "fired",
-              "description": "A task was admitted; `operation` names it."
+              "description": "A task was admitted, or a send to the branch it delivers to;\n`operation` names it. Steered into a running turn instead, the run\nhas no operation and its `outcome` is recorded at once."
             },
             {
               "type": "string",
@@ -46160,6 +48587,16 @@
               "type": "string",
               "const": "skipped_disabled",
               "description": "The trigger was disabled or removed before it fired."
+            },
+            {
+              "type": "string",
+              "const": "skipped_busy",
+              "description": "The branch it delivers to was running a turn, and its `busy`\npolicy is `skip`."
+            },
+            {
+              "type": "string",
+              "const": "lifecycle",
+              "description": "Not a firing: a step of the lifecycle of a branch the trigger\ndelivers to that its own log cannot keep, such as its deletion.\n`reason` says which, and `branches` names the branch. Counts\nneither as a success nor as a failure."
             },
             {
               "type": "string",
@@ -46486,7 +48923,7 @@
             },
             "key": {
               "type": "string",
-              "description": "`event:<id>`, `schedule:<ms>` or `missed:<ms>`: unique per trigger."
+              "description": "`event:<id>`, `schedule:<ms>`, `missed:<ms>` or\n`lifecycle:deleted:<branch>:<ms>`: unique per trigger."
             },
             "state": {
               "$ref": "#/$defs/RunState"
@@ -46599,7 +49036,7 @@
             {
               "type": "string",
               "const": "fired",
-              "description": "A task was admitted; `operation` names it."
+              "description": "A task was admitted, or a send to the branch it delivers to;\n`operation` names it. Steered into a running turn instead, the run\nhas no operation and its `outcome` is recorded at once."
             },
             {
               "type": "string",
@@ -46615,6 +49052,16 @@
               "type": "string",
               "const": "skipped_disabled",
               "description": "The trigger was disabled or removed before it fired."
+            },
+            {
+              "type": "string",
+              "const": "skipped_busy",
+              "description": "The branch it delivers to was running a turn, and its `busy`\npolicy is `skip`."
+            },
+            {
+              "type": "string",
+              "const": "lifecycle",
+              "description": "Not a firing: a step of the lifecycle of a branch the trigger\ndelivers to that its own log cannot keep, such as its deletion.\n`reason` says which, and `branches` names the branch. Counts\nneither as a success nor as a failure."
             },
             {
               "type": "string",
@@ -46954,7 +49401,7 @@
             },
             "key": {
               "type": "string",
-              "description": "`event:<id>`, `schedule:<ms>` or `missed:<ms>`: unique per trigger."
+              "description": "`event:<id>`, `schedule:<ms>`, `missed:<ms>` or\n`lifecycle:deleted:<branch>:<ms>`: unique per trigger."
             },
             "state": {
               "$ref": "#/$defs/RunState"
@@ -47067,7 +49514,7 @@
             {
               "type": "string",
               "const": "fired",
-              "description": "A task was admitted; `operation` names it."
+              "description": "A task was admitted, or a send to the branch it delivers to;\n`operation` names it. Steered into a running turn instead, the run\nhas no operation and its `outcome` is recorded at once."
             },
             {
               "type": "string",
@@ -47083,6 +49530,16 @@
               "type": "string",
               "const": "skipped_disabled",
               "description": "The trigger was disabled or removed before it fired."
+            },
+            {
+              "type": "string",
+              "const": "skipped_busy",
+              "description": "The branch it delivers to was running a turn, and its `busy`\npolicy is `skip`."
+            },
+            {
+              "type": "string",
+              "const": "lifecycle",
+              "description": "Not a firing: a step of the lifecycle of a branch the trigger\ndelivers to that its own log cannot keep, such as its deletion.\n`reason` says which, and `branches` names the branch. Counts\nneither as a success nor as a failure."
             },
             {
               "type": "string",

@@ -47,6 +47,23 @@ pub(crate) fn decide(
     }
 }
 
+/// The tool names `policy` denies that a harness's own permission rules can
+/// name: its deny rules, except one scoped to delegation commands and a
+/// `*` wildcard, which a harness cannot express. Sorted, without repeats.
+/// A sandboxed Claude Code turn writes these into its managed settings
+/// (`docs/provisioning.md#managed-settings`).
+pub(crate) fn denied_tools(policy: &Policy) -> Vec<String> {
+    let mut tools: Vec<String> = policy
+        .rules
+        .iter()
+        .filter(|rule| !rule.allow && rule.delegation_by.is_none() && !rule.tool.ends_with('*'))
+        .map(|rule| rule.tool.clone())
+        .collect();
+    tools.sort();
+    tools.dedup();
+    tools
+}
+
 /// Tools that change files, by the names the harnesses give them.
 pub const EDIT_TOOLS: &[&str] = &[
     "Edit",
@@ -305,6 +322,38 @@ mod tests {
             tool: tool.into(),
             input: serde_json::Value::Null,
         }
+    }
+
+    /// Each preset's denials are the names its rules list, sorted and
+    /// without repeats; `full` denies none. `claude.rs` writes the Claude
+    /// Code names of these same lists into managed settings.
+    #[test]
+    fn a_preset_denies_by_the_names_its_rules_list() {
+        for preset in PolicyPreset::ALL {
+            let mut listed: Vec<String> =
+                preset.rules().deny.iter().map(|t| t.to_string()).collect();
+            listed.sort();
+            listed.dedup();
+            assert_eq!(denied_tools(&preset.policy()), listed, "{}", preset.name());
+        }
+        assert!(denied_tools(&PolicyPreset::Full.policy()).is_empty());
+        let worktree = denied_tools(&PolicyPreset::EditWorktree.policy());
+        assert!(worktree.contains(&"Bash".to_owned()));
+        assert!(!worktree.contains(&"Write".to_owned()));
+    }
+
+    /// An allowance, a delegation-scoped rule and a wildcard are not names a
+    /// harness can deny; a repeated denial is written once.
+    #[test]
+    fn denied_names_skip_allowances_delegation_scopes_and_wildcards() {
+        let policy = Policy::allow_all()
+            .deny("Bash")
+            .deny("mcp__*")
+            .deny("Bash")
+            .allow("Read");
+        assert_eq!(denied_tools(&policy), ["Bash"]);
+        let scoped = Policy::deny_all().allow_delegation_commands("/opt/by/bin/by");
+        assert!(denied_tools(&scoped).is_empty());
     }
 
     #[test]

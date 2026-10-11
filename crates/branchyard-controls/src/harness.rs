@@ -29,6 +29,12 @@ pub struct Harness {
     /// Keys of Orca's `TUI_AGENT_CONFIG` (`src/shared/tui-agent-config.ts`);
     /// several when Orca launches one harness more than one way.
     pub orca: &'static [&'static str],
+    /// `AgentType` constant of Coder's agentapi (`lib/msgfmt/msgfmt.go`): the
+    /// name `agentapi server` takes for the agent.
+    pub agentapi: Option<&'static str>,
+    /// Directory of the Coder Registry module that installs the harness
+    /// (`registry/coder/modules/<dir>`).
+    pub coder_module: Option<&'static str>,
 }
 
 const fn harness(id: &'static str) -> Harness {
@@ -40,6 +46,8 @@ const fn harness(id: &'static str) -> Harness {
         scion: None,
         emdash: None,
         orca: &[],
+        agentapi: None,
+        coder_module: None,
     }
 }
 
@@ -68,6 +76,16 @@ impl Harness {
         self.orca = keys;
         self
     }
+
+    const fn agentapi(mut self, name: &'static str) -> Self {
+        self.agentapi = Some(name);
+        self
+    }
+
+    const fn coder_module(mut self, directory: &'static str) -> Self {
+        self.coder_module = Some(directory);
+        self
+    }
 }
 
 /// Every harness named by a vendored source or the integration matrix.
@@ -80,14 +98,17 @@ pub const HARNESSES: &[Harness] = &[
         .scion("claude")
         .emdash("claude")
         // Agent Teams is an Orca launch mode of the same `claude` binary.
-        .orca(&["claude", "claude-agent-teams"]),
+        .orca(&["claude", "claude-agent-teams"])
+        .agentapi("claude")
+        .coder_module("claude-code"),
     harness("codex")
         .target("Codex")
         .herdr_manifest("codex")
         .herdr_resume("herdr:codex", "codex")
         .scion("codex")
         .emdash("codex")
-        .orca(&["codex"]),
+        .orca(&["codex"])
+        .agentapi("codex"),
     harness("antigravity")
         .target("Antigravity")
         .herdr_manifest("agy")
@@ -107,7 +128,8 @@ pub const HARNESSES: &[Harness] = &[
         .target("Gemini CLI")
         .herdr_manifest("gemini")
         .scion("gemini-cli")
-        .orca(&["gemini"]),
+        .orca(&["gemini"])
+        .agentapi("gemini"),
     harness("opencode")
         .target("OpenCode")
         .herdr_manifest("opencode")
@@ -115,7 +137,8 @@ pub const HARNESSES: &[Harness] = &[
         .scion("opencode")
         .emdash("opencode")
         // `opencode2` is OpenCode 2's beta binary, with the same flags.
-        .orca(&["opencode", "opencode2"]),
+        .orca(&["opencode", "opencode2"])
+        .agentapi("opencode"),
     harness("pi")
         .target("Pi")
         .herdr_manifest("pi")
@@ -125,26 +148,35 @@ pub const HARNESSES: &[Harness] = &[
     harness("goose")
         .target("Goose")
         .emdash("goose")
-        .orca(&["goose"]),
-    harness("aider").target("Aider").orca(&["aider"]),
+        .orca(&["goose"])
+        .agentapi("goose")
+        .coder_module("goose"),
+    harness("aider")
+        .target("Aider")
+        .orca(&["aider"])
+        .agentapi("aider")
+        .coder_module("aider"),
     harness("cursor")
         .target("Cursor CLI")
         .herdr_manifest("cursor")
         .herdr_resume("herdr:cursor", "cursor")
         .emdash("cursor")
-        .orca(&["cursor"]),
+        .orca(&["cursor"])
+        .agentapi("cursor"),
     harness("github-copilot")
         .target("GitHub Copilot CLI")
         .herdr_manifest("copilot")
         .herdr_resume("herdr:copilot", "copilot")
         .scion("copilot")
         .emdash("copilot")
-        .orca(&["copilot"]),
+        .orca(&["copilot"])
+        .agentapi("copilot"),
     harness("amp")
         .target("Amp")
         .herdr_manifest("amp")
         .emdash("amp")
-        .orca(&["amp"]),
+        .orca(&["amp"])
+        .agentapi("amp"),
     harness("qwen-code")
         .target("Qwen Code")
         .herdr_manifest("qwen")
@@ -212,7 +244,10 @@ pub const HARNESSES: &[Harness] = &[
         .orca(&["qoder"]),
     // Named by emdash's or Orca's agent registries only.
     harness("ante").orca(&["ante"]),
-    harness("auggie").emdash("auggie").orca(&["aug"]),
+    harness("auggie")
+        .emdash("auggie")
+        .orca(&["aug"])
+        .agentapi("auggie"),
     harness("autohand").emdash("autohand").orca(&["autohand"]),
     harness("codebuddy")
         .emdash("codebuddy")
@@ -240,6 +275,9 @@ pub const HARNESSES: &[Harness] = &[
     harness("trae").orca(&["trae"]),
     harness("zcode").orca(&["zcode"]),
     harness("zero").emdash("zero"),
+    // Named by Coder's agentapi only: Amazon Q Developer CLI, whose
+    // executable is `q` (an agentapi alias).
+    harness("amazon-q").agentapi("amazonq"),
 ];
 
 /// Look up a harness by Branchyard ID.
@@ -267,6 +305,16 @@ pub fn from_emdash(id: &str) -> Option<&'static Harness> {
 /// The harness one of Orca's agent keys describes.
 pub fn from_orca(key: &str) -> Option<&'static Harness> {
     HARNESSES.iter().find(|h| h.orca.contains(&key))
+}
+
+/// Look up by agentapi's `AgentType` name.
+pub fn from_agentapi(name: &str) -> Option<&'static Harness> {
+    HARNESSES.iter().find(|h| h.agentapi == Some(name))
+}
+
+/// Look up by a Coder Registry module directory.
+pub fn from_coder_module(directory: &str) -> Option<&'static Harness> {
+    HARNESSES.iter().find(|h| h.coder_module == Some(directory))
 }
 
 /// The harness a Scion harness directory provisions.
@@ -505,6 +553,81 @@ mod tests {
         for harness in HARNESSES {
             for key in harness.orca {
                 assert!(agents.contains_key(*key), "no Orca agent {key}");
+            }
+        }
+    }
+
+    /// Every agent type Coder's agentapi drives is mapped, except `custom`
+    /// (any command), and every mapping names a type that exists. The alias
+    /// table is read too: `q` and `cursor-agent` are the executables of two
+    /// of them.
+    #[test]
+    fn every_agentapi_type_is_registered() {
+        let types = crate::upstream::agentapi_types();
+        assert_eq!(types.len(), 12);
+        for (name, aliases) in &types {
+            assert_eq!(aliases[0], *name);
+            if name == "custom" {
+                continue;
+            }
+            assert!(
+                from_agentapi(name).is_some(),
+                "unregistered agentapi agent {name}: map it in HARNESSES"
+            );
+        }
+        assert_eq!(types["amazonq"], ["amazonq", "q"]);
+        assert_eq!(types["cursor"], ["cursor", "cursor-agent"]);
+        for harness in HARNESSES {
+            if let Some(name) = harness.agentapi {
+                assert!(types.contains_key(name), "no agentapi type {name}");
+            }
+        }
+    }
+
+    /// Every vendored Coder Registry module tagged `agent` is mapped; the
+    /// rest are named here with why they are not harnesses; and every
+    /// mapping names an agent module that exists.
+    #[test]
+    fn every_coder_registry_agent_module_is_registered() {
+        const NOT_HARNESSES: &[(&str, &str)] = &[
+            (
+                "agentapi",
+                "a building block other modules run an agent through",
+            ),
+            (
+                "agent-firewall",
+                "network isolation for an agent, not an agent",
+            ),
+            (
+                "aibridge-proxy",
+                "routes a tool's model traffic through Coder's gateway",
+            ),
+            (
+                "mux",
+                "Coder's agent multiplexer, an orchestrator like Branchyard",
+            ),
+        ];
+        let modules = crate::upstream::coder_modules();
+        assert!(modules.len() >= 7, "{} modules vendored", modules.len());
+        for (directory, module) in &modules {
+            assert!(!module.display_name.is_empty() && !module.description.is_empty());
+            let agent = module.tags.iter().any(|t| t == "agent");
+            let excused = NOT_HARNESSES.iter().any(|(d, _)| d == directory);
+            match from_coder_module(directory) {
+                Some(_) => assert!(agent, "{directory} is mapped but not tagged `agent`"),
+                None => assert!(
+                    excused && !agent,
+                    "unregistered Coder Registry module {directory} ({:?}): map it or excuse it",
+                    module.tags
+                ),
+            }
+        }
+        for harness in HARNESSES {
+            if let Some(directory) = harness.coder_module {
+                assert!(
+                    modules.contains_key(directory),
+                    "no Coder module {directory}"
+                );
             }
         }
     }

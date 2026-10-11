@@ -4,20 +4,27 @@
 //! `orca.yaml` ([`orca`], ported from Orca), Superset's
 //! `.superset/config.json` ([`superset`]) and Conductor's
 //! `.conductor/settings.toml` ([`conductor`]), the last two written from
-//! their public documentation only.
+//! their public documentation only; and the Dev Containers specification's
+//! `devcontainer.json` ([`devcontainer`], written from the specification
+//! with Coder's envbuilder as the reference).
 //!
 //! Each importer turns its file into the parts `[workspace]` has: files to
 //! copy, setup commands, a run script and teardown commands, with the
 //! tool's own variables (`$EMDASH_PORT`, `$CONDUCTOR_ROOT_PATH`, ...)
 //! renamed to Branchyard's (`$BRANCHYARD_PORT`, `$BRANCHYARD_ROOT`, ...),
-//! and a note for each thing it left out. Nothing runs: the result is a
-//! suggestion the person reviews, and `[workspace]` scripts run only once
-//! trusted (`by workspace trust`).
+//! and a note for each thing it left out. A devcontainer also gives the
+//! variables its processes get (`env`) and keys a prepared environment
+//! (`prepare`, `inputs`). Nothing runs: the result is a suggestion the
+//! person reviews, and `[workspace]` scripts run only once trusted
+//! (`by workspace trust`).
 
 pub mod conductor;
+pub mod devcontainer;
 pub mod emdash;
 pub mod orca;
 pub mod superset;
+
+use std::collections::BTreeMap;
 
 use crate::probe::Probe;
 
@@ -33,6 +40,13 @@ pub struct Imported {
     /// The command that starts a development server.
     pub run: Option<String>,
     pub teardown: Vec<String>,
+    /// Variables the scripts and the harness get (a devcontainer's
+    /// `containerEnv` and `remoteEnv`).
+    pub env: BTreeMap<String, String>,
+    /// Setup once per environment key, as a container is built once.
+    pub prepare: bool,
+    /// The files that key the environment besides the default lockfiles.
+    pub inputs: Vec<String>,
     /// What was not imported, and why.
     pub notes: Vec<String>,
 }
@@ -43,6 +57,7 @@ impl Imported {
             && self.setup.is_empty()
             && self.run.is_none()
             && self.teardown.is_empty()
+            && self.env.is_empty()
     }
 }
 
@@ -58,6 +73,8 @@ pub const IMPORTERS: &[(&str, Importer)] = &[
     (orca::FILE, orca::import),
     (superset::FILE, superset::import),
     (conductor::FILE, conductor::import),
+    (devcontainer::FILE, devcontainer::import),
+    (devcontainer::ROOT_FILE, devcontainer::import_root),
 ];
 
 /// Every importable file in the repository, read; a file that cannot be

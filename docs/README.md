@@ -23,6 +23,7 @@
 | [Durable execution](durability.md) | What survives a crash, how leases, journaled steps, cancellation and recovery work, what is never replayed, and how the store maps onto PostgreSQL? |
 | [Pull requests](pull-requests.md) | How do I start a branch from a GitHub, Linear, Jira or GitLab issue or a pull request's head, push it as a pull request, feed CI failures and reviews back into it, and see whether it can merge? |
 | [Usage and adopting sessions](usage.md) | How much of each Claude Code and Codex login's 5-hour and weekly limits is used, how do `by run` and the router avoid a login near its limit, and how do I turn a session already on this machine into a branch? |
+| [SDKs](sdk.md) | Which SDK does a harness, a Slack or web service, or a Rust program use, how does a third-party surface keep one branch per conversation and stream its replies, and how does it give, inspect and stay within connector grants? |
 | [Surfaces](surfaces.md) | Which operations and options work in the SDK, `by`, `by --remote`, the HTTP API, the Rust client and delegation, and which are refused where? |
 | [Triggers and schedules](triggers.md) | How does a task start on a cron schedule, at an interval, or from a signed GitHub, Slack, Linear or generic webhook, with conditions, a precheck, a test run and a pause after repeated failures, and why does nothing fire twice? |
 | [Server and remote mode](server.md) | How do I run `by serve`, call its HTTP API, and drive it with `by --remote`? What is durable, and what is not isolated? |
@@ -32,7 +33,7 @@
 | [Driver qualification](qualification/README.md) | Which driver profiles passed live protocol qualification, and what did it find? |
 | [Compatibility](compatibility.md) | Which profile drives each harness, with which capabilities, and has it passed live qualification? |
 | [Writing a driver](writing-a-driver.md) | How do I add a harness profile or driver, test it against a recorded transcript, and qualify it? |
-| [Comparison](comparison.md) | How do Scion, OpenRig and Herdr compare with Branchyard, feature by feature with cited sources, and what should Branchyard absorb from each? |
+| [Comparison](comparison.md) | How do Scion, OpenRig, Herdr, Warp, Straitjacket and Coder compare with Branchyard, feature by feature with cited sources, which of their sources are vendored under which licences, and what should Branchyard absorb from each? |
 | [Vendoring](vendoring.md) | Which controls have been copied, why, and how are they adapted and upgraded? |
 | [Live testing](testing-live.md) | What do I run on a machine with real harnesses, credentials and KVM, what should happen, and where do I record it? |
 | [CI gates](ci-gates.md) | Which checks keep dependencies, licenses, docs, features, unused code, Python and test coverage from decaying, what fails them, and how do I run each locally? |

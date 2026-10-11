@@ -41,8 +41,9 @@ pub enum Capability {
     /// Artifacts and scratch areas the branch may reach under
     /// `docs/storage.md`'s grants. Every token has it.
     Storage,
-    /// Message the branch's parent (`ask`, `report`, `escalate`) and read
-    /// its own inbox. Every token has it.
+    /// Message the branch's parent (`ask`, `report`, `escalate`), state its
+    /// own status (`report_status`) and read its own inbox. Every token has
+    /// it.
     Message,
     /// Create children and act on descendants. Only a token whose
     /// envelope's `max_depth` is above 0 has it.
@@ -701,6 +702,24 @@ pub const OPERATIONS: &[Operation] = &[
         "escalate",
         Capability::Message,
         &[Param::all("<TEXT>", "text", "text"), ACT_AS, JSON],
+    ),
+    op(
+        "report_status",
+        &["report-status"],
+        "report_status",
+        "report_status",
+        "report_status",
+        Capability::Message,
+        &[
+            Param::all("<STATE>", "state", "state"),
+            Param::all("<SUMMARY>", "summary", "summary"),
+            Param::all("--link", "link", "link"),
+            ACT_AS,
+            JSON,
+        ],
+    )
+    .not_remote(
+        "a harness states its own status from inside its turn, and the server has no route for it",
     ),
     op(
         "answer",

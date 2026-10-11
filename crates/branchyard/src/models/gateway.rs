@@ -25,9 +25,13 @@ use std::time::{Duration, Instant};
 use branchyard_wire as wire;
 use serde_json::{json, Value};
 
+use super::translate;
 use super::upstream::{self, Failure, Target};
-use super::usage::Meter;
-use super::{Api, Backend, Gateway, ModelActivity, ModelCall, UsageRecord};
+use super::usage::{Asked, Collector, Meter, Observed};
+use super::{
+    audit, Api, Audit, Backend, Gateway, Interception, ModelActivity, ModelCall, Tokens,
+    UsageRecord,
+};
 use crate::connectors::keys;
 use crate::{Activity, RecordedEvent, Yard};
 use branchyard_support::time::now_ms;
@@ -460,11 +464,14 @@ fn handle(stream: TcpStream, state: &TurnState) {
         backend: None,
         reason: None,
         status: 0,
+        translated: None,
         tokens: None,
         cost_usd: None,
         latency_ms: 0,
         streamed: false,
         failed_over: Vec::new(),
+        interception: None,
+        audit_file: None,
     };
     let mut json: Option<Value> = match request.body.is_empty() {
         true => None,
@@ -590,15 +597,22 @@ fn handle(stream: TcpStream, state: &TurnState) {
             return;
         }
     }
+    // The request as the harness sent it, before the gateway changes it.
+    let asked = Asked::new(&request.body, json.as_ref());
     let mut body = request.body.clone();
     if let Some(value) = json.as_mut() {
         if with_stream_usage(api, &path, value) {
             body = serde_json::to_vec(value).unwrap_or(body);
         }
     }
+    // A route naming a backend model translates for a backend of another
+    // API, asking it for that model.
+    let backend_model = index
+        .and_then(|i| gateway.routes.get(i))
+        .and_then(|r| r.backend_model.clone());
     // Forward: the next backend on a refused connection, a 5xx or a 429.
-    let mut last: Option<(upstream::Response, Vec<u8>, String)> = None;
-    let mut answered: Option<(upstream::Response, String)> = None;
+    let mut last: Option<(upstream::Response, Vec<u8>, String, Option<String>)> = None;
+    let mut answered: Option<(upstream::Response, String, Option<String>)> = None;
     for backend in order {
         let key = match &backend.key {
             Some(source) => match source.read() {
@@ -622,8 +636,62 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 continue;
             }
         };
-        let headers = upstream_headers(&request, backend, &key);
-        match upstream::send(&target, &request.method, &path, &headers, &body) {
+        // What this backend is sent: the request as it is, or translated
+        // for the API it speaks.
+        let (send_path, send_body, as_model) = match backend.api == api {
+            true => (path.clone(), body.clone(), None),
+            false => {
+                let bridged = backend_model
+                    .clone()
+                    .filter(|_| api.translates_to(backend.api));
+                let Some(as_model) = bridged else {
+                    call.failed_over.push(format!(
+                        "{}: speaks the {} API, which a {api} request is not translated to",
+                        backend.name, backend.api
+                    ));
+                    continue;
+                };
+                if !translate::translatable(&request.method, &path) {
+                    call.failed_over.push(format!(
+                        "{}: speaks the {} API, and {} {path} is not translated",
+                        backend.name, backend.api, request.method
+                    ));
+                    continue;
+                }
+                let translated = json
+                    .as_ref()
+                    .ok_or_else(|| "the request has no JSON body".to_owned())
+                    .and_then(|j| translate::request_to_chat(j, &as_model));
+                match translated {
+                    Ok(chat) => (
+                        translate::CHAT_PATH.to_owned(),
+                        chat.to_string().into_bytes(),
+                        Some(as_model),
+                    ),
+                    Err(why) => {
+                        let why = format!(
+                            "the request cannot be translated for {}: {why}",
+                            backend.name
+                        );
+                        done(&mut call, "failed", 400, Some(why.clone()));
+                        refuse(
+                            &mut out,
+                            api,
+                            400,
+                            "bad_request",
+                            &format!("Branchyard's model gateway: {why}"),
+                            &[],
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+        let mut headers = upstream_headers(&request, backend, &key);
+        if as_model.is_some() {
+            headers.retain(|(n, _)| !n.to_ascii_lowercase().starts_with("anthropic-"));
+        }
+        match upstream::send(&target, &request.method, &send_path, &headers, &send_body) {
             Err(Failure::Connect(why)) => {
                 call.failed_over
                     .push(format!("{}: could not connect ({why})", backend.name));
@@ -648,24 +716,43 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 let _ = (&mut response.body)
                     .take(MAX_ERROR_BODY as u64)
                     .read_to_end(&mut kept);
-                last = Some((response, kept, backend.name.clone()));
+                last = Some((response, kept, backend.name.clone(), as_model));
             }
             Ok(response) => {
-                answered = Some((response, backend.name.clone()));
+                answered = Some((response, backend.name.clone(), as_model));
                 break;
             }
         }
     }
-    let Some((response, backend)) = answered else {
+    let Some((response, backend, as_model)) = answered else {
         match last {
             // Every backend failed: the harness gets the last one's
-            // answer, as it would have from the provider.
-            Some((response, kept, backend)) => {
+            // answer, as it would have from the provider, in its own API.
+            Some((response, kept, backend, as_model)) => {
                 call.failed_over.pop();
                 call.backend = Some(backend);
+                call.translated = as_model.clone();
                 let status = response.status;
+                // What the backend sent, before it is put in the harness's
+                // API.
+                let sse = is_sse(&response);
+                let mut collector = Collector::new(sse);
+                collector.feed(&kept);
+                call.interception = Some(Box::new(Interception::new(asked, collector.finish())));
+                let note = match gateway.audit {
+                    Audit::Contents => {
+                        keep_contents(state, &mut call, &request.body, &kept, sse, false)
+                    }
+                    Audit::Digests => None,
+                };
                 let why = (!call.failed_over.is_empty()).then(|| call.failed_over.join("; "));
-                done(&mut call, "failed", status, why);
+                done(&mut call, "failed", status, with_note(why, note));
+                let kept = match as_model {
+                    Some(_) => translate::error_to_anthropic(status, &kept)
+                        .to_string()
+                        .into_bytes(),
+                    None => kept,
+                };
                 let _ = write_head(&mut out, &response, false);
                 let _ = wire::write_chunk(&mut out, &kept);
                 let _ = out.write_all(wire::LAST_CHUNK);
@@ -687,46 +774,165 @@ fn handle(stream: TcpStream, state: &TurnState) {
         return;
     };
     call.backend = Some(backend.clone());
+    call.translated = as_model.clone();
     call.status = response.status;
-    let sse = response
-        .header("content-type")
-        .is_some_and(|t| t.to_ascii_lowercase().starts_with("text/event-stream"));
+    let sse = is_sse(&response);
     call.streamed = sse;
-    let mut meter = Meter::new(api, sse);
+    // Usage and tool calls are read in the backend's shape: the harness's
+    // own, unless the request was translated.
+    let backend_api = gateway.backend(&backend).map_or(api, |b| b.api);
+    let mut reading = Reading::new(backend_api, sse, matches!(gateway.audit, Audit::Contents));
     let no_body = request.method == "HEAD" || matches!(response.status, 204 | 304);
-    let mut client_gone = write_head(&mut out, &response, no_body).is_err();
     let mut response = response;
     let mut buf = vec![0u8; 16 * 1024];
     let mut broken: Option<String> = None;
-    if !no_body {
-        loop {
-            match response.body.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    meter.feed(&buf[..n]);
-                    if !client_gone && wire::write_chunk(&mut out, &buf[..n]).is_err() {
-                        // The harness went away: stop, which ends the
-                        // backend's generation too.
-                        client_gone = true;
+    let mut client_gone = false;
+    match (&as_model, sse && response_ok(response.status)) {
+        (None, _) => {
+            client_gone = write_head(&mut out, &response, no_body).is_err();
+            if !no_body {
+                loop {
+                    match response.body.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            reading.feed(&buf[..n]);
+                            if !client_gone && wire::write_chunk(&mut out, &buf[..n]).is_err() {
+                                // The harness went away: stop, which ends the
+                                // backend's generation too.
+                                client_gone = true;
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            broken = Some(format!("the backend's response broke off: {e}"));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        // A translated stream: the backend's events become the harness's
+        // as they pass.
+        (Some(_), true) => {
+            client_gone = write_head(&mut out, &response, false).is_err();
+            let mut translator = translate::StreamTranslator::new(&call.model);
+            loop {
+                match response.body.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        reading.feed(&buf[..n]);
+                        let events = translator.feed(&buf[..n]);
+                        if !client_gone
+                            && !events.is_empty()
+                            && wire::write_chunk(&mut out, &events).is_err()
+                        {
+                            client_gone = true;
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        broken = Some(format!("the backend's response broke off: {e}"));
                         break;
                     }
                 }
-                Err(e) => {
-                    broken = Some(format!("the backend's response broke off: {e}"));
-                    break;
+            }
+            let tail = translator.finish();
+            if !client_gone
+                && broken.is_none()
+                && !tail.is_empty()
+                && wire::write_chunk(&mut out, &tail).is_err()
+            {
+                client_gone = true;
+            }
+        }
+        // A translated answer, or error: whole, then in the harness's API.
+        (Some(_), false) => {
+            let mut whole = Vec::new();
+            match (&mut response.body)
+                .take(MAX_BODY as u64 + 1)
+                .read_to_end(&mut whole)
+            {
+                Err(e) => broken = Some(format!("the backend's response broke off: {e}")),
+                Ok(_) if whole.len() > MAX_BODY => {
+                    broken = Some("the backend's response is too large to translate".into())
+                }
+                Ok(_) => {}
+            }
+            reading.feed(&whole);
+            let translated = match (&broken, response_ok(response.status)) {
+                (Some(_), _) => None,
+                (None, false) => {
+                    Some(translate::error_to_anthropic(response.status, &whole).to_string())
+                }
+                (None, true) => match serde_json::from_slice::<Value>(&whole)
+                    .map_err(|e| e.to_string())
+                    .and_then(|v| translate::response_to_message(&v, &call.model))
+                {
+                    Ok(message) => Some(message.to_string()),
+                    Err(why) => {
+                        broken = Some(format!(
+                            "the backend's answer could not be translated: {why}"
+                        ));
+                        None
+                    }
+                },
+            };
+            match translated {
+                Some(text) => {
+                    let mut headers: Vec<(String, String)> = response
+                        .headers
+                        .iter()
+                        .filter(|(n, _)| !n.eq_ignore_ascii_case("content-type"))
+                        .cloned()
+                        .collect();
+                    headers.push(("Content-Type".into(), "application/json".into()));
+                    client_gone = write_head_parts(
+                        &mut out,
+                        response.status,
+                        &response.reason,
+                        &headers,
+                        false,
+                    )
+                    .is_err()
+                        || wire::write_chunk(&mut out, text.as_bytes()).is_err();
+                }
+                None => {
+                    call.status = 502;
+                    refuse(
+                        &mut out,
+                        api,
+                        502,
+                        "failed",
+                        &format!(
+                            "Branchyard's model gateway: {}",
+                            broken
+                                .as_deref()
+                                .unwrap_or("the backend's answer could not be read")
+                        ),
+                        &[],
+                    );
                 }
             }
         }
     }
     // The call is metered, stored and recorded before the harness sees its
     // response end, so the next call it makes is held to what this one
-    // cost.
-    let (tokens, answered_model) = meter.finish();
+    // cost. A translated call is priced by the model the backend served.
+    let read = reading.finish();
+    let (tokens, answered_model) = (read.tokens, read.model);
     if call.model.is_empty() {
         call.model = answered_model.unwrap_or_default();
     }
     call.tokens = tokens;
-    call.cost_usd = tokens.and_then(|t| gateway.cost(api, &call.model, &t));
+    call.interception = Some(Box::new(Interception::new(asked, read.observed)));
+    // With `audit = "contents"`, the request and the response, to a file of
+    // the turn's; never to the event log.
+    let note = match &read.kept {
+        Some(kept) => keep_contents(state, &mut call, &request.body, kept, sse, read.truncated),
+        None => None,
+    };
+    let priced = as_model.clone().unwrap_or_else(|| call.model.clone());
+    call.cost_usd = tokens.and_then(|t| gateway.cost(backend_api, &priced, &t));
     let reason = match (client_gone, broken.clone()) {
         (_, Some(why)) => Some(why),
         (true, None) => Some("the harness closed the connection".to_owned()),
@@ -735,6 +941,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
         }
         _ => None,
     };
+    let reason = with_note(reason, note);
     let status = call.status;
     let decision = if response_ok(status) {
         "allowed"
@@ -748,8 +955,8 @@ fn handle(stream: TcpStream, state: &TurnState) {
         branch: state.by_branch.clone(),
         turn: state.turn,
         subject: state.subject.clone(),
-        model: call.model.clone(),
-        api: gateway.backend(&backend).map_or(api, |b| b.api),
+        model: priced,
+        api: backend_api,
         backend: backend.clone(),
         tokens,
         cost_usd: call.cost_usd,
@@ -776,9 +983,135 @@ fn response_ok(status: u16) -> bool {
     (200..400).contains(&status)
 }
 
+fn is_sse(response: &upstream::Response) -> bool {
+    response
+        .header("content-type")
+        .is_some_and(|t| t.to_ascii_lowercase().starts_with("text/event-stream"))
+}
+
+/// Reads a backend's response as its bytes pass: its usage, what it did
+/// (the tools it called, why it stopped, how long it was), and, when the
+/// call's contents are kept, the bytes themselves.
+struct Reading {
+    meter: Meter,
+    collector: Collector,
+    kept: Option<Vec<u8>>,
+    truncated: bool,
+}
+
+/// What a response came to.
+struct Finished {
+    tokens: Option<Tokens>,
+    /// The model the provider says answered.
+    model: Option<String>,
+    observed: Observed,
+    /// The response body, when contents are kept.
+    kept: Option<Vec<u8>>,
+    /// The kept body is cut at [`audit::MAX_RESPONSE`].
+    truncated: bool,
+}
+
+impl Reading {
+    /// Reads a response of `api`'s shape; keeps its bytes when `keep`.
+    fn new(api: Api, sse: bool, keep: bool) -> Reading {
+        Reading {
+            meter: Meter::new(api, sse),
+            collector: Collector::new(sse),
+            kept: keep.then(Vec::new),
+            truncated: false,
+        }
+    }
+
+    /// Bytes of the response body, in order.
+    fn feed(&mut self, bytes: &[u8]) {
+        self.meter.feed(bytes);
+        self.collector.feed(bytes);
+        if let Some(kept) = self.kept.as_mut() {
+            // Cut at a chunk, and keep nothing after the cut.
+            if self.truncated || kept.len() + bytes.len() > audit::MAX_RESPONSE {
+                self.truncated = true;
+            } else {
+                kept.extend_from_slice(bytes);
+            }
+        }
+    }
+
+    fn finish(self) -> Finished {
+        let (tokens, model) = self.meter.finish();
+        Finished {
+            tokens,
+            model,
+            observed: self.collector.finish(),
+            kept: self.kept,
+            truncated: self.truncated,
+        }
+    }
+}
+
+/// Append the call's request and response to the turn's audit file
+/// (`[models] audit = "contents"`) and name the file on the call. `Some`
+/// says why it could not be written, for the call's reason.
+fn keep_contents(
+    state: &TurnState,
+    call: &mut ModelCall,
+    request: &[u8],
+    response: &[u8],
+    sse: bool,
+    truncated: bool,
+) -> Option<String> {
+    let path = state.yard.store().model_audit(&state.branch, state.turn);
+    let line = audit::Entry {
+        at_ms: now_ms(),
+        model: &call.model,
+        backend: call.backend.as_deref().unwrap_or(""),
+        request,
+        response,
+        sse,
+        truncated,
+    }
+    .line();
+    match audit::append(&path, &line) {
+        Ok(()) => {
+            let shown = path.strip_prefix(state.yard.root()).unwrap_or(&path);
+            call.audit_file = Some(shown.to_string_lossy().into_owned());
+            None
+        }
+        Err(e) => Some(format!(
+            "the call's contents were not written to {}: {e}",
+            path.display()
+        )),
+    }
+}
+
+/// `reason`, with `note` added to it.
+fn with_note(reason: Option<String>, note: Option<String>) -> Option<String> {
+    match (reason, note) {
+        (Some(reason), Some(note)) => Some(format!("{reason}; {note}")),
+        (reason, note) => reason.or(note),
+    }
+}
+
 fn write_head(out: &mut TcpStream, response: &upstream::Response, no_body: bool) -> io::Result<()> {
-    let mut head = format!("HTTP/1.1 {} {}\r\n", response.status, response.reason);
-    for (name, value) in &response.headers {
+    write_head_parts(
+        out,
+        response.status,
+        &response.reason,
+        &response.headers,
+        no_body,
+    )
+}
+
+/// The response head toward the harness: the backend's status and
+/// headers, hop-by-hop ones dropped, chunked unless there is no body.
+fn write_head_parts(
+    out: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    headers: &[(String, String)],
+    no_body: bool,
+) -> io::Result<()> {
+    let mut head = format!("HTTP/1.1 {status} {reason}\r\n");
+    for (name, value) in headers {
         let lower = name.to_ascii_lowercase();
         if matches!(
             lower.as_str(),
@@ -1071,6 +1404,34 @@ mod tests {
         assert!(request.is_none());
         assert!(answer.starts_with("HTTP/1.1 400 "), "{answer:?}");
         assert!(answer.contains("Transfer-Encoding"), "{answer:?}");
+    }
+
+    #[test]
+    fn a_response_is_kept_for_the_audit_only_when_asked_and_cut_once_at_a_chunk() {
+        let body = br#"{"content":[{"type":"tool_use","name":"Read"}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":2}}"#;
+        let mut plain = Reading::new(Api::Anthropic, false, false);
+        plain.feed(body);
+        let done = plain.finish();
+        assert_eq!(done.kept, None);
+        assert_eq!(done.observed.tool_uses, ["Read"]);
+        assert_eq!(done.tokens.map(|t| t.output), Some(2));
+        let mut keeping = Reading::new(Api::Anthropic, false, true);
+        keeping.feed(&body[..10]);
+        keeping.feed(&body[10..]);
+        let done = keeping.finish();
+        assert_eq!(done.kept.as_deref(), Some(&body[..]));
+        assert!(!done.truncated);
+        // A chunk that would pass the limit is dropped, and so is every
+        // chunk after it, however small: the kept bytes are a prefix.
+        let mut long = Reading::new(Api::Anthropic, true, true);
+        let first = vec![b':'; audit::MAX_RESPONSE / 2 + 1];
+        long.feed(&first);
+        long.feed(&first);
+        long.feed(b": small\n");
+        let done = long.finish();
+        assert!(done.truncated);
+        assert_eq!(done.kept.map(|k| k.len()), Some(first.len()));
+        assert_eq!(done.observed.bytes, 2 * first.len() as u64 + 8);
     }
 
     #[test]

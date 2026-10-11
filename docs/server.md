@@ -206,7 +206,7 @@ A branch's token names the principal that created it (`sub` its name, `by_tenant
 
 ## Model gateway and ceilings
 
-`"models"` in the configuration file is `[models]` of `branchyard.toml` as JSON ([model gateway](model-gateway.md#configuration)): a branch on the gateway gets one for each turn, in the process that runs the turn. A backend's `key` names an entry of `"secrets"`, else a variable of the server's own environment. Its turns' tokens are signed with the connector gateway's key and issuer when `"connectors"` is set, else with `<data_dir>/gateway/key` and `http(s)://<listen>`; usage records name the branch `<repo>/<branch>`. A request on the gateway to a server without `"models"` backends fails its turn naming it.
+`"models"` in the configuration file is `[models]` of `branchyard.toml` as JSON ([model gateway](model-gateway.md#configuration)): a branch on the gateway gets one for each turn, in the process that runs the turn. A backend's `key` names an entry of `"secrets"`, else a variable of the server's own environment. Its turns' tokens are signed with the connector gateway's key and issuer when `"connectors"` is set, else with `<data_dir>/gateway/key` and `http(s)://<listen>`; usage records name the branch `<repo>/<branch>`. A request on the gateway to a server without `"models"` backends fails its turn naming it. Its `"audit"` (`"digests"` by default, or `"contents"`) is the key of [interception records](model-gateway.md#interception-records): with `"contents"` the server writes each call's request and response, as plain text, under the served repository's `.branchyard/models/audit/`.
 
 `"ceilings"` caps what each principal's branches may reach, whatever a request asks for: the connectors (in `--connector` form), the models (globs) and the hosts (`--network` rules). Each turn's access is its request within its principal's ceiling, and an `access` event says what the ceiling narrowed ([one scope](model-gateway.md#one-scope)).
 
@@ -273,7 +273,7 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `POST /v1/repos/{repo}/branches/{b}/scratch/{name}/share` | Share it with `{"to": "BRANCH"}` | `{"ok": true}` |
 | `POST /v1/repos/{repo}/branches/{b}/scratch/{name}/lock` | Acquire its writer lock for `b` | `ScratchLock`, or `409 running` |
 | `POST /v1/repos/{repo}/branches/{b}/scratch/{name}/unlock` | Release it if `b` holds it | `{"ok": true}` |
-| `POST /v1/triggers` | Create a [trigger](triggers.md) (`run` on its repository) | `201` `TriggerCreated` |
+| `POST /v1/triggers` | Create a [trigger](triggers.md) (`run` on its repository). Its `deliver` makes it continue one branch run after run (`{"branch", "busy"}`), and `deliver.lifecycle` (`{"idle_minutes", "dormant_days", "delete_days"}`, each optional, at least 1, rising) parks, retires the session of, and deletes that branch as it rests ([lifecycle](triggers.md#lifecycle)); a lifecycle that breaks its rules is `400 invalid_request` naming the field | `201` `TriggerCreated` |
 | `GET /v1/triggers`, `GET /v1/triggers/{t}` | The tenant's triggers, or one by name or ID | `TriggerList`, `Trigger` |
 | `DELETE /v1/triggers/{t}`; `POST /v1/triggers/{t}/enable`, `/disable`, `/secret`, `/test` | Remove; enable or disable; set or generate its webhook secret; evaluate it without creating anything | `TriggerRemoved`, `Trigger`, `SecretSet`, `TriggerTest` |
 | `GET /v1/triggers/{t}/runs?limit=N` | Its runs, newest first | `TriggerRuns` |

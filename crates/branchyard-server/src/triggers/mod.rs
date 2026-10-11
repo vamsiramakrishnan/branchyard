@@ -11,6 +11,8 @@
 //!   scheduled time, so nothing fires twice.
 //! - [`routes`]: the HTTP API, and the unauthenticated, signed webhook
 //!   endpoint `POST /v1/triggers/{id}/fire`.
+//! - [`lifecycle`]: what the dispatcher does to a branch a trigger keeps
+//!   alive once it has rested: park it, mark it dormant, delete it.
 //! - [`events`], [`email`], [`cron`], [`template`], [`precheck`],
 //!   [`target`]: the parts, each testable alone.
 
@@ -19,6 +21,7 @@ pub mod dispatch;
 pub mod email;
 pub mod engine;
 pub mod events;
+pub mod lifecycle;
 pub mod precheck;
 pub mod routes;
 pub mod store;
@@ -127,6 +130,7 @@ impl StoredTrigger {
             conditions: spec.conditions.clone(),
             task: spec.task.clone(),
             route: spec.route.clone(),
+            deliver: spec.deliver.clone(),
             precheck: spec.precheck.clone(),
             policy: spec.policy.clone(),
             enabled: self.enabled,
@@ -260,6 +264,22 @@ pub fn validate(mut spec: TriggerSpec) -> Result<TriggerSpec, String> {
     template::check(&task.prompt, event, "the task's prompt")?;
     if let Some(name) = &task.name {
         template::check(name, event, "the task's name")?;
+    }
+    if let Some(deliver) = &spec.deliver {
+        if deliver.branch.trim().is_empty() {
+            return Err("deliver.branch is empty".into());
+        }
+        template::check(&deliver.branch, event, "deliver.branch")?;
+        if task.name.is_some() {
+            return Err(
+                "a trigger that delivers to a branch names it in deliver.branch; leave the \
+                        task's name out"
+                    .into(),
+            );
+        }
+        if let Some(lifecycle) = &deliver.lifecycle {
+            lifecycle::validate(lifecycle)?;
+        }
     }
     if task.harness.is_some() && !task.harnesses.is_empty() {
         return Err("give the task a harness or harnesses, not both".into());
@@ -497,7 +517,9 @@ pub fn matches(conditions: &Conditions, event: &TriggerEvent) -> Result<(), Stri
 mod tests {
     use super::*;
     use branchyard_client::api::TaskRequest;
-    use branchyard_client::triggers::{Precheck, RouteSpec, TriggerPolicy};
+    use branchyard_client::triggers::{
+        Busy, Deliver, Lifecycle, Precheck, RouteSpec, TriggerPolicy,
+    };
 
     fn spec(when: When) -> TriggerSpec {
         TriggerSpec {
@@ -510,6 +532,7 @@ mod tests {
                 ..TaskRequest::default()
             },
             route: None,
+            deliver: None,
             precheck: None,
             enabled: true,
             policy: TriggerPolicy::default(),
@@ -567,9 +590,75 @@ mod tests {
             timeout_seconds: 60,
         });
         assert!(validate(s).unwrap_err().contains("precheck"));
-        let mut s = spec(cron);
+        let mut s = spec(cron.clone());
         s.secret = Some("x".into());
         assert!(validate(s).unwrap_err().contains("no webhook secret"));
+        // A branch delivered to is named once, in deliver.branch, with
+        // placeholders the trigger's events can fill.
+        let mut s = spec(cron.clone());
+        s.deliver = Some(Deliver {
+            branch: "  ".into(),
+            busy: Busy::Queue,
+            lifecycle: None,
+        });
+        assert!(validate(s).unwrap_err().contains("deliver.branch is empty"));
+        let mut s = spec(cron.clone());
+        s.deliver = Some(Deliver {
+            branch: "slack-{{event.channel}}".into(),
+            busy: Busy::Skip,
+            lifecycle: None,
+        });
+        assert!(validate(s).unwrap_err().contains("deliver.branch"));
+        let mut s = spec(github());
+        s.deliver = Some(Deliver {
+            branch: "slack-{{event.channel}}".into(),
+            busy: Busy::Skip,
+            lifecycle: None,
+        });
+        assert!(validate(s.clone()).is_ok());
+        s.task.name = Some("issue-{{event.number}}".into());
+        assert!(validate(s)
+            .unwrap_err()
+            .contains("leave the task's name out"));
+        let mut s = spec(cron);
+        s.deliver = Some(Deliver {
+            branch: "assistant".into(),
+            busy: Busy::Queue,
+            lifecycle: None,
+        });
+        assert!(validate(s.clone()).is_ok());
+        // A lifecycle is part of delivering to a branch, held to its rules:
+        // each threshold at least 1, rising, at least one given.
+        let lifecycle = |idle, dormant, delete| {
+            let mut s = s.clone();
+            s.deliver.as_mut().unwrap().lifecycle = Some(Lifecycle {
+                idle_minutes: idle,
+                dormant_days: dormant,
+                delete_days: delete,
+            });
+            s
+        };
+        assert!(validate(lifecycle(Some(30), Some(7), Some(30))).is_ok());
+        assert!(validate(lifecycle(None, None, Some(1))).is_ok());
+        assert!(validate(lifecycle(Some(0), None, None))
+            .unwrap_err()
+            .contains("deliver.lifecycle.idle_minutes is at least 1"));
+        assert!(validate(lifecycle(None, Some(3), Some(2)))
+            .unwrap_err()
+            .contains("deliver.lifecycle.dormant_days (3d) must be less than delete_days (2d)"));
+        assert!(validate(lifecycle(None, None, None))
+            .unwrap_err()
+            .contains("deliver.lifecycle sets none of"));
+        // It reaches the stored trigger, and the one shown, as given.
+        let kept = validate(lifecycle(Some(30), None, Some(14))).unwrap();
+        assert_eq!(
+            kept.deliver.unwrap().lifecycle,
+            Some(Lifecycle {
+                idle_minutes: Some(30),
+                dormant_days: None,
+                delete_days: Some(14),
+            })
+        );
         let mut s = spec(github());
         s.precheck = Some(Precheck {
             command: " make check ".into(),

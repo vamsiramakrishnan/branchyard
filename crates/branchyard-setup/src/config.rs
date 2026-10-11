@@ -794,9 +794,11 @@ impl Connectors {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkConfig {
-    /// HOST[:PORT] rules a new branch's harness may reach, such as
-    /// `"github.com"` or `"*.npmjs.org:443"`; `[]` allows nothing. Unset:
-    /// every host (open). A connector grant adds the gateway.
+    /// `[METHOD|METHOD ]HOST[:PORT][/PATH]` rules a new branch's harness may
+    /// reach, such as `"github.com"`, `"*.npmjs.org:443"` or
+    /// `"GET api.github.com/repos/*"` (held to inside the connection); `[]`
+    /// allows nothing. Unset: every host (open). A connector grant adds the
+    /// gateway.
     // The doc comment is the schema description; `[:PORT]` is not a link.
     #[allow(rustdoc::broken_intra_doc_links)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -877,6 +879,32 @@ pub struct ModelsConfig {
     /// Seeds the weighted choice of backends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+    /// What is kept of each call besides its interception record (sizes, a
+    /// digest of the request, tools offered and called, why it stopped):
+    /// `digests` (the default) keeps no text; `contents` also writes each
+    /// call's request and response to `.branchyard/models/audit/`.
+    #[serde(default, skip_serializing_if = "ModelAudit::is_default")]
+    pub audit: ModelAudit,
+}
+
+/// `[models] audit`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelAudit {
+    /// Sizes, a digest of the request, the tools offered and called, and
+    /// why the response stopped, per call. No prompt or answer text.
+    #[default]
+    Digests,
+    /// Also each call's request and response, one JSON line per call in
+    /// `.branchyard/models/audit/<branch>/<turn>.jsonl` (the directory
+    /// 0700, the file 0600), never in the event log.
+    Contents,
+}
+
+impl ModelAudit {
+    fn is_default(&self) -> bool {
+        *self == ModelAudit::default()
+    }
 }
 
 /// `[models.backends.NAME]`.
@@ -918,6 +946,11 @@ pub struct ModelRouteConfig {
     /// process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requests_per_minute: Option<u32>,
+    /// The model to ask a backend of another API for: a request for a
+    /// Claude model translated for an OpenAI backend asks it for this
+    /// model. Without it a route never crosses APIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_model: Option<String>,
 }
 
 /// `[models.budget]`.
@@ -1047,6 +1080,13 @@ pub struct WorkspaceConfig {
     /// --rm`), best-effort.
     #[serde(default, skip_serializing_if = "Script::is_empty")]
     pub teardown: Script,
+    /// Variables setup, teardown and run scripts and the harness get
+    /// besides `BRANCHYARD_*`, as `[workspace.env]`: a devcontainer's
+    /// `containerEnv` and `remoteEnv`. A value's `$VAR`, `${VAR}` and
+    /// `${VAR:-default}` are expanded on this host, from the environment
+    /// the script runs with and the `BRANCHYARD_*` variables.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     /// Prepared environments (docs/environments.md): run `setup` once per
     /// environment key (a hash of the setup commands, the copy globs and
     /// the files `inputs` names) and keep what it produced under
@@ -1234,6 +1274,11 @@ impl WorkspaceConfig {
         for (what, script) in [("setup", &self.setup), ("teardown", &self.teardown)] {
             check_script(script).or_else(|why| fail(what.into(), &why))?;
         }
+        for name in self.env.keys() {
+            if let Err(why) = check_variable_name(name) {
+                return fail(format!("env.{name}"), &why);
+            }
+        }
         if self.prepare && self.setup.is_empty() {
             return fail(
                 "prepare".into(),
@@ -1360,8 +1405,28 @@ impl WorkspaceConfig {
                 "share": self.share,
             });
         }
+        if !self.env.is_empty() {
+            canonical["env"] = serde_json::json!(self.env);
+        }
         hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
     }
+}
+
+/// Why a `[workspace.env]` name is refused, if it is: a variable name,
+/// and not one of Branchyard's own.
+pub fn check_variable_name(name: &str) -> Result<(), String> {
+    let shaped = !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if !shaped {
+        return Err(
+            "is not a variable name (letters, digits and _, not starting with a digit)".into(),
+        );
+    }
+    if name.starts_with("BRANCHYARD_") {
+        return Err("is Branchyard's own; it is set by the branch".into());
+    }
+    Ok(())
 }
 
 /// Why a copy glob is refused, if it is: relative to the repository root,
@@ -1630,6 +1695,11 @@ pub struct Microsandbox {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub max_paused: Option<u32>,
+    /// Minutes a kept sandbox may go unused before it is destroyed instead
+    /// of resumed (default: never; it stays until `max_paused` evicts it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub max_kept_minutes: Option<u32>,
     /// Use the SDK's pause, live branching and full snapshots: unqualified
     /// until they pass on a KVM host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2061,6 +2131,9 @@ impl ProjectConfig {
             if sandbox.max_paused == Some(0) {
                 return fail("microsandbox.max_paused", "must be at least 1".into());
             }
+            if sandbox.max_kept_minutes == Some(0) {
+                return fail("microsandbox.max_kept_minutes", "must be at least 1".into());
+            }
         }
         Ok(())
     }
@@ -2445,6 +2518,9 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
         if let Some(n) = sandbox.max_paused {
             out.push_str(&format!("max_paused = {n}\n"));
         }
+        if let Some(n) = sandbox.max_kept_minutes {
+            out.push_str(&format!("max_kept_minutes = {n}\n"));
+        }
         if let Some(on) = sandbox.live_branch {
             out.push_str(&format!("live_branch = {on}\n"));
         }
@@ -2608,6 +2684,12 @@ fn render_workspace(out: &mut String, table: &str, workspace: &WorkspaceConfig) 
             out.push_str(&format!("{key} = [{}]\n", items.join(", ")));
         }
     }
+    if !workspace.env.is_empty() {
+        out.push_str(&format!("\n[{table}.env]\n"));
+        for (name, value) in &workspace.env {
+            out.push_str(&format!("{name} = {}\n", toml_string(value)));
+        }
+    }
     if let Some(pool) = &workspace.pool {
         out.push_str(&format!("\n[{table}.pool]\nsize = {}\n", pool.size));
         if !pool.labels.is_empty() {
@@ -2663,6 +2745,7 @@ config = ".branchyard/server.json"
 [microsandbox]
 image = "ghcr.io/you/codex:1"
 pass_env = ["OPENAI_API_KEY"]
+max_kept_minutes = 30
 [notify]
 desktop = true
 terminal = "osc777"
@@ -2790,6 +2873,33 @@ classes = { compensable = "allow" }
     }
 
     #[test]
+    fn the_audit_mode_defaults_to_digests_renders_back_and_refuses_other_values() {
+        let plain = parse("version = 1\n").unwrap();
+        assert_eq!(plain.models.audit, ModelAudit::Digests);
+        // Saying the default is the same as leaving it out.
+        let digests = parse("version = 1\n\n[models]\naudit = \"digests\"\n").unwrap();
+        assert_eq!(digests.models, plain.models);
+        assert!(!render(&digests, "test").contains("audit"));
+        let config = parse("version = 1\n\n[models]\naudit = \"contents\"\n").unwrap();
+        assert_eq!(config.models.audit, ModelAudit::Contents);
+        assert!(!config.models.is_empty());
+        let rendered = render(&config, "test");
+        assert!(rendered.contains("audit = \"contents\""), "{rendered}");
+        assert_eq!(parse(&rendered).unwrap(), config);
+        // A value other than the two is refused, naming it and them.
+        for bad in ["full", "Contents", "none", ""] {
+            let error = parse(&format!("[models]\naudit = \"{bad}\"\n"))
+                .unwrap_err()
+                .to_string();
+            for needle in [format!("`{bad}`"), "`digests`".into(), "`contents`".into()] {
+                assert!(error.contains(&needle), "{bad:?}: {error}");
+            }
+        }
+        let error = parse("[models]\naudit = true\n").unwrap_err().to_string();
+        assert!(error.contains("wanted string"), "{error}");
+    }
+
+    #[test]
     fn approvals_are_checked_and_become_a_policy() {
         let config = parse(FULL).unwrap();
         let policy = config.approvals.policy().unwrap().unwrap();
@@ -2906,6 +3016,10 @@ classes = { compensable = "allow" }
             ("[remote]\nurl = \"ftp://x\"", "remote.url"),
             ("version = 2", "version"),
             ("[defaults]\nprovider = \"microsandbox\"", "[microsandbox]"),
+            (
+                "[microsandbox]\nimage = \"x\"\nmax_kept_minutes = 0",
+                "microsandbox.max_kept_minutes",
+            ),
             ("[notify]\nsound = true", "unknown field `sound`"),
             ("[sync]\nremote = \"ftp://x\"", "sync.remote"),
             ("[sync]\ninterval = \"5m\"", "sync.remote: is required"),
@@ -3182,6 +3296,50 @@ command = ["pnpm build", "pnpm worker"]
         let mut shared = workspace.clone();
         shared.share.push("vendor/bundle".into());
         assert_ne!(shared.digest(), workspace.digest());
+    }
+
+    #[test]
+    fn an_env_table_parses_renders_back_is_checked_and_changes_the_digest() {
+        let text = "[workspace]\nsetup = \"pnpm install\"\n\n[workspace.env]\n\
+                    CI = \"true\"\nTOKEN_FILE = \"${HOME}/.token\"\n";
+        let config = parse(text).unwrap();
+        let workspace = config.workspace.clone().unwrap();
+        assert_eq!(workspace.env.len(), 2);
+        assert_eq!(workspace.env["TOKEN_FILE"], "${HOME}/.token");
+        let rendered = render(&config, "");
+        assert!(
+            rendered.contains("[workspace.env]\nCI = \"true\"\n"),
+            "{rendered}"
+        );
+        assert_eq!(parse(&rendered).unwrap().workspace, config.workspace);
+        // Variables change what the scripts do, so they change the digest;
+        // a section without them keeps the digest it had.
+        let plain = parse("[workspace]\nsetup = \"pnpm install\"").unwrap();
+        assert_ne!(
+            workspace.digest(),
+            plain.workspace.clone().unwrap().digest()
+        );
+        let mut without = workspace.clone();
+        without.env.clear();
+        assert_eq!(without.digest(), plain.workspace.unwrap().digest());
+        for (bad, why) in [
+            (
+                "[workspace]\n[workspace.env]\n\"1X\" = \"a\"\n",
+                "not a variable name",
+            ),
+            (
+                "[workspace]\n[workspace.env]\n\"A-B\" = \"a\"\n",
+                "not a variable name",
+            ),
+            (
+                "[workspace]\n[workspace.env]\nBRANCHYARD_PORT = \"1\"\n",
+                "Branchyard's own",
+            ),
+            ("[workspace]\n[workspace.env]\nA = 1\n", "expected a string"),
+        ] {
+            let error = parse(bad).map(|_| ()).unwrap_err().to_string();
+            assert!(error.contains(why), "{bad}: {error}");
+        }
     }
 
     #[test]

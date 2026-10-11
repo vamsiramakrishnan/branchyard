@@ -254,9 +254,17 @@ by artifact list
 by artifact get 3 --out data/results.json
 by ask "Should the parser accept tabs?" --wait 300
 by report "Tokenizer done; formatter next"
+by report-status working "Porting the tokenizer's tests"
 by inbox --unread
 by answer 12 "Yes, accept tabs"
 ```
+
+`by report-status <state> "<one line>" [--link URL]` states your own status
+beside the one Branchyard derives: `working`, `idle`, `blocked`, `complete`
+or `failure`, in at most 280 characters. Your parent sees the latest in
+`by inspect` and the person watching in `by watch`; `blocked` and `failure`
+are also escalated to your parent's inbox. It is a claim, not a message
+and not a result: `by report` is how you tell your parent something.
 
 Artifacts you publish are readable by your ancestors and descendants; a
 sibling needs `by artifact share ID --to BRANCH`. Whoever can already
@@ -301,4 +309,4 @@ If you cannot run commands, the same operations are MCP tools on the
 `steer`, `propose_integration` (`branch`, or `branches` to integrate several
 together), `check` (your own work before you finish, or a child's), `wait` (`branches`, `any`, `timeout_seconds`), `cancel`, `discard`,
 `children`, `graph`, `apply_graph`, the artifact and scratch tools, and `ask`,
-`report`, `escalate`, `answer` and `inbox`.
+`report`, `escalate`, `report_status`, `answer` and `inbox`.

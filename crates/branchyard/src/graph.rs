@@ -913,6 +913,34 @@ pub(crate) fn cancel_unstarted(store: &Store, record: &Record, by: &str) -> Resu
 mod tests {
     use super::*;
 
+    /// The MCP `spawn` tool and the SDKs give connectors as `--connector`
+    /// strings; the object form is taken too.
+    #[test]
+    fn a_spawn_specs_connectors_take_the_flag_form() {
+        let spec: SpawnSpec = serde_json::from_value(serde_json::json!({
+            "prompt": "p",
+            "connectors": ["github:write:issues.*", {"connector": "linear"}]
+        }))
+        .unwrap();
+        let spawn = spec.to_spawn().unwrap();
+        let grants: Vec<String> = spawn
+            .connectors
+            .unwrap()
+            .iter()
+            .map(|g| g.to_string())
+            .collect();
+        assert_eq!(grants, ["github:write:issues.*", "linear:read"]);
+        let bad = serde_json::from_value::<SpawnSpec>(serde_json::json!({
+            "prompt": "p",
+            "connectors": ["github:admin"]
+        }))
+        .unwrap_err();
+        assert!(
+            bad.to_string().contains("read, write or write+confirm"),
+            "{bad}"
+        );
+    }
+
     fn edges(list: &[(&str, &str)]) -> BTreeSet<(String, String)> {
         list.iter()
             .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))

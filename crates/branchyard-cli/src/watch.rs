@@ -39,6 +39,11 @@ pub struct Doing {
     pub tool: Option<String>,
     /// A permission request not yet answered.
     pub asking: Option<String>,
+    /// The latest status the harness reported about itself this turn
+    /// (`report_status`): a claim beside the protocol's status. While its
+    /// state is working or blocked, its summary is shown in place of the
+    /// last tool.
+    pub reported: Option<branchyard::StatusReport>,
     /// Text of the current message, tail only.
     text: String,
     pub last_at_ms: u64,
@@ -56,6 +61,7 @@ impl Doing {
         match &event.activity {
             Activity::Prompt(_) | Activity::Harness(Event::TurnAccepted { .. }) => {
                 self.tool = None;
+                self.reported = None;
                 self.asking = None;
                 self.text.clear();
             }
@@ -78,6 +84,19 @@ impl Doing {
             }
             Activity::Harness(Event::PermissionWithdrawn { .. }) | Activity::Decision { .. } => {
                 self.asking = None;
+            }
+            // What the harness says it is doing, in its own words.
+            Activity::StatusReport {
+                state,
+                summary,
+                link,
+            } => {
+                self.reported = Some(branchyard::StatusReport {
+                    state: *state,
+                    summary: summary.clone(),
+                    link: link.clone(),
+                    at_ms: event.at_ms,
+                });
             }
             // A gateway call is what the harness is doing, as a tool is.
             Activity::ConnectorCall(call) => {
@@ -125,8 +144,21 @@ impl Doing {
         if let Some(tool) = &self.asking {
             parts.push(format!("asks {tool}"));
         }
-        if let Some(tool) = &self.tool {
-            parts.push(format!("▸ {tool}"));
+        match (&self.reported, &self.tool) {
+            // Its own words win over the last tool while it works or waits.
+            (Some(report), _) if report.state.is_doing() => {
+                let said = report
+                    .summary
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                parts.push(match report.state {
+                    branchyard::ReportedState::Blocked => format!("▸ blocked: {said}"),
+                    _ => format!("▸ {said}"),
+                });
+            }
+            (_, Some(tool)) => parts.push(format!("▸ {tool}")),
+            _ => {}
         }
         let snippet = self.snippet();
         if !snippet.is_empty() {
@@ -1101,6 +1133,58 @@ mod tests {
         assert_eq!(doing.last_at_ms, 6);
         doing.apply(&at(7, delta(&"é".repeat(2_000))));
         assert!(doing.text.len() <= TEXT_TAIL * 2 + 2);
+    }
+
+    fn said(state: branchyard::ReportedState, summary: &str) -> Activity {
+        Activity::StatusReport {
+            state,
+            summary: summary.into(),
+            link: None,
+        }
+    }
+
+    /// What the harness says it is doing is shown in place of the last tool
+    /// while it works or is blocked, until it says something else or the
+    /// next turn starts.
+    #[test]
+    fn a_self_reported_summary_is_preferred_to_the_tool_while_working_or_blocked() {
+        use branchyard::ReportedState;
+        let tool = |name: &str| {
+            Activity::Harness(Event::ToolStarted {
+                turn: 1,
+                call_id: "c".into(),
+                name: name.into(),
+            })
+        };
+        let mut doing = Doing::default();
+        doing.apply(&at(1, Activity::Prompt("go".into())));
+        doing.apply(&at(2, tool("Bash")));
+        assert_eq!(doing.summary(), "▸ Bash");
+        doing.apply(&at(
+            3,
+            said(ReportedState::Working, "reading\nthe failing test"),
+        ));
+        assert_eq!(doing.summary(), "▸ reading the failing test");
+        // A later tool does not displace the harness's own words.
+        doing.apply(&at(4, tool("Edit")));
+        assert_eq!(doing.summary(), "▸ reading the failing test");
+        doing.apply(&at(5, said(ReportedState::Blocked, "needs the API key")));
+        assert_eq!(doing.summary(), "▸ blocked: needs the API key");
+        // Idle, complete and failure say nothing about what it is doing now.
+        for state in [
+            ReportedState::Idle,
+            ReportedState::Complete,
+            ReportedState::Failure,
+        ] {
+            doing.apply(&at(6, said(state, "x")));
+            assert_eq!(doing.summary(), "▸ Edit", "{state}");
+            assert_eq!(doing.reported.as_ref().map(|r| r.state), Some(state));
+        }
+        doing.apply(&at(7, said(ReportedState::Working, "again")));
+        assert_eq!(doing.reported.as_ref().unwrap().at_ms, 7);
+        doing.apply(&at(8, Activity::Prompt("next".into())));
+        assert_eq!(doing.reported, None);
+        assert_eq!(doing.summary(), "");
     }
 
     #[test]

@@ -391,6 +391,15 @@
           "minimum": 1,
           "description": "Kept sandboxes per repository before the least recently used is\ndestroyed (default 4)."
         },
+        "max_kept_minutes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Minutes a kept sandbox may go unused before it is destroyed instead\nof resumed (default: never; it stays until `max_paused` evicts it)."
+        },
         "live_branch": {
           "type": [
             "boolean",
@@ -490,6 +499,13 @@
         "teardown": {
           "$ref": "#/$defs/Script",
           "description": "Run in the worktree when the branch is removed (`by rm`, `by merge\n--rm`), best-effort."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Variables setup, teardown and run scripts and the harness get\nbesides `BRANCHYARD_*`, as `[workspace.env]`: a devcontainer's\n`containerEnv` and `remoteEnv`. A value's `$VAR`, `${VAR}` and\n`${VAR:-default}` are expanded on this host, from the environment\nthe script runs with and the `BRANCHYARD_*` variables."
         },
         "prepare": {
           "type": "boolean",
@@ -898,7 +914,7 @@
           "items": {
             "type": "string"
           },
-          "description": "HOST[:PORT] rules a new branch's harness may reach, such as\n`\"github.com\"` or `\"*.npmjs.org:443\"`; `[]` allows nothing. Unset:\nevery host (open). A connector grant adds the gateway."
+          "description": "`[METHOD|METHOD ]HOST[:PORT][/PATH]` rules a new branch's harness may\nreach, such as `\"github.com\"`, `\"*.npmjs.org:443\"` or\n`\"GET api.github.com/repos/*\"` (held to inside the connection); `[]`\nallows nothing. Unset: every host (open). A connector grant adds the\ngateway."
         },
         "enforce": {
           "anyOf": [
@@ -1284,6 +1300,10 @@
           "format": "uint64",
           "minimum": 0,
           "description": "Seeds the weighted choice of backends."
+        },
+        "audit": {
+          "$ref": "#/$defs/ModelAudit",
+          "description": "What is kept of each call besides its interception record (sizes, a\ndigest of the request, tools offered and called, why it stopped):\n`digests` (the default) keeps no text; `contents` also writes each\ncall's request and response to `.branchyard/models/audit/`."
         }
       },
       "description": "`[models]`."
@@ -1362,6 +1382,13 @@
           "format": "uint32",
           "minimum": 0,
           "description": "At most this many requests a minute through this route, per\nprocess."
+        },
+        "backend_model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The model to ask a backend of another API for: a request for a\nClaude model translated for an OpenAI backend asks it for this\nmodel. Without it a route never crosses APIs."
         }
       },
       "required": [
@@ -1441,6 +1468,21 @@
         "output"
       ],
       "description": "`[models.prices.MODEL]`, dollars per million tokens."
+    },
+    "ModelAudit": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "digests",
+          "description": "Sizes, a digest of the request, the tools offered and called, and\nwhy the response stopped, per call. No prompt or answer text."
+        },
+        {
+          "type": "string",
+          "const": "contents",
+          "description": "Also each call's request and response, one JSON line per call in\n`.branchyard/models/audit/<branch>/<turn>.jsonl` (the directory\n0700, the file 0600), never in the event log."
+        }
+      ],
+      "description": "`[models] audit`."
     },
     "HarnessesConfig": {
       "type": "object",

@@ -4140,3 +4140,138 @@ fn an_inherited_root_is_used_only_in_its_repository_or_the_turns_worktree() {
     inner.remove_env("BRANCHYARD_WORKTREE");
     assert!(names(&inner.json(&["ls", "--json"])).is_empty());
 }
+
+/// A harness states its own status from its shell and from Python, and
+/// every surface shows it beside the protocol's status: `by log` as a line,
+/// `by log --json` as the activity, `by show` and `by inspect` as the latest
+/// report; a blocked one reaches the parent's inbox as an escalation.
+#[test]
+fn a_harness_states_its_own_status_and_by_shows_it_beside_the_protocols() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&[
+        "run",
+        "WRITE root.txt=r",
+        "--name",
+        "root",
+        "--delegate=2",
+        "--yes",
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+
+    let script = "import branchyard as b; r = b.report_status('blocked', 'needs the API key'); \
+                  print('escalated', r.escalation.kind, r.report.state)";
+    let kid_prompt = [
+        "SH by report-status working 'reading the failing test' --link https://example.com/pull/7 --json".to_owned(),
+        format!("SH python3 -c \"{script}\""),
+    ]
+    .join("\n");
+    let kid = repo.json(&[
+        "spawn",
+        &kid_prompt,
+        "--parent",
+        "root",
+        "--name",
+        "kid",
+        "--wait",
+        "--yes",
+        "--json",
+    ]);
+    // The claim is not the status: the protocol says the turn ended with
+    // no changes.
+    assert_eq!(kid["status"]["state"], "no_changes", "{kid}");
+    let said = reply(&repo, "kid");
+    assert!(said.contains("sh: 0"), "{said}");
+    let (code, working) = sh_json(&said, 0);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(working["report"]["state"], "working");
+    assert!(working.get("escalation").is_none(), "{working}");
+    assert!(
+        said.contains("escalated escalation blocked"),
+        "the Python module returns the escalation: {said}"
+    );
+
+    // `by log`: one line each, the link when there is one.
+    let log = stdout(&repo.by(&["log", "kid"]));
+    assert!(
+        log.contains("status working: reading the failing test (https://example.com/pull/7)"),
+        "{log}"
+    );
+    assert!(log.contains("status blocked: needs the API key"), "{log}");
+    // `by log --json`: the activity.
+    let events = repo.json(&["log", "kid", "--json"]);
+    let reports: Vec<&Value> = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["activity"] == "status_report")
+        .collect();
+    assert_eq!(reports.len(), 2, "{events}");
+    assert_eq!(reports[0]["state"], "working");
+    assert_eq!(reports[0]["summary"], "reading the failing test");
+    assert_eq!(reports[0]["link"], "https://example.com/pull/7");
+    assert_eq!(reports[1]["state"], "blocked");
+    assert!(reports[1]["link"].is_null(), "{reports:?}");
+    assert!(reports[1]["at_ms"].as_u64().unwrap() > 0);
+
+    // `by show`: the latest, as JSON and as text.
+    let shown = repo.json(&["show", "kid", "--json"]);
+    assert_eq!(shown["reported"]["state"], "blocked", "{shown}");
+    assert_eq!(shown["reported"]["summary"], "needs the API key");
+    assert!(shown["reported"]["link"].is_null(), "{shown}");
+    assert_eq!(shown["reported"]["at_ms"], reports[1]["at_ms"]);
+    assert_eq!(shown["status"]["state"], "no_changes");
+    let text = stdout(&repo.by(&["show", "kid"]));
+    assert!(text.contains("reported"), "{text}");
+    assert!(text.contains("blocked: needs the API key, "), "{text}");
+    // `by inspect`, which is what the parent's tool returns.
+    let inspected = repo.json(&["inspect", "kid", "--json"]);
+    assert_eq!(inspected["reported"], shown["reported"], "{inspected}");
+    let text = stdout(&repo.by(&["inspect", "kid"]));
+    assert!(text.contains("blocked: needs the API key"), "{text}");
+    // A branch that never reported has no `reported`.
+    assert!(repo
+        .json(&["show", "root", "--json"])
+        .get("reported")
+        .is_none());
+
+    // Only the blocked one reached the parent's inbox.
+    let inbox = repo.json(&["inbox", "--as", "root", "--json"]);
+    let messages = inbox["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1, "{inbox}");
+    assert_eq!(messages[0]["kind"], "escalation");
+    assert_eq!(messages[0]["from"], "kid");
+    assert_eq!(messages[0]["text"], "status blocked: needs the API key");
+
+    // Outside a harness it needs --as, and bad input is refused.
+    let without = repo.by(&["report-status", "working", "x", "--json"]);
+    assert_eq!(without.status.code(), Some(1));
+    let without: Value = serde_json::from_slice(&without.stdout).unwrap();
+    assert!(
+        without["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--as <branch>"),
+        "{without}"
+    );
+    let long = repo.by(&[
+        "report-status",
+        "working",
+        &"x".repeat(281),
+        "--as",
+        "kid",
+        "--json",
+    ]);
+    assert_eq!(long.status.code(), Some(1));
+    let long: Value = serde_json::from_slice(&long.stdout).unwrap();
+    assert_eq!(long["error"]["kind"], "denied", "{long}");
+    assert!(
+        long["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("281 characters"),
+        "{long}"
+    );
+    let bad = repo.by(&["report-status", "done", "x", "--as", "kid"]);
+    assert_eq!(bad.status.code(), Some(2), "{}", stderr(&bad));
+    assert!(stderr(&bad).contains("working"), "{}", stderr(&bad));
+}

@@ -109,6 +109,9 @@ pub fn import(text: &str, _: Reader) -> Result<Imported, String> {
         setup,
         run: (!run.is_empty()).then(|| run.join(" && ")),
         teardown: commands(&config.teardown),
+        env: Default::default(),
+        prepare: false,
+        inputs: Vec::new(),
         notes,
     })
 }

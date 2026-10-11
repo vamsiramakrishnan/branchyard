@@ -664,6 +664,7 @@ impl App {
             copy: w.copy.clone(),
             setup: w.setup.commands(),
             teardown: w.teardown.commands(),
+            env: w.env.clone(),
             digest: Some(w.digest()),
             prepare: w.prepare,
             inputs: w.inputs.clone(),
@@ -1522,13 +1523,54 @@ async fn post_send(
     JsonBody(request, canonical): JsonBody<SendRequest>,
 ) -> Result<Response, ApiError> {
     let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
-    let policy = app.tenant_policy(&caller);
     let route = format!("POST /v1/repos/{}/branches/{branch}/send", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
-    if let Some(response) = replayed(&app, &caller, idem.as_ref()).await? {
-        return Ok(response);
+    let to = SendTo {
+        branch,
+        request,
+        reincarnate: None,
+    };
+    let (op, replayed) =
+        admit_send(&app, &repo, &caller, idem, to, incoming_trace(&headers)).await?;
+    Ok(operation_response(op, replayed))
+}
+
+/// What a send is to: the branch, what is sent, and, for a branch whose
+/// lifecycle made it dormant, why its harness session starts over first.
+pub(crate) struct SendTo {
+    /// The branch.
+    pub branch: String,
+    /// The prompt and what governs the turn.
+    pub request: SendRequest,
+    /// Set, the operation reincarnates the branch in place (a fresh harness
+    /// session on the same worktree) before the turn, for this reason; it
+    /// is then a reincarnation, not a send, to anyone who looks.
+    pub reincarnate: Option<String>,
+}
+
+/// Admit a send to `to.branch` of `repo` for `caller`, or return the
+/// operation `idem` already names (`true`): what `POST .../send` does,
+/// and what a trigger that delivers to a branch does as the principal
+/// that created it. The operation takes the branch's lock, so a send to a
+/// branch running a turn runs after that turn.
+pub(crate) async fn admit_send(
+    app: &Shared,
+    repo: &RepoState,
+    caller: &Caller,
+    idem: Option<Idempotency>,
+    to: SendTo,
+    trace: Option<String>,
+) -> Result<(Operation, bool), ApiError> {
+    let SendTo {
+        branch,
+        request,
+        reincarnate,
+    } = to;
+    if let Some(op) = replayed_operation(app, caller, idem.as_ref()).await? {
+        return Ok((op, true));
     }
-    work::send_options(&app, &repo, &request)?;
+    let policy = app.tenant_policy(caller);
+    work::send_options(app, repo, &request)?;
     let target = existing(&repo.yard, &branch).await?;
     {
         let (app, branch, request) = (app.clone(), branch.clone(), request.clone());
@@ -1542,19 +1584,32 @@ async fn post_send(
     let cursor = sync_feed(&repo.feed).await?;
     let new = NewOperation {
         repo: repo.name.clone(),
-        kind: OperationKind::Send,
+        kind: match reincarnate {
+            Some(_) => OperationKind::Reincarnate,
+            None => OperationKind::Send,
+        },
         creates: Vec::new(),
         branches: vec![branch.clone()],
         cursor,
         locks: vec![branch.clone()],
         idempotency: idem,
         principal: caller.0.clone(),
-        quota: app.admission_quota(&caller, &policy),
+        quota: app.admission_quota(caller, &policy),
         requires: required_labels(&request.require_labels)?,
         priority: admitted_priority(&policy, request.priority, 0)?,
-        trace: incoming_trace(&headers),
+        trace,
     };
-    admit(&app, new, Work::Send { branch, request }).await
+    let work = match reincarnate {
+        Some(reason) => Work::Resume {
+            branch,
+            request,
+            reason,
+        },
+        None => Work::Send { branch, request },
+    };
+    let value = work.to_value()?;
+    let registry = app.registry.clone();
+    blocking(move || registry.submit(new, value)).await?
 }
 
 async fn post_fork(

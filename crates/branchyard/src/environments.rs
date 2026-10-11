@@ -319,7 +319,7 @@ pub(crate) fn key(
     place: &str,
     inputs: &[EnvironmentInput],
 ) -> (String, String) {
-    let recipe = json!({
+    let mut recipe = json!({
         "version": 1,
         "place": place,
         "setup": spec.setup,
@@ -329,6 +329,11 @@ pub(crate) fn key(
             false => spec.inputs.clone(),
         },
     });
+    // Variables change what setup builds; a spec without them keeps the
+    // recipe it had.
+    if !spec.env.is_empty() {
+        recipe["env"] = json!(spec.env);
+    }
     let recipe = blake3::hash(recipe.to_string().as_bytes()).to_hex()[..24].to_owned();
     let keyed = json!({ "recipe": recipe, "inputs": inputs });
     let key = blake3::hash(keyed.to_string().as_bytes()).to_hex()[..24].to_owned();
@@ -1429,6 +1434,24 @@ pub(crate) fn new_use(key: &str, origin: EnvironmentOrigin) -> EnvironmentUse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn variables_change_the_recipe_only_when_present() {
+        let plain = WorkspaceSpec {
+            setup: vec!["pnpm install".into()],
+            prepare: true,
+            ..WorkspaceSpec::default()
+        };
+        let mut with_env = plain.clone();
+        with_env.env.insert("CI".into(), "true".into());
+        let (plain_key, recipe) = key(&plain, "host", &[]);
+        let (env_key, env_recipe) = key(&with_env, "host", &[]);
+        assert_ne!(recipe, env_recipe);
+        assert_ne!(plain_key, env_key);
+        let mut other = with_env.clone();
+        other.env.insert("CI".into(), "false".into());
+        assert_ne!(key(&other, "host", &[]).1, env_recipe);
+    }
 
     #[test]
     fn keys_follow_the_recipe_and_the_inputs_content() {

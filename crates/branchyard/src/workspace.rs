@@ -97,6 +97,13 @@ pub struct WorkspaceSpec {
     /// removed, best-effort.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub teardown: Vec<String>,
+    /// Variables the scripts and the harness get besides `BRANCHYARD_*`
+    /// (`[workspace.env]`; a devcontainer's `containerEnv` and
+    /// `remoteEnv`). A value's `$VAR`, `${VAR}` and `${VAR:-default}` are
+    /// expanded on this host from the environment the script runs with and
+    /// the `BRANCHYARD_*` variables; see [`WorkspaceSpec::expanded_env`].
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
     /// What the configuration this came from hashed to when it was trusted,
     /// for display; the engine does not check it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,6 +131,71 @@ impl WorkspaceSpec {
     pub fn has_scripts(&self) -> bool {
         !self.setup.is_empty() || !self.teardown.is_empty()
     }
+
+    /// The spec's variables, expanded: `$VAR`, `${VAR}` and
+    /// `${VAR:-default}` from `branch_vars` (the `BRANCHYARD_*` variables)
+    /// first, then this process's environment; an unset variable is
+    /// empty, as in a shell. A name `branch_vars` sets is left out: the
+    /// branch's own variables are never overridden.
+    pub fn expanded_env(&self, branch_vars: &[(String, String)]) -> Vec<(String, String)> {
+        let lookup = |name: &str| -> Option<String> {
+            branch_vars
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+                .or_else(|| std::env::var(name).ok())
+        };
+        self.env
+            .iter()
+            .filter(|(name, _)| !branch_vars.iter().any(|(n, _)| n == *name))
+            .map(|(name, value)| (name.clone(), expand(value, &lookup)))
+            .collect()
+    }
+}
+
+/// `value` with its `$VAR`, `${VAR}` and `${VAR:-default}` references
+/// replaced by `lookup`, an unset one by its default or nothing; `$$` is
+/// one `$`, and a `$` followed by anything else stays.
+pub fn expand(value: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
+    let mut out = String::new();
+    let mut rest = value;
+    while let Some(at) = rest.find('$') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        if let Some(inner) = after.strip_prefix('{') {
+            let Some(close) = inner.find('}') else {
+                out.push_str(&rest[at..]);
+                return out;
+            };
+            let (name, default) = match inner[..close].split_once(":-") {
+                Some((name, default)) => (name, Some(default)),
+                None => (&inner[..close], None),
+            };
+            match lookup(name) {
+                Some(found) if !found.is_empty() || default.is_none() => out.push_str(&found),
+                _ => out.push_str(default.unwrap_or_default()),
+            }
+            rest = &inner[close + 1..];
+            continue;
+        }
+        if let Some(stripped) = after.strip_prefix('$') {
+            out.push('$');
+            rest = stripped;
+            continue;
+        }
+        let end = after
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(after.len());
+        if end == 0 || after.starts_with(|c: char| c.is_ascii_digit()) {
+            out.push('$');
+            rest = after;
+            continue;
+        }
+        out.push_str(&lookup(&after[..end]).unwrap_or_default());
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// A branch's workspace as stored with its record.
@@ -340,6 +412,17 @@ pub(crate) fn reserve_port(store: &Store, root: &Path, branch: &str) -> Result<u
     store
         .ports()
         .reserve_port(branch, port_start(root, branch), &port_free)
+}
+
+/// `vars` with the spec's own variables before them, expanded against
+/// them: the branch's variables win over the spec's.
+pub(crate) fn with_spec_env(
+    spec: &WorkspaceSpec,
+    vars: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let mut env = spec.expanded_env(&vars);
+    env.extend(vars);
+    env
 }
 
 /// The variables a branch's scripts and harness get.
@@ -618,7 +701,10 @@ impl Setup<'_> {
         match self.runner {
             Runner::Host => {
                 report.ran_in = Some(RanIn::Host);
-                let env = variables(self.yard, self.name, worktree, Some(self.port));
+                let env = with_spec_env(
+                    self.spec,
+                    variables(self.yard, self.name, worktree, Some(self.port)),
+                );
                 let on_spawn = |row: &ProcessRow| store.backend().record_process(self.fence, row);
                 run_commands(
                     report,
@@ -640,11 +726,14 @@ impl Setup<'_> {
                 report.ran_in = Some(RanIn::Sandbox);
                 // The root and the port are this host's; the worktree
                 // is where the sandbox sees it.
-                let env = vec![
-                    (crate::ENV_BRANCH.to_owned(), self.name.to_owned()),
-                    (ENV_WORKTREE.to_owned(), cwd.clone()),
-                    (ENV_PORT.to_owned(), self.port.to_string()),
-                ];
+                let env = with_spec_env(
+                    self.spec,
+                    vec![
+                        (crate::ENV_BRANCH.to_owned(), self.name.to_owned()),
+                        (ENV_WORKTREE.to_owned(), cwd.clone()),
+                        (ENV_PORT.to_owned(), self.port.to_string()),
+                    ],
+                );
                 run_in_sandbox(
                     report,
                     &self.spec.setup,
@@ -1022,6 +1111,7 @@ pub(crate) fn teardown(
                     if let Some(port) = port {
                         env.push((ENV_PORT.to_owned(), port.to_string()));
                     }
+                    let env = with_spec_env(&state.spec, env);
                     run_in_sandbox(
                         &mut report,
                         &state.spec.teardown,
@@ -1047,7 +1137,10 @@ pub(crate) fn teardown(
         return Ok(Some(report));
     }
     report.ran_in = Some(RanIn::Host);
-    let env = variables(yard, &record.info.name, worktree, port);
+    let env = with_spec_env(
+        &state.spec,
+        variables(yard, &record.info.name, worktree, port),
+    );
     let on_spawn = |row: &ProcessRow| match fence {
         Some(fence) => store.backend().record_process(fence, row),
         None => Ok(()),
@@ -1572,6 +1665,67 @@ impl Tail {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_values_expand_from_the_branch_then_the_process() {
+        let lookup = |name: &str| -> Option<String> {
+            match name {
+                "BRANCHYARD_WORKTREE" => Some("/w/t".into()),
+                "HOME" => Some("/home/me".into()),
+                "EMPTY" => Some(String::new()),
+                _ => None,
+            }
+        };
+        for (value, expanded) in [
+            ("${BRANCHYARD_WORKTREE}/.cache", "/w/t/.cache"),
+            ("$HOME/x", "/home/me/x"),
+            ("${UNSET:-fallback}", "fallback"),
+            ("${EMPTY:-fallback}", "fallback"),
+            ("${UNSET}", ""),
+            ("$UNSET.", "."),
+            ("${HOME:-no}", "/home/me"),
+            ("cost $$5 $ and $1", "cost $5 $ and $1"),
+            ("plain", "plain"),
+            ("${open", "${open"),
+        ] {
+            assert_eq!(expand(value, &lookup), expanded, "{value}");
+        }
+        let spec = WorkspaceSpec {
+            env: [
+                (
+                    "APP_HOME".to_owned(),
+                    "${BRANCHYARD_WORKTREE}/.app".to_owned(),
+                ),
+                ("MODE".to_owned(), "dev".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            ..WorkspaceSpec::default()
+        };
+        let vars = vec![("BRANCHYARD_WORKTREE".to_owned(), "/w/t".to_owned())];
+        let env = with_spec_env(&spec, vars.clone());
+        assert_eq!(
+            env,
+            [
+                ("APP_HOME".to_owned(), "/w/t/.app".to_owned()),
+                ("MODE".to_owned(), "dev".to_owned()),
+                ("BRANCHYARD_WORKTREE".to_owned(), "/w/t".to_owned()),
+            ]
+        );
+        // A spec naming one of the branch's variables does not override it.
+        let mut taken = spec.clone();
+        taken
+            .env
+            .insert("BRANCHYARD_WORKTREE".into(), "/elsewhere".into());
+        let env = with_spec_env(&taken, vars);
+        assert_eq!(
+            env.iter()
+                .filter(|(n, _)| n == "BRANCHYARD_WORKTREE")
+                .count(),
+            1
+        );
+        assert!(env.contains(&("BRANCHYARD_WORKTREE".to_owned(), "/w/t".to_owned())));
+    }
 
     #[test]
     fn globs_that_leave_the_repository_are_refused() {

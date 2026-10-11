@@ -1,0 +1,312 @@
+use anyhow::{Context, Result};
+use std::process::Command;
+use tracing::{debug, info};
+
+/// RAII wrapper for nftables table that ensures cleanup on drop
+#[derive(Debug)]
+pub struct NFTable {
+    /// The table name (e.g., "httpjail_<jail_id>")
+    name: String,
+    /// Optional namespace where the table exists (None = host)
+    namespace: Option<String>,
+    /// Whether the table was successfully created
+    created: bool,
+}
+
+impl NFTable {
+    /// Create a host-side nftables table with NAT, forward, and input rules
+    ///
+    /// Note: We use numeric priorities instead of named ones (srcnat, dstnat) for
+    /// compatibility with older nftables versions (< 0.9.6)
+    pub fn new_host_table(
+        jail_id: &str,
+        subnet_cidr: &str,
+        http_port: u16,
+        https_port: u16,
+    ) -> Result<Self> {
+        let table_name = format!("httpjail_{}", jail_id);
+        let veth_host = format!("vh_{}", jail_id);
+
+        // Generate the ruleset for host-side NAT, forwarding, and input acceptance
+        let ruleset = format!(
+            r#"
+table ip {table_name} {{
+    chain prerouting {{
+        type filter hook prerouting priority -150; policy accept;
+        iifname "{veth_host}" accept comment "httpjail_{jail_id} prerouting"
+    }}
+    
+    chain postrouting {{
+        type nat hook postrouting priority 100; policy accept;
+        ip saddr {subnet_cidr} masquerade comment "httpjail_{jail_id}"
+    }}
+    
+    chain forward {{
+        type filter hook forward priority -100; policy accept;
+        ip saddr {subnet_cidr} accept comment "httpjail_{jail_id} out"
+        ip daddr {subnet_cidr} accept comment "httpjail_{jail_id} in"
+    }}
+    
+    chain input {{
+        type filter hook input priority -100; policy accept;
+        iifname "{veth_host}" tcp dport {{ {http_port}, {https_port} }} accept comment "httpjail_{jail_id} proxy"
+        iifname "{veth_host}" udp dport 53 accept comment "httpjail_{jail_id} dns"
+        iifname "{veth_host}" accept comment "httpjail_{jail_id} all"
+    }}
+    
+    chain output {{
+        type filter hook output priority -100; policy accept;
+        oifname "{veth_host}" accept comment "httpjail_{jail_id} out"
+    }}
+}}
+"#,
+            table_name = table_name,
+            veth_host = veth_host,
+            jail_id = jail_id,
+            subnet_cidr = subnet_cidr,
+            http_port = http_port,
+            https_port = https_port,
+        );
+
+        debug!("Creating nftables table: {}", table_name);
+        debug!("Ruleset placeholders count check - ensuring format args match");
+
+        // Apply the ruleset atomically
+        use std::io::Write;
+        let mut child = Command::new("/usr/sbin/nft")
+            .arg("-f")
+            .arg("-")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to spawn nft command")?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(ruleset.as_bytes())
+                .context("Failed to write ruleset to nft")?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .context("Failed to execute nft command")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Failed to create nftables table: {}", stderr);
+        }
+
+        info!(
+            "Created nftables table {} with NAT rules for subnet {}",
+            table_name, subnet_cidr
+        );
+
+        Ok(Self {
+            name: table_name,
+            namespace: None,
+            created: true,
+        })
+    }
+
+    /// Create namespace-side nftables rules for traffic redirection and egress filtering
+    pub fn new_namespace_table_with_dns(
+        namespace: &str,
+        host_ip: &str,
+        http_port: u16,
+        https_port: u16,
+        _dns_port: u16, // No longer needed but kept for compatibility
+    ) -> Result<Self> {
+        let table_name = "httpjail".to_string();
+
+        // Generate the ruleset for namespace-side DNAT + FILTER
+        let ruleset = format!(
+            r#"
+table ip {table_name} {{
+    # NAT output chain: redirect HTTP/HTTPS to host proxy
+    chain output {{
+        type nat hook output priority -100; policy accept;
+
+        # Redirect HTTP to proxy running on host
+        tcp dport 80 dnat to {host_ip}:{http_port}
+
+        # Redirect HTTPS to proxy running on host
+        tcp dport 443 dnat to {host_ip}:{https_port}
+
+        # Note: DNS does not need DNAT - /etc/resolv.conf is mounted with nameserver={host_ip}
+        # so all DNS queries naturally go directly to the host DNS server
+    }}
+
+    # FILTER output chain: block non-HTTP/HTTPS egress
+    chain outfilter {{
+        type filter hook output priority 0; policy drop;
+
+        # Always allow established/related traffic
+        ct state established,related accept
+
+        # Allow DNS traffic to host IP (resolv.conf points directly to host_ip)
+        ip daddr {host_ip} udp dport 53 accept
+
+        # Allow traffic to the host proxy ports (after DNAT)
+        ip daddr {host_ip} tcp dport {{ {http_port}, {https_port} }} accept
+
+        # Explicitly block all other UDP (e.g., QUIC on 443)
+        # This must come AFTER allowing DNS traffic
+        ip protocol udp drop
+
+        # Explicitly block all other TCP traffic
+        # This must come AFTER allowing HTTP/HTTPS traffic
+        ip protocol tcp drop
+    }}
+}}
+
+# IPv6 link-local addresses on veth pairs must not reach host services.
+table ip6 httpjail6 {{
+    chain outfilter {{
+        type filter hook output priority 0; policy drop;
+        oifname "lo" accept
+    }}
+}}
+"#,
+            table_name = table_name,
+            host_ip = host_ip,
+            http_port = http_port,
+            https_port = https_port,
+        );
+
+        debug!(
+            "Creating nftables table in namespace {}: {}",
+            namespace, table_name
+        );
+
+        // Execute nft within the namespace
+        let mut child = Command::new("/usr/sbin/ip")
+            .args(["netns", "exec", namespace, "/usr/sbin/nft", "-f", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to spawn nft command in namespace")?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            stdin
+                .write_all(ruleset.as_bytes())
+                .context("Failed to write ruleset to nft")?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .context("Failed to execute nft command in namespace")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Failed to create namespace nftables table: {}", stderr);
+        }
+
+        info!(
+            "Created nftables rules in namespace {} for HTTP:{} HTTPS:{}",
+            namespace, http_port, https_port
+        );
+
+        Ok(Self {
+            name: table_name,
+            namespace: Some(namespace.to_string()),
+            created: true,
+        })
+    }
+
+    /// Remove the nftables table
+    pub(super) fn remove(&mut self) -> Result<()> {
+        if !self.created {
+            return Ok(());
+        }
+
+        if let Some(ref namespace) = self.namespace {
+            let output = Command::new("/usr/sbin/ip")
+                .args([
+                    "netns",
+                    "exec",
+                    namespace,
+                    "/usr/sbin/nft",
+                    "delete",
+                    "table",
+                    "ip6",
+                    "httpjail6",
+                ])
+                .output()
+                .context("Failed to delete IPv6 nftables table in namespace")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr.contains("No such file or directory")
+                    && !stderr.contains("does not exist")
+                {
+                    anyhow::bail!("Failed to remove IPv6 table: {}", stderr);
+                }
+            }
+        }
+
+        let output = if let Some(ref namespace) = self.namespace {
+            // Delete table in namespace
+            Command::new("/usr/sbin/ip")
+                .args([
+                    "netns",
+                    "exec",
+                    namespace,
+                    "/usr/sbin/nft",
+                    "delete",
+                    "table",
+                    "ip",
+                    &self.name,
+                ])
+                .output()
+                .context("Failed to execute nft delete in namespace")?
+        } else {
+            // Delete table on host
+            Command::new("/usr/sbin/nft")
+                .args(["delete", "table", "ip", &self.name])
+                .output()
+                .context("Failed to execute nft delete")?
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Ignore if table doesn't exist (already removed)
+            if !stderr.contains("No such file or directory") && !stderr.contains("does not exist") {
+                anyhow::bail!("Failed to remove nftables table {}: {}", self.name, stderr);
+            }
+        } else {
+            debug!("Removed nftables table: {}", self.name);
+        }
+
+        self.created = false;
+        Ok(())
+    }
+
+    /// Create table for existing jail (for cleanup purposes)
+    pub fn for_existing(jail_id: &str, is_namespace: bool) -> Self {
+        Self {
+            name: if is_namespace {
+                "httpjail".to_string()
+            } else {
+                format!("httpjail_{}", jail_id)
+            },
+            namespace: if is_namespace {
+                Some(format!("httpjail_{}", jail_id))
+            } else {
+                None
+            },
+            created: true,
+        }
+    }
+}
+
+impl Drop for NFTable {
+    fn drop(&mut self) {
+        if self.created
+            && let Err(e) = self.remove()
+        {
+            debug!("Failed to remove nftables table on drop: {}", e);
+        }
+    }
+}

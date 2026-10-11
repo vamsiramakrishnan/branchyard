@@ -1,0 +1,61 @@
+# anyclaude
+
+[![NPM Version](https://img.shields.io/npm/v/anyclaude)](https://www.npmjs.com/package/anyclaude)
+
+Use Claude Code with OpenAI, Google, xAI, and other providers.
+
+- Extremely simple setup - just a basic command wrapper
+- Uses the AI SDK for simple support of new providers
+- Works with Claude Code GitHub Actions
+- Optimized for OpenAI's gpt-5 series
+
+<img src="./demo.png" width="65%">
+
+## Get Started
+
+```sh
+# Use your favorite package manager (bun, pnpm, and npm are supported)
+$ pnpm install -g anyclaude
+
+# anyclaude is a wrapper for the Claude CLI
+# `openai/`, `google/`, `xai/`, and `anthropic/` are supported
+$ anyclaude --model openai/gpt-5-mini
+```
+
+Switch models in the Claude UI with `/model openai/gpt-5-mini`.
+
+### GPT-5 Support
+
+Use --reasoning-effort (alias: -e) to control OpenAI reasoning.effort. Allowed values: minimal, low, medium, high.
+
+```sh
+anyclaude --model openai/gpt-5-mini -e high
+```
+
+Use --service-tier (alias: -t) to control OpenAI service tier. Allowed values: flex, priority.
+
+```sh
+anyclaude --model openai/gpt-5-mini -t priority
+```
+
+Note these flags may be extended to other providers in the future.
+
+## FAQ
+
+### What providers are supported?
+
+See [the providers](./src/main.ts#L17) for the implementation.
+
+- `GOOGLE_API_KEY` supports `google/*` models.
+- `OPENAI_API_KEY` supports `openai/*` models.
+- `XAI_API_KEY` supports `xai/*` models.
+
+Set a custom OpenAI endpoint with `OPENAI_API_URL` to use OpenRouter
+
+`ANTHROPIC_MODEL` and `ANTHROPIC_SMALL_MODEL` are supported with the `<provider>/` syntax.
+
+### How does this work?
+
+Claude Code has added support for customizing the Anthropic endpoint with `ANTHROPIC_BASE_URL`.
+
+anyclaude spawns a simple HTTP server that translates between Anthropic's format and the [AI SDK](https://github.com/vercel/ai) format, enabling support for any [AI SDK](https://github.com/vercel/ai) provider (e.g., Google, OpenAI, etc.)

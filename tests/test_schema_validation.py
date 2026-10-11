@@ -3,8 +3,8 @@ with a minimal JSON Schema validator (stdlib only: no `jsonschema` package).
 
 The payloads come from `docs/server.md`'s own worked examples: the exact
 bytes `by --remote` sends and receives, and the Python SDK receives the
-same shapes back through `by ... --json` (`docs/sdk.md#plugin-and-standalone-skill`,
-`docs/server.md`). A schema that cannot validate its own documented
+same shapes back through `by ... --json` (`docs/delegation.md#python`,
+`docs/server.md`; `docs/sdk.md` says which module is for what). A schema that cannot validate its own documented
 examples is wrong, so this doubles as `schema/contract.json`'s sanity
 check, besides `crates/branchyard-client/tests/contract.rs`'s freshness
 check.
@@ -223,11 +223,71 @@ class TriggerExamplesValidate(unittest.TestCase):
     def test_the_documented_run_validates(self):
         validate_as(_trigger_example("TriggerRun"), "TriggerRun")
 
+    def test_the_documented_spec_that_delivers_to_a_branch_validates(self):
+        spec = _trigger_example("POST /v1/triggers (a branch that lives on)")
+        validate_as(spec, "TriggerSpec")
+        self.assertEqual(spec["deliver"]["busy"], "steer")
+        self.assertEqual(
+            spec["deliver"]["lifecycle"],
+            {"idle_minutes": 30, "dormant_days": 7, "delete_days": 30},
+        )
+        spec["deliver"]["busy"] = "drop"
+        with self.assertRaises(ValidationError):
+            validate_as(spec, "TriggerSpec")
+
+    def test_a_lifecycle_is_part_of_deliver_and_names_only_its_three_thresholds(self):
+        spec = _trigger_example("POST /v1/triggers (a branch that lives on)")
+        spec["deliver"]["lifecycle"] = {"delete_days": 14}
+        validate_as(spec, "TriggerSpec")
+        spec["deliver"]["lifecycle"] = {"idle": 30}
+        with self.assertRaises(ValidationError):
+            validate_as(spec, "TriggerSpec")
+        # Beside `deliver` it is an unknown field of the spec.
+        spec = _trigger_example("POST /v1/triggers (a branch that lives on)")
+        spec["lifecycle"] = spec["deliver"].pop("lifecycle")
+        with self.assertRaises(ValidationError):
+            validate_as(spec, "TriggerSpec")
+
+    def test_a_lifecycle_note_is_a_run_state_and_a_lifecycle_activity_is_an_event(self):
+        run = _trigger_example("TriggerRun")
+        run["state"] = "lifecycle"
+        validate_as(run, "TriggerRun")
+
+        def events(state):
+            lifecycle = {"state": state, "reason": "no turn ended for 7d", "idle_since_ms": 5}
+            return {"events": [{"at_ms": 6, "activity": {"lifecycle": lifecycle}}], "cursor": 1}
+
+        validate_as(events("dormant"), "BranchEvents")
+        with self.assertRaises(ValidationError):
+            validate_as(events("asleep"), "BranchEvents")
+
     def test_schedules_and_acks_validate(self):
         validate_as({"kind": "cron", "expr": "0 3 * * 1-5", "timezone": "Europe/Berlin"}, "When")
         validate_as({"kind": "interval", "seconds": 3600}, "When")
         validate_as({"duplicate": True}, "FireAck")
         validate_as({"ignored": "a GitHub ping"}, "FireAck")
+
+
+class GrantEntriesTakeEitherForm(unittest.TestCase):
+    """A connector grant entry is the `--connector` string or the object
+    (`docs/connectors.md#grants`), wherever one goes on the wire."""
+
+    def test_a_spawn_may_ask_in_either_form(self):
+        validate_as(
+            {"prompt": "p", "connectors": ["github:write:issues.*", {"connector": "linear", "mode": "read"}]},
+            "SpawnRequest",
+        )
+        validate_as(
+            {"prompt": "p", "provision": {"connectors": ["github@work:read:issues.list,pulls.list"]}},
+            "TaskRequest",
+        )
+
+    def test_an_entry_that_is_neither_form_is_refused(self):
+        # Through `provision.connectors`, whose array the validator checks
+        # (a spawn's `connectors` is `array | null`, a type list it skips).
+        for bad in [7, {"operations": ["*"]}, {"connector": "github", "scope": "x"}]:
+            with self.assertRaises(ValidationError, msg=repr(bad)):
+                validate_as({"prompt": "p", "provision": {"connectors": [bad]}}, "TaskRequest")
 
 
 def _graph_proposal() -> dict:

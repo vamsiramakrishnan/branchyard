@@ -1,8 +1,8 @@
 # Triggers and schedules
 
-A **trigger** starts an ordinary Branchyard task on its own: on a cron schedule, at an interval, when a signed webhook from GitHub, Slack, Linear or any JSON sender arrives, or when an email arrives through Postmark's, Mailgun's or SendGrid's inbound webhook. It is a durable object in the server's store, beside the operation registry, and every firing goes through the same admission path as `POST /v1/repos/{repo}/tasks`: quotas, branch locks, worker labels and an idempotency key, so a redelivered webhook or a restarted scheduler never starts a second task. This is the *triggers and schedules* track of the [roadmap](roadmap.md#wave-2), learned from Manus automations (validated conditions, test runs, pausing after repeated failures), Devin automations, Claude Code routines and Cursor's and Jules's scheduled tasks; the precheck is ported from Orca.
+A **trigger** starts an ordinary Branchyard task on its own: on a cron schedule, at an interval, when a signed webhook from GitHub, Slack, Linear or any JSON sender arrives, or when an email arrives through Postmark's, Mailgun's or SendGrid's inbound webhook. It creates a branch per run, or, with [`deliver`](#a-branch-that-lives-on), continues one branch run after run, the way a chat assistant keeps a session. It is a durable object in the server's store, beside the operation registry, and every firing goes through the same admission path as `POST /v1/repos/{repo}/tasks`: quotas, branch locks, worker labels and an idempotency key, so a redelivered webhook or a restarted scheduler never starts a second task. This is the *triggers and schedules* track of the [roadmap](roadmap.md#wave-2), learned from Manus automations (validated conditions, test runs, pausing after repeated failures), Devin automations, Claude Code routines and Cursor's and Jules's scheduled tasks; the precheck is ported from Orca.
 
-> **Status.** Implemented and tested hermetically: the cron parser, every adapter's signature check and normalization, the store's conformance suite on SQLite and PostgreSQL 16, two to four dispatchers racing for one schedule time, a dispatcher that dies mid-fire, the HTTP API over loopback with the fake ACP agent and a manual clock, and `by trigger` locally, through `by serve`, and with `--remote`. **Nothing has received a delivery from the real GitHub, Slack, Linear, Postmark, Mailgun or SendGrid**: the payloads are built from their documentation, and the signatures from their documented schemes. Email arrives only through a provider's inbound webhook; nothing polls a mailbox ([email](#email)).
+> **Status.** Implemented and tested hermetically: the cron parser, every adapter's signature check and normalization, the store's conformance suite on SQLite and PostgreSQL 16, two to four dispatchers racing for one schedule time, a dispatcher that dies mid-fire, the HTTP API over loopback with the fake ACP agent and a manual clock (a branch that lives on going idle, dormant and being deleted included), and `by trigger` locally, through `by serve`, and with `--remote`. **Nothing has received a delivery from the real GitHub, Slack, Linear, Postmark, Mailgun or SendGrid**: the payloads are built from their documentation, and the signatures from their documented schemes. Email arrives only through a provider's inbound webhook; nothing polls a mailbox ([email](#email)).
 
 ## Where triggers fire
 
@@ -27,6 +27,15 @@ by trigger add triage --on github --if kind=issues.labeled --if label=agent \
 # webhook URL: https://by.example.com/v1/triggers/trg_…/fire
 # webhook secret (shown once; give it to the sender): …
 
+# An assistant that lives on: every mention in Slack continues one branch per channel, and a
+# heartbeat looks in every 30 minutes, skipping while it is busy.
+by trigger add chat --on slack --if author=alice --if author=bob \
+    --prompt '{{event.author}} in {{event.channel}}: {{event.text}}' \
+    --to 'slack-{{event.channel}}' --busy steer --harness claude-code --budget-usd 20 --yes
+by trigger add heartbeat --every 30m --to assistant --busy skip \
+    --prompt 'Look at what changed since your last turn and act on anything that needs you' \
+    --harness claude-code --budget-usd 20 --yes
+
 by trigger test triage --event issue.json     # conditions, precheck and the rendered task; creates nothing
 by trigger list                               # name, schedule or source, repository, state, next time or URL
 by trigger runs triage                        # fired (branch, operation, outcome), skipped and why, failed, missed
@@ -37,7 +46,7 @@ by trigger rm triage
 
 | Command | Does |
 |---|---|
-| `by trigger add NAME (--cron EXPR [--tz ZONE] \| --every DURATION \| --on SOURCE) --prompt TEXT` | Create a trigger. Task: `--harness H` or `--auto [--kind K]`, `--branch-name TEMPLATE`, `--base REF`, `--check CMD`, `--budget-usd X`, `--max-turns N`, `--max-minutes N`, `--connector GRANT` (repeatable), `--require-label L` (repeatable), `--yes` (allow every tool request; otherwise each is denied). When: `--if FIELD=VALUE` (repeatable), `--precheck CMD [--precheck-timeout SECS]`. Policy: `--pause-after N`, `--catch-up DURATION`, `--secret-file FILE`, `--disabled` |
+| `by trigger add NAME (--cron EXPR [--tz ZONE] \| --every DURATION \| --on SOURCE) --prompt TEXT` | Create a trigger. Task: `--harness H` or `--auto [--kind K]`, `--branch-name TEMPLATE` or `--to TEMPLATE [--busy queue\|steer\|skip] [--idle-after D] [--dormant-after D] [--delete-after D]` ([a branch that lives on](#a-branch-that-lives-on), [its lifecycle](#lifecycle)), `--base REF`, `--check CMD`, `--budget-usd X`, `--max-turns N`, `--max-minutes N`, `--connector GRANT` (repeatable), `--require-label L` (repeatable), `--yes` (allow every tool request; otherwise each is denied). When: `--if FIELD=VALUE` (repeatable), `--precheck CMD [--precheck-timeout SECS]`. Policy: `--pause-after N`, `--catch-up DURATION`, `--secret-file FILE`, `--disabled` |
 | `by trigger list` (`ls`) | Every trigger |
 | `by trigger show NAME` | One in full |
 | `by trigger test NAME [--event FILE] [--event-type TYPE] [--precheck]` | What it would do, creating nothing ([test runs](#test-runs)) |
@@ -121,6 +130,39 @@ An unknown placeholder, an unclosed `{{`, or an `event.*` one on a schedule is r
 
 **Routing.** `"route": {"kind": "bugfix"}` (`--auto [--kind K]`) names no harness: when the trigger fires, the server routes the rendered prompt through the repository's `[fleet]` table in `branchyard.toml` as `by run --auto` does ([fleet](fleet.md)), seeded from the run's key so a run fired again picks the same, and sets the chosen harness, model and effort on the task. A candidate's `command` is not used (the server's `harness_commands` are). There is no failover: the server does not fail a routed branch over to the next candidate, as it does not for any remote task.
 
+## A branch that lives on
+
+`"deliver": {"branch": "assistant", "busy": "skip"}` (`--to assistant --busy skip`) makes the trigger continue **one branch run after run** instead of creating a branch per run. The first run that finds the branch missing creates it from the task, under that name; every later run is a **send** to it: the same prompt, budget, policy and check as the task, in the branch's own harness and session, as `by send` would. The branch keeps its worktree, its history and its harness's context between runs, so it can be an assistant that lives on: a heartbeat that looks in on a schedule, or a conversation that goes on where it left off. `branch` takes the same placeholders as `task.name`, so one trigger keeps one branch per conversation: `slack-{{event.channel}}` continues a branch per Slack channel, `mail-{{event.from}}` one per correspondent. A `task.name` is not given with `deliver`; a placeholder that renders to nothing fails the run rather than pooling such events in one branch.
+
+`busy` says what a run does while the branch is **running a turn**:
+
+| `busy` | Does | For |
+|---|---|---|
+| `queue` (default) | The run stays `pending`, with the reason, until the turn ends (the dispatcher looks again every 30 seconds), then sends: the prompt runs as the next turn, runs in their order. Nothing is lost, nothing interrupts | Messages: each is answered in turn |
+| `steer` | The prompt joins the running turn as steered input ([`by send --steer`](delegation.md)): the model reads it at the harness's next boundary, within this turn. When the harness takes no input mid-turn, or refuses it, the run queues a send instead. The run is settled as it fires, `fired` with `ok`, and has no operation | A conversation whose next message should reach the model now |
+| `skip` | Nothing fires: the run is `skipped_busy`, which is not a failure | A heartbeat, whose next time comes anyway; nothing piles up behind a long turn |
+
+A run that creates the branch, or sends to it, is `fired` with its operation as any run, and its outcome is the operation's. The server admits one operation on a branch at a time (`409 branch_busy` to a second), so two runs never drive the branch at once, and a `queue` run that finds the branch taken by any other send waits the same way; the trigger's `pause_after_failures` applies to the sends as to tasks. The branch is an ordinary branch: `by inspect`, `by send`, `by rewind` and `by discard` work on it, a discarded branch is not recreated (a run to it fails as any send to a settled branch does), and the harness's session grows with every turn: give the branch a [lifecycle](#lifecycle) to have its session started over after it has rested, or [reincarnate](lifecycle.md#reincarnation) it yourself.
+
+### Lifecycle
+
+`"deliver": {"branch": "assistant", "lifecycle": {"idle_minutes": 30, "dormant_days": 7, "delete_days": 30}}` (`--to assistant --idle-after 30m --dormant-after 7d --delete-after 30d`) says what happens to the branch while no run reaches it, the way a Coder workspace has autostop, dormancy and auto-delete. Without a `lifecycle` the branch lives until someone removes it. Each threshold is optional, and all three count from **the end of the branch's last turn**, in absolute time. The server's dispatcher looks at the branches of triggers that have a lifecycle every 30 seconds.
+
+| Threshold | Flag | When | What the server does | What you see |
+|---|---|---|---|---|
+| `idle_minutes` | `--idle-after 30m` (whole minutes) | The branch has ended no turn for that long and is running none | **Parks** it: releases what it holds. A kept sandbox (`keep = "pause"`, [sandbox snapshots](sandbox-snapshots.md#keeping-a-branchs-sandbox)) is destroyed and the next turn gets a fresh one; a branch that holds none has nothing to release. Its worktree, history and harness session are untouched, so the next run sends to it as before | A `lifecycle` event in `by log`: `idle: no turn ended for 31m, so it is idle; sandbox: not kept (the branch went idle)`, or `…; it held nothing to release`. One event, whether or not there was anything to release |
+| `dormant_days` | `--dormant-after 7d` (whole days) | The branch has ended no turn for that long and is running none | Marks it **dormant** (and releases what it holds, as for idle). The next run that would send to it **reincarnates** it instead: its harness session is retired and the run's turn starts a fresh one on the same worktree, whose first prompt begins with a handoff, then the run's prompt. The run's operation is that reincarnation (`kind` `reincarnate`) | `dormant: no turn ended for 7d, so it is dormant; …` (the same release as idle's); at the next run `reincarnated: it was dormant: no turn ended for 7d; its harness session was retired, …`, then the turn |
+| `delete_days` | `--delete-after 30d` (whole days) | The branch has ended no turn for that long and is running none | **Deletes** it as `by rm` does: worktree, record, kept sandbox and snapshots, and the git branch `by/NAME` unless it was merged, so commits no one merged go with it. The next run finds no branch and creates it from the trigger's task, as the first run did | `deleted: no turn ended for 31d, so it was deleted` in the repository's event feed (the branch's own log goes with it), and a run of state `lifecycle` in `by trigger runs` naming the branch |
+
+- **The rules.** Each is at least 1, and when several are given they rise: `idle_minutes` < `dormant_days` < `delete_days`, compared in absolute time (`idle_minutes: 1440` is `dormant_days: 1` and is refused). At least one is given. A lifecycle is part of `deliver`: `--idle-after`, `--dormant-after` and `--delete-after` need `--to`, and a `lifecycle` beside `deliver` in the JSON is an unknown field. Every refusal names the field: `deliver.lifecycle.dormant_days (30d) must be less than delete_days (7d)`.
+- **From the last turn, not from the last step.** A branch left alone for 31 days with the thresholds above is deleted, not marked dormant first: the furthest threshold reached wins (after a server was down, say). Each step is taken once; the branch's log is how the server knows which it is at (its last turn's end, and the lifecycle events after it), so nothing is stored beside it. A branch that has ended no turn counts from its creation.
+- **A run ends the rest.** A turn that ends after a step starts the count over, whoever sent it. Only a **run** reincarnates a dormant branch: a `by send` to it continues its old session, as to any branch, and the dormancy ends with that turn.
+- **What is left alone.** A branch running a turn, waiting for its children or for its plan to be approved is never touched, nor is one that was merged or discarded. A step takes the branch's lock as a removal does: while an operation on the branch is queued or running it waits for the next look.
+- **The handoff.** A reincarnated session starts from what the log has: the branch's original task, its candidate, and the prompts and replies of its last six turns, each cut at 1,200 characters. It is the same machinery as the fresh session after a [rewind](checkpoints.md) a session cannot continue from, and `by log` shows a warning saying so at that turn. It is **not** `by reincarnate`, which makes a new branch under a new name ([lifecycle](lifecycle.md#reincarnation)): the branch here keeps its name, its worktree and its place in the trigger.
+- **Delete is destructive.** The git branch and any commits not merged are removed with the worktree. Set `delete_days` where the branch's work is merged or disposable; nothing warns before it happens. It applies to every branch the trigger's runs have been delivered to, including one that already existed under that name when the first run found it.
+
+**Heartbeats cost a full turn each.** A heartbeat whose prompt asks the model to look around makes model calls whether or not anything happened; set its budget, and prefer the longest interval that serves. Restrict a chat trigger's `conditions.author` (`--if author=`) to the people who may drive the branch: every message that matches runs as a prompt, with the trigger's budget and policy.
+
 ## Prechecks
 
 `"precheck": {"command": "…", "timeout_seconds": 60}` (`--precheck CMD`) runs a shell command before the trigger fires, in a **fresh detached worktree** of the repository at the task's `base` (default `HEAD`), removed afterwards. Ported from Orca's automation precheck ([`precheck-runner.ts`, `automation-precheck.ts`](../vendor/orca/src/main/automations/precheck-runner.ts)):
@@ -143,18 +185,20 @@ Every firing is a **run**: a delivery, a scheduled time, or a block of missed ti
 | State | Meaning |
 |---|---|
 | `pending` | Recorded, not fired yet; a dispatcher serving the repository fires it |
-| `fired` | A task was admitted: `operation` and `branches` name it. Once the operation ends, its `outcome` is recorded: `ok` when it succeeded and none of its branches ended `failed` or `interrupted` |
+| `fired` | A task was admitted, or a send to the branch it delivers to: `operation` and `branches` name it. Once the operation ends, its `outcome` is recorded: `ok` when it succeeded and none of its branches ended `failed` or `interrupted`. A run steered into a running turn has no operation; its `outcome` is `ok` as it fires |
 | `skipped_condition` | The event did not match |
 | `skipped_precheck` | The precheck did not pass |
 | `skipped_disabled` | The trigger was disabled or removed between recording and firing |
+| `skipped_busy` | The branch it [delivers to](#a-branch-that-lives-on) was running a turn, and its `busy` policy is `skip` |
+| `lifecycle` | Not a firing: the branch it delivers to was deleted by its [lifecycle](#lifecycle), which the branch's own log cannot say any more. `reason` says which branch and why, `branches` names it. It counts neither as a failure nor as a success |
 | `failed` | No task could be admitted: a quota, a branch that exists, a refused option, a repository not served, a routing error |
 | `missed` | Scheduled times older than the catch-up window |
 
-A run's `key` is unique per trigger: `event:<event id>`, `schedule:<ms>` or `missed:<ms>`. (A test's key for GitHub, Linear or an ID-less generic body hashes the event file as re-serialized, which may differ from the bytes the sender will send.)
+A run's `key` is unique per trigger: `event:<event id>`, `schedule:<ms>`, `missed:<ms>` or `lifecycle:deleted:<branch>:<ms>`. (A test's key for GitHub, Linear or an ID-less generic body hashes the event file as re-serialized, which may differ from the bytes the sender will send.)
 
 ### Failures and pausing
 
-A run that **failed**, or a fired run whose task's **outcome** was not ok, counts as a failure; an ok outcome starts the count over; skips and missed times count neither way. After `policy.pause_after_failures` failures in a row (`--pause-after`, default 3; 0 never) the trigger **disables itself** in the same transaction that recorded the last one, with the reason: `paused after 3 failed runs in a row; the last: branch_exists: …`. A delivery to a disabled trigger is answered `ignored`, and a schedule stops. `by trigger enable` resumes it with the count at zero.
+A run that **failed**, or a fired run whose task's **outcome** was not ok, counts as a failure; an ok outcome starts the count over; skips, missed times and `lifecycle` notes count neither way. After `policy.pause_after_failures` failures in a row (`--pause-after`, default 3; 0 never) the trigger **disables itself** in the same transaction that recorded the last one, with the reason: `paused after 3 failed runs in a row; the last: branch_exists: …`. A delivery to a disabled trigger is answered `ignored`, and a schedule stops. `by trigger enable` resumes it with the count at zero.
 
 ## Exactly once
 
@@ -199,6 +243,27 @@ POST /v1/triggers
   "precheck": { "command": "test -f Cargo.toml", "timeout_seconds": 30 },
   "policy": { "pause_after_failures": 3, "catch_up_seconds": 3600, "replay_window_seconds": 300 },
   "secret": "the secret you will paste into GitHub"
+}
+```
+
+```json
+POST /v1/triggers (a branch that lives on)
+{
+  "name": "chat",
+  "repo": "app",
+  "when": { "kind": "event", "source": "slack" },
+  "conditions": { "author": ["alice", "bob"] },
+  "task": {
+    "prompt": "{{event.author}} in {{event.channel}}: {{event.text}}",
+    "harness": "claude-code",
+    "budget": { "max_usd": 20.0 },
+    "policy": { "mode": "allow" }
+  },
+  "deliver": {
+    "branch": "slack-{{event.channel}}",
+    "busy": "steer",
+    "lifecycle": { "idle_minutes": 30, "dormant_days": 7, "delete_days": 30 }
+  }
 }
 ```
 
@@ -304,12 +369,21 @@ The PostgreSQL tables are created like the registry's: a dispatcher opening the 
 
 ## Not yet
 
-- Polling a mailbox (IMAP); SendGrid's signed (ECDSA) or OAuth-verified Inbound Parse; attachment contents in the event; a message's raw MIME (SendGrid's raw mode, Mailgun's `mime` URLs); character sets other than UTF-8 are read lossily. GitHub `push`, `release` and other events; Linear comments; Slack messages other than mentions; replying to the sender.
+- Polling a mailbox (IMAP); SendGrid's signed (ECDSA) or OAuth-verified Inbound Parse; attachment contents in the event; a message's raw MIME (SendGrid's raw mode, Mailgun's `mime` URLs); character sets other than UTF-8 are read lossily. GitHub `push`, `release` and other events; Linear comments; Slack messages other than mentions; replying to the sender (a branch that lives on answers in its own log and events, not in the channel).
 - A GitHub App installation (one webhook for many repositories): each trigger has its own URL and secret.
 - Editing a trigger in place: remove it and add it again (its runs go with it).
 - Failover for a routed trigger's branch, as for any remote task; a limit on a trigger's concurrently running tasks beyond its tenant's `max_running`.
 - Runs and missed blocks are kept until the trigger is removed.
+- A lifecycle acts on rest only. A branch that is never idle for `dormant_days` is never reincarnated, so a busy conversation's session still grows until someone reincarnates it; a session is retired and replaced, never compacted. Going idle frees a kept sandbox, not the worktree's disk. No lifecycle by time of day or calendar, none per branch of a trigger that keeps many (every branch of one trigger has the trigger's thresholds), no warning before a deletion, and no keeping of unmerged work when a branch is deleted.
 - Real deliveries from GitHub, Slack, Linear, Postmark, Mailgun and SendGrid: see the status note above.
+
+## Learned from OpenClaw
+
+A branch that lives on is Branchyard's form of what [OpenClaw](https://docs.openclaw.ai) calls a session: one per conversation (`agent:<id>:main`, or per channel and peer with `dmScope`), a heartbeat turn every 30 minutes, and a queue mode for a message that arrives mid-run (`steer`, the default there; `followup`; `interrupt`). Branchyard keeps its own shape: the session is a branch with a worktree and a git history, every run is an operation under the branch's lock and the trigger's idempotency key, the cost is the branch's budget, and the model never picks where a reply goes. What is not taken: a sandbox off by default, a public skill registry (341 of ClawHub's 2,857 skills were found malicious in February 2026), and a heartbeat that is a full turn by default with no budget. Branchyard does not compact a session either: a branch that rests long enough has its session retired and a fresh one started with a handoff ([lifecycle](#lifecycle)), and a branch that never rests keeps its session.
+
+## Learned from Coder
+
+The three thresholds of a branch's [lifecycle](#lifecycle) take the shape of what [Coder](https://coder.com/docs/admin/templates/managing-templates/schedule) documents for a workspace: stop it after it has been idle, mark it dormant after longer, delete it after longer still. Written from Coder's public documentation only. What differs: the thing that rests is a branch with a worktree and a git history, not a machine; "idle" is counted from the end of its last turn, not from connections; "dormant" has a consequence of its own (the next run starts the harness session over) where Coder's is a state a person reactivates; and there is no schedule, no time of day, no per-user override.
 
 ## Code
 
@@ -321,6 +395,7 @@ The PostgreSQL tables are created like the registry's: a dispatcher opening the 
 | [`triggers/email.rs`](../crates/branchyard-server/src/triggers/email.rs) | Postmark, Mailgun and SendGrid: authentication, form and multipart parsing, HTML to text, the allowlist |
 | [`triggers/template.rs`](../crates/branchyard-server/src/triggers/template.rs) | Placeholders and branch names |
 | [`triggers/precheck.rs`](../crates/branchyard-server/src/triggers/precheck.rs), [`target.rs`](../crates/branchyard-server/src/triggers/target.rs) | Ported from Orca: the precheck runner and run-target resolution |
+| [`triggers/lifecycle.rs`](../crates/branchyard-server/src/triggers/lifecycle.rs), [`branchyard/src/lifecycle.rs`](../crates/branchyard/src/lifecycle.rs) | The thresholds, `decide` (pure: the clock, the branch's last turn and stage in, an action out) and the dispatcher's pass; the engine's side: when a branch last ended a turn, parking, reincarnating in place, retiring |
 | [`triggers/store.rs`](../crates/branchyard-server/src/triggers/store.rs) | The SQLite and PostgreSQL stores and their conformance suite |
 | [`triggers/engine.rs`](../crates/branchyard-server/src/triggers/engine.rs), [`dispatch.rs`](../crates/branchyard-server/src/triggers/dispatch.rs) | Claiming, firing, settling and pausing; the dispatcher in a server or worker |
 | [`triggers/routes.rs`](../crates/branchyard-server/src/triggers/routes.rs) | The HTTP API and the webhook endpoint |

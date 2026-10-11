@@ -388,10 +388,29 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             unused_secrets,
             connectors,
             knowledge,
+            managed,
         } => {
             let mut parts = Vec::new();
             if let Some(auth) = auth {
                 parts.push(format!("auth {auth}"));
+            }
+            if let Some(managed) = managed {
+                let deny = match managed.deny.is_empty() {
+                    true => "nothing".to_owned(),
+                    false => managed.deny.join(", "),
+                };
+                let mut flags = vec![format!("deny: {deny}")];
+                if managed.bypass_disabled {
+                    flags.push("bypass disabled".to_owned());
+                }
+                if managed.telemetry_off {
+                    flags.push("telemetry off".to_owned());
+                }
+                parts.push(format!(
+                    "managed settings: {} ({})",
+                    managed.path,
+                    flags.join("; ")
+                ));
             }
             if !knowledge.is_empty() {
                 parts.push(format!(
@@ -529,6 +548,18 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             &activity.describe(),
         ),
         Activity::Access(activity) => style.paint(Tone::Yellow, &activity.describe()),
+        Activity::Lifecycle { state, reason, .. } => style.paint(
+            match state {
+                // Routine: it released what it held and will continue as before.
+                branchyard::LifecycleState::Idle => Tone::Dim,
+                branchyard::LifecycleState::Reincarnated => Tone::Cyan,
+                // The branch's next run starts over, or it is gone.
+                branchyard::LifecycleState::Dormant | branchyard::LifecycleState::Deleted => {
+                    Tone::Yellow
+                }
+            },
+            &format!("{state}: {reason}"),
+        ),
         Activity::Effect(activity) => style.paint(
             match activity.as_ref() {
                 branchyard::effects::EffectActivity::Proxy { .. } => Tone::Cyan,
@@ -553,6 +584,14 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
                 _ => Tone::Cyan,
             },
             &activity.describe(),
+        ),
+        Activity::StatusReport {
+            state,
+            summary,
+            link,
+        } => style.paint(
+            reported_tone(*state),
+            &branchyard::reported::describe(*state, summary, link.as_deref()),
         ),
         Activity::Message(message) => {
             let reply = match message.in_reply_to {
@@ -885,6 +924,32 @@ pub fn branch_status_text(info: &BranchInfo) -> (String, Tone) {
     match info.stalled {
         true => (format!("{text} (stalled)"), Tone::Yellow),
         false => (text, tone),
+    }
+}
+
+/// The tone of a self-reported state: blocked and failure are bad,
+/// complete is good, working is under way and idle is quiet.
+pub fn reported_tone(state: branchyard::ReportedState) -> Tone {
+    use branchyard::ReportedState;
+    match state {
+        ReportedState::Working => Tone::Cyan,
+        ReportedState::Idle => Tone::Dim,
+        ReportedState::Blocked | ReportedState::Failure => Tone::Red,
+        ReportedState::Complete => Tone::Green,
+    }
+}
+
+/// A self-reported status on one line: `blocked: waiting on the API key
+/// (https://...)`.
+pub fn reported_text(report: &branchyard::StatusReport) -> String {
+    let summary = report
+        .summary
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    match &report.link {
+        Some(link) => format!("{}: {summary} ({link})", report.state),
+        None => format!("{}: {summary}", report.state),
     }
 }
 
@@ -1282,6 +1347,10 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
         ));
     }
     pairs.push(("check", check_text(i)));
+    if !i.grants.is_empty() {
+        let grants: Vec<String> = i.grants.iter().map(|g| g.to_string()).collect();
+        pairs.push(("connectors", grants.join(", ")));
+    }
     if let Some(envelope) = &i.envelope {
         // Its own profile only (stored empty): name it.
         let own = envelope.harnesses.is_empty() || envelope.harnesses == [i.profile.as_str()];
@@ -1312,6 +1381,12 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     }
     if i.graph_revision > 0 {
         pairs.push(("graph revision", i.graph_revision.to_string()));
+    }
+    if let Some(report) = &i.reported {
+        pairs.push((
+            "reported",
+            style.paint(reported_tone(report.state), &reported_text(report)),
+        ));
     }
     if !i.last_message.is_empty() {
         pairs.push(("last message", i.last_message.trim_end().to_owned()));
@@ -1633,6 +1708,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lifecycle_events_say_where_the_branch_stands_and_why() {
+        use branchyard::LifecycleState;
+        let line = |state, reason: &str| {
+            activity_line(
+                &Activity::Lifecycle {
+                    state,
+                    reason: reason.into(),
+                    idle_since_ms: 1_000,
+                },
+                PLAIN,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            line(
+                LifecycleState::Idle,
+                "no turn for 30m; released its kept sandbox by-a-2"
+            ),
+            "idle: no turn for 30m; released its kept sandbox by-a-2"
+        );
+        assert_eq!(
+            line(LifecycleState::Dormant, "no turn for 7d"),
+            "dormant: no turn for 7d"
+        );
+        assert_eq!(
+            line(LifecycleState::Reincarnated, "a fresh session after 7d"),
+            "reincarnated: a fresh session after 7d"
+        );
+        assert_eq!(
+            line(LifecycleState::Deleted, "no turn for 30d"),
+            "deleted: no turn for 30d"
+        );
+        // Colored, the states differ: routine is dim, a change is yellow.
+        let colored = |state| {
+            activity_line(
+                &Activity::Lifecycle {
+                    state,
+                    reason: "r".into(),
+                    idle_since_ms: 0,
+                },
+                Style { color: true },
+            )
+            .unwrap()
+        };
+        assert_ne!(
+            colored(LifecycleState::Idle),
+            colored(LifecycleState::Dormant)
+        );
+    }
+
     fn request(tool: &str, input: Value) -> PermissionRequest {
         PermissionRequest {
             key: PermissionKey("k1".into()),
@@ -1926,6 +2052,55 @@ mod tests {
         );
     }
 
+    /// A self-reported status is one line in `by log`, with the link when
+    /// there is one, and live output shows it as it arrives.
+    #[test]
+    fn a_self_reported_status_is_a_log_line() {
+        use branchyard::ReportedState;
+        let said = |state, summary: &str, link: Option<&str>| Activity::StatusReport {
+            state,
+            summary: summary.into(),
+            link: link.map(Into::into),
+        };
+        assert_eq!(
+            activity_line(
+                &said(ReportedState::Working, "reading the failing test", None),
+                PLAIN
+            )
+            .as_deref(),
+            Some("status working: reading the failing test")
+        );
+        let blocked = said(
+            ReportedState::Blocked,
+            "needs the\nAPI key",
+            Some("https://example.com/i/1"),
+        );
+        assert_eq!(
+            activity_line(&blocked, PLAIN).as_deref(),
+            Some("status blocked: needs the API key (https://example.com/i/1)")
+        );
+        // Blocked and failure are red, complete green, working cyan.
+        let color = Style { color: true };
+        for (state, code) in [
+            (ReportedState::Blocked, "31"),
+            (ReportedState::Failure, "31"),
+            (ReportedState::Complete, "32"),
+            (ReportedState::Working, "36"),
+            (ReportedState::Idle, "2"),
+        ] {
+            let line = activity_line(&said(state, "x", None), color).unwrap();
+            assert!(
+                line.starts_with(&format!("\x1b[{code}m")),
+                "{state}: {line:?}"
+            );
+        }
+        let mut r = Renderer::new(PLAIN, false);
+        assert_eq!(
+            r.activity("b", &said(ReportedState::Complete, "done", None)),
+            "status complete: done\n"
+        );
+    }
+
     #[test]
     fn compact_input_prefers_recognizable_fields() {
         assert_eq!(
@@ -2026,6 +2201,38 @@ mod tests {
             line(inspection(&i, Style::PLAIN)).as_deref(),
             Some("the harness's default")
         );
+    }
+
+    /// `by inspect` shows the branch's own account beside its status, only
+    /// once it has made one.
+    #[test]
+    fn inspect_shows_what_the_branch_reported() {
+        let mut i: branchyard::Inspection = serde_json::from_value(serde_json::json!({
+            "name": "kid", "status": {"state": "running"}, "harness": "claude-code",
+            "profile": "claude-code-stream-json", "parent": "root", "children": [],
+            "depth": 1, "turns": 1, "candidate": null, "cost_usd": null,
+            "subtree_cost_usd": 0.0, "max_usd": null, "remaining_usd": null,
+            "envelope": null, "last_message": "",
+        }))
+        .unwrap();
+        assert!(!inspection(&i, Style::PLAIN).contains("reported"));
+        i.reported = Some(branchyard::StatusReport {
+            state: branchyard::ReportedState::Blocked,
+            summary: "needs the\nAPI key".into(),
+            link: Some("https://example.com/i/1".into()),
+            at_ms: 5,
+        });
+        let text = inspection(&i, Style::PLAIN);
+        let line = text.lines().find(|l| l.starts_with("reported")).unwrap();
+        assert_eq!(
+            line.split_whitespace()
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join(" "),
+            "blocked: needs the API key (https://example.com/i/1)"
+        );
+        // The protocol's status is still its own line.
+        assert!(text.contains("running"), "{text}");
     }
 
     #[test]

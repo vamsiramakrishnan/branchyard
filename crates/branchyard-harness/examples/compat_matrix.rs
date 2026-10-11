@@ -253,7 +253,7 @@ pub fn render() -> String {
     out += &format!(
         "\n## Known, not driven\n\n\
          The harness registry names {} CLIs. Beside the rows above, Branchyard knows these {} from the \
-         vendored Herdr, Scion, emdash and Orca registries, with no profile to drive them: {}. `by harnesses \
+         vendored Herdr, Scion, emdash, Orca, agentapi and Coder Registry sources, with no profile to drive them: {}. `by harnesses \
          --all` lists every one with its install and login commands, API-key variables and \
          models where upstream records them ([`catalog/harnesses.toml`](../catalog/harnesses.toml), \
          generated from the pinned sources); knowing a CLI is not support for it.\n\

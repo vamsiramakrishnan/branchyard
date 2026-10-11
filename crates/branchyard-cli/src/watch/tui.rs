@@ -15,7 +15,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use branchyard::{Activity, BranchInfo, BranchStatus, Event, RecordedEvent};
+use branchyard::{Activity, BranchInfo, BranchStatus, Event, LifecycleState, RecordedEvent};
 use ratatui::crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -991,7 +991,18 @@ fn tone_of(activity: &Activity) -> Tone {
         Activity::Decision { allowed: true, .. } | Activity::Snapshot(_) => Tone::Good,
         Activity::Decision { allowed: false, .. } => Tone::Bad,
         Activity::Warning(_) | Activity::Stalled { .. } | Activity::Recovered { .. } => Tone::Warn,
+        // Going idle is routine (Dim); going dormant or being deleted
+        // changes what the branch's next run does.
+        Activity::Lifecycle {
+            state: LifecycleState::Dormant | LifecycleState::Deleted,
+            ..
+        } => Tone::Warn,
+        Activity::Lifecycle {
+            state: LifecycleState::Reincarnated,
+            ..
+        } => Tone::Accent,
         Activity::Delegation { refused: true, .. } => Tone::Bad,
+        Activity::StatusReport { state, .. } => reported_tone(*state),
         Activity::Harness(event) => match event {
             Event::TurnEnded { outcome, .. } => match outcome {
                 TurnOutcome::Completed => Tone::Good,
@@ -1006,6 +1017,17 @@ fn tone_of(activity: &Activity) -> Tone {
             _ => Tone::Dim,
         },
         _ => Tone::Dim,
+    }
+}
+
+/// A self-reported state: blocked and failure are bad, complete is good.
+fn reported_tone(state: branchyard::ReportedState) -> Tone {
+    use branchyard::ReportedState;
+    match state {
+        ReportedState::Blocked | ReportedState::Failure => Tone::Bad,
+        ReportedState::Complete => Tone::Good,
+        ReportedState::Working => Tone::Plain,
+        ReportedState::Idle => Tone::Dim,
     }
 }
 
@@ -1610,6 +1632,20 @@ fn draw_detail(model: &Model, info: Option<&BranchInfo>, frame: &mut Frame, area
         .filter(|s| !s.is_empty())
     {
         lines.push(Line::from(vec![label("now"), Span::raw(summary)]));
+    }
+    // What the harness says of itself, beside the status above.
+    if let Some(report) = model
+        .doing
+        .get(&info.name)
+        .and_then(|d| d.reported.as_ref())
+    {
+        lines.push(Line::from(vec![
+            label("reported"),
+            Span::styled(
+                render::reported_text(report),
+                tone_style(reported_tone(report.state)),
+            ),
+        ]));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -2229,6 +2265,21 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_events_are_quiet_when_routine_and_loud_when_they_change_the_next_run() {
+        let at = |state| {
+            tone_of(&Activity::Lifecycle {
+                state,
+                reason: "r".into(),
+                idle_since_ms: 0,
+            })
+        };
+        assert_eq!(at(LifecycleState::Idle), Tone::Dim);
+        assert_eq!(at(LifecycleState::Dormant), Tone::Warn);
+        assert_eq!(at(LifecycleState::Deleted), Tone::Warn);
+        assert_eq!(at(LifecycleState::Reincarnated), Tone::Accent);
+    }
+
+    #[test]
     fn guides_draw_the_tree() {
         assert_eq!(
             guides(&[0, 1, 2, 1, 0, 1]),
@@ -2381,6 +2432,58 @@ mod tests {
         let last = impl_.recent.back().unwrap();
         assert_eq!(last.2, Tone::Warn);
         assert!(!m.detail.contains_key("gone"));
+    }
+
+    /// A harness's own account is a tone in the recent events (blocked and
+    /// failure are bad, complete good), the branch's activity in the tree,
+    /// and a `reported` line in the detail pane beside the protocol's
+    /// status.
+    #[test]
+    fn a_self_reported_status_is_toned_and_shown_beside_the_status() {
+        use branchyard::ReportedState;
+        let said = |state, summary: &str| Activity::StatusReport {
+            state,
+            summary: summary.into(),
+            link: None,
+        };
+        for (state, tone) in [
+            (ReportedState::Blocked, Tone::Bad),
+            (ReportedState::Failure, Tone::Bad),
+            (ReportedState::Complete, Tone::Good),
+            (ReportedState::Working, Tone::Plain),
+            (ReportedState::Idle, Tone::Dim),
+        ] {
+            assert_eq!(tone_of(&said(state, "x")), tone, "{state}");
+        }
+
+        let mut m = model();
+        update(
+            &mut m,
+            Msg::Refreshed(snapshot(
+                yard(),
+                vec![
+                    ("lead", Activity::Prompt("Split the parser".into())),
+                    ("lead", said(ReportedState::Working, "reading the grammar")),
+                    ("lead", said(ReportedState::Blocked, "needs the API key")),
+                ],
+            )),
+        );
+        let (_, line, tone) = m.detail["lead"].recent.back().unwrap();
+        assert_eq!(
+            (line.as_str(), *tone),
+            ("status blocked: needs the API key", Tone::Bad)
+        );
+        let buffer = draw(&m, 140, 24);
+        let screen = lines(&buffer);
+        assert!(
+            find(&buffer, "blocked: needs the API key").is_some(),
+            "{screen:#?}"
+        );
+        assert!(
+            screen[3].contains("▸ blocked: needs"),
+            "the tree row says what it is doing: {}",
+            screen[3]
+        );
     }
 
     #[test]
@@ -3160,6 +3263,14 @@ mod tests {
                     ("lead", asks("old")),
                     ("lead", asks("new")),
                     ("lead", Activity::Prompt("x".into())),
+                    (
+                        "lead",
+                        Activity::Lifecycle {
+                            state: LifecycleState::Dormant,
+                            reason: "no turn for 7d".into(),
+                            idle_since_ms: 1,
+                        },
+                    ),
                     ("impl", Activity::Status(BranchStatus::Interrupted)),
                     (
                         "docs",

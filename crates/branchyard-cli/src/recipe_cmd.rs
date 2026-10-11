@@ -500,6 +500,7 @@ pub fn provider(args: &crate::args::RecipeArgs) -> Result<branchyard::RecipeOpti
         pass_env: args.pass_env.clone(),
         keep: args.lifecycle.keep.unwrap_or_default(),
         max_paused: args.lifecycle.max_paused,
+        max_kept_secs: args.lifecycle.max_kept_secs(),
     })
 }
 

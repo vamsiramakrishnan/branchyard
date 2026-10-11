@@ -3,14 +3,17 @@
 //! server's own admission path, and the loop that ticks the [`Engine`].
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-use branchyard::{Fleet, RouteOptions, TaskKind};
-use branchyard_client::api::{Operation, TaskRequest};
+use branchyard::{BranchStatus, Fleet, LifecycleState, RouteOptions, SteerState, TaskKind};
+use branchyard_client::api::{Operation, SendRequest, TaskRequest};
+use branchyard_client::triggers::Busy;
 use tokio::sync::{watch, Notify};
 
-use super::engine::{Admitted, Engine, Refusal, Sink};
+use super::engine::{Admitted, Delivered, Engine, Refusal, Sink};
+use super::lifecycle::{self, Action, Stage, Standing};
 use super::store::TriggerStore;
 use super::{Settings, StoredTrigger};
 use crate::api::{App, Caller, RepoState};
@@ -53,12 +56,84 @@ pub fn idempotency_scope(trigger: &StoredTrigger) -> String {
     format!("trigger:{}/{}", trigger.tenant, trigger.id)
 }
 
+/// How long a run that steers waits for the engine running the turn to
+/// take the input, as `POST .../steer` does.
+const STEER_WAIT: Duration = Duration::from_secs(10);
+
 impl AppSink {
     fn repo(&self, name: &str) -> Result<&RepoState, String> {
         self.app
             .repos
             .get(name)
             .ok_or_else(|| super::target::NOT_SERVED.to_owned())
+    }
+
+    /// The operation the run's key already names, if an earlier attempt
+    /// admitted one: a run fired again after its dispatcher stopped finds
+    /// it, whatever it rendered.
+    fn replayed(&self, trigger: &StoredTrigger, key: &str) -> Result<Option<Admitted>, Refusal> {
+        let scope = idempotency_scope(trigger);
+        let existing = self
+            .app
+            .registry
+            .by_key(&scope, key, &trigger.tenant)
+            .map_err(|e| Refusal::Later(e.body.message.clone()))?;
+        Ok(existing.map(|op| Admitted {
+            operation: op.id,
+            branches: op.branches,
+        }))
+    }
+
+    /// The idempotency key of the run's operation, bound to what it sends.
+    fn idempotency(&self, trigger: &StoredTrigger, key: &str, canonical: &str) -> Idempotency {
+        Idempotency {
+            caller: idempotency_scope(trigger),
+            key: key.to_owned(),
+            fingerprint: crate::api::fingerprint(&format!("trigger\n{canonical}")),
+        }
+    }
+
+    /// Why the send to `branch` starts the branch's session over first, when
+    /// its lifecycle made it dormant: how long it had rested, by the
+    /// dispatcher's clock.
+    fn reincarnation(&self, yard: &branchyard::Yard, branch: &str) -> Option<String> {
+        let resting = yard.resting(branch).ok()?;
+        (resting.state == Some(LifecycleState::Dormant)).then(|| {
+            let now = self.app.triggers.settings.clock.now();
+            format!(
+                "it was dormant: no turn ended for {}",
+                lifecycle::span(now.saturating_sub(resting.last_turn_end_ms) / 1000)
+            )
+        })
+    }
+
+    /// What an admission came to: the operation, the one another attempt
+    /// bound the key to first, or the refusal.
+    fn admitted(
+        &self,
+        trigger: &StoredTrigger,
+        key: &str,
+        admitted: Result<(Operation, bool), crate::error::ApiError>,
+    ) -> Result<Admitted, Refusal> {
+        match admitted {
+            Ok((op, _)) => Ok(Admitted {
+                operation: op.id,
+                branches: op.branches,
+            }),
+            Err(e) => {
+                // Another attempt bound the key first with a different
+                // rendering: that one is the run's task.
+                if let Ok(Some(admitted)) = self.replayed(trigger, key) {
+                    return Ok(admitted);
+                }
+                let why = format!("{}: {}", e.body.code, e.body.message);
+                // A stopping server is not the trigger's failure.
+                match e.body.code.as_str() {
+                    "shutting_down" => Err(Refusal::Later(why)),
+                    _ => Err(Refusal::Failed(why)),
+                }
+            }
+        }
     }
 }
 
@@ -77,60 +152,162 @@ impl Sink for AppSink {
         key: &str,
         request: TaskRequest,
     ) -> Result<Admitted, Refusal> {
-        let caller = Caller(trigger.principal.clone());
-        let scope = idempotency_scope(trigger);
-        // A run fired again after its dispatcher stopped finds the task
-        // the first attempt admitted, whatever it rendered.
-        let existing = self
-            .app
-            .registry
-            .by_key(&scope, key, &trigger.tenant)
-            .map_err(|e| Refusal::Later(e.body.message.clone()))?;
-        if let Some(op) = existing {
-            return Ok(Admitted {
-                operation: op.id,
-                branches: op.branches,
-            });
+        if let Some(admitted) = self.replayed(trigger, key)? {
+            return Ok(admitted);
         }
         let canonical =
             serde_json::to_string(&request).map_err(|e| Refusal::Failed(e.to_string()))?;
-        let idem = Idempotency {
-            caller: scope.clone(),
-            key: key.to_owned(),
-            fingerprint: crate::api::fingerprint(&format!("trigger\n{canonical}")),
-        };
+        let idem = self.idempotency(trigger, key, &canonical);
+        let caller = Caller(trigger.principal.clone());
         let app = self.app.clone();
         let repo = trigger.spec.repo.clone();
         let admitted = self.runtime.block_on(async move {
             let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
             crate::api::admit_task(&app, &repo, &caller, Some(idem), request, None).await
         });
-        match admitted {
-            Ok((op, _)) => Ok(Admitted {
-                operation: op.id,
-                branches: op.branches,
-            }),
-            Err(e) => {
-                // Another attempt bound the key first with a different
-                // rendering: that one is the run's task.
-                if let Ok(Some(op)) = self.app.registry.by_key(&scope, key, &trigger.tenant) {
-                    return Ok(Admitted {
-                        operation: op.id,
-                        branches: op.branches,
-                    });
-                }
-                let why = format!("{}: {}", e.body.code, e.body.message);
-                // A stopping server is not the trigger's failure.
-                match e.body.code.as_str() {
-                    "shutting_down" => Err(Refusal::Later(why)),
-                    _ => Err(Refusal::Failed(why)),
+        self.admitted(trigger, key, admitted)
+    }
+
+    fn deliver(
+        &self,
+        trigger: &StoredTrigger,
+        key: &str,
+        request: TaskRequest,
+        busy: Busy,
+    ) -> Result<Delivered, Refusal> {
+        if let Some(admitted) = self.replayed(trigger, key)? {
+            return Ok(Delivered::Admitted(admitted));
+        }
+        let branch = request.name.clone().unwrap_or_default();
+        let request_name = branch.clone();
+        let yard = self
+            .repo(&trigger.spec.repo)
+            .map_err(Refusal::Failed)?
+            .yard
+            .clone();
+        let target = match yard.branch(&branch) {
+            Ok(target) => target,
+            // Missing: the task creates it, under the delivered name.
+            Err(branchyard::Error::UnknownBranch(_)) => {
+                return self.admit(trigger, key, request).map(Delivered::Admitted)
+            }
+            Err(e) => return Err(Refusal::Failed(e.to_string())),
+        };
+        let running = target.info().status == BranchStatus::Running;
+        match (running, busy) {
+            (true, Busy::Skip) => return Ok(Delivered::Busy),
+            (true, Busy::Steer) => {
+                let by = format!("trigger {}", trigger.spec.name);
+                let steered = yard
+                    .steer_as(&branch, &request.prompt, &by)
+                    .and_then(|s| yard.wait_steer(&branch, s.id, STEER_WAIT));
+                match steered {
+                    Ok(steer) if !matches!(steer.state, SteerState::Refused { .. }) => {
+                        return Ok(Delivered::Steered)
+                    }
+                    // The turn ended first, refused the input, or its
+                    // harness takes none mid-turn: a send runs after it.
+                    Ok(_)
+                    | Err(branchyard::Error::NotRunning(_))
+                    | Err(branchyard::Error::Unsupported(_)) => {}
+                    Err(e) => return Err(Refusal::Failed(e.to_string())),
                 }
             }
+            _ => {}
         }
+        // What the task would have given a new branch, the send gives this
+        // one; its harness, base and name are the branch's own.
+        let send = SendRequest {
+            prompt: request.prompt,
+            budget: request.budget,
+            policy: request.policy,
+            check: request.check,
+            command: request.command,
+            delegation: request.delegation,
+            allow_delegation: request.allow_delegation,
+            unapproved_tools: request.unapproved_tools,
+            provision: request.provision,
+            require_labels: request.require_labels,
+            priority: request.priority,
+            ..SendRequest::default()
+        };
+        let canonical = serde_json::to_string(&send).map_err(|e| Refusal::Failed(e.to_string()))?;
+        let idem = self.idempotency(trigger, key, &canonical);
+        let caller = Caller(trigger.principal.clone());
+        let app = self.app.clone();
+        let repo = trigger.spec.repo.clone();
+        // A branch its lifecycle made dormant starts its session over: the
+        // run's operation is that reincarnation, and its turn the first of
+        // the new session.
+        let reincarnate = self.reincarnation(&yard, &branch);
+        let to = crate::api::SendTo {
+            branch,
+            request: send,
+            reincarnate,
+        };
+        let admitted = self.runtime.block_on(async move {
+            let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
+            crate::api::admit_send(&app, &repo, &caller, Some(idem), to, None).await
+        });
+        // The server admits one operation on a branch at a time: taken
+        // meanwhile (a turn started since the look above, or another
+        // send), the run does what its policy says, now that it knows.
+        if let Err(e) = &admitted {
+            if e.body.code == "branch_busy" {
+                return match busy {
+                    Busy::Skip => Ok(Delivered::Busy),
+                    Busy::Queue | Busy::Steer => Err(Refusal::Later(format!(
+                        "{request_name} is running a turn; the send waits for it"
+                    ))),
+                };
+            }
+        }
+        self.admitted(trigger, key, admitted)
+            .map(Delivered::Admitted)
     }
 
     fn operation(&self, id: &str) -> Option<Operation> {
         self.app.registry.get(id).ok().flatten()
+    }
+
+    fn standing(&self, trigger: &StoredTrigger, branch: &str) -> Result<Option<Standing>, String> {
+        let repo = self.repo(&trigger.spec.repo)?;
+        match repo.yard.resting(branch) {
+            Ok(resting) if resting.finished() => Ok(None),
+            Ok(resting) => Ok(Some(Standing {
+                running: resting.engaged(),
+                last_turn_end_ms: resting.last_turn_end_ms,
+                stage: Stage::of(resting.state),
+            })),
+            Err(branchyard::Error::UnknownBranch(_)) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    fn rest(
+        &self,
+        trigger: &StoredTrigger,
+        branch: &str,
+        action: Action,
+        reason: &str,
+    ) -> Result<(), String> {
+        let repo = self.repo(&trigger.spec.repo)?;
+        // Held in the operation store, as a removal is, so no operation on
+        // any server sharing it changes the branch meanwhile; one queued or
+        // running holds it, and the step waits for the next look.
+        let hold = self
+            .app
+            .registry
+            .hold(&repo.name, branch, "its lifecycle")
+            .map_err(|e| e.body.message.clone())?;
+        let yard = &repo.yard;
+        let done = match action {
+            Action::Park => yard.park(branch, LifecycleState::Idle, reason).map(drop),
+            Action::GoDormant => yard.park(branch, LifecycleState::Dormant, reason).map(drop),
+            Action::Delete => yard.retire(branch, reason).map(drop),
+        };
+        drop(hold);
+        done.map_err(|e| e.to_string())
     }
 
     fn prechecks_allowed(&self, repo: &str) -> bool {
@@ -276,6 +453,7 @@ pub fn spawn(app: Arc<App>, mut shutdown: watch::Receiver<bool>) -> tokio::task:
                 runtime: tokio::runtime::Handle::current(),
             }),
             worker: hub.worker.clone(),
+            rested_at: AtomicU64::new(0),
         });
         loop {
             tokio::select! {
@@ -306,6 +484,17 @@ pub fn spawn(app: Arc<App>, mut shutdown: watch::Receiver<bool>) -> tokio::task:
                 }
                 Err(_) => return,
             };
+            // The lifecycles of branches triggers keep alive, at their own
+            // pace and on a thread of their own: a removal takes git.
+            let resting = engine.clone();
+            tokio::task::spawn_blocking(move || match resting.rest() {
+                Ok(done) => {
+                    for (trigger, branch, action) in done {
+                        tracing::info!(%trigger, %branch, action = ?action, "trigger branch lifecycle");
+                    }
+                }
+                Err(e) => tracing::error!(error = %e, "resting trigger branches"),
+            });
             // Each run on a thread of its own: a precheck may take minutes.
             for (run, fence) in claimed {
                 let firing = engine.clone();

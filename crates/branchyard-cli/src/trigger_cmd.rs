@@ -15,8 +15,8 @@ use std::time::Duration;
 use branchyard_client::api::{BudgetSpec, PolicySpec, TaskRequest};
 use branchyard_client::new_key;
 use branchyard_client::triggers::{
-    Conditions, EventSource, Precheck, RouteSpec, RunState, Trigger, TriggerCreated, TriggerPolicy,
-    TriggerRun, TriggerSpec, TriggerTest, TriggerTestRequest, When,
+    Busy, Conditions, Deliver, EventSource, Lifecycle, Precheck, RouteSpec, RunState, Trigger,
+    TriggerCreated, TriggerPolicy, TriggerRun, TriggerSpec, TriggerTest, TriggerTestRequest, When,
 };
 use branchyard_server::config::Principal;
 use branchyard_server::triggers::store::TriggerStore;
@@ -132,6 +132,50 @@ pub struct AddArgs {
     /// The branch name, with placeholders (default: <trigger>-<issue number or time>)
     #[arg(long, value_name = "TEMPLATE", help_heading = "Task")]
     pub branch_name: Option<String>,
+    /// Continue this branch run after run instead of creating one per run (placeholders
+    /// allowed: one branch per Slack channel with slack-{{event.channel}}); the first run
+    /// creates it
+    #[arg(
+        long,
+        value_name = "TEMPLATE",
+        conflicts_with = "branch_name",
+        help_heading = "Task"
+    )]
+    pub to: Option<String>,
+    /// With --to, while that branch runs a turn: queue the prompt for after it (default),
+    /// steer it into the turn, or skip the run
+    #[arg(long, value_name = "MODE", value_parser = busy, requires = "to", help_heading = "Task")]
+    pub busy: Option<Busy>,
+    /// With --to, park the branch once it has ended no turn for DURATION (30m, 2h; whole
+    /// minutes): its kept sandbox is released, and the next run continues it as before
+    #[arg(
+        long,
+        value_name = "DURATION",
+        value_parser = minutes,
+        requires = "to",
+        help_heading = "Task"
+    )]
+    pub idle_after: Option<u32>,
+    /// With --to, mark the branch dormant after DURATION without a turn (7d; whole days): the
+    /// next run starts a fresh harness session on the same worktree
+    #[arg(
+        long,
+        value_name = "DURATION",
+        value_parser = days,
+        requires = "to",
+        help_heading = "Task"
+    )]
+    pub dormant_after: Option<u32>,
+    /// With --to, delete the branch after DURATION without a turn (30d; whole days): the next
+    /// run creates it again from the task
+    #[arg(
+        long,
+        value_name = "DURATION",
+        value_parser = days,
+        requires = "to",
+        help_heading = "Task"
+    )]
+    pub delete_after: Option<u32>,
     /// Branch from this ref
     #[arg(long, help_heading = "Task")]
     pub base: Option<String>,
@@ -170,6 +214,78 @@ pub struct AddArgs {
     pub disabled: bool,
 }
 
+/// `queue`, `steer` or `skip`.
+fn busy(text: &str) -> Result<Busy, String> {
+    match text.trim() {
+        "queue" => Ok(Busy::Queue),
+        "steer" => Ok(Busy::Steer),
+        "skip" => Ok(Busy::Skip),
+        other => Err(format!("{other:?} is not queue, steer or skip")),
+    }
+}
+
+/// Whole minutes of a duration (`30m`, `2h`, `1d`, or seconds): at least one.
+fn minutes(text: &str) -> Result<u32, String> {
+    whole(text, 60, "minutes", "30m or 2h")
+}
+
+/// Whole days of a duration (`7d`, `168h`, or seconds): at least one.
+fn days(text: &str) -> Result<u32, String> {
+    whole(text, 86_400, "days", "7d or 30d")
+}
+
+fn whole(text: &str, unit: u64, name: &str, example: &str) -> Result<u32, String> {
+    let seconds = duration(text)?.as_secs();
+    if seconds == 0 || seconds % unit != 0 {
+        return Err(format!(
+            "{text:?} is not a whole number of {name}, at least 1 (such as {example})"
+        ));
+    }
+    u32::try_from(seconds / unit).map_err(|_| format!("{text:?} is too long"))
+}
+
+/// `deliver.lifecycle` for the `--idle-after`, `--dormant-after` and
+/// `--delete-after` given; refused without `--to`, which they belong to.
+fn lifecycle_of(args: &AddArgs) -> Result<Option<Lifecycle>, Failure> {
+    let given = [
+        ("--idle-after", args.idle_after.is_some()),
+        ("--dormant-after", args.dormant_after.is_some()),
+        ("--delete-after", args.delete_after.is_some()),
+    ];
+    if args.to.is_none() {
+        if let Some((flag, _)) = given.iter().find(|(_, set)| *set) {
+            return Err(Failure::Message(format!(
+                "{flag} is the lifecycle of a branch a trigger delivers to: give --to TEMPLATE \
+                 with it"
+            )));
+        }
+        return Ok(None);
+    }
+    if given.iter().all(|(_, set)| !set) {
+        return Ok(None);
+    }
+    Ok(Some(Lifecycle {
+        idle_minutes: args.idle_after,
+        dormant_days: args.dormant_after,
+        delete_days: args.delete_after,
+    }))
+}
+
+/// `idle after 30m, dormant after 7d, deleted after 30d`.
+fn describe_lifecycle(lifecycle: &Lifecycle) -> String {
+    let mut parts = Vec::new();
+    if let Some(m) = lifecycle.idle_minutes {
+        parts.push(format!("idle after {m}m"));
+    }
+    if let Some(d) = lifecycle.dormant_days {
+        parts.push(format!("dormant after {d}d"));
+    }
+    if let Some(d) = lifecycle.delete_days {
+        parts.push(format!("deleted after {d}d"));
+    }
+    parts.join(", ")
+}
+
 /// `90s`, `30m`, `2h`, `1d`, or seconds.
 fn duration(text: &str) -> Result<Duration, String> {
     let text = text.trim();
@@ -206,6 +322,7 @@ fn read_secret(path: &Path) -> Result<String, Failure> {
 
 /// The spec `args` describe, for repository `repo`.
 fn spec(args: &AddArgs, repo: &str) -> Result<TriggerSpec, Failure> {
+    let lifecycle = lifecycle_of(args)?;
     let when = match (&args.cron, args.every, args.on) {
         (Some(expr), None, None) => When::Cron {
             expr: expr.clone(),
@@ -296,6 +413,11 @@ fn spec(args: &AddArgs, repo: &str) -> Result<TriggerSpec, Failure> {
         },
         route: args.auto.then(|| RouteSpec {
             kind: args.kind.clone(),
+        }),
+        deliver: args.to.as_ref().map(|branch| Deliver {
+            branch: branch.clone(),
+            busy: args.busy.unwrap_or_default(),
+            lifecycle,
         }),
         precheck: args.precheck.as_ref().map(|command| Precheck {
             command: command.clone(),
@@ -428,6 +550,16 @@ fn show_one(t: &Trigger, json: bool) -> Outcome {
         (None, None) => "the default harness".into(),
     };
     out.push_str(&format!("  harness:  {runs_on}\n"));
+    if let Some(d) = &t.deliver {
+        out.push_str(&format!(
+            "  deliver:  to {} run after run (created if missing; while it runs a turn: {})\n",
+            d.branch,
+            d.busy.as_str()
+        ));
+        if let Some(lifecycle) = &d.lifecycle {
+            out.push_str(&format!("  rests:    {}\n", describe_lifecycle(lifecycle)));
+        }
+    }
     out.push_str(&format!(
         "  prompt:   {}\n",
         t.task.prompt.replace('\n', "\n            ")
@@ -527,6 +659,16 @@ fn show_test(test: &TriggerTest, json: bool) -> Outcome {
                 .collect::<Vec<_>>()
                 .join("\n")
         ));
+    }
+    if let Some(d) = &test.deliver {
+        out.push_str(&format!(
+            "delivers:  to {} (created if missing; while it runs a turn: {})\n",
+            d.branch,
+            d.busy.as_str()
+        ));
+        if let Some(lifecycle) = &d.lifecycle {
+            out.push_str(&format!("rests:     {}\n", describe_lifecycle(lifecycle)));
+        }
     }
     if let Some(route) = &test.route {
         out.push_str(&format!(
@@ -903,6 +1045,36 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_durations_are_whole_minutes_and_whole_days() {
+        assert_eq!(minutes("30m"), Ok(30));
+        assert_eq!(minutes("2h"), Ok(120));
+        assert_eq!(minutes("1d"), Ok(1440));
+        assert_eq!(minutes("600"), Ok(10));
+        for bad in ["90s", "0m", "0", "45", "2w", "m", ""] {
+            let e = minutes(bad).unwrap_err();
+            assert!(
+                e.contains("minutes") || e.contains("duration"),
+                "{bad}: {e}"
+            );
+        }
+        assert_eq!(days("7d"), Ok(7));
+        assert_eq!(days("168h"), Ok(7));
+        assert_eq!(days("86400"), Ok(1));
+        for bad in ["36h", "12h", "0d", "30m", "1w"] {
+            let e = days(bad).unwrap_err();
+            assert!(e.contains("days") || e.contains("duration"), "{bad}: {e}");
+        }
+        assert_eq!(
+            describe_lifecycle(&Lifecycle {
+                idle_minutes: Some(30),
+                dormant_days: None,
+                delete_days: Some(30),
+            }),
+            "idle after 30m, deleted after 30d"
+        );
+    }
+
+    #[test]
     fn conditions_come_from_if_flags() {
         let args = AddArgs {
             name: "triage".into(),
@@ -923,6 +1095,11 @@ mod tests {
             auto: true,
             kind: Some("bugfix".into()),
             branch_name: None,
+            to: None,
+            busy: None,
+            idle_after: None,
+            dormant_after: None,
+            delete_after: None,
             base: None,
             check: Some("cargo test -p x".into()),
             budget_usd: Some(2.0),
@@ -947,6 +1124,63 @@ mod tests {
         let mut bad = args.clone();
         bad.conditions = vec!["colour=red".into()];
         assert!(spec(&bad, "app").is_err());
+        // --to names the branch every run continues; --busy says what a
+        // run does while it runs a turn, queue unless told otherwise.
+        let mut resident = args.clone();
+        resident.to = Some("slack-{{event.channel}}".into());
+        let s = spec(&resident, "app").unwrap();
+        assert_eq!(
+            s.deliver,
+            Some(Deliver {
+                branch: "slack-{{event.channel}}".into(),
+                busy: Busy::Queue,
+                lifecycle: None
+            })
+        );
+        resident.busy = Some(busy("skip").unwrap());
+        assert_eq!(
+            spec(&resident, "app").unwrap().deliver.unwrap().busy,
+            Busy::Skip
+        );
+        assert!(busy("drop").is_err());
+        // --idle-after, --dormant-after and --delete-after are the lifecycle
+        // of that branch: minutes and days, given as durations.
+        resident.idle_after = Some(30);
+        resident.dormant_after = Some(7);
+        resident.delete_after = Some(30);
+        assert_eq!(
+            spec(&resident, "app").unwrap().deliver.unwrap().lifecycle,
+            Some(Lifecycle {
+                idle_minutes: Some(30),
+                dormant_days: Some(7),
+                delete_days: Some(30),
+            })
+        );
+        resident.idle_after = None;
+        resident.dormant_after = None;
+        assert_eq!(
+            spec(&resident, "app")
+                .unwrap()
+                .deliver
+                .unwrap()
+                .lifecycle
+                .unwrap(),
+            Lifecycle {
+                idle_minutes: None,
+                dormant_days: None,
+                delete_days: Some(30),
+            }
+        );
+        // Without --to there is no branch for them to belong to.
+        let mut alone = args.clone();
+        alone.dormant_after = Some(7);
+        let Err(Failure::Message(refused)) = spec(&alone, "app") else {
+            panic!("a lifecycle without --to is refused");
+        };
+        assert!(
+            refused.contains("--dormant-after") && refused.contains("--to"),
+            "{refused}"
+        );
         let mut mail = args.clone();
         mail.on = Some(EventSource::Mailgun);
         mail.conditions = vec![
