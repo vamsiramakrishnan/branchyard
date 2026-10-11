@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""Run the gates CI runs, in CI's order, with one command.
+
+    python3 tools/check.py                  every step in STEPS
+    python3 tools/check.py --fast           without the cargo steps (the pre-push hook runs this)
+    python3 tools/check.py --fix            rewrite first: docs facts, cargo fmt, ruff format, the schemas
+    python3 tools/check.py --only A,B       only the named steps
+    python3 tools/check.py --keep-going     run past a failing step and report every failure
+
+Each step prints `ok` or `FAILED` (with the last lines of its output); a step that --fast
+skips prints `skip`. The verdict is `check: PASSED` or `check: FAILED (n steps)`, and the exit
+code is 0 or 1. Standard library only.
+
+CI's controls job runs `--fast --keep-going` for the Python steps, so each gate is defined
+once, here. Its cargo steps stay in the workflow where they are: they need `cargo fetch`
+first, and check_missing_docs.py runs `cargo check` itself. A new Python gate goes in STEPS;
+tests/test_check.py fails when check.yml runs a script that STEPS does not.
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import NamedTuple
+
+ROOT = Path(__file__).resolve().parents[1]
+PY = sys.executable
+TARGETS = ("tools", "tests", "sdk/python/branchyard_client.py")
+TAIL_LINES = 20
+# A check only reads. These make the schema generators and the catalog rewrite what they compare.
+REWRITE_VARIABLES = ("BY_UPDATE_SCHEMA", "BRANCHYARD_BLESS")
+
+
+class Step(NamedTuple):
+    """One gate. `job` is the check.yml job that runs it; `cargo` steps are skipped by --fast."""
+
+    name: str
+    job: str
+    argv: tuple
+    cargo: bool = False
+    fix: bool = False  # rewrites files: runs only with --fix, before the checks
+    env: tuple = ()  # extra (name, value) pairs for this step
+    stdout: str = ""  # on success, the command's stdout is written to this file
+
+
+STEPS = (
+    # --fix, in the order it runs.
+    Step("fix_docs_facts", "controls", (PY, "tools/docs_facts.py", "--write"), fix=True),
+    Step("fix_cargo_fmt", "controls", ("cargo", "fmt", "--all"), cargo=True, fix=True),
+    Step("fix_ruff_format", "python", (PY, "-m", "ruff", "format", *TARGETS), fix=True),
+    Step(
+        "fix_contract_schema",
+        "controls",
+        (
+            "cargo",
+            "run",
+            "-q",
+            "-p",
+            "branchyard-client",
+            "--features",
+            "schema",
+            "--example",
+            "generate_contract",
+            "--locked",
+            "--offline",
+        ),
+        cargo=True,
+        fix=True,
+        stdout="schema/contract.json",
+    ),
+    Step(
+        "fix_setup_schemas",
+        "controls",
+        ("cargo", "run", "-q", "-p", "branchyard-setup", "--example", "generate_schemas", "--locked", "--offline"),
+        cargo=True,
+        fix=True,
+    ),
+    Step(
+        "fix_server_config_schema",
+        "controls",
+        (
+            "cargo",
+            "run",
+            "-q",
+            "-p",
+            "branchyard-server",
+            "--features",
+            "schema",
+            "--example",
+            "generate_server_config_schema",
+            "--locked",
+            "--offline",
+        ),
+        cargo=True,
+        fix=True,
+        stdout="schema/server.config.json",
+    ),
+    # schema/rig.json is not written by an example: its test rewrites it when BY_UPDATE_SCHEMA is set.
+    Step(
+        "fix_rig_schema",
+        "controls",
+        ("cargo", "test", "-p", "branchyard-cli", "--locked", "--offline", "--features", "schema", "--lib", "rig_json"),
+        cargo=True,
+        fix=True,
+        env=(("BY_UPDATE_SCHEMA", "1"),),
+    ),
+    # The python job: lint, format and type-check tools/, tests/ and the shipped client.
+    Step("ruff_check", "python", (PY, "-m", "ruff", "check", *TARGETS)),
+    Step("ruff_format", "python", (PY, "-m", "ruff", "format", "--check", *TARGETS)),
+    Step(
+        "mypy",
+        "python",
+        (
+            PY,
+            "-m",
+            "mypy",
+            "--python-version",
+            "3.12",
+            "--ignore-missing-imports",
+            "--explicit-package-bases",
+            *TARGETS,
+        ),
+    ),
+    Step("test_install_ci_tool", "python", (PY, "tests/test_install_ci_tool.py")),
+    Step("test_check_coverage", "python", (PY, "tests/test_check_coverage.py")),
+    # The controls job's Python gates, in its order.
+    Step("verify_vendor", "controls", (PY, "tools/verify_vendor.py")),
+    Step("test_verify_vendor", "controls", (PY, "tests/test_verify_vendor.py")),
+    Step("test_vendor_pin", "controls", (PY, "tests/test_vendor_pin.py")),
+    Step("verify_derivatives", "controls", (PY, "tools/verify_derivatives.py")),
+    Step("check_catalog", "controls", (PY, "tools/check_catalog.py")),
+    # No hand-rolled percent/hex/base64/shell/tar codecs (tools/handrolled_banlist.toml).
+    Step("check_handrolled", "controls", (PY, "tools/check_handrolled.py")),
+    Step("test_check_handrolled", "controls", (PY, "tests/test_check_handrolled.py")),
+    Step("check_docs", "controls", (PY, "tools/check_docs.py")),
+    Step("check_test_hygiene", "controls", (PY, "tools/check_test_hygiene.py")),
+    Step("test_check_test_hygiene", "controls", (PY, "tests/test_check_test_hygiene.py")),
+    Step("check_silent_failures", "controls", (PY, "tools/check_silent_failures.py")),
+    Step("test_check_silent_failures", "controls", (PY, "tests/test_check_silent_failures.py")),
+    # The lint table's exceptions only fall, and every crate inherits the table.
+    Step("check_lint_ratchet", "controls", (PY, "tools/check_lint_ratchet.py")),
+    Step("test_check_lint_ratchet", "controls", (PY, "tests/test_check_lint_ratchet.py")),
+    # HTTP framing is parsed only in branchyard-wire.
+    Step("check_wire", "controls", (PY, "tools/check_wire.py")),
+    Step("test_check_wire", "controls", (PY, "tests/test_check_wire.py")),
+    Step("docs_facts", "controls", (PY, "tools/docs_facts.py", "--check")),
+    Step("test_docs_facts", "controls", (PY, "tests/test_docs_facts.py")),
+    # Dependency versions are declared once, in [workspace.dependencies].
+    Step("check_workspace_deps", "controls", (PY, "tools/check_workspace_deps.py")),
+    Step("test_check_workspace_deps", "controls", (PY, "tests/test_check_workspace_deps.py")),
+    # The delegation battery's evaluator.
+    Step("test_qualify_score", "controls", (PY, "tests/test_qualify_score.py")),
+    Step("test_scion", "controls", (PY, "tools/test_scion.py", "--qualified")),
+    Step("check_scion_compatibility", "controls", (PY, "tools/check_scion_compatibility.py")),
+    Step("test_distribution", "controls", (PY, "tests/test_distribution.py")),
+    Step("test_schema_validation", "controls", (PY, "tests/test_schema_validation.py")),
+    Step("test_sdk_client", "controls", (PY, "tests/test_sdk_client.py")),
+    Step("test_check", "controls", (PY, "tests/test_check.py")),
+    Step("test_install_hooks", "controls", (PY, "tests/test_install_hooks.py")),
+    # Cargo: rustdoc (the docs job), formatting, the undocumented-items ratchet, Clippy, and the
+    # schema freshness tests. The Clippy passes CI runs for the feature builds stay in the workflow.
+    Step(
+        "cargo_doc",
+        "docs",
+        ("cargo", "doc", "--workspace", "--no-deps", "--locked", "--offline"),
+        cargo=True,
+        env=(("RUSTDOCFLAGS", "-D warnings"),),
+    ),
+    Step("cargo_fmt", "controls", ("cargo", "fmt", "--all", "--", "--check"), cargo=True),
+    Step("check_missing_docs", "controls", (PY, "tools/check_missing_docs.py"), cargo=True),
+    Step(
+        "cargo_clippy",
+        "controls",
+        ("cargo", "clippy", "--workspace", "--all-targets", "--locked", "--offline", "--", "-D", "warnings"),
+        cargo=True,
+    ),
+    Step(
+        "schema_contract",
+        "controls",
+        (
+            "cargo",
+            "test",
+            "-p",
+            "branchyard-client",
+            "--locked",
+            "--offline",
+            "--features",
+            "schema",
+            "--test",
+            "contract",
+        ),
+        cargo=True,
+    ),
+    Step(
+        "schema_server_config",
+        "controls",
+        (
+            "cargo",
+            "test",
+            "-p",
+            "branchyard-server",
+            "--locked",
+            "--offline",
+            "--features",
+            "schema",
+            "--test",
+            "server_config_schema",
+        ),
+        cargo=True,
+    ),
+    Step(
+        "schema_setup",
+        "controls",
+        ("cargo", "test", "-p", "branchyard-setup", "--locked", "--offline", "--test", "schema"),
+        cargo=True,
+    ),
+    Step(
+        "schema_rig",
+        "controls",
+        ("cargo", "test", "-p", "branchyard-cli", "--locked", "--offline", "--features", "schema", "--lib", "rig_json"),
+        cargo=True,
+    ),
+)
+
+
+def plan(steps, only=None, fast=False, fix=False):
+    """The steps this run covers, as (step, skipped) pairs: the rewrites first, then the checks,
+    each in table order.
+
+    `only` is the --only text. Raises ValueError for a request that cannot run.
+    """
+    ordered = [step for step in steps if step.fix] + [step for step in steps if not step.fix]
+    by_name = {step.name: step for step in ordered}
+    names = [name for name in (only or "").split(",") if name]
+    unknown = [name for name in names if name not in by_name]
+    if unknown:
+        raise ValueError(f"unknown step: {', '.join(unknown)}")
+    if names:
+        chosen = [step for step in ordered if step.name in names]
+        for step in chosen:
+            if step.fix and not fix:
+                raise ValueError(f"{step.name} rewrites files; pass --fix to run it")
+            if step.cargo and fast:
+                raise ValueError(f"{step.name} is a cargo step, and --fast skips those")
+    else:
+        chosen = [step for step in ordered if fix or not step.fix]
+    return [(step, fast and step.cargo) for step in chosen]
+
+
+def run_step(step):
+    """Run one step: (exit code, its stdout, the text to show when it fails)."""
+    env = {key: value for key, value in os.environ.items() if key not in REWRITE_VARIABLES}
+    env.update(step.env)
+    try:
+        done = subprocess.run(list(step.argv), cwd=ROOT, env=env, capture_output=True)
+    except OSError as error:
+        return 1, b"", str(error)
+    shown = done.stderr if step.stdout else done.stdout + done.stderr
+    return done.returncode, done.stdout, shown.decode("utf-8", "replace")
+
+
+def say(status, name):
+    print(f"{status:<8}{name}", flush=True)
+
+
+def main(argv=None, steps=STEPS):
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("--fast", action="store_true", help="skip the cargo steps")
+    parser.add_argument("--fix", action="store_true", help="rewrite the generated files and formatting first")
+    parser.add_argument("--only", metavar="NAME[,NAME]", help="run only these steps")
+    parser.add_argument("--keep-going", action="store_true", help="run past a failing step")
+    args = parser.parse_args(argv)
+    try:
+        chosen = plan(steps, args.only, args.fast, args.fix)
+    except ValueError as error:
+        parser.error(str(error))
+    failed = 0
+    for step, skipped in chosen:
+        if skipped:
+            say("skip", step.name)
+            continue
+        code, out, shown = run_step(step)
+        if code == 0:
+            if step.stdout:
+                (ROOT / step.stdout).write_bytes(out)
+            say("ok", step.name)
+            continue
+        failed += 1
+        say("FAILED", step.name)
+        for line in shown.splitlines()[-TAIL_LINES:]:
+            print(f"    {line}", flush=True)
+        if not args.keep_going:
+            break
+    if failed:
+        print(f"check: FAILED ({failed} {'step' if failed == 1 else 'steps'})", flush=True)
+        return 1
+    print("check: PASSED", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

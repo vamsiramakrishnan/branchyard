@@ -2,6 +2,12 @@
 
 Start with [the implementation plan](docs/implementation-plan.md). The next deliverable is the domain/provider contract and sandbox qualification, followed by one complete remote task. The workspace has <!-- fact:workspace.crate_count -->22<!-- /fact --> crates. The current crates provide the harness identity registry, unqualified harness protocol drivers with per-capability support reasons, sandbox capability admission, and an unqualified Agent Substrate adapter.
 
+## Before you push
+
+Run `python3 tools/check.py --fast` before you push. It runs the Python gates, ruff, mypy and every Python test the controls job runs, in CI's order; it takes about 40 seconds here. Without `--fast` it also runs the cargo steps: `cargo fmt --check`, rustdoc with warnings denied, the undocumented-items ratchet, `cargo clippy` for the workspace, and the schema freshness tests. `--fix` rewrites what would fail first (`docs/facts.json`, formatting, the generated schemas). `--keep-going` reports every failing step rather than stopping at the first, and `--only NAME` runs named steps. The Python steps need `pip install ruff==0.15.8 mypy==2.4.0`, the versions CI pins.
+
+`python3 tools/install_hooks.py` makes `git push` run `python3 tools/check.py --fast` first. The hook is committed as `.githooks/pre-push`, and the command sets `core.hooksPath` to `.githooks` in your clone; `python3 tools/install_hooks.py --uninstall` unsets it. To push once without the checks, run `git push --no-verify`.
+
 ## Boundaries to preserve
 
 - Keep the public SDK a remote client. Runtime state and harness execution belong on servers.
