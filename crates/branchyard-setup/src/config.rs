@@ -1054,6 +1054,13 @@ pub struct WorkspaceConfig {
     /// --rm`), best-effort.
     #[serde(default, skip_serializing_if = "Script::is_empty")]
     pub teardown: Script,
+    /// Variables setup, teardown and run scripts and the harness get
+    /// besides `BRANCHYARD_*`, as `[workspace.env]`: a devcontainer's
+    /// `containerEnv` and `remoteEnv`. A value's `$VAR`, `${VAR}` and
+    /// `${VAR:-default}` are expanded on this host, from the environment
+    /// the script runs with and the `BRANCHYARD_*` variables.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     /// Prepared environments (docs/environments.md): run `setup` once per
     /// environment key (a hash of the setup commands, the copy globs and
     /// the files `inputs` names) and keep what it produced under
@@ -1241,6 +1248,11 @@ impl WorkspaceConfig {
         for (what, script) in [("setup", &self.setup), ("teardown", &self.teardown)] {
             check_script(script).or_else(|why| fail(what.into(), &why))?;
         }
+        for name in self.env.keys() {
+            if let Err(why) = check_variable_name(name) {
+                return fail(format!("env.{name}"), &why);
+            }
+        }
         if self.prepare && self.setup.is_empty() {
             return fail(
                 "prepare".into(),
@@ -1367,8 +1379,28 @@ impl WorkspaceConfig {
                 "share": self.share,
             });
         }
+        if !self.env.is_empty() {
+            canonical["env"] = serde_json::json!(self.env);
+        }
         hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
     }
+}
+
+/// Why a `[workspace.env]` name is refused, if it is: a variable name,
+/// and not one of Branchyard's own.
+pub fn check_variable_name(name: &str) -> Result<(), String> {
+    let shaped = !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if !shaped {
+        return Err(
+            "is not a variable name (letters, digits and _, not starting with a digit)".into(),
+        );
+    }
+    if name.starts_with("BRANCHYARD_") {
+        return Err("is Branchyard's own; it is set by the branch".into());
+    }
+    Ok(())
 }
 
 /// Why a copy glob is refused, if it is: relative to the repository root,
@@ -2615,6 +2647,12 @@ fn render_workspace(out: &mut String, table: &str, workspace: &WorkspaceConfig) 
             out.push_str(&format!("{key} = [{}]\n", items.join(", ")));
         }
     }
+    if !workspace.env.is_empty() {
+        out.push_str(&format!("\n[{table}.env]\n"));
+        for (name, value) in &workspace.env {
+            out.push_str(&format!("{name} = {}\n", toml_string(value)));
+        }
+    }
     if let Some(pool) = &workspace.pool {
         out.push_str(&format!("\n[{table}.pool]\nsize = {}\n", pool.size));
         if !pool.labels.is_empty() {
@@ -3189,6 +3227,50 @@ command = ["pnpm build", "pnpm worker"]
         let mut shared = workspace.clone();
         shared.share.push("vendor/bundle".into());
         assert_ne!(shared.digest(), workspace.digest());
+    }
+
+    #[test]
+    fn an_env_table_parses_renders_back_is_checked_and_changes_the_digest() {
+        let text = "[workspace]\nsetup = \"pnpm install\"\n\n[workspace.env]\n\
+                    CI = \"true\"\nTOKEN_FILE = \"${HOME}/.token\"\n";
+        let config = parse(text).unwrap();
+        let workspace = config.workspace.clone().unwrap();
+        assert_eq!(workspace.env.len(), 2);
+        assert_eq!(workspace.env["TOKEN_FILE"], "${HOME}/.token");
+        let rendered = render(&config, "");
+        assert!(
+            rendered.contains("[workspace.env]\nCI = \"true\"\n"),
+            "{rendered}"
+        );
+        assert_eq!(parse(&rendered).unwrap().workspace, config.workspace);
+        // Variables change what the scripts do, so they change the digest;
+        // a section without them keeps the digest it had.
+        let plain = parse("[workspace]\nsetup = \"pnpm install\"").unwrap();
+        assert_ne!(
+            workspace.digest(),
+            plain.workspace.clone().unwrap().digest()
+        );
+        let mut without = workspace.clone();
+        without.env.clear();
+        assert_eq!(without.digest(), plain.workspace.unwrap().digest());
+        for (bad, why) in [
+            (
+                "[workspace]\n[workspace.env]\n\"1X\" = \"a\"\n",
+                "not a variable name",
+            ),
+            (
+                "[workspace]\n[workspace.env]\n\"A-B\" = \"a\"\n",
+                "not a variable name",
+            ),
+            (
+                "[workspace]\n[workspace.env]\nBRANCHYARD_PORT = \"1\"\n",
+                "Branchyard's own",
+            ),
+            ("[workspace]\n[workspace.env]\nA = 1\n", "expected a string"),
+        ] {
+            let error = parse(bad).map(|_| ()).unwrap_err().to_string();
+            assert!(error.contains(why), "{bad}: {error}");
+        }
     }
 
     #[test]

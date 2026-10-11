@@ -126,6 +126,7 @@ impl Resolved {
             copy: self.workspace.copy.clone(),
             setup: self.workspace.setup.commands(),
             teardown: self.workspace.teardown.commands(),
+            env: self.workspace.env.clone(),
             digest: Some(self.digest.clone()),
             prepare: self.workspace.prepare,
             inputs: self.workspace.inputs.clone(),

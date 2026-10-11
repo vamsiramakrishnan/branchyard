@@ -76,6 +76,9 @@ pub fn import(text: &str, read: Reader) -> Result<Imported, String> {
         setup: translate(commands(&config, "setup", read)?),
         run: (!run.is_empty()).then(|| run.join(" && ")),
         teardown: translate(commands(&config, "teardown", read)?),
+        env: Default::default(),
+        prepare: false,
+        inputs: Vec::new(),
         notes: Vec::new(),
     })
 }

@@ -491,6 +491,13 @@
           "$ref": "#/$defs/Script",
           "description": "Run in the worktree when the branch is removed (`by rm`, `by merge\n--rm`), best-effort."
         },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Variables setup, teardown and run scripts and the harness get\nbesides `BRANCHYARD_*`, as `[workspace.env]`: a devcontainer's\n`containerEnv` and `remoteEnv`. A value's `$VAR`, `${VAR}` and\n`${VAR:-default}` are expanded on this host, from the environment\nthe script runs with and the `BRANCHYARD_*` variables."
+        },
         "prepare": {
           "type": "boolean",
           "description": "Prepared environments (docs/environments.md): run `setup` once per\nenvironment key (a hash of the setup commands, the copy globs and\nthe files `inputs` names) and keep what it produced under\n`.branchyard/environments/`; a new branch with the same key starts\nfrom it instead of running setup, cloned where the filesystem can."

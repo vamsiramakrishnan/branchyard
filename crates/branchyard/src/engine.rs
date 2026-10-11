@@ -724,6 +724,19 @@ fn run(
     // never mistakes it for a person, and finds `by` itself; only a
     // delegated one gets a token.
     if !placement.is_sandbox() {
+        // The workspace's own variables first, so the branch's win.
+        if let Some(spec) = record.workspace.as_ref().map(|w| &w.spec) {
+            let mut vars = crate::workspace::variables(
+                turn.yard,
+                &record.info.name,
+                &record.info.worktree,
+                store.ports().port(&record.info.name)?,
+            );
+            vars.push((ENV_ROOT.to_owned(), turn.yard.root.display().to_string()));
+            for (name, value) in spec.expanded_env(&vars) {
+                placement.set_env(&name, &value);
+            }
+        }
         placement.set_env(ENV_ROOT, &turn.yard.root.display().to_string());
         placement.set_env(ENV_BRANCH, &record.info.name);
         if let Some(by) = crate::projection::by_path(turn.options) {

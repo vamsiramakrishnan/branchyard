@@ -790,12 +790,11 @@ impl Yard {
         let store = self.store();
         let record = store.read(branch)?;
         let port = workspace::reserve_port(&store, &self.root, branch)?;
-        Ok(workspace::variables(
-            self,
-            branch,
-            &record.info.worktree,
-            Some(port),
-        ))
+        let vars = workspace::variables(self, branch, &record.info.worktree, Some(port));
+        Ok(match record.workspace.as_ref() {
+            Some(state) => workspace::with_spec_env(&state.spec, vars),
+            None => vars,
+        })
     }
 
     /// Append a workspace lifecycle report to `branch`'s event log, for a

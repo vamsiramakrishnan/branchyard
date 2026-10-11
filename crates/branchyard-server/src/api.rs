@@ -664,6 +664,7 @@ impl App {
             copy: w.copy.clone(),
             setup: w.setup.commands(),
             teardown: w.teardown.commands(),
+            env: w.env.clone(),
             digest: Some(w.digest()),
             prepare: w.prepare,
             inputs: w.inputs.clone(),
