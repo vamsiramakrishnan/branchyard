@@ -162,12 +162,12 @@ fn scratch_areas_need_an_explicit_share_for_a_sibling() {
     assert_eq!(area.owner_branch, "a");
     assert!(f.yard.scratch_path("cache").is_dir());
 
-    assert!(f
-        .yard
-        .scratch_areas("root")
-        .unwrap()
-        .iter()
-        .any(|s| s.name == "cache"));
+    // What create returned is what a read finds, creation time included.
+    assert_eq!(
+        f.yard.scratch_areas("root").unwrap(),
+        std::slice::from_ref(&area)
+    );
+    assert_eq!(f.yard.scratch_areas("a").unwrap(), [area]);
     assert!(!f
         .yard
         .scratch_areas("b")

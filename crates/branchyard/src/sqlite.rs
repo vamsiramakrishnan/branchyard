@@ -2554,7 +2554,7 @@ impl StorageBackend for Sqlite {
                         new.name,
                         new.owner,
                         encode("ancestry", &new.ancestry)?,
-                        to_db("now_ms", now_ms())?,
+                        to_db("created_ms", new.created_ms)?,
                         new.owner_incarnation,
                         encode("ancestry", &new.ancestry_incarnations)?,
                     ],

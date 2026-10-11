@@ -114,7 +114,7 @@ A publish accepts `Idempotency-Key` like the other mutating routes, but through 
 
 ## Scratch areas
 
-A scratch area is a named shared directory for a subtree: `by scratch create NAME` (or `Yard::create_scratch`) creates `.branchyard/scratch/NAME/`, owned by the creating branch. The same read-authorization rule as artifacts governs who may reach it (`Yard::scratch_areas`, `by scratch list`): the owner, its ancestors and descendants, and anyone it is explicitly shared with (`by scratch share NAME --to BRANCH`).
+A scratch area is a named shared directory for a subtree: `by scratch create NAME` (or `Yard::create_scratch`) creates `.branchyard/scratch/NAME/`, owned by the creating branch. Its creation time is read from the clock once, before the row is inserted, and both the stored row and the `ScratchArea` the create returns carry it, so a later list, after a restart too, reports the `created_at` the create did. (An artifact's `created_at` is likewise one read, stored and returned.) The same read-authorization rule as artifacts governs who may reach it (`Yard::scratch_areas`, `by scratch list`): the owner, its ancestors and descendants, and anyone it is explicitly shared with (`by scratch share NAME --to BRANCH`).
 
 ### One writer at a time
 
@@ -163,7 +163,7 @@ A scratch area's name is lowercase `[a-z0-9-]`, starting with a letter, at most 
 |---|---|---|
 | `artifacts` / `by_artifacts` | `id` | Provenance, the publisher's ancestor chain at publish time, labels |
 | `artifact_shares` / `by_artifact_shares` | `(id, branch)` | Explicit shares |
-| `scratch_areas` / `by_scratch_areas` | `name` | Owner, its ancestor chain at creation time |
+| `scratch_areas` / `by_scratch_areas` | `name` | Owner, its ancestor chain at creation time, and `created_ms`, the time `storage::create_scratch` read before inserting |
 | `scratch_shares` / `by_scratch_shares` | `(name, branch)` | Explicit shares |
 | `scratch_locks` / `by_scratch_locks` | `name` | Current holder branch, acquired time; no separate generation or heartbeat — see above |
 
@@ -175,7 +175,7 @@ Both backends implement `StorageBackend` on the same struct, and so the same con
 |---|---|
 | [`storage.rs`](../crates/branchyard/src/storage.rs) | `ArtifactRef`, `ScratchArea`, `ScratchLock`, the `StorageBackend` trait, publish/list/get/share, create/list/lock/unlock/share for scratch, the ancestor/descendant grant check, GC after removal, unit tests for grants surviving a publisher's removal |
 | [`sqlite.rs`](../crates/branchyard/src/sqlite.rs), [`pg.rs`](../crates/branchyard/src/pg.rs) | `StorageBackend` for `Sqlite` and `Postgres`, their tables |
-| [`conformance.rs`](../crates/branchyard/src/conformance.rs) | The `storage` conformance check: digest dedup and refcounting, ancestor/descendant/sibling grants, a scratch lock reclaimed once its holder is not running, held while it still is |
+| [`conformance.rs`](../crates/branchyard/src/conformance.rs) | The `storage` conformance check: digest dedup and refcounting, ancestor/descendant/sibling grants, a created scratch area reading back equal to what the create returned (its creation time included), a scratch lock reclaimed once its holder is not running, held while it still is |
 | [`tests/storage.rs`](../crates/branchyard/tests/storage.rs) | End to end against the fake ACP agent: reads following the tree, sibling refusal until shared, GC on removal (referenced and unreferenced), a scratch lock across two `Yard` handles, environment-variable exposure in a real turn |
 | [`crates/branchyard-mcp/tests/delegation.rs`](../crates/branchyard-mcp/tests/delegation.rs) | `artifacts_and_scratch_areas_are_reachable_over_mcp`: publish, create, and a descendant reading and locking without an explicit share, all over the real MCP server |
 | [`crates/branchyard-cli/tests/cli.rs`](../crates/branchyard-cli/tests/cli.rs) | `by artifact`/`by scratch` end to end outside a harness, and through the Python module inside one |

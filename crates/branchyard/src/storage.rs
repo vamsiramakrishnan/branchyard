@@ -122,7 +122,9 @@ pub(crate) struct ScratchRow {
     pub ancestry_incarnations: Vec<i64>,
 }
 
-/// A new scratch area, before the backend records its creation time.
+/// A new scratch area, stamped with its creation time once, before the
+/// backend inserts it: the stored row and the area returned to the caller
+/// carry the same `created_ms`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct NewScratch {
     pub name: String,
@@ -130,6 +132,19 @@ pub(crate) struct NewScratch {
     pub owner_incarnation: i64,
     pub ancestry: Vec<String>,
     pub ancestry_incarnations: Vec<i64>,
+    /// When it was created, in milliseconds since the epoch; stored as is.
+    pub created_ms: u64,
+}
+
+impl NewScratch {
+    /// The area as a read of the stored row reports it.
+    pub(crate) fn area(&self) -> ScratchArea {
+        ScratchArea {
+            name: self.name.clone(),
+            owner_branch: self.owner.clone(),
+            created_at: self.created_ms / 1000,
+        }
+    }
 }
 
 /// One explicit share of an artifact or scratch area: the target's name,
@@ -199,7 +214,8 @@ pub(crate) trait StorageBackend: Send + Sync + fmt::Debug {
     /// deleted only once none do.
     fn digest_refcount(&self, digest: &str) -> Result<u64, Error>;
 
-    /// `false` if `name` is already a scratch area.
+    /// Insert `new` with its own `created_ms`, so a read of the row equals
+    /// [`NewScratch::area`]. `false` if `name` is already a scratch area.
     fn create_scratch(&self, new: &NewScratch) -> Result<bool, Error>;
     fn scratch(&self, name: &str) -> Result<Option<ScratchRow>, Error>;
     fn scratch_list(&self) -> Result<Vec<ScratchRow>, Error>;
@@ -684,24 +700,21 @@ pub(crate) fn create_scratch(yard: &Yard, owner: &str, name: &str) -> Result<Scr
     store.read(owner)?;
     let lineage = Lineage::load(&store)?;
     let id = lineage.id(owner)?;
-    let created = store.storage().create_scratch(&NewScratch {
+    let new = NewScratch {
         name: name.to_owned(),
         owner: owner.to_owned(),
         owner_incarnation: id,
         ancestry: ancestry_of(&store, owner),
         ancestry_incarnations: lineage.ancestors(id),
-    })?;
-    if !created {
+        created_ms: now_ms(),
+    };
+    if !store.storage().create_scratch(&new)? {
         return Err(Error::Denied(format!("scratch area {name} already exists")));
     }
     let dir = scratch_dir(&store, name);
     std::fs::create_dir_all(&dir)
         .map_err(|e| Error::State(format!("create {}: {e}", dir.display())))?;
-    Ok(ScratchArea {
-        name: name.to_owned(),
-        owner_branch: owner.to_owned(),
-        created_at: now_ms() / 1000,
-    })
+    Ok(new.area())
 }
 
 /// Every scratch area `reader` may reach.
