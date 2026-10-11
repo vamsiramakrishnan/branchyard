@@ -9,7 +9,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Variables whose presence setup reports, by name only: the credentials
-/// harness provisioning reads, and Branchyard's own.
+/// harnesses read (`DEEPSEEK_API_KEY` for DeepSeek Harness, `GEMINI_API_KEY` for
+/// Gemini CLI and Antigravity), and Branchyard's own.
 pub const KNOWN_VARIABLES: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "BRANCHYARD_REMOTE",
@@ -18,6 +19,7 @@ pub const KNOWN_VARIABLES: &[&str] = &[
     "CODEX_API_KEY",
     "COPILOT_GITHUB_TOKEN",
     "DATABASE_URL",
+    "DEEPSEEK_API_KEY",
     "GEMINI_API_KEY",
     "GH_TOKEN",
     "GITHUB_TOKEN",

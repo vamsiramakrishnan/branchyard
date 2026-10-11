@@ -158,6 +158,55 @@ fn steer_evidence(profile_id: &str, offered: bool) -> &'static str {
     Evidence::cell(offered, evidence)
 }
 
+/// How to install, sign in to and key each harness with a profile, from the
+/// catalog, and what running the CLIs showed about Codex, Antigravity,
+/// Gemini CLI and DeepSeek Harness.
+fn install_and_sign_in() -> String {
+    let code = |items: &[String]| match items.is_empty() {
+        true => "—".to_owned(),
+        false => items
+            .iter()
+            .map(|i| format!("`{}`", i.replace('|', "\\|")))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    let mut out = String::from(
+        "\n## Install, sign-in and key\n\
+         \n\
+         What `by harnesses --all` lists for each harness above, from the [harness catalog](../catalog/harnesses.toml): the executables to look for, the recommended install command, the command that signs in through the CLI itself, and the variables that carry an API key instead. Whether a machine has each, and whether it is logged in, is that machine's inventory ([harness lifecycle](harness-lifecycle.md#how-detection-works)).\n\
+         \n\
+         | Harness | Executables | Install | Sign in | API key variables |\n\
+         |---|---|---|---|---|\n",
+    );
+    for harness in HARNESSES
+        .iter()
+        .filter(|h| PROFILES.iter().any(|p| p.harness == h.id))
+    {
+        let Some(entry) = branchyard_controls::catalog::harness(harness.id) else {
+            continue;
+        };
+        let login: Vec<String> = entry.login.iter().cloned().collect();
+        out += &format!(
+            "| {} (`{}`) | {} | {} | {} | {} |\n",
+            harness.target.unwrap_or(harness.id),
+            harness.id,
+            code(&entry.binaries),
+            code(&entry.install[..entry.install.len().min(1)]),
+            code(&login),
+            code(&entry.auth_env),
+        );
+    }
+    out.push_str(
+        "\nChecked by running the CLIs (Codex 0.157.1, Antigravity CLI 1.3.3, Gemini CLI 0.63.0, DeepSeek Harness 0.2.0-rc.2):\n\
+         \n\
+         - **Codex** signs in headless with `codex login --device-auth`; `codex login status` prints `Logged in using ChatGPT`, and the login is the file `~/.codex/auth.json` (Branchyard's provisioner takes it as the `CODEX_AUTH` secret). `CODEX_API_KEY` or `OPENAI_API_KEY` is the key.\n\
+         - **Antigravity** reads a key from `GEMINI_API_KEY` alone (`GOOGLE_API_KEY` has no effect), and only when `~/.gemini/antigravity-cli/settings.json` has `\"modelProvider\": \"gemini\"`; otherwise it asks for a Google sign-in, which a headless run cannot give. Branchyard sets the setting in isolated runs; `by harnesses` says when it is missing.\n\
+         - **Gemini CLI** takes `GEMINI_API_KEY`. Its headless `gemini -p` refuses an untrusted directory unless `GEMINI_CLI_TRUST_WORKSPACE=true` (or `--skip-trust`).\n\
+         - **DeepSeek Harness** is the `dsh` binary (not `dsh-tui` or `dst`, which only launch its terminal profile). It has no sign-in command: `DEEPSEEK_API_KEY` feeds its shipped provider (`deepseek-official`), and a provider in `$DSH_HOME/cordis.patch.yml` (default `~/.dsh`) or in `profiles/acp/cordis.patch.yml` replaces it; `dsh --profile acp --dump-config` prints the composed configuration.\n",
+    );
+    out
+}
+
 /// The matrix as Markdown.
 pub fn render() -> String {
     let qualified = qualifications();
@@ -243,6 +292,7 @@ pub fn render() -> String {
             );
         }
     }
+    out += &install_and_sign_in();
     // The CLIs Branchyard knows about without driving them.
     let catalog = branchyard_controls::catalog::harnesses();
     let known: Vec<String> = catalog

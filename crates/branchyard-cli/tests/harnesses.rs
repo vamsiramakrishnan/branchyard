@@ -274,6 +274,74 @@ fn harness<'a>(inventory: &'a Value, id: &str) -> Option<&'a Value> {
         .find(|h| h["id"] == id)
 }
 
+/// `by harnesses --all` for DeepSeek Harness 0.2.0-rc.2 (`dsh`), Gemini CLI
+/// 0.63.0 and Antigravity CLI 1.3.3, whose entries were corrected by
+/// running them: how to install each, sign in, and give it a key.
+#[test]
+fn the_full_listing_says_how_to_install_log_in_and_key_the_harnesses_that_were_run() {
+    let w = World::new();
+    let list = w.json(&["harnesses", "--all", "--json"]);
+    let row = |id: &str| {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is listed"))
+    };
+    let dsh = row("deepseek-harness");
+    assert_eq!(dsh["binaries"], serde_json::json!(["dsh"]));
+    assert_eq!(
+        dsh["install"],
+        serde_json::json!(["npm install -g @deepseek-ai/dsh"])
+    );
+    assert_eq!(dsh["auth_env"], serde_json::json!(["DEEPSEEK_API_KEY"]));
+    assert_eq!(dsh["drivable"], true);
+    let gemini = row("gemini-cli");
+    assert_eq!(
+        gemini["install"],
+        serde_json::json!(["npm install -g @google/gemini-cli"])
+    );
+    assert_eq!(gemini["login"], "gemini");
+    assert_eq!(
+        gemini["auth_env"],
+        serde_json::json!(["GEMINI_API_KEY", "GOOGLE_API_KEY"])
+    );
+    let agy = row("antigravity");
+    assert_eq!(agy["login"], "agy");
+    assert_eq!(agy["auth_env"], serde_json::json!(["GEMINI_API_KEY"]));
+
+    // The table shows them in the install, login and key columns.
+    let table = text(&w.ok(&["harnesses", "--all"]).stdout);
+    let line = |id: &str| {
+        table
+            .lines()
+            .find(|l| l.starts_with(id))
+            .unwrap_or_else(|| panic!("{id} is in the table:\n{table}"))
+    };
+    for (id, wants) in [
+        (
+            "deepseek-harness",
+            &["npm install -g @deepseek-ai/dsh", "DEEPSEEK_API_KEY"][..],
+        ),
+        (
+            "gemini-cli",
+            &[
+                "npm install -g @google/gemini-cli",
+                "gemini",
+                "GEMINI_API_KEY, GOOGLE_API_KEY",
+            ][..],
+        ),
+        (
+            "antigravity",
+            &["antigravity.google/cli/install.sh", "agy", "GEMINI_API_KEY"][..],
+        ),
+    ] {
+        for want in wants {
+            assert!(line(id).contains(want), "{id} lacks {want}:\n{}", line(id));
+        }
+    }
+}
+
 #[test]
 fn detection_reads_versions_and_logins_without_reading_secrets() {
     let w = World::new();
@@ -568,7 +636,7 @@ fn installs_follow_the_policy_and_are_verified_and_logged() {
     // A harness without an install command, and one Branchyard does not know.
     w.user_config("[harnesses]\ninstall = \"auto\"\n");
     assert!(w
-        .fails(&["harnesses", "install", "gemini-cli"])
+        .fails(&["harnesses", "install", "trae"])
         .contains("no install command"));
     assert!(w
         .fails(&["harnesses", "install", "nope"])

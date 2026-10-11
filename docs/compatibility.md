@@ -30,6 +30,35 @@ Capabilities are what the driver offers before negotiation. ACP resume is used o
 | Kimi CLI (`kimi-cli`) | `kimi-cli-acp` | ACP v1 | default | if advertised | no | yes | yes | contract-only | not verified | no | no | — | not qualified | resume: uses session/resume when the agent advertises it, else session/load; a session that cannot resume fails to open rather than starting fresh; fork: ACP session/fork is an unstable method; a driver that cannot fork must say so rather than start a fresh session; turn_acknowledgment: not verified; model: ACP v1 has no model parameter; selection belongs to the agent's own configuration; budget: ACP v1 has no spending limit; a prompt runs until the agent ends it; usage: not verified |
 | Hermes (`hermes`) | `hermes-acp` | ACP v1 | default | if advertised | no | yes | yes | contract-only | not verified | no | no | — | not qualified | resume: uses session/resume when the agent advertises it, else session/load; a session that cannot resume fails to open rather than starting fresh; fork: ACP session/fork is an unstable method; a driver that cannot fork must say so rather than start a fresh session; turn_acknowledgment: not verified; model: ACP v1 has no model parameter; selection belongs to the agent's own configuration; budget: ACP v1 has no spending limit; a prompt runs until the agent ends it; usage: not verified |
 
+## Install, sign-in and key
+
+What `by harnesses --all` lists for each harness above, from the [harness catalog](../catalog/harnesses.toml): the executables to look for, the recommended install command, the command that signs in through the CLI itself, and the variables that carry an API key instead. Whether a machine has each, and whether it is logged in, is that machine's inventory ([harness lifecycle](harness-lifecycle.md#how-detection-works)).
+
+| Harness | Executables | Install | Sign in | API key variables |
+|---|---|---|---|---|
+| Claude Code (`claude-code`) | `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` | `claude auth login` | `ANTHROPIC_API_KEY` |
+| Codex (`codex`) | `codex` | `npm install -g @openai/codex` | `codex login --device-auth` | `OPENAI_API_KEY` |
+| Antigravity (`antigravity`) | `agy`, `antigravity` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `agy` | `GEMINI_API_KEY` |
+| Oh My Pi (`oh-my-pi`) | `omp` | `curl -fsSL https://omp.sh/install \| sh` | — | — |
+| DeepSeek Harness (`deepseek-harness`) | `dsh` | `npm install -g @deepseek-ai/dsh` | — | `DEEPSEEK_API_KEY` |
+| Gemini CLI (`gemini-cli`) | `gemini` | `npm install -g @google/gemini-cli` | `gemini` | `GEMINI_API_KEY`, `GOOGLE_API_KEY` |
+| OpenCode (`opencode`) | `opencode`, `opencode2` | `npm install -g opencode-ai` | `opencode auth login` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ORCAROUTER_API_KEY` |
+| Pi (`pi`) | `pi` | `npm install -g @earendil-works/pi-coding-agent --ignore-scripts` | — | — |
+| Goose (`goose`) | `goose` | `curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh \| bash` | — | — |
+| Cursor CLI (`cursor`) | `cursor-agent` | `curl https://cursor.com/install -fsS \| bash` | — | — |
+| GitHub Copilot CLI (`github-copilot`) | `copilot` | `npm install -g @github/copilot` | — | — |
+| Amp (`amp`) | `amp` | `npm install -g @ampcode/cli` | — | — |
+| Qwen Code (`qwen-code`) | `qwen` | `npm install -g @qwen-code/qwen-code` | — | — |
+| Kimi CLI (`kimi-cli`) | `kimi`, `kimi-code` | `curl -LsSf https://code.kimi.com/install.sh \| bash` | — | — |
+| Hermes (`hermes`) | `hermes` | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | — | — |
+
+Checked by running the CLIs (Codex 0.157.1, Antigravity CLI 1.3.3, Gemini CLI 0.63.0, DeepSeek Harness 0.2.0-rc.2):
+
+- **Codex** signs in headless with `codex login --device-auth`; `codex login status` prints `Logged in using ChatGPT`, and the login is the file `~/.codex/auth.json` (Branchyard's provisioner takes it as the `CODEX_AUTH` secret). `CODEX_API_KEY` or `OPENAI_API_KEY` is the key.
+- **Antigravity** reads a key from `GEMINI_API_KEY` alone (`GOOGLE_API_KEY` has no effect), and only when `~/.gemini/antigravity-cli/settings.json` has `"modelProvider": "gemini"`; otherwise it asks for a Google sign-in, which a headless run cannot give. Branchyard sets the setting in isolated runs; `by harnesses` says when it is missing.
+- **Gemini CLI** takes `GEMINI_API_KEY`. Its headless `gemini -p` refuses an untrusted directory unless `GEMINI_CLI_TRUST_WORKSPACE=true` (or `--skip-trust`).
+- **DeepSeek Harness** is the `dsh` binary (not `dsh-tui` or `dst`, which only launch its terminal profile). It has no sign-in command: `DEEPSEEK_API_KEY` feeds its shipped provider (`deepseek-official`), and a provider in `$DSH_HOME/cordis.patch.yml` (default `~/.dsh`) or in `profiles/acp/cordis.patch.yml` replaces it; `dsh --profile acp --dump-config` prints the composed configuration.
+
 ## Known, not driven
 
 The harness registry names 48 CLIs. Beside the rows above, Branchyard knows these 33 from the vendored Herdr, Scion, emdash, Orca, agentapi and Coder Registry sources, with no profile to drive them: `aider`, `cline`, `devin`, `droid`, `grok-build`, `kilo`, `kiro`, `letta`, `maki`, `mastracode`, `muse-code`, `qodercli`, `ante`, `auggie`, `autohand`, `codebuddy`, `codebuff`, `command-code`, `continue`, `crush`, `freebuff`, `jules`, `junie`, `mimo-code`, `mistral-vibe`, `openclaude`, `openclaw`, `prime-agent`, `rovo-dev`, `trae`, `zcode`, `zero`, `amazon-q`. `by harnesses --all` lists every one with its install and login commands, API-key variables and models where upstream records them ([`catalog/harnesses.toml`](../catalog/harnesses.toml), generated from the pinned sources); knowing a CLI is not support for it.

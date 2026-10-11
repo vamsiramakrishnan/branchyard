@@ -439,6 +439,21 @@ fn credentials_are_named_and_their_values_never_shown() {
     assert!(!String::from_utf8_lossy(&out.stdout).contains(secret));
     assert!(!String::from_utf8_lossy(&out.stderr).contains(secret));
 
+    // The keys Gemini CLI, Antigravity and DeepSeek Harness read are among
+    // the usual variables.
+    let report = repo.doctor_in(
+        &repo.root,
+        &[],
+        &[
+            ("GEMINI_API_KEY", "g-never-shown"),
+            ("DEEPSEEK_API_KEY", "d-never-shown"),
+        ],
+    );
+    let detail = report.detail("harnesses.credentials");
+    assert!(detail.contains("DEEPSEEK_API_KEY"), "{detail}");
+    assert!(detail.contains("GEMINI_API_KEY"), "{detail}");
+    assert!(!report.stdout.contains("never-shown"), "{}", report.stdout);
+
     // A declared secret with nothing behind it is named, with its source.
     repo.project_file("[secrets]\nDEPLOY_KEY = \"DOCTOR_TEST_DEPLOY_VAR\"\n");
     let report = repo.doctor(&[]);

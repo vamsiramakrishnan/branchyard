@@ -92,7 +92,7 @@ pub fn harnesses(env: &Env, target: &Target, as_json: bool) -> Outcome {
         },
         Column {
             header: "API KEY",
-            max: 28,
+            max: 32,
             right: false,
         },
     ];

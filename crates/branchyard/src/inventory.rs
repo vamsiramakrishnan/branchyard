@@ -13,7 +13,12 @@
 //!
 //! A login state is `verified` only when the harness's own status command
 //! said so; otherwise it is `likely` (a key variable or credential file is
-//! present, or every known credential file is absent) or unknown.
+//! present, or every known credential file is absent) or unknown. Three
+//! harnesses need a look inside their configuration, still by name only
+//! ([`probes`]): Antigravity reads a key only when its settings select the
+//! Gemini provider, DeepSeek Harness takes its provider from
+//! `cordis.patch.yml`, and Gemini CLI's headless runs need the workspace
+//! trusted (`GEMINI_CLI_TRUST_WORKSPACE`).
 //!
 //! Installing runs the catalog's own install command for the harness,
 //! pinned to the version its default profile was checked against when the
@@ -329,7 +334,7 @@ const LOGIN_CHECKS: &[LoginCheck] = &[
             "$HOME/.gemini/oauth_creds.json",
             "~/.gemini/oauth_creds.json",
         )],
-        env: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        env: &[],
         keychain_on_macos: false,
     },
     LoginCheck {
@@ -349,7 +354,20 @@ const LOGIN_CHECKS: &[LoginCheck] = &[
             "$HOME/.gemini/antigravity-cli/antigravity-oauth-token",
             "~/.gemini/antigravity-cli/antigravity-oauth-token",
         )],
-        env: &["AGY_TOKEN", "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        // GEMINI_API_KEY is the catalog's `auth_env`: agy reads a key from
+        // it alone (GOOGLE_API_KEY has no effect), and only with
+        // `modelProvider` set to `gemini` in its settings.
+        env: &["AGY_TOKEN"],
+        keychain_on_macos: false,
+    },
+    // DeepSeek Harness 0.2.0-rc.2 has no login command: DEEPSEEK_API_KEY
+    // (the catalog's `auth_env`) feeds its shipped provider, and `probes`
+    // reads the provider a `cordis.patch.yml` configures.
+    LoginCheck {
+        harness: "deepseek-harness",
+        status: None,
+        files: &[],
+        env: &[],
         keychain_on_macos: false,
     },
     LoginCheck {
@@ -387,6 +405,53 @@ const VERSION_ARGS: &[(&str, &[&str])] = &[("jules", &["version"])];
 
 fn login_check(id: &str) -> Option<&'static LoginCheck> {
     LOGIN_CHECKS.iter().find(|c| c.harness == id)
+}
+
+/// The `cordis.patch.yml` files DeepSeek Harness composes its providers
+/// from, as `probes` reads them: under `$DSH_HOME` (default `~/.dsh`) and
+/// under its ACP profile there, for people.
+const DSH_CONFIGS: &[&str] = &[
+    "~/.dsh/cordis.patch.yml",
+    "~/.dsh/profiles/acp/cordis.patch.yml",
+];
+
+/// What only a look inside a configuration file or a flag variable can
+/// tell, as `sh` run on the machine once the harness is found. Each prints
+/// `fact ID NAME` (or an `env` line for a key variable that is set) and
+/// never a value: the files are searched, not printed.
+///
+/// - Antigravity 1.3.3 reads `GEMINI_API_KEY` only when its `settings.json`
+///   has `"modelProvider": "gemini"`: `model-provider-gemini`.
+/// - Gemini CLI 0.63.0's headless `gemini -p` refuses an untrusted
+///   directory unless `GEMINI_CLI_TRUST_WORKSPACE` is `true`:
+///   `trust-workspace`.
+/// - DeepSeek Harness 0.2.0-rc.2 composes its `llm-pi-ai` providers from
+///   `cordis.patch.yml` under `$DSH_HOME` and the profile's: a `providers:`
+///   key is `providers FILE`, and each `apiKeyEnv:` variable that is set is
+///   an `env` line.
+fn probes(id: &str) -> &'static str {
+    match id {
+        "antigravity" => {
+            r##"  grep -Eq '"modelProvider"[[:space:]]*:[[:space:]]*"gemini"' "$HOME/.gemini/antigravity-cli/settings.json" 2>/dev/null && echo 'fact antigravity model-provider-gemini'
+"##
+        }
+        "gemini-cli" => {
+            r##"  [ "${GEMINI_CLI_TRUST_WORKSPACE:-}" = true ] && echo 'fact gemini-cli trust-workspace'
+"##
+        }
+        "deepseek-harness" => {
+            r##"  ph=${DSH_HOME:-$HOME/.dsh}
+  for pf in cordis.patch.yml profiles/acp/cordis.patch.yml; do
+    [ -f "$ph/$pf" ] || continue
+    grep -Eq '^[[:space:]-]*providers:' "$ph/$pf" 2>/dev/null && echo "fact deepseek-harness providers $pf"
+    for pv in $(sed -n 's/^[[:space:]-]*apiKeyEnv:[^A-Za-z_]*\([A-Za-z_][A-Za-z0-9_]*\).*$/\1/p' "$ph/$pf" 2>/dev/null); do
+      eval "[ -n \"\${$pv:-}\" ]" && echo "env deepseek-harness $pv"
+    done
+  done
+"##
+        }
+        _ => "",
+    }
 }
 
 fn version_args(id: &str) -> &'static [&'static str] {
@@ -580,6 +645,7 @@ pub fn script(options: &DetectOptions) -> String {
                 quote(&format!("file {id} {shown}"))
             ));
         }
+        s.push_str(probes(id));
         s.push_str("fi\n");
     }
     s.push_str("echo end\n");
@@ -601,6 +667,8 @@ struct Found {
     status: Option<Ran>,
     env: Vec<String>,
     files: Vec<String>,
+    /// What [`probes`] found, as it printed it after `fact ID`.
+    facts: Vec<String>,
 }
 
 /// Read the script's output into an inventory taken at `now_ms`.
@@ -643,7 +711,7 @@ pub fn parse(output: &str, now_ms: u64) -> Result<Inventory, String> {
                     },
                 );
             }
-            "version" | "status" | "version-out" | "status-out" | "env" | "file" => {
+            "version" | "status" | "version-out" | "status-out" | "env" | "file" | "fact" => {
                 let id = word();
                 let value = word();
                 let Some(f) = found.get_mut(&id) else {
@@ -664,6 +732,7 @@ pub fn parse(output: &str, now_ms: u64) -> Result<Inventory, String> {
                         }
                     }
                     "env" => f.env.push(value),
+                    "fact" => f.facts.push(value),
                     _ => f.files.push(value),
                 }
             }
@@ -710,6 +779,26 @@ fn state(id: &str, found: Found, os: &str) -> HarnessState {
 }
 
 fn login(id: &str, found: &Found, os: &str) -> Login {
+    let mut login = login_from_evidence(id, found, os);
+    // Gemini CLI's headless `gemini -p` refuses an untrusted directory
+    // whatever the login; say so where the login is shown.
+    if id == "gemini-cli" && login.state == LoginState::LoggedIn {
+        login
+            .detail
+            .push_str(match found.facts.iter().any(|f| f == "trust-workspace") {
+                true => {
+                    "; GEMINI_CLI_TRUST_WORKSPACE=true is set, so headless runs trust the workspace"
+                }
+                false => {
+                    "; headless runs (gemini -p) refuse an untrusted workspace: set \
+                     GEMINI_CLI_TRUST_WORKSPACE=true or pass --skip-trust"
+                }
+            });
+    }
+    login
+}
+
+fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
     let check = login_check(id);
     let program = catalog::harness(id)
         .and_then(|e| e.binaries.first().cloned())
@@ -741,11 +830,21 @@ fn login(id: &str, found: &Found, os: &str) -> Login {
     if let Some((LoginState::LoggedIn, detail)) = &said {
         return verified(LoginState::LoggedIn, detail.clone());
     }
+    // Antigravity reads GEMINI_API_KEY only when its settings select the
+    // gemini provider; without that it asks for a Google sign-in.
+    let provider = found.facts.iter().any(|f| f == "model-provider-gemini");
+    let key_is_used =
+        |var: &&String| id != "antigravity" || var.as_str() != "GEMINI_API_KEY" || provider;
     // A key variable works whatever the login says.
-    if let Some(var) = found.env.first() {
+    if let Some(var) = found.env.iter().find(key_is_used) {
         return likely(
             LoginState::LoggedIn,
-            format!("{var} is set (an API key; not checked)"),
+            match (id, var.as_str()) {
+                ("antigravity", "GEMINI_API_KEY") => "GEMINI_API_KEY is set and settings.json \
+                    selects the gemini provider (an API key; not checked)"
+                    .to_owned(),
+                _ => format!("{var} is set (an API key; not checked)"),
+            },
         );
     }
     if let Some((state, detail)) = said {
@@ -754,21 +853,59 @@ fn login(id: &str, found: &Found, os: &str) -> Login {
     if let Some(file) = found.files.first() {
         return likely(LoginState::LoggedIn, format!("{file} exists"));
     }
+    if id == "antigravity" && found.env.iter().any(|v| v == "GEMINI_API_KEY") {
+        // Still a key Branchyard can use: isolated runs set the provider.
+        return likely(
+            LoginState::LoggedIn,
+            "GEMINI_API_KEY is set but ~/.gemini/antigravity-cli/settings.json does not set \
+             modelProvider gemini: agy will ask for a Google sign-in; Branchyard sets it in \
+             isolated runs"
+                .to_owned(),
+        );
+    }
+    if let Some(file) = found
+        .facts
+        .iter()
+        .find_map(|f| f.strip_prefix("providers "))
+        .filter(|_| id == "deepseek-harness")
+    {
+        return likely(
+            LoginState::LoggedIn,
+            format!("~/.dsh/{file} configures a provider (its key variable is not checked)"),
+        );
+    }
+    if id == "deepseek-harness" {
+        let vars = key_variables(id).join(" or ");
+        return likely(
+            LoginState::LoggedOut,
+            format!(
+                "no provider in {} and no {vars}; set {vars} (the shipped provider \
+                 deepseek-official reads it) or configure a provider under the llm-pi-ai \
+                 plugin in cordis.patch.yml (`dsh --profile acp --dump-config` shows the \
+                 composed configuration)",
+                DSH_CONFIGS.join(" or ")
+            ),
+        );
+    }
     match check {
         Some(c) if !(c.files.is_empty() || c.keychain_on_macos && os == "Darwin") => {
             let files: Vec<&str> = c.files.iter().map(|(_, shown)| *shown).collect();
             let vars = key_variables(id);
-            likely(
-                LoginState::LoggedOut,
-                format!(
-                    "no {} and no {}",
-                    files.join(" or "),
-                    match vars.is_empty() {
-                        true => "key variable".to_owned(),
-                        false => vars.join(" or "),
-                    }
-                ),
-            )
+            let mut detail = format!(
+                "no {} and no {}",
+                files.join(" or "),
+                match vars.is_empty() {
+                    true => "key variable".to_owned(),
+                    false => vars.join(" or "),
+                }
+            );
+            if id == "antigravity" {
+                detail.push_str(
+                    "; a GEMINI_API_KEY also needs modelProvider gemini in \
+                     ~/.gemini/antigravity-cli/settings.json",
+                );
+            }
+            likely(LoginState::LoggedOut, detail)
         }
         _ => Login {
             state: LoginState::Unknown,
@@ -1605,11 +1742,9 @@ mod tests {
         assert!(curl.unpinned.unwrap().contains("takes no version"));
         let none = plan("codex", InstallAction::Install, None, &tools(&[])).unwrap_err();
         assert!(none.contains("npm, or curl and sh, or brew"), "{none}");
-        assert!(
-            plan("gemini-cli", InstallAction::Install, None, &tools(&["npm"]))
-                .unwrap_err()
-                .contains("no install command")
-        );
+        assert!(plan("trae", InstallAction::Install, None, &tools(&["npm"]))
+            .unwrap_err()
+            .contains("no install command"));
         let explicit = plan(
             "codex",
             InstallAction::Update,
@@ -1713,6 +1848,212 @@ mod tests {
         assert!(parse("by-inventory 1\nhost x\n", 0)
             .unwrap_err()
             .contains("stopped before"));
+    }
+
+    /// What detection makes of `id` found on a Linux machine, given the
+    /// `env`, `file` and `fact` lines the script printed for it.
+    fn found(id: &str, lines: &[&str]) -> HarnessState {
+        let mut output = format!(
+            "by-inventory 1\nhost box\nos Linux\nchecked {id}\nfound {id} 1 /bin/{id}\n\
+             version {id} 0\nversion-out {id} 1.0.0\n"
+        );
+        for line in lines {
+            output.push_str(&format!("{line}\n"));
+        }
+        output.push_str("end\n");
+        parse(&output, 0).unwrap().get(id).unwrap().clone()
+    }
+
+    const AGY_SETTINGS: &str = "~/.gemini/antigravity-cli/settings.json";
+
+    #[test]
+    fn antigravity_uses_a_gemini_key_only_with_the_gemini_provider() {
+        // agy 1.3.3 reads GEMINI_API_KEY alone, and only with modelProvider
+        // gemini in its settings.
+        let with = found(
+            "antigravity",
+            &[
+                "env antigravity GEMINI_API_KEY",
+                "fact antigravity model-provider-gemini",
+            ],
+        );
+        assert_eq!(with.login.state, LoginState::LoggedIn);
+        assert_eq!(with.login.evidence, Evidence::Likely);
+        assert_eq!(
+            with.login.detail,
+            "GEMINI_API_KEY is set and settings.json selects the gemini provider \
+             (an API key; not checked)"
+        );
+        // The key without the setting: agy would ask for a Google sign-in,
+        // but isolated runs set the provider, so it can still run.
+        let without = found("antigravity", &["env antigravity GEMINI_API_KEY"]);
+        assert_eq!(without.login.state, LoginState::LoggedIn);
+        assert_eq!(without.login.evidence, Evidence::Likely);
+        assert_eq!(
+            without.login.detail,
+            format!(
+                "GEMINI_API_KEY is set but {AGY_SETTINGS} does not set modelProvider gemini: \
+                 agy will ask for a Google sign-in; Branchyard sets it in isolated runs"
+            )
+        );
+        assert!(without.ready().is_ok());
+        // A Google sign-in works whatever the key and the setting say.
+        let token = found(
+            "antigravity",
+            &[
+                "env antigravity GEMINI_API_KEY",
+                "file antigravity ~/.gemini/antigravity-cli/antigravity-oauth-token",
+            ],
+        );
+        assert_eq!(
+            token.login.detail,
+            "~/.gemini/antigravity-cli/antigravity-oauth-token exists"
+        );
+        let agy_token = found("antigravity", &["env antigravity AGY_TOKEN"]);
+        assert_eq!(
+            agy_token.login.detail,
+            "AGY_TOKEN is set (an API key; not checked)"
+        );
+        let nothing = found("antigravity", &[]);
+        assert_eq!(nothing.login.state, LoginState::LoggedOut);
+        assert_eq!(nothing.login.evidence, Evidence::Likely);
+        assert!(
+            nothing
+                .login
+                .detail
+                .starts_with("no ~/.gemini/antigravity-cli/antigravity-oauth-token and no GEMINI_API_KEY or AGY_TOKEN;"),
+            "{}",
+            nothing.login.detail
+        );
+        assert!(!nothing.login.detail.contains("GOOGLE_API_KEY"));
+        assert!(nothing
+            .login
+            .detail
+            .ends_with("a GEMINI_API_KEY also needs modelProvider gemini in ~/.gemini/antigravity-cli/settings.json"));
+        // GOOGLE_API_KEY has no effect on agy, so the script does not test it.
+        let text = script(&DetectOptions {
+            only: Some(vec!["antigravity".into()]),
+            ..DetectOptions::default()
+        });
+        assert!(text.contains("echo 'env antigravity GEMINI_API_KEY'"));
+        assert!(text.contains("echo 'env antigravity AGY_TOKEN'"));
+        assert!(!text.contains("GOOGLE_API_KEY"));
+        assert!(text.contains(
+            "grep -Eq '\"modelProvider\"[[:space:]]*:[[:space:]]*\"gemini\"' \
+             \"$HOME/.gemini/antigravity-cli/settings.json\""
+        ));
+    }
+
+    #[test]
+    fn deepseek_harness_is_logged_in_by_a_key_or_a_configured_provider() {
+        let version = found("deepseek-harness", &[]);
+        assert_eq!(version.version.as_deref(), Some("1.0.0"));
+        assert_eq!(parse_version("0.2.0-rc.2").as_deref(), Some("0.2.0-rc.2"));
+        for (line, shown) in [
+            (
+                "fact deepseek-harness providers cordis.patch.yml",
+                "~/.dsh/cordis.patch.yml",
+            ),
+            (
+                "fact deepseek-harness providers profiles/acp/cordis.patch.yml",
+                "~/.dsh/profiles/acp/cordis.patch.yml",
+            ),
+        ] {
+            let configured = found("deepseek-harness", &[line]);
+            assert_eq!(configured.login.state, LoginState::LoggedIn, "{line}");
+            assert_eq!(configured.login.evidence, Evidence::Likely);
+            assert_eq!(
+                configured.login.detail,
+                format!("{shown} configures a provider (its key variable is not checked)")
+            );
+        }
+        // The shipped provider's key, and a key variable a config names.
+        for var in ["DEEPSEEK_API_KEY", "MY_PROXY_KEY"] {
+            let keyed = found(
+                "deepseek-harness",
+                &[&format!("env deepseek-harness {var}")],
+            );
+            assert_eq!(keyed.login.state, LoginState::LoggedIn, "{var}");
+            assert_eq!(keyed.login.evidence, Evidence::Likely);
+            assert_eq!(
+                keyed.login.detail,
+                format!("{var} is set (an API key; not checked)")
+            );
+        }
+        // Neither: logged out, and the detail says how to configure it.
+        let none = found("deepseek-harness", &[]);
+        assert_eq!(none.login.state, LoginState::LoggedOut);
+        assert_eq!(none.login.evidence, Evidence::Likely);
+        for want in [
+            "~/.dsh/cordis.patch.yml",
+            "~/.dsh/profiles/acp/cordis.patch.yml",
+            "DEEPSEEK_API_KEY",
+            "deepseek-official",
+            "llm-pi-ai",
+            "dsh --profile acp --dump-config",
+        ] {
+            assert!(
+                none.login.detail.contains(want),
+                "{want}: {}",
+                none.login.detail
+            );
+        }
+        let why = none.ready().unwrap_err();
+        assert!(why.contains("likely logged out"), "{why}");
+        assert!(why.contains("by harnesses login deepseek-harness"), "{why}");
+        // DEEPSEEK_API_KEY is the catalog's key variable, found by name.
+        assert_eq!(key_variables("deepseek-harness"), ["DEEPSEEK_API_KEY"]);
+        let text = script(&DetectOptions {
+            only: Some(vec!["deepseek-harness".into()]),
+            ..DetectOptions::default()
+        });
+        assert!(text.contains("echo 'env deepseek-harness DEEPSEEK_API_KEY'"));
+        assert!(text.contains("${DSH_HOME:-$HOME/.dsh}"));
+        for file in DSH_CONFIGS {
+            let relative = file.trim_start_matches("~/.dsh/");
+            assert!(text.contains(relative), "{relative}");
+        }
+        assert!(!text.contains("cat "), "a config file must not be printed");
+    }
+
+    #[test]
+    fn gemini_cli_notes_what_headless_runs_need() {
+        let keyed = found("gemini-cli", &["env gemini-cli GEMINI_API_KEY"]);
+        assert_eq!(keyed.login.state, LoginState::LoggedIn);
+        assert_eq!(keyed.login.evidence, Evidence::Likely);
+        assert_eq!(
+            keyed.login.detail,
+            "GEMINI_API_KEY is set (an API key; not checked); headless runs (gemini -p) \
+             refuse an untrusted workspace: set GEMINI_CLI_TRUST_WORKSPACE=true or pass \
+             --skip-trust"
+        );
+        let trusted = found(
+            "gemini-cli",
+            &[
+                "file gemini-cli ~/.gemini/oauth_creds.json",
+                "fact gemini-cli trust-workspace",
+            ],
+        );
+        assert_eq!(
+            trusted.login.detail,
+            "~/.gemini/oauth_creds.json exists; GEMINI_CLI_TRUST_WORKSPACE=true is set, so \
+             headless runs trust the workspace"
+        );
+        // The note is for a harness that can run; a logged-out one says what
+        // it is missing.
+        let out = found("gemini-cli", &[]);
+        assert_eq!(out.login.state, LoginState::LoggedOut);
+        assert_eq!(
+            out.login.detail,
+            "no ~/.gemini/oauth_creds.json and no GEMINI_API_KEY or GOOGLE_API_KEY"
+        );
+        let text = script(&DetectOptions {
+            only: Some(vec!["gemini-cli".into()]),
+            ..DetectOptions::default()
+        });
+        assert!(text.contains("echo 'env gemini-cli GEMINI_API_KEY'"));
+        assert!(text.contains("echo 'env gemini-cli GOOGLE_API_KEY'"));
+        assert!(text.contains("[ \"${GEMINI_CLI_TRUST_WORKSPACE:-}\" = true ]"));
     }
 
     #[test]
