@@ -50,6 +50,7 @@ Or let your coding harness do it. `by init plugin` installs the `setup` skill in
 Local mode runs the engine in-process and each harness as a local process in its own git worktree under `.branchyard/`. It needs no server, but it provides **no isolation beyond your operating-system user**: by default a harness runs with your environment, your `HOME` and your own harness login, and can read and write whatever you can. Every `CLAUDE*` variable except Claude Code configuration (provider selection, credentials, TLS client identity, limits) is removed, so a harness never runs under the identity of a Claude Code session that launched `by`. `--isolated` scrubs credentials and uses a private `HOME`, so the harness is then usually not logged in; `--secret` [provisions](docs/provisioning.md) a credential into that home.
 
 ```sh
+by doctor                                             # is this machine and repository ready? (docs/doctor.md)
 by harnesses                                          # installed harnesses and their qualification
 by harnesses --all                                    # every harness CLI Branchyard knows of: install, login, API keys
 by run "Make the flaky parser test deterministic" --check "cargo test" --max-minutes 20 --ask
