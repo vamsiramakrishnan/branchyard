@@ -164,6 +164,29 @@ fn resolve_all(root: &Path) -> Result<BTreeMap<String, Resolved>, Failure> {
     Ok(all)
 }
 
+/// Whether a recipe is defined and may run, for `by doctor`.
+pub(crate) enum Readiness {
+    /// Neither the repository's file nor yours defines it.
+    Undefined,
+    /// Defined, and yours or trusted as it is now.
+    Runs,
+    /// Defined in the repository's file and never trusted.
+    Untrusted,
+    /// Trusted once, and changed since.
+    Changed,
+}
+
+/// Recipe `name` of the repository at `root` (canonical), as the trust
+/// decision sees it.
+pub(crate) fn readiness(root: &Path, name: &str) -> Result<Readiness, Failure> {
+    Ok(match resolve_all(root)?.get(name).map(|r| r.trust) {
+        None => Readiness::Undefined,
+        Some(Trust::NotNeeded | Trust::Trusted) => Readiness::Runs,
+        Some(Trust::Untrusted) => Readiness::Untrusted,
+        Some(Trust::Changed) => Readiness::Changed,
+    })
+}
+
 fn resolve(root: &Path, name: &str) -> Result<Resolved, Failure> {
     let mut all = resolve_all(root)?;
     let names: Vec<String> = all.keys().cloned().collect();

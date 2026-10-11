@@ -108,6 +108,13 @@ fn cache() -> InventoryCache {
     InventoryCache::new(inventory::user_paths(&user_dir()).0, inventory::DEFAULT_TTL)
 }
 
+/// The harnesses this machine has, from the cache `by harnesses` keeps
+/// (detected afresh once it is older than its time to live), without the
+/// usage meters. For `by doctor`.
+pub(crate) fn detected_here() -> Result<Inventory, String> {
+    cache().local(&DetectOptions::from_env(), false)
+}
+
 fn log() -> HarnessLog {
     HarnessLog::new(inventory::user_paths(&user_dir()).1)
 }

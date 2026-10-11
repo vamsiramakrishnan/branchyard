@@ -1035,6 +1035,33 @@ Examples:
   by config validate ~/.config/branchyard/config.toml
   by config schema > branchyard.config.json";
 
+const DOCTOR_EXAMPLES: &str = "\
+Checks, each ok, warn or fail with a line on what to do:
+  repository       a repository; .branchyard/ and its store; the store's schema
+                   against this binary's; services whose lease ran out
+  configuration    branchyard.toml and the user file load and validate (a refusal is
+                   shown with its line); [workspace] scripts trusted, as they are now
+  harnesses        what `by harnesses` detects (installed, version, qualification);
+                   [defaults] harness installed; credential variables, by name only
+  provider         the configured provider as the engine checks it; kept sandboxes
+                   and snapshots against max_kept_minutes
+  host             unprivileged user namespaces (egress confinement), a loopback
+                   listener, /dev/kvm
+  server           a configured [remote] answers GET /v1/repos with its token
+  model gateway    [models] backends' key variables set; routed models priced
+
+Exit status: 0 when nothing failed (warnings do not fail), 1 when something did.
+Offline apart from a configured server, which gets 5 seconds. It opens an existing
+.branchyard/ as every command does, creates none, and prints no secret.
+
+Examples:
+  by doctor
+  by doctor --json
+  by doctor --path ~/src/app
+  by doctor --remote https://ci.example:8421 --token-file ~/.by-token
+
+See docs/doctor.md.";
+
 const MODELS_EXAMPLES: &str = "\
 Examples:
   by models                        # routes, backends, budgets, and this month's usage
@@ -1921,6 +1948,16 @@ pub enum Command {
         json: bool,
         #[command(subcommand)]
         action: ConfigAction,
+    },
+    /// Check that this machine and repository are ready, and say what to fix
+    #[command(display_order = 604, after_help = DOCTOR_EXAMPLES)]
+    Doctor {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+        /// Check the repository at PATH instead of the one around the current directory
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
+        path: Option<String>,
     },
     /// Run, stop or inspect this repository's connector gateway (Anvil), and its keys
     #[command(display_order = 403, subcommand_required = true, after_help = GATEWAY_EXAMPLES)]
@@ -6507,5 +6544,38 @@ mod tests {
         }
         assert!(err("config shwo").contains("a similar subcommand exists: 'show'"));
         assert!(help("config").contains("BRANCHYARD_USER_CONFIG"));
+    }
+
+    #[test]
+    fn doctor_takes_json_and_a_path_and_the_global_server_options() {
+        let doctor = |line: &str| match parse_str(line).unwrap() {
+            Command::Doctor { json, path } => (json, path),
+            other => panic!("{line}: parsed as {other:?}"),
+        };
+        assert_eq!(doctor("doctor"), (false, None));
+        assert_eq!(doctor("doctor --json"), (true, None));
+        assert_eq!(
+            doctor("doctor --path ~/src/app --json"),
+            (true, Some("~/src/app".into()))
+        );
+        // `--repo` is the global option naming a repository on a server, not
+        // a path; doctor leaves it to the server check.
+        let cli = parse_from(split_words("by doctor --repo app --remote http://h:1").unwrap());
+        let cli = cli.unwrap();
+        assert_eq!(cli.globals.repo.as_deref(), Some("app"));
+        assert_eq!(cli.globals.remote.as_deref(), Some("http://h:1"));
+        for line in ["doctor extra", "doctor --path", "doctor --bogus"] {
+            let error = parse_str(line).unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{line}: {error}");
+        }
+        let text = help("doctor");
+        for needle in [
+            "--json",
+            "--path <PATH>",
+            "Exit status: 0",
+            "docs/doctor.md",
+        ] {
+            assert!(text.contains(needle), "{needle} missing from:\n{text}");
+        }
     }
 }

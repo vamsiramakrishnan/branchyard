@@ -52,6 +52,7 @@ pub fn apply(
         command,
         Command::Init { .. }
             | Command::Config { .. }
+            | Command::Doctor { .. }
             | Command::Mcp { .. }
             | Command::Completions { .. }
             | Command::Man

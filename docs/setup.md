@@ -255,6 +255,8 @@ by config schema                     # the JSON Schema
 
 `--json` may come before or after the action (`by config --json show`). `by config` alone prints its help and exits 2, as any command missing its action does.
 
+`by doctor` runs these loaders with the rest of what makes a machine and repository ready (the store, the trust decision, the harnesses, a configured server) and prints one report of `ok`, `warn` and `fail` rows with what to do about each: see [doctor](doctor.md).
+
 ## `by serve --check`
 
 `by serve --config FILE --check` (also `branchyard-server --check`) builds and validates the configuration exactly as serving would, prints its warnings, and exits without binding, serving, or writing a file: where serving would create a default token it only says so. `by init server` and `by init deploy` check every server configuration they propose with the same function, on a private staging copy of the plan's files.

@@ -16,6 +16,7 @@ mod commands;
 mod config_cmd;
 mod console;
 mod defaults;
+mod doctor_cmd;
 mod effects_cmd;
 mod env_cmd;
 mod fleet_cmd;
@@ -170,6 +171,11 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         // Setup needs no repository or server: it may be what creates them.
         Command::Init { init } => return init::main(env, &init),
         Command::Config { json, action } => return config_cmd::main(&action, json),
+        // Doctor reports a broken configuration, a missing store or an
+        // unreachable server rather than stopping at it.
+        Command::Doctor { json, path } => {
+            return doctor_cmd::main(env, globals, path.as_deref(), json)
+        }
         // The meters read this machine's session files; no repository needed.
         Command::Usage { json } => return usage::show(env, json),
         // The ssh connection itself, not a server's API.
@@ -592,6 +598,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Man
         | Command::Init { .. }
         | Command::Config { .. }
+        | Command::Doctor { .. }
         | Command::Usage { .. }
         | Command::Remote { .. }
         | Command::Catalog { .. }

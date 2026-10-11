@@ -43,7 +43,7 @@ use branchyard_support::time::now_ms;
 /// How long a write waits for another process's transaction.
 const BUSY: Duration = Duration::from_secs(30);
 /// 2: grants bound to incarnations (see `crate::storage::LegacyBinder`).
-const SCHEMA: i64 = 2;
+pub(crate) const SCHEMA: i64 = 2;
 
 const TABLES: &str = "
 CREATE TABLE IF NOT EXISTS meta (

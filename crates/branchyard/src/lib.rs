@@ -104,6 +104,7 @@ mod compare;
 mod conformance;
 pub mod connectors;
 mod delegation;
+pub mod doctor;
 pub mod effects;
 mod egress;
 mod engine;
