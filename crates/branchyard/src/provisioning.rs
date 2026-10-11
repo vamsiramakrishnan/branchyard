@@ -30,15 +30,18 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use branchyard_provision::apply::{self, Applied};
 use branchyard_provision::{
     Context, EnvVar, Instructions, Provisioning, Secret, SecretFrom, SecretSource, Session,
 };
+use branchyard_provision::{ManagedWritten, MANAGED_SETTINGS};
 
 use crate::placement;
 use crate::projection::{Projection, SERVER_NAME};
 use crate::state::Record;
+use crate::workspace::{self, InSandbox, WorkspacePhase, WorkspaceReport};
 use crate::{Activity, Error};
 use branchyard_harness::profiles::Protocol;
 
@@ -388,6 +391,8 @@ pub(crate) fn prepare(
         unused_secrets: plan.unused_secrets.clone(),
         connectors: granted,
         knowledge: knowledge_ids,
+        // Set once the sandbox has taken the managed settings; see `with_managed`.
+        managed: None,
     });
     let scrub = spec
         .secrets
@@ -408,9 +413,194 @@ pub(crate) fn prepare(
     })
 }
 
+/// How long the write of a sandbox's managed settings may take.
+const MANAGED_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The shell command that writes `json` to `path`, creating the file's
+/// directory. The JSON is one quoted word and nothing else is interpolated:
+/// `run_in_sandbox` drops a command's standard input, so the document cannot
+/// come in on it.
+pub(crate) fn managed_command(path: &str, json: &str) -> String {
+    let dir = match Path::new(path).parent() {
+        Some(dir) => dir.display().to_string(),
+        None => String::new(),
+    };
+    format!(
+        "mkdir -p {} && printf '%s\\n' {} > {}",
+        branchyard_recipe::quote(&dir),
+        branchyard_recipe::quote(json),
+        branchyard_recipe::quote(path),
+    )
+}
+
+/// Write Claude Code's managed settings into a sandboxed turn's sandbox,
+/// before the harness starts. Only a Claude Code turn in a sandbox gets
+/// them: a local harness is not Branchyard's to configure in the host's
+/// `/etc`, and a turn's home cannot override a managed setting. `Ok(None)`
+/// when none are due; `Err` says why the write failed, and the turn goes on
+/// with the settings in its home only.
+pub(crate) fn write_managed(
+    harness: &str,
+    record: &Record,
+    placement: &placement::Placement,
+    denied: &[String],
+    cancel: &dyn Fn() -> Option<String>,
+) -> Result<Option<ManagedWritten>, String> {
+    if harness != "claude-code" {
+        return Ok(None);
+    }
+    let Some((provider, sandbox)) = placement.sandbox() else {
+        return Ok(None);
+    };
+    let telemetry_off = record
+        .provision
+        .as_ref()
+        .and_then(|spec| spec.telemetry.as_ref())
+        .is_some_and(|telemetry| !telemetry.enabled);
+    let denied: Vec<&str> = denied.iter().map(String::as_str).collect();
+    let settings = branchyard_provision::managed_settings(&denied, telemetry_off);
+    let cwd = placement.cwd();
+    // `run_in_sandbox` reports into a workspace report. Only its outcome is
+    // used here: this is not workspace setup, and nothing is recorded as it.
+    let mut report = WorkspaceReport::new(WorkspacePhase::Setup, None);
+    workspace::run_in_sandbox(
+        &mut report,
+        &[managed_command(MANAGED_SETTINGS, &settings.json)],
+        InSandbox {
+            provider,
+            sandbox,
+            cwd: &cwd,
+            env: &[],
+            timeout: MANAGED_TIMEOUT,
+            cancel,
+        },
+    );
+    if report.ok {
+        return Ok(Some(ManagedWritten {
+            path: MANAGED_SETTINGS.to_owned(),
+            deny: settings.deny,
+            bypass_disabled: true,
+            telemetry_off: settings.telemetry_off,
+        }));
+    }
+    let mut why = report
+        .error
+        .clone()
+        .or_else(|| report.exit_code.map(|code| format!("exit status {code}")))
+        .unwrap_or_else(|| "it did not finish".to_owned());
+    if let Some(line) = report.output.lines().rev().find(|l| !l.trim().is_empty()) {
+        why = format!("{why}: {}", line.trim());
+    }
+    Err(format!(
+        "managed settings could not be written to {MANAGED_SETTINGS}, so the harness runs with \
+         the settings in its home only: {why}"
+    ))
+}
+
+/// The turn's `Provisioned` activity with the managed settings the sandbox
+/// took added to it, so one activity records everything provisioning did.
+/// A turn that provisioned nothing else gets one for them alone.
+pub(crate) fn with_managed(
+    activity: Option<Activity>,
+    managed: Option<ManagedWritten>,
+) -> Option<Activity> {
+    let Some(managed) = managed else {
+        return activity;
+    };
+    let mut activity = activity.unwrap_or_else(|| Activity::Provisioned {
+        auth: None,
+        files: Vec::new(),
+        env: Vec::new(),
+        secrets: Vec::new(),
+        unused_secrets: Vec::new(),
+        connectors: Vec::new(),
+        knowledge: Vec::new(),
+        managed: None,
+    });
+    if let Activity::Provisioned { managed: slot, .. } = &mut activity {
+        *slot = Some(managed);
+    }
+    Some(activity)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The command writes exactly the document, quoted for the shell: a
+    /// document holding quotes, expansions and a `;` reaches the file as it
+    /// was, and no other file is touched. Run here in a scratch directory.
+    #[test]
+    fn the_managed_command_writes_the_document_exactly() {
+        let dir = tempfile::Builder::new()
+            .prefix("by-managed-")
+            .tempdir()
+            .unwrap();
+        let target = dir.path().join("etc").join("managed-settings.json");
+        let json = "{\"a\":\"it's $HOME `id` \\\\ \\\"q\\\" ;rm -rf x\"}";
+        let command = managed_command(&target.display().to_string(), json);
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{command}");
+        let written = fs::read_to_string(&target).unwrap();
+        assert_eq!(written, format!("{json}\n"));
+        assert_eq!(
+            fs::read_dir(dir.path().join("etc")).unwrap().count(),
+            1,
+            "only the managed file is in its directory"
+        );
+    }
+
+    /// The turn's `Provisioned` activity takes the managed settings, keeps
+    /// what it had, and a turn with nothing else gets one for them alone.
+    #[test]
+    fn managed_settings_join_the_provisioned_activity() {
+        let managed = ManagedWritten {
+            path: MANAGED_SETTINGS.to_owned(),
+            deny: vec!["Bash".to_owned()],
+            bypass_disabled: true,
+            telemetry_off: false,
+        };
+        assert_eq!(with_managed(None, None), None);
+        let alone = with_managed(None, Some(managed.clone()));
+        assert!(matches!(
+            alone,
+            Some(Activity::Provisioned { ref files, managed: Some(ref m), .. })
+                if files.is_empty() && *m == managed
+        ));
+        let before = Activity::Provisioned {
+            auth: Some("api-key".into()),
+            files: vec![".claude/settings.json".into()],
+            env: vec!["ANTHROPIC_MODEL".into()],
+            secrets: Vec::new(),
+            unused_secrets: Vec::new(),
+            connectors: Vec::new(),
+            knowledge: Vec::new(),
+            managed: None,
+        };
+        match with_managed(Some(before.clone()), Some(managed.clone())) {
+            Some(Activity::Provisioned {
+                auth,
+                files,
+                env,
+                managed: Some(m),
+                ..
+            }) => {
+                assert_eq!(auth.as_deref(), Some("api-key"));
+                assert_eq!(files, [".claude/settings.json"]);
+                assert_eq!(env, ["ANTHROPIC_MODEL"]);
+                assert_eq!(m, managed);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(matches!(
+            with_managed(Some(before.clone()), None),
+            Some(Activity::Provisioned { managed: None, .. })
+        ));
+    }
 
     #[test]
     fn secrets_resolve_from_variables_and_files_without_trailing_newlines() {

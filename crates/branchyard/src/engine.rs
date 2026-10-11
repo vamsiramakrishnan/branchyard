@@ -659,17 +659,43 @@ fn run(
             return Ok(driven);
         }
     };
-    if let Some(activity) = provisioned.activity {
-        recorder.record(activity)?;
-    }
-    // Declared before the session so a sandbox outlives it.
+    // Declared before the session so a sandbox outlives it. The turn's
+    // provisioning is recorded once the sandbox exists, so its activity can
+    // say what the sandbox took: see the managed settings below.
     let mut placement = match Placement::prepare(turn.yard, record, fence, &turn.sandbox) {
         Ok(placement) => placement,
         Err(reason) => {
+            if let Some(activity) = provisioned.activity {
+                recorder.record(activity)?;
+            }
             driven.end = End::failed(reason);
             return Ok(driven);
         }
     };
+    // Claude Code's managed settings, written into a sandbox before the
+    // harness starts (`provisioning::write_managed`). A write that fails is
+    // a warning, and the turn goes on with the home's settings alone.
+    let managed = crate::provisioning::write_managed(
+        turn.profile.harness,
+        record,
+        &placement,
+        &crate::policy::denied_tools(&bounds.policy),
+        &|| {
+            lease
+                .lost()
+                .then(|| "the turn's lease was taken over".to_owned())
+        },
+    );
+    let (managed, managed_failure) = match managed {
+        Ok(managed) => (managed, None),
+        Err(why) => (None, Some(why)),
+    };
+    if let Some(activity) = crate::provisioning::with_managed(provisioned.activity, managed) {
+        recorder.record(activity)?;
+    }
+    if let Some(why) = managed_failure {
+        recorder.record(Activity::Warning(why))?;
+    }
     if let Some(started) = placement.started() {
         recorder.record(crate::snapshots::event(started.clone()))?;
         // A seed is used once: later turns resume the kept sandbox or

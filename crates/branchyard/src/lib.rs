@@ -2441,6 +2441,12 @@ pub enum Activity {
         /// `docs/knowledge.md`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         knowledge: Vec<u64>,
+        /// The managed settings written into a sandbox for a Claude Code
+        /// turn, before the harness started, when the turn's sandbox took
+        /// them; see `docs/provisioning.md#managed-settings`. Names and
+        /// flags only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        managed: Option<branchyard_provision::ManagedWritten>,
     },
     /// Input from `by` was written into the running turn; see
     /// [`Branch::steer`]. The harness's `steer_accepted` or

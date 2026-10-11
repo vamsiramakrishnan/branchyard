@@ -29,7 +29,8 @@ use crate::model::{Branches, Report};
 enum Feed {
     /// The branches as listed after the stream opened.
     Snapshot(Vec<BranchInfo>),
-    Entry(FeedEntry),
+    /// One event, boxed: an activity is many times a snapshot's size.
+    Entry(Box<FeedEntry>),
     /// The server refused the stream for good.
     Fatal(String),
 }
@@ -136,6 +137,7 @@ pub fn run(config: &Config) -> Result<(), String> {
                 bridge.dirty.extend(names);
             }
             Ok(Feed::Entry(entry)) => {
+                let entry = *entry;
                 if bridge.branches.apply(&entry.branch, &entry.activity) {
                     bridge.dirty.insert(entry.branch);
                 }
@@ -211,7 +213,7 @@ fn follow(repo: Repo, tx: mpsc::Sender<Feed>) {
                     failures = 0;
                     delays = branchyard_client::reconnect_backoff();
                     cursor = Some(entry.seq);
-                    if tx.send(Feed::Entry(entry)).is_err() {
+                    if tx.send(Feed::Entry(Box::new(entry))).is_err() {
                         return;
                     }
                 }

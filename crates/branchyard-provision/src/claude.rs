@@ -124,6 +124,124 @@ pub fn resolve_model_alias(raw: &str, aliases: &[(&str, &str)]) -> String {
         .map_or(normalized.clone(), |(_, model)| (*model).to_owned())
 }
 
+/// Where Claude Code reads its managed settings on Linux and WSL, and where
+/// a sandboxed turn's are written; see `docs/provisioning.md#managed-settings`.
+pub const MANAGED_SETTINGS: &str = "/etc/claude-code/managed-settings.json";
+
+/// Claude Code's built-in tool names, as its tools reference spells them in
+/// permission rules, and the names it had before that reference
+/// (`MultiEdit`, `BashOutput`, `KillBash`, `KillShell`). A denied name not in
+/// this list is another harness's, such as `shell` or `write_file`, and is
+/// not written: Claude Code would match nothing with it.
+const CLAUDE_CODE_TOOLS: &[&str] = &[
+    "Agent",
+    "Artifact",
+    "AskUserQuestion",
+    "Bash",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "Edit",
+    "EndConversation",
+    "EnterPlanMode",
+    "EnterWorktree",
+    "ExitPlanMode",
+    "ExitWorktree",
+    "Glob",
+    "Grep",
+    "LSP",
+    "ListAgents",
+    "ListMcpResourcesTool",
+    "Monitor",
+    "NotebookEdit",
+    "PowerShell",
+    "PushNotification",
+    "ReadMcpResourceTool",
+    "Read",
+    "RemoteTrigger",
+    "ReportFindings",
+    "ScheduleWakeup",
+    "SendFeedback",
+    "SendMessage",
+    "SendUserFile",
+    "ShareOnboardingGuide",
+    "Skill",
+    "SubagentHandback",
+    "TaskCreate",
+    "TaskGet",
+    "TaskList",
+    "TaskOutput",
+    "TaskStop",
+    "TaskUpdate",
+    "TodoWrite",
+    "ToolSearch",
+    "WaitForMcpServers",
+    "WebFetch",
+    "WebSearch",
+    "Workflow",
+    "Write",
+    "MultiEdit",
+    "BashOutput",
+    "KillBash",
+    "KillShell",
+];
+
+/// The variables [`plan`] sets to turn Claude Code's telemetry export off.
+/// Pinned in managed settings too, so a setting in the home cannot turn it
+/// back on.
+const TELEMETRY_OFF: &[(&str, &str)] = &[
+    ("CLAUDE_CODE_ENABLE_TELEMETRY", "0"),
+    ("OTEL_METRICS_EXPORTER", "none"),
+    ("OTEL_LOGS_EXPORTER", "none"),
+    ("OTEL_TRACES_EXPORTER", "none"),
+];
+
+/// A sandboxed Claude Code turn's managed settings, and what they say.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManagedSettings {
+    /// The tool names denied, sorted: the policy's denials that Claude Code
+    /// has a name for, and `mcp__` names.
+    pub deny: Vec<String>,
+    /// Whether the telemetry variables are pinned off.
+    pub telemetry_off: bool,
+    /// The file's content, with sorted keys and a trailing newline.
+    pub json: String,
+}
+
+/// The managed settings for a sandboxed Claude Code turn, from the tool
+/// names its policy denies (`denied`, names of any harness): the Claude Code
+/// ones are denied, bypass mode is disabled, and with `telemetry_off` the
+/// telemetry variables are pinned. Nothing else goes in the file. A policy
+/// with no denials gets no `deny` list; a turn with telemetry on or unset
+/// gets no `env` block, since provisioning sets no telemetry variable then.
+pub fn managed_settings(denied: &[&str], telemetry_off: bool) -> ManagedSettings {
+    let mut deny: Vec<String> = denied
+        .iter()
+        .copied()
+        .filter(|name| CLAUDE_CODE_TOOLS.contains(name) || name.starts_with("mcp__"))
+        .map(str::to_owned)
+        .collect();
+    deny.sort();
+    deny.dedup();
+    let mut permissions = json!({ "disableBypassPermissionsMode": "disable" });
+    if !deny.is_empty() {
+        permissions["deny"] = json!(deny);
+    }
+    let mut document = json!({ "permissions": permissions });
+    if telemetry_off {
+        let env: serde_json::Map<String, serde_json::Value> = TELEMETRY_OFF
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), json!(value)))
+            .collect();
+        document["env"] = serde_json::Value::Object(env);
+    }
+    ManagedSettings {
+        deny,
+        telemetry_off,
+        json: crate::json_text(&document),
+    }
+}
+
 pub(crate) struct Claude;
 
 impl Provisioner for Claude {
@@ -400,5 +518,160 @@ mod tests {
             resolve_model_alias("claude-sonnet-4-5", TEST_ALIASES),
             "claude-sonnet-4-5"
         );
+    }
+
+    /// The tool names each preset denies, as `PolicyPreset::rules` lists
+    /// them (`EDIT_TOOLS`, `SHELL_TOOLS`, `WEB_TOOLS`); `full` denies none.
+    const READ_ONLY_DENIES: &[&str] = &[
+        "Edit",
+        "Write",
+        "MultiEdit",
+        "NotebookEdit",
+        "fileChange",
+        "write_file",
+        "replace",
+        "Bash",
+        "BashOutput",
+        "KillBash",
+        "KillShell",
+        "commandExecution",
+        "run_shell_command",
+        "shell",
+        "exec_command",
+        "WebFetch",
+        "WebSearch",
+        "web_fetch",
+        "google_web_search",
+    ];
+    const EDIT_WORKTREE_DENIES: &[&str] = &[
+        "Bash",
+        "BashOutput",
+        "KillBash",
+        "KillShell",
+        "commandExecution",
+        "run_shell_command",
+        "shell",
+        "exec_command",
+        "WebFetch",
+        "WebSearch",
+        "web_fetch",
+        "google_web_search",
+    ];
+
+    /// The file a sandboxed turn's `read-only` policy gets, with telemetry
+    /// on or off: the Claude Code names of its denials, bypass disabled.
+    #[test]
+    fn read_only_writes_its_claude_code_denials() {
+        let deny = serde_json::json!([
+            "Bash",
+            "BashOutput",
+            "Edit",
+            "KillBash",
+            "KillShell",
+            "MultiEdit",
+            "NotebookEdit",
+            "WebFetch",
+            "WebSearch",
+            "Write"
+        ]);
+        let permissions =
+            serde_json::json!({ "disableBypassPermissionsMode": "disable", "deny": deny });
+        let off = managed_settings(READ_ONLY_DENIES, true);
+        assert_eq!(
+            parse(&off.json),
+            serde_json::json!({
+                "permissions": permissions,
+                "env": telemetry_off_env(),
+            })
+        );
+        assert_eq!(off.deny.len(), 10);
+        let on = managed_settings(READ_ONLY_DENIES, false);
+        assert_eq!(
+            parse(&on.json),
+            serde_json::json!({ "permissions": permissions })
+        );
+        assert!(!on.telemetry_off);
+    }
+
+    /// `edit-worktree` denies the shell and the web and nothing it edits.
+    #[test]
+    fn edit_worktree_writes_its_shell_and_web_denials() {
+        let deny = serde_json::json!([
+            "Bash",
+            "BashOutput",
+            "KillBash",
+            "KillShell",
+            "WebFetch",
+            "WebSearch"
+        ]);
+        let permissions =
+            serde_json::json!({ "disableBypassPermissionsMode": "disable", "deny": deny });
+        assert_eq!(
+            parse(&managed_settings(EDIT_WORKTREE_DENIES, true).json),
+            serde_json::json!({ "permissions": permissions, "env": telemetry_off_env() })
+        );
+        assert_eq!(
+            parse(&managed_settings(EDIT_WORKTREE_DENIES, false).json),
+            serde_json::json!({ "permissions": permissions })
+        );
+    }
+
+    /// `full` denies nothing, so there is no `deny` list; bypass mode is
+    /// still disabled, since the drivers route every request through the
+    /// branch's policy.
+    #[test]
+    fn full_writes_no_denials_only_the_bypass_setting() {
+        let permissions = serde_json::json!({ "disableBypassPermissionsMode": "disable" });
+        let off = managed_settings(&[], true);
+        assert_eq!(
+            parse(&off.json),
+            serde_json::json!({ "permissions": permissions, "env": telemetry_off_env() })
+        );
+        assert!(off.deny.is_empty());
+        assert_eq!(
+            parse(&managed_settings(&[], false).json),
+            serde_json::json!({ "permissions": permissions })
+        );
+    }
+
+    /// Names of other harnesses are not written, and `mcp__` names are, as
+    /// Claude Code spells MCP tools.
+    #[test]
+    fn only_claude_code_names_are_written() {
+        let managed = managed_settings(&["shell", "Bash", "mcp__docs__search", "Bash"], false);
+        assert_eq!(managed.deny, ["Bash", "mcp__docs__search"]);
+    }
+
+    /// Telemetry pinned off is what [`plan`] sets when telemetry is off, so
+    /// the managed file never disagrees with the home's environment.
+    #[test]
+    fn pinned_telemetry_is_what_the_plan_sets_when_off() {
+        let mut context = crate::Context::new(
+            "claude-code",
+            crate::Protocol::ClaudeStreamJson,
+            "/home/branch",
+            "/work",
+        );
+        context.telemetry = Some(crate::Telemetry {
+            enabled: false,
+            endpoint: None,
+        });
+        let plan = crate::plan(&context).unwrap();
+        for (name, value) in TELEMETRY_OFF {
+            let set = plan.env.iter().find(|var| var.name == *name);
+            assert_eq!(set.map(|var| var.value.as_str()), Some(*value), "{name}");
+        }
+    }
+
+    fn parse(text: &str) -> serde_json::Value {
+        serde_json::from_str(text).unwrap()
+    }
+
+    fn telemetry_off_env() -> serde_json::Value {
+        TELEMETRY_OFF
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), serde_json::json!(value)))
+            .collect::<serde_json::Map<_, _>>()
+            .into()
     }
 }

@@ -19368,6 +19368,17 @@
                         "format": "uint64",
                         "minimum": 0
                       }
+                    },
+                    "managed": {
+                      "description": "The managed settings written into a sandbox for a Claude Code\nturn, before the harness started, when the turn's sandbox took\nthem; see `docs/provisioning.md#managed-settings`. Names and\nflags only.",
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/ManagedWritten"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -20972,6 +20983,35 @@
             }
           ],
           "description": "How one secret reaches the harness. Names and paths only."
+        },
+        "ManagedWritten": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Where the file is, as Claude Code in the sandbox reads it."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The tool names the file denies."
+            },
+            "bypass_disabled": {
+              "type": "boolean",
+              "description": "Whether the file disables bypass mode. Every managed file does."
+            },
+            "telemetry_off": {
+              "type": "boolean",
+              "description": "Whether the file pins telemetry off."
+            }
+          },
+          "required": [
+            "path",
+            "bypass_disabled"
+          ],
+          "description": "The managed settings a sandboxed Claude Code turn wrote into its sandbox,\nas recorded in the turn's `Provisioned` activity: names and flags, never\nthe file's content. See `docs/provisioning.md#managed-settings`."
         },
         "Message": {
           "type": "object",
@@ -24117,6 +24157,17 @@
                         "format": "uint64",
                         "minimum": 0
                       }
+                    },
+                    "managed": {
+                      "description": "The managed settings written into a sandbox for a Claude Code\nturn, before the harness started, when the turn's sandbox took\nthem; see `docs/provisioning.md#managed-settings`. Names and\nflags only.",
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/ManagedWritten"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -25721,6 +25772,35 @@
             }
           ],
           "description": "How one secret reaches the harness. Names and paths only."
+        },
+        "ManagedWritten": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Where the file is, as Claude Code in the sandbox reads it."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The tool names the file denies."
+            },
+            "bypass_disabled": {
+              "type": "boolean",
+              "description": "Whether the file disables bypass mode. Every managed file does."
+            },
+            "telemetry_off": {
+              "type": "boolean",
+              "description": "Whether the file pins telemetry off."
+            }
+          },
+          "required": [
+            "path",
+            "bypass_disabled"
+          ],
+          "description": "The managed settings a sandboxed Claude Code turn wrote into its sandbox,\nas recorded in the turn's `Provisioned` activity: names and flags, never\nthe file's content. See `docs/provisioning.md#managed-settings`."
         },
         "Message": {
           "type": "object",
@@ -32523,6 +32603,17 @@
                         "format": "uint64",
                         "minimum": 0
                       }
+                    },
+                    "managed": {
+                      "description": "The managed settings written into a sandbox for a Claude Code\nturn, before the harness started, when the turn's sandbox took\nthem; see `docs/provisioning.md#managed-settings`. Names and\nflags only.",
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/ManagedWritten"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -34127,6 +34218,35 @@
             }
           ],
           "description": "How one secret reaches the harness. Names and paths only."
+        },
+        "ManagedWritten": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Where the file is, as Claude Code in the sandbox reads it."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The tool names the file denies."
+            },
+            "bypass_disabled": {
+              "type": "boolean",
+              "description": "Whether the file disables bypass mode. Every managed file does."
+            },
+            "telemetry_off": {
+              "type": "boolean",
+              "description": "Whether the file pins telemetry off."
+            }
+          },
+          "required": [
+            "path",
+            "bypass_disabled"
+          ],
+          "description": "The managed settings a sandboxed Claude Code turn wrote into its sandbox,\nas recorded in the turn's `Provisioned` activity: names and flags, never\nthe file's content. See `docs/provisioning.md#managed-settings`."
         },
         "Message": {
           "type": "object",

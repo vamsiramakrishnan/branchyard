@@ -388,10 +388,29 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             unused_secrets,
             connectors,
             knowledge,
+            managed,
         } => {
             let mut parts = Vec::new();
             if let Some(auth) = auth {
                 parts.push(format!("auth {auth}"));
+            }
+            if let Some(managed) = managed {
+                let deny = match managed.deny.is_empty() {
+                    true => "nothing".to_owned(),
+                    false => managed.deny.join(", "),
+                };
+                let mut flags = vec![format!("deny: {deny}")];
+                if managed.bypass_disabled {
+                    flags.push("bypass disabled".to_owned());
+                }
+                if managed.telemetry_off {
+                    flags.push("telemetry off".to_owned());
+                }
+                parts.push(format!(
+                    "managed settings: {} ({})",
+                    managed.path,
+                    flags.join("; ")
+                ));
             }
             if !knowledge.is_empty() {
                 parts.push(format!(

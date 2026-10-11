@@ -57,6 +57,28 @@ Every other harness (Pi, Amp, Goose, Cursor, Qwen Code, Kimi CLI, Oh My Pi, Deep
 
 **Model.** Branchyard had no per-task model option. `Provisioning::model` (`--model`) is one, set where each harness takes it, as the table says. An ACP profile without a native setting refuses it, because ACP v1 has no model parameter. A child's model (`by spawn --model`) is checked the same way before the child is created ([delegation](delegation.md#models)): where the provisioner sets it, the profile takes it, whatever its driver can do; a setting written into the home (Codex's `config.toml`, Gemini CLI's `settings.json`) needs a private one.
 
+### Managed settings
+
+Claude Code reads a managed settings file above every user, project, local and `--settings` value: no other scope overrides a managed key, and a `permissions.deny` in managed settings cannot be allowed back by any other scope ([settings precedence](https://code.claude.com/docs/en/settings), [permissions](https://code.claude.com/docs/en/permissions#settings-precedence)). On Linux and WSL the file is `/etc/claude-code/managed-settings.json`. Claude Code also merges the `*.json` files in `managed-settings.d/` beside it, after the file, in alphabetical order ([deploying managed settings](https://code.claude.com/docs/en/managed-settings)). Branchyard writes only the file.
+
+**What is written, and when.** A Claude Code turn in a sandbox, whichever provider it is on (Microsandbox, Substrate or a recipe), writes `/etc/claude-code/managed-settings.json` into the sandbox before its harness starts. It is one command run through the provider's `exec`: `mkdir -p` and a `printf` of the document, which is one shell-quoted word. The document holds these three things and nothing else:
+
+- `permissions.deny`: the tool names the branch's permission policy denies that Claude Code has a name for, which are the built-in names in its tools reference, the names it had before them (`MultiEdit`, `BashOutput`, `KillBash`, `KillShell`), and `mcp__` names. Another harness's names (`shell`, `write_file`, `commandExecution`) are not written. Under `read-only` that is `Bash`, `BashOutput`, `Edit`, `KillBash`, `KillShell`, `MultiEdit`, `NotebookEdit`, `WebFetch`, `WebSearch` and `Write`; under `edit-worktree`, the shell and web names; under `full`, no list at all. A wildcard denial (`mcp__*`) and a denial scoped to delegation commands are not written, since Claude Code cannot express either.
+- `permissions.disableBypassPermissionsMode`: `"disable"`, always. The docs put this key under `permissions`. The drivers route every permission request through the branch's policy, and bypass mode would skip that.
+- `env`: `CLAUDE_CODE_ENABLE_TELEMETRY` as `"0"` and `OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER` and `OTEL_TRACES_EXPORTER` as `"none"`, only when the task turns telemetry off. These are the variables provisioning sets then. With telemetry on or unset, nothing is written.
+
+The allowances and the policy's default are not in the file. The file only takes the denied tools out of what Claude Code runs on its own, so a settings file the harness writes in its home cannot allow them back.
+
+**If the write fails.** The sandbox may have no root, or no `/etc`. The turn goes on with the settings in its home alone, and a `Warning` activity names the file and why the write failed. There is no retry.
+
+**What `by log` shows.** The turn's `provisioned` line gains the write, for example `managed settings: /etc/claude-code/managed-settings.json (deny: Bash, WebFetch; bypass disabled)`, with `telemetry off` added inside the brackets when telemetry is pinned. The JSON `provisioned` event has the same names and flags in its `managed` field.
+
+**A local branch gets none.** A local Claude Code harness runs on the host, and the host's `/etc` is not Branchyard's to write. Its settings are the ones in its home, and the denials of its policy hold only through Branchyard's permission requests.
+
+**What this does not guarantee.** Under the default `managedSourcesBehavior`, `"first-wins"`, Claude Code takes the highest admin source that delivers any policy key and ignores the rest. A server-managed or MDM policy above the file therefore replaces it. A session that authenticates to Anthropic's API with an eligible credential fetches server-managed settings, so it can receive them this way. Claude Code reads the file at startup, and the write happens before the harness starts, so the file applies to the turn that writes it.
+
+**Not checked.** The document is built from the documented keys and precedence above. No Claude Code binary was run against it, in a sandbox or elsewhere, and no model was called. `CLAUDE_CODE_TOOLS` in `crates/branchyard-provision/src/claude.rs` lists the tools reference's names as read when this was written; a tool Claude Code adds later is not written until the list is extended.
+
 ### Secrets and the harness's tools
 
 A variable in the harness's environment reaches every command its tools run (its shell tool, the MCP servers it starts) without anyone asking for it: `env`, a build script or a crash report can print it. A file in the private home does not travel with the environment, though a tool running as the same user could still open it: nothing but a harness that sandboxes its tools prevents that. So each provisioner prefers a file, or a helper that reads one, wherever the harness is known to take it, and otherwise says in its plan that the secret is in the tools' environment. The `provisioned` event carries that, per secret, by name.
