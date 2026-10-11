@@ -661,8 +661,11 @@ fn the_model_gateways_keys_are_named_and_its_routed_models_priced() {
     let repo = Repo::used();
     repo.project_file(
         "[models.backends.anthropic]\napi = \"anthropic\"\nkey = \"DOCTOR_TEST_MODEL_KEY\"\n\
+         [models.backends.openai]\napi = \"openai\"\nkey = \"DOCTOR_TEST_MODEL_KEY\"\n\
          [models.backends.local]\napi = \"generic\"\nurl = \"http://127.0.0.1:9\"\n\
          [[models.routes]]\nmodel = \"claude-sonnet-4-6\"\nbackends = [\"anthropic\"]\n\
+         [[models.routes]]\nmodel = \"claude-opus-4-1\"\nbackends = [\"anthropic\"]\n\
+         fallbacks = [\"openai\"]\nbackend_model = \"made-up-gpt\"\n\
          [[models.routes]]\nmodel = \"made-up-model\"\nbackends = [\"local\"]\n\
          [[models.routes]]\nmodel = \"gpt-*\"\nbackends = [\"local\"]\n",
     );
@@ -678,11 +681,20 @@ fn the_model_gateways_keys_are_named_and_its_routed_models_priced() {
     assert!(report.fix("models.keys").contains("export the variable"));
     assert_eq!(report.status("models.prices"), "warn");
     let prices = report.detail("models.prices");
-    assert!(prices.contains("no price for made-up-model"), "{prices}");
+    // The unpriced models, in route order: the opus route's fallback is
+    // asked for a model nothing prices and is named for it, while the
+    // catalog prices the route itself on its Anthropic backend.
+    assert!(
+        prices.contains(
+            "no price for claude-opus-4-1 via openai as made-up-gpt, made-up-model: its calls"
+        ),
+        "{prices}"
+    );
     assert!(
         !prices.contains("claude-sonnet-4-6"),
         "the catalog prices it: {prices}"
     );
+    assert_eq!(prices.matches("claude-opus-4-1").count(), 1, "{prices}");
     assert!(
         prices.contains("gpt-*"),
         "a pattern is named as not checked: {prices}"
@@ -696,7 +708,10 @@ fn the_model_gateways_keys_are_named_and_its_routed_models_priced() {
     // A price in the configuration covers the model.
     repo.project_file(
         "[models.backends.local]\napi = \"generic\"\nurl = \"http://127.0.0.1:9\"\n\
+         [models.backends.openai]\napi = \"openai\"\n\
          [[models.routes]]\nmodel = \"made-up-model\"\nbackends = [\"local\"]\n\
+         [[models.routes]]\nmodel = \"claude-opus-4-1\"\nbackends = [\"openai\"]\n\
+         backend_model = \"made-up-gpt\"\n\
          [models.prices.\"made-up-*\"]\ninput = 1.0\noutput = 2.0\n",
     );
     let report = repo.doctor(&[]);

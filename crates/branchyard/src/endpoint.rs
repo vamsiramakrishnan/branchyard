@@ -38,7 +38,7 @@
 use branchyard_support::{best_effort, CondvarExt as _, LockExt as _};
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -416,13 +416,9 @@ impl Endpoint {
         if self.state.stop.swap(true, Ordering::SeqCst) {
             return;
         }
-        let mut wake = self.address;
-        if wake.ip().is_unspecified() {
-            wake.set_ip(Ipv4Addr::LOCALHOST.into());
-        }
         best_effort(
             "connect to wake the delegation endpoint",
-            TcpStream::connect_timeout(&wake, Duration::from_secs(1)),
+            TcpStream::connect_timeout(&wake_address(self.address), Duration::from_secs(1)),
         );
         if let Some(thread) = self.thread.take() {
             branchyard_support::join_reporting("delegation endpoint accept", thread);
@@ -515,6 +511,22 @@ fn issue(
         .map_err(|e| format!("could not sign the delegation token: {e}"))?;
     let jwks = ring.jwks().map_err(|e| e.to_string())?;
     Ok((token, jwks, by_branch))
+}
+
+/// Where a connection reaches the listener bound at `address`, to wake its
+/// accept loop: a wildcard through the loopback of its own family, since a
+/// `::` listener on a host that keeps IPv6 to itself never sees an IPv4
+/// connection, and a wake that never arrives leaves the join of the accept
+/// thread waiting forever.
+fn wake_address(address: SocketAddr) -> SocketAddr {
+    let mut wake = address;
+    if wake.ip().is_unspecified() {
+        wake.set_ip(match wake.ip() {
+            IpAddr::V4(_) => Ipv4Addr::LOCALHOST.into(),
+            IpAddr::V6(_) => Ipv6Addr::LOCALHOST.into(),
+        });
+    }
+    wake
 }
 
 fn serve(listener: TcpListener, state: Arc<State>, address: SocketAddr) -> io::Result<Endpoint> {
@@ -1019,5 +1031,14 @@ mod tests {
         );
         assert!(state.session(first.as_deref().unwrap()).is_none());
         end_all(&state);
+    }
+
+    #[test]
+    fn a_wildcard_listener_is_woken_through_the_loopback_of_its_own_family() {
+        let at = |text: &str| text.parse::<SocketAddr>().unwrap();
+        assert_eq!(wake_address(at("0.0.0.0:4321")), at("127.0.0.1:4321"));
+        assert_eq!(wake_address(at("[::]:4321")), at("[::1]:4321"));
+        assert_eq!(wake_address(at("10.0.0.7:4321")), at("10.0.0.7:4321"));
+        assert_eq!(wake_address(at("[fd00::7]:4321")), at("[fd00::7]:4321"));
     }
 }

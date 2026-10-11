@@ -972,7 +972,9 @@ fn keys_row(rows: &[KeyRow]) -> Check {
     }
 }
 
-/// Every routed model has a price, from `[models.prices]` or the catalog.
+/// Every routed model has a price on every backend the gateway may send it
+/// to, as the model that backend is asked for, from `[models.prices]` or the
+/// catalog.
 pub(super) fn models_prices(ctx: &Context) -> Vec<Check> {
     const NAME: &str = "models.prices";
     let Some(config) = ctx.config() else {
@@ -1002,31 +1004,39 @@ pub(super) fn models_prices(ctx: &Context) -> Vec<Check> {
                 )]
             }
         };
-    let mut unpriced = Vec::new();
+    let mut unpriced: Vec<String> = Vec::new();
     let mut patterns = Vec::new();
-    for route in &config.models.routes {
+    for route in &engine.routes {
         if route.model.contains(['*', '?']) {
             patterns.push(route.model.as_str());
             continue;
         }
-        let api = route
-            .backends
-            .first()
-            .and_then(|name| config.models.backends.get(name))
-            .and_then(|backend| backend.api.parse::<Api>().ok())
-            .unwrap_or(Api::Generic);
-        if doctor::price_source(&engine, api, &route.model).is_none() {
-            unpriced.push(route.model.as_str());
+        // Every backend the gateway may send the route's calls to, priced
+        // as the model it asks that backend for: the route's, or its
+        // backend_model where the call is translated. A route none of
+        // whose backends is defined is priced as the request itself.
+        let served = doctor::served_by(&engine, route);
+        if served.is_empty() && doctor::price_source(&engine, Api::Generic, &route.model).is_none()
+        {
+            unpriced.push(route.model.clone());
+        }
+        for place in served {
+            if doctor::price_source(&engine, place.api, &place.model).is_some() {
+                continue;
+            }
+            let entry = match place.model == route.model {
+                true => route.model.clone(),
+                false => format!("{} via {} as {}", route.model, place.backend, place.model),
+            };
+            if !unpriced.contains(&entry) {
+                unpriced.push(entry);
+            }
         }
     }
     let mut detail = format!(
         "{} route{}",
-        config.models.routes.len(),
-        if config.models.routes.len() == 1 {
-            ""
-        } else {
-            "s"
-        }
+        engine.routes.len(),
+        if engine.routes.len() == 1 { "" } else { "s" }
     );
     if !patterns.is_empty() {
         detail.push_str(&format!(

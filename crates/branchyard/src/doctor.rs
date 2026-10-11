@@ -15,13 +15,17 @@
 //!   harness to the egress proxy (docs/egress.md).
 //! - [`price_source`] says what prices a routed model, as the model gateway
 //!   does (docs/model-gateway.md).
+//! - [`served_by`] lists the backends a route's calls may reach and what
+//!   each prices them as, as the gateway plans them.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
-use crate::models::{pricing, Api, Config, Tokens};
+use strum::IntoEnumIterator as _;
+
+use crate::models::{pricing, Api, Config, RouteConfig, Tokens};
 use crate::providers::ProviderKind;
 use crate::state::SandboxKind;
 use crate::{Error, SandboxOptions, Yard};
@@ -237,6 +241,65 @@ pub fn price_source(config: &Config, api: Api, model: &str) -> Option<PriceSourc
     pricing::cost(api, model, &Tokens::default()).map(|_| PriceSource::Catalog)
 }
 
+/// One backend a route's calls may reach, and what the gateway prices
+/// them as there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Served {
+    /// The backend's name.
+    pub backend: String,
+    /// The API it speaks, which the price is looked up under.
+    pub api: Api,
+    /// The model it is asked for: the route's, or the route's
+    /// `backend_model` when the call is translated for it.
+    pub model: String,
+}
+
+/// Where the gateway may send a call for `route`, which names one model,
+/// and what each backend prices it as. Every backend the route names is
+/// reachable: the gateway chooses among the weighted ones by weight, then
+/// tries the rest and the fallbacks in order. A route without a
+/// `backend_model` serves requests of the API its first backend speaks,
+/// and each backend of that API is asked for the route's model; a route
+/// with one serves the API that translates to one of its backends, which
+/// are asked for the `backend_model`, while backends of the request's own
+/// API are asked for the route's model. A backend the request never
+/// reaches, or that the configuration does not define (`by config
+/// validate` reports it), is left out.
+pub fn served_by(config: &Config, route: &RouteConfig) -> Vec<Served> {
+    let backends: Vec<_> = route
+        .backends
+        .iter()
+        .chain(&route.fallbacks)
+        .filter_map(|name| config.backends.get(name).map(|backend| (name, backend)))
+        .collect();
+    let Some((_, first)) = backends.first() else {
+        return Vec::new();
+    };
+    let request = match route.backend_model {
+        Some(_) => Api::iter()
+            .find(|api| backends.iter().any(|(_, b)| api.translates_to(b.api)))
+            .unwrap_or(first.api),
+        None => first.api,
+    };
+    backends
+        .iter()
+        .filter_map(|(name, backend)| {
+            let model = if backend.api == request {
+                route.model.clone()
+            } else if request.translates_to(backend.api) {
+                route.backend_model.clone()?
+            } else {
+                return None;
+            };
+            Some(Served {
+                backend: (*name).clone(),
+                api: backend.api,
+                model,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,5 +481,53 @@ mod tests {
         if let Err(reason) = egress_confinement() {
             assert!(!reason.is_empty());
         }
+    }
+
+    #[test]
+    fn a_route_is_served_by_every_backend_its_requests_reach_as_the_model_each_is_asked_for() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "backends": {
+                "a": {"api": "anthropic", "key": "A"},
+                "b": {"api": "anthropic", "key": "B"},
+                "o": {"api": "openai", "key": "O"},
+                "g": {"api": "generic", "url": "http://127.0.0.1:9"}
+            },
+            "routes": [
+                {"model": "claude-x", "backends": ["a", "b"], "fallbacks": ["o"]},
+                {"model": "claude-x", "backends": ["a", "o"], "backend_model": "gpt-5"},
+                {"model": "claude-x", "backends": ["o"], "fallbacks": ["g"], "backend_model": "gpt-5"},
+                {"model": "any", "backends": ["missing"]}
+            ]
+        }))
+        .unwrap();
+        let served = |i: usize| -> Vec<(String, Api, String)> {
+            served_by(&config, &config.routes[i])
+                .into_iter()
+                .map(|s| (s.backend, s.api, s.model))
+                .collect()
+        };
+        let at = |backend: &str, api: Api, model: &str| (backend.to_owned(), api, model.to_owned());
+        // Without a backend_model the route serves its first backend's API,
+        // and a fallback of another API is never reached.
+        assert_eq!(
+            served(0),
+            [
+                at("a", Api::Anthropic, "claude-x"),
+                at("b", Api::Anthropic, "claude-x")
+            ]
+        );
+        // With one, the Anthropic request is translated for the OpenAI
+        // backend, which is asked for the backend_model and prices it.
+        assert_eq!(
+            served(1),
+            [
+                at("a", Api::Anthropic, "claude-x"),
+                at("o", Api::Openai, "gpt-5")
+            ]
+        );
+        // Only translated backends: the request speaks the API that
+        // translates, which the generic fallback never receives.
+        assert_eq!(served(2), [at("o", Api::Openai, "gpt-5")]);
+        assert!(served(3).is_empty());
     }
 }
