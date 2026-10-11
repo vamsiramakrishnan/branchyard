@@ -64,11 +64,11 @@
     }
   },
   "tests": {
-    "total": 2087,
+    "total": 2096,
     "ignored": 29,
     "by_crate": {
       "branchyard": {
-        "tests": 641,
+        "tests": 648,
         "ignored": 15
       },
       "branchyard-bridge": {
@@ -76,7 +76,7 @@
         "ignored": 0
       },
       "branchyard-cli": {
-        "tests": 426,
+        "tests": 428,
         "ignored": 3
       },
       "branchyard-client": {

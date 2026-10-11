@@ -16044,6 +16044,21 @@
               "format": "double",
               "description": "What is left of `max_usd` after its own spend, what its live\nchildren hold (`reserved_usd`) and what its settled and removed\nchildren spent (`settled_children_usd`): what it can still spend or\ngrant."
             },
+            "tree_remaining_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "What the cost limits above it leave it: the least, over its\nancestors that have a limit, of that limit less everything its tree\nhas spent (the ancestor's own spend and all its descendants').\nWhen it reaches zero, the tree has spent that limit: nothing more\nis spawned below that ancestor and the turns running below it are\nstopped over budget. Omitted when no ancestor has a limit."
+            },
+            "tree_capped_by": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The ancestor whose limit `tree_remaining_usd` is."
+            },
             "reserved_usd": {
               "type": "number",
               "format": "double",
@@ -17363,6 +17378,21 @@
               ],
               "format": "double",
               "description": "What is left of `max_usd` after its own spend, what its live\nchildren hold (`reserved_usd`) and what its settled and removed\nchildren spent (`settled_children_usd`): what it can still spend or\ngrant."
+            },
+            "tree_remaining_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "What the cost limits above it leave it: the least, over its\nancestors that have a limit, of that limit less everything its tree\nhas spent (the ancestor's own spend and all its descendants').\nWhen it reaches zero, the tree has spent that limit: nothing more\nis spawned below that ancestor and the turns running below it are\nstopped over budget. Omitted when no ancestor has a limit."
+            },
+            "tree_capped_by": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The ancestor whose limit `tree_remaining_usd` is."
             },
             "reserved_usd": {
               "type": "number",
@@ -18721,6 +18751,21 @@
               ],
               "format": "double",
               "description": "What is left of `max_usd` after its own spend, what its live\nchildren hold (`reserved_usd`) and what its settled and removed\nchildren spent (`settled_children_usd`): what it can still spend or\ngrant."
+            },
+            "tree_remaining_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "What the cost limits above it leave it: the least, over its\nancestors that have a limit, of that limit less everything its tree\nhas spent (the ancestor's own spend and all its descendants').\nWhen it reaches zero, the tree has spent that limit: nothing more\nis spawned below that ancestor and the turns running below it are\nstopped over budget. Omitted when no ancestor has a limit."
+            },
+            "tree_capped_by": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The ancestor whose limit `tree_remaining_usd` is."
             },
             "reserved_usd": {
               "type": "number",
@@ -30473,6 +30518,21 @@
               "format": "double",
               "description": "What is left of `max_usd` after its own spend, what its live\nchildren hold (`reserved_usd`) and what its settled and removed\nchildren spent (`settled_children_usd`): what it can still spend or\ngrant."
             },
+            "tree_remaining_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "What the cost limits above it leave it: the least, over its\nancestors that have a limit, of that limit less everything its tree\nhas spent (the ancestor's own spend and all its descendants').\nWhen it reaches zero, the tree has spent that limit: nothing more\nis spawned below that ancestor and the turns running below it are\nstopped over budget. Omitted when no ancestor has a limit."
+            },
+            "tree_capped_by": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The ancestor whose limit `tree_remaining_usd` is."
+            },
             "reserved_usd": {
               "type": "number",
               "format": "double",
@@ -32182,6 +32242,21 @@
           ],
           "format": "double",
           "description": "What is left of `max_usd` after its own spend, what its live\nchildren hold (`reserved_usd`) and what its settled and removed\nchildren spent (`settled_children_usd`): what it can still spend or\ngrant."
+        },
+        "tree_remaining_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "What the cost limits above it leave it: the least, over its\nancestors that have a limit, of that limit less everything its tree\nhas spent (the ancestor's own spend and all its descendants').\nWhen it reaches zero, the tree has spent that limit: nothing more\nis spawned below that ancestor and the turns running below it are\nstopped over budget. Omitted when no ancestor has a limit."
+        },
+        "tree_capped_by": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The ancestor whose limit `tree_remaining_usd` is."
         },
         "reserved_usd": {
           "type": "number",

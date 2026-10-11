@@ -106,7 +106,8 @@ pub fn tools() -> Vec<Tool> {
     let mut inspect = Tool::new(
         "inspect",
         "A branch's status, candidate diffstat, cost, budget, children and last message. \
-         Omit branch for your own, including what budget you have left to grant.",
+         Omit branch for your own, including what budget you have left to grant and what the \
+         cost limits above you leave you (tree_remaining_usd).",
         schema(json!({
             "type": "object",
             "properties": {"branch": branch_property("Your own branch or a descendant; defaults to your own")},
@@ -226,7 +227,10 @@ pub fn tools() -> Vec<Tool> {
             "spawn",
             "Create a child branch and start a harness on it with a prompt. It starts from your \
              current work (your uncommitted changes are committed to your branch first) or from \
-             base. Its budget must fit in what you have left. Returns the child's name once it \
+             base. Its budget must fit in what you have left and in what the cost limits above you \
+             leave their trees (inspect shows both); it is refused by name when it does not, and \
+             once your tree has spent your limit. A child is stopped over budget when the tree \
+             under a limit above it has spent that limit. Returns the child's name once it \
              has started; it runs in parallel with you. With depends_on it is created waiting, \
              and starts once those children have settled.",
             schema(json!({

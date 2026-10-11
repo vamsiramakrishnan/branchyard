@@ -340,6 +340,32 @@ class Requests(ServerCase):
         assert bare.reported is not None
         self.assertIsNone(bare.reported.link)
 
+    def test_inspection_says_what_the_cost_limits_above_a_branch_leave_it(self):
+        self.fake.always(
+            "GET",
+            f"{REPO}/branches/kid/inspection",
+            200,
+            {
+                "name": "kid",
+                "status": {"state": "running"},
+                "max_usd": 0.5,
+                "remaining_usd": 0.4,
+                "subtree_cost_usd": 0.1,
+                "tree_remaining_usd": 0.05,
+                "tree_capped_by": "meta",
+            },
+        )
+        inspection = self.app.inspect("kid")
+        # Its own limit leaves more than the tree under its parent does: the
+        # smaller figure is what it can really still spend.
+        self.assertEqual(inspection.remaining_usd, 0.4)
+        self.assertEqual(inspection.tree_remaining_usd, 0.05)
+        self.assertEqual(inspection.tree_capped_by, "meta")
+        # Omitted when no branch above it has a cost limit.
+        bare = bc.Inspection({"name": "x", "status": {"state": "running"}})
+        self.assertIsNone(bare.tree_remaining_usd)
+        self.assertIsNone(bare.tree_capped_by)
+
     def test_the_health_check_sends_no_token(self):
         self.assertTrue(self.client.healthy())
         ((_, _, headers, _),) = self.requests("GET", "/healthz")

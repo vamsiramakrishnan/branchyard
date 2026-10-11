@@ -1298,6 +1298,41 @@ fn held_text(i: &branchyard::Inspection) -> String {
     }
 }
 
+/// The lines that say what a branch has spent with its descendants, what
+/// it may still spend and what the cost limits above it leave, for `by
+/// inspect` and `by show`: `subtree cost` (with `every_subtree`, or when it
+/// has children, so a branch with none does not say its own cost twice),
+/// `budget` when it has a cost limit, and `tree budget` when a branch above
+/// it has one.
+pub fn budget_lines(
+    i: &branchyard::Inspection,
+    every_subtree: bool,
+) -> Vec<(&'static str, String)> {
+    let money = |v: Option<f64>| v.map_or("unknown".into(), usd);
+    let mut lines = Vec::new();
+    if every_subtree || !i.children.is_empty() {
+        lines.push(("subtree cost", usd(i.subtree_cost_usd)));
+    }
+    if let Some(max) = i.max_usd {
+        lines.push((
+            "budget",
+            format!(
+                "{} of {} left{}",
+                money(i.remaining_usd),
+                usd(max),
+                held_text(i)
+            ),
+        ));
+    }
+    if let (Some(left), Some(by)) = (i.tree_remaining_usd, &i.tree_capped_by) {
+        lines.push((
+            "tree budget",
+            format!("{} left under {by}'s cost limit", usd(left)),
+        ));
+    }
+    lines
+}
+
 /// A branch's harness as every command names it to a person: the harness
 /// ID typed (`--harness claude-code`) and the profile it resolved to.
 pub fn harness_label(harness: &str, profile: &str) -> String {
@@ -1333,19 +1368,8 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
         ("candidate", candidate_text(i.candidate.as_ref())),
         ("turns", i.turns.to_string()),
         ("cost", money(i.cost_usd)),
-        ("subtree cost", usd(i.subtree_cost_usd)),
     ];
-    if let Some(max) = i.max_usd {
-        pairs.push((
-            "budget",
-            format!(
-                "{} of {} left{}",
-                money(i.remaining_usd),
-                usd(max),
-                held_text(i)
-            ),
-        ));
-    }
+    pairs.extend(budget_lines(i, true));
     pairs.push(("check", check_text(i)));
     if !i.grants.is_empty() {
         let grants: Vec<String> = i.grants.iter().map(|g| g.to_string()).collect();
@@ -1562,7 +1586,13 @@ pub fn graph_applied(a: &branchyard::GraphApplied, style: Style) -> String {
 
 /// `by show`.
 /// With `extra` `(key, value)` lines at the end, aligned with the rest.
-pub fn details(info: &BranchInfo, now: u64, style: Style, extra: Vec<(&str, String)>) -> String {
+pub fn details(
+    info: &BranchInfo,
+    budget: Option<&branchyard::Inspection>,
+    now: u64,
+    style: Style,
+    extra: Vec<(&str, String)>,
+) -> String {
     let (status, tone) = branch_status_text(info);
     let mut pairs = vec![
         ("branch", info.name.clone()),
@@ -1581,6 +1611,11 @@ pub fn details(info: &BranchInfo, now: u64, style: Style, extra: Vec<(&str, Stri
         ("base", short_commit(&info.base).to_owned()),
         ("candidate", candidate_detail(info)),
         ("cost", cost_detail(info)),
+    ]);
+    if let Some(inspection) = budget {
+        pairs.extend(budget_lines(inspection, false));
+    }
+    pairs.extend([
         (
             "session",
             info.session.clone().unwrap_or_else(|| "none".into()),
@@ -2178,6 +2213,53 @@ mod tests {
         assert!(text.contains("$0.20 of $1.50 left") && !text.contains("reserved by"));
     }
 
+    /// `by inspect` and `by show` say what a branch may still spend, what
+    /// its tree has spent, and what the limit above it leaves, in the same
+    /// words.
+    #[test]
+    fn budget_lines_say_what_the_trees_above_leave() {
+        let mut i: branchyard::Inspection = serde_json::from_value(serde_json::json!({
+            "name": "kid", "status": {"state": "running"}, "harness": "claude-code",
+            "profile": "claude-code-stream-json", "parent": "meta", "children": ["leaf"],
+            "depth": 1, "turns": 1, "candidate": null, "cost_usd": 0.04,
+            "subtree_cost_usd": 0.07, "max_usd": 0.5, "remaining_usd": 0.43,
+            "tree_remaining_usd": 0.06, "tree_capped_by": "meta",
+            "envelope": null, "last_message": "",
+        }))
+        .unwrap();
+        let text = inspection(&i, Style::PLAIN);
+        for line in [
+            "subtree cost  $0.07\n",
+            "budget        $0.43 of $0.50 left\n",
+            "tree budget   $0.06 left under meta's cost limit\n",
+        ] {
+            assert!(text.contains(line), "{line:?} not in {text}");
+        }
+        // `by show` has the same lines after the cost, and no subtree cost
+        // for a branch with no children, which would only repeat its cost.
+        let shown = details(&info("kid", None), Some(&i), 10_000, PLAIN, Vec::new());
+        assert!(
+            shown.contains(
+                "cost          not reported, 1 turn\n\
+                 subtree cost  $0.07\n\
+                 budget        $0.43 of $0.50 left\n\
+                 tree budget   $0.06 left under meta's cost limit\n\
+                 session"
+            ),
+            "{shown}"
+        );
+        i.children.clear();
+        let shown = details(&info("kid", None), Some(&i), 10_000, PLAIN, Vec::new());
+        assert!(!shown.contains("subtree cost"), "{shown}");
+        assert!(shown.contains("tree budget"), "{shown}");
+        // Nothing to say without a limit anywhere: no lines.
+        (i.max_usd, i.remaining_usd) = (None, None);
+        (i.tree_remaining_usd, i.tree_capped_by) = (None, None);
+        let shown = details(&info("kid", None), Some(&i), 10_000, PLAIN, Vec::new());
+        assert!(!shown.contains("budget"), "{shown}");
+        assert!(inspection(&i, Style::PLAIN).contains("subtree cost  $0.07\n"));
+    }
+
     /// The model line names the model a branch was given, or says it runs
     /// its harness's default.
     #[test]
@@ -2486,7 +2568,7 @@ mod tests {
     fn details_include_fork_parent_and_session() {
         let mut fork = info("alt", Some("flaky"));
         fork.session = Some("s-9".into());
-        let text = details(&fork, 10_000 + 120, PLAIN, Vec::new());
+        let text = details(&fork, None, 10_000 + 120, PLAIN, Vec::new());
         assert!(text.contains("forked from  flaky\n"), "{text}");
         assert!(text.contains("session      s-9\n"));
         assert!(text.contains("base         0123456789\n"));

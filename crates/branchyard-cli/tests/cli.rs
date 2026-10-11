@@ -1056,6 +1056,55 @@ fn a_send_without_limits_keeps_the_ones_given_before() {
     assert_eq!(me["max_usd"], 7.0);
 }
 
+/// `by show` says what a branch may still spend, what its tree has spent,
+/// and, for a child, what the limit above it leaves, in text and in JSON,
+/// as `by inspect` does.
+#[test]
+fn show_says_what_is_left_of_a_budget_and_what_the_tree_has_spent() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&[
+        "run",
+        "SH by spawn 'say hi' --name kid --budget-usd 0.4 --wait --json",
+        "--name",
+        "root",
+        "--delegate",
+        "--budget-usd",
+        "1",
+        "--yes",
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let root = repo.json(&["show", "root", "--json"]);
+    assert_eq!(root["max_usd"], 1.0, "{root}");
+    assert_eq!(root["remaining_usd"], 1.0, "{root}");
+    assert_eq!(root["subtree_cost_usd"], 0.0, "{root}");
+    assert!(root.get("tree_remaining_usd").is_none(), "nothing above it");
+    let kid = repo.json(&["show", "kid", "--json"]);
+    assert_eq!(kid["max_usd"], 0.4, "{kid}");
+    assert_eq!(kid["remaining_usd"], 0.4, "{kid}");
+    assert_eq!(kid["tree_remaining_usd"], 1.0, "{kid}");
+    assert_eq!(kid["tree_capped_by"], "root", "{kid}");
+    let text = stdout(&repo.by(&["show", "root"]));
+    for line in [
+        "subtree cost  $0.00\n",
+        "budget        $1.00 of $1.00 left\n",
+    ] {
+        assert!(text.contains(line), "{line:?} not in\n{text}");
+    }
+    let text = stdout(&repo.by(&["show", "kid"]));
+    for line in [
+        "budget       $0.40 of $0.40 left\n",
+        "tree budget  $1.00 left under root's cost limit\n",
+    ] {
+        assert!(text.contains(line), "{line:?} not in\n{text}");
+    }
+    // A branch with no limit anywhere shows none.
+    let out = repo.by_agent(&["run", "say hi", "--name", "free"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let free = repo.json(&["show", "free", "--json"]);
+    assert_eq!(free["max_usd"], Value::Null, "{free}");
+    assert!(!stdout(&repo.by(&["show", "free"])).contains("budget"));
+}
+
 /// The battery's recovery scenario: a child's question was steered into
 /// its parent's running turn and counted delivered once written to the
 /// harness, which reads it only at its next step; the parent's

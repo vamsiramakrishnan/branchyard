@@ -925,6 +925,20 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         },
     };
     let checkpoints = crate::attempts::checkpoints(target, &info)?;
+    // What it may still spend, and what its tree has spent (docs/delegation.md
+    // "Budgets"); a server that cannot inspect it, or a branch that cannot be
+    // inspected, shows neither.
+    let budget = match target {
+        Target::Local => open().ok().and_then(|yard| {
+            yard.branch(&info.name)
+                .ok()?
+                .delegate(TaskOptions::default())
+                .ok()?
+                .inspect(&info.name)
+                .ok()
+        }),
+        Target::Remote(remote) => remote::inspect(remote, &info.name).ok(),
+    };
     let (readiness, line) = crate::pr::show_readiness(&info, &events, env.style());
     // The task it is an attempt of (docs/task-repos.md); a server too old
     // to say has none.
@@ -942,6 +956,15 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
             value["task"] = task.clone();
         }
         value["checkpoints"] = serde_json::to_value(&checkpoints).unwrap_or_default();
+        if let Some(i) = &budget {
+            value["subtree_cost_usd"] = serde_json::json!(i.subtree_cost_usd);
+            value["max_usd"] = serde_json::json!(i.max_usd);
+            value["remaining_usd"] = serde_json::json!(i.remaining_usd);
+            if let (Some(left), Some(by)) = (i.tree_remaining_usd, &i.tree_capped_by) {
+                value["tree_remaining_usd"] = serde_json::json!(left);
+                value["tree_capped_by"] = serde_json::json!(by);
+            }
+        }
         value["merge_readiness"] = readiness;
         // Only when something listens, so local and remote `show --json`
         // agree for a branch with no servers.
@@ -994,6 +1017,7 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
     extra.extend(crate::plan_cmd::show_lines(&info.name, &events));
     let mut text = render::details(
         &info,
+        budget.as_ref(),
         branchyard_support::time::now_ms() / 1000,
         env.style(),
         extra,

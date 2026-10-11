@@ -464,7 +464,8 @@ class StatusReport(Record):
 class Inspection(Record):
     """`Inspection`, as `by inspect --json`: `name`, `status`, `harness`,
     `parent`, `children`, `depth`, `turns`, `cost_usd`, `subtree_cost_usd`,
-    `max_usd`, `remaining_usd`, `envelope`, `allowed_harnesses`,
+    `max_usd`, `remaining_usd`, `tree_remaining_usd`, `tree_capped_by`,
+    `envelope`, `allowed_harnesses`,
     `last_message`, `check`, `model`, `grants`, `reported`, ...
     (`docs/delegation.md`)."""
 

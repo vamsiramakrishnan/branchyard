@@ -58,10 +58,13 @@ pub(crate) struct TurnState {
     pub by_branch: String,
     pub turn: u32,
     pub subject: String,
-    /// The branch's cost limit, and what it had spent (with what its
-    /// children reserved) before this turn.
+    /// The branch's cost limit, what it had spent before this turn, and
+    /// what its children held of the limit when the turn started (the
+    /// figure a call falls back on when the store cannot be read: each
+    /// call reads what they hold then).
     pub max_usd: Option<f64>,
-    pub spent_before: f64,
+    pub cost_before: f64,
+    pub held: f64,
     /// What this turn's calls cost so far.
     pub metered: Mutex<f64>,
 }
@@ -1136,17 +1139,36 @@ fn write_head_parts(
     out.flush()
 }
 
-/// Refuse a call the branch's budget or the yard's period budgets leave
-/// no room for.
+/// Refuse a call the branch's budget, the cost limits above it or the
+/// yard's period budgets leave no room for. A call that would start with
+/// the spend already at the limit is refused; one already running is not
+/// cut short and is counted when it ends, so a branch ends over by at most
+/// the calls in flight when it reached the limit.
 fn within_budgets(state: &TurnState) -> Result<(), String> {
     let metered = *state.metered.lock_recovering("metered");
+    let store = state.yard.store();
     if let Some(max) = state.max_usd {
-        let spent = state.spent_before + metered;
+        // What the branch's children hold changes while the turn runs
+        // (it may spawn them in this very turn), so it is read for the
+        // call.
+        let held = store.read(&state.branch).map_or(state.held, |record| {
+            crate::delegation::reserved(&store, &record)
+        });
+        let spent = state.cost_before + held + metered;
         if spent >= max {
             return Err(format!(
                 "the branch's budget is spent (max_usd: ${spent:.4} of ${max:.2})"
             ));
         }
+    }
+    // The turns of a tree spend a limit above them together: once the
+    // tree has spent it, none of them may start a call.
+    let own = state.cost_before + metered;
+    if let Some(cap) = crate::delegation::capped_above(&store, &state.branch, Some(own)) {
+        return Err(format!(
+            "the cost limit above this branch is spent ({})",
+            cap.spent_text()
+        ));
     }
     let budget = &state.gateway.budget;
     if budget.daily_usd.is_none()

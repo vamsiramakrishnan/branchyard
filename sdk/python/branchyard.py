@@ -295,6 +295,14 @@ class Inspection:
     reserved_usd: Optional[float] = None
     reserving_children: Optional[int] = None
     settled_children_usd: Optional[float] = None
+    # What the cost limits above it leave it: the least, over its ancestors
+    # that have a limit, of that limit less everything the ancestor's tree
+    # has spent, and the ancestor holding it. At zero the tree has spent
+    # that limit: nothing is spawned below it and the turns running below it
+    # stop over budget. None when no ancestor has a limit; see
+    # docs/delegation.md "Budgets".
+    tree_remaining_usd: Optional[float] = None
+    tree_capped_by: Optional[str] = None
     # What its children may run, as harness= names it: the envelope's list,
     # or its own profile when that list is empty ("its own only"). The
     # envelope's "harnesses" here is the same list.

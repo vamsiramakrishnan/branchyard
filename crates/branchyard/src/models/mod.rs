@@ -1129,7 +1129,8 @@ pub(crate) fn prepare(
         turn: record.info.turns + 1,
         subject,
         max_usd: budget.max_usd,
-        spent_before: record.info.cost_usd.unwrap_or(0.0) + reserved,
+        cost_before: record.info.cost_usd.unwrap_or(0.0),
+        held: reserved,
         metered: Mutex::new(0.0),
     };
     let running = TurnGateway::start(listener, Arc::new(turn))

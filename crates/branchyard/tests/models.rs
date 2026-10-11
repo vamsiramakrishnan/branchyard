@@ -1669,3 +1669,151 @@ fn a_translated_call_is_read_in_the_backends_shape() {
     let message: Value = serde_json::from_str(&message).unwrap();
     assert_eq!(message["stop_reason"], "tool_use");
 }
+
+/// A call that would start with the branch's spend already at its limit is
+/// refused before it is forwarded, not only one that starts over it: a
+/// branch limited to exactly what one call costs makes that call, and the
+/// ones after it are refused. Nothing was forwarded for them, the cost is
+/// exactly the one call, and the turn ends over budget, stopped as the
+/// call's end took it to the limit.
+#[test]
+fn a_call_that_would_start_at_the_branchs_limit_is_refused() {
+    let f = Fixture::new();
+    let upstream = mock(Behavior::Answer);
+    use_gateway(
+        &f,
+        json!({"backends": {"anthropic": {"api": "anthropic", "url": upstream.url(),
+            "key": "anthropic"}}}),
+    );
+    let script = harness(&f.dir);
+    let one_call = "anthropic,/v1/messages,claude-sonnet-4-6,json";
+    let probe = f
+        .task(&prompt(&script, "direct", &[one_call]))
+        .options(options(&f, on_gateway(&["*"])))
+        .name("probe")
+        .run()
+        .unwrap();
+    let one = probe.info().cost_usd.unwrap();
+    assert!(one > 0.0);
+    let mut opts = options(&f, on_gateway(&["*"]));
+    opts.budget.max_usd = Some(one);
+    let branch = f
+        .task(&prompt(&script, "direct", &[one_call, one_call, one_call]))
+        .options(opts)
+        .name("exact")
+        .run()
+        .unwrap();
+    let decisions: Vec<String> = calls(&branch.events().unwrap())
+        .iter()
+        .map(|c| c.decision.clone())
+        .collect();
+    assert_eq!(decisions, ["allowed", "budget", "budget"]);
+    // The probe's call, and the first of this branch's.
+    assert_eq!(upstream.seen().len(), 2);
+    assert_eq!(branch.info().cost_usd, Some(one));
+    assert_eq!(
+        branch.info().status,
+        branchyard::BranchStatus::BudgetExceeded {
+            limit: "max_usd".into()
+        }
+    );
+}
+
+/// A cost limit above a branch bounds its calls through the gateway, which
+/// counts what the whole tree under that limit has spent: the child was
+/// given $0.0005 but the tree has only $0.0003 left (its parent spent the
+/// rest itself), so its calls stop at the one that takes the tree to the
+/// parent's limit, though its own is far off.
+#[test]
+fn a_childs_calls_stop_at_the_limit_its_tree_shares() {
+    use branchyard::{Envelope, Spawn};
+    let f = Fixture::new();
+    let anthropic = mock(Behavior::Answer);
+    use_gateway(
+        &f,
+        json!({"backends": {"anthropic": {"api": "anthropic", "url": anthropic.url(),
+            "key": "anthropic"}}}),
+    );
+    let script = harness(&f.dir);
+    // Haiku 4.5's call costs $0.0001025 (see the first test).
+    let options = TaskOptions {
+        budget: Budget {
+            max_usd: Some(0.0006),
+            ..Budget::default()
+        },
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![common::fake_agent().display().to_string()]),
+        ..options(&f, on_gateway(&["claude-*"]))
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("parent")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options).unwrap();
+    // `waiter` ends at once, when the test says; the child that calls the
+    // gateway waits for it, so the parent's spending is in place before.
+    let go = f.dir.join("go");
+    delegate
+        .spawn(Spawn {
+            prompt: format!("SH while [ ! -e {} ]; do sleep 0.05; done", go.display()),
+            name: Some("waiter".into()),
+            budget: Budget::usd(0.0001),
+            ..Spawn::default()
+        })
+        .unwrap();
+    let call = "anthropic,/v1/messages,claude-haiku-4-5,json";
+    delegate
+        .spawn(Spawn {
+            prompt: prompt(&script, "direct", &[call, call, call, call]),
+            name: Some("caller".into()),
+            budget: Budget::usd(0.0005),
+            depends_on: vec!["waiter".into()],
+            ..Spawn::default()
+        })
+        .unwrap();
+    // The parent spent $0.0003 of its $0.0006 by itself.
+    common::edit_record(&f.root, "parent", |r| {
+        r["info"]["cost_usd"] = 0.0003.into();
+    });
+    std::fs::write(&go, "").unwrap();
+    branchyard_testkit::wait::until("the caller to settle", || {
+        let info = f.yard.branch("caller").ok()?.info().clone();
+        (!matches!(
+            info.status,
+            branchyard::BranchStatus::Running | branchyard::BranchStatus::Waiting
+        ))
+        .then_some(())
+    });
+    // Three calls started under the limit; the fourth would start over it
+    // and was refused, or never made as the engine stopped the turn first.
+    let events = f.yard.branch("caller").unwrap().events().unwrap();
+    let recorded = calls(&events);
+    assert!((3..=4).contains(&recorded.len()), "{recorded:?}");
+    assert!(recorded[..3].iter().all(|c| c.decision == "allowed"));
+    if let Some(fourth) = recorded.get(3) {
+        assert_eq!(fourth.decision, "budget");
+        assert!(
+            fourth
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("the cost limit above this branch is spent"),
+            "{fourth:?}"
+        );
+    }
+    assert_eq!(anthropic.seen().len(), 3);
+    let rows: Vec<_> = f
+        .yard
+        .model_usage(0)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.branch == "caller")
+        .collect();
+    assert_eq!(rows.len(), 3);
+    let spent: f64 = rows.iter().filter_map(|r| r.cost_usd).sum();
+    assert!(spent < 0.0005, "far from its own limit: {spent}");
+    assert!(0.0003 + spent >= 0.0006, "the tree's limit: {spent}");
+}

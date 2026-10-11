@@ -1224,3 +1224,143 @@ fn a_seat_without_a_model_keeps_its_parents_on_the_same_harness() {
         assert_eq!(provision["model"], "gemini-2.5-flash", "{record}");
     });
 }
+
+/// The warnings in a branch's log.
+fn warnings_of(f: &Fixture, name: &str) -> Vec<String> {
+    f.yard
+        .branch(name)
+        .unwrap()
+        .events()
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.activity {
+            Activity::Warning(text) => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A cost limit bounds the whole tree under it, not only what the branch
+/// reserved: a child is refused when a limit above its parent has less left
+/// than it asks, whatever its parent has reserved; and once the tree has
+/// spent the limit nothing is spawned below it and every turn still running
+/// there is stopped over budget, recorded on the branch that holds the limit
+/// and on each branch stopped.
+#[test]
+fn a_cost_limit_bounds_the_whole_tree_under_it() {
+    let f = Fixture::new();
+    let options = TaskOptions {
+        budget: Budget::usd(1.0),
+        ..delegating(
+            &f,
+            Envelope {
+                max_depth: 2,
+                ..Envelope::default()
+            },
+        )
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options.clone()).unwrap();
+    let with = |usd: f64, name: &str| Spawn {
+        budget: Budget::usd(usd),
+        ..spawn("HANG", name)
+    };
+    delegate.spawn(with(0.8, "mid")).unwrap();
+    let mid = f
+        .yard
+        .branch("mid")
+        .unwrap()
+        .delegate(options.clone())
+        .unwrap();
+
+    // root spent half its limit itself. Its child holds $0.80 of what it
+    // had, so mid may grant $0.80, but only $0.50 is left to spend under
+    // root: a child of mid asking more is refused, by the limit it breaks.
+    edit_record(&f.root, "root", |r| r["info"]["cost_usd"] = 0.5.into());
+    denied(
+        mid.spawn(with(0.7, "leaf")),
+        "exceeds what the tree under root has left, $0.5000: root and everything below it has \
+         spent $0.5000 of its max_usd (--budget-usd) $1.0000",
+    );
+    let seen = mid.inspect("mid").unwrap();
+    assert_eq!(seen.remaining_usd, Some(0.8), "{seen:?}");
+    assert_eq!(seen.tree_remaining_usd, Some(0.5), "{seen:?}");
+    assert_eq!(seen.tree_capped_by.as_deref(), Some("root"));
+    let seen = delegate.inspect("root").unwrap();
+    assert_eq!(seen.tree_remaining_usd, None, "nothing is above root");
+    mid.spawn(with(0.4, "leaf")).unwrap();
+
+    // root has now spent all of it. Nothing more is spawned by root, or by
+    // a branch below it, whatever its own reservation says.
+    edit_record(&f.root, "root", |r| r["info"]["cost_usd"] = 1.0.into());
+    denied(
+        delegate.spawn(with(0.01, "late")),
+        "root cannot spawn: root and everything below it has spent $1.0000",
+    );
+    denied(
+        mid.spawn(with(0.01, "later")),
+        "mid cannot spawn: root and everything below it has spent $1.0000",
+    );
+    let seen = mid.inspect("mid").unwrap();
+    assert_eq!(seen.tree_remaining_usd, Some(0.0), "{seen:?}");
+
+    // The children still running notice and stop, over budget.
+    wait::until("mid and leaf to stop", || {
+        ["mid", "leaf"]
+            .iter()
+            .all(|name| f.yard.branch(name).unwrap().info().status != BranchStatus::Running)
+    });
+    for name in ["mid", "leaf"] {
+        assert_eq!(
+            f.yard.branch(name).unwrap().info().status,
+            BranchStatus::BudgetExceeded {
+                limit: "max_usd".into()
+            },
+            "{name}"
+        );
+        assert!(
+            warnings_of(&f, name).iter().any(|w| w.contains(
+                "stopped at the cost limit of root, which bounds this branch's tree: root and \
+                 everything below it has spent $1.0000"
+            )),
+            "{name}: {:?}",
+            warnings_of(&f, name)
+        );
+        assert!(
+            warnings_of(&f, "root").iter().any(|w| w.contains(&format!(
+                "stopped {name}'s turn: the tree under root has spent its cost limit"
+            ))),
+            "root: {:?}",
+            warnings_of(&f, "root")
+        );
+    }
+
+    // And they do not run again while the tree stays at its limit, whoever
+    // sends them work: root has nothing left to give mid; mid has room of
+    // its own for leaf, but the limit above it is spent; a person's turn
+    // ends at once.
+    denied(delegate.send("mid", "go on"), "nothing left");
+    denied(
+        mid.send("leaf", "go on"),
+        "leaf cannot run again: root and everything below it has spent",
+    );
+    let again = f
+        .yard
+        .branch("mid")
+        .unwrap()
+        .send("go on", f.options())
+        .unwrap();
+    assert_eq!(
+        again.info().status,
+        BranchStatus::BudgetExceeded {
+            limit: "max_usd".into()
+        }
+    );
+    assert_eq!(again.info().turns, 1, "it ran no turn");
+}
