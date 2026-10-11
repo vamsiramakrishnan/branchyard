@@ -16,11 +16,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
+use branchyard::{Activity, LifecycleState};
 use branchyard_client::api::{OperationKind, OperationState, PolicySpec, SendRequest, TaskRequest};
 use branchyard_client::new_key;
 use branchyard_client::triggers::{
-    Busy, Conditions, Deliver, EventSource, Precheck, RunState, TriggerPolicy, TriggerRun,
-    TriggerSpec, TriggerTestRequest, When,
+    Busy, Conditions, Deliver, EventSource, Lifecycle, Precheck, RunState, TriggerPolicy,
+    TriggerRun, TriggerSpec, TriggerTestRequest, When,
 };
 use branchyard_client::Client;
 use branchyard_server::config::WorkspaceScripts;
@@ -188,6 +189,7 @@ fn a_trigger_that_delivers_to_a_branch_continues_it_run_after_run() {
     s.deliver = Some(Deliver {
         branch: "assistant".into(),
         busy: Busy::Skip,
+        lifecycle: None,
     });
     client.create_trigger(&s, &new_key()).unwrap();
     // The first run creates the branch, under the delivered name.
@@ -268,6 +270,7 @@ fn a_trigger_that_delivers_to_a_branch_continues_it_run_after_run() {
     s.deliver = Some(Deliver {
         branch: "assistant".into(),
         busy: Busy::Steer,
+        lifecycle: None,
     });
     client.create_trigger(&s, &new_key()).unwrap();
     clock.store(T0 + 240_000 + 10_000, Ordering::SeqCst);
@@ -298,6 +301,7 @@ fn a_trigger_that_delivers_to_a_branch_continues_it_run_after_run() {
     s.deliver = Some(Deliver {
         branch: "assistant".into(),
         busy: Busy::Queue,
+        lifecycle: None,
     });
     client.create_trigger(&s, &new_key()).unwrap();
     let held = waiting("AWAIT_STEER");
@@ -340,10 +344,338 @@ fn a_trigger_that_delivers_to_a_branch_continues_it_run_after_run() {
         test.deliver,
         Some(Deliver {
             branch: "assistant".into(),
-            busy: Busy::Queue
+            busy: Busy::Queue,
+            lifecycle: None
         })
     );
     assert_eq!(test.task.unwrap().name.as_deref(), Some("assistant"));
+}
+
+/// The recorded lifecycle events of a branch: state and reason.
+fn lifecycle_events(events: &[branchyard::RecordedEvent]) -> Vec<(LifecycleState, String)> {
+    events
+        .iter()
+        .filter_map(|e| match &e.activity {
+            Activity::Lifecycle { state, reason, .. } => Some((*state, reason.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What the harness answered in the branch's last turn.
+fn last_reply(events: &[branchyard::RecordedEvent]) -> String {
+    let start = events
+        .iter()
+        .rposition(|e| matches!(e.activity, Activity::Prompt(_)))
+        .unwrap();
+    events[start..]
+        .iter()
+        .filter_map(|e| match &e.activity {
+            Activity::Harness(branchyard::Event::MessageDelta { text, .. }) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A branch that lives on rests: parked once it has ended no turn for its
+/// idle minutes, marked dormant at its dormant days (and its next run starts
+/// the session over, as a reincarnation), deleted at its delete days (and
+/// its next run creates it again from the task). The thresholds are
+/// measured by the dispatcher's clock, which the test sets.
+#[test]
+fn a_branch_that_lives_on_rests_goes_dormant_is_reincarnated_and_is_deleted_by_its_lifecycle() {
+    const MINUTE: u64 = 60_000;
+    const DAY: u64 = 86_400_000;
+    let f = Fixture::new();
+    let mut config = f.config();
+    let clock = with_clock(&mut config);
+    let server = Server::start(config);
+    let client = server.client();
+    let app = client.repo("app");
+    let mut s = spec("chat", event(EventSource::Generic), "{{event.text}}");
+    s.deliver = Some(Deliver {
+        branch: "assistant".into(),
+        busy: Busy::Queue,
+        lifecycle: Some(Lifecycle {
+            idle_minutes: Some(30),
+            dormant_days: Some(7),
+            delete_days: Some(30),
+        }),
+    });
+    let created = client.create_trigger(&s, &new_key()).unwrap();
+    let secret = created.secret.expect("a generated secret");
+    let id = created.trigger.id;
+    // The lifecycle is on the trigger as given.
+    assert_eq!(
+        client
+            .trigger("chat")
+            .unwrap()
+            .deliver
+            .unwrap()
+            .lifecycle
+            .unwrap()
+            .dormant_days,
+        Some(7)
+    );
+    // The end of the branch's last turn, as its log has it, and its events.
+    let turn_end = || {
+        let events = app.events("assistant", 0).unwrap().events;
+        let at = events
+            .iter()
+            .rev()
+            .find_map(|e| matches!(e.activity, Activity::Status(_)).then_some(e.at_ms))
+            .unwrap();
+        (at, events)
+    };
+    let mut said = 0;
+    // A message, delivered; the fired run and its operation, once it ends.
+    let mut say = |text: &str| {
+        said += 1;
+        let body = format!(r#"{{"id":"m-{said}","kind":"message","text":"{text}"}}"#);
+        let (status, ack) = deliver(&server, &id, &generic_headers(&secret, &body), &body);
+        assert_eq!(status, 202, "{ack}");
+        let key = format!("event:m-{said}");
+        let runs = runs_when(&client, "chat", "the message's run to fire", |runs| {
+            runs.iter()
+                .any(|r| r.key == key && r.state == RunState::Fired)
+        });
+        let run = runs.iter().find(|r| r.key == key).unwrap();
+        let op = await_operation(&client, run.operation.as_ref().unwrap());
+        assert_eq!(op.state, OperationState::Succeeded, "{op:?}");
+        // The turn ended just now by the log's clock: the dispatcher's
+        // clock, which the test drives, reads a second after it.
+        clock.store(turn_end().0 + 1_000, Ordering::SeqCst);
+        op
+    };
+    let rested = |state: LifecycleState, count: usize| {
+        wait::until(&format!("{count} {state} event(s)"), || {
+            let (_, events) = turn_end();
+            let found = lifecycle_events(&events)
+                .iter()
+                .filter(|(s, _)| *s == state)
+                .count();
+            (found >= count).then_some(events)
+        })
+    };
+
+    // The first message creates the branch.
+    let op = say("WHOAMI first");
+    assert_eq!(op.kind, OperationKind::Task);
+    let (first_end, events) = turn_end();
+    assert!(lifecycle_events(&events).is_empty());
+    assert!(last_reply(&events).contains("resumed=false"));
+
+    // Idle: ended no turn for 30 minutes. It holds nothing, and the event
+    // says so; the branch is as it was, and the next message continues it.
+    clock.store(first_end + 31 * MINUTE, Ordering::SeqCst);
+    let events = rested(LifecycleState::Idle, 1);
+    let parked = lifecycle_events(&events);
+    assert_eq!(parked.len(), 1, "{parked:?}");
+    assert!(
+        parked[0]
+            .1
+            .starts_with("no turn ended for 31m, so it is idle")
+            && parked[0].1.ends_with("it held nothing to release"),
+        "{parked:?}"
+    );
+    let info = app.branch("assistant").unwrap();
+    assert_eq!(info.turns, 1);
+    assert_eq!(info.status, turn_status(&events));
+    let op = say("WHOAMI second");
+    assert_eq!(op.kind, OperationKind::Send, "{op:?}");
+    let (second_end, events) = turn_end();
+    assert!(second_end > first_end);
+    assert!(last_reply(&events).contains("resumed=true"));
+    assert_eq!(app.branch("assistant").unwrap().turns, 2);
+
+    // Idle again (the dispatcher looks every 30 seconds by its clock, so
+    // this is a different minute than the last), then dormant: the branch
+    // is still the one branch, as it was; only its next run differs.
+    clock.store(second_end + 33 * MINUTE, Ordering::SeqCst);
+    rested(LifecycleState::Idle, 2);
+    clock.store(second_end + 7 * DAY, Ordering::SeqCst);
+    let events = rested(LifecycleState::Dormant, 1);
+    let states: Vec<_> = lifecycle_events(&events).iter().map(|e| e.0).collect();
+    assert_eq!(
+        states,
+        [
+            LifecycleState::Idle,
+            LifecycleState::Idle,
+            LifecycleState::Dormant
+        ]
+    );
+    assert_eq!(app.branches().unwrap().len(), 1);
+    assert_eq!(app.branch("assistant").unwrap().turns, 2);
+
+    // The next message reincarnates it: the run's operation is the
+    // reincarnation, on the same branch and worktree, with a fresh
+    // session that begins with a handoff.
+    let before = app.branch("assistant").unwrap();
+    let op = say("WHOAMI after the quiet");
+    assert_eq!(op.kind, OperationKind::Reincarnate, "{op:?}");
+    let (third_end, events) = turn_end();
+    let after = app.branch("assistant").unwrap();
+    assert_eq!(after.name, "assistant");
+    assert_eq!(after.worktree, before.worktree);
+    assert_eq!(after.superseded_by, None);
+    assert_eq!(after.turns, 3);
+    assert_eq!(app.branches().unwrap().len(), 1);
+    assert!(last_reply(&events).contains("resumed=false"));
+    let reborn = lifecycle_events(&events)
+        .into_iter()
+        .filter(|(s, _)| *s == LifecycleState::Reincarnated)
+        .collect::<Vec<_>>();
+    assert_eq!(reborn.len(), 1, "{reborn:?}");
+    assert!(
+        reborn[0]
+            .1
+            .starts_with("it was dormant: no turn ended for 7d"),
+        "{reborn:?}"
+    );
+    let prompt = events
+        .iter()
+        .rev()
+        .find_map(|e| match &e.activity {
+            Activity::Prompt(p) => Some(p.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        prompt.contains("This continues the work of branch assistant")
+            && prompt.contains("### The original task\nWHOAMI first")
+            && prompt.ends_with("## Your task now\nWHOAMI after the quiet"),
+        "{prompt}"
+    );
+    // Awake again: the next message continues the new session.
+    let op = say("WHOAMI once more");
+    assert_eq!(op.kind, OperationKind::Send);
+    let (fourth_end, events) = turn_end();
+    assert!(last_reply(&events).contains("resumed=true"));
+    assert!(third_end <= fourth_end);
+
+    // Dormant again, and then, with no message in between, deleted.
+    clock.store(fourth_end + 7 * DAY, Ordering::SeqCst);
+    rested(LifecycleState::Dormant, 2);
+    clock.store(fourth_end + 31 * DAY, Ordering::SeqCst);
+    wait::until("the branch to be deleted", || {
+        app.branch("assistant")
+            .err()
+            .is_some_and(|e| e.code() == Some("unknown_branch"))
+    });
+    // The trigger notes it, where the branch's own log no longer can.
+    let runs = runs_when(&client, "chat", "the deletion to be noted", |runs| {
+        runs.iter().any(|r| r.state == RunState::Lifecycle)
+    });
+    let noted = runs
+        .iter()
+        .find(|r| r.state == RunState::Lifecycle)
+        .unwrap();
+    assert_eq!(noted.branches, ["assistant"]);
+    assert!(
+        noted
+            .reason
+            .as_deref()
+            .unwrap()
+            .starts_with("assistant: no turn ended for 31d, so it was deleted"),
+        "{noted:?}"
+    );
+    // Not a failure, and not a success: the trigger carries on.
+    let trigger = client.trigger("chat").unwrap();
+    assert_eq!((trigger.enabled, trigger.consecutive_failures), (true, 0));
+
+    // The next message creates the branch again from the trigger's task,
+    // as the first did, with a log of its own.
+    let op = say("WHOAMI again from the start");
+    assert_eq!(op.kind, OperationKind::Task, "{op:?}");
+    let (_, events) = turn_end();
+    assert!(lifecycle_events(&events).is_empty());
+    assert_eq!(app.branch("assistant").unwrap().turns, 1);
+    assert!(last_reply(&events).contains("resumed=false"));
+}
+
+/// The status the branch's last turn ended with, from its log.
+fn turn_status(events: &[branchyard::RecordedEvent]) -> branchyard::BranchStatus {
+    events
+        .iter()
+        .rev()
+        .find_map(|e| match &e.activity {
+            Activity::Status(s) => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// A lifecycle is part of delivering to a branch, and held to its rules by
+/// the server, with the field named in the refusal.
+#[test]
+fn a_lifecycle_that_breaks_its_rules_or_has_no_branch_is_refused_with_the_field() {
+    let f = Fixture::new();
+    let mut config = f.config();
+    with_clock(&mut config);
+    let server = Server::start(config);
+    let client = server.client();
+    let with = |lifecycle: Lifecycle| {
+        let mut s = spec("rules", event(EventSource::Generic), "{{event.text}}");
+        s.deliver = Some(Deliver {
+            branch: "assistant".into(),
+            busy: Busy::Queue,
+            lifecycle: Some(lifecycle),
+        });
+        client.create_trigger(&s, &new_key()).unwrap_err()
+    };
+    let refused = with(Lifecycle {
+        idle_minutes: Some(0),
+        ..Lifecycle::default()
+    });
+    assert_eq!(refused.code(), Some("invalid_request"));
+    assert!(
+        refused
+            .to_string()
+            .contains("deliver.lifecycle.idle_minutes is at least 1"),
+        "{refused}"
+    );
+    let refused = with(Lifecycle {
+        dormant_days: Some(30),
+        delete_days: Some(7),
+        ..Lifecycle::default()
+    });
+    assert!(
+        refused
+            .to_string()
+            .contains("deliver.lifecycle.dormant_days (30d) must be less than delete_days (7d)"),
+        "{refused}"
+    );
+    let refused = with(Lifecycle::default());
+    assert!(
+        refused
+            .to_string()
+            .contains("deliver.lifecycle sets none of"),
+        "{refused}"
+    );
+    // A lifecycle with no deliver block has nothing to belong to: refused,
+    // naming the field.
+    let mut value = serde_json::to_value(spec(
+        "orphan",
+        event(EventSource::Generic),
+        "{{event.text}}",
+    ))
+    .unwrap();
+    value["lifecycle"] = serde_json::json!({"idle_minutes": 30});
+    let (status, _, body) = raw(
+        server.addr,
+        &post(
+            "/v1/triggers",
+            Some(common::TOKEN),
+            "Idempotency-Key: orphan-1\r\n",
+            &value.to_string(),
+        ),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body.contains("lifecycle") && body.contains("unknown field"),
+        "{body}"
+    );
+    assert!(client.triggers().unwrap().is_empty());
 }
 
 #[test]

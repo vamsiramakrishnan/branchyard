@@ -273,7 +273,7 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `POST /v1/repos/{repo}/branches/{b}/scratch/{name}/share` | Share it with `{"to": "BRANCH"}` | `{"ok": true}` |
 | `POST /v1/repos/{repo}/branches/{b}/scratch/{name}/lock` | Acquire its writer lock for `b` | `ScratchLock`, or `409 running` |
 | `POST /v1/repos/{repo}/branches/{b}/scratch/{name}/unlock` | Release it if `b` holds it | `{"ok": true}` |
-| `POST /v1/triggers` | Create a [trigger](triggers.md) (`run` on its repository) | `201` `TriggerCreated` |
+| `POST /v1/triggers` | Create a [trigger](triggers.md) (`run` on its repository). Its `deliver` makes it continue one branch run after run (`{"branch", "busy"}`), and `deliver.lifecycle` (`{"idle_minutes", "dormant_days", "delete_days"}`, each optional, at least 1, rising) parks, retires the session of, and deletes that branch as it rests ([lifecycle](triggers.md#lifecycle)); a lifecycle that breaks its rules is `400 invalid_request` naming the field | `201` `TriggerCreated` |
 | `GET /v1/triggers`, `GET /v1/triggers/{t}` | The tenant's triggers, or one by name or ID | `TriggerList`, `Trigger` |
 | `DELETE /v1/triggers/{t}`; `POST /v1/triggers/{t}/enable`, `/disable`, `/secret`, `/test` | Remove; enable or disable; set or generate its webhook secret; evaluate it without creating anything | `TriggerRemoved`, `Trigger`, `SecretSet`, `TriggerTest` |
 | `GET /v1/triggers/{t}/runs?limit=N` | Its runs, newest first | `TriggerRuns` |

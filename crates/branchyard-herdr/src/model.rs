@@ -305,6 +305,21 @@ mod tests {
         assert!(!branches.apply("b", &Activity::Warning("w".into())));
         assert!(branches.apply("b", &Activity::Status(BranchStatus::Ready)));
         assert_eq!(now(&branches), HerdrState::Idle);
+        // A branch a trigger keeps alive going idle or dormant is still
+        // idle to herdr: nothing to report.
+        for state in [
+            branchyard::LifecycleState::Idle,
+            branchyard::LifecycleState::Dormant,
+            branchyard::LifecycleState::Reincarnated,
+        ] {
+            let lifecycle = Activity::Lifecycle {
+                state,
+                reason: "r".into(),
+                idle_since_ms: 1,
+            };
+            assert!(!branches.apply("b", &lifecycle));
+        }
+        assert_eq!(now(&branches), HerdrState::Idle);
     }
 
     fn said(state: ReportedState, summary: &str) -> Activity {

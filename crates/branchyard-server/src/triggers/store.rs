@@ -128,6 +128,11 @@ pub trait TriggerStore: Send + Sync {
         -> io::Result<Accounted>;
     /// A trigger's runs, newest first.
     fn runs(&self, trigger_id: &str, limit: usize) -> io::Result<Vec<TriggerRun>>;
+    /// The branches the trigger's runs delivered to (a send, the task that
+    /// created it, or a skip for want of the branch being free), by name,
+    /// each once. A name that only appeared in a run that failed is not
+    /// one.
+    fn delivered_to(&self, trigger_id: &str) -> io::Result<Vec<String>>;
     /// Spend `nonce` for `key` until `expires_ms`, forgetting the
     /// trigger's nonces expired by `now_ms` first. Returns the key it was
     /// first spent for: `key` itself when new (or for a redelivery of the
@@ -797,6 +802,23 @@ impl TriggerStore for SqliteTriggers {
         )
     }
 
+    fn delivered_to(&self, trigger_id: &str) -> io::Result<Vec<String>> {
+        let conn = self.conn.lock_recovering("conn");
+        let mut statement = conn
+            .prepare(
+                "SELECT DISTINCT j.value FROM trigger_runs r, json_each(r.body, '$.branches') j \
+                 WHERE r.trigger_id = ?1 AND r.state IN ('fired', 'skipped_busy') \
+                 ORDER BY j.value",
+            )
+            .map_err(sql)?;
+        let rows = statement
+            .query_map([trigger_id], |r| r.get::<_, String>(0))
+            .map_err(sql)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql)?;
+        Ok(rows)
+    }
+
     fn claim_nonce(
         &self,
         trigger_id: &str,
@@ -1430,6 +1452,21 @@ impl TriggerStore for PostgresTriggers {
         pg_runs(&rows)
     }
 
+    fn delivered_to(&self, trigger_id: &str) -> io::Result<Vec<String>> {
+        let id = trigger_id.to_owned();
+        let rows = self.with(move |c| {
+            c.query(
+                "SELECT DISTINCT b.value FROM by_trigger_runs r, \
+                 LATERAL jsonb_array_elements_text(COALESCE((r.body::jsonb) -> 'branches', \
+                 '[]'::jsonb)) AS b(value) \
+                 WHERE r.trigger_id = $1 AND r.state IN ('fired', 'skipped_busy') \
+                 ORDER BY b.value",
+                &[&id],
+            )
+        })?;
+        Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
+    }
+
     fn claim_nonce(
         &self,
         trigger_id: &str,
@@ -1543,6 +1580,37 @@ pub mod conformance {
         runs_are_recorded_once_and_claimed_by_fence(store);
         failures_pause_and_successes_reset(store);
         nonces_are_spent_once(store);
+        delivered_branches_are_listed_once(store);
+    }
+
+    /// The branches a trigger's runs delivered to, each once: those of
+    /// runs that fired or were skipped as busy, not of one that failed or
+    /// waits, and not another trigger's.
+    pub fn delivered_branches_are_listed_once(store: &dyn TriggerStore) {
+        let t = trigger("lifecycle", "chat", false);
+        let other = trigger("lifecycle", "other", false);
+        assert!(store.create(&t).unwrap());
+        assert!(store.create(&other).unwrap());
+        assert!(store.delivered_to(&t.id).unwrap().is_empty());
+        let record = |trigger: &str, key: &str, state: RunState, branches: &[&str]| {
+            let mut r = run(trigger, key, state);
+            r.branches = branches.iter().map(|b| (*b).to_owned()).collect();
+            assert_eq!(store.record(&r).unwrap(), Recorded::Inserted);
+        };
+        record(&t.id, "event:1", RunState::Fired, &["slack-b"]);
+        record(&t.id, "event:2", RunState::Fired, &["slack-a"]);
+        record(&t.id, "event:3", RunState::Fired, &["slack-b"]);
+        record(&t.id, "event:4", RunState::SkippedBusy, &["slack-c"]);
+        record(&t.id, "event:5", RunState::Failed, &["slack-d"]);
+        record(&t.id, "event:6", RunState::Pending, &["slack-e"]);
+        record(&t.id, "event:7", RunState::Fired, &[]);
+        record(&other.id, "event:1", RunState::Fired, &["theirs"]);
+        assert_eq!(
+            store.delivered_to(&t.id).unwrap(),
+            ["slack-a", "slack-b", "slack-c"]
+        );
+        assert_eq!(store.delivered_to(&other.id).unwrap(), ["theirs"]);
+        assert!(store.delivered_to("trg_unknown").unwrap().is_empty());
     }
 
     /// A one-time token is spent for the first key it came with: the

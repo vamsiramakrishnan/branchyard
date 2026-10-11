@@ -20041,6 +20041,40 @@
               ],
               "additionalProperties": false,
               "description": "The harness's own account of what it is doing, from its\n`report_status` tool or `by report-status`: a claim beside the\nprotocol's status, never a replacement for it. See\n`docs/delegation.md#self-reported-status`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "lifecycle": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "description": "Where the branch stands now.",
+                      "$ref": "#/$defs/LifecycleState"
+                    },
+                    "reason": {
+                      "description": "Why, and what it released.",
+                      "type": "string"
+                    },
+                    "idle_since_ms": {
+                      "description": "Milliseconds since the Unix epoch when the branch last ended a\nturn: where its idleness is counted from.",
+                      "type": "integer",
+                      "format": "uint64",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "reason",
+                    "idle_since_ms"
+                  ]
+                }
+              },
+              "required": [
+                "lifecycle"
+              ],
+              "additionalProperties": false,
+              "description": "A branch that a trigger keeps alive moved through its lifecycle: it\nwent idle (its kept sandbox released), dormant (its next run starts\na fresh session), was reincarnated, or was deleted. See\n[`LifecycleState`] and `docs/triggers.md#lifecycle`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -24273,6 +24307,31 @@
             }
           ],
           "description": "What a harness says it is doing."
+        },
+        "LifecycleState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "It has not ended a turn for its idle time and is running none: what\nit held (a kept sandbox) was released. The next send continues it\nas before."
+            },
+            {
+              "type": "string",
+              "const": "dormant",
+              "description": "It has been idle for its dormant time: the next run that would send\nto it starts a fresh harness session on the same worktree instead."
+            },
+            {
+              "type": "string",
+              "const": "reincarnated",
+              "description": "A fresh harness session was started on the same worktree, with a\nhandoff of what the old one did."
+            },
+            {
+              "type": "string",
+              "const": "deleted",
+              "description": "It had been idle for its delete time, and was removed: the next run\ncreates it again from the trigger's task."
+            }
+          ],
+          "description": "Where a branch that lives on stands in its lifecycle: the `state` of\n[`Activity::Lifecycle`]. Serialized in snake case."
         }
       }
     },
@@ -24967,6 +25026,40 @@
               ],
               "additionalProperties": false,
               "description": "The harness's own account of what it is doing, from its\n`report_status` tool or `by report-status`: a claim beside the\nprotocol's status, never a replacement for it. See\n`docs/delegation.md#self-reported-status`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "lifecycle": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "description": "Where the branch stands now.",
+                      "$ref": "#/$defs/LifecycleState"
+                    },
+                    "reason": {
+                      "description": "Why, and what it released.",
+                      "type": "string"
+                    },
+                    "idle_since_ms": {
+                      "description": "Milliseconds since the Unix epoch when the branch last ended a\nturn: where its idleness is counted from.",
+                      "type": "integer",
+                      "format": "uint64",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "reason",
+                    "idle_since_ms"
+                  ]
+                }
+              },
+              "required": [
+                "lifecycle"
+              ],
+              "additionalProperties": false,
+              "description": "A branch that a trigger keeps alive moved through its lifecycle: it\nwent idle (its kept sandbox released), dormant (its next run starts\na fresh session), was reincarnated, or was deleted. See\n[`LifecycleState`] and `docs/triggers.md#lifecycle`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -29199,6 +29292,31 @@
             }
           ],
           "description": "What a harness says it is doing."
+        },
+        "LifecycleState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "It has not ended a turn for its idle time and is running none: what\nit held (a kept sandbox) was released. The next send continues it\nas before."
+            },
+            {
+              "type": "string",
+              "const": "dormant",
+              "description": "It has been idle for its dormant time: the next run that would send\nto it starts a fresh harness session on the same worktree instead."
+            },
+            {
+              "type": "string",
+              "const": "reincarnated",
+              "description": "A fresh harness session was started on the same worktree, with a\nhandoff of what the old one did."
+            },
+            {
+              "type": "string",
+              "const": "deleted",
+              "description": "It had been idle for its delete time, and was removed: the next run\ncreates it again from the trigger's task."
+            }
+          ],
+          "description": "Where a branch that lives on stands in its lifecycle: the `state` of\n[`Activity::Lifecycle`]. Serialized in snake case."
         }
       }
     },
@@ -33696,6 +33814,40 @@
               ],
               "additionalProperties": false,
               "description": "The harness's own account of what it is doing, from its\n`report_status` tool or `by report-status`: a claim beside the\nprotocol's status, never a replacement for it. See\n`docs/delegation.md#self-reported-status`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "lifecycle": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "description": "Where the branch stands now.",
+                      "$ref": "#/$defs/LifecycleState"
+                    },
+                    "reason": {
+                      "description": "Why, and what it released.",
+                      "type": "string"
+                    },
+                    "idle_since_ms": {
+                      "description": "Milliseconds since the Unix epoch when the branch last ended a\nturn: where its idleness is counted from.",
+                      "type": "integer",
+                      "format": "uint64",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "reason",
+                    "idle_since_ms"
+                  ]
+                }
+              },
+              "required": [
+                "lifecycle"
+              ],
+              "additionalProperties": false,
+              "description": "A branch that a trigger keeps alive moved through its lifecycle: it\nwent idle (its kept sandbox released), dormant (its next run starts\na fresh session), was reincarnated, or was deleted. See\n[`LifecycleState`] and `docs/triggers.md#lifecycle`."
             }
           ],
           "description": "Something that happened on a branch, as recorded and observed.\n\nSerialized with the variant as the key in snake case, such as\n`{\"harness\": {\"type\": \"ready\"}}` or `{\"warning\": \"...\"}`."
@@ -37928,6 +38080,31 @@
             }
           ],
           "description": "What a harness says it is doing."
+        },
+        "LifecycleState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "It has not ended a turn for its idle time and is running none: what\nit held (a kept sandbox) was released. The next send continues it\nas before."
+            },
+            {
+              "type": "string",
+              "const": "dormant",
+              "description": "It has been idle for its dormant time: the next run that would send\nto it starts a fresh harness session on the same worktree instead."
+            },
+            {
+              "type": "string",
+              "const": "reincarnated",
+              "description": "A fresh harness session was started on the same worktree, with a\nhandoff of what the old one did."
+            },
+            {
+              "type": "string",
+              "const": "deleted",
+              "description": "It had been idle for its delete time, and was removed: the next run\ncreates it again from the trigger's task."
+            }
+          ],
+          "description": "Where a branch that lives on stands in its lifecycle: the `state` of\n[`Activity::Lifecycle`]. Serialized in snake case."
         }
       }
     },
@@ -40529,6 +40706,17 @@
               "$ref": "#/$defs/Busy",
               "description": "What a run does while the branch is running a turn.",
               "default": "queue"
+            },
+            "lifecycle": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lifecycle"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "When the branch rests: parked after it has been idle a while, made\ndormant after a long one, deleted after longer. Unset, the branch\nlives until someone removes it."
             }
           },
           "required": [
@@ -40555,6 +40743,40 @@
             }
           ],
           "description": "What a run does when the branch it delivers to is running a turn."
+        },
+        "Lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "idle_minutes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Park the branch once it has not ended a turn for this many minutes\nand runs none: release what it holds (a kept sandbox). The next run\ncontinues it as before."
+            },
+            "dormant_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Mark the branch dormant once it has not ended a turn for this many\ndays: the next run that would send to it starts a fresh harness\nsession on the same worktree instead (a reincarnation)."
+            },
+            "delete_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Remove the branch once it has not ended a turn for this many days:\nthe next run creates it again from the trigger's task."
+            }
+          },
+          "description": "How long a branch that lives on may rest, counted from the end of its\nlast turn, before the server acts on it. Each is optional, at least 1,\nand when several are given they rise: `idle_minutes` is less than\n`dormant_days`, which is less than `delete_days`, compared in absolute\ntime. A run that continues the branch ends its rest: it starts the\ncount over."
         },
         "Precheck": {
           "type": "object",
@@ -42279,6 +42501,17 @@
               "$ref": "#/$defs/Busy",
               "description": "What a run does while the branch is running a turn.",
               "default": "queue"
+            },
+            "lifecycle": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lifecycle"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "When the branch rests: parked after it has been idle a while, made\ndormant after a long one, deleted after longer. Unset, the branch\nlives until someone removes it."
             }
           },
           "required": [
@@ -42305,6 +42538,40 @@
             }
           ],
           "description": "What a run does when the branch it delivers to is running a turn."
+        },
+        "Lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "idle_minutes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Park the branch once it has not ended a turn for this many minutes\nand runs none: release what it holds (a kept sandbox). The next run\ncontinues it as before."
+            },
+            "dormant_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Mark the branch dormant once it has not ended a turn for this many\ndays: the next run that would send to it starts a fresh harness\nsession on the same worktree instead (a reincarnation)."
+            },
+            "delete_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Remove the branch once it has not ended a turn for this many days:\nthe next run creates it again from the trigger's task."
+            }
+          },
+          "description": "How long a branch that lives on may rest, counted from the end of its\nlast turn, before the server acts on it. Each is optional, at least 1,\nand when several are given they rise: `idle_minutes` is less than\n`dormant_days`, which is less than `delete_days`, compared in absolute\ntime. A run that continues the branch ends its rest: it starts the\ncount over."
         },
         "Precheck": {
           "type": "object",
@@ -44048,6 +44315,17 @@
               "$ref": "#/$defs/Busy",
               "description": "What a run does while the branch is running a turn.",
               "default": "queue"
+            },
+            "lifecycle": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lifecycle"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "When the branch rests: parked after it has been idle a while, made\ndormant after a long one, deleted after longer. Unset, the branch\nlives until someone removes it."
             }
           },
           "required": [
@@ -44074,6 +44352,40 @@
             }
           ],
           "description": "What a run does when the branch it delivers to is running a turn."
+        },
+        "Lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "idle_minutes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Park the branch once it has not ended a turn for this many minutes\nand runs none: release what it holds (a kept sandbox). The next run\ncontinues it as before."
+            },
+            "dormant_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Mark the branch dormant once it has not ended a turn for this many\ndays: the next run that would send to it starts a fresh harness\nsession on the same worktree instead (a reincarnation)."
+            },
+            "delete_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Remove the branch once it has not ended a turn for this many days:\nthe next run creates it again from the trigger's task."
+            }
+          },
+          "description": "How long a branch that lives on may rest, counted from the end of its\nlast turn, before the server acts on it. Each is optional, at least 1,\nand when several are given they rise: `idle_minutes` is less than\n`dormant_days`, which is less than `delete_days`, compared in absolute\ntime. A run that continues the branch ends its rest: it starts the\ncount over."
         },
         "Precheck": {
           "type": "object",
@@ -45813,6 +46125,17 @@
               "$ref": "#/$defs/Busy",
               "description": "What a run does while the branch is running a turn.",
               "default": "queue"
+            },
+            "lifecycle": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lifecycle"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "When the branch rests: parked after it has been idle a while, made\ndormant after a long one, deleted after longer. Unset, the branch\nlives until someone removes it."
             }
           },
           "required": [
@@ -45839,6 +46162,40 @@
             }
           ],
           "description": "What a run does when the branch it delivers to is running a turn."
+        },
+        "Lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "idle_minutes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Park the branch once it has not ended a turn for this many minutes\nand runs none: release what it holds (a kept sandbox). The next run\ncontinues it as before."
+            },
+            "dormant_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Mark the branch dormant once it has not ended a turn for this many\ndays: the next run that would send to it starts a fresh harness\nsession on the same worktree instead (a reincarnation)."
+            },
+            "delete_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Remove the branch once it has not ended a turn for this many days:\nthe next run creates it again from the trigger's task."
+            }
+          },
+          "description": "How long a branch that lives on may rest, counted from the end of its\nlast turn, before the server acts on it. Each is optional, at least 1,\nand when several are given they rise: `idle_minutes` is less than\n`dormant_days`, which is less than `delete_days`, compared in absolute\ntime. A run that continues the branch ends its rest: it starts the\ncount over."
         },
         "Precheck": {
           "type": "object",
@@ -47929,6 +48286,17 @@
               "$ref": "#/$defs/Busy",
               "description": "What a run does while the branch is running a turn.",
               "default": "queue"
+            },
+            "lifecycle": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Lifecycle"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "When the branch rests: parked after it has been idle a while, made\ndormant after a long one, deleted after longer. Unset, the branch\nlives until someone removes it."
             }
           },
           "required": [
@@ -47955,6 +48323,40 @@
             }
           ],
           "description": "What a run does when the branch it delivers to is running a turn."
+        },
+        "Lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "idle_minutes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Park the branch once it has not ended a turn for this many minutes\nand runs none: release what it holds (a kept sandbox). The next run\ncontinues it as before."
+            },
+            "dormant_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Mark the branch dormant once it has not ended a turn for this many\ndays: the next run that would send to it starts a fresh harness\nsession on the same worktree instead (a reincarnation)."
+            },
+            "delete_days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Remove the branch once it has not ended a turn for this many days:\nthe next run creates it again from the trigger's task."
+            }
+          },
+          "description": "How long a branch that lives on may rest, counted from the end of its\nlast turn, before the server acts on it. Each is optional, at least 1,\nand when several are given they rise: `idle_minutes` is less than\n`dormant_days`, which is less than `delete_days`, compared in absolute\ntime. A run that continues the branch ends its rest: it starts the\ncount over."
         },
         "RouteSpec": {
           "type": "object",
@@ -48006,6 +48408,11 @@
         },
         {
           "type": "string",
+          "const": "lifecycle",
+          "description": "Not a firing: a step of the lifecycle of a branch the trigger\ndelivers to that its own log cannot keep, such as its deletion.\n`reason` says which, and `branches` names the branch. Counts\nneither as a success nor as a failure."
+        },
+        {
+          "type": "string",
           "const": "failed",
           "description": "No task could be admitted; counts toward pausing."
         },
@@ -48049,7 +48456,7 @@
         },
         "key": {
           "type": "string",
-          "description": "`event:<id>`, `schedule:<ms>` or `missed:<ms>`: unique per trigger."
+          "description": "`event:<id>`, `schedule:<ms>`, `missed:<ms>` or\n`lifecycle:deleted:<branch>:<ms>`: unique per trigger."
         },
         "state": {
           "$ref": "#/$defs/RunState"
@@ -48185,6 +48592,11 @@
               "type": "string",
               "const": "skipped_busy",
               "description": "The branch it delivers to was running a turn, and its `busy`\npolicy is `skip`."
+            },
+            {
+              "type": "string",
+              "const": "lifecycle",
+              "description": "Not a firing: a step of the lifecycle of a branch the trigger\ndelivers to that its own log cannot keep, such as its deletion.\n`reason` says which, and `branches` names the branch. Counts\nneither as a success nor as a failure."
             },
             {
               "type": "string",
@@ -48511,7 +48923,7 @@
             },
             "key": {
               "type": "string",
-              "description": "`event:<id>`, `schedule:<ms>` or `missed:<ms>`: unique per trigger."
+              "description": "`event:<id>`, `schedule:<ms>`, `missed:<ms>` or\n`lifecycle:deleted:<branch>:<ms>`: unique per trigger."
             },
             "state": {
               "$ref": "#/$defs/RunState"
@@ -48645,6 +49057,11 @@
               "type": "string",
               "const": "skipped_busy",
               "description": "The branch it delivers to was running a turn, and its `busy`\npolicy is `skip`."
+            },
+            {
+              "type": "string",
+              "const": "lifecycle",
+              "description": "Not a firing: a step of the lifecycle of a branch the trigger\ndelivers to that its own log cannot keep, such as its deletion.\n`reason` says which, and `branches` names the branch. Counts\nneither as a success nor as a failure."
             },
             {
               "type": "string",
@@ -48984,7 +49401,7 @@
             },
             "key": {
               "type": "string",
-              "description": "`event:<id>`, `schedule:<ms>` or `missed:<ms>`: unique per trigger."
+              "description": "`event:<id>`, `schedule:<ms>`, `missed:<ms>` or\n`lifecycle:deleted:<branch>:<ms>`: unique per trigger."
             },
             "state": {
               "$ref": "#/$defs/RunState"
@@ -49118,6 +49535,11 @@
               "type": "string",
               "const": "skipped_busy",
               "description": "The branch it delivers to was running a turn, and its `busy`\npolicy is `skip`."
+            },
+            {
+              "type": "string",
+              "const": "lifecycle",
+              "description": "Not a firing: a step of the lifecycle of a branch the trigger\ndelivers to that its own log cannot keep, such as its deletion.\n`reason` says which, and `branches` names the branch. Counts\nneither as a success nor as a failure."
             },
             {
               "type": "string",

@@ -548,6 +548,18 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             &activity.describe(),
         ),
         Activity::Access(activity) => style.paint(Tone::Yellow, &activity.describe()),
+        Activity::Lifecycle { state, reason, .. } => style.paint(
+            match state {
+                // Routine: it released what it held and will continue as before.
+                branchyard::LifecycleState::Idle => Tone::Dim,
+                branchyard::LifecycleState::Reincarnated => Tone::Cyan,
+                // The branch's next run starts over, or it is gone.
+                branchyard::LifecycleState::Dormant | branchyard::LifecycleState::Deleted => {
+                    Tone::Yellow
+                }
+            },
+            &format!("{state}: {reason}"),
+        ),
         Activity::Effect(activity) => style.paint(
             match activity.as_ref() {
                 branchyard::effects::EffectActivity::Proxy { .. } => Tone::Cyan,
@@ -1693,6 +1705,57 @@ mod tests {
                 sandbox: "by-a-2".into(),
             }),
             "sandbox: kept paused for the next turn (substrate by-a-2)"
+        );
+    }
+
+    #[test]
+    fn lifecycle_events_say_where_the_branch_stands_and_why() {
+        use branchyard::LifecycleState;
+        let line = |state, reason: &str| {
+            activity_line(
+                &Activity::Lifecycle {
+                    state,
+                    reason: reason.into(),
+                    idle_since_ms: 1_000,
+                },
+                PLAIN,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            line(
+                LifecycleState::Idle,
+                "no turn for 30m; released its kept sandbox by-a-2"
+            ),
+            "idle: no turn for 30m; released its kept sandbox by-a-2"
+        );
+        assert_eq!(
+            line(LifecycleState::Dormant, "no turn for 7d"),
+            "dormant: no turn for 7d"
+        );
+        assert_eq!(
+            line(LifecycleState::Reincarnated, "a fresh session after 7d"),
+            "reincarnated: a fresh session after 7d"
+        );
+        assert_eq!(
+            line(LifecycleState::Deleted, "no turn for 30d"),
+            "deleted: no turn for 30d"
+        );
+        // Colored, the states differ: routine is dim, a change is yellow.
+        let colored = |state| {
+            activity_line(
+                &Activity::Lifecycle {
+                    state,
+                    reason: "r".into(),
+                    idle_since_ms: 0,
+                },
+                Style { color: true },
+            )
+            .unwrap()
+        };
+        assert_ne!(
+            colored(LifecycleState::Idle),
+            colored(LifecycleState::Dormant)
         );
     }
 

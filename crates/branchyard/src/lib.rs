@@ -119,6 +119,7 @@ pub mod inventory;
 mod json_schema;
 mod judge;
 mod knowledge;
+mod lifecycle;
 mod lock;
 mod map;
 mod map_input;
@@ -227,6 +228,7 @@ pub use knowledge::{
     KnowledgeStatus, NewKnowledge, DEFAULT_BUDGET_TOKENS as KNOWLEDGE_DEFAULT_BUDGET_TOKENS,
     TEXT_MAX as KNOWLEDGE_TEXT_MAX,
 };
+pub use lifecycle::{Parked, Resting};
 pub use map::{
     check_spec as check_map_spec, default_name as map_default_name,
     follow_up_prompt as map_follow_up_prompt, item_prompt as map_item_prompt,
@@ -2567,6 +2569,43 @@ pub enum Activity {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         link: Option<String>,
     },
+    /// A branch that a trigger keeps alive moved through its lifecycle: it
+    /// went idle (its kept sandbox released), dormant (its next run starts
+    /// a fresh session), was reincarnated, or was deleted. See
+    /// [`LifecycleState`] and `docs/triggers.md#lifecycle`.
+    Lifecycle {
+        /// Where the branch stands now.
+        state: LifecycleState,
+        /// Why, and what it released.
+        reason: String,
+        /// Milliseconds since the Unix epoch when the branch last ended a
+        /// turn: where its idleness is counted from.
+        idle_since_ms: u64,
+    },
+}
+
+/// Where a branch that lives on stands in its lifecycle: the `state` of
+/// [`Activity::Lifecycle`]. Serialized in snake case.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, strum::Display, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum LifecycleState {
+    /// It has not ended a turn for its idle time and is running none: what
+    /// it held (a kept sandbox) was released. The next send continues it
+    /// as before.
+    Idle,
+    /// It has been idle for its dormant time: the next run that would send
+    /// to it starts a fresh harness session on the same worktree instead.
+    Dormant,
+    /// A fresh harness session was started on the same worktree, with a
+    /// handoff of what the old one did.
+    Reincarnated,
+    /// It had been idle for its delete time, and was removed: the next run
+    /// creates it again from the trigger's task.
+    Deleted,
 }
 
 /// A turn's checkpoint: the branch's commit when the turn ended, kept as the

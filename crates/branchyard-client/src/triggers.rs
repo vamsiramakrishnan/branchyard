@@ -216,6 +216,37 @@ pub struct Deliver {
     /// What a run does while the branch is running a turn.
     #[serde(default)]
     pub busy: Busy,
+    /// When the branch rests: parked after it has been idle a while, made
+    /// dormant after a long one, deleted after longer. Unset, the branch
+    /// lives until someone removes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<Lifecycle>,
+}
+
+/// How long a branch that lives on may rest, counted from the end of its
+/// last turn, before the server acts on it. Each is optional, at least 1,
+/// and when several are given they rise: `idle_minutes` is less than
+/// `dormant_days`, which is less than `delete_days`, compared in absolute
+/// time. A run that continues the branch ends its rest: it starts the
+/// count over.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lifecycle {
+    /// Park the branch once it has not ended a turn for this many minutes
+    /// and runs none: release what it holds (a kept sandbox). The next run
+    /// continues it as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_minutes: Option<u32>,
+    /// Mark the branch dormant once it has not ended a turn for this many
+    /// days: the next run that would send to it starts a fresh harness
+    /// session on the same worktree instead (a reincarnation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dormant_days: Option<u32>,
+    /// Remove the branch once it has not ended a turn for this many days:
+    /// the next run creates it again from the trigger's task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_days: Option<u32>,
 }
 
 /// What a run does when the branch it delivers to is running a turn.
@@ -599,6 +630,11 @@ pub enum RunState {
     /// The branch it delivers to was running a turn, and its `busy`
     /// policy is `skip`.
     SkippedBusy,
+    /// Not a firing: a step of the lifecycle of a branch the trigger
+    /// delivers to that its own log cannot keep, such as its deletion.
+    /// `reason` says which, and `branches` names the branch. Counts
+    /// neither as a success nor as a failure.
+    Lifecycle,
     /// No task could be admitted; counts toward pausing.
     Failed,
     /// Scheduled times older than the catch-up window, never fired.
@@ -614,6 +650,7 @@ impl RunState {
             RunState::SkippedPrecheck => "skipped_precheck",
             RunState::SkippedDisabled => "skipped_disabled",
             RunState::SkippedBusy => "skipped_busy",
+            RunState::Lifecycle => "lifecycle",
             RunState::Failed => "failed",
             RunState::Missed => "missed",
         }
@@ -627,6 +664,7 @@ impl RunState {
             RunState::SkippedPrecheck,
             RunState::SkippedDisabled,
             RunState::SkippedBusy,
+            RunState::Lifecycle,
             RunState::Failed,
             RunState::Missed,
         ]
@@ -650,7 +688,8 @@ pub struct RunOutcome {
 pub struct TriggerRun {
     pub id: String,
     pub trigger: String,
-    /// `event:<id>`, `schedule:<ms>` or `missed:<ms>`: unique per trigger.
+    /// `event:<id>`, `schedule:<ms>`, `missed:<ms>` or
+    /// `lifecycle:deleted:<branch>:<ms>`: unique per trigger.
     pub key: String,
     pub state: RunState,
     pub at_ms: u64,

@@ -1117,9 +1117,9 @@ fn prepare(
         None if record.context.is_some() => (
             SessionMode::Fresh,
             Some(format!(
-                "{name} was rewound to a checkpoint its harness session cannot continue from; \
-                 this turn starts a fresh session whose prompt begins with a summary of the \
-                 turns before it"
+                "{name}'s harness session cannot be continued (it was rewound to a checkpoint \
+                 the session cannot continue from, or reincarnated in place); this turn starts \
+                 a fresh session whose prompt begins with a summary of the turns before it"
             )),
         ),
         None if record.checkpoint == Some(0) && record.info.turns > 0 => (

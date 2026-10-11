@@ -430,6 +430,7 @@ pub fn evaluate(
         test.deliver = Some(Deliver {
             branch: task.name.clone().unwrap_or_default(),
             busy: deliver.busy,
+            lifecycle: deliver.lifecycle.clone(),
         });
     }
     test.task = Some(task);

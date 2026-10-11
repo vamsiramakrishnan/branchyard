@@ -51,6 +51,18 @@ pub enum Work {
         branch: String,
         request: ReincarnateRequest,
     },
+    /// A trigger's run to a branch its lifecycle made dormant: the branch's
+    /// harness session starts over on the same worktree for `reason`
+    /// (`Branch::reincarnate_in_place`), then the send runs as a fresh
+    /// session. Listed as a reincarnation.
+    Resume {
+        /// The dormant branch.
+        branch: String,
+        /// The run's send, as `Work::Send` has it.
+        request: SendRequest,
+        /// Why the session starts over, for the branch's log.
+        reason: String,
+    },
     /// `POST .../branches/{branch}/merge`, with the target resolved at
     /// admission.
     Merge { branch: String, target: String },
@@ -91,7 +103,7 @@ impl Work {
             Work::Task { .. } => OperationKind::Task,
             Work::Send { .. } => OperationKind::Send,
             Work::Fork { .. } => OperationKind::Fork,
-            Work::Reincarnate { .. } => OperationKind::Reincarnate,
+            Work::Reincarnate { .. } | Work::Resume { .. } => OperationKind::Reincarnate,
             Work::Merge { .. } => OperationKind::Merge,
             Work::Spawn { .. } => OperationKind::Spawn,
             Work::Integrate { .. } => OperationKind::Integrate,
@@ -174,6 +186,24 @@ impl Work {
                 };
                 yard.branch(&branch)
                     .and_then(|source| source.reincarnate(options))
+                    .and_then(|b| finished(vec![b]))
+                    .map_err(sdk)
+            }
+            Work::Resume {
+                branch,
+                request,
+                reason,
+            } => {
+                let options = TaskOptions {
+                    trace_parent: trace_parent.clone(),
+                    ..send_options(app, repo, &request).map_err(api)?
+                };
+                let target = yard.branch(&branch).map_err(sdk)?;
+                send_allowed(app, &target, &branch, &request).map_err(api)?;
+                let prompt = sent_prompt(&target, &request).map_err(api)?;
+                target.reincarnate_in_place(&reason).map_err(sdk)?;
+                target
+                    .send(&prompt, options)
                     .and_then(|b| finished(vec![b]))
                     .map_err(sdk)
             }

@@ -806,7 +806,9 @@ class Client:
     def create_trigger(self, spec: JSON) -> Record:
         """`POST /v1/triggers` with a `TriggerSpec` (`docs/triggers.md`):
         `name`, `repo`, `when`, `task`, and `deliver: {"branch": TEMPLATE,
-        "busy": "queue" | "steer" | "skip"}` for a branch that lives on.
+        "busy": "queue" | "steer" | "skip", "lifecycle": {"idle_minutes": N,
+        "dormant_days": N, "delete_days": N}}` for a branch that lives on
+        (each lifecycle threshold optional, rising when several are given).
         Returns `{"trigger", "secret"?}`."""
         return Record(self.post("/v1/triggers", spec))
 

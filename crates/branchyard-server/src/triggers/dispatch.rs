@@ -3,15 +3,17 @@
 //! server's own admission path, and the loop that ticks the [`Engine`].
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-use branchyard::{BranchStatus, Fleet, RouteOptions, SteerState, TaskKind};
+use branchyard::{BranchStatus, Fleet, LifecycleState, RouteOptions, SteerState, TaskKind};
 use branchyard_client::api::{Operation, SendRequest, TaskRequest};
 use branchyard_client::triggers::Busy;
 use tokio::sync::{watch, Notify};
 
 use super::engine::{Admitted, Delivered, Engine, Refusal, Sink};
+use super::lifecycle::{self, Action, Stage, Standing};
 use super::store::TriggerStore;
 use super::{Settings, StoredTrigger};
 use crate::api::{App, Caller, RepoState};
@@ -89,6 +91,20 @@ impl AppSink {
             key: key.to_owned(),
             fingerprint: crate::api::fingerprint(&format!("trigger\n{canonical}")),
         }
+    }
+
+    /// Why the send to `branch` starts the branch's session over first, when
+    /// its lifecycle made it dormant: how long it had rested, by the
+    /// dispatcher's clock.
+    fn reincarnation(&self, yard: &branchyard::Yard, branch: &str) -> Option<String> {
+        let resting = yard.resting(branch).ok()?;
+        (resting.state == Some(LifecycleState::Dormant)).then(|| {
+            let now = self.app.triggers.settings.clock.now();
+            format!(
+                "it was dormant: no turn ended for {}",
+                lifecycle::span(now.saturating_sub(resting.last_turn_end_ms) / 1000)
+            )
+        })
     }
 
     /// What an admission came to: the operation, the one another attempt
@@ -220,9 +236,18 @@ impl Sink for AppSink {
         let caller = Caller(trigger.principal.clone());
         let app = self.app.clone();
         let repo = trigger.spec.repo.clone();
+        // A branch its lifecycle made dormant starts its session over: the
+        // run's operation is that reincarnation, and its turn the first of
+        // the new session.
+        let reincarnate = self.reincarnation(&yard, &branch);
+        let to = crate::api::SendTo {
+            branch,
+            request: send,
+            reincarnate,
+        };
         let admitted = self.runtime.block_on(async move {
             let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
-            crate::api::admit_send(&app, &repo, &caller, Some(idem), branch, send, None).await
+            crate::api::admit_send(&app, &repo, &caller, Some(idem), to, None).await
         });
         // The server admits one operation on a branch at a time: taken
         // meanwhile (a turn started since the look above, or another
@@ -243,6 +268,46 @@ impl Sink for AppSink {
 
     fn operation(&self, id: &str) -> Option<Operation> {
         self.app.registry.get(id).ok().flatten()
+    }
+
+    fn standing(&self, trigger: &StoredTrigger, branch: &str) -> Result<Option<Standing>, String> {
+        let repo = self.repo(&trigger.spec.repo)?;
+        match repo.yard.resting(branch) {
+            Ok(resting) if resting.finished() => Ok(None),
+            Ok(resting) => Ok(Some(Standing {
+                running: resting.engaged(),
+                last_turn_end_ms: resting.last_turn_end_ms,
+                stage: Stage::of(resting.state),
+            })),
+            Err(branchyard::Error::UnknownBranch(_)) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    fn rest(
+        &self,
+        trigger: &StoredTrigger,
+        branch: &str,
+        action: Action,
+        reason: &str,
+    ) -> Result<(), String> {
+        let repo = self.repo(&trigger.spec.repo)?;
+        // Held in the operation store, as a removal is, so no operation on
+        // any server sharing it changes the branch meanwhile; one queued or
+        // running holds it, and the step waits for the next look.
+        let hold = self
+            .app
+            .registry
+            .hold(&repo.name, branch, "its lifecycle")
+            .map_err(|e| e.body.message.clone())?;
+        let yard = &repo.yard;
+        let done = match action {
+            Action::Park => yard.park(branch, LifecycleState::Idle, reason).map(drop),
+            Action::GoDormant => yard.park(branch, LifecycleState::Dormant, reason).map(drop),
+            Action::Delete => yard.retire(branch, reason).map(drop),
+        };
+        drop(hold);
+        done.map_err(|e| e.to_string())
     }
 
     fn prechecks_allowed(&self, repo: &str) -> bool {
@@ -388,6 +453,7 @@ pub fn spawn(app: Arc<App>, mut shutdown: watch::Receiver<bool>) -> tokio::task:
                 runtime: tokio::runtime::Handle::current(),
             }),
             worker: hub.worker.clone(),
+            rested_at: AtomicU64::new(0),
         });
         loop {
             tokio::select! {
@@ -418,6 +484,17 @@ pub fn spawn(app: Arc<App>, mut shutdown: watch::Receiver<bool>) -> tokio::task:
                 }
                 Err(_) => return,
             };
+            // The lifecycles of branches triggers keep alive, at their own
+            // pace and on a thread of their own: a removal takes git.
+            let resting = engine.clone();
+            tokio::task::spawn_blocking(move || match resting.rest() {
+                Ok(done) => {
+                    for (trigger, branch, action) in done {
+                        tracing::info!(%trigger, %branch, action = ?action, "trigger branch lifecycle");
+                    }
+                }
+                Err(e) => tracing::error!(error = %e, "resting trigger branches"),
+            });
             // Each run on a thread of its own: a precheck may take minutes.
             for (run, fence) in claimed {
                 let firing = engine.clone();

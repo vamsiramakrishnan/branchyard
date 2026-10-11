@@ -1525,20 +1525,30 @@ async fn post_send(
     let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
     let route = format!("POST /v1/repos/{}/branches/{branch}/send", repo.name);
     let idem = idempotency(&headers, &caller, &route, &canonical)?;
-    let (op, replayed) = admit_send(
-        &app,
-        &repo,
-        &caller,
-        idem,
+    let to = SendTo {
         branch,
         request,
-        incoming_trace(&headers),
-    )
-    .await?;
+        reincarnate: None,
+    };
+    let (op, replayed) =
+        admit_send(&app, &repo, &caller, idem, to, incoming_trace(&headers)).await?;
     Ok(operation_response(op, replayed))
 }
 
-/// Admit a send to `branch` of `repo` for `caller`, or return the
+/// What a send is to: the branch, what is sent, and, for a branch whose
+/// lifecycle made it dormant, why its harness session starts over first.
+pub(crate) struct SendTo {
+    /// The branch.
+    pub branch: String,
+    /// The prompt and what governs the turn.
+    pub request: SendRequest,
+    /// Set, the operation reincarnates the branch in place (a fresh harness
+    /// session on the same worktree) before the turn, for this reason; it
+    /// is then a reincarnation, not a send, to anyone who looks.
+    pub reincarnate: Option<String>,
+}
+
+/// Admit a send to `to.branch` of `repo` for `caller`, or return the
 /// operation `idem` already names (`true`): what `POST .../send` does,
 /// and what a trigger that delivers to a branch does as the principal
 /// that created it. The operation takes the branch's lock, so a send to a
@@ -1548,10 +1558,14 @@ pub(crate) async fn admit_send(
     repo: &RepoState,
     caller: &Caller,
     idem: Option<Idempotency>,
-    branch: String,
-    request: SendRequest,
+    to: SendTo,
     trace: Option<String>,
 ) -> Result<(Operation, bool), ApiError> {
+    let SendTo {
+        branch,
+        request,
+        reincarnate,
+    } = to;
     if let Some(op) = replayed_operation(app, caller, idem.as_ref()).await? {
         return Ok((op, true));
     }
@@ -1570,7 +1584,10 @@ pub(crate) async fn admit_send(
     let cursor = sync_feed(&repo.feed).await?;
     let new = NewOperation {
         repo: repo.name.clone(),
-        kind: OperationKind::Send,
+        kind: match reincarnate {
+            Some(_) => OperationKind::Reincarnate,
+            None => OperationKind::Send,
+        },
         creates: Vec::new(),
         branches: vec![branch.clone()],
         cursor,
@@ -1582,7 +1599,15 @@ pub(crate) async fn admit_send(
         priority: admitted_priority(&policy, request.priority, 0)?,
         trace,
     };
-    let value = Work::Send { branch, request }.to_value()?;
+    let work = match reincarnate {
+        Some(reason) => Work::Resume {
+            branch,
+            request,
+            reason,
+        },
+        None => Work::Send { branch, request },
+    };
+    let value = work.to_value()?;
     let registry = app.registry.clone();
     blocking(move || registry.submit(new, value)).await?
 }

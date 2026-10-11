@@ -329,6 +329,16 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "summary": summary,
             "link": link,
         }),
+        Activity::Lifecycle {
+            state,
+            reason,
+            idle_since_ms,
+        } => json!({
+            "activity": "lifecycle",
+            "state": state,
+            "reason": reason,
+            "idle_since_ms": idle_since_ms,
+        }),
     };
     value["at_ms"] = json!(recorded.at_ms);
     value
@@ -536,5 +546,22 @@ mod tests {
             })
         );
         assert_eq!(status_report(None)["link"], Value::Null);
+        assert_eq!(
+            recorded(&RecordedEvent {
+                at_ms: 8,
+                activity: Activity::Lifecycle {
+                    state: branchyard::LifecycleState::Dormant,
+                    reason: "no turn for 7d".into(),
+                    idle_since_ms: 3,
+                }
+            }),
+            json!({
+                "at_ms": 8,
+                "activity": "lifecycle",
+                "state": "dormant",
+                "reason": "no turn for 7d",
+                "idle_since_ms": 3,
+            })
+        );
     }
 }

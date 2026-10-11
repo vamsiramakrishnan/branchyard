@@ -227,9 +227,39 @@ class TriggerExamplesValidate(unittest.TestCase):
         spec = _trigger_example("POST /v1/triggers (a branch that lives on)")
         validate_as(spec, "TriggerSpec")
         self.assertEqual(spec["deliver"]["busy"], "steer")
+        self.assertEqual(
+            spec["deliver"]["lifecycle"],
+            {"idle_minutes": 30, "dormant_days": 7, "delete_days": 30},
+        )
         spec["deliver"]["busy"] = "drop"
         with self.assertRaises(ValidationError):
             validate_as(spec, "TriggerSpec")
+
+    def test_a_lifecycle_is_part_of_deliver_and_names_only_its_three_thresholds(self):
+        spec = _trigger_example("POST /v1/triggers (a branch that lives on)")
+        spec["deliver"]["lifecycle"] = {"delete_days": 14}
+        validate_as(spec, "TriggerSpec")
+        spec["deliver"]["lifecycle"] = {"idle": 30}
+        with self.assertRaises(ValidationError):
+            validate_as(spec, "TriggerSpec")
+        # Beside `deliver` it is an unknown field of the spec.
+        spec = _trigger_example("POST /v1/triggers (a branch that lives on)")
+        spec["lifecycle"] = spec["deliver"].pop("lifecycle")
+        with self.assertRaises(ValidationError):
+            validate_as(spec, "TriggerSpec")
+
+    def test_a_lifecycle_note_is_a_run_state_and_a_lifecycle_activity_is_an_event(self):
+        run = _trigger_example("TriggerRun")
+        run["state"] = "lifecycle"
+        validate_as(run, "TriggerRun")
+
+        def events(state):
+            lifecycle = {"state": state, "reason": "no turn ended for 7d", "idle_since_ms": 5}
+            return {"events": [{"at_ms": 6, "activity": {"lifecycle": lifecycle}}], "cursor": 1}
+
+        validate_as(events("dormant"), "BranchEvents")
+        with self.assertRaises(ValidationError):
+            validate_as(events("asleep"), "BranchEvents")
 
     def test_schedules_and_acks_validate(self):
         validate_as({"kind": "cron", "expr": "0 3 * * 1-5", "timezone": "Europe/Berlin"}, "When")

@@ -24,6 +24,7 @@
 
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use branchyard_client::api::{Operation, OperationState, TaskRequest};
@@ -31,6 +32,7 @@ use branchyard_client::triggers::{Busy, RunOutcome, RunState, TriggerRun};
 
 use sha2::Digest;
 
+use super::lifecycle::{Action, Standing};
 use super::store::TriggerStore;
 use super::template::{self, Context};
 use super::{precheck, target, Clock, Schedule, StoredTrigger};
@@ -104,6 +106,20 @@ pub trait Sink: Send + Sync {
     ) -> Result<Delivered, Refusal>;
     /// An operation as the registry has it now.
     fn operation(&self, id: &str) -> Option<Operation>;
+    /// What `branch`, which `trigger` delivers to, looks like to its
+    /// lifecycle; `None` when it no longer exists or is settled for good
+    /// (merged, discarded), so there is nothing to do to it.
+    fn standing(&self, trigger: &StoredTrigger, branch: &str) -> Result<Option<Standing>, String>;
+    /// Apply a lifecycle `action` to `branch`, for `reason`: park it, mark
+    /// it dormant, or remove it. An error is a step not taken (the branch
+    /// is busy, or went): the next look decides again.
+    fn rest(
+        &self,
+        trigger: &StoredTrigger,
+        branch: &str,
+        action: Action,
+        reason: &str,
+    ) -> Result<(), String>;
     /// Whether the operator lets `repo`'s triggers run prechecks.
     fn prechecks_allowed(&self, repo: &str) -> bool;
     /// `request` with a harness the repository's fleet table picked, the
@@ -125,6 +141,9 @@ pub struct Engine {
     pub sink: Arc<dyn Sink>,
     /// This dispatcher's name on its claims.
     pub worker: String,
+    /// When the lifecycles of the triggers that have one were last looked
+    /// at (0: never); see [`Engine::rest`].
+    pub rested_at: AtomicU64,
 }
 
 /// What one [`Engine::tick`] did.
@@ -132,6 +151,9 @@ pub struct Engine {
 pub struct Tick {
     pub fired: Vec<TriggerRun>,
     pub settled: usize,
+    /// What the lifecycle of a branch a trigger delivers to did this tick,
+    /// as (trigger, branch, action).
+    pub rested: Vec<(String, String, Action)>,
 }
 
 fn new_run(trigger: &str, key: String, state: RunState, at_ms: u64) -> TriggerRun {
@@ -495,6 +517,7 @@ impl Engine {
             tick.fired.push(self.fire(run, fence)?);
         }
         tick.settled = self.settle()?;
+        tick.rested = self.rest()?;
         Ok(tick)
     }
 }
@@ -641,9 +664,10 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
-    use branchyard_client::triggers::{Deliver, TriggerEvent, When};
+    use branchyard_client::triggers::{Deliver, Lifecycle, TriggerEvent, When};
 
     use super::*;
+    use crate::triggers::lifecycle::Stage;
     use crate::triggers::store::{conformance, SqliteTriggers};
 
     /// Records admissions; admits with the idempotency key as the store's
@@ -659,6 +683,10 @@ mod tests {
         existing: Mutex<BTreeSet<String>>,
         running: Mutex<BTreeSet<String>>,
         delivered: Mutex<Vec<(String, String)>>,
+        /// What each branch looks like to its lifecycle, and what the
+        /// lifecycle did to it: (branch, action, reason).
+        standings: Mutex<BTreeMap<String, Standing>>,
+        rested: Mutex<Vec<(String, Action, String)>>,
     }
 
     impl Sink for FakeSink {
@@ -729,6 +757,34 @@ mod tests {
         fn operation(&self, id: &str) -> Option<Operation> {
             self.ops.lock().unwrap().get(id).cloned()
         }
+        fn standing(&self, _: &StoredTrigger, branch: &str) -> Result<Option<Standing>, String> {
+            Ok(self.standings.lock().unwrap().get(branch).copied())
+        }
+        fn rest(
+            &self,
+            _: &StoredTrigger,
+            branch: &str,
+            action: Action,
+            reason: &str,
+        ) -> Result<(), String> {
+            if self.refuse.lock().unwrap().is_some() {
+                return Err("busy".into());
+            }
+            let mut standings = self.standings.lock().unwrap();
+            match action {
+                Action::Park => standings.get_mut(branch).unwrap().stage = Stage::Idle,
+                Action::GoDormant => standings.get_mut(branch).unwrap().stage = Stage::Dormant,
+                Action::Delete => {
+                    standings.remove(branch);
+                    self.existing.lock().unwrap().remove(branch);
+                }
+            }
+            self.rested
+                .lock()
+                .unwrap()
+                .push((branch.into(), action, reason.into()));
+            Ok(())
+        }
         fn prechecks_allowed(&self, _: &str) -> bool {
             true
         }
@@ -765,6 +821,7 @@ mod tests {
                 clock: Clock::manual(clock.clone()),
                 sink: sink.clone(),
                 worker: format!("w{i}"),
+                rested_at: AtomicU64::new(0),
             })
             .collect();
         (engines, sink, store)
@@ -850,6 +907,7 @@ mod tests {
         t.spec.deliver = Some(Deliver {
             branch: "Assistant".into(),
             busy: Busy::Queue,
+            lifecycle: None,
         });
         t.next_due_ms = Some(10 * MINUTE);
         assert!(store.create(&t).unwrap());
@@ -897,6 +955,7 @@ mod tests {
             t.spec.deliver = Some(Deliver {
                 branch: "assistant".into(),
                 busy,
+                lifecycle: None,
             });
             t.next_due_ms = Some(10 * MINUTE);
             assert!(store.create(&t).unwrap());
@@ -957,6 +1016,7 @@ mod tests {
         t.spec.deliver = Some(Deliver {
             branch: "slack-{{event.author}}".into(),
             busy: Busy::Queue,
+            lifecycle: None,
         });
         assert!(store.create(&t).unwrap());
         event_run(&t, &store, 1, "Alice");
@@ -995,6 +1055,152 @@ mod tests {
         assert_eq!(fired[0].state, RunState::Failed, "{fired:?}");
         let reason = fired[0].reason.as_deref().unwrap();
         assert!(reason.contains("{{event.author}} is empty"), "{reason}");
+    }
+
+    /// A trigger with a lifecycle: the branch it delivers to is parked once
+    /// it has rested for `idle_minutes`, made dormant at `dormant_days` and
+    /// deleted at `delete_days`, each once, by the engine's clock. A branch
+    /// running a turn is left alone, a step not taken is tried again, and
+    /// the deletion is noted on the trigger. A trigger without a lifecycle
+    /// is not looked at.
+    #[test]
+    fn a_branch_a_trigger_delivers_to_is_parked_made_dormant_and_deleted_as_it_rests() {
+        const DAY: u64 = 86_400_000;
+        let clock = Arc::new(AtomicU64::new(10 * MINUTE));
+        let (engines, sink, store) = engines(1, &clock);
+        let delivering = |name: &str, branch: &str, lifecycle: Option<Lifecycle>| {
+            let mut t = conformance::trigger("default", name, true);
+            t.spec.when = When::Interval { seconds: 60 };
+            t.spec.deliver = Some(Deliver {
+                branch: branch.into(),
+                busy: Busy::Queue,
+                lifecycle,
+            });
+            t.next_due_ms = Some(10 * MINUTE);
+            assert!(store.create(&t).unwrap());
+            t
+        };
+        let t = delivering(
+            "heartbeat",
+            "assistant",
+            Some(Lifecycle {
+                idle_minutes: Some(30),
+                dormant_days: Some(7),
+                delete_days: Some(30),
+            }),
+        );
+        delivering("plain", "keeper", None);
+        let fired = engines[0].tick().unwrap().fired;
+        assert_eq!(fired.len(), 2, "{fired:?}");
+        let ended = 10 * MINUTE;
+        for branch in ["assistant", "keeper"] {
+            sink.standings.lock().unwrap().insert(
+                branch.into(),
+                Standing {
+                    running: false,
+                    last_turn_end_ms: ended,
+                    stage: Stage::Active,
+                },
+            );
+        }
+        let rest = |after: u64| {
+            clock.store(ended + after, Ordering::SeqCst);
+            engines[0].rest().unwrap()
+        };
+        let stage = || sink.standings.lock().unwrap()["assistant"].stage;
+        // Not yet.
+        assert!(rest(29 * MINUTE).is_empty());
+        // Idle: parked once, saying how long it rested.
+        let done = rest(31 * MINUTE);
+        assert_eq!(
+            done,
+            [("heartbeat".to_owned(), "assistant".to_owned(), Action::Park)]
+        );
+        assert_eq!(stage(), Stage::Idle);
+        let said = sink.rested.lock().unwrap()[0].clone();
+        assert_eq!(said.0, "assistant");
+        assert!(said.2.starts_with("no turn ended for 31m"), "{said:?}");
+        // A look inside the pace of the engine changes nothing, and neither
+        // does a look at a branch already parked.
+        assert!(rest(31 * MINUTE + 1_000).is_empty());
+        assert!(rest(40 * MINUTE).is_empty());
+        // Dormant at its days; deleting waits for its own.
+        assert_eq!(rest(7 * DAY).len(), 1);
+        assert_eq!(stage(), Stage::Dormant);
+        assert!(rest(29 * DAY).is_empty());
+        // A branch running a turn is never touched, however long it has
+        // gone, and a step the server could not take is tried again.
+        sink.standings
+            .lock()
+            .unwrap()
+            .get_mut("assistant")
+            .unwrap()
+            .running = true;
+        assert!(rest(31 * DAY).is_empty());
+        sink.standings
+            .lock()
+            .unwrap()
+            .get_mut("assistant")
+            .unwrap()
+            .running = false;
+        *sink.refuse.lock().unwrap() = Some("busy".into());
+        assert!(rest(31 * DAY + MINUTE).is_empty());
+        assert_eq!(stage(), Stage::Dormant);
+        *sink.refuse.lock().unwrap() = None;
+        let done = rest(31 * DAY + 2 * MINUTE);
+        assert_eq!(
+            done,
+            [(
+                "heartbeat".to_owned(),
+                "assistant".to_owned(),
+                Action::Delete
+            )]
+        );
+        assert!(!sink.standings.lock().unwrap().contains_key("assistant"));
+        // The trigger notes it: a run of its own state, naming the branch.
+        let runs = store.runs(&t.id, 20).unwrap();
+        let noted = runs
+            .iter()
+            .find(|r| r.state == RunState::Lifecycle)
+            .expect("a lifecycle run");
+        assert_eq!(noted.branches, ["assistant"]);
+        assert!(
+            noted.key.starts_with("lifecycle:deleted:assistant:"),
+            "{}",
+            noted.key
+        );
+        assert!(
+            noted
+                .reason
+                .as_deref()
+                .unwrap()
+                .starts_with("assistant: no turn ended for 31d"),
+            "{noted:?}"
+        );
+        // It counts neither way toward pausing.
+        let stored = store.get(&t.id).unwrap().unwrap();
+        assert_eq!((stored.failures, stored.enabled), (0, true));
+        // Nothing of the trigger without a lifecycle was touched.
+        assert!(sink
+            .rested
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(branch, _, _)| branch == "assistant"));
+        assert!(sink.standings.lock().unwrap().contains_key("keeper"));
+        // And a disabled trigger is not looked at.
+        store
+            .set_state(&t.id, false, Some("paused"), 0, None)
+            .unwrap();
+        sink.standings.lock().unwrap().insert(
+            "assistant".into(),
+            Standing {
+                running: false,
+                last_turn_end_ms: ended,
+                stage: Stage::Active,
+            },
+        );
+        assert!(rest(40 * DAY).is_empty());
     }
 
     #[test]
