@@ -22,9 +22,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use branchyard_provision::apply::{apply, installed, remove_credentials};
+use branchyard_provision::permissions::{Fallback, PermissionRule};
 use branchyard_provision::{
-    for_harness, provisioners, Context, Effort, Instructions, McpServer, Plan, Protocol,
-    RemoteMcpServer, RemoteTransport, Secret, Telemetry, Via, NOT_PORTED,
+    for_harness, provisioners, Context, Effort, Instructions, McpServer, Permissions, Plan,
+    Protocol, RemoteMcpServer, RemoteTransport, Secret, Telemetry, Via, NOT_PORTED,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -469,23 +470,24 @@ fn a_remote_mcp_server_goes_in_claude_codes_private_file_with_its_headers() {
     assert!(!plan.secrets[0].tool_env);
     assert!(!format!("{:?}", plan.session).contains("remote-header-secret"));
 
-    // Over ACP, the agent decides; elsewhere, refused before anything.
+    // Over ACP, the agent decides; Antigravity takes it in its
+    // configuration (see below); elsewhere, refused before anything.
     let mut acp = self::context("claude-code", Protocol::Acp);
     acp.remote_mcp_servers = vec![remote("search")];
     let plan = branchyard_provision::plan(&acp).unwrap();
     assert_eq!(plan.session.remote_mcp_servers, acp.remote_mcp_servers);
-    for (harness, protocol) in [
-        ("codex", Protocol::CodexAppServer),
-        ("antigravity", Protocol::AntigravityStreamJson),
-    ] {
-        let mut context = self::context(harness, protocol);
-        context.remote_mcp_servers = vec![remote("search")];
-        let refused = branchyard_provision::plan(&context).unwrap_err().0;
-        assert!(
-            refused.contains("search") && !refused.contains("remote-header-secret"),
-            "{refused}"
-        );
-    }
+    let mut antigravity = self::context("antigravity", Protocol::AntigravityStreamJson);
+    antigravity.remote_mcp_servers = vec![remote("search")];
+    let plan = branchyard_provision::plan(&antigravity).unwrap();
+    assert!(plan.session.remote_mcp_servers.is_empty());
+    assert_eq!(plan.installed_mcp_servers.unwrap(), ["search"]);
+    let mut codex = self::context("codex", Protocol::CodexAppServer);
+    codex.remote_mcp_servers = vec![remote("search")];
+    let refused = branchyard_provision::plan(&codex).unwrap_err().0;
+    assert!(
+        refused.contains("search") && !refused.contains("remote-header-secret"),
+        "{refused}"
+    );
 }
 
 #[test]
@@ -744,40 +746,177 @@ fn server(name: &str) -> McpServer {
     }
 }
 
+/// Branchyard's delegation endpoint as a sandboxed harness is given it: an
+/// HTTP server with its turn's bearer token.
+fn delegation_endpoint() -> RemoteMcpServer {
+    RemoteMcpServer {
+        name: "branchyard".into(),
+        transport: RemoteTransport::Http,
+        url: "http://192.168.127.1:41000/mcp".into(),
+        headers: vec![("Authorization".into(), "Bearer turn-token".into())],
+    }
+}
+
 #[test]
-fn antigravity_gets_mcp_servers_and_instructions_in_its_configuration() {
+fn antigravity_gets_mcp_servers_instructions_and_rules_in_its_configuration() {
     // Scion's antigravity/provision.py: AGY_MCP_MAPPING and the
-    // instructions file, merged instead of replaced.
+    // instructions file, merged instead of replaced; the branch's policy as
+    // the CLI's permission rules, next to a rule of the user's.
     let temp = Temp::new();
     temp.seed(
         ".gemini/config/mcp_config.json",
         r#"{"mcpServers": {"users-own": {"command": "/opt/mine"}}}"#,
     );
     temp.seed(".gemini/GEMINI.md", "# My notes\n\nKeep these.\n");
+    temp.seed(
+        ".gemini/antigravity-cli/settings.json",
+        r#"{"permissions": {"allow": ["command(regex:make .*)"]}}"#,
+    );
     let mut context = context("antigravity", Protocol::AntigravityStreamJson);
     context.secrets = secrets(&[("GEMINI_API_KEY", "g-secret")]);
     context.mcp_servers = vec![server("docs"), server("search")];
+    context.remote_mcp_servers = vec![delegation_endpoint()];
     context.instructions = Some(Instructions {
         text: "Use the docs server.".into(),
         plugin_dir: None,
     });
     context.model = Some("Gemini 3.8 Flash (Medium)".into());
+    // `full`, on a harness that has `by`.
+    context.permissions = Some(Permissions {
+        by: Some("/usr/local/bin/by".into()),
+        ..Permissions::new(Fallback::Allow)
+    });
     let plan = provision(&temp, &context);
     golden("antigravity-mcp", &temp, &plan);
     assert!(plan.session.mcp_servers.is_empty() && plan.session.instructions.is_none());
+    assert!(plan.session.remote_mcp_servers.is_empty());
     assert_eq!(
         plan.session.model.as_deref(),
         Some("Gemini 3.8 Flash (Medium)")
     );
+    assert_eq!(temp.mode(".gemini/config/mcp_config.json"), 0o600);
+    let written = plan.permissions.unwrap();
+    assert_eq!(written.path, ".gemini/antigravity-cli/settings.json");
+    assert!(written.allow.contains(&"mcp(branchyard/*)".to_owned()));
 
-    // A later turn without `search` and without instructions removes only
-    // what Branchyard installed.
+    // A later turn without `search`, the endpoint or instructions, and
+    // allowed only Branchyard's delegation commands, removes only what
+    // Branchyard installed, its earlier rules included.
     context.installed = installed(&temp.home());
-    assert_eq!(context.installed.mcp_servers, ["docs", "search"]);
+    assert_eq!(
+        context.installed.mcp_servers,
+        ["docs", "search", "branchyard"]
+    );
     context.mcp_servers = vec![server("docs")];
+    context.remote_mcp_servers.clear();
     context.instructions = None;
+    context.permissions = Some(Permissions {
+        rules: vec![PermissionRule {
+            tool: "*".into(),
+            allow: true,
+            delegation_by: Some("/usr/local/bin/by".into()),
+        }],
+        by: Some("/usr/local/bin/by".into()),
+        ..Permissions::new(Fallback::Deny)
+    });
     let plan = provision(&temp, &context);
     golden("antigravity-mcp-later", &temp, &plan);
+}
+
+#[test]
+fn antigravity_rules_follow_the_policy_and_never_touch_a_home_that_is_yours() {
+    // Every turn writes the policy's rules again: a send under a stricter
+    // policy takes back what an earlier one allowed, and a turn with no
+    // policy to translate takes back everything Branchyard wrote.
+    let temp = Temp::new();
+    let mut context = context("antigravity", Protocol::AntigravityStreamJson);
+    context.mcp_servers = vec![server("branchyard")];
+    context.permissions = Some(Permissions {
+        by: Some("/usr/local/bin/by".into()),
+        ..Permissions::new(Fallback::Allow)
+    });
+    provision(&temp, &context);
+    let settings = |temp: &Temp| -> serde_json::Value {
+        serde_json::from_str(&temp.read(".gemini/antigravity-cli/settings.json")).unwrap()
+    };
+    assert_eq!(
+        settings(&temp)["permissions"]["allow"],
+        serde_json::json!([
+            "command(regex:git .*)",
+            "command(regex:by .*)",
+            "command(regex:/usr/local/bin/by .*)",
+            "mcp(branchyard/*)"
+        ])
+    );
+    // No rule allows every command.
+    assert!(!temp
+        .read(".gemini/antigravity-cli/settings.json")
+        .contains("regex:.*\""));
+
+    // `read-only`: nothing allowed, writes denied.
+    context.installed = installed(&temp.home());
+    context.permissions = Some(Permissions {
+        rules: ["Bash", "run_command", "write_file", "Edit"]
+            .iter()
+            .map(|tool| PermissionRule {
+                tool: (*tool).into(),
+                allow: false,
+                delegation_by: None,
+            })
+            .collect(),
+        ..Permissions::new(Fallback::Deny)
+    });
+    let plan = provision(&temp, &context);
+    assert_eq!(
+        settings(&temp)["permissions"]["allow"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        settings(&temp)["permissions"]["deny"],
+        serde_json::json!(["write_file(*)"])
+    );
+    assert_eq!(plan.permissions.unwrap().deny, ["write_file(*)"]);
+
+    // Nothing to translate: Branchyard's rules go, and the record of them.
+    context.installed = installed(&temp.home());
+    context.permissions = None;
+    let plan = provision(&temp, &context);
+    assert_eq!(
+        settings(&temp)["permissions"]["deny"],
+        serde_json::json!([])
+    );
+    assert!(plan.permissions.unwrap().is_empty());
+    assert_eq!(installed(&temp.home()).permissions, None);
+
+    // A home that is yours keeps your rules: none are planned, and nothing
+    // is refused for it.
+    let mut context = self::context("antigravity", Protocol::AntigravityStreamJson);
+    context.private_home = false;
+    context.sandbox = false;
+    context.permissions = Some(Permissions::new(Fallback::Allow));
+    let plan = branchyard_provision::plan(&context).unwrap();
+    assert!(plan.files.is_empty() && plan.permissions.is_none());
+
+    // No plan for any harness passes the CLI's bypass flag.
+    assert!(!format!("{plan:?}").contains("dangerously"));
+}
+
+#[test]
+fn antigravity_takes_an_http_mcp_server_but_not_an_sse_one() {
+    let mut context = context("antigravity", Protocol::AntigravityStreamJson);
+    context.remote_mcp_servers = vec![RemoteMcpServer {
+        transport: RemoteTransport::Sse,
+        ..delegation_endpoint()
+    }];
+    let refused = branchyard_provision::plan(&context).unwrap_err().0;
+    assert!(refused.contains("SSE"), "{refused}");
+    // An HTTP one needs a private home, as every MCP server does there.
+    context.remote_mcp_servers = vec![delegation_endpoint()];
+    context.private_home = false;
+    context.sandbox = false;
+    let refused = branchyard_provision::plan(&context).unwrap_err().0;
+    assert!(refused.contains("--isolated"), "{refused}");
+    assert!(!refused.contains("turn-token"), "{refused}");
 }
 
 #[test]

@@ -13,5 +13,15 @@
   ],
   "mcp_servers": [
     "docs"
-  ]
+  ],
+  "permissions": {
+    "allow": [
+      "command(regex:by .*)",
+      "command(regex:/usr/local/bin/by .*)"
+    ],
+    "deny": [
+      "write_file(*)"
+    ],
+    "path": ".gemini/antigravity-cli/settings.json"
+  }
 }

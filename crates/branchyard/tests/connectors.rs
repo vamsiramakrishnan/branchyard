@@ -337,6 +337,189 @@ fn the_token_never_reaches_the_log_or_the_record_and_the_index_is_in_the_instruc
     }
 }
 
+/// The rules a settings file holds under `permissions.<list>`.
+fn rules_in(settings: &serde_json::Value, list: &str) -> Vec<String> {
+    settings["permissions"][list]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|rule| rule.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// A delegated, granted turn on Antigravity, whose driver has no session
+/// channel: the delegation server goes into its `mcp_config.json`, the
+/// skill and the connectors' line into its `GEMINI.md`, the gateway's
+/// variables onto its process, and the branch's policy (`full`) becomes the
+/// CLI's permission rules, recorded with the turn. The command is a shell
+/// that keeps its environment and exits, so the turn fails after its
+/// provisioning, which is what is checked.
+#[test]
+fn antigravity_gets_its_grant_the_delegation_tools_and_its_policy_as_rules() {
+    let f = Fixture::new();
+    gateway(&f, &["github"]);
+    let script = "env > \"$HOME/agy-env.txt\"; exit 0";
+    let branch = f
+        .task("go")
+        .options(TaskOptions {
+            harness: Some("antigravity".into()),
+            command: Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            unapproved_tools: true,
+            delegation: Some(Envelope::default()),
+            delegation_server: Some(vec![fake_agent().display().to_string()]),
+            delegation_cli: Some(fake_agent().to_path_buf()),
+            ..granted(&f, &["github"])
+        })
+        .name("agy")
+        .run()
+        .unwrap();
+    assert!(
+        matches!(branch.info().status, BranchStatus::Failed { .. }),
+        "{:?}",
+        branch.info().status
+    );
+    let home = PathBuf::from(stored_record(&f.root, "agy")["home"].as_str().unwrap());
+    let read = |path: &str| fs::read_to_string(home.join(path)).unwrap();
+
+    // The delegation server, its turn's token among its variables, in a
+    // file only this user reads.
+    let config: serde_json::Value =
+        serde_json::from_str(&read(".gemini/config/mcp_config.json")).unwrap();
+    let server = &config["mcpServers"]["branchyard"];
+    assert_eq!(
+        server["command"],
+        fake_agent().display().to_string(),
+        "{config}"
+    );
+    assert!(
+        server["env"]["BRANCHYARD_DELEGATION"].is_string(),
+        "{config}"
+    );
+    let mode = fs::metadata(home.join(".gemini/config/mcp_config.json"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+
+    // The grant: the package, and the gateway's variables on the process.
+    assert!(home
+        .join(".branchyard/connectors/github/SKILL.md")
+        .is_file());
+    let env = read("agy-env.txt");
+    for var in [
+        "ANVIL_GATEWAY_URL=http://",
+        "ANVIL_GATEWAY_TOKEN_FILE=",
+        "BRANCHYARD_DELEGATION=",
+    ] {
+        assert!(env.contains(var), "{var} missing from {env}");
+    }
+
+    // The skill and the connectors' line, in the CLI's instructions.
+    let instructions = read(".gemini/GEMINI.md");
+    assert!(
+        instructions.contains("Connectors (github)"),
+        "{instructions}"
+    );
+    assert!(instructions.contains("by spawn"), "{instructions}");
+
+    // `full` as the CLI's rules: git, `by` by name and by path, and the
+    // delegation tools; never every command.
+    let settings: serde_json::Value =
+        serde_json::from_str(&read(".gemini/antigravity-cli/settings.json")).unwrap();
+    let allow = rules_in(&settings, "allow");
+    for rule in [
+        "command(regex:git .*)",
+        "command(regex:by .*)",
+        "mcp(branchyard/*)",
+    ] {
+        assert!(
+            allow.contains(&rule.to_owned()),
+            "{rule} missing from {allow:?}"
+        );
+    }
+    assert!(
+        allow
+            .iter()
+            .any(|r| r.starts_with("command(regex:/") && r.ends_with("fake-acp-agent .*)")),
+        "{allow:?}"
+    );
+    assert!(!allow
+        .iter()
+        .any(|r| r == "command(*)" || r == "command(regex:.*)"));
+    assert!(rules_in(&settings, "deny").is_empty());
+
+    // Recorded with the turn: the rules and the grant, never the token.
+    let events = branch.events().unwrap();
+    let (written, granted) = events
+        .iter()
+        .find_map(|e| match &e.activity {
+            Activity::Provisioned {
+                permissions,
+                connectors,
+                ..
+            } => Some((permissions.clone(), connectors.clone())),
+            _ => None,
+        })
+        .expect("a provisioned event");
+    let written = written.expect("the rules written");
+    assert_eq!(written.path, ".gemini/antigravity-cli/settings.json");
+    assert_eq!(written.allow, allow);
+    assert_eq!(granted, ["github"]);
+}
+
+/// A harness with no provisioner of its own, DeepSeek Harness over ACP
+/// (the fake agent in its place), gets its grant and the delegation server
+/// as every ACP agent does: the gateway's variables on its process, and
+/// Branchyard's server in `session/new`'s `mcpServers`.
+#[test]
+fn an_acp_harness_without_a_provisioner_gets_its_grant_and_the_delegation_tools() {
+    let f = Fixture::new();
+    gateway(&f, &["github"]);
+    let saved = f.dir.join("deepseek-server.json");
+    // A server that exits at once: the agent saves what it was given, then
+    // fails to reach it.
+    let delegation_server = Some(vec!["/bin/sh".into(), "-c".into(), "exit 0".into()]);
+    let options = TaskOptions {
+        harness: Some("deepseek-harness-acp".into()),
+        delegation: Some(Envelope::default()),
+        delegation_server: delegation_server.clone(),
+        ..granted(&f, &["github"])
+    };
+    let branch = f
+        .task(&format!("MCP_SAVE {}\nMCP tools", saved.display()))
+        .options(options)
+        .name("dsh")
+        .run()
+        .unwrap();
+    assert_eq!(branch.info().profile, "deepseek-harness-acp");
+    let server: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&saved).unwrap()).unwrap();
+    assert_eq!(server["name"], "branchyard", "{server}");
+    assert_eq!(server["command"], "/bin/sh");
+    let token = server["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|var| var["name"] == "BRANCHYARD_DELEGATION");
+    assert!(token, "{server}");
+    let branch = branch
+        .send(
+            "SH echo url=$ANVIL_GATEWAY_URL; test -s \"$ANVIL_GATEWAY_TOKEN_FILE\" && echo token-file",
+            TaskOptions {
+                policy: Policy::allow_all(),
+                delegation_server,
+                ..TaskOptions::default()
+            },
+        )
+        .unwrap();
+    let said = text(&branch.events().unwrap());
+    assert!(
+        after(&said, "url=").starts_with("http://127.0.0.1:"),
+        "{said}"
+    );
+    assert!(said.contains("token-file"), "{said}");
+}
+
 #[test]
 fn two_granted_connectors_also_get_the_composite() {
     let f = Fixture::new();

@@ -64,6 +64,38 @@ pub(crate) fn denied_tools(policy: &Policy) -> Vec<String> {
     tools
 }
 
+/// `policy` as data, for a harness that enforces its own permission rules
+/// instead of asking Branchyard (Antigravity's CLI): its rules in order and
+/// its fallback, with an asking fallback kept as asking, which such a
+/// harness cannot do. `by` is the `by` the turn's harness runs, if any.
+/// See `docs/provisioning.md#antigravity-permission-rules`.
+pub(crate) fn permissions(
+    policy: &Policy,
+    by: Option<String>,
+) -> branchyard_provision::Permissions {
+    use branchyard_provision::permissions::{Fallback as Native, PermissionRule};
+    branchyard_provision::Permissions {
+        rules: policy
+            .rules
+            .iter()
+            .map(|rule| PermissionRule {
+                tool: rule.tool.clone(),
+                allow: rule.allow,
+                delegation_by: rule
+                    .delegation_by
+                    .as_ref()
+                    .map(|by| by.display().to_string()),
+            })
+            .collect(),
+        fallback: match policy.fallback {
+            Fallback::Allow => Native::Allow,
+            Fallback::Deny => Native::Deny,
+            Fallback::Ask(_) => Native::Ask,
+        },
+        by,
+    }
+}
+
 /// Tools that change files, by the names the harnesses give them.
 pub const EDIT_TOOLS: &[&str] = &[
     "Edit",
@@ -367,6 +399,31 @@ mod tests {
         assert_eq!(denied_tools(&policy), ["Bash"]);
         let scoped = Policy::deny_all().allow_delegation_commands("/opt/by/bin/by");
         assert!(denied_tools(&scoped).is_empty());
+    }
+
+    /// The policy as data decides as the policy does without asking:
+    /// Antigravity's shell (`run_command`) and file writes under each
+    /// preset, an asking fallback kept as asking, and the delegation rule
+    /// with the `by` it names.
+    #[test]
+    fn a_policy_as_data_decides_as_the_policy_does() {
+        let decide = |policy: &Policy, tool: &str| permissions(policy, None).decide(tool);
+        let read_only = PolicyPreset::ReadOnly.policy();
+        assert_eq!(decide(&read_only, "run_command"), Some(false));
+        assert_eq!(decide(&read_only, "write_file"), Some(false));
+        let worktree = PolicyPreset::EditWorktree.policy();
+        assert_eq!(decide(&worktree, "run_command"), Some(false));
+        assert_eq!(decide(&worktree, "write_file"), Some(true));
+        let full = PolicyPreset::Full.policy();
+        assert_eq!(decide(&full, "run_command"), Some(true));
+        let asking = Policy::ask(|_, _| PermissionDecision::Allow).allow("Read");
+        assert_eq!(decide(&asking, "run_command"), None);
+        assert_eq!(decide(&asking, "Read"), Some(true));
+        let scoped = Policy::deny_all().allow_delegation_commands("/opt/by/bin/by");
+        let data = permissions(&scoped, Some("/opt/by/bin/by".into()));
+        assert_eq!(data.delegation_by("run_command"), Some("/opt/by/bin/by"));
+        assert_eq!(data.decide("run_command"), Some(false));
+        assert_eq!(data.by.as_deref(), Some("/opt/by/bin/by"));
     }
 
     #[test]

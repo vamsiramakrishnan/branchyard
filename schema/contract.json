@@ -20267,6 +20267,17 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "permissions": {
+                      "description": "The permission rules written into the harness's own settings,\nfrom the branch's policy, for a harness that enforces its own\nrather than asking Branchyard (Antigravity); see\n`docs/provisioning.md#antigravity-permission-rules`. Rules only.",
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/PermissionsWritten"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -21989,6 +22000,33 @@
             "bypass_disabled"
           ],
           "description": "The managed settings a sandboxed Claude Code turn wrote into its sandbox,\nas recorded in the turn's `Provisioned` activity: names and flags, never\nthe file's content. See `docs/provisioning.md#managed-settings`."
+        },
+        "PermissionsWritten": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "The settings file, relative to the home."
+            },
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The rules that let the harness's tools run without asking."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The rules that refuse them."
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "description": "The permission rules a provisioner wrote into a harness's own settings,\nas recorded in the turn's `Provisioned` activity and in the home, so a\nlater turn removes the ones it no longer writes. Rules only; the file\nholds nothing secret."
         },
         "Message": {
           "type": "object",
@@ -25273,6 +25311,17 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "permissions": {
+                      "description": "The permission rules written into the harness's own settings,\nfrom the branch's policy, for a harness that enforces its own\nrather than asking Branchyard (Antigravity); see\n`docs/provisioning.md#antigravity-permission-rules`. Rules only.",
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/PermissionsWritten"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -26995,6 +27044,33 @@
             "bypass_disabled"
           ],
           "description": "The managed settings a sandboxed Claude Code turn wrote into its sandbox,\nas recorded in the turn's `Provisioned` activity: names and flags, never\nthe file's content. See `docs/provisioning.md#managed-settings`."
+        },
+        "PermissionsWritten": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "The settings file, relative to the home."
+            },
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The rules that let the harness's tools run without asking."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The rules that refuse them."
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "description": "The permission rules a provisioner wrote into a harness's own settings,\nas recorded in the turn's `Provisioned` activity and in the home, so a\nlater turn removes the ones it no longer writes. Rules only; the file\nholds nothing secret."
         },
         "Message": {
           "type": "object",
@@ -34258,6 +34334,17 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "permissions": {
+                      "description": "The permission rules written into the harness's own settings,\nfrom the branch's policy, for a harness that enforces its own\nrather than asking Branchyard (Antigravity); see\n`docs/provisioning.md#antigravity-permission-rules`. Rules only.",
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/PermissionsWritten"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -35980,6 +36067,33 @@
             "bypass_disabled"
           ],
           "description": "The managed settings a sandboxed Claude Code turn wrote into its sandbox,\nas recorded in the turn's `Provisioned` activity: names and flags, never\nthe file's content. See `docs/provisioning.md#managed-settings`."
+        },
+        "PermissionsWritten": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "The settings file, relative to the home."
+            },
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The rules that let the harness's tools run without asking."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The rules that refuse them."
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "description": "The permission rules a provisioner wrote into a harness's own settings,\nas recorded in the turn's `Provisioned` activity and in the home, so a\nlater turn removes the ones it no longer writes. Rules only; the file\nholds nothing secret."
         },
         "Message": {
           "type": "object",

@@ -560,6 +560,78 @@ fn antigravity_accepts_mcp_servers_through_its_configuration() {
     );
 }
 
+/// A sandboxed Antigravity turn that may delegate cannot start `by mcp`
+/// on this host, so it is given the turn's delegation endpoint as an HTTP
+/// server in its configuration (`serverUrl` with the bearer token), and the
+/// CLI's rules allow that server's tools; with no `by` in the sandbox, no
+/// command rule names it. The fake provider runs the sandbox on this host,
+/// and the command is a shell that exits, so the turn fails after its
+/// provisioning, which is what is checked.
+#[test]
+fn a_sandboxed_antigravity_turn_is_given_the_delegation_endpoint_and_rules_for_it() {
+    use branchyard::{Envelope, Provider, SandboxHost, SandboxOptions};
+    let f = Fixture::new();
+    let fake = branchyard_sandbox::fake::FakeProvider::plain(
+        Box::new(branchyard_runtime::LocalProvider::new()),
+        f.dir.join("fake-provider"),
+    );
+    f.yard.use_sandbox_provider(std::sync::Arc::new(fake));
+    f.yard.use_sandbox_host(SandboxHost::loopback());
+    let branch = f
+        .task("x")
+        .options(TaskOptions {
+            harness: Some("antigravity".into()),
+            command: Some(vec!["/bin/sh".into(), "-c".into(), "exit 0".into()]),
+            unapproved_tools: true,
+            provider: Some(Provider::Microsandbox(SandboxOptions {
+                image: "registry.example/harness:1".into(),
+                ..SandboxOptions::default()
+            })),
+            delegation: Some(Envelope::default()),
+            delegation_server: Some(vec!["/bin/sh".into(), "-c".into(), "exit 0".into()]),
+            policy: Policy::allow_all(),
+            ..TaskOptions::default()
+        })
+        .name("agy-boxed")
+        .run()
+        .unwrap();
+    let reason = match &branch.info().status {
+        BranchStatus::Failed { reason } => reason.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(!reason.contains("could not provision"), "{reason}");
+    let home = PathBuf::from(
+        stored_record(&f.root, "agy-boxed")["home"]
+            .as_str()
+            .unwrap(),
+    );
+    let config: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(home.join(".gemini/config/mcp_config.json")).unwrap(),
+    )
+    .unwrap();
+    let server = &config["mcpServers"]["branchyard"];
+    let url = server["serverUrl"].as_str().unwrap();
+    assert!(
+        url.starts_with("http://127.0.0.1:") && url.ends_with("/mcp"),
+        "{config}"
+    );
+    let bearer = server["headers"]["Authorization"].as_str().unwrap();
+    assert!(bearer.starts_with("Bearer ey"), "{config}");
+    assert!(server.get("command").is_none(), "{config}");
+    let settings: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(home.join(".gemini/antigravity-cli/settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        settings["permissions"]["allow"],
+        serde_json::json!(["command(regex:git .*)", "mcp(branchyard/*)"]),
+        "{settings}"
+    );
+    // The token is in the 0600 configuration only, not in the log.
+    let log = serde_json::to_string(&branch.events().unwrap()).unwrap();
+    assert!(!log.contains(&bearer["Bearer ".len()..]));
+}
+
 /// Branches `owner`, provisioned with a Codex API key, and `sharer`, whose
 /// record is changed to share `owner`'s private home, as a forked session
 /// does. Returns the home.

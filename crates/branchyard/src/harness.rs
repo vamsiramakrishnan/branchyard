@@ -123,6 +123,32 @@ pub(crate) fn check_model(profile: &Profile, model: &str, private_home: bool) ->
     ))
 }
 
+/// Refuse a delegated branch on `profile` that could not be given
+/// Branchyard's delegation tools, which every delegated turn is given: its
+/// provisioner decides, as the turn's provisioning would. A harness that
+/// takes MCP servers only in its configuration (Antigravity) needs a home
+/// private to the branch for them, so a child of a parent without one is
+/// refused when it is spawned rather than failing its first turn.
+pub(crate) fn check_delegation_tools(profile: &Profile, private_home: bool) -> Result<(), Error> {
+    let mut context =
+        branchyard_provision::Context::new(profile.harness, profile.protocol, "/home", "/work");
+    context.private_home = private_home;
+    context.mcp_servers = vec![branchyard_harness::McpServer {
+        name: crate::projection::SERVER_NAME.into(),
+        command: "/by".into(),
+        args: Vec::new(),
+        env: Vec::new(),
+    }];
+    branchyard_provision::plan(&context)
+        .map(drop)
+        .map_err(|why| {
+            Error::Unsupported(format!(
+                "{} cannot be given Branchyard's delegation tools here: {}",
+                profile.id, why.0
+            ))
+        })
+}
+
 /// Fail with [`Error::HarnessUnavailable`] unless `command[0]` is an
 /// executable file, by path or on `PATH`.
 pub(crate) fn check_available(harness: &str, command: &[String]) -> Result<(), Error> {

@@ -2822,6 +2822,15 @@ impl Local {
         if child_grant.can_spawn() {
             crate::projection::tools(&self.options)?;
         }
+        let seat = seated.as_ref().map(|(_, seat, _)| seat);
+        let isolated =
+            caller.home.is_some() || self.options.isolated || seat.is_some_and(|s| s.isolated);
+        // Every child is given the delegation tools; refuse one whose
+        // harness could not take them where it would run.
+        harness::check_delegation_tools(
+            profile,
+            isolated || crate::placement::sandboxed(caller.provider.as_ref()),
+        )?;
         // The same harness keeps the parent's executable override.
         let command = match profile.id == own.id {
             true => caller.command.clone(),
@@ -2830,9 +2839,6 @@ impl Local {
         let launch = harness::command(profile, command.as_deref());
         harness::check_approvals(profile, self.options.unapproved_tools)?;
         harness::check_available(profile.harness, &launch)?;
-        let seat = seated.as_ref().map(|(_, seat, _)| seat);
-        let isolated =
-            caller.home.is_some() || self.options.isolated || seat.is_some_and(|s| s.isolated);
         let seated_provision = seat.and_then(|s| s.provision.as_ref());
         let model = child_model(
             request.model.as_deref(),

@@ -389,10 +389,24 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             connectors,
             knowledge,
             managed,
+            permissions,
         } => {
             let mut parts = Vec::new();
             if let Some(auth) = auth {
                 parts.push(format!("auth {auth}"));
+            }
+            if let Some(rules) = permissions {
+                let mut lists = Vec::new();
+                for (word, list) in [("allow", &rules.allow), ("deny", &rules.deny)] {
+                    if !list.is_empty() {
+                        lists.push(format!("{word}: {}", list.join(", ")));
+                    }
+                }
+                parts.push(format!(
+                    "permission rules: {} ({})",
+                    rules.path,
+                    lists.join("; ")
+                ));
             }
             if let Some(managed) = managed {
                 let deny = match managed.deny.is_empty() {

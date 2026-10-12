@@ -323,6 +323,45 @@ fn the_envelope_bounds_depth_width_and_harnesses() {
     denied(plain.spawn(spawn("say p", "p")), "not given delegation");
 }
 
+/// Every child gets the delegation tools. Antigravity takes MCP servers
+/// only in its configuration, in a home private to the branch, so a child
+/// on it of a parent without one is refused when it is spawned, naming
+/// what would give it one, rather than failing its first turn; nothing is
+/// created. The harness's executable is never looked for first.
+#[test]
+fn a_child_whose_harness_cannot_take_the_tools_where_it_runs_is_refused_at_spawn() {
+    let f = Fixture::new();
+    let envelope = Envelope {
+        harnesses: vec!["antigravity".into()],
+        ..Envelope::default()
+    };
+    let options = TaskOptions {
+        unapproved_tools: true,
+        ..delegating(&f, envelope)
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options).unwrap();
+    let refused = delegate.spawn(Spawn {
+        harness: Some("antigravity".into()),
+        ..spawn("x", "agy")
+    });
+    match refused {
+        Err(Error::Unsupported(why)) => assert!(
+            why.contains("antigravity-stream-json cannot be given Branchyard's delegation tools")
+                && why.contains("--isolated"),
+            "{why}"
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(f.yard.branch("agy").is_err());
+}
+
 /// A parent adds input to its running child's turn: delivered by the
 /// engine running the child, recorded with the parent as its sender, and
 /// the child's turn goes on to end once. Only descendants can be steered.

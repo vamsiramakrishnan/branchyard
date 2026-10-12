@@ -59,6 +59,9 @@ pub enum JsonEdit {
     Default(Vec<String>, Value),
     /// Append to the array there (created if absent) unless present.
     Push(Vec<String>, Value),
+    /// Remove every copy of the value from the array there, if there is
+    /// one; the array stays, even when empty.
+    Pull(Vec<String>, Value),
     /// Remove the key if present.
     Remove(Vec<String>),
     /// Remove the key if it holds exactly this value.
@@ -208,6 +211,11 @@ fn json(current: Option<&str>, edits: &[JsonEdit], comment_lines: bool) -> Resul
                     }
                 }
             }
+            JsonEdit::Pull(path, value) => {
+                if let Some(Value::Array(items)) = lookup_mut(&mut root, path) {
+                    items.retain(|item| item != value);
+                }
+            }
             JsonEdit::Remove(path) => remove(&mut root, path),
             JsonEdit::RemoveIf(path, value) => {
                 if lookup(&root, path) == Some(value) {
@@ -243,6 +251,11 @@ fn slot<'a>(root: &'a mut Value, path: &[String]) -> &'a mut Value {
 fn lookup<'a>(root: &'a Value, path: &[String]) -> Option<&'a Value> {
     path.iter()
         .try_fold(root, |current, key| current.get(key.as_str()))
+}
+
+fn lookup_mut<'a>(root: &'a mut Value, path: &[String]) -> Option<&'a mut Value> {
+    path.iter()
+        .try_fold(root, |current, key| current.get_mut(key.as_str()))
 }
 
 fn remove(root: &mut Value, path: &[String]) {
@@ -370,6 +383,24 @@ mod tests {
             json!({"user": {"theme": "dark"}, "keep": [1, 2],
                    "security": {"auth": {"selectedType": "x"}}})
         );
+    }
+
+    #[test]
+    fn a_pull_takes_one_value_out_of_an_array_and_nothing_else() {
+        let current = r#"{"permissions": {"allow": ["a", "b", "a"]}, "other": "b"}"#;
+        let edit = Edit::Json {
+            edits: vec![
+                JsonEdit::Pull(path(&["permissions", "allow"]), json!("a")),
+                JsonEdit::Pull(path(&["permissions", "deny"]), json!("a")),
+                JsonEdit::Pull(path(&["other"]), json!("b")),
+            ],
+            comment_lines: false,
+        };
+        let out: Value =
+            serde_json::from_str(&edit.apply(Some(current)).unwrap().unwrap()).unwrap();
+        assert_eq!(out, json!({"permissions": {"allow": ["b"]}, "other": "b"}));
+        // A pull on a missing file does not create it.
+        assert_eq!(edit.apply(None).unwrap(), None);
     }
 
     #[test]

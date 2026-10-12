@@ -733,6 +733,7 @@ fn run(
         projection.as_ref(),
         connectors.as_ref(),
         Some(&briefing),
+        &bounds.policy,
         store.dir(),
     ) {
         Ok(provisioned) => provisioned,

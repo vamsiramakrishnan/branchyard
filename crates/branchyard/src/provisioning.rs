@@ -291,13 +291,15 @@ fn own_instructions(
 }
 
 /// Plan and apply the turn's provisioning. A failure is the turn's failure
-/// reason.
+/// reason. `policy` is the turn's permission policy, which a harness that
+/// enforces its own rules (Antigravity) is given as rules in its home.
 pub(crate) fn prepare(
     record: &Record,
     profile: &branchyard_harness::profiles::Profile,
     projection: Option<&Projection>,
     connectors: Option<&crate::connectors::Prepared>,
     knowledge: Option<&crate::knowledge::Briefing>,
+    policy: &crate::Policy,
     state: &Path,
 ) -> Result<Provisioned, String> {
     let spec = record.provision.clone().unwrap_or_default();
@@ -327,6 +329,13 @@ pub(crate) fn prepare(
         mcp_secrets.extend(used);
     }
     let private = record.home.as_deref();
+    // The `by` a delegating harness runs; a sandboxed one has none.
+    let by = projection.and_then(|p| {
+        p.env
+            .iter()
+            .find(|(name, _)| name == crate::projection::ENV_BY)
+            .map(|(_, value)| value.clone())
+    });
     let context = Context {
         harness: profile.harness.to_owned(),
         protocol: profile.protocol,
@@ -357,6 +366,7 @@ pub(crate) fn prepare(
         model: spec.model.clone(),
         effort: spec.effort,
         telemetry: spec.telemetry.clone(),
+        permissions: Some(crate::policy::permissions(policy, by)),
         installed: private.map(apply::installed).unwrap_or_default(),
     };
     let plan = branchyard_provision::plan(&context).map_err(|r| r.to_string())?;
@@ -386,11 +396,13 @@ pub(crate) fn prepare(
     let env: Vec<String> = plan_env.iter().map(|e| e.name.clone()).collect();
     let granted = connectors.map(|c| c.connectors.clone()).unwrap_or_default();
     let knowledge_ids = knowledge.map(|k| k.ids.clone()).unwrap_or_default();
+    let permissions = plan.permissions.clone().filter(|p| !p.is_empty());
     let activity = (plan.auth.is_some()
         || !files.is_empty()
         || !env.is_empty()
         || !plan.unused_secrets.is_empty()
-        || !knowledge_ids.is_empty())
+        || !knowledge_ids.is_empty()
+        || permissions.is_some())
     .then(|| Activity::Provisioned {
         auth: plan.auth.clone(),
         files,
@@ -401,6 +413,7 @@ pub(crate) fn prepare(
         knowledge: knowledge_ids,
         // Set once the sandbox has taken the managed settings; see `with_managed`.
         managed: None,
+        permissions,
     });
     let scrub = spec
         .secrets
@@ -524,6 +537,7 @@ pub(crate) fn with_managed(
         connectors: Vec::new(),
         knowledge: Vec::new(),
         managed: None,
+        permissions: None,
     });
     if let Activity::Provisioned { managed: slot, .. } = &mut activity {
         *slot = Some(managed);
@@ -588,6 +602,7 @@ mod tests {
             connectors: Vec::new(),
             knowledge: Vec::new(),
             managed: None,
+            permissions: None,
         };
         match with_managed(Some(before.clone()), Some(managed.clone())) {
             Some(Activity::Provisioned {

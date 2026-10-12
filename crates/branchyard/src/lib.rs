@@ -2481,6 +2481,12 @@ pub enum Activity {
         /// flags only.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         managed: Option<branchyard_provision::ManagedWritten>,
+        /// The permission rules written into the harness's own settings,
+        /// from the branch's policy, for a harness that enforces its own
+        /// rather than asking Branchyard (Antigravity); see
+        /// `docs/provisioning.md#antigravity-permission-rules`. Rules only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permissions: Option<branchyard_provision::PermissionsWritten>,
     },
     /// Input from `by` was written into the running turn; see
     /// [`Branch::steer`]. The harness's `steer_accepted` or

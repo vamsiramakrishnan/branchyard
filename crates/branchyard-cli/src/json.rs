@@ -199,6 +199,7 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             connectors,
             knowledge,
             managed,
+            permissions,
         } => json!({
             "activity": "provisioned",
             "auth": auth,
@@ -209,6 +210,7 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "connectors": connectors,
             "knowledge": knowledge,
             "managed": managed,
+            "permissions": permissions,
         }),
         Activity::Steered { id, by, text } => json!({
             "activity": "steered",

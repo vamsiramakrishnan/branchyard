@@ -53,6 +53,7 @@ pub mod edit;
 pub mod instructions;
 pub mod models;
 pub mod network;
+pub mod permissions;
 pub mod toml;
 
 mod antigravity;
@@ -74,6 +75,7 @@ use serde::{Deserialize, Serialize};
 
 pub use claude::{managed_settings, ManagedSettings, MANAGED_SETTINGS};
 pub use edit::{Edit, JsonEdit, TomlEdit};
+pub use permissions::{Permissions, PermissionsWritten};
 
 /// The Scion revision the translated provisioners follow.
 pub const SCION_REVISION: &str = "d9b9e6a2e1e29e428e6f8e72c2d5ab0df0475338";
@@ -588,6 +590,10 @@ pub struct Context {
     pub model: Option<String>,
     pub effort: Option<Effort>,
     pub telemetry: Option<Telemetry>,
+    /// The branch's permission policy, for a harness that enforces its own
+    /// rules rather than asking Branchyard (Antigravity); see
+    /// [`permissions`]. `None`: no policy to translate.
+    pub permissions: Option<Permissions>,
     /// What an earlier provisioning of this home installed in native
     /// configuration, from [`apply::installed`].
     pub installed: Installed,
@@ -617,6 +623,7 @@ impl Context {
             model: None,
             effort: None,
             telemetry: None,
+            permissions: None,
             installed: Installed::default(),
         }
     }
@@ -644,9 +651,9 @@ impl Context {
 }
 
 /// What Branchyard installed in a home, recorded there at
-/// [`INSTALLED_PATH`]: native MCP entries, so a later provisioning removes
-/// the ones no longer asked for and nothing else, and the credentials it
-/// wrote, so removing the branch removes them
+/// [`INSTALLED_PATH`]: native MCP entries and permission rules, so a later
+/// provisioning removes the ones no longer asked for and nothing else, and
+/// the credentials it wrote, so removing the branch removes them
 /// ([`apply::remove_credentials`]).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -655,6 +662,9 @@ pub struct Installed {
     pub mcp_servers: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<Credential>,
+    /// The permission rules written into the harness's own settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<PermissionsWritten>,
 }
 
 /// A credential Branchyard wrote in a home: a file holding a secret, by
@@ -916,6 +926,11 @@ pub struct Plan {
     /// The native MCP entries now installed, when the provisioner manages
     /// them; recorded in the home by [`plan`].
     pub installed_mcp_servers: Option<Vec<String>>,
+    /// The permission rules the plan writes into the harness's own
+    /// settings, when its provisioner translates the branch's policy
+    /// ([`Context::permissions`]); recorded in the home by [`plan`], and in
+    /// the turn's `Provisioned` activity when it holds any.
+    pub permissions: Option<PermissionsWritten>,
 }
 
 impl Plan {
@@ -1051,12 +1066,16 @@ pub fn plan(context: &Context) -> Result<Plan, Refused> {
         telemetry.check().map_err(Refused)?;
     }
     if let Some(server) = context.remote_mcp_servers.first() {
-        if !matches!(context.protocol, Protocol::ClaudeStreamJson | Protocol::Acp) {
+        let takes = matches!(
+            context.protocol,
+            Protocol::ClaudeStreamJson | Protocol::Acp | Protocol::AntigravityStreamJson
+        );
+        if !takes {
             return Err(unsupported(
                 context,
                 &format!("the HTTP or SSE MCP server {}", server.name),
-                "only Claude Code's stream-json driver and ACP agents that advertise them \
-                 take one",
+                "only Claude Code's stream-json driver, ACP agents that advertise them and \
+                 Antigravity (an HTTP one, in a private home) take one",
             ));
         }
     }
@@ -1072,8 +1091,9 @@ pub fn plan(context: &Context) -> Result<Plan, Refused> {
     Ok(plan)
 }
 
-/// Record in the home what the plan installs: its native MCP entries and,
-/// with what earlier turns recorded, every credential file it writes.
+/// Record in the home what the plan installs: its native MCP entries and
+/// permission rules and, with what earlier turns recorded, every
+/// credential file it writes.
 #[allow(clippy::expect_used)] // ratchet: branchyard-provision
 fn record_installed(context: &Context, plan: &mut Plan) {
     let mut credentials = context.installed.credentials.clone();
@@ -1119,6 +1139,10 @@ fn record_installed(context: &Context, plan: &mut Plan) {
             .clone()
             .unwrap_or_else(|| context.installed.mcp_servers.clone()),
         credentials,
+        permissions: match &plan.permissions {
+            Some(written) => Some(written.clone()).filter(|w| !w.is_empty()),
+            None => context.installed.permissions.clone(),
+        },
     };
     if installed != context.installed || plan.installed_mcp_servers.is_some() {
         let record = serde_json::to_value(&installed).expect("serializes");

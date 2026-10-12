@@ -497,6 +497,11 @@ mod tests {
         let want = Installed {
             mcp_servers: vec!["one".into()],
             credentials: vec![Credential::File { path: "k".into() }],
+            permissions: Some(crate::PermissionsWritten {
+                path: "settings.json".into(),
+                allow: vec!["command(regex:git .*)".into()],
+                deny: Vec::new(),
+            }),
         };
         record(h.path(), &want);
         assert_eq!(installed(h.path()), want);
@@ -539,6 +544,7 @@ mod tests {
                         path: "already-gone".into(),
                     },
                 ],
+                permissions: None,
             },
         );
         let applied = remove_credentials(h.path()).unwrap();
@@ -570,6 +576,7 @@ mod tests {
                 credentials: vec![Credential::File {
                     path: "whole".into(),
                 }],
+                permissions: None,
             },
         );
         remove_credentials(h.path()).unwrap();

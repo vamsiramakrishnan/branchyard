@@ -63,8 +63,9 @@ pub const ENV_ROOT: &str = "BRANCHYARD_ROOT";
 pub const ENV_BY: &str = "BRANCHYARD_BY";
 
 /// The name harnesses know Branchyard's MCP server by. Claude Code names its
-/// tools `mcp__branchyard__<tool>`.
-pub(crate) const SERVER_NAME: &str = "branchyard";
+/// tools `mcp__branchyard__<tool>`; Antigravity's rules allow them as
+/// `mcp(branchyard/*)`.
+pub(crate) const SERVER_NAME: &str = branchyard_provision::permissions::DELEGATION_SERVER;
 
 /// The Python module, written to `.branchyard/sdk/python/branchyard.py`.
 const PYTHON_MODULE: &str = include_str!("../../../sdk/python/branchyard.py");
