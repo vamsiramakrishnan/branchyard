@@ -1075,6 +1075,9 @@ const MODELS_EXAMPLES: &str = "\
 Examples:
   by models                        # routes, backends, budgets, and this month's usage
   by models --period day --json
+  by models list                   # the models your keys can call, from the providers' own APIs
+  by models list --refresh         # ask them again (otherwise the cache, with its age)
+  by models list --harness codex   # the catalog's list beside what OpenAI lists now
   by run --model-gateway 'fix the bug'              # this branch's model calls go through the gateway
   by run --model-gateway='claude-sonnet-*' 'fix it' # and only to these models
 
@@ -1082,6 +1085,22 @@ Examples:
 holding each key), the routes by model, and daily and monthly budgets. A
 branch on the gateway gets its own gateway each turn, on the turn's token; the
 key never reaches the harness. See docs/model-gateway.md.";
+
+const MODELS_LIST_EXAMPLES: &str = "\
+Examples:
+  by models list                   # every source whose key is set: Gemini, OpenAI, Anthropic, [models.backends]
+  by models list --refresh         # list them again and cache the answer
+  by models list --harness gemini-cli
+  by models list --json
+
+Each source whose key is in the environment (GEMINI_API_KEY, OPENAI_API_KEY or
+CODEX_API_KEY, ANTHROPIC_API_KEY, or the key a [models.backends] entry names) is
+asked for its models; one without a key is skipped, one that fails says its
+status. A model neither catalog/pricing.toml nor [models.prices] can price is
+marked: a dollar budget cannot count its calls. The answer is cached under
+~/.cache/branchyard/catalog (or $BRANCHYARD_CATALOG_DIR) and shown, with its
+age, until --refresh. HTTPS_PROXY, NO_PROXY and SSL_CERT_FILE are honored.
+Keys are never printed. See docs/model-gateway.md.";
 
 const SYNC_EXAMPLES: &str = "\
 Examples:
@@ -1987,15 +2006,22 @@ pub enum Command {
         #[command(subcommand)]
         action: GatewayAction,
     },
-    /// The model gateway: its routes, backends and budgets, and what its calls cost
-    #[command(display_order = 405, after_help = MODELS_EXAMPLES)]
+    /// The model gateway: its routes, backends and budgets, and what its calls cost; `list` asks
+    /// the providers which models your keys can call
+    #[command(
+        display_order = 405,
+        after_help = MODELS_EXAMPLES,
+        args_conflicts_with_subcommands = true
+    )]
     Models {
         /// Usage over this period (UTC): day, month, or all
         #[arg(long, value_name = "PERIOD", default_value = "month", value_parser = ["day", "month", "all"])]
         period: String,
         /// Print JSON
-        #[arg(long)]
+        #[arg(long, global = true)]
         json: bool,
+        #[command(subcommand)]
+        action: Option<ModelsAction>,
     },
     /// Connect your account for a connector through the gateway (anvil connect)
     #[command(display_order = 404, after_help = CONNECT_EXAMPLES)]
@@ -2121,6 +2147,46 @@ pub enum ServicesAction {
     /// Expire services whose lease ran out or whose owner is gone, and reclaim what Branchyard
     /// started for them
     Gc,
+}
+
+/// `by models ...`; see docs/model-gateway.md.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum ModelsAction {
+    /// Ask each provider whose key you have which models it serves, cache the answer, and mark
+    /// the models no price covers
+    #[command(after_help = MODELS_LIST_EXAMPLES)]
+    List {
+        /// Ask the providers again instead of showing the cache
+        #[arg(long)]
+        refresh: bool,
+        /// A harness in the catalog: its static list of models beside what its key's provider lists
+        #[arg(long, value_name = "ID")]
+        harness: Option<String>,
+        /// Gemini's API base URL
+        #[arg(
+            long,
+            value_name = "URL",
+            env = "BRANCHYARD_GEMINI_URL",
+            default_value = "https://generativelanguage.googleapis.com"
+        )]
+        gemini_url: String,
+        /// OpenAI's API base URL
+        #[arg(
+            long,
+            value_name = "URL",
+            env = "BRANCHYARD_OPENAI_URL",
+            default_value = "https://api.openai.com"
+        )]
+        openai_url: String,
+        /// Anthropic's API base URL
+        #[arg(
+            long,
+            value_name = "URL",
+            env = "BRANCHYARD_ANTHROPIC_URL",
+            default_value = "https://api.anthropic.com"
+        )]
+        anthropic_url: String,
+    },
 }
 
 /// `by catalog ...`; see docs/registry.md.
@@ -4986,10 +5052,46 @@ mod tests {
             parse_str("models --period day --json").unwrap(),
             Command::Models {
                 period: "day".into(),
-                json: true
+                json: true,
+                action: None
             }
         );
         assert!(err("models --period week").contains("week"));
+        // `list` is a subcommand, and --json goes after it.
+        let Command::Models { json, action, .. } = parse_str("models list --json").unwrap() else {
+            panic!("models list --json");
+        };
+        assert!(json);
+        assert_eq!(
+            action,
+            Some(ModelsAction::List {
+                refresh: false,
+                harness: None,
+                gemini_url: "https://generativelanguage.googleapis.com".into(),
+                openai_url: "https://api.openai.com".into(),
+                anthropic_url: "https://api.anthropic.com".into(),
+            })
+        );
+        let Command::Models { action, .. } =
+            parse_str("models list --refresh --harness codex --openai-url http://127.0.0.1:9")
+                .unwrap()
+        else {
+            panic!("models list");
+        };
+        let Some(ModelsAction::List {
+            refresh,
+            harness,
+            openai_url,
+            ..
+        }) = action
+        else {
+            panic!("models list");
+        };
+        assert!(refresh);
+        assert_eq!(harness.as_deref(), Some("codex"));
+        assert_eq!(openai_url, "http://127.0.0.1:9");
+        // The usage view's flag does not go with a subcommand.
+        assert!(parse_str("models --period day list").is_err());
     }
 
     #[test]

@@ -30,6 +30,7 @@ mod knowledge_cmd;
 mod live_catalog;
 mod map_cmd;
 mod models_cmd;
+mod models_list;
 mod notify;
 mod open;
 mod operations;
@@ -574,7 +575,14 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         } => commands::inbox(target, as_branch, unread, json),
         Command::Rig { json, action } => commands::rig(env, target, &action.into_args(json)),
         Command::Gateway { json, action } => gateway_cmd::main(target, &action, json),
-        Command::Models { period, json } => models_cmd::main(env, target, &period, json),
+        Command::Models {
+            period,
+            json,
+            action,
+        } => match action {
+            Some(action) => models_list::main(env, target, &action, json),
+            None => models_cmd::main(env, target, &period, json),
+        },
         Command::Services {
             json,
             kind,

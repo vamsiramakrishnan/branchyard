@@ -31,6 +31,8 @@ The topic completes in every shell `by completions` supports, and an unknown one
 
 It detects the repository and its default branch, the installed harnesses and their versions (`--version`, three seconds at most each), which credential variables are set (by name only), docker and the PostgreSQL client tools, the platform and KVM, a check command from the files at the root (`Cargo.toml` → `cargo test`, `package.json` → `npm test`, …), and existing configuration files, whose values become the defaults. Then it asks, reviews every file with its diff and its validator's verdict, asks before replacing a file that differs, and asks once more before writing. Ctrl-C at any point writes nothing.
 
+Once a provider's key is set (`GEMINI_API_KEY`, `OPENAI_API_KEY` or `CODEX_API_KEY`, `ANTHROPIC_API_KEY`, or the key a `[models.backends]` entry names), `by models list` asks that provider which models the key can call, caches the answer, and marks the models no price covers, so a model name need not come from the static `models` lists of the harness catalog; `--harness ID` sets a harness's catalog list beside the live one ([model gateway](model-gateway.md#listing-models)). It prints the variable's name, never the key.
+
 Without a terminal, `by init` refuses (exit 2) and points to the protocol. `--defaults` answers every question with its default. The wizard is `cliclack`; see [what was tested](#what-is-tested).
 
 ## For a harness: the protocol

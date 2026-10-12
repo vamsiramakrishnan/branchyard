@@ -31,6 +31,7 @@
 //! added to its egress policy, and says so ([`ModelActivity::Direct`]).
 
 mod audit;
+pub mod discover;
 pub(crate) mod gateway;
 mod gemini;
 pub mod pricing;
@@ -41,6 +42,9 @@ pub(crate) mod upstream;
 /// prefix. The one parser for them; `branchyard_client::http::Endpoint`
 /// builds on it.
 pub use upstream::Target as BaseUrl;
+/// How a request reaches a provider through the operator's proxy and root
+/// certificates (`by models list`).
+pub use upstream::Transport;
 mod usage;
 
 use branchyard_support::LockExt as _;
