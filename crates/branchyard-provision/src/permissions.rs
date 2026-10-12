@@ -21,7 +21,9 @@ pub const DELEGATION_SERVER: &str = "branchyard";
 /// What a policy does with a request no rule decides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fallback {
+    /// The request is allowed.
     Allow,
+    /// The request is denied.
     Deny,
     /// A person is asked: a harness that cannot ask treats it as a denial.
     Ask,
@@ -31,7 +33,9 @@ pub enum Fallback {
 /// suffix wildcard (`mcp__*`), and whether it allows the tool.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PermissionRule {
+    /// The tool the rule names: exact, or a prefix ending in `*`.
     pub tool: String,
+    /// Whether a matching request is allowed (`true`) or denied.
     pub allow: bool,
     /// For the rule that allows only Branchyard's delegation commands (`by`
     /// with an operation a harness may run, `allow_delegation_commands`):
@@ -43,7 +47,9 @@ pub struct PermissionRule {
 /// fallback.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Permissions {
+    /// The rules, in the order they are tried; the first match decides.
     pub rules: Vec<PermissionRule>,
+    /// What happens to a request no rule matches.
     pub fallback: Fallback,
     /// `by` as the harness runs it, when the turn's harness has it (a local
     /// delegating turn, which also finds `by` first on its `PATH`).
