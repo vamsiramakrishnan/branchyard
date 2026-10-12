@@ -15,7 +15,7 @@
 //! said so; otherwise it is `likely` (a key variable or credential file is
 //! present, or every known credential file is absent) or unknown. Three
 //! harnesses need a look inside their configuration, still by name only
-//! ([`probes`]): Antigravity reads a key only when its settings select the
+//! (the `probes` module): Antigravity reads a key only when its settings select the
 //! Gemini provider, DeepSeek Harness takes its provider from
 //! `cordis.patch.yml`, and Gemini CLI's headless runs need the workspace
 //! trusted (`GEMINI_CLI_TRUST_WORKSPACE`).
