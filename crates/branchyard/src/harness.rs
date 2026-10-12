@@ -55,6 +55,10 @@ pub(crate) const REPORTS: &[(&str, &str)] = &[
         include_str!("../../../docs/qualification/claude-code-stream-json.json"),
     ),
     (
+        "codex-app-server",
+        include_str!("../../../docs/qualification/codex-app-server.json"),
+    ),
+    (
         "deepseek-harness-acp",
         include_str!("../../../docs/qualification/deepseek-harness-acp.json"),
     ),
@@ -332,7 +336,10 @@ mod tests {
             qualification("antigravity-stream-json").unwrap(),
             "4/9 on 1.3.3"
         );
-        assert_eq!(qualification("codex-app-server"), None);
+        assert_eq!(
+            qualification("codex-app-server").unwrap(),
+            "6/9 on codex-cli 0.157.1"
+        );
     }
 
     #[test]

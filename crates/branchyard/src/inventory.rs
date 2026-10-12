@@ -828,7 +828,18 @@ fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
         }
     }
     if let Some((LoginState::LoggedIn, detail)) = &said {
-        return verified(LoginState::LoggedIn, detail.clone());
+        // Codex sends its requests with CODEX_API_KEY when the variable is
+        // set, whatever `codex login status` says: that key's organization is
+        // billed, and a key without quota answers "Quota exceeded" beside a
+        // valid login. Say so, rather than report the login alone.
+        let detail = match found.env.iter().find(|v| v.as_str() == "CODEX_API_KEY") {
+            Some(var) if id == "codex" => format!(
+                "{detail}; {var} is set, and Codex uses it instead of the login (unset it, or \
+                 run isolated, to use the login)"
+            ),
+            _ => detail.clone(),
+        };
+        return verified(LoginState::LoggedIn, detail);
     }
     // Antigravity reads GEMINI_API_KEY only when its settings select the
     // gemini provider; without that it asks for a Google sign-in.
@@ -1800,6 +1811,33 @@ mod tests {
         assert!(!text.contains("echo \"$OPENAI_API_KEY"));
         assert!(!text.contains("checked claude-code"));
         assert!(text.contains("\"$HOME\"/.local/bin"));
+    }
+
+    /// `codex login status` says logged in and CODEX_API_KEY is set: the
+    /// login is verified, and the detail says the key is what Codex uses.
+    #[test]
+    fn a_key_variable_beside_a_verified_codex_login_is_named_as_what_codex_uses() {
+        let output = "by-inventory 1\nhost box\nos Linux\n\
+            checked codex\n\
+            found codex 1 /bin/codex\nversion codex 0\nversion-out codex codex-cli 0.157.1\n\
+            status codex 0\nstatus-out codex Logged in using ChatGPT\n\
+            file codex ~/.codex/auth.json\nenv codex CODEX_API_KEY\nend\n";
+        let inventory = parse(output, 7).unwrap();
+        let codex = inventory.get("codex").unwrap();
+        assert_eq!(codex.login.state, LoginState::LoggedIn);
+        assert_eq!(codex.login.evidence, Evidence::Verified);
+        assert_eq!(
+            codex.login.detail,
+            "codex login status: Logged in using ChatGPT; CODEX_API_KEY is set, and Codex uses \
+             it instead of the login (unset it, or run isolated, to use the login)"
+        );
+        // Without the variable the detail is the status alone.
+        let alone = output.replace("env codex CODEX_API_KEY\n", "");
+        let codex = parse(&alone, 7).unwrap();
+        assert_eq!(
+            codex.get("codex").unwrap().login.detail,
+            "codex login status: Logged in using ChatGPT"
+        );
     }
 
     #[test]

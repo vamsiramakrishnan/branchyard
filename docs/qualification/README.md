@@ -29,6 +29,15 @@ The same key, in a scratch clone, `by fan --harness gemini-cli,antigravity,deeps
 
 Costs were not reported by any of the three. The run also exposed that `by cancel` on a wedged ACP harness takes effect only once the 30-second interrupt grace has passed and the process is killed, which it does.
 
+### Codex on a ChatGPT login, 12 October 2026
+
+`codex-app-server` (codex-cli 0.157.1, `npm @openai/codex@0.157.1`, a Pro ChatGPT login made with `codex login --device-auth`): 6 of 9. The login's `auth.json` was placed in the runner's private home; the runner's scrubbed environment carries no `CODEX*` variable. Passing: fresh turn, permission allowed, clean close, resume, fork, connection lost. Failing:
+
+- `permission_denied` and `interrupt_during_permission`: no permission request reached the driver. The driver starts threads with `approvalPolicy: "on-request"` and `sandbox: "workspace-write"`, and under those Codex runs a write inside the workspace (`echo qualified > deny-marker.txt`) without asking, so Branchyard's policy never gets to deny it. A policy that denies the shell needs the thread started with `approvalPolicy: "untrusted"` or a read-only sandbox, which the driver does not do yet.
+- `interrupt_during_tool`: the driver sent no `turn/interrupt` while `python3 -c "import time; time.sleep(45)"` ran; the command ran to completion and the scenario timed out.
+
+The day before, every Codex turn had failed with `Quota exceeded. Check your plan and billing details.` on an account with 98% of its weekly limit left. The cause was a `CODEX_API_KEY` variable in the environment, from an API organization without credit: Codex sends its requests with that key whatever `codex login status` says. `by harnesses` now names the variable beside a verified Codex login ([harness lifecycle](../harness-lifecycle.md#login-states)); isolated branches drop it and take the login as `CODEX_AUTH`. On that login Codex completed the knowledge task above in a minute (one file, +43) under `edit-worktree`, and the code task (the `--list` flag in `tools/check.py` with a test: two files, +21 −1, the 24 tests passing) in four minutes under `full`, each with `--isolated --secret CODEX_AUTH=@~/.codex/auth.json`.
+
 ## Results, 26 September 2026
 
 | Profile | Harness version | Result | Report |
