@@ -139,8 +139,12 @@ pub struct TaskArgs {
     pub kind: Option<branchyard::TaskKind>,
     /// `--seed`: a reproducible route.
     pub seed: Option<u64>,
-    /// The configuration's `[fleet]`, when it has one (`crate::defaults`).
+    /// The configuration's `[fleet]`, when it has one (`crate::defaults`);
+    /// else, for `--auto`, the inventory default (`crate::fleet_cmd`).
     pub fleet: Option<branchyard::Fleet>,
+    /// Installed harnesses the inventory default left out, and why, when
+    /// `fleet` is the inventory default.
+    pub fleet_excluded: Vec<branchyard::Excluded>,
     /// `--plan`: plan first, read-only, and wait for `by plan approve`.
     pub plan: bool,
     /// `--goal`: a goal a judge verifies when the branch would be ready.
@@ -4961,6 +4965,7 @@ mod tests {
                 kind: None,
                 seed: None,
                 fleet: None,
+                fleet_excluded: Vec::new(),
                 plan: false,
                 goal: None,
                 goal_rounds: None,

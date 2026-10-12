@@ -207,10 +207,11 @@ pub use environments::{
     DEFAULT_MAX_AGE as ENVIRONMENT_DEFAULT_MAX_AGE,
 };
 pub use fleet::{
-    classify, credit, fresh_seed as fleet_seed, harness_fault, recorded_route,
-    stats as fleet_stats, BranchOutcome, CandidateStats, Classification, Excluded, Fleet,
-    FleetActivity, FleetCandidate, FleetEntry, JudgeMark, JudgeSpec, OutcomeRecord, Route,
-    RouteDecision, RouteOptions, RoutePick, Routed, TaskKind, DEFAULT_EXPLORATION,
+    classify, credit, entry_label as fleet_entry_label, fresh_seed as fleet_seed, harness_fault,
+    inventory_default, recorded_route, stats as fleet_stats, BranchOutcome, CandidateStats,
+    Classification, Excluded, Fleet, FleetActivity, FleetCandidate, FleetEntry, InventoryDefault,
+    JudgeMark, JudgeSpec, OutcomeRecord, Route, RouteDecision, RouteOptions, RoutePick, Routed,
+    TaskKind, DEFAULT_EXPLORATION, INVENTORY_ENTRY,
 };
 pub use goal::{
     follow_up_prompt as goal_follow_up_prompt, from_events as goal_from_events,

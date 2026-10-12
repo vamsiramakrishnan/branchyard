@@ -938,6 +938,10 @@ pub struct ModelBackendConfig {
     pub compat: Option<String>,
 }
 
+/// Gemini's OpenAI-compatible endpoint, which `by init project` proposes
+/// for `GEMINI_API_KEY`.
+pub const GEMINI_OPENAI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
+
 /// `[[models.routes]]`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

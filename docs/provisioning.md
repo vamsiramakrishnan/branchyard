@@ -207,6 +207,8 @@ by run "Same, in a microVM" --provider microsandbox --image ghcr.io/you/codex:0.
   --secret CODEX_AUTH=@$HOME/.codex/auth.json --yes
 ```
 
+`by init project` offers to record a login it finds in a file (`CODEX_AUTH = "@~/.codex/auth.json"`) so every isolated or sandboxed branch gets it; keeping that file on a machine whose home does not survive is in [setup](setup.md#persisting-a-harness-login).
+
 An HTTP server's header is a secret like any other: `--mcp-header search:Authorization=SEARCH_AUTH` reads the value from the variable `SEARCH_AUTH` each turn (the secret `SEARCH_AUTH`, as `--secret SEARCH_AUTH` would), and `--mcp-header search:Authorization=@/run/search-auth` from the file (the secret `MCP_SEARCH_AUTHORIZATION`). Neither value is stored, and the header reaches only the harness's MCP configuration (a 0600 file for Claude Code), so it needs a private home, as `--secret` does. With no header, an HTTP server needs nothing more:
 
 ```sh

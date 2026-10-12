@@ -65,9 +65,29 @@ A candidate's `model` is the harness's model. On the [model gateway](model-gatew
 
 The table is checked as strictly as `[workspace]`: unknown keys, an unknown harness, a bad effort, an empty candidate list, `attempts = 0`, an exploration outside 0 to 1 are errors naming the key (`by config validate` reports them). It may be in the project file or the user file; a project's `[fleet.<kind>]` replaces the user file's for the same kind. It is in `schema/branchyard.config.json`. A harness running on a branch (`BRANCHYARD_BRANCH` set) reads no configuration, so its `by` never routes.
 
+## The inventory default
+
+With no `[fleet]` in either file, `by run --auto`, `by fan --auto`, `by map --auto` and `by fleet route` route by a table built from this machine's [inventory](harness-lifecycle.md) at that moment (`branchyard::inventory_default`):
+
+- **Candidates**: every installed harness that Branchyard has a profile for, whose login `by harnesses` reads as likely or verified, and that can run here (on `PATH`, not at a usage limit), in catalog order, with `[defaults] harness` first when it is among them (a profile ID there is kept as the candidate).
+- **Safe defaults** for each: no model of its own, and effort `medium` only where the harness takes one for the branch's home. Codex writes its effort into its `config.toml`, so only an isolated Codex gets it; every other provisioner refuses an effort, so the harness keeps its own.
+- **Judge**: the first candidate that routes tool permission requests to Branchyard (a judge runs with every tool denied, so Antigravity, Pi and Amp are passed over).
+- **The rest** at the documented defaults: one attempt, exploration 0.1, no limits; `--auto` fails over as it always does.
+- **Left out**, each listed as the router lists an excluded candidate: a harness installed but logged out (with its login detail), one whose login cannot be told, one off `PATH` or at its limit, and one with no profile.
+
+```text
+by: routed as bugfix (classifier: fix) by the inventory default (no [fleet]): candidates codex, gemini-cli; seed 1834...
+by:   gemini-cli — sampled success rate 0.62 (no recorded bugfix outcomes)
+by:   not claude-code: claude-code is likely logged out (no ~/.claude/.credentials.json and no ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN); run by harnesses login claude-code
+```
+
+The route records the entry `inventory` (no `[fleet.<kind>]` can have that name), so `by log` says `routed bugfix (classifier) by the inventory default to gemini-cli: ...` and `by fleet route --json` has `"entry": "inventory"`, with the harnesses left out among `excluded`. Nothing logged in is an error listing each installed harness and why, and nothing is created. A sandboxed task (`--sandbox`, a substrate, a recipe) runs its image's harnesses, which this machine's inventory does not describe, so with `--auto` it needs a `[fleet]`.
+
+The configuration stays authoritative: any `[fleet]` turns the inventory default off, even one without an entry for the task's kind (that is the usual "no `[fleet.<kind>]` and no `[fleet.default]`" error). `by init project` offers to write the default it would use now as an explicit `[fleet.default]`, so it stops moving with the logins ([setup](setup.md#routing-and-the-gateway-from-what-is-present)); it is off by default, because a `[fleet]` also routes `by run` without `--harness`.
+
 ## Routing
 
-A new top-level branch is routed when `by run` or `by fan` is given `--auto`, or when the configuration has a `[fleet]` and the command names no harness (`[defaults] harness` then does not apply). `--auto` with `--harness` is refused. Before anything starts, `by` prints the decision:
+A new top-level branch is routed when `by run` or `by fan` is given `--auto`, or when the configuration has a `[fleet]` and the command names no harness (`[defaults] harness` then does not apply). Without a `[fleet]`, `--auto` routes by [the inventory default](#the-inventory-default). `--auto` with `--harness` is refused. Before anything starts, `by` prints the decision:
 
 ```text
 by: routed as bugfix (classifier: fix, flaky) by [fleet.default], seed 1834...
@@ -169,6 +189,7 @@ A judge's pick (and a merge) also proposes [repository knowledge](knowledge.md) 
 | Judge | `Yard::judge`, `Judge`, `HarnessJudge`, `parse_verdict`, `deterministic_scores` | `judge`, `fan --judge` | no: refused |
 | Outcomes | `Yard::outcomes`, `fleet_stats` | `fleet stats` | no: refused |
 | What can run here | `RouteOptions::harnesses` (`inventory::HarnessGate`, `LocalGate`) | consulted by `run --auto`, `fan --auto`, `fleet route` | no |
+| The inventory default | `inventory_default`, `InventoryDefault`, `INVENTORY_ENTRY` | `run --auto`, `fan --auto`, `map --auto`, `fleet route` with no `[fleet]` | no |
 
 ## Not done yet
 
@@ -183,10 +204,10 @@ A judge's pick (and a merge) also proposes [repository knowledge](knowledge.md) 
 
 | Where | What |
 |---|---|
-| [`fleet.rs`](../crates/branchyard/src/fleet.rs) | Kinds and the classifier, the table, routing events, outcomes and `OutcomeBackend`, the router, routed runs and fans, failover; unit tests: classification, determinism under a seed, learning, the exploration floor, exclusion, rounds, Beta's mean, failure classification, credit |
+| [`fleet.rs`](../crates/branchyard/src/fleet.rs) | Kinds and the classifier, the table, routing events, outcomes and `OutcomeBackend`, the router, routed runs and fans, failover; unit tests: classification, determinism under a seed, learning, the exploration floor, exclusion, rounds, Beta's mean, failure classification, credit, the inventory default (candidates, safe defaults, judge, what is left out and why, its entry and wording) |
 | [`judge.rs`](../crates/branchyard/src/judge.rs) | The deterministic score, the prompt, strict verdicts, `Judge` and `HarnessJudge`, ranking and recording; unit tests for each |
 | [`run.rs`](../crates/branchyard/src/run.rs) | `run_attempts` (a run or fan with per-attempt harness, command, provisioning, budget and events), `reincarnate_with` (from the base when there is no candidate), a send keeping its model |
 | [`sqlite.rs`](../crates/branchyard/src/sqlite.rs), [`pg.rs`](../crates/branchyard/src/pg.rs), [`conformance.rs`](../crates/branchyard/src/conformance.rs) | The `outcomes` tables and their conformance test on both |
 | [`tests/fleet.rs`](../crates/branchyard/tests/fleet.rs) | A routed run recording its route and outcome, merged; failover from a harness that exits, keeping the entry's limits and never to a candidate the router excluded; no failover for a driver refusing the configuration, with no candidate left, or with failover off; unavailable candidates never routed to; a routed fan's names; a send keeping its model; the deterministic judge; a judge harness on a read-only scratch branch, its strict verdict and fallback; a pluggable judge |
-| [`fleet_cmd.rs`](../crates/branchyard-cli/src/fleet_cmd.rs), [`tests/fleet.rs`](../crates/branchyard-cli/tests/fleet.rs) | `by run` routed by a `[fleet]`, `--kind`, `--auto` failing over, `by fan --auto --judge` with a judge harness, `by judge --pick --discard-others`, `by fleet stats|route`, refusals |
+| [`fleet_cmd.rs`](../crates/branchyard-cli/src/fleet_cmd.rs), [`tests/fleet.rs`](../crates/branchyard-cli/tests/fleet.rs) | `by run` routed by a `[fleet]`, `--kind`, `--auto` failing over, `by fan --auto --judge` with a judge harness, `by judge --pick --discard-others`, `by fleet stats|route`, refusals; without a `[fleet]`, `--auto` and `by fleet route` routing by the inventory default among fake harnesses on a private `PATH` (Codex verified, Gemini CLI by its key; Claude Code logged out and Goose unknown left out), `[defaults] harness` first, and a `[fleet]` turning it off |
 | [`config.rs`](../crates/branchyard-setup/src/config.rs) | `[fleet]`'s format and checks |

@@ -2,11 +2,15 @@
 //! and the fake ACP agent: routing with a `[fleet]` and no `--harness`,
 //! `--auto` failing over from a harness that exits, `--kind`, `by fan
 //! --auto --judge` with a judge harness answering a canned verdict, `by
-//! judge --pick`, `by fleet stats|route`, and the refusals. Hermetic: no
-//! model is called. Requires `git` and `sh`.
+//! judge --pick`, `by fleet stats|route`, the inventory default `--auto`
+//! routes by without a `[fleet]` (fake harnesses on a private `PATH`), and
+//! the refusals. Hermetic: no model is called, and no harness of the
+//! machine running the tests is found. Requires `git` and `sh`.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::process::Output;
 
 use branchyard_testkit::fake_agent;
@@ -22,12 +26,46 @@ impl std::ops::Deref for Repo {
     }
 }
 
+/// Key variables a harness's login is read from, which the machine
+/// running the tests may set: none reaches `by` unless a test sets it.
+const KEY_VARIABLES: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_API_KEY",
+    "CODEX_HOME",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "AGY_TOKEN",
+];
+
 impl Repo {
+    /// A repository whose `by` finds only the harnesses a test fakes into
+    /// `bin` ([`Repo::fake`]): `PATH` is `bin` and the system's tools, and
+    /// `HOME` is a scratch directory.
     fn new() -> Repo {
-        Repo(branchyard_testkit::repo!(&[
-            ("a.txt", "one\n"),
-            (".gitignore", "branchyard.toml\n")
-        ]))
+        let mut repo =
+            branchyard_testkit::repo!(&[("a.txt", "one\n"), (".gitignore", "branchyard.toml\n")]);
+        let (bin, home) = (repo.dir.join("bin"), repo.dir.join("home"));
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(home.join(".local/bin")).unwrap();
+        repo.set_env("PATH", &format!("{}:/usr/bin:/bin", bin.display()));
+        repo.set_env("HOME", &home.display().to_string());
+        repo.set_env("BRANCHYARD_HARNESS_DIRS", "$HOME/.local/bin");
+        repo.set_env("BRANCHYARD_HARNESS_TIMEOUT", "2");
+        for name in KEY_VARIABLES {
+            repo.remove_env(name);
+        }
+        Repo(repo)
+    }
+
+    /// A fake harness executable `name` in `bin`, running `body` (sh).
+    fn fake(&self, name: &str, body: &str) -> PathBuf {
+        let path = self.dir.join("bin").join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
     }
 
     /// Write `branchyard.toml`, with `AGENT` replaced by the fake agent.
@@ -238,11 +276,20 @@ judge = {{ harness = "gemini-cli", command = "AGENT", rubric = "REPLY_FILE {}" }
 #[test]
 fn routing_is_refused_with_reasons() {
     let repo = Repo::new();
-    // --auto without a [fleet].
+    // --auto without a [fleet], and no harness logged in here.
     let out = repo.by(&["run", "x", "--auto", "--yes"]);
     assert!(!out.status.success());
     assert!(
-        stderr(&out).contains("has none; add [fleet.default]"),
+        stderr(&out).contains(
+            "with no [fleet], --auto routes among the harnesses logged in here, and none is \
+             installed"
+        ),
+        "{}",
+        stderr(&out)
+    );
+    let out = repo.by(&["fan", "x", "--auto", "--yes"]);
+    assert!(
+        stderr(&out).contains("and none is installed"),
         "{}",
         stderr(&out)
     );
@@ -282,4 +329,113 @@ fn routing_is_refused_with_reasons() {
     assert!(repo.json(&["ls", "--json"]).as_array().unwrap().is_empty());
     let route = repo.by(&["fleet", "route", "x"]);
     assert!(!route.status.success());
+}
+
+/// Without a `[fleet]`, `--auto` and `by fleet route` route among the
+/// harnesses logged in on this machine at that moment: Codex (verified by
+/// its status command) and Gemini CLI (by `GEMINI_API_KEY`); Claude Code,
+/// installed but logged out, and Goose, whose login cannot be told, are
+/// listed as left out. `[defaults] harness` goes first, and a `[fleet]`
+/// turns the default off.
+#[test]
+fn without_a_fleet_auto_routes_among_the_harnesses_logged_in_here() {
+    let mut repo = Repo::new();
+    let agent = fake_agent!().display().to_string();
+    repo.fake("claude", "echo '2.1.283 (Claude Code)'");
+    repo.fake(
+        "codex",
+        r#"case "$1" in --version) echo "codex-cli 0.157.1";; login) echo "Logged in using ChatGPT";; *) exit 3;; esac"#,
+    );
+    repo.fake(
+        "gemini",
+        &format!("[ \"$1\" = --version ] && {{ echo 0.63.0; exit 0; }}\nexec '{agent}'"),
+    );
+    repo.fake("goose", "echo 'goose 1.0.0'");
+    repo.0.set_env("GEMINI_API_KEY", "not-a-key");
+
+    let route = repo.json(&["fleet", "route", "Fix the bug", "--seed", "1", "--json"]);
+    assert_eq!(route["entry"], "inventory", "{route}");
+    let picked = route["picks"][0]["candidate"]["harness"].as_str().unwrap();
+    assert!(["codex", "gemini-cli"].contains(&picked), "{route}");
+    let left_out: Vec<(String, String)> = route["excluded"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["candidate"]["harness"].as_str().unwrap().to_owned(),
+                e["reason"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(left_out.len(), 2, "{left_out:?}");
+    assert_eq!(left_out[0].0, "claude-code");
+    assert!(
+        left_out[0]
+            .1
+            .contains("logged out (no ~/.claude/.credentials.json"),
+        "{left_out:?}"
+    );
+    assert_eq!(left_out[1].0, "goose");
+    assert!(
+        left_out[1].1.contains("login cannot be told"),
+        "{left_out:?}"
+    );
+    let text = stdout(&repo.ok(&["fleet", "route", "Fix the bug", "--seed", "1"]));
+    assert!(
+        text.contains(
+            "would route as bugfix (classifier: fix, bug) by the inventory default (no \
+             [fleet]): candidates codex, gemini-cli; seed 1"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("not claude-code: claude-code is likely logged out"),
+        "{text}"
+    );
+
+    // A routed run says where its route came from, and records it.
+    let prompt = "Add a file WRITE added.txt=1";
+    let seed = repo.seed_for(prompt, "gemini-cli");
+    let out = repo.ok(&[
+        "run",
+        prompt,
+        "--auto",
+        "-n",
+        "inventory",
+        "--seed",
+        &seed,
+        "--yes",
+    ]);
+    let err = stderr(&out);
+    assert!(
+        err.contains("by: routed as feature (classifier: add"),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!(
+            ") by the inventory default (no [fleet]): candidates codex, gemini-cli; seed {seed}"
+        )),
+        "{err}"
+    );
+    assert!(err.contains("by:   not goose:"), "{err}");
+    let show = repo.json(&["show", "inventory", "--json"]);
+    assert_eq!(show["status"]["state"], "ready", "{show}");
+    let log = stdout(&repo.ok(&["log", "inventory"]));
+    assert!(
+        log.contains("routed feature (classifier) by the inventory default to gemini-cli"),
+        "{log}"
+    );
+
+    // [defaults] harness goes first; a [fleet] is the configuration's.
+    repo.config("[defaults]\nharness = \"gemini-cli\"\n");
+    let text = stdout(&repo.ok(&["fleet", "route", "Fix the bug", "--seed", "1"]));
+    assert!(
+        text.contains("candidates gemini-cli, codex; seed 1"),
+        "{text}"
+    );
+    repo.config(TWO);
+    let route = repo.json(&["fleet", "route", "Fix the bug", "--seed", "1", "--json"]);
+    assert_eq!(route["entry"], "default", "{route}");
+    assert!(route["excluded"].as_array().unwrap().is_empty(), "{route}");
 }

@@ -26,7 +26,7 @@ use crate::{
 };
 
 const SETTINGS: &str = ".gemini/settings.json";
-const OAUTH_CREDS: &str = ".gemini/oauth_creds.json";
+pub(crate) const OAUTH_CREDS: &str = ".gemini/oauth_creds.json";
 
 pub const AUTH: Spec = Spec {
     harness: "gemini-cli",

@@ -50,7 +50,7 @@ use crate::{
 };
 
 const CLAUDE_JSON: &str = ".claude.json";
-const CREDENTIALS: &str = ".claude/.credentials.json";
+pub(crate) const CREDENTIALS: &str = ".claude/.credentials.json";
 const SETTINGS: &str = ".claude/settings.json";
 /// The API key `apiKeyHelper` prints.
 pub(crate) const API_KEY_FILE: &str = ".branchyard/credentials/anthropic-api-key";

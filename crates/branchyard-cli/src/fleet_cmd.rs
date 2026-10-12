@@ -6,8 +6,9 @@
 use std::sync::Arc;
 
 use branchyard::{
-    classify, fleet_stats, recorded_route, CandidateStats, Fleet, Judge, JudgeOptions, JudgeSpec,
-    Judgement, Route, RouteOptions, Routed, TaskKind, TaskOptions, Yard,
+    classify, fleet_stats, recorded_route, CandidateStats, Fleet, InventoryDefault, Judge,
+    JudgeOptions, JudgeSpec, Judgement, Route, RouteOptions, Routed, TaskKind, TaskOptions, Yard,
+    INVENTORY_ENTRY,
 };
 use serde_json::json;
 
@@ -41,6 +42,63 @@ pub fn table(task: &TaskArgs) -> Result<&Fleet, Failure> {
     })
 }
 
+/// The inventory default here (docs/fleet.md#the-inventory-default): the
+/// harnesses `by harnesses` says are logged in on this machine, `[defaults]
+/// harness` first, for a branch whose home is (`private_home`) or is not
+/// its own.
+pub fn inventory_default(private_home: bool) -> Result<InventoryDefault, Failure> {
+    let inventory = crate::harness_cmd::detected_here().map_err(|e| {
+        Failure::Message(format!(
+            "with no [fleet], --auto routes among the harnesses logged in here, and they \
+             could not be detected: {e}"
+        ))
+    })?;
+    let cwd = std::env::current_dir()?;
+    let config = crate::defaults::config_at(&cwd, &|name| std::env::var(name).ok())
+        .map_err(Failure::Message)?;
+    let preferred = config.and_then(|c| c.defaults.harness);
+    let built = branchyard::inventory_default(&inventory, preferred.as_deref(), private_home);
+    if built.entry.candidates.is_empty() {
+        let why: Vec<String> = built
+            .excluded
+            .iter()
+            .map(|e| format!("{}: {}", e.candidate.harness, e.reason))
+            .collect();
+        return Err(Failure::Message(format!(
+            "with no [fleet], --auto routes among the harnesses logged in here, and none is{}; \
+             log one in (by harnesses login ID), or add [fleet.default] with candidates (see \
+             docs/fleet.md)",
+            match why.is_empty() {
+                true => " installed".to_owned(),
+                false => format!(": {}", why.join("; ")),
+            }
+        )));
+    }
+    Ok(built)
+}
+
+/// `task` with the inventory default as its fleet when `--auto` routes it
+/// and the configuration has no `[fleet]`: the configuration stays
+/// authoritative, and a `[fleet]` turns the default off. A sandbox runs its
+/// image's harnesses, which this machine's inventory does not describe, so
+/// a sandboxed task needs a `[fleet]`.
+pub fn with_inventory_default(task: &mut TaskArgs) -> Result<(), Failure> {
+    if !task.auto || task.fleet.is_some() {
+        return Ok(());
+    }
+    if task.sandbox.is_some() || task.substrate.is_some() || task.recipe.is_some() {
+        return Err(Failure::Message(
+            "with no [fleet], --auto routes among the harnesses logged in on this machine, which \
+             says nothing of a sandbox's; add [fleet.default] with candidates (see docs/fleet.md)"
+                .into(),
+        ));
+    }
+    let built = inventory_default(task.isolated)?;
+    task.fleet = Some(built.fleet());
+    task.fleet_excluded = built.excluded;
+    Ok(())
+}
+
 /// How the router runs for `task`: its kind and seed, fixed now so the
 /// route printed before running is the one that runs.
 pub fn route_options(task: &TaskArgs, attempts: Option<u32>) -> RouteOptions {
@@ -56,15 +114,33 @@ pub fn route_options(task: &TaskArgs, attempts: Option<u32>) -> RouteOptions {
     }
 }
 
-/// The router's choice, for stderr before the branches start.
-pub fn route_text(route: &Route) -> String {
+/// The router's choice, for stderr before the branches start. A route
+/// from the inventory default says so, with its candidates.
+pub fn route_text(route: &Route, fleet: &Fleet) -> String {
     let matched = match route.matched.is_empty() {
         true => String::new(),
         false => format!(": {}", route.matched.join(", ")),
     };
+    let by = match route.entry.as_str() {
+        INVENTORY_ENTRY => format!(
+            "the inventory default (no [fleet]): candidates {};",
+            fleet
+                .entries
+                .get(INVENTORY_ENTRY)
+                .map(|e| {
+                    e.candidates
+                        .iter()
+                        .map(branchyard::FleetCandidate::label)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default()
+        ),
+        entry => format!("[fleet.{entry}],"),
+    };
     let mut text = format!(
-        "by: routed as {} ({}{matched}) by [fleet.{}], seed {}\n",
-        route.kind, route.kind_source, route.entry, route.seed
+        "by: routed as {} ({}{matched}) by {by} seed {}\n",
+        route.kind, route.kind_source, route.seed
     );
     for pick in &route.picks {
         text.push_str(&format!(
@@ -104,7 +180,7 @@ pub fn routed(
     // What this machine has of each harness, installing on demand when
     // [harnesses] install = "auto" (docs/harness-lifecycle.md).
     how.harnesses = crate::harness_cmd::route_gate(fleet, options, false);
-    let route = yard.route(
+    let mut route = yard.route(
         prompt,
         options,
         fleet,
@@ -114,7 +190,8 @@ pub fn routed(
             false => Some(1),
         },
     )?;
-    eprint!("{}", route_text(&route));
+    route.excluded.extend(task.fleet_excluded.iter().cloned());
+    eprint!("{}", route_text(&route, fleet));
     let routed = match fan {
         true => yard.fan_routed(prompt, options, fleet, &how)?,
         false => yard.run_routed(prompt, options, fleet, &how)?,
@@ -400,24 +477,32 @@ pub fn route(
     if let Target::Remote(_) = target {
         return Err(local_only());
     }
-    let fleet = fleet.ok_or_else(|| {
-        Failure::Message(
-            "branchyard.toml has no [fleet] table; add [fleet.default] (see docs/fleet.md)".into(),
-        )
-    })?;
+    // No [fleet]: the inventory default, as --auto would route.
+    let (fleet, excluded) = match fleet {
+        Some(fleet) => (fleet.clone(), Vec::new()),
+        None => {
+            let cwd = std::env::current_dir()?;
+            let isolated = crate::defaults::config_at(&cwd, &|name| std::env::var(name).ok())
+                .map_err(Failure::Message)?
+                .is_some_and(|c| c.defaults.isolated == Some(true));
+            let built = inventory_default(isolated)?;
+            (built.fleet(), built.excluded)
+        }
+    };
     let yard = open()?;
     let options = TaskOptions::default();
     let how = RouteOptions {
         seed: Some(how.seed.unwrap_or_else(branchyard::fleet_seed)),
         // What this machine has of each harness, installing nothing.
-        harnesses: crate::harness_cmd::route_gate(fleet, &options, true),
+        harnesses: crate::harness_cmd::route_gate(&fleet, &options, true),
         ..how.clone()
     };
-    let route = yard.route(prompt, &options, fleet, &how, how.attempts)?;
+    let mut route = yard.route(prompt, &options, &fleet, &how, how.attempts)?;
+    route.excluded.extend(excluded);
     match as_json {
         true => print(&json::text(
             &serde_json::to_value(&route).unwrap_or_default(),
         )),
-        false => print(&route_text(&route).replace("by: routed as", "would route as")),
+        false => print(&route_text(&route, &fleet).replace("by: routed as", "would route as")),
     }
 }

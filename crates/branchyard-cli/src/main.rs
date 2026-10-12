@@ -218,23 +218,45 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
 /// One arm per command that runs against a repository or a server; see
 /// "Adding a command" in `args.rs`.
 fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
+    // `--auto` with no [fleet] routes among what is logged in here
+    // (docs/fleet.md#the-inventory-default); a server refuses routing.
+    let local = matches!(target, Target::Local);
+    let inventory_default = |task: &mut args::TaskArgs| match local {
+        true => fleet_cmd::with_inventory_default(task),
+        false => Ok(()),
+    };
     match command {
-        Command::Run { prompt, task } => commands::run(env, target, &prompt, &task),
+        Command::Run { prompt, mut task } => {
+            inventory_default(&mut task)?;
+            commands::run(env, target, &prompt, &task)
+        }
         Command::Fan {
             prompt,
             harnesses,
             attempts,
             judge,
-            task,
-        } => commands::fan(
-            env,
-            target,
-            &prompt,
-            harnesses.as_ref().map(|h| h.0.as_slice()),
-            &task,
-            &commands::FanRoute { attempts, judge },
-        ),
-        Command::Map { json, action, map } => {
+            mut task,
+        } => {
+            if harnesses.is_none() {
+                inventory_default(&mut task)?;
+            }
+            commands::fan(
+                env,
+                target,
+                &prompt,
+                harnesses.as_ref().map(|h| h.0.as_slice()),
+                &task,
+                &commands::FanRoute { attempts, judge },
+            )
+        }
+        Command::Map {
+            json,
+            action,
+            mut map,
+        } => {
+            if action.is_none() {
+                inventory_default(&mut map.task)?;
+            }
             map_cmd::main(env, target, action.as_ref(), &map, json)
         }
         Command::Judge {

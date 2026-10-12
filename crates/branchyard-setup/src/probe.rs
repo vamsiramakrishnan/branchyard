@@ -278,6 +278,119 @@ pub struct HarnessFact {
     /// Live qualification, such as "9/9 on 2.1.283".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qualification: Option<String>,
+    /// Whether it is logged in, as `by harnesses` tells it, when it is
+    /// installed and the machine's inventory was read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<HarnessLogin>,
+}
+
+/// A harness's login as the inventory reads it (docs/harness-lifecycle.md):
+/// from its own status command, or from key variables and credential
+/// files by name. Never a credential.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HarnessLogin {
+    /// `logged_in`, `logged_out` or `unknown`.
+    pub state: String,
+    /// `verified` (its status command said so), `likely` (inferred), or
+    /// `none`.
+    pub evidence: String,
+    /// What decided it: `codex login status: Logged in using ChatGPT`.
+    pub detail: String,
+}
+
+impl HarnessLogin {
+    /// Logged in, likely or verified: what a routing candidate needs.
+    pub fn logged_in(&self) -> bool {
+        self.state == "logged_in"
+    }
+}
+
+/// A login a harness keeps in a file, found in the home directory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LoginFile {
+    /// The harness that keeps it.
+    pub harness: String,
+    /// The file, under `~/`: `~/.codex/auth.json`.
+    pub file: String,
+    /// The secret Branchyard provisions its content as into a private home
+    /// (`CODEX_AUTH`); `None` when no provisioner takes this file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    /// A non-secret label read from it, as `key value`: Codex's
+    /// `auth_mode chatgpt`, Antigravity's `modelProvider gemini`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// Files a login lives in beyond the provisioners' `auth-file` methods,
+/// and the label key read from each: `(harness, file under ~/, label)`.
+/// Antigravity's are found and shown, not provisioned: it takes
+/// `GEMINI_API_KEY`.
+const OTHER_LOGIN_FILES: &[(&str, &str, Option<&str>)] = &[
+    (
+        "antigravity",
+        ".gemini/antigravity-cli/antigravity-oauth-token",
+        None,
+    ),
+    (
+        "antigravity",
+        ".gemini/antigravity-cli/settings.json",
+        Some("modelProvider"),
+    ),
+];
+
+/// The label key read from a provisioned login file.
+fn login_label_key(harness: &str) -> Option<&'static str> {
+    match harness {
+        "codex" => Some("auth_mode"),
+        _ => None,
+    }
+}
+
+/// The logins kept in files under the home directory, provisioned ones
+/// first (in the provisioners' order), each with its label.
+pub fn login_files(probe: &dyn Probe) -> Vec<LoginFile> {
+    let provisioned = branchyard_provision::file_logins().into_iter().map(|l| {
+        (
+            l.harness,
+            l.path,
+            Some(l.secret),
+            login_label_key(l.harness),
+        )
+    });
+    let others = OTHER_LOGIN_FILES
+        .iter()
+        .map(|(harness, path, label)| (*harness, *path, None, *label));
+    provisioned
+        .chain(others)
+        .filter_map(|(harness, path, secret, label)| {
+            let file = format!("~/{path}");
+            probe.exists(&file).then(|| LoginFile {
+                harness: harness.to_owned(),
+                label: label.and_then(|key| {
+                    probe
+                        .json_label(&file, key)
+                        .map(|value| format!("{key} {value}"))
+                }),
+                secret: secret.map(str::to_owned),
+                file,
+            })
+        })
+        .collect()
+}
+
+/// The top-level string `key` of a JSON document, only when it reads as a
+/// label (letters, digits, `.`, `_`, `-`, at most 32 characters), so no
+/// token can come back through it.
+pub fn label_in(text: &str, key: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let label = value.get(key)?.as_str()?;
+    let plain = !label.is_empty()
+        && label.len() <= 32
+        && label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    plain.then(|| label.to_owned())
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -313,6 +426,14 @@ pub trait Probe {
     /// when missing. Only files setup may write are asked for.
     fn read(&self, path: &str) -> Option<String>;
     fn exists(&self, path: &str) -> bool;
+    /// A non-secret label from a JSON credential or settings file (`~/`
+    /// for the home directory): its top-level string `key`, through
+    /// [`label_in`], such as Codex's `auth_mode`. Nothing else of the file
+    /// leaves the probe.
+    fn json_label(&self, path: &str, key: &str) -> Option<String> {
+        let _ = (path, key);
+        None
+    }
     /// The SHA-256 of a token file's first line, lowercase hex: how setup
     /// keeps an existing token without reading it into a plan.
     fn token_sha256(&self, path: &str) -> Option<String>;
@@ -353,6 +474,9 @@ pub struct Facts {
     /// What the root's files suggest for `[workspace]`.
     #[serde(default, skip_serializing_if = "WorkspaceFacts::is_empty")]
     pub workspace: WorkspaceFacts,
+    /// Logins harnesses keep in files under the home directory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logins: Vec<LoginFile>,
     /// The existing project and user files' text, for defaults.
     #[serde(skip)]
     #[schemars(skip)]
@@ -394,6 +518,7 @@ impl Facts {
                 .exists(PLUGIN_MANIFEST)
                 .then(|| format!("{}/plugins/branchyard", probe.root())),
             workspace: WorkspaceFacts::detect(probe),
+            logins: login_files(probe),
             project_text: probe.read(crate::config::PROJECT_FILE),
             user_text: probe.read(&user_config_path),
             user_config_path,
@@ -405,17 +530,30 @@ impl Facts {
         self.harnesses.iter().filter(|h| h.installed)
     }
 
-    /// The harness to suggest: Claude Code or Codex when installed, else
-    /// the first installed, else Claude Code.
+    /// The harness to suggest: Claude Code or Codex when installed and not
+    /// known to be logged out, else the first installed one logged in,
+    /// else the first installed, else Claude Code.
     pub fn preferred_harness(&self) -> String {
+        let usable = |h: &&HarnessFact| h.login.as_ref().is_none_or(|l| l.state != "logged_out");
         for preferred in ["claude-code", "codex"] {
-            if self.installed().any(|h| h.harness == preferred) {
+            if self
+                .installed()
+                .filter(usable)
+                .any(|h| h.harness == preferred)
+            {
                 return preferred.into();
             }
         }
         self.installed()
-            .next()
+            .find(|h| h.login.as_ref().is_some_and(HarnessLogin::logged_in))
+            .or_else(|| self.installed().next())
             .map_or_else(|| "claude-code".into(), |h| h.harness.clone())
+    }
+
+    /// Installed harnesses logged in, likely or verified.
+    pub fn logged_in(&self) -> impl Iterator<Item = &HarnessFact> {
+        self.installed()
+            .filter(|h| h.login.as_ref().is_some_and(HarnessLogin::logged_in))
     }
 
     pub fn repo_name(&self) -> String {
@@ -466,9 +604,22 @@ impl Facts {
         );
         let installed: Vec<String> = self
             .installed()
-            .map(|h| match &h.version {
-                Some(v) if !v.is_empty() => format!("{} {v}", h.harness),
-                _ => h.harness.clone(),
+            .map(|h| {
+                let named = match &h.version {
+                    Some(v) if !v.is_empty() => format!("{} {v}", h.harness),
+                    _ => h.harness.clone(),
+                };
+                match &h.login {
+                    Some(login) => format!(
+                        "{named} ({}{})",
+                        login.state.replace('_', " "),
+                        match login.evidence.as_str() {
+                            "none" | "" => String::new(),
+                            how => format!(", {how}"),
+                        }
+                    ),
+                    None => named,
+                }
             })
             .collect();
         push(
@@ -479,6 +630,23 @@ impl Facts {
                 false => installed.join(", "),
             },
         );
+        if !self.logins.is_empty() {
+            let logins: Vec<String> = self
+                .logins
+                .iter()
+                .map(|l| {
+                    let label = l
+                        .label
+                        .as_ref()
+                        .map_or(String::new(), |l| format!(" ({l})"));
+                    match &l.secret {
+                        Some(secret) => format!("{} {}{label}, as {secret}", l.harness, l.file),
+                        None => format!("{} {}{label}, not provisioned", l.harness, l.file),
+                    }
+                })
+                .collect();
+            push("logins", "Harness logins in files", logins.join("; "));
+        }
         push(
             "credentials",
             "Credential variables set",
@@ -624,6 +792,7 @@ impl FakeProbe {
                 installed,
                 version: version.map(str::to_owned),
                 qualification: None,
+                login: None,
             };
         FakeProbe {
             root: "/src/app".into(),
@@ -686,6 +855,9 @@ impl Probe for FakeProbe {
     }
     fn exists(&self, path: &str) -> bool {
         self.files.contains_key(path)
+    }
+    fn json_label(&self, path: &str, key: &str) -> Option<String> {
+        label_in(self.files.get(path)?, key)
     }
     fn token_sha256(&self, path: &str) -> Option<String> {
         self.files

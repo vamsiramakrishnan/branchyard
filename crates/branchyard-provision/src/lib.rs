@@ -1040,6 +1040,52 @@ pub const NOT_PORTED: &[(&str, &str)] = &[
     ),
 ];
 
+/// A login a harness keeps in a file in its home, and the secret its
+/// provisioner takes that file's whole content as (its `auth-file`
+/// method): how a device-code login reaches a branch with a private home.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileLogin {
+    /// Branchyard's harness ID.
+    pub harness: &'static str,
+    /// The file, relative to the home: `.codex/auth.json`.
+    pub path: &'static str,
+    /// The secret it is provisioned as: `CODEX_AUTH`.
+    pub secret: &'static str,
+}
+
+/// Every login kept in a file that a provisioner can carry into a private
+/// home, from the provisioners' own authentication methods.
+pub fn file_logins() -> Vec<FileLogin> {
+    [
+        (&claude::AUTH, claude::CREDENTIALS),
+        (&codex::AUTH, codex::AUTH_FILE),
+        (&gemini::AUTH, gemini::OAUTH_CREDS),
+    ]
+    .into_iter()
+    .flat_map(|(spec, path)| {
+        spec.methods.iter().filter_map(move |m| match m.kind {
+            auth::Kind::File { secret } => Some(FileLogin {
+                harness: spec.harness,
+                path,
+                secret,
+            }),
+            auth::Kind::Env { .. } => None,
+        })
+    })
+    .collect()
+}
+
+/// Whether `harness`'s provisioner takes a reasoning effort for a branch
+/// whose home is (`private_home`) or is not its own: Codex writes it into
+/// its `config.toml`, which needs a private home; the others have no
+/// setting for it and refuse one.
+pub fn takes_effort(harness: &str, protocol: Protocol, private_home: bool) -> bool {
+    let mut context = Context::new(harness, protocol, "/home", "/work");
+    context.private_home = private_home;
+    context.effort = Some(Effort::Medium);
+    plan(&context).is_ok()
+}
+
 /// The provisioner for a harness: a translated one, or one that only
 /// passes session items through and refuses anything else.
 pub fn for_harness(harness: &str) -> &'static dyn Provisioner {
@@ -1203,6 +1249,40 @@ pub(crate) fn json_text(value: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_logins_are_the_auth_file_methods_and_where_each_file_is() {
+        let logins: Vec<(&str, &str, &str)> = file_logins()
+            .iter()
+            .map(|l| (l.harness, l.path, l.secret))
+            .collect();
+        assert_eq!(
+            logins,
+            [
+                ("claude-code", ".claude/.credentials.json", "CLAUDE_AUTH"),
+                ("codex", ".codex/auth.json", "CODEX_AUTH"),
+                (
+                    "gemini-cli",
+                    ".gemini/oauth_creds.json",
+                    "GEMINI_OAUTH_CREDS"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_codex_takes_an_effort_and_only_into_a_private_home() {
+        assert!(takes_effort("codex", Protocol::CodexAppServer, true));
+        assert!(!takes_effort("codex", Protocol::CodexAppServer, false));
+        for (harness, protocol) in [
+            ("claude-code", Protocol::ClaudeStreamJson),
+            ("gemini-cli", Protocol::Acp),
+            ("antigravity", Protocol::AntigravityStreamJson),
+            ("goose", Protocol::Acp),
+        ] {
+            assert!(!takes_effort(harness, protocol, true), "{harness}");
+        }
+    }
 
     #[test]
     fn secret_sources_parse_names_variables_and_files() {

@@ -154,6 +154,8 @@ by:   not qwen-code: qwen-code is not installed on this machine; install it with
 
 With `install = "auto"` (and `allow` naming it, when set), a missing candidate is installed first, verified, and recorded in the log by `router`; then the route goes on. `by fleet route` never installs: it shows such a candidate excluded with "a routed run would install it first". A routed fan picks each attempt from the same eligible candidates, so split work lands where its harnesses run.
 
+With no `[fleet]` configured, `--auto` routes among the harnesses this inventory reads as logged in, likely or verified: the [inventory default](fleet.md#the-inventory-default). An installed harness that is logged out, or whose login cannot be told, is listed as left out with its login detail. `by init project` reads the same inventory to suggest a default harness that is logged in and to offer that default as an explicit `[fleet.default]` ([setup](setup.md#routing-and-the-gateway-from-what-is-present)).
+
 ## Not done yet
 
 - A delegated child, graph node or rig seat that names its harness is not checked against the inventory before it starts here; on a server, only tasks (one branch or a fan) are steered, not sends, forks, spawns or graph nodes.

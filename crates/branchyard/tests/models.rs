@@ -335,8 +335,10 @@ fn serve(stream: std::net::TcpStream, behavior: Behavior, sender: mpsc::Sender<S
 }
 
 /// The fake harness: `harness.py direct|proxy CALL...`. A call is
-/// `API,PATH,MODEL,json|stream|tools|toolstream[,KEY]` (PATH after the base
-/// URL), sent the way that provider's SDK sends it, printing `call MODEL
+/// `API,PATH,MODEL,json|stream|tools|toolstream|extras[,KEY]` (PATH after
+/// the base URL), sent the way that provider's SDK sends it (`extras` is
+/// `json` with what SDKs add: Claude Code's `metadata.user_id`, an OpenAI
+/// SDK's `store` and `user`), printing `call MODEL
 /// MODE: STATUS events=N [ERROR TYPE] [retry=SECONDS]`; `tools` and
 /// `toolstream` are `json` and `stream` offering the tools Read, Edit and
 /// Bash, with a marker in the prompt ([`MARKER`]); `token=FILE` writes the
@@ -392,6 +394,12 @@ for spec in sys.argv[2:]:
             body["tools"] = [{"type": "function", "function": {"name": n, "parameters": {"type": "object"}}} for n in names]
     if kind in ("stream", "toolstream"):
         body["stream"] = True
+    if kind == "extras":
+        if api == "anthropic":
+            body["metadata"] = {"user_id": "user_1"}
+        else:
+            body["store"] = False
+            body["user"] = "user_1"
     headers["content-type"] = "application/json"
     payload = json.dumps(body).encode() if kind != "broken" else b'{"model": "' + model.encode()
     if sent:
@@ -1320,6 +1328,75 @@ fn a_claude_request_is_translated_for_an_openai_backend() {
             - recorded.iter().filter_map(|c| c.cost_usd).sum::<f64>())
         .abs()
             < 1e-9
+    );
+}
+
+/// `compat = "gemini"`: Gemini's OpenAI-compatible endpoint is sent its
+/// own path under its versioned base URL, and none of the OpenAI-only
+/// fields it refuses, whether a Claude request was translated for it or an
+/// OpenAI one passed through.
+#[test]
+fn a_gemini_backend_gets_its_own_path_and_none_of_the_fields_it_refuses() {
+    let f = Fixture::new();
+    let gemini = mock(Behavior::Answer);
+    use_gateway(
+        &f,
+        json!({
+            "backends": {"gemini": {"api": "openai", "key": "openai", "compat": "gemini",
+                "url": format!("{}/v1beta/openai", gemini.url())}},
+            "routes": [
+                {"model": "gemini-*", "backends": ["gemini"]},
+                {"model": "claude-*", "backends": ["gemini"], "backend_model": "gemini-3.5-flash"}
+            ]
+        }),
+    );
+    let script = harness(&f.dir);
+    let branch = f
+        .task(&prompt(
+            &script,
+            "direct",
+            &[
+                "anthropic,/v1/messages,claude-sonnet-4-6,extras",
+                "openai,/chat/completions,gemini-3.5-flash,extras",
+            ],
+        ))
+        .options(options(&f, on_gateway(&["claude-sonnet-*", "gemini-*"])))
+        .name("on-gemini")
+        .run()
+        .unwrap();
+    let events = branch.events().unwrap();
+    said(
+        &events,
+        &[
+            "call claude-sonnet-4-6 extras: 200",
+            "call gemini-3.5-flash extras: 200",
+        ],
+    );
+    let seen = gemini.seen();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    for request in &seen {
+        assert_eq!(request.path, "/v1beta/openai/chat/completions");
+        assert_eq!(request.body["model"], "gemini-3.5-flash");
+        for refused in ["store", "user", "metadata"] {
+            assert!(
+                request.body.get(refused).is_none(),
+                "{refused}: {request:?}"
+            );
+        }
+        let bearer = format!("Bearer {OPENAI_KEY}");
+        assert_eq!(request.header("authorization"), Some(bearer.as_str()));
+    }
+    assert_eq!(seen[0].body["max_completion_tokens"], 16);
+    let recorded = calls(&events);
+    assert_eq!(
+        recorded
+            .iter()
+            .map(|c| (c.backend.as_deref(), c.translated.as_deref()))
+            .collect::<Vec<_>>(),
+        [
+            (Some("gemini"), Some("gemini-3.5-flash")),
+            (Some("gemini"), None)
+        ]
     );
 }
 

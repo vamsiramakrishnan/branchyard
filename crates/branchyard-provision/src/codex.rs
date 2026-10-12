@@ -32,7 +32,7 @@ use crate::{
     Refused, Telemetry, Via,
 };
 
-const AUTH_FILE: &str = ".codex/auth.json";
+pub(crate) const AUTH_FILE: &str = ".codex/auth.json";
 const CONFIG: &str = ".codex/config.toml";
 
 /// Scion's `model_aliases` for Codex.

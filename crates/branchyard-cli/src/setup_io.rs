@@ -16,7 +16,7 @@ use branchyard_setup::config::{self, ConfigError, Effective, ProjectConfig, Sour
 use branchyard_setup::plan::{
     ArtifactKind, BuiltinValidator, FileAction, Plan, PlannedFile, Validation, Validator,
 };
-use branchyard_setup::probe::{Entropy, GitFact, HarnessFact, Platform, Probe};
+use branchyard_setup::probe::{Entropy, GitFact, HarnessFact, HarnessLogin, Platform, Probe};
 use branchyard_setup::protocol::Applied;
 
 /// The directory holding `.git` at or above `cwd`, else `cwd`.
@@ -255,6 +255,23 @@ impl Probe for HostProbe {
             .into_iter()
             .filter(|h| h.default)
             .collect();
+        // Logins as `by harnesses` reads them: its cached inventory, by
+        // names and files only.
+        let inventory = crate::harness_cmd::detected_here().ok();
+        fn word<T: serde::Serialize>(value: &T) -> String {
+            serde_json::to_value(value)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default()
+        }
+        let login_of = |harness: &str| -> Option<HarnessLogin> {
+            let state = inventory.as_ref()?.get(harness)?;
+            Some(HarnessLogin {
+                state: word(&state.login.state),
+                evidence: word(&state.login.evidence),
+                detail: state.login.detail.clone(),
+            })
+        };
         // Ask each installed harness for its version at once, bounded.
         let handles: Vec<_> = defaults
             .into_iter()
@@ -275,11 +292,25 @@ impl Probe for HostProbe {
                         installed: info.available,
                         version: version.map(|v| short_version(&v)),
                         qualification: info.qualification,
+                        login: None,
                     }
                 })
             })
             .collect();
-        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .map(|mut fact| {
+                if fact.installed {
+                    fact.login = login_of(&fact.harness);
+                }
+                fact
+            })
+            .collect()
+    }
+
+    fn json_label(&self, path: &str, key: &str) -> Option<String> {
+        branchyard_setup::probe::label_in(&fs::read_to_string(self.resolve(path)).ok()?, key)
     }
 
     fn env_is_set(&self, name: &str) -> bool {
@@ -583,6 +614,9 @@ impl<P: Probe> Probe for CachedProbe<P> {
     }
     fn exists(&self, path: &str) -> bool {
         self.inner.exists(path)
+    }
+    fn json_label(&self, path: &str, key: &str) -> Option<String> {
+        self.inner.json_label(path, key)
     }
     fn token_sha256(&self, path: &str) -> Option<String> {
         self.inner.token_sha256(path)

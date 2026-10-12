@@ -60,6 +60,11 @@ impl Repo {
             )
             .stdin(Stdio::null());
         command.env_remove("XDG_CONFIG_HOME");
+        // The credential variables setup reports, by name: none of this
+        // machine's, so the questions they add are the test's choice.
+        for name in branchyard_setup::probe::KNOWN_VARIABLES {
+            command.env_remove(name);
+        }
         command
     }
 
@@ -474,6 +479,108 @@ fn a_pasted_secret_is_refused_and_never_echoed() {
     );
     assert!(!text(&next).contains("DONOTPRINTME"));
     assert!(!repo.root.join("branchyard.toml").exists());
+}
+
+/// `by init project` on a machine with a device-code login in a file
+/// (Codex's, holding a refresh token), Gemini CLI on `PATH` and
+/// `GEMINI_API_KEY` set: it shows the login by where it is, records it as
+/// `CODEX_AUTH` by that path when asked, writes the logged-in harnesses as
+/// `[fleet.default]`, and gives the gateway a Gemini backend, with Claude
+/// models routed to it; the file loads, and the login's content is never
+/// printed or written.
+#[test]
+fn project_setup_records_a_login_a_fleet_and_gateway_backends_by_name() {
+    let repo = Repo::new();
+    let base = repo.root.parent().unwrap().to_path_buf();
+    let (bin, home) = (base.join("bin"), base.join("home"));
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::create_dir_all(home.join(".local/bin")).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    let token = "rt-DONOTPRINT-0123456789abcdef";
+    fs::write(
+        home.join(".codex/auth.json"),
+        format!(r#"{{"auth_mode": "chatgpt", "tokens": {{"refresh_token": "{token}"}}}}"#),
+    )
+    .unwrap();
+    let gemini = bin.join("gemini");
+    fs::write(&gemini, "#!/bin/sh\necho 0.63.0\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&gemini, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let run = |args: &[&str]| {
+        let out = repo
+            .command()
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("BRANCHYARD_HARNESS_DIRS", "$HOME/.local/bin")
+            .env("GEMINI_API_KEY", "not-a-key")
+            .args(args)
+            .output()
+            .unwrap();
+        repo.record(&out);
+        out
+    };
+    let first = run(&["init", "project", "--json", "--next"]);
+    let first: Value = serde_json::from_slice(&first.stdout).unwrap();
+    let logins = first["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "logins")
+        .unwrap_or_else(|| panic!("{first:#}"));
+    assert_eq!(
+        logins["value"],
+        "codex ~/.codex/auth.json (auth_mode chatgpt), as CODEX_AUTH"
+    );
+    let mut answers = Map::new();
+    for (id, value) in [
+        ("logins", "Codex login"),
+        ("fleet", "Yes"),
+        ("models", "Yes"),
+        ("models.claude", "Yes"),
+    ] {
+        answers.insert(id.into(), json!(value));
+    }
+    let file = repo.write_answers(&answers);
+    let out = run(&[
+        "init",
+        "project",
+        "--answers",
+        &file,
+        "--defaults",
+        "--apply",
+        "--json",
+    ]);
+    assert!(out.status.success(), "{}", text(&out));
+    let written = fs::read_to_string(repo.root.join("branchyard.toml")).unwrap();
+    assert!(!written.contains(token), "{written}");
+    assert!(
+        written.contains("CODEX_AUTH = \"@~/.codex/auth.json\""),
+        "{written}"
+    );
+    let config: toml_edit::DocumentMut = written.parse().unwrap();
+    let fleet = &config["fleet"]["default"];
+    assert_eq!(
+        fleet["candidates"][0]["harness"].as_str(),
+        Some("gemini-cli"),
+        "{written}"
+    );
+    assert_eq!(fleet["judge"]["harness"].as_str(), Some("gemini-cli"));
+    let backend = &config["models"]["backends"]["gemini"];
+    assert_eq!(backend["api"].as_str(), Some("openai"), "{written}");
+    assert_eq!(
+        backend["url"].as_str(),
+        Some("https://generativelanguage.googleapis.com/v1beta/openai")
+    );
+    assert_eq!(backend["key"].as_str(), Some("GEMINI_API_KEY"));
+    assert_eq!(backend["compat"].as_str(), Some("gemini"));
+    assert!(
+        written.contains("backend_model = \"gemini-3.5-flash\""),
+        "{written}"
+    );
+    let check = run(&["config", "validate"]);
+    assert!(check.status.success(), "{}", text(&check));
+    assert!(!repo.printed.borrow().contains(token));
 }
 
 #[test]
