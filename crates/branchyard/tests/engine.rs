@@ -977,7 +977,16 @@ fn harnesses_lists_every_profile_with_availability_and_qualification() {
         .iter()
         .find(|h| h.profile == "codex-app-server")
         .unwrap();
-    assert!(codex.default && codex.qualification.is_none());
+    assert!(codex.default);
+    assert_eq!(
+        codex.qualification.as_deref(),
+        Some("6/9 on codex-cli 0.157.1")
+    );
+    let codex_acp = harnesses
+        .iter()
+        .find(|h| h.profile == "codex-acp")
+        .unwrap();
+    assert!(!codex_acp.default && codex_acp.qualification.is_none());
     let path = std::env::var_os("PATH").unwrap_or_default();
     for harness in &harnesses {
         let program = branchyard_harness::profiles::by_id(&harness.profile)
