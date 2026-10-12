@@ -63,6 +63,7 @@ mod copilot;
 mod gemini;
 mod generic;
 mod hermes;
+mod oh_my_pi;
 mod opencode;
 
 use std::collections::BTreeMap;
@@ -1019,6 +1020,7 @@ static PROVISIONERS: &[&dyn Provisioner] = &[
     &copilot::Copilot,
     &hermes::Hermes,
     &antigravity::Antigravity,
+    &oh_my_pi::OhMyPi,
 ];
 
 /// Every translated provisioner.
@@ -1077,8 +1079,8 @@ pub fn file_logins() -> Vec<FileLogin> {
 
 /// Whether `harness`'s provisioner takes a reasoning effort for a branch
 /// whose home is (`private_home`) or is not its own: Codex writes it into
-/// its `config.toml`, which needs a private home; the others have no
-/// setting for it and refuse one.
+/// its `config.toml` and Oh My Pi into its `config.yml`, which need a
+/// private home; the others have no setting for it and refuse one.
 pub fn takes_effort(harness: &str, protocol: Protocol, private_home: bool) -> bool {
     let mut context = Context::new(harness, protocol, "/home", "/work");
     context.private_home = private_home;

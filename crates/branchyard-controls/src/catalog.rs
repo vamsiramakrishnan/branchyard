@@ -276,6 +276,22 @@ pub(crate) mod tests {
                 e.login = Some("agy".into());
                 e.auth_env = strings(&["GEMINI_API_KEY"]);
             }
+            // Oh My Pi 18.10.3: `omp` is a Bun script and needs Bun 1.3.14
+            // or newer on PATH (its installer installs or upgrades Bun;
+            // `bun install -g` needs it there already). `omp login PROVIDER`
+            // stores an OAuth login; provider keys are read from the
+            // environment. Its resume flag is `--resume` (`-r`), not the
+            // `--session` the vendored sources recorded.
+            "oh-my-pi" => {
+                e.login = Some("omp login".into());
+                e.auth_env = strings(&[
+                    "GEMINI_API_KEY",
+                    "OPENAI_API_KEY",
+                    "ANTHROPIC_API_KEY",
+                    "OPENROUTER_API_KEY",
+                ]);
+                e.resume_flag = Some("--resume".into());
+            }
             _ => {}
         }
     }

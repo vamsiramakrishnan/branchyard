@@ -71,10 +71,11 @@ name = "Oh My Pi"
 binaries = ["omp"]
 homepage = "https://omp.sh"
 install = ["curl -fsSL https://omp.sh/install | sh", "bun install -g @oh-my-pi/pi-coding-agent"]
-auth_env = []
+login = "omp login"
+auth_env = ["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"]
 models = []
 model_flag = "--model"
-resume_flag = "--session"
+resume_flag = "--resume"
 sources = ["emdash:oh-my-pi", "orca:omp"]
 
 [[harness]]

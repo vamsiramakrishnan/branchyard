@@ -66,6 +66,10 @@ pub(crate) const REPORTS: &[(&str, &str)] = &[
         "gemini-cli-acp",
         include_str!("../../../docs/qualification/gemini-cli-acp.json"),
     ),
+    (
+        "oh-my-pi-acp",
+        include_str!("../../../docs/qualification/oh-my-pi-acp.json"),
+    ),
 ];
 
 /// A harness ID picks its default profile; otherwise a profile ID.
@@ -340,6 +344,7 @@ mod tests {
             qualification("codex-app-server").unwrap(),
             "6/9 on codex-cli 0.157.1"
         );
+        assert_eq!(qualification("oh-my-pi-acp").unwrap(), "9/9 on omp/18.10.3");
     }
 
     #[test]

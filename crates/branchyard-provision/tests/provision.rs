@@ -339,6 +339,7 @@ fn every_secret_says_how_it_reaches_the_harness() {
             Protocol::AntigravityStreamJson,
             &["GOOGLE_API_KEY"],
         ),
+        ("oh-my-pi", Protocol::Acp, &["GEMINI_API_KEY"]),
     ];
     for (harness, protocol, names) in cases {
         let mut context = context(harness, *protocol);
@@ -917,6 +918,97 @@ fn antigravity_takes_an_http_mcp_server_but_not_an_sse_one() {
     let refused = branchyard_provision::plan(&context).unwrap_err().0;
     assert!(refused.contains("--isolated"), "{refused}");
     assert!(!refused.contains("turn-token"), "{refused}");
+}
+
+#[test]
+fn oh_my_pi_gets_its_key_model_thinking_level_and_tool_policies() {
+    // omp 18.10.3: provider keys from the environment; the model, thinking
+    // level and the per-tool policies a `read-only` policy needs in its
+    // config.yml, as a JSON object omp reads; MCP servers and instructions
+    // on the ACP session.
+    let temp = Temp::new();
+    let mut context = context("oh-my-pi", Protocol::Acp);
+    context.secrets = secrets(&[("GEMINI_API_KEY", "g-secret"), ("GH_TOKEN", "gh-secret")]);
+    context.mcp_servers = vec![server("docs")];
+    context.instructions = Some(Instructions {
+        text: "Use the docs server.".into(),
+        plugin_dir: None,
+    });
+    context.model = Some("google/gemini-3.5-flash".into());
+    context.effort = Some(Effort::Medium);
+    context.permissions = Some(Permissions {
+        rules: ["acp:edit", "acp:execute", "acp:fetch"]
+            .iter()
+            .map(|tool| PermissionRule {
+                tool: (*tool).into(),
+                allow: false,
+                delegation_by: None,
+            })
+            .collect(),
+        ..Permissions::new(Fallback::Deny)
+    });
+    let plan = provision(&temp, &context);
+    golden("oh-my-pi-read-only", &temp, &plan);
+    assert_eq!(
+        plan.session.model, None,
+        "the model is in config.yml, not the session"
+    );
+    assert_eq!(plan.session.mcp_servers.len(), 1);
+    assert_eq!(plan.unused_secrets, ["GH_TOKEN"]);
+    assert_eq!(
+        plan.permissions.as_ref().unwrap().deny,
+        ["write", "edit", "web_search", "browser"]
+    );
+    let config: serde_json::Value =
+        serde_json::from_str(&temp.read(".omp/agent/config.yml")).unwrap();
+    assert_eq!(config["modelRoles"]["default"], "google/gemini-3.5-flash");
+    assert_eq!(config["defaultThinkingLevel"], "medium");
+    assert_eq!(config["tools"]["approval"]["write"], "deny");
+
+    // A later send under `full`, without a model or effort: everything
+    // Branchyard wrote is taken back, and a policy of the user's stays.
+    temp.seed(
+        ".omp/agent/config.yml",
+        &serde_json::to_string_pretty(&serde_json::json!({
+            "modelRoles": {"default": "google/gemini-3.5-flash"},
+            "defaultThinkingLevel": "medium",
+            "tools": {"approval": {"write": "deny", "edit": "deny", "browser": "prompt"}},
+            "theme": "dark"
+        }))
+        .unwrap(),
+    );
+    context.installed = installed(&temp.home());
+    context.model = None;
+    context.effort = None;
+    context.permissions = Some(Permissions::new(Fallback::Allow));
+    let plan = provision(&temp, &context);
+    let config: serde_json::Value =
+        serde_json::from_str(&temp.read(".omp/agent/config.yml")).unwrap();
+    assert_eq!(
+        config,
+        serde_json::json!({
+            "modelRoles": {},
+            "tools": {"approval": {"browser": "prompt"}},
+            "theme": "dark"
+        })
+    );
+    assert!(plan.permissions.as_ref().unwrap().deny.is_empty());
+
+    // A home that is yours: the key in the environment, nothing written,
+    // and a model refused with the reason.
+    let yours = Temp::new();
+    let mut local = self::context("oh-my-pi", Protocol::Acp);
+    local.private_home = false;
+    local.permissions = Some(Permissions::new(Fallback::Deny));
+    let plan = provision(&yours, &local);
+    assert!(plan.files.is_empty() && plan.permissions.is_none());
+    local.model = Some("gemini-3.5-flash".into());
+    let refused = branchyard_provision::plan(&local).unwrap_err();
+    assert!(
+        refused.0.contains("modelRoles.default") && refused.0.contains("--isolated"),
+        "{}",
+        refused.0
+    );
 }
 
 #[test]

@@ -78,6 +78,19 @@ impl Permissions {
             .map_or_else(|| self.fallback_decision(), |rule| Some(rule.allow))
     }
 
+    /// What the first rule naming `tool` decides, when one does:
+    /// `Some(true)` allows it, `Some(false)` denies it, `None` when no rule
+    /// names it, whatever the fallback would do ([`Permissions::decide`]
+    /// applies the fallback). Rules for delegation commands are passed over,
+    /// as in `decide`.
+    pub fn rule(&self, tool: &str) -> Option<bool> {
+        self.rules
+            .iter()
+            .filter(|rule| rule.delegation_by.is_none())
+            .find(|rule| matches(&rule.tool, tool))
+            .map(|rule| rule.allow)
+    }
+
     /// Whether the policy allows a shell tool named `tool` to run `by`'s
     /// delegation commands, and which `by` its rule names: the first rule
     /// matching `tool` is the delegation rule. `None` when another rule or

@@ -370,6 +370,16 @@ const LOGIN_CHECKS: &[LoginCheck] = &[
         env: &[],
         keychain_on_macos: false,
     },
+    // Oh My Pi 18.10.3 reads provider keys from its environment (the
+    // catalog's `auth_env`) and keeps `omp login` logins in a database,
+    // which `probes` reads for provider names.
+    LoginCheck {
+        harness: "oh-my-pi",
+        status: None,
+        files: &[],
+        env: &[],
+        keychain_on_macos: false,
+    },
     LoginCheck {
         harness: "github-copilot",
         status: None,
@@ -415,6 +425,14 @@ const DSH_CONFIGS: &[&str] = &[
     "~/.dsh/profiles/acp/cordis.patch.yml",
 ];
 
+/// Where Oh My Pi keeps the logins `omp login` stores, as shown to people.
+const OMP_LOGINS: &str = "~/.omp/agent/agent.db";
+
+/// The Bun release Oh My Pi 18.10.3 needs (`engines.bun` of
+/// `@oh-my-pi/pi-coding-agent`, and `MIN_BUN_VERSION` of its installer): an
+/// older Bun fails to parse `omp` and its version command exits 1.
+const OMP_MIN_BUN: &str = "1.3.14";
+
 /// What only a look inside a configuration file or a flag variable can
 /// tell, as `sh` run on the machine once the harness is found. Each prints
 /// `fact ID NAME` (or an `env` line for a key variable that is set) and
@@ -429,6 +447,14 @@ const DSH_CONFIGS: &[&str] = &[
 ///   `cordis.patch.yml` under `$DSH_HOME` and the profile's: a `providers:`
 ///   key is `providers FILE`, and each `apiKeyEnv:` variable that is set is
 ///   an `env` line.
+/// - Oh My Pi 18.10.3 is a Bun script: `runs-on-bun` when its executable's
+///   first bytes name `bun`, and `bun VERSION` or `bun missing` for the Bun
+///   on `PATH`. Its `omp login` logins are rows of `~/.omp/agent/agent.db`:
+///   `login PROVIDER` for each provider with one, read with `sqlite3` or
+///   `python3` (`login-store unread` when the file exists and neither
+///   does); the provider's name is read, never the credential. A key in
+///   `~/.omp/agent/.env` or `~/.omp/.env`, which omp loads, is `env-file
+///   NAME FILE`, the name alone.
 fn probes(id: &str) -> &'static str {
     match id {
         "antigravity" => {
@@ -450,8 +476,41 @@ fn probes(id: &str) -> &'static str {
   done
 "##
         }
+        "oh-my-pi" => {
+            r##"  head -c 64 "$f" 2>/dev/null | tr -d '\0' | grep -q bun && echo 'fact oh-my-pi runs-on-bun'
+  if b=$(command -v bun 2>/dev/null); then echo "fact oh-my-pi bun $("$b" --version 2>/dev/null | head -n1)"; else echo 'fact oh-my-pi bun missing'; fi
+  db="$HOME/.omp/agent/agent.db"
+  if [ -f "$db" ]; then
+    q='select distinct provider from auth_credentials where disabled_cause is null'
+    if command -v sqlite3 >/dev/null 2>&1; then
+      for pv in $(sqlite3 -readonly "$db" "$q" 2>/dev/null); do echo "fact oh-my-pi login $pv"; done
+    elif command -v python3 >/dev/null 2>&1; then
+      for pv in $(python3 -I -c 'import sqlite3,sys
+c=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True)
+print("\n".join(r[0] for r in c.execute(sys.argv[2])))' "$db" "$q" 2>/dev/null); do echo "fact oh-my-pi login $pv"; done
+    else
+      echo 'fact oh-my-pi login-store unread'
+    fi
+  fi
+  for ef in "$HOME/.omp/agent/.env" "$HOME/.omp/.env"; do
+    [ -f "$ef" ] || continue
+    for pv in $(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*_API_KEY\)[[:space:]]*=.*/\2/p' "$ef" 2>/dev/null); do echo "fact oh-my-pi env-file $pv ~/${ef#"$HOME"/}"; done
+  done
+"##
+        }
         _ => "",
     }
+}
+
+/// Whether a Bun `version` (`1.3.11`) is older than [`OMP_MIN_BUN`].
+fn bun_too_old(version: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> {
+        v.split(['.', '-', '+'])
+            .take(3)
+            .map(|p| p.parse().unwrap_or(0))
+            .collect()
+    };
+    parts(version) < parts(OMP_MIN_BUN)
 }
 
 fn version_args(id: &str) -> &'static [&'static str] {
@@ -766,6 +825,27 @@ fn state(id: &str, found: Found, os: &str) -> HarnessState {
         },
         None => (None, Some("its version command did not run".into())),
     };
+    // omp is a Bun script: when it cannot even print its version and the
+    // Bun on PATH is missing or too old, that is why.
+    let version_note = match (id, &version) {
+        ("oh-my-pi", None) if found.facts.iter().any(|f| f == "runs-on-bun") => {
+            let bun = found.facts.iter().find_map(|f| f.strip_prefix("bun "));
+            let found_bun = match bun {
+                Some("missing") => Some("no bun is on PATH".to_owned()),
+                Some(v) if bun_too_old(v) => Some(format!("the bun on PATH is {v}")),
+                _ => None,
+            };
+            match found_bun {
+                Some(found_bun) => Some(format!(
+                    "{}; omp runs on Bun {OMP_MIN_BUN} or newer and {found_bun}: \
+                     `curl -fsSL https://omp.sh/install | sh` installs or upgrades it",
+                    version_note.unwrap_or_default()
+                )),
+                None => version_note,
+            }
+        }
+        _ => version_note,
+    };
     let login = login(id, &found, os);
     HarnessState {
         id: id.to_owned(),
@@ -895,6 +975,47 @@ fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
                  plugin in cordis.patch.yml (`dsh --profile acp --dump-config` shows the \
                  composed configuration)",
                 DSH_CONFIGS.join(" or ")
+            ),
+        );
+    }
+    if id == "oh-my-pi" {
+        let logins: Vec<&str> = found
+            .facts
+            .iter()
+            .filter_map(|f| f.strip_prefix("login "))
+            .collect();
+        if !logins.is_empty() {
+            return likely(
+                LoginState::LoggedIn,
+                format!(
+                    "omp login stored for {} in {OMP_LOGINS} (not checked)",
+                    logins.join(", ")
+                ),
+            );
+        }
+        if let Some(rest) = found.facts.iter().find_map(|f| f.strip_prefix("env-file ")) {
+            let (var, file) = rest.split_once(' ').unwrap_or((rest, "~/.omp/agent/.env"));
+            return likely(
+                LoginState::LoggedIn,
+                format!("{var} is set in {file}, which omp loads (an API key; not checked)"),
+            );
+        }
+        let vars = key_variables(id).join(", ");
+        if found.facts.iter().any(|f| f == "login-store unread") {
+            return Login {
+                state: LoginState::Unknown,
+                evidence: Evidence::None,
+                detail: format!(
+                    "{OMP_LOGINS} may hold a login, which needs sqlite3 or python3 on the \
+                     machine to read, and none of {vars} is set"
+                ),
+            };
+        }
+        return likely(
+            LoginState::LoggedOut,
+            format!(
+                "no login stored in {OMP_LOGINS} and none of {vars} is set; set one, or run \
+                 omp login"
             ),
         );
     }
@@ -1980,6 +2101,126 @@ mod tests {
             "grep -Eq '\"modelProvider\"[[:space:]]*:[[:space:]]*\"gemini\"' \
              \"$HOME/.gemini/antigravity-cli/settings.json\""
         ));
+    }
+
+    #[test]
+    fn oh_my_pi_is_logged_in_by_a_key_a_stored_login_or_an_env_file() {
+        // The catalog's key variables, through the generic path.
+        let keyed = found("oh-my-pi", &["env oh-my-pi GEMINI_API_KEY"]);
+        assert_eq!(keyed.login.state, LoginState::LoggedIn);
+        assert_eq!(keyed.login.evidence, Evidence::Likely);
+        assert_eq!(
+            keyed.login.detail,
+            "GEMINI_API_KEY is set (an API key; not checked)"
+        );
+        // Logins `omp login` stored, by provider name.
+        let stored = found(
+            "oh-my-pi",
+            &[
+                "fact oh-my-pi bun 1.4.3",
+                "fact oh-my-pi login anthropic",
+                "fact oh-my-pi login openai-codex",
+            ],
+        );
+        assert_eq!(stored.login.state, LoginState::LoggedIn);
+        assert_eq!(stored.login.evidence, Evidence::Likely);
+        assert_eq!(
+            stored.login.detail,
+            "omp login stored for anthropic, openai-codex in ~/.omp/agent/agent.db (not checked)"
+        );
+        // A key in a .env file omp loads: the name, never the line.
+        let env_file = found(
+            "oh-my-pi",
+            &["fact oh-my-pi env-file OPENAI_API_KEY ~/.omp/agent/.env"],
+        );
+        assert_eq!(env_file.login.state, LoginState::LoggedIn);
+        assert_eq!(
+            env_file.login.detail,
+            "OPENAI_API_KEY is set in ~/.omp/agent/.env, which omp loads (an API key; not \
+             checked)"
+        );
+        // Nothing: logged out, with what to do.
+        let nothing = found("oh-my-pi", &["fact oh-my-pi bun 1.4.3"]);
+        assert_eq!(nothing.login.state, LoginState::LoggedOut);
+        assert_eq!(nothing.login.evidence, Evidence::Likely);
+        assert_eq!(
+            nothing.login.detail,
+            "no login stored in ~/.omp/agent/agent.db and none of GEMINI_API_KEY, \
+             OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENROUTER_API_KEY is set; set one, or run omp \
+             login"
+        );
+        // The database is there but nothing on the machine can read it.
+        let unread = found("oh-my-pi", &["fact oh-my-pi login-store unread"]);
+        assert_eq!(unread.login.state, LoginState::Unknown);
+        assert_eq!(unread.login.evidence, Evidence::None);
+        assert!(
+            unread.login.detail.starts_with(
+                "~/.omp/agent/agent.db may hold a login, which needs sqlite3 or python3"
+            ),
+            "{}",
+            unread.login.detail
+        );
+        // The script reads provider names from the database and variable
+        // names from the .env files, and tests the key variables.
+        let text = script(&DetectOptions {
+            only: Some(vec!["oh-my-pi".into()]),
+            ..DetectOptions::default()
+        });
+        assert!(text.contains("echo 'env oh-my-pi GEMINI_API_KEY'"));
+        assert!(text.contains("echo 'env oh-my-pi OPENROUTER_API_KEY'"));
+        assert!(text.contains("select distinct provider from auth_credentials"));
+        assert!(text.contains("echo 'fact oh-my-pi login-store unread'"));
+        assert!(text.contains("echo 'fact oh-my-pi runs-on-bun'"));
+        assert!(!text.contains("select data") && !text.contains("select *"));
+    }
+
+    #[test]
+    fn oh_my_pi_that_cannot_start_names_the_bun_it_needs() {
+        let state = |facts: &[&str]| {
+            let mut output = "by-inventory 1\nhost box\nos Linux\nchecked oh-my-pi\n\
+                found oh-my-pi 1 /usr/local/bin/omp\nversion oh-my-pi 1\n\
+                version-out oh-my-pi SyntaxError: Unexpected identifier 'u'\n"
+                .to_owned();
+            for fact in facts {
+                output.push_str(&format!("fact oh-my-pi {fact}\n"));
+            }
+            output.push_str("end\n");
+            parse(&output, 0).unwrap().get("oh-my-pi").unwrap().clone()
+        };
+        let old = state(&["runs-on-bun", "bun 1.3.11"]);
+        assert_eq!(old.version, None);
+        assert_eq!(
+            old.version_note.as_deref(),
+            Some(
+                "its version command exited with status 1; omp runs on Bun 1.3.14 or newer and \
+                 the bun on PATH is 1.3.11: `curl -fsSL https://omp.sh/install | sh` installs \
+                 or upgrades it"
+            )
+        );
+        let missing = state(&["runs-on-bun", "bun missing"]);
+        assert!(missing
+            .version_note
+            .as_deref()
+            .unwrap()
+            .contains("Bun 1.3.14 or newer and no bun is on PATH"));
+        // A new enough Bun, or a prebuilt binary: the failure is something
+        // else, and the note says only what happened.
+        for facts in [&["runs-on-bun", "bun 1.4.3"][..], &["bun 1.3.11"][..]] {
+            assert_eq!(
+                state(facts).version_note.as_deref(),
+                Some("its version command exited with status 1"),
+                "{facts:?}"
+            );
+        }
+        assert!(bun_too_old("1.3.11") && bun_too_old("1.2") && bun_too_old("0.9.9"));
+        assert!(!bun_too_old("1.3.14") && !bun_too_old("1.4.3") && !bun_too_old("2.0.0"));
+        // A working omp has a version and no note.
+        let fine = found(
+            "oh-my-pi",
+            &["fact oh-my-pi runs-on-bun", "fact oh-my-pi bun 1.4.3"],
+        );
+        assert_eq!(fine.version.as_deref(), Some("1.0.0"));
+        assert_eq!(fine.version_note, None);
     }
 
     #[test]
