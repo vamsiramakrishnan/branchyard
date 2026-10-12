@@ -17,6 +17,18 @@ Three more profiles ran against real binaries installed that day, all on one Gem
 
 What the private homes held: Antigravity's `~/.gemini/antigravity-cli/settings.json` with `"modelProvider": "gemini"` (the key alone makes `agy` ask for a Google sign-in, and `GOOGLE_API_KEY` is not read); a second Antigravity run with `command(echo)`, `command(sleep)` and `command(sh)` under `permissions.allow` changed nothing, because a prefix rule does not match a command with a redirect, while `command(*)`, `command(regex:echo .*)` and the exact line do (probed directly, not in the runner). Gemini CLI ran with `GEMINI_CLI_TRUST_WORKSPACE=true`, without which a headless run refuses an untrusted directory. DeepSeek Harness ran with `DSH_HOME` pointing at a home whose `cordis.patch.yml` adds a provider for Gemini's OpenAI-compatible endpoint (`api: openai-completions`, `apiKeyEnv: GEMINI_API_KEY`, `compat: {supportsStore: false}`, since the endpoint rejects the OpenAI-only `store` field) and routes `agent-default-model` and `acp` to it; with `gemini-3.5-flash` every tool call fails on the missing thought signature, and with `gemini-2.5-flash-lite` a tool call ran in one of two direct tries, the other ending `MALFORMED_FUNCTION_CALL`. The endpoint accepts the documented dummy signature `skip_thought_signature_validator` in `extra_content.google.thought_signature` of a replayed tool call, which is how the model gateway can front Gemini for OpenAI-speaking harnesses.
 
+### A fanned task on three harnesses, 12 October 2026
+
+The same key, in a scratch clone, `by fan --harness gemini-cli,antigravity,deepseek-harness --isolated --secret GEMINI_API_KEY --permissions edit-worktree --allow-unapproved-tools --stall-after 8m --stall-action interrupt`: a knowledge task (read three docs, write a note on the five biggest friction points) and a code task (add a `--list` flag to `tools/check.py` with a test, checked by running the tests). DeepSeek Harness ran on `gemini-2.5-flash-lite` through its own Gemini provider.
+
+| Harness | Knowledge task | Code task | What it showed |
+|---|---|---|---|
+| Gemini CLI 0.63.0 | ready, one file (+33) | interrupted after 11 minutes of searching; an earlier run stalled 22 minutes on `google_web_search` | Permission requests are now named by tool kind, so `edit-worktree` lets its writes through; its grounding search needs no permission and can hang a turn, so a `--stall-after` limit matters |
+| Antigravity 1.3.3 | no changes | no changes | `run_command` is denied by `edit-worktree`, which the CLI soft-denies headless; its provisioned rules follow the policy, and under `full` they allow only `git` and `by`, so a test run needs a policy rule of its own (`command(regex:python3 .*)`) |
+| DeepSeek Harness 0.2.0-rc.2 | failed: the model answered with no content | ready, two files (+235), tests passing | Before the generic provisioner handed over `GEMINI_API_KEY`, every isolated turn failed for want of the key; `gemini-2.5-flash-lite` answers empty now and then |
+
+Costs were not reported by any of the three. The run also exposed that `by cancel` on a wedged ACP harness takes effect only once the 30-second interrupt grace has passed and the process is killed, which it does.
+
 ## Results, 26 September 2026
 
 | Profile | Harness version | Result | Report |
