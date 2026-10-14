@@ -30,11 +30,7 @@
 //! Nothing here is evidence about a real cluster: the real router's
 //! addressing, activation and authentication are not modelled.
 
-#![allow(
-    clippy::expect_used,
-    clippy::let_underscore_must_use,
-    clippy::unwrap_used
-)] // ratchet: branchyard-substrate
+#![allow(clippy::expect_used, clippy::unwrap_used)] // ratchet: branchyard-substrate
 use branchyard_support::LockExt as _;
 use std::collections::HashMap;
 use std::fs;
@@ -181,7 +177,10 @@ impl Inner {
             .spawn()
             .map_err(|e| Status::internal(format!("could not start the bridge: {e}")))?;
         let mut line = String::new();
-        let _ = BufReader::new(child.stdout.take().expect("piped")).read_line(&mut line);
+        branchyard_support::best_effort(
+            "read the bridge's listening line",
+            BufReader::new(child.stdout.take().expect("piped")).read_line(&mut line),
+        );
         let address = line
             .trim()
             .strip_prefix("listening ")
@@ -227,7 +226,10 @@ impl Inner {
                 .scratch
                 .join("actors")
                 .join(format!("{name}-{}", metadata.uid));
-            let _ = fs::create_dir_all(&root);
+            branchyard_support::best_effort(
+                "create the actor's directory",
+                fs::create_dir_all(&root),
+            );
             set_state(&mut proto, pb::ActorState::Suspended);
             state.actors.insert(
                 name.to_owned(),
@@ -668,11 +670,20 @@ fn route(inner: &Inner, client: TcpStream) -> io::Result<()> {
     upstream.write_all(forwarded.as_bytes())?;
     let (mut client_read, mut upstream_write) = (client.try_clone()?, upstream.try_clone()?);
     let up = thread::spawn(move || {
-        let _ = io::copy(&mut client_read, &mut upstream_write);
-        let _ = upstream_write.shutdown(Shutdown::Write);
+        branchyard_support::best_effort(
+            "relay the client's bytes upstream",
+            io::copy(&mut client_read, &mut upstream_write),
+        );
+        branchyard_support::best_effort(
+            "half-close upstream",
+            upstream_write.shutdown(Shutdown::Write),
+        );
     });
-    let _ = io::copy(&mut upstream, &mut client);
-    let _ = client.shutdown(Shutdown::Write);
+    branchyard_support::best_effort(
+        "relay upstream's bytes to the client",
+        io::copy(&mut upstream, &mut client),
+    );
+    branchyard_support::best_effort("close the client", client.shutdown(Shutdown::Write));
     branchyard_support::join_reporting("fake upstream relay", up);
     Ok(())
 }
@@ -747,10 +758,13 @@ impl FakeCluster {
             server = server.tls_config(config).expect("the fake's TLS");
         }
         runtime.spawn(async move {
-            let _ = server
-                .add_service(service)
-                .serve_with_incoming(TcpListenerStream::new(listener))
-                .await;
+            branchyard_support::best_effort(
+                "serve the fake gRPC API",
+                server
+                    .add_service(service)
+                    .serve_with_incoming(TcpListenerStream::new(listener))
+                    .await,
+            );
         });
         let router = TcpListener::bind("127.0.0.1:0").expect("bind the fake router");
         let router_url = format!(
@@ -763,7 +777,10 @@ impl FakeCluster {
                 for client in router.incoming().flatten() {
                     let inner = inner.clone();
                     thread::spawn(move || {
-                        let _ = route(&inner, client);
+                        branchyard_support::best_effort(
+                            "route a router connection",
+                            route(&inner, client),
+                        );
                     });
                 }
             });

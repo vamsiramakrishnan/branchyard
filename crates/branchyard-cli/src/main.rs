@@ -16,6 +16,7 @@ mod commands;
 mod config_cmd;
 mod console;
 mod defaults;
+mod doctor_cmd;
 mod effects_cmd;
 mod env_cmd;
 mod fleet_cmd;
@@ -29,6 +30,7 @@ mod knowledge_cmd;
 mod live_catalog;
 mod map_cmd;
 mod models_cmd;
+mod models_list;
 mod notify;
 mod open;
 mod operations;
@@ -62,7 +64,6 @@ use std::process::ExitCode;
 use args::{Command, Globals};
 use commands::{Env, Failure, Target};
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().collect();
     args::unset_blank_env();
@@ -74,12 +75,12 @@ fn main() -> ExitCode {
         // Help and --version come this way too, to stdout with exit 0;
         // usage errors go to stderr with exit 2.
         Err(error) => {
-            let _ = error.print();
+            branchyard_support::best_effort("print the usage error", error.print());
             return ExitCode::from(error.exit_code() as u8);
         }
     };
     let Some(command) = cli.command else {
-        let _ = args::command().print_help();
+        branchyard_support::best_effort("print the help", args::command().print_help());
         return ExitCode::SUCCESS;
     };
     // branchyard.toml and the user configuration, under flags and variables.
@@ -114,12 +115,11 @@ fn main() -> ExitCode {
 
 /// `by serve`, `by worker` and their help: the server's own command line.
 /// `prefix` is `by`'s part, parsed only for its global options.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn serve(prefix: &[OsString], call: args::ServerCall) -> ExitCode {
     let globals = match args::parse_from(prefix) {
         Ok(cli) => cli.globals,
         Err(error) => {
-            let _ = error.print();
+            branchyard_support::best_effort("print the server usage error", error.print());
             return ExitCode::from(error.exit_code() as u8);
         }
     };
@@ -170,6 +170,11 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         // Setup needs no repository or server: it may be what creates them.
         Command::Init { init } => return init::main(env, &init),
         Command::Config { json, action } => return config_cmd::main(&action, json),
+        // Doctor reports a broken configuration, a missing store or an
+        // unreachable server rather than stopping at it.
+        Command::Doctor { json, path } => {
+            return doctor_cmd::main(env, globals, path.as_deref(), json)
+        }
         // The meters read this machine's session files; no repository needed.
         Command::Usage { json } => return usage::show(env, json),
         // The ssh connection itself, not a server's API.
@@ -213,23 +218,45 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
 /// One arm per command that runs against a repository or a server; see
 /// "Adding a command" in `args.rs`.
 fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
+    // `--auto` with no [fleet] routes among what is logged in here
+    // (docs/fleet.md#the-inventory-default); a server refuses routing.
+    let local = matches!(target, Target::Local);
+    let inventory_default = |task: &mut args::TaskArgs| match local {
+        true => fleet_cmd::with_inventory_default(task),
+        false => Ok(()),
+    };
     match command {
-        Command::Run { prompt, task } => commands::run(env, target, &prompt, &task),
+        Command::Run { prompt, mut task } => {
+            inventory_default(&mut task)?;
+            commands::run(env, target, &prompt, &task)
+        }
         Command::Fan {
             prompt,
             harnesses,
             attempts,
             judge,
-            task,
-        } => commands::fan(
-            env,
-            target,
-            &prompt,
-            harnesses.as_ref().map(|h| h.0.as_slice()),
-            &task,
-            &commands::FanRoute { attempts, judge },
-        ),
-        Command::Map { json, action, map } => {
+            mut task,
+        } => {
+            if harnesses.is_none() {
+                inventory_default(&mut task)?;
+            }
+            commands::fan(
+                env,
+                target,
+                &prompt,
+                harnesses.as_ref().map(|h| h.0.as_slice()),
+                &task,
+                &commands::FanRoute { attempts, judge },
+            )
+        }
+        Command::Map {
+            json,
+            action,
+            mut map,
+        } => {
+            if action.is_none() {
+                inventory_default(&mut map.task)?;
+            }
             map_cmd::main(env, target, action.as_ref(), &map, json)
         }
         Command::Judge {
@@ -535,8 +562,16 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         Command::Report {
             as_branch,
             text,
+            result,
+            result_file,
             json,
-        } => commands::report(target, as_branch, &text, json),
+        } => commands::report(
+            target,
+            as_branch,
+            &text,
+            (result.as_deref(), result_file.as_deref()),
+            json,
+        ),
         Command::Escalate {
             as_branch,
             text,
@@ -562,7 +597,14 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         } => commands::inbox(target, as_branch, unread, json),
         Command::Rig { json, action } => commands::rig(env, target, &action.into_args(json)),
         Command::Gateway { json, action } => gateway_cmd::main(target, &action, json),
-        Command::Models { period, json } => models_cmd::main(env, target, &period, json),
+        Command::Models {
+            period,
+            json,
+            action,
+        } => match action {
+            Some(action) => models_list::main(env, target, &action, json),
+            None => models_cmd::main(env, target, &period, json),
+        },
         Command::Services {
             json,
             kind,
@@ -592,6 +634,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Man
         | Command::Init { .. }
         | Command::Config { .. }
+        | Command::Doctor { .. }
         | Command::Usage { .. }
         | Command::Remote { .. }
         | Command::Catalog { .. }

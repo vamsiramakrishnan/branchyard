@@ -327,7 +327,6 @@ impl Ran {
 /// `BRANCHYARD_RECIPE_INSTANCE`, `BRANCHYARD_ROOT` and
 /// `BRANCHYARD_RECIPE_RESULT_SCHEMA_VERSION` added to this process's, and
 /// the last [`MAX_CAPTURE_BYTES`] of each stream kept.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-recipe
 pub fn run(
     recipe: &Recipe,
     command: &str,
@@ -354,7 +353,10 @@ pub fn run(
     let mut pipe = child.stdin.take();
     let writer = thread::spawn(move || {
         if let Some(pipe) = pipe.as_mut() {
-            let _ = pipe.write_all(&input);
+            branchyard_support::best_effort(
+                "feed the script its stdin (it may exit first)",
+                pipe.write_all(&input),
+            );
         }
     });
     let out = tail_reader(child.stdout.take());

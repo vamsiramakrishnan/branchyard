@@ -157,6 +157,8 @@ bundles = "../connectors"                  # the bundle root (default: connector
 anvil = "node /opt/anvil/packages/cli/dist/bin-anvil.js"   # default: anvil
 grants = ["github:read"]                   # for new isolated or sandboxed branches that name none
 # sandbox_gateway = "http://192.168.127.1:8931/mcp"   # the gateway as a sandbox reaches it
+# effects_sandbox_host = "192.168.127.1"   # this host as a sandbox reaches it: the ledger proxy, the delegation endpoint
+# effects_listen = "0.0.0.0"               # what those bind (default 127.0.0.1)
 # listen = "0.0.0.0"                       # what by gateway start binds, when not the URL's loopback host
 # vault_key = "~/.config/branchyard/vault.key"        # default .branchyard/gateway/vault.key, made 0600
 ```
@@ -190,6 +192,8 @@ A sandboxed harness cannot reach the host's loopback, so a sandboxed branch with
 - **Microsandbox**: point `sandbox_gateway` at an address of the host the guest routes to, and have the gateway listen there (`listen = "0.0.0.0"` or that address). Anvil requires HTTPS for a non-loopback audience but not for the address a client dials, so the audience can stay `http://127.0.0.1:...`. Not checked on a KVM host.
 - **Substrate**: point `sandbox_gateway` at a URL the actor's egress reaches, such as the gateway exposed through the cluster's routed ingress. Not checked against a cluster.
 
+`effects_sandbox_host` and `effects_listen` are this host as a sandbox reaches it: what a per-turn service for a sandboxed harness binds (`effects_listen`, default `127.0.0.1`) and the host the harness dials (`effects_sandbox_host`). The effect-ledger proxy and a sandboxed turn's [delegation endpoint](delegation.md#sandboxed-harnesses) both use them, so one address serves both; `by` reads them whether or not a gateway is configured (a server, from `connectors`, only with one). `sandbox_gateway` stays separate because the gateway need not run on this host.
+
 The target rule is that **a sandboxed branch may reach only the gateway**. It is **not enforced** in a sandbox: Microsandbox guests get the runtime's default network, and Substrate's egress policy is not vendored, so a branch's [network policy](egress.md) is not applied there. Until it is, a sandboxed harness can reach whatever its network allows; it still holds no upstream credential, and the gateway still enforces its grant.
 
 ### Egress
@@ -199,6 +203,8 @@ A local branch can be held to the gateway: `--network none --connector github:re
 ### Delegation, rigs and the server
 
 See [delegation](delegation.md#connectors), [rigs](rigs.md) and [server](server.md#connectors). A third-party surface gives and inspects grants through the [SDK](sdk.md#connectors): the grant it gives a conversation's branch is the ceiling of everything that branch delegates.
+
+A child spawned on another harness gets its narrowed grant the same way on every harness: the files above in its private home, the two variables on its process, and the instruction line through that harness's own channel (Claude Code's appended system prompt, Codex's `developerInstructions`, an ACP agent's first-prompt preamble, Antigravity's `GEMINI.md`). [Children on other harnesses](delegation.md#children-on-other-harnesses) has the table, profile by profile, with the delegation server beside it and the test that covers each.
 
 ## Anvil side
 
@@ -217,7 +223,7 @@ Built in Anvil (ADR-0029 there, `docs/branchyard.md`): the `branchyard` inbound 
 ## Tests
 
 - Unit: grant parsing, both wire forms (the object and the flag string, a bad mode refused with the parser's words), globs, intersection and narrowing chains (`branchyard-provision`, 7); a `SpawnSpec` whose `connectors` mix the two forms (`branchyard`); key rings, rotation, signing and verification, bad key files, bundle discovery and hashing, audit line and time parsing, the gateway command, vault key and supervisor restarts (`branchyard`, 10); `[connectors]` parsing and rendering (`branchyard-setup`); `--connector`, `by gateway`, `by connect`, default grants and rig seats (`by`); the server's configuration file.
-- Engine (`crates/branchyard/tests/connectors.rs`, 10, fake packager and the fake ACP agent): a granted turn sees its packages, index, URL and a 0600 token that verifies against the yard's JWKS with the contract's claims, no `by_purpose`, and an `exp` within the turn's deadline; a connect token carries `by_purpose: "connect"`, no grant, branch or turn, and lives at most ten minutes; a second turn reuses the cached package and gets a new token; the token appears in neither the event log nor the stored record, and the index is in the instructions; no grant, no token; an unserved connector, a missing gateway and a missing private home each refused by name; children narrowed by spawn, by seat and on a send; audit lines recorded once, a partial line kept for later, a rotated log read again; a sandboxed turn given the sandbox address or failed naming it.
+- Engine (`crates/branchyard/tests/connectors.rs`, 14, fake packager and the fake ACP agent): a granted turn sees its packages, index, URL and a 0600 token that verifies against the yard's JWKS with the contract's claims, no `by_purpose`, and an `exp` within the turn's deadline; a connect token carries `by_purpose: "connect"`, no grant, branch or turn, and lives at most ten minutes; a second turn reuses the cached package and gets a new token; the token appears in neither the event log nor the stored record, and the index is in the instructions; no grant, no token; an unserved connector, a missing gateway and a missing private home each refused by name; children narrowed by spawn, by seat and on a send; audit lines recorded once, a partial line kept for later, a rotated log read again; a sandboxed turn given the sandbox address or failed naming it; a granted, delegated Antigravity turn (a shell in its place) given its packages, the variables, the connectors' line and the skill in `GEMINI.md`, the delegation server in its `mcp_config.json` and its policy as permission rules; and the fake agent as `deepseek-harness-acp`, a profile with no provisioner, given the variables, a token file and the delegation server.
 - CLI (`crates/branchyard-cli/tests/connectors.rs`, 2): `by gateway start|status|rotate-key|jwks|stop` supervising a stand-in Anvil written in Python, a granted turn calling it through its token, `by log` and `by log --json` showing the two calls, `by connect` (with a connect token), and a refusal without a private home.
 - HTTP client (`crates/branchyard-cli/tests/sdk_client.rs`, running `tests/sdk_client_e2e.py` against `by serve` with the fake agent and a fake Anvil): a surface's conversation created with a grant, its harness spawning a child that asks for more and gets the intersection, visible in `inspect().grants` on both sides; a send that names no grant keeping it; a child asking for a connector its parent lacks refused `denied`; a grant without a private home refused before a branch exists. `tests/test_sdk_client.py` covers the client's grant round trips and the grant's private home against a scripted server ([SDKs](sdk.md#connectors)).
 - Server (`crates/branchyard-server/tests/connectors.rs`, 2): the JWKS route, refusal without a gateway, the principal and `<repo>/<branch>` in a verified token, and audit lines recorded by the poller for that repository only.
@@ -228,6 +234,8 @@ Built in Anvil (ADR-0029 there, `docs/branchyard.md`): the `branchyard` inbound 
 - Effects, approvals and undo are Branchyard's side only until Anvil declares effects; see [effects](effects.md#what-is-not-done).
 - Egress enforcement for sandboxes (above), and any check of the sandbox addresses on a KVM host or a Substrate cluster.
 - A real harness using a connector: the end-to-end test drives the packaged SDK from the fake agent's shell.
+- Codex's shell commands and `ANVIL_GATEWAY_TOKEN_FILE`: Codex drops variables named like `*TOKEN*` from the environment of the commands it runs by default ([delegation](delegation.md#what-a-delegated-harness-gets)), so a Codex harness on a granted branch would have the variable and its packaged CLI would not. Not tested and not changed; Codex's `shell_environment_policy.set` could name it.
+- The gateway as an MCP server of the harness's own, for a harness without a shell ([above](#files-in-the-harness-home-anvil-packages-branchyard-places)): every harness Branchyard drives reaches it through its shell.
 - One gateway per host for several local repositories: each local yard runs its own (`by gateway` per repository) with its own issuer and keys.
 - Removing a branch removes its home, and with it the placed packages; nothing else is tracked in `provisioned.json` for connectors, since the token file is removed when each turn ends.
 

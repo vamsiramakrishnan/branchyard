@@ -423,13 +423,19 @@ impl Drop for Proxy {
 /// Wake a thread blocked in `accept` on `listener`: shutting a listening
 /// socket down does that on Linux; connecting to it does it anywhere this
 /// host can reach it.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-runtime
 fn wake(listener: &Listening) {
     // Both are expected to fail somewhere: on Linux the shutdown ends the
-    // listening, so the connect is then refused. Neither is worth a log line.
-    let _ = rustix::net::shutdown(&listener.socket, rustix::net::Shutdown::Both);
+    // listening, so the connect is then refused. Logged once per process,
+    // not on every stop.
+    branchyard_support::best_effort_once(
+        "shut down the egress listener",
+        rustix::net::shutdown(&listener.socket, rustix::net::Shutdown::Both),
+    );
     if let Some(local) = listener.local {
-        let _ = TcpStream::connect_timeout(&local, Duration::from_secs(1));
+        branchyard_support::best_effort_once(
+            "wake the egress listener",
+            TcpStream::connect_timeout(&local, Duration::from_secs(1)),
+        );
     }
 }
 
@@ -489,7 +495,6 @@ struct Opened {
     decision: Decision,
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-runtime
 fn handle(stream: TcpStream, shared: &Shared) {
     best_effort(
         "restore the stream's read timeout",
@@ -504,14 +509,20 @@ fn handle(stream: TcpStream, shared: &Shared) {
         Ok(Some(head)) => head,
         Ok(None) => return,
         Err(why) => {
-            let _ = respond(&mut out, 400, "Bad Request", &why);
+            branchyard_support::best_effort(
+                "answer the client a refusal",
+                respond(&mut out, 400, "Bad Request", &why),
+            );
             return;
         }
     };
     let (host, port, path) = match parse_target(&head) {
         Ok(target) => target,
         Err(why) => {
-            let _ = respond(&mut out, 400, "Bad Request", &why);
+            branchyard_support::best_effort(
+                "answer the client a refusal",
+                respond(&mut out, 400, "Bad Request", &why),
+            );
             return;
         }
     };
@@ -537,12 +548,15 @@ fn handle(stream: TcpStream, shared: &Shared) {
             Some((method, path)) => format!("{method} {}{path}", authority(&host, port)),
             None => authority(&host, port),
         };
-        let _ = respond(
-            &mut out,
-            403,
-            "Forbidden",
-            &format!(
+        branchyard_support::best_effort(
+            "answer the client a refusal",
+            respond(
+                &mut out,
+                403,
+                "Forbidden",
+                &format!(
                 "Branchyard's egress policy does not allow {what} for this branch (docs/egress.md)"
+            ),
             ),
         );
         return;
@@ -556,14 +570,17 @@ fn handle(stream: TcpStream, shared: &Shared) {
                     .into(),
             );
             (shared.report)(&decision);
-            let _ = respond(
-                &mut out,
-                403,
-                "Forbidden",
-                &format!(
+            branchyard_support::best_effort(
+                "answer the client a refusal",
+                respond(
+                    &mut out,
+                    403,
+                    "Forbidden",
+                    &format!(
                     "Branchyard's egress policy allows only some requests to {}, and this proxy \
                      cannot look inside the connection (docs/egress.md)",
                     authority(&host, port)
+                ),
                 ),
             );
             return;
@@ -576,7 +593,10 @@ fn handle(stream: TcpStream, shared: &Shared) {
         // Whatever ends the connection early (the client or the origin
         // going away) is the connection's business, and already reported
         // where it mattered.
-        let _ = inspect(client, out, opened, shared, interceptor);
+        branchyard_support::best_effort(
+            "inspect a tunnelled connection",
+            inspect(client, out, opened, shared, interceptor),
+        );
         return;
     }
     let upstream = match connect(&host, port, verdict.loopback) {
@@ -585,18 +605,24 @@ fn handle(stream: TcpStream, shared: &Shared) {
             decision.allowed = false;
             decision.reason = Some(why.clone());
             (shared.report)(&decision);
-            let _ = respond(
-                &mut out,
-                403,
-                "Forbidden",
-                &format!("Branchyard's egress policy does not allow {why}"),
+            branchyard_support::best_effort(
+                "answer the client a refusal",
+                respond(
+                    &mut out,
+                    403,
+                    "Forbidden",
+                    &format!("Branchyard's egress policy does not allow {why}"),
+                ),
             );
             return;
         }
         Err(Refused::Unreachable(why)) => {
             decision.reason = Some(why.clone());
             (shared.report)(&decision);
-            let _ = respond(&mut out, 502, "Bad Gateway", &why);
+            branchyard_support::best_effort(
+                "answer the client a refusal",
+                respond(&mut out, 502, "Bad Gateway", &why),
+            );
             return;
         }
     };
@@ -646,8 +672,19 @@ fn handle(stream: TcpStream, shared: &Shared) {
     relay(client_stream, out, upstream, upstream_writer);
 }
 
+/// Shut `stream` down. `NotConnected` means the peer went first, which is
+/// routine and not logged; any other failure is.
+fn shut_down_quietly(stream: &TcpStream, how: Shutdown, what: &str) {
+    best_effort(
+        what,
+        stream.shutdown(how).or_else(|error| match error.kind() {
+            io::ErrorKind::NotConnected => Ok(()),
+            _ => Err(error),
+        }),
+    );
+}
+
 /// Copy both ways until the upstream is done, then close both.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-runtime
 fn relay(
     mut client_read: TcpStream,
     mut client_write: TcpStream,
@@ -657,13 +694,19 @@ fn relay(
     let up = thread::Builder::new()
         .name("by-egress-up".into())
         .spawn(move || {
-            let _ = io::copy(&mut client_read, &mut upstream_write);
-            let _ = upstream_write.shutdown(Shutdown::Write);
+            branchyard_support::best_effort(
+                "relay the client's bytes upstream",
+                io::copy(&mut client_read, &mut upstream_write),
+            );
+            shut_down_quietly(&upstream_write, Shutdown::Write, "half-close upstream");
         });
-    let _ = io::copy(&mut upstream_read, &mut client_write);
-    let _ = client_write.shutdown(Shutdown::Both);
+    branchyard_support::best_effort(
+        "relay upstream's bytes to the client",
+        io::copy(&mut upstream_read, &mut client_write),
+    );
+    shut_down_quietly(&client_write, Shutdown::Both, "close the client");
     // ENOTCONN when the client closed first: routine, not worth a log line.
-    let _ = upstream_read.shutdown(Shutdown::Both);
+    shut_down_quietly(&upstream_read, Shutdown::Both, "close upstream");
     if let Ok(up) = up {
         branchyard_support::join_reporting("egress upstream relay", up);
     }
@@ -1250,10 +1293,9 @@ fn write_response(out: &mut impl Write, code: u16, reason: &str, body: &str) -> 
     out.flush()
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-runtime
 fn respond(out: &mut TcpStream, code: u16, reason: &str, body: &str) -> io::Result<()> {
     write_response(out, code, reason, body)?;
-    let _ = out.shutdown(Shutdown::Both);
+    shut_down_quietly(out, Shutdown::Both, "close a refused connection");
     Ok(())
 }
 

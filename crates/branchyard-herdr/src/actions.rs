@@ -106,14 +106,13 @@ pub fn action(config: &Config, name: &str) -> Result<(), String> {
 /// The send popup: read one prompt line, run `by send`, and wait for Enter
 /// so the result can be read. Ctrl-C stops watching; the turn keeps
 /// running on the server and its branch pane shows it.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-herdr
 pub fn send_popup(config: &Config) -> Result<(), String> {
     let branch = config
         .get("BRANCHYARD_HERDR_BRANCH")
         .ok_or("BRANCHYARD_HERDR_BRANCH is not set")?
         .to_owned();
     print!("Send to {branch} (empty to cancel): ");
-    let _ = std::io::stdout().flush();
+    branchyard_support::best_effort("flush stdout", std::io::stdout().flush());
     let mut prompt = String::new();
     std::io::stdin()
         .lock()
@@ -133,8 +132,11 @@ pub fn send_popup(config: &Config) -> Result<(), String> {
         .status()
         .map_err(|e| format!("cannot run {}: {e}", config.by().display()))?;
     print!("\nby send exited with {status}; press Enter to close ");
-    let _ = std::io::stdout().flush();
-    let _ = std::io::stdin().lock().read_line(&mut String::new());
+    branchyard_support::best_effort("flush stdout", std::io::stdout().flush());
+    branchyard_support::best_effort(
+        "wait for Enter before the pane closes",
+        std::io::stdin().lock().read_line(&mut String::new()),
+    );
     match status.success() {
         true => Ok(()),
         false => Err(format!("by send {branch} failed")),
@@ -144,7 +146,6 @@ pub fn send_popup(config: &Config) -> Result<(), String> {
 /// A branch pane: `by log --follow` for `BRANCHYARD_HERDR_BRANCH`. When it ends
 /// (the branch was removed, say), the pane waits for Enter so the reason
 /// stays visible.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-herdr
 pub fn log(config: &Config) -> Result<(), String> {
     let branch = config
         .get("BRANCHYARD_HERDR_BRANCH")
@@ -154,8 +155,11 @@ pub fn log(config: &Config) -> Result<(), String> {
         .status()
         .map_err(|e| format!("cannot run {}: {e}", config.by().display()))?;
     print!("\nby log exited with {status}; press Enter to close ");
-    let _ = std::io::stdout().flush();
-    let _ = std::io::stdin().lock().read_line(&mut String::new());
+    branchyard_support::best_effort("flush stdout", std::io::stdout().flush());
+    branchyard_support::best_effort(
+        "wait for Enter before the pane closes",
+        std::io::stdin().lock().read_line(&mut String::new()),
+    );
     Ok(())
 }
 

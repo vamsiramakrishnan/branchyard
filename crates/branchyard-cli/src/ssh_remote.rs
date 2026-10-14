@@ -311,7 +311,6 @@ impl<'a> Ssh<'a> {
     }
 
     /// Run `script` with `sh -s` on the remote, its arguments quoted.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
     fn script(&self, script: &str, args: &[String]) -> Result<Output, Failure> {
         let mut remote = String::from("sh -s --");
         for arg in args {
@@ -331,7 +330,10 @@ impl<'a> Ssh<'a> {
             ))
         })?;
         if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(script.as_bytes());
+            branchyard_support::best_effort(
+                "send the remote script",
+                stdin.write_all(script.as_bytes()),
+            );
         }
         child.wait_with_output().map_err(Failure::Io)
     }

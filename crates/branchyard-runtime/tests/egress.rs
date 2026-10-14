@@ -2,7 +2,7 @@
 //! it, and connections it looks inside.
 
 #![cfg(unix)]
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -72,12 +72,18 @@ fn upstream() -> Upstream {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let head = read_request(&mut reader);
                 let body = format!("upstream {port}\n");
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
-                    body.len()
+                branchyard_support::best_effort(
+                    "write the origin's answer",
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    ),
                 );
-                let _ = sender.send(head);
+                branchyard_support::best_effort(
+                    "hand the request head to the test",
+                    sender.send(head),
+                );
             });
         }
     });
@@ -119,14 +125,20 @@ fn tls_upstream() -> (Upstream, String) {
                 let mut reader = BufReader::new(&mut tls);
                 let head = read_request(&mut reader);
                 let body = format!("upstream {port}\n");
-                let _ = write!(
-                    tls,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
+                branchyard_support::best_effort(
+                    "write the origin's answer",
+                    write!(
+                        tls,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    ),
                 );
                 tls.conn.send_close_notify();
-                let _ = tls.flush();
-                let _ = sender.send(head);
+                branchyard_support::best_effort("flush the origin's answer", tls.flush());
+                branchyard_support::best_effort(
+                    "hand the request head to the test",
+                    sender.send(head),
+                );
             });
         }
     });
@@ -212,7 +224,10 @@ fn ask(proxy: SocketAddr, request: &str) -> String {
     stream.set_read_timeout(Some(WAIT)).unwrap();
     stream.write_all(request.as_bytes()).unwrap();
     let mut answer = String::new();
-    let _ = stream.read_to_string(&mut answer);
+    branchyard_support::best_effort(
+        "read the proxy's answer (it closes after answering)",
+        stream.read_to_string(&mut answer),
+    );
     answer
 }
 
@@ -378,7 +393,10 @@ fn connect_tunnels_to_an_allowed_port_only() {
     )
     .unwrap();
     let mut answer = String::new();
-    let _ = stream.read_to_string(&mut answer);
+    branchyard_support::best_effort(
+        "read the proxy's answer (it closes after answering)",
+        stream.read_to_string(&mut answer),
+    );
     assert!(
         answer.starts_with("HTTP/1.1 200 Connection established\r\n\r\nHTTP/1.1 200 OK"),
         "{answer}"
@@ -556,7 +574,10 @@ fn plain_http_inside_an_inspected_tunnel_is_checked_too() {
     )
     .unwrap();
     let mut answer = String::new();
-    let _ = stream.read_to_string(&mut answer);
+    branchyard_support::best_effort(
+        "read the proxy's answer (it closes after answering)",
+        stream.read_to_string(&mut answer),
+    );
     assert!(
         answer.starts_with("HTTP/1.1 200 Connection established\r\n\r\nHTTP/1.1 200 OK"),
         "{answer}"
@@ -570,7 +591,10 @@ fn plain_http_inside_an_inspected_tunnel_is_checked_too() {
     let mut stream = connect(address, port);
     stream.write_all(b"GET /ok/later HTTP/1.0\r\n\r\n").unwrap();
     let mut answer = String::new();
-    let _ = stream.read_to_string(&mut answer);
+    branchyard_support::best_effort(
+        "read the proxy's answer (it closes after answering)",
+        stream.read_to_string(&mut answer),
+    );
     assert!(answer.starts_with("HTTP/1.1 200 OK"), "{answer}");
     let head = origin.heads.recv_timeout(WAIT).unwrap();
     assert!(
@@ -586,7 +610,10 @@ fn plain_http_inside_an_inspected_tunnel_is_checked_too() {
     )
     .unwrap();
     let mut answer = String::new();
-    let _ = stream.read_to_string(&mut answer);
+    branchyard_support::best_effort(
+        "read the proxy's answer (it closes after answering)",
+        stream.read_to_string(&mut answer),
+    );
     assert!(answer.starts_with("HTTP/1.1 403 Forbidden"), "{answer}");
     assert!(origin.heads.try_recv().is_err());
 

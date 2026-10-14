@@ -11,7 +11,7 @@ Both front-ends call the same engine, [`branchyard-setup`](../crates/branchyard-
 
 | Topic | Writes | Checked by |
 |---|---|---|
-| `project` | `branchyard.toml` at the repository root, or the user's `~/.config/branchyard/config.toml`: default harness, model, effort, budget, turns, duration, permissions, isolation, check, provider, secrets by name, a server to use, and (project only) a [`[workspace]`](workspace.md) suggested from the repository's lockfiles, `Cargo.toml`, `pyproject.toml`, `go.mod`, Compose file and `.env` files, or imported from another tool's committed configuration ([below](#importing-another-tools-workspace-configuration)) | the configuration parser `by` uses ([below](#configuration)) |
+| `project` | `branchyard.toml` at the repository root, or the user's `~/.config/branchyard/config.toml`: default harness, model, effort, budget, turns, duration, permissions, isolation, check, provider, secrets by name, harness logins by where their files are, the [inventory default](fleet.md#the-inventory-default) as an explicit `[fleet.default]`, [model gateway](model-gateway.md) backends and routes for the provider keys set ([below](#routing-and-the-gateway-from-what-is-present)), a server to use, and (project only) a [`[workspace]`](workspace.md) suggested from the repository's lockfiles, `Cargo.toml`, `pyproject.toml`, `go.mod`, Compose file and `.env` files, or imported from another tool's committed configuration ([below](#importing-another-tools-workspace-configuration)) | the configuration parser `by` uses ([below](#configuration)) |
 | `server` | A server configuration (default `.branchyard/server.json`): listen address and TLS, SQLite or PostgreSQL, one credential per tenant (hash only) with its token in a 0600 file under `tokens/`, tenant quotas, allowed providers, delegation, secrets by reference, a signed webhook | `branchyard-server`'s own loader and `Config::validate`, as `by serve --check` runs them |
 | `rig` | A [rig](rigs.md) spec: a lead seat and, by shape, an implementer (two may run), a reviewer denied every editing tool, or two implementers on different harnesses; budgets split so the children fit | `by rig check`'s parser and planner |
 | `deploy` | `compose.yaml` (PostgreSQL 16 and the server), `server.json`, and `secrets/` (client token, database password, both 0600, and a `.gitignore`) | the server's loader with `--insecure-bind`; `docker compose config` when docker is installed |
@@ -29,7 +29,9 @@ by init server --defaults    # every question at its default, still reviewed bef
 
 The topic completes in every shell `by completions` supports, and an unknown one is a usage error listing the five (exit 2).
 
-It detects the repository and its default branch, the installed harnesses and their versions (`--version`, three seconds at most each), which credential variables are set (by name only), docker and the PostgreSQL client tools, the platform and KVM, a check command from the files at the root (`Cargo.toml` → `cargo test`, `package.json` → `npm test`, …), and existing configuration files, whose values become the defaults. Then it asks, reviews every file with its diff and its validator's verdict, asks before replacing a file that differs, and asks once more before writing. Ctrl-C at any point writes nothing.
+It detects the repository and its default branch, the installed harnesses and their versions (`--version`, three seconds at most each), each installed harness's login as `by harnesses` reads it ([harness lifecycle](harness-lifecycle.md): its own status command, or credential files and key variables by name), the logins harnesses keep in files under the home directory ([below](#persisting-a-harness-login)), which credential variables are set (by name only), docker and the PostgreSQL client tools, the platform and KVM, a check command from the files at the root (`Cargo.toml` → `cargo test`, `package.json` → `npm test`, …), and existing configuration files, whose values become the defaults. Then it asks, reviews every file with its diff and its validator's verdict, asks before replacing a file that differs, and asks once more before writing. Ctrl-C at any point writes nothing.
+
+Once a provider's key is set (`GEMINI_API_KEY`, `OPENAI_API_KEY` or `CODEX_API_KEY`, `ANTHROPIC_API_KEY`, or the key a `[models.backends]` entry names), `by models list` asks that provider which models the key can call, caches the answer, and marks the models no price covers, so a model name need not come from the static `models` lists of the harness catalog; `--harness ID` sets a harness's catalog list beside the live one ([model gateway](model-gateway.md#listing-models)). It prints the variable's name, never the key.
 
 Without a terminal, `by init` refuses (exit 2) and points to the protocol. `--defaults` answers every question with its default. The wizard is `cliclack`; see [what was tested](#what-is-tested).
 
@@ -152,6 +154,84 @@ A repository already set up for emdash, Orca, Superset, Conductor or a Dev Conta
 
 The emdash and Orca readers are ports of `emdash-config.ts` (Apache-2.0) and `orca-yaml.ts` (MIT) at pinned revisions (`crates/branchyard-setup/src/import/`, recorded in `patches/ports.json`); Orca's file is read by a small reader for the block subset of YAML, which refuses flow collections, anchors and tags rather than guessing. Superset's and Conductor's are written from their public documentation only: Superset is under the Elastic License 2.0, and nothing of its code, schema or documentation text is copied. The devcontainer reader is written from the specification, with Coder's envbuilder (Apache-2.0, vendored under `vendor/envbuilder`) as the reference for the fields and the variable grammar; nothing of it is copied. Tested on fixtures written for the tests, not on those tools' own repositories.
 
+## Routing and the gateway from what is present
+
+`by init project` turns what it detected into configuration, one question per step, each with a default you can take or change:
+
+| Step | Asked when | Writes | Default |
+|---|---|---|---|
+| Logins | a harness keeps a login in a file Branchyard can provision ([below](#persisting-a-harness-login)) | `[secrets] NAME = "@~/path"` for each login chosen | the installed harnesses' logins when new branches get a private home (isolated, or Microsandbox), else none |
+| Fleet | no `[fleet]` in either file, and an installed harness is logged in | `[fleet.default]`: the [inventory default](fleet.md#the-inventory-default) as it is now (candidates, effort where it applies, judge) | no: without it `--auto` routes among what is logged in at that moment; with it `by run` without `--harness` routes too |
+| Gateway | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CODEX_API_KEY` or `GEMINI_API_KEY` is set, and the file has no `[models.backends]` of its own | backends and routes for the keys set, below | yes, so `--defaults` writes them only when a key is present; skippable |
+| Claude on Gemini | the gateway step is yes and `GEMINI_API_KEY` is set | a `claude-*` route to the gemini backend with a `backend_model` (default `gemini-3.5-flash`), or, with an Anthropic key, the gemini backend as that route's fallback | no; the question says the trade-off: the answers come from Gemini, not Claude, thinking comes back unsigned, and `count_tokens` is not served |
+
+The default harness it suggests is Claude Code or Codex when installed and not known to be logged out, else the first installed harness that is logged in.
+
+| Variable set | Backend | Routes |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | `anthropic`: `api = "anthropic"` | `claude-*` |
+| `OPENAI_API_KEY`, else `CODEX_API_KEY` | `openai`: `api = "openai"`, `key` the variable that is set | `gpt-*`, `codex-*` |
+| `GEMINI_API_KEY` | `gemini`: `api = "openai"`, `url = "https://generativelanguage.googleapis.com/v1beta/openai"`, `compat = "gemini"` ([Gemini](model-gateway.md#gemini)) | `gemini-*` |
+
+Keys are named, never written. The backends do not put a branch on the gateway: a branch uses them when run with `--model-gateway`, or once `[models] allow` is set. On a machine with `GEMINI_API_KEY` and `CODEX_API_KEY` set, Codex logged in by device code and Gemini CLI by its key, choosing the login, the fleet and Claude on Gemini gives, in short:
+
+```toml
+[secrets]
+CODEX_AUTH = "@~/.codex/auth.json"
+
+[models.backends.gemini]
+api = "openai"
+url = "https://generativelanguage.googleapis.com/v1beta/openai"
+key = "GEMINI_API_KEY"
+compat = "gemini"
+
+[models.backends.openai]
+api = "openai"
+key = "CODEX_API_KEY"
+
+[[models.routes]]
+model = "claude-*"
+backends = ["gemini"]
+backend_model = "gemini-3.5-flash"
+
+[[models.routes]]
+model = "gpt-*"
+backends = ["openai"]
+
+[[models.routes]]
+model = "codex-*"
+backends = ["openai"]
+
+[[models.routes]]
+model = "gemini-*"
+backends = ["gemini"]
+
+[fleet.default]
+candidates = [{ harness = "codex" }, { harness = "gemini-cli" }]
+judge = { harness = "codex" }
+```
+
+## Persisting a harness login
+
+A device-code login lives in a file. `codex login --device-auth` writes `~/.codex/auth.json`: its `auth_mode` (`chatgpt` for a ChatGPT login, `apikey` for a key) and the tokens, including the refresh token Codex renews its access with as it expires. A branch that runs in your own home uses that file as it is. A branch with a private home (`--isolated`, a sandbox) is not logged in, so Branchyard provisions the login into it as the `CODEX_AUTH` secret: the file's content, written 0600 to the branch's own `~/.codex/auth.json` before the harness starts ([provisioning](provisioning.md)).
+
+```sh
+by run "Fix the flaky test" --harness codex --isolated --secret CODEX_AUTH=@$HOME/.codex/auth.json
+```
+
+`by init project` finds the file, shows it with its `auth_mode` (the only thing it reads from it, and only when it looks like a word), and offers to record it in `[secrets]` by where it is, never by its content: `CODEX_AUTH = "@~/.codex/auth.json"`. Claude Code's login is provisioned the same way as `CLAUDE_AUTH` from `~/.claude/.credentials.json` (on macOS it is in the keychain, not a file), and Gemini CLI's as `GEMINI_OAUTH_CREDS` from `~/.gemini/oauth_creds.json`. Antigravity's token file and settings are found and shown (its `modelProvider`) but not provisioned: Antigravity takes `GEMINI_API_KEY`.
+
+On an ephemeral machine, a CI runner or a cloud session whose home does not survive, keep the file's content as a secret variable named `CODEX_AUTH` in the environment the machine starts with (a repository or environment secret), and restore it to `~/.codex/auth.json`, mode 0600, before `by` runs:
+
+```sh
+mkdir -p ~/.codex
+( umask 077 && printf '%s' "$CODEX_AUTH" > ~/.codex/auth.json )
+chmod 600 ~/.codex/auth.json
+codex login status        # Logged in using ChatGPT
+```
+
+The refresh token in it keeps the login valid from one run to the next without logging in again. Restoring the file serves every branch: those in your own home read it, `by harnesses` and the [inventory default](fleet.md#the-inventory-default) see Codex logged in, and `[secrets] CODEX_AUTH = "@~/.codex/auth.json"` carries it into private homes. If a copy is refused because its refresh token was used up elsewhere (by another copy of the same login), log in once more and store the new file's content.
+
 ## Applying
 
 `--apply` recomputes the plan from the answers, then:
@@ -255,6 +335,8 @@ by config schema                     # the JSON Schema
 
 `--json` may come before or after the action (`by config --json show`). `by config` alone prints its help and exits 2, as any command missing its action does.
 
+`by doctor` runs these loaders with the rest of what makes a machine and repository ready (the store, the trust decision, the harnesses, a configured server) and prints one report of `ok`, `warn` and `fail` rows with what to do about each: see [doctor](doctor.md).
+
 ## `by serve --check`
 
 `by serve --config FILE --check` (also `branchyard-server --check`) builds and validates the configuration exactly as serving would, prints its warnings, and exits without binding, serving, or writing a file: where serving would create a default token it only says so. `by init server` and `by init deploy` check every server configuration they propose with the same function, on a private staging copy of the plan's files.
@@ -263,7 +345,7 @@ by config schema                     # the JSON Schema
 
 - **Imports**: each importer on its own fixtures (mapping, variable renaming, script splitting, refusals of wrong types), the YAML subset reader, the vendored emdash and Orca sources still having the fields the ports read, precedence among several files in the engine, and `by init project --defaults --apply` writing a loadable `branchyard.toml` from each of the four files (`tests/setup.rs`).
 - **Workspace**: the `[workspace]` section's parsing, refusals, digest and precedence, the project topic's detection and plan, and a golden batch (`tests/golden/project-workspace.json`); see [workspace](workspace.md#what-is-tested).
-- **Engine** (`crates/branchyard-setup`): conditions and batching, answer normalization for every kind, detection with a fake probe (installed harnesses, KVM, existing files as defaults), every topic walked batch by batch answering by label and finishing with a valid plan, determinism of the JSON, no generated secret in any response, a pasted secret refused without being repeated, golden first batches, both schemas' freshness, and the embedded skills byte for byte against `plugins/branchyard/skills`.
+- **Engine** (`crates/branchyard-setup`): conditions and batching, answer normalization for every kind, detection with a fake probe (installed harnesses, KVM, existing files as defaults), every topic walked batch by batch answering by label and finishing with a valid plan, determinism of the JSON, no generated secret in any response, a pasted secret refused without being repeated, golden first batches, both schemas' freshness, and the embedded skills byte for byte against `plugins/branchyard/skills`. The project topic on a fake machine like the one above: logins found by path with their label and never a token (a value that could be a credential is not read as a label), recorded by where they are, suggested when isolated, removed when deselected; the inventory default written as `[fleet.default]` (logged-in harnesses only, the default harness first, effort `medium` for an isolated Codex, a judge that can be denied every tool), not offered with a `[fleet]` or nothing logged in; gateway backends for the keys present, Gemini's with its URL and `compat`, Claude on Gemini as a route or as Anthropic's fallback, and nothing without a key or over backends the file already has.
 - **Command line** (`crates/branchyard-cli/src/args.rs`): `init` parsed into its topic and step for every topic and flag spelling; each conflict and missing requirement a usage error with exit 2 and its message; the help's topics and flags; `config`'s four actions with `--json` before or after them, and its usage errors; completions for five shells and the man page listing `init`, its flags and `config`. `defaults.rs` and the server's `names_config` test that `-c FILE`, `-cFILE`, `--config=FILE`, `--help`, `--version` and `token new` keep their own configuration.
-- **CLI** (`crates/branchyard-cli/tests/setup.rs`): the built `by` in temporary repositories: a scripted harness completing every topic through `--next`, `--dry-run` and `--apply`; applying twice writes nothing; every generated file passes the tool that reads it (`by serve --check`, `by rig check`, `by config validate`); a multi-tenant server with one 0600 token per tenant and only hashes in the configuration; an off-loopback server without TLS refused by the server's loader; refusal to replace a file without `--force`; a pasted secret never echoed; no generated secret in any output; the non-terminal refusal; configuration defaults under flags and variables, and not inside a harness's branch. The wizard runs on a pseudo-terminal (util-linux `script`) accepting every default and writing after review; its question-to-prompt mapping and review rendering are unit-tested.
+- **CLI** (`crates/branchyard-cli/tests/setup.rs`): the built `by` in temporary repositories: a scripted harness completing every topic through `--next`, `--dry-run` and `--apply`; applying twice writes nothing; every generated file passes the tool that reads it (`by serve --check`, `by rig check`, `by config validate`); a multi-tenant server with one 0600 token per tenant and only hashes in the configuration; an off-loopback server without TLS refused by the server's loader; refusal to replace a file without `--force`; a pasted secret never echoed; no generated secret in any output; the non-terminal refusal; configuration defaults under flags and variables, and not inside a harness's branch; a Codex auth file holding a refresh token, a fake Gemini CLI and `GEMINI_API_KEY`: the login shown with its `auth_mode`, recorded as `CODEX_AUTH` by path, `[fleet.default]` and the Gemini backend with a Claude route written, the file passing `by config validate`, and the token in no output and no file. The machine's own credential variables are removed from every setup command. The wizard runs on a pseudo-terminal (util-linux `script`) accepting every default and writing after review; its question-to-prompt mapping and review rendering are unit-tested.
 - Not tested: a real harness running the skill (no model call was made), the wizard on macOS, and `docker compose up` of a generated deployment.

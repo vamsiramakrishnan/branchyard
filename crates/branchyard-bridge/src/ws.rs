@@ -104,7 +104,6 @@ pub fn read_head(stream: &mut impl Read) -> io::Result<Head> {
 }
 
 /// Write a complete, non-upgrade HTTP response and close the connection.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 pub fn respond(stream: &mut Stream, status: &str, body: &str) -> io::Result<()> {
     write!(
         stream,
@@ -113,7 +112,10 @@ pub fn respond(stream: &mut Stream, status: &str, body: &str) -> io::Result<()> 
         body.len()
     )?;
     stream.flush()?;
-    let _ = stream.shutdown(Shutdown::Write);
+    branchyard_support::best_effort(
+        "shut down the response's write side",
+        stream.shutdown(Shutdown::Write),
+    );
     Ok(())
 }
 
@@ -182,9 +184,11 @@ impl WsWriter {
     }
 
     /// Close the TCP connection in both directions without a close frame.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
     pub fn abort(&self) {
-        let _ = self.stream.shutdown(Shutdown::Both);
+        branchyard_support::best_effort(
+            "close a WebSocket connection",
+            self.stream.shutdown(Shutdown::Both),
+        );
     }
 }
 
@@ -199,7 +203,6 @@ pub struct WsReader {
 impl WsReader {
     /// The next binary message, or `None` once the peer closed the
     /// WebSocket or the connection.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
     pub fn recv(&mut self) -> io::Result<Option<Vec<u8>>> {
         let mut message: Option<Vec<u8>> = None;
         loop {
@@ -262,14 +265,23 @@ impl WsReader {
                 }
                 OP_PING => {
                     let mut writer = self.writer.lock_recovering("writer");
-                    let _ = writer.frame(OP_PONG, &payload);
+                    branchyard_support::best_effort(
+                        "answer a ping",
+                        writer.frame(OP_PONG, &payload),
+                    );
                 }
                 OP_PONG => {}
                 OP_CLOSE => {
                     self.closed = true;
                     let mut writer = self.writer.lock_recovering("writer");
-                    let _ = writer.frame(OP_CLOSE, &payload[..payload.len().min(2)]);
-                    let _ = writer.stream.shutdown(Shutdown::Write);
+                    branchyard_support::best_effort(
+                        "echo a close frame",
+                        writer.frame(OP_CLOSE, &payload[..payload.len().min(2)]),
+                    );
+                    branchyard_support::best_effort(
+                        "shut down the write side after a close frame",
+                        writer.stream.shutdown(Shutdown::Write),
+                    );
                     return Ok(None);
                 }
                 other => return Err(invalid(format!("unexpected WebSocket opcode {other}"))),
@@ -333,7 +345,6 @@ pub struct Refused {
 /// `protocol`, with `headers` added. A non-101 answer is returned as
 /// [`Refused`] inside the error, with kind `PermissionDenied` for 401 and
 /// 403, `NotFound` for 404 and `Other` otherwise.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 pub fn client(
     mut stream: Stream,
     host: &str,
@@ -371,7 +382,10 @@ pub fn client(
             .unwrap_or(0)
             .min(MAX_HEAD);
         let mut body = vec![0u8; length];
-        let _ = stream.read_exact(&mut body);
+        branchyard_support::best_effort(
+            "read the body of a refused upgrade",
+            stream.read_exact(&mut body),
+        );
         let body = String::from_utf8_lossy(&body).trim().to_owned();
         let kind = match status {
             401 | 403 => io::ErrorKind::PermissionDenied,
@@ -424,6 +438,7 @@ pub fn server_accept(
 #[cfg(test)]
 mod tests {
     use std::net::{TcpListener, TcpStream};
+    use std::os::unix::net::UnixStream;
     use std::thread;
 
     use super::*;
@@ -487,5 +502,168 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("expired credential"), "{error}");
         server.join().unwrap();
+    }
+
+    /// A WebSocket over a socket pair with no handshake: the client's two
+    /// halves and the raw peer end, for frames [`WsWriter`] never sends.
+    fn paired() -> (WsReader, Arc<Mutex<WsWriter>>, UnixStream) {
+        let (ours, peer) = UnixStream::pair().unwrap();
+        let (reader, writer) = split(Stream::Tls(ours), Role::Client).unwrap();
+        (reader, writer, peer)
+    }
+
+    #[test]
+    fn fragments_are_reassembled_and_pings_answered_between_them() {
+        let (mut reader, _writer, mut peer) = paired();
+        // The first fragment of a binary message, a ping in between, the
+        // final continuation, an unsolicited pong and then a whole message.
+        // Server frames are not masked.
+        peer.write_all(&[OP_BINARY, 3, b'a', b'b', b'c']).unwrap();
+        peer.write_all(&[0x80 | OP_PING, 4, b'p', b'i', b'n', b'g'])
+            .unwrap();
+        peer.write_all(&[0x80 | OP_CONTINUATION, 3, b'd', b'e', b'f'])
+            .unwrap();
+        peer.write_all(&[0x80 | OP_PONG, 0]).unwrap();
+        peer.write_all(&[0x80 | OP_BINARY, 1, b'z']).unwrap();
+        assert_eq!(reader.recv().unwrap(), Some(b"abcdef".to_vec()));
+        assert_eq!(reader.recv().unwrap(), Some(b"z".to_vec()));
+        // The ping was answered at once with a masked pong carrying its
+        // payload: two bytes of head, the mask, four masked bytes.
+        let mut pong = [0u8; 10];
+        peer.read_exact(&mut pong).unwrap();
+        assert_eq!(pong[0], 0x80 | OP_PONG);
+        assert_eq!(pong[1], 0x80 | 4);
+        let payload: Vec<u8> = (0..4).map(|i| pong[6 + i] ^ pong[2 + i % 4]).collect();
+        assert_eq!(payload, b"ping");
+    }
+
+    #[test]
+    fn malformed_frames_are_refused() {
+        let refused = |frame: &[u8]| {
+            let (mut reader, _writer, mut peer) = paired();
+            peer.write_all(frame).unwrap();
+            reader.recv().unwrap_err().to_string()
+        };
+        // A text message.
+        assert_eq!(
+            refused(&[0x80 | 0x1, 2, b'h', b'i']),
+            "unexpected WebSocket opcode 1"
+        );
+        // A continuation with nothing to continue.
+        assert_eq!(
+            refused(&[0x80 | OP_CONTINUATION, 0]),
+            "unexpected WebSocket opcode 0"
+        );
+        // A reserved bit, as an extension would set.
+        assert_eq!(
+            refused(&[0x80 | 0x40 | OP_BINARY, 0]),
+            "WebSocket extensions are not supported"
+        );
+        // A length over the limit is refused before any of it is read.
+        let mut huge = vec![0x80 | OP_BINARY, 127];
+        huge.extend_from_slice(&(MAX_MESSAGE as u64 + 1).to_be_bytes());
+        assert_eq!(
+            refused(&huge),
+            "WebSocket message exceeds the protocol's limit"
+        );
+    }
+
+    #[test]
+    fn a_message_over_the_protocol_limit_is_refused_before_it_is_sent() {
+        let (_reader, writer, mut peer) = paired();
+        let error = writer
+            .lock()
+            .unwrap()
+            .send(&vec![0u8; MAX_MESSAGE + 1])
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        // Nothing reached the peer.
+        peer.set_nonblocking(true).unwrap();
+        assert_eq!(
+            peer.read(&mut [0u8; 1]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn a_head_that_ends_early_never_ends_or_is_malformed_is_refused() {
+        let head = |bytes: &[u8]| read_head(&mut io::Cursor::new(bytes.to_vec())).unwrap_err();
+        assert_eq!(
+            head(b"GET / HTTP/1.1\r\nHost: h\r\n").kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        assert_eq!(
+            head(&vec![b'x'; MAX_HEAD + 1]).to_string(),
+            "HTTP head is too large"
+        );
+        assert_eq!(
+            head(b"GET / HTTP/1.1\r\nno colon\r\n\r\n").to_string(),
+            "malformed HTTP header \"no colon\""
+        );
+    }
+
+    /// Run the client upgrade against a server answering with
+    /// `answer(&request)` verbatim, and return the error it reports.
+    fn upgrade_error(answer: impl FnOnce(&Head) -> String + Send + 'static) -> io::Error {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut stream = Stream::from(stream);
+            let head = read_head(&mut stream).unwrap();
+            stream.write_all(answer(&head).as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+        let stream = TcpStream::connect(address).unwrap().into();
+        let error = client(stream, "localhost", "/", "p.v1", &[])
+            .err()
+            .expect("refused");
+        server.join().unwrap();
+        error
+    }
+
+    #[test]
+    fn upgrade_answers_that_are_not_the_websocket_asked_for_are_refused() {
+        let error = upgrade_error(|_| "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".into());
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            error.to_string(),
+            "the bridge refused the connection with HTTP 200"
+        );
+
+        let error =
+            upgrade_error(|_| "HTTP/1.1 404 Not Found\r\nContent-Length: 7\r\n\r\nnothing".into());
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(
+            error.to_string(),
+            "the bridge refused the connection with HTTP 404: nothing"
+        );
+
+        let error =
+            upgrade_error(|_| "HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\n\r\n".into());
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "the upgrade answer is not a WebSocket");
+
+        let error = upgrade_error(|_| {
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+             Sec-WebSocket-Accept: bogus\r\n\r\n"
+                .into()
+        });
+        assert_eq!(
+            error.to_string(),
+            "the upgrade answer has the wrong Sec-WebSocket-Accept"
+        );
+
+        let error = upgrade_error(|request| {
+            format!(
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                 Sec-WebSocket-Accept: {}\r\nSec-WebSocket-Protocol: other.v9\r\n\r\n",
+                accept_key(request.header("sec-websocket-key").unwrap())
+            )
+        });
+        assert_eq!(
+            error.to_string(),
+            "the bridge does not speak p.v1; it answered Some(\"other.v9\")"
+        );
     }
 }

@@ -15,12 +15,14 @@ import unittest
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
+from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "sdk" / "python"))
 
+import branchyard as bm  # noqa: E402
 import branchyard_client as bc  # noqa: E402
 
 TOKEN = "secret-token"
@@ -339,6 +341,204 @@ class Requests(ServerCase):
         bare = bc.Inspection({"name": "x", "reported": {"state": "working", "summary": "s", "at_ms": 1}})
         assert bare.reported is not None
         self.assertIsNone(bare.reported.link)
+
+    def test_inspection_says_what_the_cost_limits_above_a_branch_leave_it(self):
+        self.fake.always(
+            "GET",
+            f"{REPO}/branches/kid/inspection",
+            200,
+            {
+                "name": "kid",
+                "status": {"state": "running"},
+                "max_usd": 0.5,
+                "remaining_usd": 0.4,
+                "subtree_cost_usd": 0.1,
+                "tree_remaining_usd": 0.05,
+                "tree_capped_by": "meta",
+            },
+        )
+        inspection = self.app.inspect("kid")
+        # Its own limit leaves more than the tree under its parent does: the
+        # smaller figure is what it can really still spend.
+        self.assertEqual(inspection.remaining_usd, 0.4)
+        self.assertEqual(inspection.tree_remaining_usd, 0.05)
+        self.assertEqual(inspection.tree_capped_by, "meta")
+        # Omitted when no branch above it has a cost limit.
+        bare = bc.Inspection({"name": "x", "status": {"state": "running"}})
+        self.assertIsNone(bare.tree_remaining_usd)
+        self.assertIsNone(bare.tree_capped_by)
+
+    def test_spawn_carries_the_childs_result_contract(self):
+        self.fake.answer("POST", f"{REPO}/branches/p/spawn", (202, self.op("op5", "queued", "kid", kind="spawn")))
+        contract = {"schema": {"type": "object", "required": ["files"]}, "required": True}
+        self.app.spawn("p", "work", name="kid", result=contract)
+        body = self.requests("POST", f"{REPO}/branches/p/spawn")[0][3]
+        self.assertEqual(body["result"], contract)
+        # Without one it is null, which the server reads as none.
+        self.fake.answer("POST", f"{REPO}/branches/p/spawn", (202, self.op("op6", "queued", "kid2", kind="spawn")))
+        self.app.spawn("p", "work", name="kid2")
+        self.assertIsNone(self.requests("POST", f"{REPO}/branches/p/spawn")[1][3].get("result"))
+
+    def test_report_carries_a_result_and_keeps_an_empty_one(self):
+        message = {"id": 1, "from": "kid", "to": "p", "kind": "report", "text": "done", "at_ms": 1}
+        self.fake.always("POST", f"{REPO}/branches/kid/report", 200, message)
+        self.app.report("kid", "plain")
+        self.app.report("kid", "found", result={"files": ["a.rs"]})
+        # `{}`, `[]` and `False` are results, not absent ones.
+        for empty in ({}, [], False, 0):
+            self.app.report("kid", "empty", result=empty)
+        bodies = [r[3] for r in self.requests("POST", f"{REPO}/branches/kid/report")]
+        self.assertEqual(bodies[0], {"text": "plain"})
+        self.assertEqual(bodies[1], {"text": "found", "result": {"files": ["a.rs"]}})
+        self.assertEqual([b["result"] for b in bodies[2:]], [{}, [], False, 0])
+
+    def test_inspection_carries_the_contract_and_the_result(self):
+        contract = {"schema": {"type": "array"}, "required": False}
+        self.fake.always(
+            "GET",
+            f"{REPO}/branches/kid/inspection",
+            200,
+            {"name": "kid", "status": {"state": "ready"}, "result_contract": contract, "result": [1, 2]},
+        )
+        inspection = self.app.inspect("kid")
+        self.assertEqual(inspection.result_contract, contract)
+        self.assertEqual(inspection.result, [1, 2])
+        # Omitted until there is one; a falsy result is still a result.
+        bare = bc.Inspection({"name": "x", "status": {"state": "running"}})
+        self.assertIsNone(bare.result_contract)
+        self.assertIsNone(bare.result)
+        self.assertEqual(bc.Inspection({"result": 0}).result, 0)
+        self.assertEqual(bc.Inspection({"result": {}}).result, {})
+
+    def test_a_check_is_an_operation_whose_result_is_the_report(self):
+        failed = {
+            "branch": "b",
+            "check": ["make", "test"],
+            "work": "a1b2c3d",
+            "target": "by/root",
+            "checked": "d4e5f6a",
+            "outcome": "failed",
+            "output_tail": "2 tests failed",
+        }
+        self.fake.answer("POST", f"{REPO}/branches/b/check", (202, self.op("op3", "queued", kind="check")))
+        self.fake.answer(
+            "GET",
+            "/v1/operations/op3",
+            (200, self.op("op3", "running", kind="check")),
+            (200, self.op("op3", "succeeded", kind="check", result={"check_report": failed})),
+        )
+        op = self.app.check("b", key="k-9")
+        self.assertEqual((op.kind, op.branch), ("check", "b"))
+        self.assertIsNone(op.check_report, "nothing until the check has ended")
+        ((_, _, headers, body),) = self.requests("POST", f"{REPO}/branches/b/check")
+        self.assertEqual((headers["idempotency-key"], body), ("k-9", {}))
+        done = self.client.wait(op, poll=0.01, check=True)
+        report = done.check_report
+        assert report is not None
+        self.assertIsInstance(report, bc.CheckReport)
+        # A check that fails is a succeeded operation, not an exception.
+        self.assertEqual((report.outcome, report.output_tail), ("failed", "2 tests failed"))
+        self.assertEqual(report.check, ["make", "test"])
+        self.assertFalse(report.passed)
+        # `passed` is the engine's: the check passed, or there is none and nothing conflicted.
+        for fields, passed in [
+            ({"check": ["t"], "outcome": "passed"}, True),
+            ({"check": ["t"], "outcome": "timed_out"}, False),
+            ({"check": ["t"], "outcome": "not_run", "conflicts": ["a.txt"]}, False),
+            ({"check": None, "outcome": "not_run"}, True),
+            ({"outcome": "not_run", "conflicts": []}, True),
+            ({"outcome": "not_run", "conflicts": ["a.txt"]}, False),
+        ]:
+            self.assertIs(bc.CheckReport({"branch": "b", "work": "w", **fields}).passed, passed, fields)
+        # Without a key, one is generated.
+        self.fake.answer("POST", f"{REPO}/branches/c/check", (202, self.op("op4", "queued", "c", kind="check")))
+        self.app.check("c")
+        ((_, _, headers, _),) = self.requests("POST", f"{REPO}/branches/c/check")
+        self.assertEqual(len(headers["idempotency-key"]), 32)
+
+    def test_a_check_is_refused_with_typed_errors(self):
+        for status, body, expected in [
+            (403, _error("scope_required", "needs run", {"scope": "run"}), bc.DeniedError),
+            (404, _error("unknown_branch", "no branch named b"), bc.NotFoundError),
+            (422, _error("idempotency_key_reused", "", {"operation": "op3"}), bc.IdempotencyKeyReusedError),
+        ]:
+            self.fake.answer("POST", f"{REPO}/branches/b/check", (status, body))
+            with self.assertRaises(expected) as raised:
+                self.app.check("b")
+            self.assertEqual(type(raised.exception), expected, body)
+        # An operation that could not run the check at all fails with its error.
+        self.fake.answer("POST", f"{REPO}/branches/b/check", (202, self.op("op5", "queued", kind="check")))
+        self.fake.answer(
+            "GET",
+            "/v1/operations/op5",
+            (200, self.op("op5", "failed", kind="check", error={"code": "git_error", "message": "no worktree"})),
+        )
+        with self.assertRaises(bc.OperationFailedError) as failed:
+            self.client.wait(self.app.check("b"), poll=0.01, check=True)
+        self.assertEqual(failed.exception.code, "git_error")
+        self.assertIsNone(failed.exception.operation.check_report)
+
+    def test_report_status_posts_the_report_and_reads_what_was_recorded(self):
+        report = {"state": "blocked", "summary": "needs the API key", "link": "https://example.com/i/1", "at_ms": 7}
+        escalation = {
+            "id": 4,
+            "from": "kid",
+            "to": "root",
+            "kind": "escalation",
+            "text": "status blocked: needs the API key (https://example.com/i/1)",
+            "at_ms": 7,
+        }
+        self.fake.answer(
+            "POST",
+            f"{REPO}/branches/kid/report-status",
+            (200, {"report": report, "escalation": escalation}),
+            (200, {"report": {"state": "working", "summary": "reading", "at_ms": 8}}),
+        )
+        reported = self.app.report_status("kid", "blocked", "needs the API key", link="https://example.com/i/1")
+        self.assertIsInstance(reported, bc.Reported)
+        self.assertIsInstance(reported.report, bc.StatusReport)
+        self.assertEqual(reported.report.raw, report)
+        assert reported.escalation is not None
+        self.assertIsInstance(reported.escalation, bc.Message)
+        self.assertEqual((reported.escalation["from"], reported.escalation.to), ("kid", "root"))
+        working = self.app.report_status("kid", "working", "reading")
+        self.assertEqual(working.report.state, "working")
+        self.assertIsNone(working.report.link)
+        self.assertIsNone(working.escalation, "only blocked and failure reach the parent")
+        sent = [r[3] for r in self.requests("POST", f"{REPO}/branches/kid/report-status")]
+        self.assertEqual(
+            sent,
+            [
+                {"state": "blocked", "summary": "needs the API key", "link": "https://example.com/i/1"},
+                {"state": "working", "summary": "reading"},
+            ],
+        )
+
+    def test_a_refused_report_names_its_field(self):
+        path = f"{REPO}/branches/kid/report-status"
+        for field, message in [
+            ("state", 'state must be one of working, idle, blocked, complete, failure, not "done"'),
+            ("summary", "the summary is 281 characters; keep it to one line of at most 280"),
+            ("link", 'the link must be an http or https URL, not "ftp://x/"'),
+        ]:
+            self.fake.answer("POST", path, (400, _error("invalid_request", message, {"field": field})))
+            with self.assertRaises(bc.InvalidRequestError) as raised:
+                self.app.report_status("kid", "done", "x")
+            self.assertEqual(raised.exception.field, field)
+            self.assertEqual(raised.exception.message, message)
+            self.assertEqual(raised.exception.status, 400)
+        # A refusal that names no field has none.
+        self.fake.answer("POST", path, (400, _error("invalid_request", "invalid request body: missing field")))
+        with self.assertRaises(bc.InvalidRequestError) as raised:
+            self.app.report_status("kid", "working", "x")
+        self.assertIsNone(raised.exception.field)
+        for status, body, expected in [
+            (403, _error("scope_required", "", {"scope": "run"}), bc.DeniedError),
+            (404, _error("unknown_branch", "no branch named kid"), bc.NotFoundError),
+        ]:
+            self.fake.answer("POST", path, (status, body))
+            with self.assertRaises(expected):
+                self.app.report_status("kid", "working", "x")
 
     def test_the_health_check_sends_no_token(self):
         self.assertTrue(self.client.healthy())
@@ -842,6 +1042,85 @@ class GrantsAndNames(unittest.TestCase):
         self.assertEqual(
             bc.FeedEntry({"seq": 2, "branch": "a", "activity": {"status": {"state": "ready"}}}).status, "ready"
         )
+
+
+class ModuleSpawnAndReport(unittest.TestCase):
+    """`sdk/python/branchyard.py`, which runs `by --json`: what it asks `by`
+    for, with `_run` replaced, and what it makes of the answers."""
+
+    def run_by(self, call, answer):
+        seen = []
+
+        def fake(args, result_on_failure=False, stdin=None):
+            seen.append((args, stdin))
+            return answer
+
+        with mock.patch.object(bm, "_run", fake):
+            returned = call()
+        return seen, returned
+
+    SPAWNED: ClassVar[dict[str, Any]] = {
+        "name": "kid",
+        "git_branch": "by/kid",
+        "harness": "h",
+        "profile": "p",
+        "base": "b",
+        "depth": 1,
+        "status": {"state": "running"},
+        "budget": {},
+    }
+
+    def test_spawn_gives_by_the_schema_and_whether_it_is_required(self):
+        schema = {"type": "object", "required": ["files"]}
+        seen, spawned = self.run_by(
+            lambda: bm.spawn("work", name="kid", result={"schema": schema, "required": True}), self.SPAWNED
+        )
+        ((args, stdin),) = seen
+        self.assertEqual(spawned.name, "kid")
+        self.assertEqual(stdin, "work")
+        self.assertEqual(args[args.index("--result-schema") + 1], json.dumps(schema))
+        self.assertIn("--result-required", args)
+        # Optional: the schema alone.
+        seen, _ = self.run_by(lambda: bm.spawn("work", result={"schema": schema}), self.SPAWNED)
+        self.assertIn("--result-schema", seen[0][0])
+        self.assertNotIn("--result-required", seen[0][0])
+        # None at all: neither flag.
+        seen, _ = self.run_by(lambda: bm.spawn("work"), self.SPAWNED)
+        self.assertNotIn("--result-schema", seen[0][0])
+
+    def test_spawn_refuses_a_result_that_is_not_a_contract_before_running_by(self):
+        for bad in ({}, {"required": True}, {"schema": {}, "requried": True}, "object", ["schema"]):
+            with self.assertRaises(ValueError):
+                self.run_by(lambda: bm.spawn("work", result=bad), self.SPAWNED)  # noqa: B023
+
+    def test_report_gives_by_the_result_as_json(self):
+        message = {"id": 1, "from": "kid", "to": "p", "kind": "report", "text": "done", "at_ms": 1}
+        seen, sent = self.run_by(lambda: bm.report("found", result={"files": ["a.rs"]}), message)
+        self.assertEqual(seen[0][0], ["report", "--result", '{"files": ["a.rs"]}', "--", "found"])
+        self.assertEqual(sent.text, "done")
+        seen, _ = self.run_by(lambda: bm.report("plain"), message)
+        self.assertEqual(seen[0][0], ["report", "--", "plain"])
+        # An empty result is still a result.
+        seen, _ = self.run_by(lambda: bm.report("empty", result={}), message)
+        self.assertEqual(seen[0][0], ["report", "--result", "{}", "--", "empty"])
+
+    def test_inspect_and_wait_carry_the_contract_and_the_result(self):
+        contract = {"schema": {"type": "object"}, "required": True}
+        inspection = {
+            "name": "kid",
+            "status": {"state": "ready"},
+            "result_contract": contract,
+            "result": {"files": []},
+        }
+        _, inspected = self.run_by(lambda: bm.inspect("kid"), inspection)
+        self.assertEqual(inspected.result_contract, contract)
+        self.assertEqual(inspected.result, {"files": []})
+        _, waited = self.run_by(lambda: bm.wait_all("kid"), {"settled": [inspection], "pending": []})
+        self.assertEqual(waited.settled[0].result, {"files": []})
+        self.assertEqual(waited.settled[0].result_contract, contract)
+        _, bare = self.run_by(lambda: bm.inspect("kid"), {"name": "kid", "status": {"state": "running"}})
+        self.assertIsNone(bare.result)
+        self.assertIsNone(bare.result_contract)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,10 @@
 //!   claude-model-pricing.ts`, `vendor/orca/src/main/codex-usage/
 //!   codex-model-pricing.ts`).
 //!
+//! Three harness entries are corrected after generation (`curated`, in the
+//! tests that generate the file) where the CLIs themselves were checked and
+//! the upstream sources describe them differently or not at all.
+//!
 //! An entry is knowledge, not support: whether Branchyard can drive a
 //! harness is its profile's business (`branchyard_harness::profiles`), and a
 //! connector is used only once Anvil compiles it (`docs/connectors.md`).
@@ -241,6 +245,57 @@ pub(crate) mod tests {
         out
     }
 
+    /// Corrections to the generated entries, from running the CLIs in
+    /// October 2026; they replace what the upstream sources gave for the
+    /// field. Antigravity also needs `modelProvider` set to `gemini` in its
+    /// settings before it reads the key (the catalog has no field for that;
+    /// `branchyard::inventory` reports it and the provisioner sets it).
+    fn curated(e: &mut HarnessEntry) {
+        let strings = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect();
+        match e.id.as_str() {
+            // DeepSeek Harness 0.2.0-rc.2: one `dsh` binary boots a profile
+            // (Orca detects its `dsh-tui` launcher, which Branchyard does not
+            // use: `dsh --profile acp` is the ACP profile).
+            "deepseek-harness" => {
+                e.binaries = strings(&["dsh"]);
+                e.homepage = Some("https://github.com/deepseek-ai/deepseek-harness".into());
+                e.install = strings(&["npm install -g @deepseek-ai/dsh"]);
+                e.auth_env = strings(&["DEEPSEEK_API_KEY"]);
+            }
+            // Gemini CLI 0.63.0: no emdash plugin describes it. `gemini`
+            // signs in on its first interactive run.
+            "gemini-cli" => {
+                e.homepage = Some("https://geminicli.com/docs/cli/cli-reference/".into());
+                e.install = strings(&["npm install -g @google/gemini-cli"]);
+                e.login = Some("gemini".into());
+                e.auth_env = strings(&["GEMINI_API_KEY", "GOOGLE_API_KEY"]);
+            }
+            // Antigravity CLI 1.3.3: `agy` signs in with Google on its first
+            // interactive run and reads a key from GEMINI_API_KEY only.
+            "antigravity" => {
+                e.login = Some("agy".into());
+                e.auth_env = strings(&["GEMINI_API_KEY"]);
+            }
+            // Oh My Pi 18.10.3: `omp` is a Bun script and needs Bun 1.3.14
+            // or newer on PATH (its installer installs or upgrades Bun;
+            // `bun install -g` needs it there already). `omp login PROVIDER`
+            // stores an OAuth login; provider keys are read from the
+            // environment. Its resume flag is `--resume` (`-r`), not the
+            // `--session` the vendored sources recorded.
+            "oh-my-pi" => {
+                e.login = Some("omp login".into());
+                e.auth_env = strings(&[
+                    "GEMINI_API_KEY",
+                    "OPENAI_API_KEY",
+                    "ANTHROPIC_API_KEY",
+                    "OPENROUTER_API_KEY",
+                ]);
+                e.resume_flag = Some("--resume".into());
+            }
+            _ => {}
+        }
+    }
+
     fn entry(harness: &crate::harness::Harness) -> HarnessEntry {
         let emdash = upstream_emdash();
         let orca = upstream::orca_agents();
@@ -303,7 +358,7 @@ pub(crate) mod tests {
         sources.extend(harness.orca.iter().map(|key| format!("orca:{key}")));
         sources.extend(harness.agentapi.map(|name| format!("agentapi:{name}")));
         sources.extend(harness.coder_module.map(|dir| format!("coder:{dir}")));
-        HarnessEntry {
+        let mut e = HarnessEntry {
             id: harness.id.to_owned(),
             name,
             binaries,
@@ -315,7 +370,9 @@ pub(crate) mod tests {
             model_flag: text(&command["modelFlag"]),
             resume_flag: text(&command["resumeFlag"]),
             sources,
-        }
+        };
+        curated(&mut e);
+        e
     }
 
     fn upstream_emdash() -> &'static std::collections::BTreeMap<String, EmdashAgent> {
@@ -371,7 +428,9 @@ pub(crate) mod tests {
              # data (Linux install commands with npm and Homebrew helpers expanded, CLI\n\
              # login, API-key variables, model names, model and resume flags) and joined\n\
              # with Orca's executables, agentapi's type names and the registry's module\n\
-             # names under Branchyard's harness IDs.\n"
+             # names under Branchyard's harness IDs. DeepSeek Harness, Gemini CLI and\n\
+             # Antigravity are corrected where their CLIs were run (`curated` in\n\
+             # crates/branchyard-controls/src/catalog.rs).\n"
         );
         for harness in HARNESSES {
             let e = entry(harness);
@@ -734,6 +793,21 @@ pub(crate) mod tests {
         let trae = harness("trae").unwrap();
         assert_eq!(trae.binaries, ["traecli"]);
         assert!(trae.install.is_empty());
+        // Corrected where the CLIs were run (DeepSeek Harness 0.2.0-rc.2,
+        // Gemini CLI 0.63.0, Antigravity CLI 1.3.3).
+        let dsh = harness("deepseek-harness").unwrap();
+        assert_eq!(dsh.binaries, ["dsh"]);
+        assert_eq!(dsh.install, ["npm install -g @deepseek-ai/dsh"]);
+        assert_eq!(dsh.auth_env, ["DEEPSEEK_API_KEY"]);
+        let gemini = harness("gemini-cli").unwrap();
+        assert_eq!(gemini.binaries, ["gemini"]);
+        assert_eq!(gemini.install, ["npm install -g @google/gemini-cli"]);
+        assert_eq!(gemini.login.as_deref(), Some("gemini"));
+        assert_eq!(gemini.auth_env, ["GEMINI_API_KEY", "GOOGLE_API_KEY"]);
+        let agy = harness("antigravity").unwrap();
+        assert_eq!(agy.binaries, ["agy", "antigravity"]);
+        assert_eq!(agy.login.as_deref(), Some("agy"));
+        assert_eq!(agy.auth_env, ["GEMINI_API_KEY"]);
         let known = entries.iter().filter(|e| !e.sources.is_empty()).count();
         assert!(known >= 40, "only {known} harnesses described upstream");
     }

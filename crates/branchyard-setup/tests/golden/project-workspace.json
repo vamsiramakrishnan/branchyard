@@ -53,6 +53,7 @@
     "max_minutes": 30,
     "max_turns": null,
     "model": null,
+    "models": true,
     "permissions": "ask",
     "remote": "local",
     "remote.ca_file": null,

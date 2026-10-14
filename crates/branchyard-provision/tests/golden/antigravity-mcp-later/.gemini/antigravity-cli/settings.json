@@ -1,0 +1,13 @@
+{
+  "modelProvider": "gemini",
+  "permissions": {
+    "allow": [
+      "command(regex:make .*)",
+      "command(regex:by .*)",
+      "command(regex:/usr/local/bin/by .*)"
+    ],
+    "deny": [
+      "write_file(*)"
+    ]
+  }
+}

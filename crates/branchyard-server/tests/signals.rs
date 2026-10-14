@@ -4,7 +4,7 @@
 //! a connection that never finishes its request. Unix only; requires
 //! `kill`.
 #![cfg(unix)]
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::io::{BufRead, BufReader, Write};
@@ -72,8 +72,8 @@ fn stop(child: &mut Child, signal: &str, limit: Duration) -> (Option<i32>, Durat
             (status.code(), elapsed, stderr)
         }
         Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            child.kill().unwrap();
+            child.wait().unwrap();
             panic!("still running {limit:?} after SIG{signal}");
         }
     }

@@ -100,11 +100,13 @@ impl Broker {
 
     /// Stop accepting connections and remove the socket. Connections
     /// already open keep being served, but their tokens have been revoked.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::Release);
         // Wake the accept loop so it sees the flag.
-        let _ = UnixStream::connect(&self.path);
+        best_effort(
+            "wake the broker accept loop",
+            UnixStream::connect(&self.path),
+        );
         if let Some(accept) = self.accept.take() {
             branchyard_support::join_reporting("broker accept", accept);
         }
@@ -113,7 +115,6 @@ impl Broker {
 }
 
 /// Answer one connection's requests until it closes.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn serve(yard: &Yard, stream: UnixStream) {
     let Ok(mut writer) = stream.try_clone() else {
         return;
@@ -125,7 +126,10 @@ fn serve(yard: &Yard, stream: UnixStream) {
             Ok(0) | Err(_) => return,
             Ok(_) if !line.ends_with('\n') => {
                 let error = Error::State("request line too long".into());
-                let _ = writeln!(writer, "{}", json!({ "error": describe(&error) }));
+                best_effort(
+                    "answer an over-long request",
+                    writeln!(writer, "{}", json!({ "error": describe(&error) })),
+                );
                 return;
             }
             Ok(_) => {}

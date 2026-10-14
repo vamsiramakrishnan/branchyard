@@ -37,7 +37,6 @@ pub fn set_failure_sink(sink: Arc<dyn FailureSink>) {
     *SINK.lock_recovering("failure sink") = Some(sink);
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-support
 pub(crate) fn report(context: &str, error: &dyn Display) {
     let error = error.to_string();
     tracing::warn!(
@@ -52,7 +51,9 @@ pub(crate) fn report(context: &str, error: &dyn Display) {
             error,
         };
         // A sink that panics must not take a Drop path down with it.
-        let _ = catch_unwind(AssertUnwindSafe(|| sink.record(&failure)));
+        if catch_unwind(AssertUnwindSafe(|| sink.record(&failure))).is_err() {
+            tracing::warn!("the failure sink panicked; this failure was logged but not recorded");
+        }
     }
 }
 

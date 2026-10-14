@@ -10,8 +10,9 @@ and delegation allowed, then runs this with:
 A surface's conversation is created with a grant and an envelope, its
 harness delegates a child that asks for more than the parent holds and
 gets the intersection, a second message continues the same branch and
-keeps the grant, the busy policies hold against a running turn, and the
-server's refusals arrive as the typed errors. Prints `ok` and exits 0.
+keeps the grant, the busy policies hold against a running turn, the server's
+refusals arrive as the typed errors, and a check and a self-reported status
+are run for the child through their routes. Prints `ok` and exits 0.
 
 Not a `test_*.py`: it needs the server the Rust test starts.
 """
@@ -183,7 +184,32 @@ def main() -> None:
         raise AssertionError("a child was granted a connector its parent lacks")
     check(not app.exists("too-wide"), "a refused spawn made a branch")
 
-    # 8. The harness-side view agrees: `by inspect --json` is the same object.
+    # 8. A check and a self-reported status for the child, as a person acting
+    #    for it: the check is an operation whose result is the report (this
+    #    branch has no check, so nothing ran and nothing conflicted), and a
+    #    blocked status reaches the parent and shows in the inspection.
+    checked = client.wait(app.check("kid"), timeout=180, check=True)
+    report = checked.check_report
+    check(report is not None and report.passed and report.outcome == "not_run", "check:", checked.raw)
+    check(report is not None and report.branch == "kid" and report.target == f"by/{branch}", report)
+    reported = app.report_status("kid", "blocked", "needs the API key", link="https://example.com/issues/7")
+    check(reported.report.state == "blocked" and reported.report.link == "https://example.com/issues/7", reported)
+    check(reported.escalation is not None and reported.escalation.to == branch, "escalation:", reported)
+    check(app.inspect("kid").reported == reported.report, "inspection:", app.inspect("kid").raw)
+    try:
+        app.report_status("kid", "done", "x")
+    except bc.InvalidRequestError as error:
+        check(error.field == "state" and "working" in error.message, "the refusal:", error.detail, error.message)
+    else:
+        raise AssertionError("a state that is not one of the five was accepted")
+    try:
+        app.check("nope")
+    except bc.NotFoundError as error:
+        check(error.code == "unknown_branch", error.code)
+    else:
+        raise AssertionError("checking a missing branch succeeded")
+
+    # 9. The harness-side view agrees: `by inspect --json` is the same object.
     check(json.dumps(parent.raw)[:1] == "{", parent.raw)
     print("ok")
 

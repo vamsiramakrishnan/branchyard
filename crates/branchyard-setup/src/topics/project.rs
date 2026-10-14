@@ -6,7 +6,7 @@ use super::{flag, harness_question, list, secret_choices, secret_ref_question, t
 use crate::config::{self, ProjectConfig, ProviderKind};
 use crate::interview::{number, Answers, Choice, Condition, Kind, Question, Rule};
 use crate::plan::{ArtifactKind, Plan, PlannedFile};
-use crate::probe::{Facts, Probe};
+use crate::probe::{harness_label, unapproved_tools, Facts, HarnessFact, LoginFile, Probe};
 use crate::Topic;
 
 const SECRET_PREFIX: &str = "secret.";
@@ -297,6 +297,9 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
         }
         qs.push(q);
     }
+    login_question(facts, &current, answers, &mut qs);
+    fleet_question(facts, answers, &mut qs);
+    models_questions(facts, &current, &mut qs);
     workspace_questions(facts, &current, &mut qs);
     let remote = current.remote.url.clone();
     qs.push(
@@ -402,6 +405,352 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
         .when(Condition::equals("remote", "server")),
     );
     qs
+}
+
+/// Asked once isolation is decided, whatever it is.
+fn after_isolation() -> Condition {
+    Condition::In {
+        id: "isolated".into(),
+        values: vec![Value::Bool(true), Value::Bool(false)],
+    }
+}
+
+/// Whether new branches get a private home by default: isolated, or a
+/// sandbox.
+fn private_home(answers: &Answers) -> bool {
+    flag(answers, "isolated") || text(answers, "provider").as_deref() == Some("microsandbox")
+}
+
+/// The source a login file is recorded under: `@~/.codex/auth.json`.
+fn login_source(login: &LoginFile) -> String {
+    format!("@{}", login.file)
+}
+
+/// The logins harnesses keep in files that a provisioner can carry into a
+/// private home: recorded in `[secrets]` by name with where the file is
+/// (`CODEX_AUTH = "@~/.codex/auth.json"`), never its content. Suggested
+/// for installed harnesses when new branches get a private home, since
+/// they have no login there otherwise.
+fn login_question(
+    facts: &Facts,
+    current: &ProjectConfig,
+    answers: &Answers,
+    qs: &mut Vec<Question>,
+) {
+    let logins: Vec<(&LoginFile, &str)> = facts
+        .logins
+        .iter()
+        .filter_map(|l| l.secret.as_deref().map(|secret| (l, secret)))
+        .collect();
+    if logins.is_empty() {
+        return;
+    }
+    let installed = |harness: &str| facts.installed().any(|h| h.harness == harness);
+    let default: Vec<Value> = logins
+        .iter()
+        .filter(|(login, secret)| match current.secrets.get(*secret) {
+            Some(source) => *source == login_source(login),
+            None => private_home(answers) && installed(&login.harness),
+        })
+        .map(|(_, secret)| Value::from(*secret))
+        .collect();
+    let choices = logins
+        .iter()
+        .map(|(login, secret)| {
+            Choice::new(
+                *secret,
+                format!("{} login", harness_label(&login.harness)),
+                format!(
+                    "{}{}, as {secret}",
+                    login.file,
+                    login
+                        .label
+                        .as_ref()
+                        .map_or(String::new(), |l| format!(" ({l})"))
+                ),
+            )
+        })
+        .collect();
+    qs.push(
+        Question::new(
+            "logins",
+            Kind::Multiselect,
+            "Logins",
+            "Which harness logins should isolated and sandboxed branches be given?",
+            "A branch with a private home (--isolated, a sandbox) is not logged in. Each login \
+             chosen is recorded in [secrets] by name with where its file is (CODEX_AUTH = \
+             \"@~/.codex/auth.json\"), never its content, and copied 0600 into such a branch's \
+             home when it starts. Branches that use your own home are not affected.",
+        )
+        .optional()
+        .default(Value::Array(default))
+        .choices(choices)
+        .when(after_isolation()),
+    );
+}
+
+/// The inventory default as `by init project` writes it: the installed
+/// harnesses logged in here (as `by harnesses` tells), `harness` first,
+/// effort `medium` where the harness takes one for the chosen isolation,
+/// and the first that routes tool permission requests as the judge. The
+/// same rules as `branchyard::inventory_default` (docs/fleet.md).
+fn inventory_fleet(facts: &Facts, answers: &Answers) -> Option<config::FleetConfig> {
+    let mut logged_in: Vec<&HarnessFact> = facts.logged_in().collect();
+    if let Some(preferred) = text(answers, "harness") {
+        if let Some(at) = logged_in.iter().position(|h| h.harness == preferred) {
+            let first = logged_in.remove(at);
+            logged_in.insert(0, first);
+        }
+    }
+    let candidates: Vec<config::CandidateConfig> = logged_in
+        .iter()
+        .map(|h| config::CandidateConfig {
+            harness: h.harness.clone(),
+            effort: branchyard_harness::profiles::by_id(&h.profile)
+                .is_some_and(|p| {
+                    branchyard_provision::takes_effort(p.harness, p.protocol, private_home(answers))
+                })
+                .then(|| "medium".to_owned()),
+            ..config::CandidateConfig::default()
+        })
+        .collect();
+    let judge = candidates
+        .iter()
+        .find(|c| !unapproved_tools(&c.harness))
+        .map(|c| config::JudgeConfig {
+            harness: c.harness.clone(),
+            effort: c.effort.clone(),
+            ..config::JudgeConfig::default()
+        });
+    (!candidates.is_empty()).then_some(config::FleetConfig {
+        candidates,
+        judge,
+        ..config::FleetConfig::default()
+    })
+}
+
+/// The candidates' labels: `codex, gemini-cli`.
+fn fleet_names(fleet: &config::FleetConfig) -> String {
+    fleet
+        .candidates
+        .iter()
+        .map(|c| match &c.effort {
+            Some(effort) => format!("{} effort={effort}", c.harness),
+            None => c.harness.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether neither file has a `[fleet]`: the inventory default is in use.
+fn no_fleet(facts: &Facts) -> bool {
+    [&facts.project_text, &facts.user_text]
+        .into_iter()
+        .flatten()
+        .filter_map(|text| config::parse(text).ok())
+        .all(|c| c.fleet.is_empty())
+}
+
+/// Offer to write the inventory default as an explicit `[fleet.default]`,
+/// so it stops moving with the logins. Off by default: a `[fleet]` also
+/// routes `by run` without `--harness`.
+fn fleet_question(facts: &Facts, answers: &Answers, qs: &mut Vec<Question>) {
+    if !no_fleet(facts) {
+        return;
+    }
+    let Some(fleet) = inventory_fleet(facts, answers) else {
+        return;
+    };
+    let names = fleet_names(&fleet);
+    let judge = fleet
+        .judge
+        .as_ref()
+        .map_or("deterministic".to_owned(), |j| j.harness.clone());
+    qs.push(
+        Question::new(
+            "fleet",
+            Kind::Confirm,
+            "Fleet",
+            "Should the harnesses logged in here be written down as [fleet.default]?",
+            &format!(
+                "Without a [fleet], by run --auto and by fan --auto route among the harnesses \
+                 logged in at that moment (now {names}; judge {judge}), so the list moves as \
+                 logins change. Written down it stays until you edit it, and by run without \
+                 --harness routes too instead of using the default harness."
+            ),
+        )
+        .default(false)
+        .choices(vec![
+            Choice::new(false, "No", "--auto keeps routing among what is logged in"),
+            Choice::new(true, "Yes", format!("write [fleet.default]: {names}")),
+        ])
+        .when(Condition::All(vec![
+            Condition::truthy("harness"),
+            after_isolation(),
+        ])),
+    );
+}
+
+/// The keys present by name, and the backends they make: `(backend, api,
+/// key variable)`.
+fn detected_backends(facts: &Facts) -> Vec<(&'static str, &'static str, &'static str)> {
+    let set = |name: &str| facts.variables.contains(name);
+    let mut backends = Vec::new();
+    if set("ANTHROPIC_API_KEY") {
+        backends.push(("anthropic", "anthropic", "ANTHROPIC_API_KEY"));
+    }
+    if let Some(key) = ["OPENAI_API_KEY", "CODEX_API_KEY"]
+        .into_iter()
+        .find(|k| set(k))
+    {
+        backends.push(("openai", "openai", key));
+    }
+    if set("GEMINI_API_KEY") {
+        backends.push(("gemini", "openai", "GEMINI_API_KEY"));
+    }
+    backends
+}
+
+/// The Gemini model a Claude request is answered by on the `gemini`
+/// backend, unless the person names another.
+const CLAUDE_ON_GEMINI: &str = "gemini-3.5-flash";
+
+/// The model gateway's backends and routes for the provider keys set here,
+/// by name; offered only while the file has no backends of its own.
+fn models_questions(facts: &Facts, current: &ProjectConfig, qs: &mut Vec<Question>) {
+    let backends = detected_backends(facts);
+    if backends.is_empty() || !current.models.backends.is_empty() {
+        return;
+    }
+    let listed: Vec<String> = backends
+        .iter()
+        .map(|(name, _, key)| format!("{name} ({key})"))
+        .collect();
+    let anthropic = backends.iter().any(|(name, _, _)| *name == "anthropic");
+    qs.push(
+        Question::new(
+            "models",
+            Kind::Confirm,
+            "Gateway",
+            "Should the model gateway get backends for the provider keys set here?",
+            &format!(
+                "Writes [models.backends] and routes by model for {}, each key by its variable's \
+                 name. Branches use the gateway when run with --model-gateway (or once [models] \
+                 allow is set); nothing else changes.",
+                listed.join(", ")
+            ),
+        )
+        .optional()
+        .default(true)
+        .choices(vec![
+            Choice::new(true, "Yes", format!("backends {}", listed.join(", "))),
+            Choice::new(false, "No", "no [models]"),
+        ]),
+    );
+    if !backends.iter().any(|(name, _, _)| *name == "gemini") {
+        return;
+    }
+    qs.push(
+        Question::new(
+            "models.claude",
+            Kind::Confirm,
+            "Claude route",
+            match anthropic {
+                true => "Should Claude models fall back to Gemini when Anthropic cannot answer?",
+                false => "Should requests for Claude models be answered by Gemini?",
+            },
+            "The gateway translates Claude Code's Anthropic requests into chat completions for \
+             the gemini backend, so Claude Code runs on a branch without an Anthropic key or \
+             login. The trade-off: the answers come from a Gemini model, not Claude, so quality \
+             and tool use differ; thinking comes back unsigned; count_tokens and the rest of \
+             Anthropic's API are not served (502); and this route has not been tried against \
+             Gemini's endpoint itself.",
+        )
+        .optional()
+        .default(false)
+        .choices(vec![
+            Choice::new(false, "No", "Claude models go to Anthropic only"),
+            Choice::new(
+                true,
+                "Yes",
+                match anthropic {
+                    true => "after Anthropic fails (refused, 5xx, 429), translated for Gemini",
+                    false => "translated for a Gemini model",
+                },
+            ),
+        ])
+        .when(Condition::truthy("models")),
+    );
+    qs.push(
+        Question::new(
+            "models.claude_model",
+            Kind::Text,
+            "Gemini model",
+            "Which Gemini model should answer requests for Claude models?",
+            "The route's backend_model: what the gemini backend is asked for in place of the \
+             Claude model the harness names.",
+        )
+        .default(CLAUDE_ON_GEMINI)
+        .choices(vec![Choice::new(
+            CLAUDE_ON_GEMINI,
+            CLAUDE_ON_GEMINI,
+            "the model deepseek-harness ran on through this endpoint",
+        )])
+        .rule(Rule::Name { max: 64 })
+        .when(Condition::truthy("models.claude")),
+    );
+}
+
+/// `[models.backends]` and `[[models.routes]]` from the answers.
+fn models_tables(facts: &Facts, answers: &Answers) -> (Value, Value) {
+    let backends = detected_backends(facts);
+    let has = |name: &str| backends.iter().any(|(n, _, _)| *n == name);
+    let mut tables = serde_json::Map::new();
+    for (name, api, key) in &backends {
+        let backend = config::ModelBackendConfig {
+            api: (*api).to_owned(),
+            key: Some((*key).to_owned()),
+            url: (*name == "gemini").then(|| config::GEMINI_OPENAI_URL.to_owned()),
+            compat: (*name == "gemini").then(|| "gemini".to_owned()),
+            ..config::ModelBackendConfig::default()
+        };
+        tables.insert(
+            (*name).to_owned(),
+            serde_json::to_value(backend).unwrap_or_default(),
+        );
+    }
+    let route = |model: &str, backend: &str| config::ModelRouteConfig {
+        model: model.to_owned(),
+        backends: vec![backend.to_owned()],
+        ..config::ModelRouteConfig::default()
+    };
+    let claude_model = (has("gemini") && flag(answers, "models.claude")).then(|| {
+        text(answers, "models.claude_model").unwrap_or_else(|| CLAUDE_ON_GEMINI.to_owned())
+    });
+    let mut routes = Vec::new();
+    if has("anthropic") {
+        let mut claude = route("claude-*", "anthropic");
+        if let Some(model) = &claude_model {
+            claude.fallbacks = vec!["gemini".into()];
+            claude.backend_model = Some(model.clone());
+        }
+        routes.push(claude);
+    } else if let Some(model) = &claude_model {
+        let mut claude = route("claude-*", "gemini");
+        claude.backend_model = Some(model.clone());
+        routes.push(claude);
+    }
+    if has("openai") {
+        routes.push(route("gpt-*", "openai"));
+        routes.push(route("codex-*", "openai"));
+    }
+    if has("gemini") {
+        routes.push(route("gemini-*", "gemini"));
+    }
+    (
+        Value::Object(tables),
+        serde_json::to_value(routes).unwrap_or_default(),
+    )
 }
 
 /// `[workspace]`, for the project file only: detected install commands,
@@ -567,6 +916,43 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
             flat.insert(format!("secrets.{name}"), Value::from(source));
         }
     }
+    // Logins in files, by where they are; the secrets question's own
+    // answer for a name wins. One not chosen is removed only when it is
+    // recorded as this question would record it.
+    if answers.contains_key("logins") {
+        let chosen = list(answers, "logins");
+        let named = list(answers, "secrets");
+        for login in &facts.logins {
+            let Some(secret) = &login.secret else {
+                continue;
+            };
+            let key = format!("secrets.{secret}");
+            let source = Value::from(login_source(login));
+            if chosen.contains(secret) {
+                if !named.contains(secret) {
+                    flat.insert(key, source);
+                }
+            } else if flat.get(&key) == Some(&source) {
+                flat.remove(&key);
+            }
+        }
+    }
+    let fleet = match flag(answers, "fleet") {
+        true => inventory_fleet(facts, answers),
+        false => None,
+    };
+    if let Some(fleet) = &fleet {
+        flat.insert(
+            "fleet.default".into(),
+            serde_json::to_value(fleet).unwrap_or_default(),
+        );
+    }
+    let gateway = flag(answers, "models");
+    if gateway {
+        let (backends, routes) = models_tables(facts, answers);
+        flat.insert("models.backends".into(), backends);
+        flat.insert("models.routes".into(), routes);
+    }
     match text(answers, "remote").as_deref() {
         Some("server") => {
             set!("remote.url", get("remote.url"));
@@ -692,12 +1078,43 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
                 .into(),
         );
     }
-    let secret_note = list(answers, "secrets");
+    let mut secret_note = list(answers, "secrets");
+    for login in list(answers, "logins") {
+        if !secret_note.contains(&login) {
+            secret_note.push(login);
+        }
+    }
     if !secret_note.is_empty() {
         plan.notes.push(format!(
             "Secrets by name only ({}); their values stay in their variables or files.",
             secret_note.join(", ")
         ));
+    }
+    if let Some(fleet) = &fleet {
+        plan.notes.push(format!(
+            "[fleet.default] routes every kind of task among {}; by run without --harness now \
+             routes too. Remove it to route --auto by what is logged in again.",
+            fleet_names(fleet)
+        ));
+    } else if no_fleet(facts) {
+        if let Some(fleet) = inventory_fleet(facts, answers) {
+            plan.notes.push(format!(
+                "No [fleet]: by run --auto and by fan --auto route among the harnesses logged in \
+                 when they run (now {}).",
+                fleet_names(&fleet)
+            ));
+        }
+    }
+    if gateway {
+        plan.notes.push(
+            "The model gateway's backends hold the keys by name; a branch uses them when run \
+             with --model-gateway, or once [models] allow is set."
+                .into(),
+        );
+        plan.command(
+            "by doctor",
+            "Check the gateway's backends and routes, and what each route's models cost.",
+        );
     }
     plan.files.push(PlannedFile::new(
         &path,
@@ -927,6 +1344,298 @@ mod tests {
             .content
             .clone()
             .unwrap()
+    }
+
+    fn login(state: &str, evidence: &str) -> Option<crate::probe::HarnessLogin> {
+        Some(crate::probe::HarnessLogin {
+            state: state.into(),
+            evidence: evidence.into(),
+            detail: format!("{state} ({evidence})"),
+        })
+    }
+
+    /// Today's machine: Codex logged in by device code (its auth file has a
+    /// token), Antigravity and Gemini CLI by GEMINI_API_KEY with
+    /// Antigravity's settings naming Gemini, Claude Code logged out;
+    /// GEMINI_API_KEY and CODEX_API_KEY set.
+    fn machine() -> FakeProbe {
+        let mut probe = FakeProbe::typical();
+        probe.variables = ["GEMINI_API_KEY".to_owned(), "CODEX_API_KEY".to_owned()].into();
+        for h in &mut probe.harnesses {
+            (h.installed, h.login) = match h.harness.as_str() {
+                "claude-code" => (true, login("logged_out", "likely")),
+                "codex" => (true, login("logged_in", "verified")),
+                "antigravity" | "gemini-cli" => (true, login("logged_in", "likely")),
+                _ => (false, None),
+            };
+        }
+        probe.files.insert(
+            "~/.codex/auth.json".into(),
+            r#"{"auth_mode": "chatgpt", "tokens": {"refresh_token": "rt-SECRET-VALUE-1"}}"#.into(),
+        );
+        probe.files.insert(
+            "~/.gemini/antigravity-cli/settings.json".into(),
+            r#"{"modelProvider": "gemini"}"#.into(),
+        );
+        probe
+    }
+
+    fn answers(value: Value) -> BTreeMap<String, Value> {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn config_of(facts: &Facts, answers: &Answers, probe: &FakeProbe) -> ProjectConfig {
+        let body = plan_body(facts, answers, probe);
+        assert!(!body.contains("rt-SECRET"), "{body}");
+        config::parse(&body).unwrap_or_else(|e| panic!("{e}\n{body}"))
+    }
+
+    #[test]
+    fn harness_logins_in_files_are_found_and_recorded_by_where_they_are() {
+        let probe = machine();
+        let facts = Facts::gather(&probe);
+        assert_eq!(facts.logins.len(), 2, "{:?}", facts.logins);
+        let codex = &facts.logins[0];
+        assert_eq!(
+            (
+                codex.file.as_str(),
+                codex.secret.as_deref(),
+                codex.label.as_deref()
+            ),
+            (
+                "~/.codex/auth.json",
+                Some("CODEX_AUTH"),
+                Some("auth_mode chatgpt")
+            )
+        );
+        assert_eq!(facts.logins[1].secret, None);
+        let lines = serde_json::to_string(&facts.lines()).unwrap();
+        assert!(!lines.contains("rt-SECRET"), "{lines}");
+        assert!(lines.contains("codex ~/.codex/auth.json (auth_mode chatgpt), as CODEX_AUTH"));
+        assert!(lines.contains("antigravity ~/.gemini/antigravity-cli/settings.json (modelProvider gemini), not provisioned"));
+        assert!(lines.contains("claude-code 2.1.283 (Claude Code) (logged out, likely)"));
+        // A label that could be a credential never comes back.
+        assert_eq!(
+            crate::probe::label_in(r#"{"k": "sk-ant-api03-AbC/xyz+=="}"#, "k"),
+            None
+        );
+        assert_eq!(crate::probe::label_in(r#"{"k": {"nested": 1}}"#, "k"), None);
+
+        // Logged out Claude Code is not suggested; logged in Codex is.
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        assert_eq!(state.answers["harness"], json!("codex"));
+        // Not isolated: offered, not chosen, and nothing recorded.
+        assert_eq!(state.answers["logins"], json!([]));
+        let config = config_of(&facts, &state.answers, &probe);
+        assert!(config.secrets.is_empty(), "{:?}", config.secrets);
+        // Isolated: suggested for the installed harness, by where it is.
+        let isolated = resolve(
+            &|a| questions(&facts, a),
+            &answers(json!({"isolated": true, "secrets": []})),
+            true,
+        );
+        assert_eq!(isolated.answers["logins"], json!(["CODEX_AUTH"]));
+        let config = config_of(&facts, &isolated.answers, &probe);
+        assert_eq!(config.secrets["CODEX_AUTH"], "@~/.codex/auth.json");
+        // Chosen by label without isolation, it is recorded too; dropped
+        // again, the entry this question wrote goes.
+        let chosen = resolve(
+            &|a| questions(&facts, a),
+            &answers(json!({"logins": "Codex login"})),
+            true,
+        );
+        let mut probe_with = probe.clone();
+        let written = plan_body(&facts, &chosen.answers, &probe);
+        assert!(
+            written.contains("CODEX_AUTH = \"@~/.codex/auth.json\""),
+            "{written}"
+        );
+        probe_with
+            .files
+            .insert(config::PROJECT_FILE.into(), written.clone());
+        let again = Facts::gather(&probe_with);
+        let kept = resolve(&|a| questions(&again, a), &BTreeMap::new(), true);
+        assert_eq!(kept.answers["logins"], json!(["CODEX_AUTH"]));
+        let dropped = resolve(
+            &|a| questions(&again, a),
+            &answers(json!({"logins": []})),
+            true,
+        );
+        let config = config_of(&again, &dropped.answers, &probe_with);
+        assert!(!config.secrets.contains_key("CODEX_AUTH"));
+    }
+
+    #[test]
+    fn the_inventory_default_can_be_written_as_the_fleet_default() {
+        let probe = machine();
+        let facts = Facts::gather(&probe);
+        // Offered, off by default: --auto keeps routing by the inventory.
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        assert_eq!(state.answers["fleet"], json!(false));
+        let plan = plan(&facts, &state.answers, &probe);
+        assert!(
+            plan.notes
+                .iter()
+                .any(|n| n.contains("route among the harnesses logged in when they run (now codex, antigravity, gemini-cli)")),
+            "{:?}",
+            plan.notes
+        );
+        assert!(config_of(&facts, &state.answers, &probe).fleet.is_empty());
+        // Written: the logged-in harnesses, the default harness first, the
+        // first that routes permission requests as the judge.
+        let chosen = resolve(
+            &|a| questions(&facts, a),
+            &answers(json!({"fleet": "yes", "harness": "gemini-cli"})),
+            true,
+        );
+        let fleet = config_of(&facts, &chosen.answers, &probe).fleet["default"].clone();
+        let names: Vec<&str> = fleet
+            .candidates
+            .iter()
+            .map(|c| c.harness.as_str())
+            .collect();
+        assert_eq!(names, ["gemini-cli", "codex", "antigravity"]);
+        assert!(fleet
+            .candidates
+            .iter()
+            .all(|c| c.model.is_none() && c.effort.is_none()));
+        assert_eq!(fleet.judge.unwrap().harness, "gemini-cli");
+        assert_eq!((fleet.attempts, fleet.failover), (None, None));
+        // Isolated, Codex takes effort medium; Antigravity is never judge.
+        let isolated = resolve(
+            &|a| questions(&facts, a),
+            &answers(
+                json!({"fleet": true, "isolated": true, "harness": "antigravity", "secrets": []}),
+            ),
+            true,
+        );
+        let fleet = config_of(&facts, &isolated.answers, &probe).fleet["default"].clone();
+        assert_eq!(fleet.candidates[1].effort.as_deref(), Some("medium"));
+        assert_eq!(fleet.candidates[0].harness, "antigravity");
+        let judge = fleet.judge.unwrap();
+        assert_eq!(
+            (judge.harness.as_str(), judge.effort.as_deref()),
+            ("codex", Some("medium"))
+        );
+        // A [fleet] in either file is the configuration's: not asked.
+        let mut configured = probe.clone();
+        configured.files.insert(
+            config::PROJECT_FILE.into(),
+            "[fleet.docs]\ncandidates = [{ harness = \"codex\" }]\n".into(),
+        );
+        let facts = Facts::gather(&configured);
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        assert!(!state.answers.contains_key("fleet"), "{:?}", state.answers);
+        // Nothing logged in: not asked either.
+        let facts = Facts::gather(&FakeProbe::typical());
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        assert!(!state.answers.contains_key("fleet"));
+    }
+
+    #[test]
+    fn the_gateway_gets_backends_for_the_keys_set_here() {
+        let probe = machine();
+        let facts = Facts::gather(&probe);
+        // With a key, --defaults configures it; Claude on Gemini stays off.
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        assert_eq!(state.answers["models"], json!(true));
+        assert_eq!(state.answers["models.claude"], json!(false));
+        let models = config_of(&facts, &state.answers, &probe).models;
+        assert_eq!(
+            models.backends.keys().collect::<Vec<_>>(),
+            ["gemini", "openai"]
+        );
+        let gemini = &models.backends["gemini"];
+        assert_eq!(gemini.api, "openai");
+        assert_eq!(gemini.url.as_deref(), Some(config::GEMINI_OPENAI_URL));
+        assert_eq!(gemini.key.as_deref(), Some("GEMINI_API_KEY"));
+        assert_eq!(gemini.compat.as_deref(), Some("gemini"));
+        assert_eq!(
+            models.backends["openai"].key.as_deref(),
+            Some("CODEX_API_KEY")
+        );
+        assert_eq!(models.backends["openai"].url, None);
+        let routes: Vec<(&str, &str)> = models
+            .routes
+            .iter()
+            .map(|r| (r.model.as_str(), r.backends[0].as_str()))
+            .collect();
+        assert_eq!(
+            routes,
+            [
+                ("gpt-*", "openai"),
+                ("codex-*", "openai"),
+                ("gemini-*", "gemini")
+            ]
+        );
+        assert!(models.allow.is_none(), "branches are not put on it");
+
+        // Claude models on Gemini, translated, with a backend model.
+        let claude = resolve(
+            &|a| questions(&facts, a),
+            &answers(json!({"models.claude": "yes"})),
+            true,
+        );
+        let models = config_of(&facts, &claude.answers, &probe).models;
+        let route = &models.routes[0];
+        assert_eq!(
+            (
+                route.model.as_str(),
+                route.backends.as_slice(),
+                route.backend_model.as_deref()
+            ),
+            (
+                "claude-*",
+                &["gemini".to_owned()][..],
+                Some("gemini-3.5-flash")
+            )
+        );
+        // With an Anthropic key, Gemini is the fallback after Anthropic.
+        let mut both = machine();
+        both.variables.insert("ANTHROPIC_API_KEY".into());
+        let facts = Facts::gather(&both);
+        let state = resolve(
+            &|a| questions(&facts, a),
+            &answers(json!({"models.claude": true, "models.claude_model": "gemini-2.5-pro"})),
+            true,
+        );
+        let models = config_of(&facts, &state.answers, &both).models;
+        let claude = &models.routes[0];
+        assert_eq!(claude.backends, ["anthropic"]);
+        assert_eq!(claude.fallbacks, ["gemini"]);
+        assert_eq!(claude.backend_model.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(
+            models.backends["anthropic"].key.as_deref(),
+            Some("ANTHROPIC_API_KEY")
+        );
+        // Skipped, nothing is written.
+        let skipped = resolve(
+            &|a| questions(&facts, a),
+            &answers(json!({"models": "skip"})),
+            true,
+        );
+        assert!(config_of(&facts, &skipped.answers, &both).models.is_empty());
+
+        // No key: no question, and --defaults keeps the gateway off.
+        let mut keyless = machine();
+        keyless.variables.clear();
+        let facts = Facts::gather(&keyless);
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        assert!(!state.answers.contains_key("models"));
+        assert!(config_of(&facts, &state.answers, &keyless)
+            .models
+            .is_empty());
+        // Backends of its own: the file is the configuration's.
+        let mut configured = machine();
+        configured.files.insert(
+            config::PROJECT_FILE.into(),
+            "[models.backends.local]\napi = \"openai\"\nurl = \"http://127.0.0.1:8000\"\n".into(),
+        );
+        let facts = Facts::gather(&configured);
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        assert!(!state.answers.contains_key("models"));
+        let models = config_of(&facts, &state.answers, &configured).models;
+        assert_eq!(models.backends.keys().collect::<Vec<_>>(), ["local"]);
     }
 
     #[test]

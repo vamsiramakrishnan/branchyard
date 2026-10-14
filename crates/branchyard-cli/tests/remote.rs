@@ -3,7 +3,7 @@
 //! Hermetic: the fake ACP agent stands in for every harness. Requires
 //! `git`, `sh` and `kill`.
 
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -30,7 +30,9 @@ impl Dir {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(&dir).unwrap();
         Dir(fs::canonicalize(dir).unwrap())
     }
@@ -63,7 +65,7 @@ impl Dir {
 
 impl Drop for Dir {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        branchyard_support::cleanup_dir(&self.0);
     }
 }
 
@@ -135,16 +137,19 @@ impl Served {
     }
 
     fn stop(&mut self) -> Option<i32> {
-        let _ = Command::new("kill")
-            .args(["-TERM", &self.child.id().to_string()])
-            .status();
+        branchyard_support::best_effort(
+            "send the kill signal",
+            Command::new("kill")
+                .args(["-TERM", &self.child.id().to_string()])
+                .status(),
+        );
         if let Ok(status) =
             wait::try_until_for(Duration::from_secs(20), || self.child.try_wait().unwrap())
         {
             return status.code();
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        branchyard_support::best_effort("kill the test server", self.child.kill());
+        branchyard_support::best_effort("reap the test server", self.child.wait());
         None
     }
 
@@ -745,8 +750,10 @@ fn delegation_commands_print_what_local_ones_do() {
         assert_eq!(
             l.status.code(),
             r.status.code(),
-            "{args:?}\nlocal: {}\nremote: {}",
+            "{args:?}\nlocal: {}{}\nremote: {}{}",
+            text(&l.stdout),
             text(&l.stderr),
+            text(&r.stdout),
             text(&r.stderr)
         );
         let (l, r) = (json(&l.stdout, &here), json(&r.stdout, &there));
@@ -796,6 +803,61 @@ fn delegation_commands_print_what_local_ones_do() {
     assert_eq!(sent["name"], "kid");
     same_text(&["inspect", "kid"]);
     same_text(&["events", "kid", "--cursor", "1", "--limit", "3"]);
+
+    // `check` runs the branch's check as integrating it would, on the
+    // server, and prints the report a local one does; a check that fails
+    // exits 1 either way.
+    let report = same_json(&["check", "kid", "--json"]);
+    assert_eq!(report["outcome"], "not_run", "{report}");
+    assert_eq!(report["target"], "by/root");
+    same_text(&["check", "kid"]);
+    same_json(&[
+        "spawn",
+        "WRITE bad.txt=b",
+        "--parent",
+        "root",
+        "--name",
+        "bad",
+        "--check",
+        "false",
+        "--yes",
+        "--json",
+    ]);
+    let failed = same_json(&["check", "bad", "--json"]);
+    assert_eq!(failed["outcome"], "failed", "{failed}");
+    let (l, r) = both(&["check", "bad"]);
+    assert_eq!((l.status.code(), r.status.code()), (Some(1), Some(1)));
+    assert_eq!(
+        normalize(&text(&l.stdout), &here),
+        normalize(&text(&r.stdout), &there)
+    );
+
+    // `report-status --as` states a branch's own status through the
+    // server; a blocked one reaches the parent's inbox, and the
+    // inspection shows it.
+    let said = same_json(&[
+        "report-status",
+        "blocked",
+        "needs the API key",
+        "--as",
+        "kid",
+        "--link",
+        "https://example.com/issues/7",
+        "--json",
+    ]);
+    assert_eq!(said["report"]["state"], "blocked", "{said}");
+    assert_eq!(said["escalation"]["to"], "root");
+    let inspected = same_json(&["inspect", "kid", "--json"]);
+    assert_eq!(inspected["reported"], said["report"]);
+    same_text(&[
+        "report-status",
+        "working",
+        "reading the tests",
+        "--as",
+        "kid",
+    ]);
+    same_json(&["inbox", "--as", "root", "--json"]);
+
     let merged = same_json(&["integrate", "kid", "--json"]);
     assert_eq!(merged["target"], "by/root");
     assert_eq!(
@@ -815,6 +877,21 @@ fn delegation_commands_print_what_local_ones_do() {
         &["inspect", "nope", "--json"],
         &["children", "--json"],
         &["events", "nope", "--json"],
+        &["check", "nope", "--json"],
+        &["check", "--json"],
+        &["report-status", "working", "x", "--as", "nope", "--json"],
+        &["report-status", "working", "x", "--json"],
+        &["report-status", "working", " ", "--as", "kid", "--json"],
+        &[
+            "report-status",
+            "working",
+            "x",
+            "--link",
+            "ftp://example.com/",
+            "--as",
+            "kid",
+            "--json",
+        ],
     ] {
         let error = same_json(args);
         assert!(error["error"]["kind"].is_string(), "{args:?}: {error}");
@@ -1736,8 +1813,8 @@ struct Killed(Child);
 
 impl Drop for Killed {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        branchyard_support::best_effort("kill the test child", self.0.kill());
+        branchyard_support::best_effort("reap the test child", self.0.wait());
     }
 }
 

@@ -1,0 +1,14 @@
+{
+  "defaultThinkingLevel": "medium",
+  "modelRoles": {
+    "default": "google/gemini-3.5-flash"
+  },
+  "tools": {
+    "approval": {
+      "browser": "deny",
+      "edit": "deny",
+      "web_search": "deny",
+      "write": "deny"
+    }
+  }
+}

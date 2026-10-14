@@ -164,10 +164,12 @@ pub fn review_text(plan: &Plan, color: bool) -> String {
     out
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn cancelled(error: io::Error) -> Failure {
     if error.kind() == io::ErrorKind::Interrupted {
-        let _ = cliclack::outro_cancel("Cancelled; nothing was written.");
+        branchyard_support::best_effort(
+            "print the cancel message",
+            cliclack::outro_cancel("Cancelled; nothing was written."),
+        );
         return Failure::Reported;
     }
     Failure::Io(error)

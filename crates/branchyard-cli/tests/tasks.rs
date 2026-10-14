@@ -5,7 +5,7 @@
 //! task, and is removed without touching it; rewind and fork by task.
 //! Hermetic: `BRANCHYARD_HOME` is the test's own directory.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -31,7 +31,9 @@ impl Fixture {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(dir.join("repo")).unwrap();
         fs::create_dir_all(dir.join("folder")).unwrap();
         let dir = fs::canonicalize(dir).unwrap();
@@ -104,7 +106,7 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+        branchyard_support::cleanup_dir(&self.dir);
     }
 }
 

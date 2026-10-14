@@ -3,7 +3,7 @@
 //! `--remote`. Hermetic: the fake ACP agent is the harness; the webhook is
 //! signed here. Requires `git`, `sh` and `kill`.
 
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -30,7 +30,9 @@ impl Dir {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(&dir).unwrap();
         Dir(fs::canonicalize(dir).unwrap())
     }
@@ -55,7 +57,7 @@ impl Dir {
 
 impl Drop for Dir {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        branchyard_support::cleanup_dir(&self.0);
     }
 }
 
@@ -144,7 +146,10 @@ impl Served {
         );
         stream.write_all(request.as_bytes()).unwrap();
         let mut response = String::new();
-        let _ = stream.read_to_string(&mut response);
+        branchyard_support::best_effort(
+            "read the test response",
+            stream.read_to_string(&mut response),
+        );
         response
             .split_whitespace()
             .nth(1)
@@ -155,17 +160,20 @@ impl Served {
 
 impl Drop for Served {
     fn drop(&mut self) {
-        let _ = Command::new("kill")
-            .args(["-TERM", &self.child.id().to_string()])
-            .status();
+        branchyard_support::best_effort(
+            "send the kill signal",
+            Command::new("kill")
+                .args(["-TERM", &self.child.id().to_string()])
+                .status(),
+        );
         let exited = wait::try_until_for(Duration::from_secs(20), || {
             self.child.try_wait().ok().flatten().is_some()
         });
         if exited.is_ok() {
             return;
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        branchyard_support::best_effort("kill the test server", self.child.kill());
+        branchyard_support::best_effort("reap the test server", self.child.wait());
     }
 }
 

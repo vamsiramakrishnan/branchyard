@@ -13,7 +13,12 @@
 //!
 //! A login state is `verified` only when the harness's own status command
 //! said so; otherwise it is `likely` (a key variable or credential file is
-//! present, or every known credential file is absent) or unknown.
+//! present, or every known credential file is absent) or unknown. Three
+//! harnesses need a look inside their configuration, still by name only
+//! (the `probes` module): Antigravity reads a key only when its settings select the
+//! Gemini provider, DeepSeek Harness takes its provider from
+//! `cordis.patch.yml`, and Gemini CLI's headless runs need the workspace
+//! trusted (`GEMINI_CLI_TRUST_WORKSPACE`).
 //!
 //! Installing runs the catalog's own install command for the harness,
 //! pinned to the version its default profile was checked against when the
@@ -329,7 +334,7 @@ const LOGIN_CHECKS: &[LoginCheck] = &[
             "$HOME/.gemini/oauth_creds.json",
             "~/.gemini/oauth_creds.json",
         )],
-        env: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        env: &[],
         keychain_on_macos: false,
     },
     LoginCheck {
@@ -349,7 +354,30 @@ const LOGIN_CHECKS: &[LoginCheck] = &[
             "$HOME/.gemini/antigravity-cli/antigravity-oauth-token",
             "~/.gemini/antigravity-cli/antigravity-oauth-token",
         )],
-        env: &["AGY_TOKEN", "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        // GEMINI_API_KEY is the catalog's `auth_env`: agy reads a key from
+        // it alone (GOOGLE_API_KEY has no effect), and only with
+        // `modelProvider` set to `gemini` in its settings.
+        env: &["AGY_TOKEN"],
+        keychain_on_macos: false,
+    },
+    // DeepSeek Harness 0.2.0-rc.2 has no login command: DEEPSEEK_API_KEY
+    // (the catalog's `auth_env`) feeds its shipped provider, and `probes`
+    // reads the provider a `cordis.patch.yml` configures.
+    LoginCheck {
+        harness: "deepseek-harness",
+        status: None,
+        files: &[],
+        env: &[],
+        keychain_on_macos: false,
+    },
+    // Oh My Pi 18.10.3 reads provider keys from its environment (the
+    // catalog's `auth_env`) and keeps `omp login` logins in a database,
+    // which `probes` reads for provider names.
+    LoginCheck {
+        harness: "oh-my-pi",
+        status: None,
+        files: &[],
+        env: &[],
         keychain_on_macos: false,
     },
     LoginCheck {
@@ -387,6 +415,102 @@ const VERSION_ARGS: &[(&str, &[&str])] = &[("jules", &["version"])];
 
 fn login_check(id: &str) -> Option<&'static LoginCheck> {
     LOGIN_CHECKS.iter().find(|c| c.harness == id)
+}
+
+/// The `cordis.patch.yml` files DeepSeek Harness composes its providers
+/// from, as `probes` reads them: under `$DSH_HOME` (default `~/.dsh`) and
+/// under its ACP profile there, for people.
+const DSH_CONFIGS: &[&str] = &[
+    "~/.dsh/cordis.patch.yml",
+    "~/.dsh/profiles/acp/cordis.patch.yml",
+];
+
+/// Where Oh My Pi keeps the logins `omp login` stores, as shown to people.
+const OMP_LOGINS: &str = "~/.omp/agent/agent.db";
+
+/// The Bun release Oh My Pi 18.10.3 needs (`engines.bun` of
+/// `@oh-my-pi/pi-coding-agent`, and `MIN_BUN_VERSION` of its installer): an
+/// older Bun fails to parse `omp` and its version command exits 1.
+const OMP_MIN_BUN: &str = "1.3.14";
+
+/// What only a look inside a configuration file or a flag variable can
+/// tell, as `sh` run on the machine once the harness is found. Each prints
+/// `fact ID NAME` (or an `env` line for a key variable that is set) and
+/// never a value: the files are searched, not printed.
+///
+/// - Antigravity 1.3.3 reads `GEMINI_API_KEY` only when its `settings.json`
+///   has `"modelProvider": "gemini"`: `model-provider-gemini`.
+/// - Gemini CLI 0.63.0's headless `gemini -p` refuses an untrusted
+///   directory unless `GEMINI_CLI_TRUST_WORKSPACE` is `true`:
+///   `trust-workspace`.
+/// - DeepSeek Harness 0.2.0-rc.2 composes its `llm-pi-ai` providers from
+///   `cordis.patch.yml` under `$DSH_HOME` and the profile's: a `providers:`
+///   key is `providers FILE`, and each `apiKeyEnv:` variable that is set is
+///   an `env` line.
+/// - Oh My Pi 18.10.3 is a Bun script: `runs-on-bun` when its executable's
+///   first bytes name `bun`, and `bun VERSION` or `bun missing` for the Bun
+///   on `PATH`. Its `omp login` logins are rows of `~/.omp/agent/agent.db`:
+///   `login PROVIDER` for each provider with one, read with `sqlite3` or
+///   `python3` (`login-store unread` when the file exists and neither
+///   does); the provider's name is read, never the credential. A key in
+///   `~/.omp/agent/.env` or `~/.omp/.env`, which omp loads, is `env-file
+///   NAME FILE`, the name alone.
+fn probes(id: &str) -> &'static str {
+    match id {
+        "antigravity" => {
+            r##"  grep -Eq '"modelProvider"[[:space:]]*:[[:space:]]*"gemini"' "$HOME/.gemini/antigravity-cli/settings.json" 2>/dev/null && echo 'fact antigravity model-provider-gemini'
+"##
+        }
+        "gemini-cli" => {
+            r##"  [ "${GEMINI_CLI_TRUST_WORKSPACE:-}" = true ] && echo 'fact gemini-cli trust-workspace'
+"##
+        }
+        "deepseek-harness" => {
+            r##"  ph=${DSH_HOME:-$HOME/.dsh}
+  for pf in cordis.patch.yml profiles/acp/cordis.patch.yml; do
+    [ -f "$ph/$pf" ] || continue
+    grep -Eq '^[[:space:]-]*providers:' "$ph/$pf" 2>/dev/null && echo "fact deepseek-harness providers $pf"
+    for pv in $(sed -n 's/^[[:space:]-]*apiKeyEnv:[^A-Za-z_]*\([A-Za-z_][A-Za-z0-9_]*\).*$/\1/p' "$ph/$pf" 2>/dev/null); do
+      eval "[ -n \"\${$pv:-}\" ]" && echo "env deepseek-harness $pv"
+    done
+  done
+"##
+        }
+        "oh-my-pi" => {
+            r##"  head -c 64 "$f" 2>/dev/null | tr -d '\0' | grep -q bun && echo 'fact oh-my-pi runs-on-bun'
+  if b=$(command -v bun 2>/dev/null); then echo "fact oh-my-pi bun $("$b" --version 2>/dev/null | head -n1)"; else echo 'fact oh-my-pi bun missing'; fi
+  db="$HOME/.omp/agent/agent.db"
+  if [ -f "$db" ]; then
+    q='select distinct provider from auth_credentials where disabled_cause is null'
+    if command -v sqlite3 >/dev/null 2>&1; then
+      for pv in $(sqlite3 -readonly "$db" "$q" 2>/dev/null); do echo "fact oh-my-pi login $pv"; done
+    elif command -v python3 >/dev/null 2>&1; then
+      for pv in $(python3 -I -c 'import sqlite3,sys
+c=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True)
+print("\n".join(r[0] for r in c.execute(sys.argv[2])))' "$db" "$q" 2>/dev/null); do echo "fact oh-my-pi login $pv"; done
+    else
+      echo 'fact oh-my-pi login-store unread'
+    fi
+  fi
+  for ef in "$HOME/.omp/agent/.env" "$HOME/.omp/.env"; do
+    [ -f "$ef" ] || continue
+    for pv in $(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*_API_KEY\)[[:space:]]*=.*/\2/p' "$ef" 2>/dev/null); do echo "fact oh-my-pi env-file $pv ~/${ef#"$HOME"/}"; done
+  done
+"##
+        }
+        _ => "",
+    }
+}
+
+/// Whether a Bun `version` (`1.3.11`) is older than [`OMP_MIN_BUN`].
+fn bun_too_old(version: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> {
+        v.split(['.', '-', '+'])
+            .take(3)
+            .map(|p| p.parse().unwrap_or(0))
+            .collect()
+    };
+    parts(version) < parts(OMP_MIN_BUN)
 }
 
 fn version_args(id: &str) -> &'static [&'static str] {
@@ -580,6 +704,7 @@ pub fn script(options: &DetectOptions) -> String {
                 quote(&format!("file {id} {shown}"))
             ));
         }
+        s.push_str(probes(id));
         s.push_str("fi\n");
     }
     s.push_str("echo end\n");
@@ -601,6 +726,8 @@ struct Found {
     status: Option<Ran>,
     env: Vec<String>,
     files: Vec<String>,
+    /// What [`probes`] found, as it printed it after `fact ID`.
+    facts: Vec<String>,
 }
 
 /// Read the script's output into an inventory taken at `now_ms`.
@@ -643,7 +770,7 @@ pub fn parse(output: &str, now_ms: u64) -> Result<Inventory, String> {
                     },
                 );
             }
-            "version" | "status" | "version-out" | "status-out" | "env" | "file" => {
+            "version" | "status" | "version-out" | "status-out" | "env" | "file" | "fact" => {
                 let id = word();
                 let value = word();
                 let Some(f) = found.get_mut(&id) else {
@@ -664,6 +791,7 @@ pub fn parse(output: &str, now_ms: u64) -> Result<Inventory, String> {
                         }
                     }
                     "env" => f.env.push(value),
+                    "fact" => f.facts.push(value),
                     _ => f.files.push(value),
                 }
             }
@@ -697,6 +825,27 @@ fn state(id: &str, found: Found, os: &str) -> HarnessState {
         },
         None => (None, Some("its version command did not run".into())),
     };
+    // omp is a Bun script: when it cannot even print its version and the
+    // Bun on PATH is missing or too old, that is why.
+    let version_note = match (id, &version) {
+        ("oh-my-pi", None) if found.facts.iter().any(|f| f == "runs-on-bun") => {
+            let bun = found.facts.iter().find_map(|f| f.strip_prefix("bun "));
+            let found_bun = match bun {
+                Some("missing") => Some("no bun is on PATH".to_owned()),
+                Some(v) if bun_too_old(v) => Some(format!("the bun on PATH is {v}")),
+                _ => None,
+            };
+            match found_bun {
+                Some(found_bun) => Some(format!(
+                    "{}; omp runs on Bun {OMP_MIN_BUN} or newer and {found_bun}: \
+                     `curl -fsSL https://omp.sh/install | sh` installs or upgrades it",
+                    version_note.unwrap_or_default()
+                )),
+                None => version_note,
+            }
+        }
+        _ => version_note,
+    };
     let login = login(id, &found, os);
     HarnessState {
         id: id.to_owned(),
@@ -710,6 +859,26 @@ fn state(id: &str, found: Found, os: &str) -> HarnessState {
 }
 
 fn login(id: &str, found: &Found, os: &str) -> Login {
+    let mut login = login_from_evidence(id, found, os);
+    // Gemini CLI's headless `gemini -p` refuses an untrusted directory
+    // whatever the login; say so where the login is shown.
+    if id == "gemini-cli" && login.state == LoginState::LoggedIn {
+        login
+            .detail
+            .push_str(match found.facts.iter().any(|f| f == "trust-workspace") {
+                true => {
+                    "; GEMINI_CLI_TRUST_WORKSPACE=true is set, so headless runs trust the workspace"
+                }
+                false => {
+                    "; headless runs (gemini -p) refuse an untrusted workspace: set \
+                     GEMINI_CLI_TRUST_WORKSPACE=true or pass --skip-trust"
+                }
+            });
+    }
+    login
+}
+
+fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
     let check = login_check(id);
     let program = catalog::harness(id)
         .and_then(|e| e.binaries.first().cloned())
@@ -739,13 +908,34 @@ fn login(id: &str, found: &Found, os: &str) -> Login {
         }
     }
     if let Some((LoginState::LoggedIn, detail)) = &said {
-        return verified(LoginState::LoggedIn, detail.clone());
+        // Codex sends its requests with CODEX_API_KEY when the variable is
+        // set, whatever `codex login status` says: that key's organization is
+        // billed, and a key without quota answers "Quota exceeded" beside a
+        // valid login. Say so, rather than report the login alone.
+        let detail = match found.env.iter().find(|v| v.as_str() == "CODEX_API_KEY") {
+            Some(var) if id == "codex" => format!(
+                "{detail}; {var} is set, and Codex uses it instead of the login (unset it, or \
+                 run isolated, to use the login)"
+            ),
+            _ => detail.clone(),
+        };
+        return verified(LoginState::LoggedIn, detail);
     }
+    // Antigravity reads GEMINI_API_KEY only when its settings select the
+    // gemini provider; without that it asks for a Google sign-in.
+    let provider = found.facts.iter().any(|f| f == "model-provider-gemini");
+    let key_is_used =
+        |var: &&String| id != "antigravity" || var.as_str() != "GEMINI_API_KEY" || provider;
     // A key variable works whatever the login says.
-    if let Some(var) = found.env.first() {
+    if let Some(var) = found.env.iter().find(key_is_used) {
         return likely(
             LoginState::LoggedIn,
-            format!("{var} is set (an API key; not checked)"),
+            match (id, var.as_str()) {
+                ("antigravity", "GEMINI_API_KEY") => "GEMINI_API_KEY is set and settings.json \
+                    selects the gemini provider (an API key; not checked)"
+                    .to_owned(),
+                _ => format!("{var} is set (an API key; not checked)"),
+            },
         );
     }
     if let Some((state, detail)) = said {
@@ -754,21 +944,100 @@ fn login(id: &str, found: &Found, os: &str) -> Login {
     if let Some(file) = found.files.first() {
         return likely(LoginState::LoggedIn, format!("{file} exists"));
     }
+    if id == "antigravity" && found.env.iter().any(|v| v == "GEMINI_API_KEY") {
+        // Still a key Branchyard can use: isolated runs set the provider.
+        return likely(
+            LoginState::LoggedIn,
+            "GEMINI_API_KEY is set but ~/.gemini/antigravity-cli/settings.json does not set \
+             modelProvider gemini: agy will ask for a Google sign-in; Branchyard sets it in \
+             isolated runs"
+                .to_owned(),
+        );
+    }
+    if let Some(file) = found
+        .facts
+        .iter()
+        .find_map(|f| f.strip_prefix("providers "))
+        .filter(|_| id == "deepseek-harness")
+    {
+        return likely(
+            LoginState::LoggedIn,
+            format!("~/.dsh/{file} configures a provider (its key variable is not checked)"),
+        );
+    }
+    if id == "deepseek-harness" {
+        let vars = key_variables(id).join(" or ");
+        return likely(
+            LoginState::LoggedOut,
+            format!(
+                "no provider in {} and no {vars}; set {vars} (the shipped provider \
+                 deepseek-official reads it) or configure a provider under the llm-pi-ai \
+                 plugin in cordis.patch.yml (`dsh --profile acp --dump-config` shows the \
+                 composed configuration)",
+                DSH_CONFIGS.join(" or ")
+            ),
+        );
+    }
+    if id == "oh-my-pi" {
+        let logins: Vec<&str> = found
+            .facts
+            .iter()
+            .filter_map(|f| f.strip_prefix("login "))
+            .collect();
+        if !logins.is_empty() {
+            return likely(
+                LoginState::LoggedIn,
+                format!(
+                    "omp login stored for {} in {OMP_LOGINS} (not checked)",
+                    logins.join(", ")
+                ),
+            );
+        }
+        if let Some(rest) = found.facts.iter().find_map(|f| f.strip_prefix("env-file ")) {
+            let (var, file) = rest.split_once(' ').unwrap_or((rest, "~/.omp/agent/.env"));
+            return likely(
+                LoginState::LoggedIn,
+                format!("{var} is set in {file}, which omp loads (an API key; not checked)"),
+            );
+        }
+        let vars = key_variables(id).join(", ");
+        if found.facts.iter().any(|f| f == "login-store unread") {
+            return Login {
+                state: LoginState::Unknown,
+                evidence: Evidence::None,
+                detail: format!(
+                    "{OMP_LOGINS} may hold a login, which needs sqlite3 or python3 on the \
+                     machine to read, and none of {vars} is set"
+                ),
+            };
+        }
+        return likely(
+            LoginState::LoggedOut,
+            format!(
+                "no login stored in {OMP_LOGINS} and none of {vars} is set; set one, or run \
+                 omp login"
+            ),
+        );
+    }
     match check {
         Some(c) if !(c.files.is_empty() || c.keychain_on_macos && os == "Darwin") => {
             let files: Vec<&str> = c.files.iter().map(|(_, shown)| *shown).collect();
             let vars = key_variables(id);
-            likely(
-                LoginState::LoggedOut,
-                format!(
-                    "no {} and no {}",
-                    files.join(" or "),
-                    match vars.is_empty() {
-                        true => "key variable".to_owned(),
-                        false => vars.join(" or "),
-                    }
-                ),
-            )
+            let mut detail = format!(
+                "no {} and no {}",
+                files.join(" or "),
+                match vars.is_empty() {
+                    true => "key variable".to_owned(),
+                    false => vars.join(" or "),
+                }
+            );
+            if id == "antigravity" {
+                detail.push_str(
+                    "; a GEMINI_API_KEY also needs modelProvider gemini in \
+                     ~/.gemini/antigravity-cli/settings.json",
+                );
+            }
+            likely(LoginState::LoggedOut, detail)
         }
         _ => Login {
             state: LoginState::Unknown,
@@ -816,7 +1085,7 @@ pub fn detect_local(options: &DetectOptions) -> Result<Inventory, String> {
 /// Run the detection script with the command `make` returns for it: the
 /// script goes on its stdin when `stdin` (`sh -s`, `ssh host sh -s`);
 /// otherwise `make` puts it in the arguments (`sh -c SCRIPT`).
-#[allow(clippy::expect_used, clippy::let_underscore_must_use)] // ratchet: branchyard
+#[allow(clippy::expect_used)] // ratchet: branchyard
 pub fn detect_with(
     options: &DetectOptions,
     stdin: bool,
@@ -839,13 +1108,19 @@ pub fn detect_with(
         let mut input = child.stdin.take().expect("piped");
         let text = text.clone();
         std::thread::spawn(move || {
-            let _ = input.write_all(text.as_bytes());
+            best_effort(
+                "send the detection script",
+                input.write_all(text.as_bytes()),
+            );
         });
     }
     let mut stderr = child.stderr.take().expect("piped");
     let errors = std::thread::spawn(move || {
         let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
+        best_effort(
+            "read the detection errors",
+            stderr.read_to_string(&mut text),
+        );
         text
     });
     let mut out = String::new();
@@ -1599,11 +1874,9 @@ mod tests {
         assert!(curl.unpinned.unwrap().contains("takes no version"));
         let none = plan("codex", InstallAction::Install, None, &tools(&[])).unwrap_err();
         assert!(none.contains("npm, or curl and sh, or brew"), "{none}");
-        assert!(
-            plan("gemini-cli", InstallAction::Install, None, &tools(&["npm"]))
-                .unwrap_err()
-                .contains("no install command")
-        );
+        assert!(plan("trae", InstallAction::Install, None, &tools(&["npm"]))
+            .unwrap_err()
+            .contains("no install command"));
         let explicit = plan(
             "codex",
             InstallAction::Update,
@@ -1661,6 +1934,33 @@ mod tests {
         assert!(text.contains("\"$HOME\"/.local/bin"));
     }
 
+    /// `codex login status` says logged in and CODEX_API_KEY is set: the
+    /// login is verified, and the detail says the key is what Codex uses.
+    #[test]
+    fn a_key_variable_beside_a_verified_codex_login_is_named_as_what_codex_uses() {
+        let output = "by-inventory 1\nhost box\nos Linux\n\
+            checked codex\n\
+            found codex 1 /bin/codex\nversion codex 0\nversion-out codex codex-cli 0.157.1\n\
+            status codex 0\nstatus-out codex Logged in using ChatGPT\n\
+            file codex ~/.codex/auth.json\nenv codex CODEX_API_KEY\nend\n";
+        let inventory = parse(output, 7).unwrap();
+        let codex = inventory.get("codex").unwrap();
+        assert_eq!(codex.login.state, LoginState::LoggedIn);
+        assert_eq!(codex.login.evidence, Evidence::Verified);
+        assert_eq!(
+            codex.login.detail,
+            "codex login status: Logged in using ChatGPT; CODEX_API_KEY is set, and Codex uses \
+             it instead of the login (unset it, or run isolated, to use the login)"
+        );
+        // Without the variable the detail is the status alone.
+        let alone = output.replace("env codex CODEX_API_KEY\n", "");
+        let codex = parse(&alone, 7).unwrap();
+        assert_eq!(
+            codex.get("codex").unwrap().login.detail,
+            "codex login status: Logged in using ChatGPT"
+        );
+    }
+
     #[test]
     fn output_is_parsed_into_states() {
         let output = "by-inventory 1\nhost box\nos Linux\ntool npm /usr/bin/npm\n\
@@ -1707,6 +2007,332 @@ mod tests {
         assert!(parse("by-inventory 1\nhost x\n", 0)
             .unwrap_err()
             .contains("stopped before"));
+    }
+
+    /// What detection makes of `id` found on a Linux machine, given the
+    /// `env`, `file` and `fact` lines the script printed for it.
+    fn found(id: &str, lines: &[&str]) -> HarnessState {
+        let mut output = format!(
+            "by-inventory 1\nhost box\nos Linux\nchecked {id}\nfound {id} 1 /bin/{id}\n\
+             version {id} 0\nversion-out {id} 1.0.0\n"
+        );
+        for line in lines {
+            output.push_str(&format!("{line}\n"));
+        }
+        output.push_str("end\n");
+        parse(&output, 0).unwrap().get(id).unwrap().clone()
+    }
+
+    const AGY_SETTINGS: &str = "~/.gemini/antigravity-cli/settings.json";
+
+    #[test]
+    fn antigravity_uses_a_gemini_key_only_with_the_gemini_provider() {
+        // agy 1.3.3 reads GEMINI_API_KEY alone, and only with modelProvider
+        // gemini in its settings.
+        let with = found(
+            "antigravity",
+            &[
+                "env antigravity GEMINI_API_KEY",
+                "fact antigravity model-provider-gemini",
+            ],
+        );
+        assert_eq!(with.login.state, LoginState::LoggedIn);
+        assert_eq!(with.login.evidence, Evidence::Likely);
+        assert_eq!(
+            with.login.detail,
+            "GEMINI_API_KEY is set and settings.json selects the gemini provider \
+             (an API key; not checked)"
+        );
+        // The key without the setting: agy would ask for a Google sign-in,
+        // but isolated runs set the provider, so it can still run.
+        let without = found("antigravity", &["env antigravity GEMINI_API_KEY"]);
+        assert_eq!(without.login.state, LoginState::LoggedIn);
+        assert_eq!(without.login.evidence, Evidence::Likely);
+        assert_eq!(
+            without.login.detail,
+            format!(
+                "GEMINI_API_KEY is set but {AGY_SETTINGS} does not set modelProvider gemini: \
+                 agy will ask for a Google sign-in; Branchyard sets it in isolated runs"
+            )
+        );
+        assert!(without.ready().is_ok());
+        // A Google sign-in works whatever the key and the setting say.
+        let token = found(
+            "antigravity",
+            &[
+                "env antigravity GEMINI_API_KEY",
+                "file antigravity ~/.gemini/antigravity-cli/antigravity-oauth-token",
+            ],
+        );
+        assert_eq!(
+            token.login.detail,
+            "~/.gemini/antigravity-cli/antigravity-oauth-token exists"
+        );
+        let agy_token = found("antigravity", &["env antigravity AGY_TOKEN"]);
+        assert_eq!(
+            agy_token.login.detail,
+            "AGY_TOKEN is set (an API key; not checked)"
+        );
+        let nothing = found("antigravity", &[]);
+        assert_eq!(nothing.login.state, LoginState::LoggedOut);
+        assert_eq!(nothing.login.evidence, Evidence::Likely);
+        assert!(
+            nothing
+                .login
+                .detail
+                .starts_with("no ~/.gemini/antigravity-cli/antigravity-oauth-token and no GEMINI_API_KEY or AGY_TOKEN;"),
+            "{}",
+            nothing.login.detail
+        );
+        assert!(!nothing.login.detail.contains("GOOGLE_API_KEY"));
+        assert!(nothing
+            .login
+            .detail
+            .ends_with("a GEMINI_API_KEY also needs modelProvider gemini in ~/.gemini/antigravity-cli/settings.json"));
+        // GOOGLE_API_KEY has no effect on agy, so the script does not test it.
+        let text = script(&DetectOptions {
+            only: Some(vec!["antigravity".into()]),
+            ..DetectOptions::default()
+        });
+        assert!(text.contains("echo 'env antigravity GEMINI_API_KEY'"));
+        assert!(text.contains("echo 'env antigravity AGY_TOKEN'"));
+        assert!(!text.contains("GOOGLE_API_KEY"));
+        assert!(text.contains(
+            "grep -Eq '\"modelProvider\"[[:space:]]*:[[:space:]]*\"gemini\"' \
+             \"$HOME/.gemini/antigravity-cli/settings.json\""
+        ));
+    }
+
+    #[test]
+    fn oh_my_pi_is_logged_in_by_a_key_a_stored_login_or_an_env_file() {
+        // The catalog's key variables, through the generic path.
+        let keyed = found("oh-my-pi", &["env oh-my-pi GEMINI_API_KEY"]);
+        assert_eq!(keyed.login.state, LoginState::LoggedIn);
+        assert_eq!(keyed.login.evidence, Evidence::Likely);
+        assert_eq!(
+            keyed.login.detail,
+            "GEMINI_API_KEY is set (an API key; not checked)"
+        );
+        // Logins `omp login` stored, by provider name.
+        let stored = found(
+            "oh-my-pi",
+            &[
+                "fact oh-my-pi bun 1.4.3",
+                "fact oh-my-pi login anthropic",
+                "fact oh-my-pi login openai-codex",
+            ],
+        );
+        assert_eq!(stored.login.state, LoginState::LoggedIn);
+        assert_eq!(stored.login.evidence, Evidence::Likely);
+        assert_eq!(
+            stored.login.detail,
+            "omp login stored for anthropic, openai-codex in ~/.omp/agent/agent.db (not checked)"
+        );
+        // A key in a .env file omp loads: the name, never the line.
+        let env_file = found(
+            "oh-my-pi",
+            &["fact oh-my-pi env-file OPENAI_API_KEY ~/.omp/agent/.env"],
+        );
+        assert_eq!(env_file.login.state, LoginState::LoggedIn);
+        assert_eq!(
+            env_file.login.detail,
+            "OPENAI_API_KEY is set in ~/.omp/agent/.env, which omp loads (an API key; not \
+             checked)"
+        );
+        // Nothing: logged out, with what to do.
+        let nothing = found("oh-my-pi", &["fact oh-my-pi bun 1.4.3"]);
+        assert_eq!(nothing.login.state, LoginState::LoggedOut);
+        assert_eq!(nothing.login.evidence, Evidence::Likely);
+        assert_eq!(
+            nothing.login.detail,
+            "no login stored in ~/.omp/agent/agent.db and none of GEMINI_API_KEY, \
+             OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENROUTER_API_KEY is set; set one, or run omp \
+             login"
+        );
+        // The database is there but nothing on the machine can read it.
+        let unread = found("oh-my-pi", &["fact oh-my-pi login-store unread"]);
+        assert_eq!(unread.login.state, LoginState::Unknown);
+        assert_eq!(unread.login.evidence, Evidence::None);
+        assert!(
+            unread.login.detail.starts_with(
+                "~/.omp/agent/agent.db may hold a login, which needs sqlite3 or python3"
+            ),
+            "{}",
+            unread.login.detail
+        );
+        // The script reads provider names from the database and variable
+        // names from the .env files, and tests the key variables.
+        let text = script(&DetectOptions {
+            only: Some(vec!["oh-my-pi".into()]),
+            ..DetectOptions::default()
+        });
+        assert!(text.contains("echo 'env oh-my-pi GEMINI_API_KEY'"));
+        assert!(text.contains("echo 'env oh-my-pi OPENROUTER_API_KEY'"));
+        assert!(text.contains("select distinct provider from auth_credentials"));
+        assert!(text.contains("echo 'fact oh-my-pi login-store unread'"));
+        assert!(text.contains("echo 'fact oh-my-pi runs-on-bun'"));
+        assert!(!text.contains("select data") && !text.contains("select *"));
+    }
+
+    #[test]
+    fn oh_my_pi_that_cannot_start_names_the_bun_it_needs() {
+        let state = |facts: &[&str]| {
+            let mut output = "by-inventory 1\nhost box\nos Linux\nchecked oh-my-pi\n\
+                found oh-my-pi 1 /usr/local/bin/omp\nversion oh-my-pi 1\n\
+                version-out oh-my-pi SyntaxError: Unexpected identifier 'u'\n"
+                .to_owned();
+            for fact in facts {
+                output.push_str(&format!("fact oh-my-pi {fact}\n"));
+            }
+            output.push_str("end\n");
+            parse(&output, 0).unwrap().get("oh-my-pi").unwrap().clone()
+        };
+        let old = state(&["runs-on-bun", "bun 1.3.11"]);
+        assert_eq!(old.version, None);
+        assert_eq!(
+            old.version_note.as_deref(),
+            Some(
+                "its version command exited with status 1; omp runs on Bun 1.3.14 or newer and \
+                 the bun on PATH is 1.3.11: `curl -fsSL https://omp.sh/install | sh` installs \
+                 or upgrades it"
+            )
+        );
+        let missing = state(&["runs-on-bun", "bun missing"]);
+        assert!(missing
+            .version_note
+            .as_deref()
+            .unwrap()
+            .contains("Bun 1.3.14 or newer and no bun is on PATH"));
+        // A new enough Bun, or a prebuilt binary: the failure is something
+        // else, and the note says only what happened.
+        for facts in [&["runs-on-bun", "bun 1.4.3"][..], &["bun 1.3.11"][..]] {
+            assert_eq!(
+                state(facts).version_note.as_deref(),
+                Some("its version command exited with status 1"),
+                "{facts:?}"
+            );
+        }
+        assert!(bun_too_old("1.3.11") && bun_too_old("1.2") && bun_too_old("0.9.9"));
+        assert!(!bun_too_old("1.3.14") && !bun_too_old("1.4.3") && !bun_too_old("2.0.0"));
+        // A working omp has a version and no note.
+        let fine = found(
+            "oh-my-pi",
+            &["fact oh-my-pi runs-on-bun", "fact oh-my-pi bun 1.4.3"],
+        );
+        assert_eq!(fine.version.as_deref(), Some("1.0.0"));
+        assert_eq!(fine.version_note, None);
+    }
+
+    #[test]
+    fn deepseek_harness_is_logged_in_by_a_key_or_a_configured_provider() {
+        let version = found("deepseek-harness", &[]);
+        assert_eq!(version.version.as_deref(), Some("1.0.0"));
+        assert_eq!(parse_version("0.2.0-rc.2").as_deref(), Some("0.2.0-rc.2"));
+        for (line, shown) in [
+            (
+                "fact deepseek-harness providers cordis.patch.yml",
+                "~/.dsh/cordis.patch.yml",
+            ),
+            (
+                "fact deepseek-harness providers profiles/acp/cordis.patch.yml",
+                "~/.dsh/profiles/acp/cordis.patch.yml",
+            ),
+        ] {
+            let configured = found("deepseek-harness", &[line]);
+            assert_eq!(configured.login.state, LoginState::LoggedIn, "{line}");
+            assert_eq!(configured.login.evidence, Evidence::Likely);
+            assert_eq!(
+                configured.login.detail,
+                format!("{shown} configures a provider (its key variable is not checked)")
+            );
+        }
+        // The shipped provider's key, and a key variable a config names.
+        for var in ["DEEPSEEK_API_KEY", "MY_PROXY_KEY"] {
+            let keyed = found(
+                "deepseek-harness",
+                &[&format!("env deepseek-harness {var}")],
+            );
+            assert_eq!(keyed.login.state, LoginState::LoggedIn, "{var}");
+            assert_eq!(keyed.login.evidence, Evidence::Likely);
+            assert_eq!(
+                keyed.login.detail,
+                format!("{var} is set (an API key; not checked)")
+            );
+        }
+        // Neither: logged out, and the detail says how to configure it.
+        let none = found("deepseek-harness", &[]);
+        assert_eq!(none.login.state, LoginState::LoggedOut);
+        assert_eq!(none.login.evidence, Evidence::Likely);
+        for want in [
+            "~/.dsh/cordis.patch.yml",
+            "~/.dsh/profiles/acp/cordis.patch.yml",
+            "DEEPSEEK_API_KEY",
+            "deepseek-official",
+            "llm-pi-ai",
+            "dsh --profile acp --dump-config",
+        ] {
+            assert!(
+                none.login.detail.contains(want),
+                "{want}: {}",
+                none.login.detail
+            );
+        }
+        let why = none.ready().unwrap_err();
+        assert!(why.contains("likely logged out"), "{why}");
+        assert!(why.contains("by harnesses login deepseek-harness"), "{why}");
+        // DEEPSEEK_API_KEY is the catalog's key variable, found by name.
+        assert_eq!(key_variables("deepseek-harness"), ["DEEPSEEK_API_KEY"]);
+        let text = script(&DetectOptions {
+            only: Some(vec!["deepseek-harness".into()]),
+            ..DetectOptions::default()
+        });
+        assert!(text.contains("echo 'env deepseek-harness DEEPSEEK_API_KEY'"));
+        assert!(text.contains("${DSH_HOME:-$HOME/.dsh}"));
+        for file in DSH_CONFIGS {
+            let relative = file.trim_start_matches("~/.dsh/");
+            assert!(text.contains(relative), "{relative}");
+        }
+        assert!(!text.contains("cat "), "a config file must not be printed");
+    }
+
+    #[test]
+    fn gemini_cli_notes_what_headless_runs_need() {
+        let keyed = found("gemini-cli", &["env gemini-cli GEMINI_API_KEY"]);
+        assert_eq!(keyed.login.state, LoginState::LoggedIn);
+        assert_eq!(keyed.login.evidence, Evidence::Likely);
+        assert_eq!(
+            keyed.login.detail,
+            "GEMINI_API_KEY is set (an API key; not checked); headless runs (gemini -p) \
+             refuse an untrusted workspace: set GEMINI_CLI_TRUST_WORKSPACE=true or pass \
+             --skip-trust"
+        );
+        let trusted = found(
+            "gemini-cli",
+            &[
+                "file gemini-cli ~/.gemini/oauth_creds.json",
+                "fact gemini-cli trust-workspace",
+            ],
+        );
+        assert_eq!(
+            trusted.login.detail,
+            "~/.gemini/oauth_creds.json exists; GEMINI_CLI_TRUST_WORKSPACE=true is set, so \
+             headless runs trust the workspace"
+        );
+        // The note is for a harness that can run; a logged-out one says what
+        // it is missing.
+        let out = found("gemini-cli", &[]);
+        assert_eq!(out.login.state, LoginState::LoggedOut);
+        assert_eq!(
+            out.login.detail,
+            "no ~/.gemini/oauth_creds.json and no GEMINI_API_KEY or GOOGLE_API_KEY"
+        );
+        let text = script(&DetectOptions {
+            only: Some(vec!["gemini-cli".into()]),
+            ..DetectOptions::default()
+        });
+        assert!(text.contains("echo 'env gemini-cli GEMINI_API_KEY'"));
+        assert!(text.contains("echo 'env gemini-cli GOOGLE_API_KEY'"));
+        assert!(text.contains("[ \"${GEMINI_CLI_TRUST_WORKSPACE:-}\" = true ]"));
     }
 
     #[test]

@@ -31,7 +31,9 @@
 //! added to its egress policy, and says so ([`ModelActivity::Direct`]).
 
 mod audit;
+pub mod discover;
 pub(crate) mod gateway;
+mod gemini;
 pub mod pricing;
 mod translate;
 pub(crate) mod upstream;
@@ -40,6 +42,9 @@ pub(crate) mod upstream;
 /// prefix. The one parser for them; `branchyard_client::http::Endpoint`
 /// builds on it.
 pub use upstream::Target as BaseUrl;
+/// How a request reaches a provider through the operator's proxy and root
+/// certificates (`by models list`).
+pub use upstream::Transport;
 mod usage;
 
 use branchyard_support::LockExt as _;
@@ -222,6 +227,34 @@ pub struct BackendConfig {
     /// `authorization`, as `Bearer <key>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<String>,
+    /// What the gateway adapts for an endpoint that imitates OpenAI's API
+    /// with differences ([`Compat`]). Default: [`Compat::Gemini`] for an
+    /// `openai` backend whose URL's host is
+    /// `generativelanguage.googleapis.com`, else [`Compat::Off`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat: Option<Compat>,
+}
+
+/// A backend's compatibility layer (`[models.backends.NAME] compat`): what
+/// the gateway changes in the chat completions it sends an endpoint that
+/// imitates OpenAI's API but differs from it, and what it reads from the
+/// answers (`docs/model-gateway.md`, "Gemini through the OpenAI-compatible
+/// endpoint").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Compat {
+    /// Requests go as they are (`none`), even to a host that would
+    /// otherwise turn a layer on.
+    #[default]
+    #[serde(rename = "none")]
+    Off,
+    /// Gemini's OpenAI-compatible endpoint
+    /// (`https://generativelanguage.googleapis.com/v1beta/openai`): the
+    /// OpenAI path's `/v1` is dropped (the base URL stands for it), request
+    /// fields it rejects are stripped, and the thought signatures Gemini 3
+    /// puts on tool calls are kept and put back on the calls a later
+    /// request replays.
+    Gemini,
 }
 
 /// One route.
@@ -288,6 +321,8 @@ pub struct Backend {
     pub url: String,
     pub key: Option<KeySource>,
     pub header: Option<String>,
+    /// Its compatibility layer: as configured, else by its URL's host.
+    pub compat: Compat,
 }
 
 /// A route, resolved.
@@ -368,6 +403,9 @@ pub struct Gateway {
     /// Whether calls' contents are written to files too.
     pub audit: Audit,
     state: Mutex<Shared>,
+    /// The thought signatures Gemini put on tool calls, by person and
+    /// call id, for the requests that replay them ([`Compat::Gemini`]).
+    signatures: gemini::Signatures,
 }
 
 impl fmt::Debug for Gateway {
@@ -409,11 +447,23 @@ impl Gateway {
                     ))
                 }
             };
-            upstream::Target::parse(&url)
+            let target = upstream::Target::parse(&url)
                 .map_err(|e| format!("models.backends.{name}.url: {e}"))?;
             if b.header.is_some() && b.api != Api::Generic {
                 return Err(format!(
                     "models.backends.{name}.header: only a generic backend takes a header"
+                ));
+            }
+            let compat = match b.compat {
+                Some(compat) => compat,
+                None if b.api == Api::Openai && gemini::is_host(&target.host) => Compat::Gemini,
+                None => Compat::Off,
+            };
+            if compat == Compat::Gemini && b.api != Api::Openai {
+                return Err(format!(
+                    "models.backends.{name}.compat: gemini is for an openai backend \
+                     (Gemini's OpenAI-compatible endpoint), not {}",
+                    b.api
                 ));
             }
             backends.push(Backend {
@@ -422,6 +472,7 @@ impl Gateway {
                 url,
                 key: b.key.as_deref().map(&key),
                 header: b.header.clone(),
+                compat,
             });
         }
         let known = |name: &str, at: &str| -> Result<(), String> {
@@ -503,6 +554,7 @@ impl Gateway {
                 rng: branchyard_support::rng::SplitMix64::new(seed),
                 alerted: Vec::new(),
             }),
+            signatures: gemini::Signatures::default(),
         })
     }
 
@@ -1129,7 +1181,8 @@ pub(crate) fn prepare(
         turn: record.info.turns + 1,
         subject,
         max_usd: budget.max_usd,
-        spent_before: record.info.cost_usd.unwrap_or(0.0) + reserved,
+        cost_before: record.info.cost_usd.unwrap_or(0.0),
+        held: reserved,
         metered: Mutex::new(0.0),
     };
     let running = TurnGateway::start(listener, Arc::new(turn))

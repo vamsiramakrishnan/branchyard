@@ -183,6 +183,185 @@ fn detection_reads_versions_and_logins_and_times_out_slow_commands() {
 }
 
 #[test]
+fn antigravity_deepseek_and_gemini_logins_are_read_from_their_configuration() {
+    // agy 1.3.3 uses GEMINI_API_KEY only with modelProvider gemini in its
+    // settings; dsh 0.2.0-rc.2 takes a provider from cordis.patch.yml; gemini
+    // 0.63.0 headless needs the workspace trusted.
+    let m = Machine::new();
+    m.fake("agy", "echo '1.3.3'\n");
+    m.fake("dsh", "echo '0.2.0-rc.2'\n");
+    m.fake("gemini", "echo '0.63.0'\n");
+    let only = DetectOptions {
+        only: Some(vec![
+            "antigravity".into(),
+            "deepseek-harness".into(),
+            "gemini-cli".into(),
+        ]),
+        ..options()
+    };
+    let secret = "g-never-printed";
+
+    // Keys and nothing configured.
+    let found = m.detect(&only, &[("GEMINI_API_KEY", secret)]);
+    let agy = found.get("antigravity").unwrap();
+    assert_eq!(agy.version.as_deref(), Some("1.3.3"));
+    assert_eq!(agy.login.state, LoginState::LoggedIn);
+    assert_eq!(agy.login.evidence, Evidence::Likely);
+    assert_eq!(
+        agy.login.detail,
+        "GEMINI_API_KEY is set but ~/.gemini/antigravity-cli/settings.json does not set \
+         modelProvider gemini: agy will ask for a Google sign-in; Branchyard sets it in \
+         isolated runs"
+    );
+    let gemini = found.get("gemini-cli").unwrap();
+    assert_eq!(gemini.version.as_deref(), Some("0.63.0"));
+    assert!(gemini
+        .login
+        .detail
+        .starts_with("GEMINI_API_KEY is set (an API key; not checked); headless runs"));
+    assert!(gemini
+        .login
+        .detail
+        .contains("GEMINI_CLI_TRUST_WORKSPACE=true"));
+    let dsh = found.get("deepseek-harness").unwrap();
+    assert_eq!(dsh.version.as_deref(), Some("0.2.0-rc.2"));
+    assert_eq!(dsh.login.state, LoginState::LoggedOut);
+    assert_eq!(dsh.login.evidence, Evidence::Likely);
+    assert!(dsh.login.detail.contains("DEEPSEEK_API_KEY"));
+    assert!(found
+        .ready("deepseek-harness")
+        .unwrap_err()
+        .contains("likely logged out"));
+    // A key alone never reaches the report.
+    assert!(!serde_json::to_string(&found).unwrap().contains(secret));
+
+    // Settings that select the gemini provider, and a trusted workspace.
+    let settings = m.home.join(".gemini/antigravity-cli");
+    fs::create_dir_all(&settings).unwrap();
+    fs::write(
+        settings.join("settings.json"),
+        "{\n  \"permissions\": {\"allow\": [\"command(git)\"]},\n  \"modelProvider\": \"gemini\"\n}\n",
+    )
+    .unwrap();
+    let found = m.detect(
+        &only,
+        &[
+            ("GEMINI_API_KEY", secret),
+            ("GEMINI_CLI_TRUST_WORKSPACE", "true"),
+        ],
+    );
+    assert_eq!(
+        found.get("antigravity").unwrap().login.detail,
+        "GEMINI_API_KEY is set and settings.json selects the gemini provider \
+         (an API key; not checked)"
+    );
+    assert!(found
+        .get("gemini-cli")
+        .unwrap()
+        .login
+        .detail
+        .ends_with("GEMINI_CLI_TRUST_WORKSPACE=true is set, so headless runs trust the workspace"));
+    // Another provider in the settings does not count, and neither does a
+    // key the variable name misses.
+    fs::write(
+        settings.join("settings.json"),
+        "{\"modelProvider\": \"vertex\"}\n",
+    )
+    .unwrap();
+    let found = m.detect(&only, &[("GOOGLE_API_KEY", secret)]);
+    let agy = found.get("antigravity").unwrap();
+    assert_eq!(agy.login.state, LoginState::LoggedOut, "{:?}", agy.login);
+    assert!(!agy.login.detail.contains("GOOGLE_API_KEY"));
+    assert_eq!(
+        found.get("gemini-cli").unwrap().login.state,
+        LoginState::LoggedIn,
+        "gemini reads GOOGLE_API_KEY"
+    );
+
+    // DeepSeek Harness: a provider in either config file, an apiKeyEnv whose
+    // variable is set, the shipped provider's key; not a comment, not an
+    // apiKeyEnv whose variable is unset, not another DSH_HOME.
+    let dsh_home = m.home.join(".dsh");
+    fs::create_dir_all(dsh_home.join("profiles/acp")).unwrap();
+    let detail = |m: &Machine, vars: &[(&str, &str)]| -> (LoginState, String) {
+        let found = m.detect(&only, vars);
+        let login = &found.get("deepseek-harness").unwrap().login;
+        (login.state, login.detail.clone())
+    };
+    fs::write(
+        dsh_home.join("cordis.patch.yml"),
+        "# providers:\n#   apiKeyEnv: COMMENTED_KEY\nplugins: []\n",
+    )
+    .unwrap();
+    assert_eq!(
+        detail(&m, &[("COMMENTED_KEY", "x")]).0,
+        LoginState::LoggedOut,
+        "a comment configures nothing"
+    );
+    fs::write(
+        dsh_home.join("profiles/acp/cordis.patch.yml"),
+        "plugins:\n  - id: llm-pi-ai\n    config:\n      providers:\n        proxy:\n          \
+         apiKeyEnv: PROXY_KEY\n          api: openai-completions\n",
+    )
+    .unwrap();
+    assert_eq!(
+        detail(&m, &[]),
+        (
+            LoginState::LoggedIn,
+            "~/.dsh/profiles/acp/cordis.patch.yml configures a provider (its key variable \
+             is not checked)"
+                .to_owned()
+        )
+    );
+    assert_eq!(
+        detail(&m, &[("PROXY_KEY", secret)]),
+        (
+            LoginState::LoggedIn,
+            "PROXY_KEY is set (an API key; not checked)".to_owned()
+        )
+    );
+    fs::write(
+        dsh_home.join("profiles/acp/cordis.patch.yml"),
+        "plugins:\n  - id: agent-default-model\n    config:\n      provider: deepseek-official\n",
+    )
+    .unwrap();
+    assert_eq!(detail(&m, &[]).0, LoginState::LoggedOut);
+    assert_eq!(
+        detail(&m, &[("DEEPSEEK_API_KEY", secret)]),
+        (
+            LoginState::LoggedIn,
+            "DEEPSEEK_API_KEY is set (an API key; not checked)".to_owned()
+        )
+    );
+    fs::write(
+        dsh_home.join("cordis.patch.yml"),
+        "plugins:\n  - id: llm-pi-ai\n    config:\n      providers:\n        mine: {}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        detail(&m, &[]).1,
+        "~/.dsh/cordis.patch.yml configures a provider (its key variable is not checked)"
+    );
+    let elsewhere = m.home.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let elsewhere = elsewhere.to_str().unwrap();
+    assert_eq!(
+        detail(&m, &[("DSH_HOME", elsewhere)]).0,
+        LoginState::LoggedOut,
+        "DSH_HOME moves the configuration"
+    );
+    fs::write(
+        m.home.join("elsewhere/cordis.patch.yml"),
+        "providers:\n  moved:\n    apiKeyEnv: 'MOVED_KEY'\n",
+    )
+    .unwrap();
+    assert_eq!(
+        detail(&m, &[("DSH_HOME", elsewhere), ("MOVED_KEY", secret)]).1,
+        "MOVED_KEY is set (an API key; not checked)"
+    );
+}
+
+#[test]
 fn the_cache_keeps_an_inventory_for_its_ttl() {
     let dir = tempfile::tempdir().unwrap();
     let cache = InventoryCache::new(dir.path().join("inventory.json"), Duration::from_secs(60));

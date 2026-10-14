@@ -139,8 +139,12 @@ pub struct TaskArgs {
     pub kind: Option<branchyard::TaskKind>,
     /// `--seed`: a reproducible route.
     pub seed: Option<u64>,
-    /// The configuration's `[fleet]`, when it has one (`crate::defaults`).
+    /// The configuration's `[fleet]`, when it has one (`crate::defaults`);
+    /// else, for `--auto`, the inventory default (`crate::fleet_cmd`).
     pub fleet: Option<branchyard::Fleet>,
+    /// Installed harnesses the inventory default left out, and why, when
+    /// `fleet` is the inventory default.
+    pub fleet_excluded: Vec<branchyard::Excluded>,
     /// `--plan`: plan first, read-only, and wait for `by plan approve`.
     pub plan: bool,
     /// `--goal`: a goal a judge verifies when the branch would be ready.
@@ -555,6 +559,14 @@ pub struct SpawnArgs {
     pub plan: bool,
     /// `--model`: the child's model. Unset: its seat's or its parent's.
     pub model: Option<String>,
+    /// `--result-schema`: the child's result contract's schema, as JSON
+    /// text.
+    pub result_schema: Option<String>,
+    /// `--result-schema-file`: the same, in a file (`-` for standard
+    /// input).
+    pub result_schema_file: Option<String>,
+    /// `--result-required`: the child must report a result.
+    pub result_required: bool,
     pub json: bool,
 }
 
@@ -871,6 +883,7 @@ Examples (inside a harness, the parent is the harness's own branch):
   by spawn \"write the parser\" --depends-on tokenizer --after integrated
   by spawn \"fix it\" --parent root --yes            # outside a harness
   by spawn --prompt-file task.md --name parser       # a long task, from a file (- for stdin)
+  by spawn \"list the unsafe blocks\" --result-schema '{\"type\":\"object\",\"required\":[\"files\"],\"properties\":{\"files\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}' --result-required
 
 The child's check (--check) defaults to its parent's, and the spawn says which it
 inherits. It runs on the merge when the child is integrated, so siblings that share
@@ -1035,10 +1048,40 @@ Examples:
   by config validate ~/.config/branchyard/config.toml
   by config schema > branchyard.config.json";
 
+const DOCTOR_EXAMPLES: &str = "\
+Checks, each ok, warn or fail with a line on what to do:
+  repository       a repository; .branchyard/ and its store; the store's schema
+                   against this binary's; services whose lease ran out
+  configuration    branchyard.toml and the user file load and validate (a refusal is
+                   shown with its line); [workspace] scripts trusted, as they are now
+  harnesses        what `by harnesses` detects (installed, version, qualification);
+                   [defaults] harness installed; credential variables, by name only
+  provider         the configured provider as the engine checks it; kept sandboxes
+                   and snapshots against max_kept_minutes
+  host             unprivileged user namespaces (egress confinement), a loopback
+                   listener, /dev/kvm
+  server           a configured [remote] answers GET /v1/repos with its token
+  model gateway    [models] backends' key variables set; routed models priced
+
+Exit status: 0 when nothing failed (warnings do not fail), 1 when something did.
+Offline apart from a configured server, which gets 5 seconds. It opens an existing
+.branchyard/ as every command does, creates none, and prints no secret.
+
+Examples:
+  by doctor
+  by doctor --json
+  by doctor --path ~/src/app
+  by doctor --remote https://ci.example:8421 --token-file ~/.by-token
+
+See docs/doctor.md.";
+
 const MODELS_EXAMPLES: &str = "\
 Examples:
   by models                        # routes, backends, budgets, and this month's usage
   by models --period day --json
+  by models list                   # the models your keys can call, from the providers' own APIs
+  by models list --refresh         # ask them again (otherwise the cache, with its age)
+  by models list --harness codex   # the catalog's list beside what OpenAI lists now
   by run --model-gateway 'fix the bug'              # this branch's model calls go through the gateway
   by run --model-gateway='claude-sonnet-*' 'fix it' # and only to these models
 
@@ -1046,6 +1089,22 @@ Examples:
 holding each key), the routes by model, and daily and monthly budgets. A
 branch on the gateway gets its own gateway each turn, on the turn's token; the
 key never reaches the harness. See docs/model-gateway.md.";
+
+const MODELS_LIST_EXAMPLES: &str = "\
+Examples:
+  by models list                   # every source whose key is set: Gemini, OpenAI, Anthropic, [models.backends]
+  by models list --refresh         # list them again and cache the answer
+  by models list --harness gemini-cli
+  by models list --json
+
+Each source whose key is in the environment (GEMINI_API_KEY, OPENAI_API_KEY or
+CODEX_API_KEY, ANTHROPIC_API_KEY, or the key a [models.backends] entry names) is
+asked for its models; one without a key is skipped, one that fails says its
+status. A model neither catalog/pricing.toml nor [models.prices] can price is
+marked: a dollar budget cannot count its calls. The answer is cached under
+~/.cache/branchyard/catalog (or $BRANCHYARD_CATALOG_DIR) and shown, with its
+age, until --refresh. HTTPS_PROXY, NO_PROXY and SSL_CERT_FILE are honored.
+Keys are never printed. See docs/model-gateway.md.";
 
 const SYNC_EXAMPLES: &str = "\
 Examples:
@@ -1735,13 +1794,23 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Report to this branch's parent
+    /// Report to this branch's parent, optionally with a JSON result
+    ///
+    /// A result is checked against the contract the parent gave at spawn (`by inspect` shows it
+    /// as result_contract); a mismatch is refused naming the path and the rule, and nothing is
+    /// recorded. The parent reads the latest result in `by inspect` and `by wait`.
     #[command(display_order = 308)]
     Report {
         /// Act as this branch (outside a harness; inside one, it is the harness's own)
         #[arg(long = "as", value_name = "BRANCH")]
         as_branch: Option<String>,
         text: String,
+        /// The branch's result, as JSON text
+        #[arg(long, value_name = "JSON", value_parser = non_blank, conflicts_with = "result_file")]
+        result: Option<String>,
+        /// Read the result from this file instead, `-` for standard input
+        #[arg(long, value_name = "PATH", value_parser = non_blank)]
+        result_file: Option<String>,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -1922,6 +1991,16 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Check that this machine and repository are ready, and say what to fix
+    #[command(display_order = 604, after_help = DOCTOR_EXAMPLES)]
+    Doctor {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+        /// Check the repository at PATH instead of the one around the current directory
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
+        path: Option<String>,
+    },
     /// Run, stop or inspect this repository's connector gateway (Anvil), and its keys
     #[command(display_order = 403, subcommand_required = true, after_help = GATEWAY_EXAMPLES)]
     Gateway {
@@ -1931,15 +2010,22 @@ pub enum Command {
         #[command(subcommand)]
         action: GatewayAction,
     },
-    /// The model gateway: its routes, backends and budgets, and what its calls cost
-    #[command(display_order = 405, after_help = MODELS_EXAMPLES)]
+    /// The model gateway: its routes, backends and budgets, and what its calls cost; `list` asks
+    /// the providers which models your keys can call
+    #[command(
+        display_order = 405,
+        after_help = MODELS_EXAMPLES,
+        args_conflicts_with_subcommands = true
+    )]
     Models {
         /// Usage over this period (UTC): day, month, or all
         #[arg(long, value_name = "PERIOD", default_value = "month", value_parser = ["day", "month", "all"])]
         period: String,
         /// Print JSON
-        #[arg(long)]
+        #[arg(long, global = true)]
         json: bool,
+        #[command(subcommand)]
+        action: Option<ModelsAction>,
     },
     /// Connect your account for a connector through the gateway (anvil connect)
     #[command(display_order = 404, after_help = CONNECT_EXAMPLES)]
@@ -2065,6 +2151,46 @@ pub enum ServicesAction {
     /// Expire services whose lease ran out or whose owner is gone, and reclaim what Branchyard
     /// started for them
     Gc,
+}
+
+/// `by models ...`; see docs/model-gateway.md.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum ModelsAction {
+    /// Ask each provider whose key you have which models it serves, cache the answer, and mark
+    /// the models no price covers
+    #[command(after_help = MODELS_LIST_EXAMPLES)]
+    List {
+        /// Ask the providers again instead of showing the cache
+        #[arg(long)]
+        refresh: bool,
+        /// A harness in the catalog: its static list of models beside what its key's provider lists
+        #[arg(long, value_name = "ID")]
+        harness: Option<String>,
+        /// Gemini's API base URL
+        #[arg(
+            long,
+            value_name = "URL",
+            env = "BRANCHYARD_GEMINI_URL",
+            default_value = "https://generativelanguage.googleapis.com"
+        )]
+        gemini_url: String,
+        /// OpenAI's API base URL
+        #[arg(
+            long,
+            value_name = "URL",
+            env = "BRANCHYARD_OPENAI_URL",
+            default_value = "https://api.openai.com"
+        )]
+        openai_url: String,
+        /// Anthropic's API base URL
+        #[arg(
+            long,
+            value_name = "URL",
+            env = "BRANCHYARD_ANTHROPIC_URL",
+            default_value = "https://api.anthropic.com"
+        )]
+        anthropic_url: String,
+    },
 }
 
 /// `by catalog ...`; see docs/registry.md.
@@ -4108,11 +4234,34 @@ pub struct SpawnGraph {
     /// parent's inbox; it changes nothing until `by plan approve`
     #[arg(long)]
     plan: bool,
+    /// The shape of the answer the child must report with `by report --result`, as a JSON Schema
+    /// using only type, properties, required, additionalProperties (false), items, enum,
+    /// minimum, maximum, minLength, maxLength and description; anything else is refused. You
+    /// read the result in `by inspect` and `by wait`
+    #[arg(long, value_name = "JSON", value_parser = non_blank, conflicts_with = "result_schema_file")]
+    result_schema: Option<String>,
+    /// Read the result schema from this file instead, `-` for standard input
+    #[arg(long, value_name = "PATH", value_parser = non_blank)]
+    result_schema_file: Option<String>,
+    /// The child must report a result: its `by report` without --result is refused, and its
+    /// ending a turn without one is noted in your log
+    #[arg(long)]
+    result_required: bool,
 }
 
 impl Flags for SpawnFlags {
     type Output = SpawnArgs;
     fn check(self) -> Result<SpawnArgs, String> {
+        if self.graph.result_required
+            && self.graph.result_schema.is_none()
+            && self.graph.result_schema_file.is_none()
+        {
+            return Err(
+                "--result-required needs the schema it applies to: --result-schema or \
+                 --result-schema-file"
+                    .into(),
+            );
+        }
         let mut task = TaskArgs {
             harness: self.harness,
             name: self.name,
@@ -4142,6 +4291,9 @@ impl Flags for SpawnFlags {
             connectors: self.graph.connectors,
             plan: self.graph.plan,
             model: self.model,
+            result_schema: self.graph.result_schema,
+            result_schema_file: self.graph.result_schema_file,
+            result_required: self.graph.result_required,
             json: self.json,
         })
     }
@@ -4813,6 +4965,7 @@ mod tests {
                 kind: None,
                 seed: None,
                 fleet: None,
+                fleet_excluded: Vec::new(),
                 plan: false,
                 goal: None,
                 goal_rounds: None,
@@ -4904,10 +5057,46 @@ mod tests {
             parse_str("models --period day --json").unwrap(),
             Command::Models {
                 period: "day".into(),
-                json: true
+                json: true,
+                action: None
             }
         );
         assert!(err("models --period week").contains("week"));
+        // `list` is a subcommand, and --json goes after it.
+        let Command::Models { json, action, .. } = parse_str("models list --json").unwrap() else {
+            panic!("models list --json");
+        };
+        assert!(json);
+        assert_eq!(
+            action,
+            Some(ModelsAction::List {
+                refresh: false,
+                harness: None,
+                gemini_url: "https://generativelanguage.googleapis.com".into(),
+                openai_url: "https://api.openai.com".into(),
+                anthropic_url: "https://api.anthropic.com".into(),
+            })
+        );
+        let Command::Models { action, .. } =
+            parse_str("models list --refresh --harness codex --openai-url http://127.0.0.1:9")
+                .unwrap()
+        else {
+            panic!("models list");
+        };
+        let Some(ModelsAction::List {
+            refresh,
+            harness,
+            openai_url,
+            ..
+        }) = action
+        else {
+            panic!("models list");
+        };
+        assert!(refresh);
+        assert_eq!(harness.as_deref(), Some("codex"));
+        assert_eq!(openai_url, "http://127.0.0.1:9");
+        // The usage view's flag does not go with a subcommand.
+        assert!(parse_str("models --period day list").is_err());
     }
 
     #[test]
@@ -6507,5 +6696,38 @@ mod tests {
         }
         assert!(err("config shwo").contains("a similar subcommand exists: 'show'"));
         assert!(help("config").contains("BRANCHYARD_USER_CONFIG"));
+    }
+
+    #[test]
+    fn doctor_takes_json_and_a_path_and_the_global_server_options() {
+        let doctor = |line: &str| match parse_str(line).unwrap() {
+            Command::Doctor { json, path } => (json, path),
+            other => panic!("{line}: parsed as {other:?}"),
+        };
+        assert_eq!(doctor("doctor"), (false, None));
+        assert_eq!(doctor("doctor --json"), (true, None));
+        assert_eq!(
+            doctor("doctor --path ~/src/app --json"),
+            (true, Some("~/src/app".into()))
+        );
+        // `--repo` is the global option naming a repository on a server, not
+        // a path; doctor leaves it to the server check.
+        let cli = parse_from(split_words("by doctor --repo app --remote http://h:1").unwrap());
+        let cli = cli.unwrap();
+        assert_eq!(cli.globals.repo.as_deref(), Some("app"));
+        assert_eq!(cli.globals.remote.as_deref(), Some("http://h:1"));
+        for line in ["doctor extra", "doctor --path", "doctor --bogus"] {
+            let error = parse_str(line).unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{line}: {error}");
+        }
+        let text = help("doctor");
+        for needle in [
+            "--json",
+            "--path <PATH>",
+            "Exit status: 0",
+            "docs/doctor.md",
+        ] {
+            assert!(text.contains(needle), "{needle} missing from:\n{text}");
+        }
     }
 }

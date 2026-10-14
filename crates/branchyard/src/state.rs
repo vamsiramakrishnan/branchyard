@@ -186,6 +186,11 @@ pub(crate) struct Record {
     /// A delegated child's own come from its parent, in its grant.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
+    /// What the branch's parent asked of the answer it reports with
+    /// `report`, given at spawn: a schema and whether a result is required.
+    /// Kept for the branch's life; see `crate::contract`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_contract: Option<crate::contract::ResultContract>,
     /// Delegated children that were removed, with what each one's subtree
     /// had spent: the ledger that keeps a removed child's spend in this
     /// branch's subtree cost and budget. Appended by the store as it
@@ -193,6 +198,14 @@ pub(crate) struct Record {
     /// its children are.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed: Vec<RemovedChild>,
+    /// While a turn on the model gateway runs: what the branch had spent
+    /// before the turn. The record's `cost_usd` then also counts the
+    /// turn's metered calls as they happen, so a parent, an ancestor's cap
+    /// and `by show` see them; this is the figure the turn's cost is added
+    /// to when it ends, or when recovery ends it, so a call is never
+    /// counted twice. Cleared when the turn ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metered_from: Option<f64>,
 }
 
 /// A delegated child that was removed, as its parent's record remembers it.

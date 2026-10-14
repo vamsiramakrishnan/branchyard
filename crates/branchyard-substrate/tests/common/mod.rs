@@ -2,7 +2,7 @@
 //! Requires `git` and `sh`.
 
 #![allow(dead_code)]
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -67,7 +67,9 @@ impl Scratch {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(&dir).unwrap();
         Scratch(fs::canonicalize(dir).unwrap())
     }
@@ -79,7 +81,7 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        branchyard_support::cleanup_dir(&self.0);
     }
 }
 

@@ -5,11 +5,7 @@
 //! worktree changed since, and deletes its actor. Hermetic; not evidence
 //! about a Substrate cluster.
 
-#![allow(
-    clippy::expect_used,
-    clippy::let_underscore_must_use,
-    clippy::unwrap_used
-)] // tests: a panic is the failure report
+#![allow(clippy::expect_used, clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::path::PathBuf;
@@ -291,24 +287,35 @@ fn a_local_branch_forks_into_an_actor_with_its_secrets() {
     assert!(fake.actor_names().is_empty());
 }
 
+/// An actor cannot reach this host, where a sandboxed harness's delegation
+/// tools are served: the turn says so and runs without them.
 #[test]
-fn delegation_is_refused_to_a_harness_in_an_actor() {
+fn a_harness_in_an_actor_runs_without_delegation_tools_and_says_why() {
     let f = Fixture::new();
     let (fake, substrate) = cluster(&f);
     let branch = f
-        .task("WRITE x.txt=1")
+        .task("MCP inspect {}")
         .options(TaskOptions {
             delegation: Some(Envelope::default()),
             delegation_server: Some(vec![fake_agent().display().to_string()]),
+            policy: Policy::allow_all(),
             ..options(&f, &substrate)
         })
         .name("delegating")
         .run()
         .unwrap();
+    let events = branch.events().unwrap();
+    assert_eq!(branch.info().status, BranchStatus::NoChanges, "{events:?}");
+    let warned = events.iter().any(|e| {
+        matches!(&e.activity, Activity::Warning(w) if w.starts_with(
+            "delegation is unavailable in this sandbox: a substrate sandbox cannot reach this host"
+        ))
+    });
+    assert!(warned, "{events:?}");
     assert!(
-        matches!(&branch.info().status, BranchStatus::Failed { reason } if reason.contains("sandboxed")),
-        "{:?}",
-        branch.info().status
+        text(&events).contains("mcp: no server"),
+        "{}",
+        text(&events)
     );
     assert!(fake.actor_names().is_empty());
 }
@@ -328,14 +335,14 @@ fn substrate_engine_child() {
     };
     let provider: Provider = serde_json::from_str(&provider).unwrap();
     let yard = Yard::open(root).unwrap();
-    let _ = yard
-        .task(prompt)
+    yard.task(prompt)
         .harness("gemini-cli")
         .command([agent])
         .provider(provider)
         .policy(Policy::allow_all())
         .name("crashy")
-        .run();
+        .run()
+        .unwrap();
 }
 
 /// Start a turn in an actor in another process with the ORPHAN prompt,

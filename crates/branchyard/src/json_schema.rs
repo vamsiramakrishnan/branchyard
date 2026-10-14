@@ -83,8 +83,14 @@ impl JsonSchema {
     /// `$` is the value, `$.a[0]` a field's first item. Empty when it
     /// matches.
     pub fn validate(&self, value: &Value) -> Vec<String> {
+        self.validate_at(value, "$")
+    }
+
+    /// [`JsonSchema::validate`], naming the value `root` instead of `$`:
+    /// with `result`, `result.a[0]` is a field's first item.
+    pub fn validate_at(&self, value: &Value, root: &str) -> Vec<String> {
         let mut errors = Vec::new();
-        validate(&self.root, value, "$", &mut errors);
+        validate(&self.root, value, root, &mut errors);
         errors.truncate(ERRORS_MAX);
         errors
     }

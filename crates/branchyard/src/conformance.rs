@@ -72,7 +72,7 @@ pub(crate) struct Opened {
 
 /// A name no other test in this process (or database scope) uses.
 #[cfg(feature = "postgres")]
-fn unique(name: &str) -> String {
+pub(crate) fn unique(name: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     format!(
@@ -163,7 +163,13 @@ pub(crate) fn postgres_url() -> Option<String> {
 
 #[cfg(feature = "postgres")]
 pub(crate) fn postgres(name: &str) -> Option<Opened> {
-    let url = postgres_url()?;
+    postgres_url().map(|url| postgres_at(url, name))
+}
+
+/// A store in the database at `url` (which may choose a schema with
+/// `search_path`), under a fresh repository scope.
+#[cfg(feature = "postgres")]
+pub(crate) fn postgres_at(url: String, name: &str) -> Opened {
     let scope = format!("conformance-{}", unique(name));
     let shared = Arc::new(crate::pg::Postgres::open(&url, &scope).unwrap());
     let open = {
@@ -221,7 +227,7 @@ pub(crate) fn postgres(name: &str) -> Option<Opened> {
                 .unwrap()
         }
     };
-    Some(Opened {
+    Opened {
         raw: Box::new(raw),
         prefix: "by_",
         scope: Some(scope.clone()),
@@ -244,7 +250,7 @@ pub(crate) fn postgres(name: &str) -> Option<Opened> {
         again_sandboxes: Box::new(open_sandboxes),
         again: Box::new(open),
         _cleanup: Box::new(()),
-    })
+    }
 }
 
 fn record(name: &str) -> Record {
@@ -919,6 +925,110 @@ pub(crate) fn concurrent_appends(s: Opened) {
     }
 }
 
+/// How many engines [`contended_feed`] runs at once.
+pub(crate) const CONTENDERS: usize = 8;
+/// How many events each of them appends.
+const CONTENDED_EVENTS: u64 = 20;
+
+/// Engines appending to one repository's feed at once, each through its
+/// own handle under its own lease, as a task graph's children do: fenced
+/// appends, then a final event committed with the record and the lease's
+/// release. See [`contend`].
+pub(crate) fn contended_feed(s: Opened) {
+    let handles = (0..CONTENDERS).map(|_| (s.again)()).collect();
+    contend(&s, handles);
+}
+
+/// Drive [`contended_feed`] through `handles`, one engine each. Every
+/// append succeeds and gets exactly one feed position; positions are dense
+/// from 1 in commit order, so a reader polling meanwhile only ever sees a
+/// gap-free prefix; each branch numbers its events from 1.
+pub(crate) fn contend(s: &Opened, handles: Vec<Arc<dyn Backend>>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let engines = handles.len();
+    let each = CONTENDED_EVENTS;
+    let total = each * u64::try_from(engines).unwrap();
+    let start = Arc::new(Barrier::new(engines));
+    let writing = Arc::new(AtomicBool::new(true));
+    let reader = {
+        let (store, writing) = ((s.again)(), writing.clone());
+        std::thread::spawn(move || {
+            let mut seen = 0;
+            loop {
+                // Read the flag first: a read after the last commit is
+                // then always made.
+                let last = !writing.load(Ordering::Acquire);
+                let ids: Vec<u64> = store
+                    .feed_since(0, 10_000)
+                    .unwrap()
+                    .iter()
+                    .map(|f| f.id)
+                    .collect();
+                let prefix: Vec<u64> = (1..).take(ids.len()).collect();
+                assert_eq!(ids, prefix, "a reader saw a position before an earlier one");
+                assert!(ids.len() >= seen, "the feed shrank");
+                seen = ids.len();
+                if last {
+                    return seen;
+                }
+            }
+        })
+    };
+    // Each engine takes its branch's lease first, one at a time, so what
+    // runs at once below is only appends.
+    let leased: Vec<(String, Arc<dyn Backend>, Fence)> = handles
+        .into_iter()
+        .enumerate()
+        .map(|(i, store)| {
+            let name = format!("c{i}");
+            let me = owner(&format!("engine{i}"));
+            assert!(store.reserve(&name, &me).unwrap());
+            let fence = granted(store.acquire(&record(&name), &me, TTL).unwrap());
+            (name, store, fence)
+        })
+        .collect();
+    let threads: Vec<_> = leased
+        .into_iter()
+        .map(|(name, store, fence)| {
+            let start = start.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                for n in 1..each {
+                    assert_eq!(store.append(&name, &event(n), Some(&fence)).unwrap(), n);
+                }
+                let mut done = record(&name);
+                done.info.status = BranchStatus::Ready;
+                store
+                    .finish(&fence, Some(&done), Some(&event(each)))
+                    .unwrap();
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    writing.store(false, Ordering::Release);
+    assert_eq!(u64::try_from(reader.join().unwrap()).unwrap(), total);
+    let feed = s.backend.feed_since(0, 10_000).unwrap();
+    assert_eq!(
+        feed.iter().map(|f| f.id).collect::<Vec<_>>(),
+        (1..=total).collect::<Vec<_>>(),
+        "one position per event, dense from 1"
+    );
+    assert_eq!(s.backend.head().unwrap(), total);
+    for i in 0..engines {
+        let name = format!("c{i}");
+        let at: Vec<u64> = feed
+            .iter()
+            .filter(|f| f.branch == name)
+            .map(|f| f.event.at_ms)
+            .collect();
+        assert_eq!(at, (1..=each).collect::<Vec<_>>(), "{name}'s order");
+        assert_eq!(s.backend.event_count(&name).unwrap(), each);
+    }
+    assert!(s.backend.leases().unwrap().is_empty());
+}
+
 /// Engines racing for one name, then one lease on the created branch, then
 /// one takeover: exactly one wins each.
 pub(crate) fn races(s: Opened) {
@@ -1183,17 +1293,28 @@ pub(crate) fn storage(s: Opened) {
         .is_empty());
 
     // Scratch: one writer at a time, reclaimed once the holder is no
-    // longer running.
+    // longer running. Each is created at a time of its own, 999 ms into a
+    // second, far from the backend's clock.
+    let created_ms = |name: &str| match name {
+        "cache" => 1_700_000_000_999,
+        _ => 1_700_000_100_999,
+    };
     let scratch = |name: &str, owner: &str, incarnation: i64| NewScratch {
         name: name.into(),
         owner: owner.into(),
         owner_incarnation: incarnation,
         ancestry: vec!["root".into()],
         ancestry_incarnations: vec![root],
+        created_ms: created_ms(name),
     };
-    assert!(storage.create_scratch(&scratch("cache", "aa", aa)).unwrap());
+    let cache = scratch("cache", "aa", aa);
+    assert!(storage.create_scratch(&cache).unwrap());
     assert!(!storage.create_scratch(&scratch("cache", "b", b2)).unwrap());
     let row = storage.scratch("cache").unwrap().unwrap();
+    // The row keeps the time it was created with, so the area the create
+    // returned (`NewScratch::area`) is the area every read finds.
+    assert_eq!(row.area, cache.area());
+    assert_eq!(row.area.created_at, 1_700_000_000);
     assert_eq!(row.owner_incarnation, Some(aa));
     assert_eq!(row.ancestry_incarnations, vec![root]);
     assert!(storage.share_scratch("cache", "b", b2).unwrap());
@@ -1242,7 +1363,17 @@ pub(crate) fn storage(s: Opened) {
         storage.scratch_lock("busy", "b", b2).unwrap().unwrap(),
         LockOutcome::Granted(_)
     ));
-    assert_eq!(storage.scratch_list().unwrap().len(), 2);
+    let listed: Vec<_> = storage
+        .scratch_list()
+        .unwrap()
+        .into_iter()
+        .map(|row| row.area)
+        .collect();
+    assert_eq!(
+        listed,
+        [cache.area(), scratch("busy", "root", root).area()],
+        "oldest first, as created"
+    );
     storage.delete_scratch("busy").unwrap();
     assert!(storage.scratch("busy").unwrap().is_none());
 }
@@ -2452,7 +2583,7 @@ macro_rules! suite {
     ($open:expr) => {
         suite!($open; fencing, expiry, steps, cancels, steers, records, removed_children,
             reservations, events,
-            concurrent_appends, races, storage, messages, delivery, graph, ports, sandboxes,
+            concurrent_appends, contended_feed, races, storage, messages, delivery, graph, ports, sandboxes,
             outcomes, knowledge, pools, usage, effects, limits, corrupt);
     };
     ($open:expr; $($check:ident),*) => {

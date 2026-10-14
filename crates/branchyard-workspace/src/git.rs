@@ -180,7 +180,6 @@ impl Git {
     }
 
     /// Runs git and returns its output whatever the exit status.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
     pub fn output(mut self) -> Result<(Output, Vec<String>), GitError> {
         let Some(input) = self.input.take() else {
             let out = self.cmd.output().map_err(GitError::Spawn)?;
@@ -201,7 +200,7 @@ impl Git {
             if let Some(mut stdin) = stdin {
                 // git may exit before reading everything (a failed apply);
                 // its exit status says so, not the broken pipe.
-                let _ = stdin.write_all(&input);
+                branchyard_support::best_effort("feed git its input", stdin.write_all(&input));
             }
         });
         let out = child.wait_with_output().map_err(GitError::Io)?;

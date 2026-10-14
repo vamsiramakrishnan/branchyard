@@ -14463,6 +14463,17 @@
             "null"
           ],
           "description": "The child's model, like [`branchyard::Spawn::model`]; unset is its\nseat's or its parent's."
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResultContract"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The shape of the answer the child must report, like\n[`branchyard::Spawn::result`]: a schema in the contract's subset\nand whether a result is required. A keyword outside the subset is\nrefused. See `docs/delegation.md#result-contract`."
         }
       },
       "required": [
@@ -14716,6 +14727,24 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
         }
       }
     },
@@ -14873,6 +14902,17 @@
                     "null"
                   ],
                   "description": "The child's model; unset is its seat's or its parent's."
+                },
+                "result": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ResultContract"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The shape of the answer the child must report: a schema in the\nsubset `crate::contract` supports, and whether a result is\nrequired. See `docs/delegation.md#result-contract`."
                 },
                 "kind": {
                   "type": "string",
@@ -15071,6 +15111,24 @@
             "allow"
           ],
           "description": "Whether a mutation that needs confirmation may run under an entry."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
         },
         "PolicySpec": {
           "type": "object",
@@ -15860,6 +15918,293 @@
       "title": "SteerRequest",
       "$schema": "https://json-schema.org/draft/2020-12/schema"
     },
+    "CheckRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`POST /v1/repos/{repo}/branches/{branch}/check`: run the branch's check\non its current work, as integrating it would, like `by check`. No\nfields yet. The operation's result holds the\n[`branchyard::CheckReport`] as `check_report`.",
+      "title": "CheckRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "CheckReport": {
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": "string",
+          "description": "The branch checked."
+        },
+        "check": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Its check, as its argv: its own, or the one it inherited. `None`\nwhen it has none: nothing ran, and integrating it runs none."
+        },
+        "inherited_from": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The parent whose check it is, when the branch inherited it."
+        },
+        "work": {
+          "type": "string",
+          "description": "Its current work as a commit: its worktree's files as they are,\ncommitted nowhere, or its git branch's head when it has no worktree."
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The git branch the work was merged into first, as integrating it\nwould: its parent's. `None` for a branch without a parent, whose\nwork was checked alone."
+        },
+        "checked": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The commit the check ran on: the merge of `work` into `target`'s\nhead, or `work` itself. `None` when the check did not run."
+        },
+        "outcome": {
+          "$ref": "#/$defs/CheckVerdict",
+          "description": "How it ended; `not_run` when there is no check or the merge\nconflicted."
+        },
+        "conflicts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Files where the work conflicts with `target`: integrating it would\nfail before its check."
+        },
+        "output_tail": {
+          "type": "string",
+          "description": "The last [`branchyard_workspace::OUTPUT_TAIL_BYTES`] bytes of its\noutput, or why it could not start.",
+          "default": ""
+        }
+      },
+      "required": [
+        "branch",
+        "work",
+        "outcome"
+      ],
+      "description": "A branch's check run on its current work, as integrating the branch\nwould run it, with nothing integrated; see [`Delegate::check`].",
+      "title": "CheckReport",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "CheckVerdict": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "passed",
+              "description": "The check exited successfully."
+            },
+            {
+              "type": "string",
+              "const": "failed",
+              "description": "The check exited unsuccessfully."
+            },
+            {
+              "type": "string",
+              "const": "timed_out",
+              "description": "The check ran past its timeout and was killed."
+            },
+            {
+              "type": "string",
+              "const": "not_started",
+              "description": "The check could not be started."
+            },
+            {
+              "type": "string",
+              "const": "not_run",
+              "description": "A check before it did not pass."
+            }
+          ],
+          "description": "How an [`IntegrationCheck`] ended. The checks run in order and stop at\nthe first that does not pass: those after it are `not_run`."
+        }
+      }
+    },
+    "ReportStatusRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "type": "string",
+          "description": "One of `working`, `idle`, `blocked`, `complete` or `failure`. A\nstring, not an enum, so the server can refuse a bad one naming the\nfield (`400 invalid_request`, `detail.field` `state`)."
+        },
+        "summary": {
+          "type": "string",
+          "description": "What the branch is doing, one line of at most 280 characters."
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Where to read more: an `http` or `https` URL of at most 2048 bytes.\nA blank one counts as none."
+        }
+      },
+      "required": [
+        "state",
+        "summary"
+      ],
+      "description": "`POST /v1/repos/{repo}/branches/{branch}/report-status`: the branch's\nown status beside the protocol's, like `by report-status --as`. The\nanswer is a [`branchyard::Reported`].",
+      "title": "ReportStatusRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "Reported": {
+      "type": "object",
+      "properties": {
+        "report": {
+          "$ref": "#/$defs/StatusReport",
+          "description": "The report, as recorded on the branch."
+        },
+        "escalation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Message"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The escalation sent to the parent's inbox for a `blocked` or\n`failure` report. Omitted for the other states, for a branch with no\nparent, and for a report that repeats the one before it exactly (the\nparent was told then)."
+        }
+      },
+      "required": [
+        "report"
+      ],
+      "description": "What `report_status` returns: the report as recorded, and the message to\nthe parent it raised when the state asks for attention.",
+      "title": "Reported",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "StatusReport": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ReportedState",
+              "description": "What the harness says it is doing."
+            },
+            "summary": {
+              "type": "string",
+              "description": "One line of at most 280 characters."
+            },
+            "link": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Where to read more, an `http` or `https` URL. Omitted when none was\ngiven."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch when the report was recorded."
+            }
+          },
+          "required": [
+            "state",
+            "summary",
+            "at_ms"
+          ],
+          "description": "A branch's own report of its status, as `report_status` returns it and\n`Inspection::reported` shows the latest."
+        },
+        "ReportedState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "working",
+              "description": "At work on the task."
+            },
+            {
+              "type": "string",
+              "const": "idle",
+              "description": "Not working on anything, and not stuck."
+            },
+            {
+              "type": "string",
+              "const": "blocked",
+              "description": "Cannot go on without something it names: an answer, a credential, a\ndecision. Escalated to the parent."
+            },
+            {
+              "type": "string",
+              "const": "complete",
+              "description": "Believes the task is done."
+            },
+            {
+              "type": "string",
+              "const": "failure",
+              "description": "Gave up, or cannot do the task. Escalated to the parent."
+            }
+          ],
+          "description": "What a harness says it is doing."
+        },
+        "Message": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Assigned by the store when it is sent; counts from 1 across the\nwhole repository."
+            },
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/$defs/MessageKind"
+            },
+            "text": {
+              "type": "string"
+            },
+            "in_reply_to": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "The question this answers, for an `answer`."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch, when it was sent."
+            },
+            "delivered": {
+              "type": "boolean",
+              "description": "Whether it has been delivered to its recipient's turn (at the start\nof one, or through a running turn's delivery hook). `inbox --unread`\nis the messages for which this is `false`.",
+              "default": false
+            }
+          },
+          "required": [
+            "id",
+            "from",
+            "to",
+            "kind",
+            "text",
+            "at_ms"
+          ],
+          "description": "One harness-to-harness message, durable in the store; see\n`docs/delegation.md#inbox`."
+        },
+        "MessageKind": {
+          "type": "string",
+          "enum": [
+            "question",
+            "report",
+            "escalation",
+            "answer"
+          ],
+          "description": "What a message means, and so who it may go to: a `question` and a\n`report` go to the sender's parent; an `escalation` goes to the parent\ntoo, or further up an ancestor its rig seat's `escalates_to` names; an\n`answer` goes from a branch to one of its own descendants, and normally\ncarries `in_reply_to` a question's id."
+        }
+      }
+    },
     "CancelRequest": {
       "type": "object",
       "additionalProperties": false,
@@ -16044,6 +16389,21 @@
               "format": "double",
               "description": "What is left of `max_usd` after its own spend, what its live\nchildren hold (`reserved_usd`) and what its settled and removed\nchildren spent (`settled_children_usd`): what it can still spend or\ngrant."
             },
+            "tree_remaining_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "What the cost limits above it leave it: the least, over its\nancestors that have a limit, of that limit less everything its tree\nhas spent (the ancestor's own spend and all its descendants').\nWhen it reaches zero, the tree has spent that limit: nothing more\nis spawned below that ancestor and the turns running below it are\nstopped over budget. Omitted when no ancestor has a limit."
+            },
+            "tree_capped_by": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The ancestor whose limit `tree_remaining_usd` is."
+            },
             "reserved_usd": {
               "type": "number",
               "format": "double",
@@ -16122,6 +16482,20 @@
                 }
               ],
               "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
+            },
+            "result_contract": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
+            },
+            "result": {
+              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
             },
             "seat": {
               "type": [
@@ -16545,6 +16919,24 @@
           ],
           "description": "What a harness says it is doing."
         },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
         "Dependency": {
           "type": "object",
           "additionalProperties": false,
@@ -16648,8 +17040,27 @@
       "required": [
         "text"
       ],
-      "description": "`POST /v1/repos/{repo}/branches/{branch}/report` or `/escalate`: a\nmessage with no answer expected, like `by report` and `by escalate`.",
+      "description": "`POST /v1/repos/{repo}/branches/{branch}/escalate`: a message with no\nanswer expected, like `by escalate`.",
       "title": "TextRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "ReportRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "What to tell the parent."
+        },
+        "result": {
+          "description": "The branch's result, a JSON value checked against its result\ncontract and recorded when it matches; see\n`docs/delegation.md#result-contract`. A `null` counts as none."
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "description": "`POST /v1/repos/{repo}/branches/{branch}/report`: a message to the\nbranch's parent with no answer expected, like `by report`, and\noptionally the branch's result.",
+      "title": "ReportRequest",
       "$schema": "https://json-schema.org/draft/2020-12/schema"
     },
     "AnswerRequest": {
@@ -16713,6 +17124,11 @@
           "type": "string",
           "const": "map",
           "description": "A wide map started with `POST .../maps` or `.../maps/{name}/resume`."
+        },
+        {
+          "type": "string",
+          "const": "check",
+          "description": "A branch's check run with `POST .../check`: nothing is merged and no\nturn runs."
         }
       ],
       "title": "OperationKind",
@@ -16801,6 +17217,17 @@
             }
           ],
           "description": "A map's rows and progress once it ended; its `branches` above are\nthe branches that answered or were tried last, where they remain."
+        },
+        "check_report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckReport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A check's report: whether the branch's work would get past its\ncheck, the way `by check` prints it. A check that fails is a\nsucceeded operation whose report says `failed`; the operation\nfails only when the check could not be run at all."
         }
       },
       "description": "What a finished operation produced.",
@@ -17364,6 +17791,21 @@
               "format": "double",
               "description": "What is left of `max_usd` after its own spend, what its live\nchildren hold (`reserved_usd`) and what its settled and removed\nchildren spent (`settled_children_usd`): what it can still spend or\ngrant."
             },
+            "tree_remaining_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "What the cost limits above it leave it: the least, over its\nancestors that have a limit, of that limit less everything its tree\nhas spent (the ancestor's own spend and all its descendants').\nWhen it reaches zero, the tree has spent that limit: nothing more\nis spawned below that ancestor and the turns running below it are\nstopped over budget. Omitted when no ancestor has a limit."
+            },
+            "tree_capped_by": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The ancestor whose limit `tree_remaining_usd` is."
+            },
             "reserved_usd": {
               "type": "number",
               "format": "double",
@@ -17442,6 +17884,20 @@
                 }
               ],
               "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
+            },
+            "result_contract": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
+            },
+            "result": {
+              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
             },
             "seat": {
               "type": [
@@ -17654,6 +18110,24 @@
             }
           ],
           "description": "What a harness says it is doing."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
         },
         "Dependency": {
           "type": "object",
@@ -17931,6 +18405,72 @@
             "at_ms"
           ],
           "description": "The reduce turn's outcome, as `reduce.json` records it."
+        },
+        "CheckReport": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch checked."
+            },
+            "check": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "Its check, as its argv: its own, or the one it inherited. `None`\nwhen it has none: nothing ran, and integrating it runs none."
+            },
+            "inherited_from": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The parent whose check it is, when the branch inherited it."
+            },
+            "work": {
+              "type": "string",
+              "description": "Its current work as a commit: its worktree's files as they are,\ncommitted nowhere, or its git branch's head when it has no worktree."
+            },
+            "target": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The git branch the work was merged into first, as integrating it\nwould: its parent's. `None` for a branch without a parent, whose\nwork was checked alone."
+            },
+            "checked": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The commit the check ran on: the merge of `work` into `target`'s\nhead, or `work` itself. `None` when the check did not run."
+            },
+            "outcome": {
+              "$ref": "#/$defs/CheckVerdict",
+              "description": "How it ended; `not_run` when there is no check or the merge\nconflicted."
+            },
+            "conflicts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Files where the work conflicts with `target`: integrating it would\nfail before its check."
+            },
+            "output_tail": {
+              "type": "string",
+              "description": "The last [`branchyard_workspace::OUTPUT_TAIL_BYTES`] bytes of its\noutput, or why it could not start.",
+              "default": ""
+            }
+          },
+          "required": [
+            "branch",
+            "work",
+            "outcome"
+          ],
+          "description": "A branch's check run on its current work, as integrating the branch\nwould run it, with nothing integrated; see [`Delegate::check`]."
         }
       }
     },
@@ -18077,6 +18617,11 @@
               "type": "string",
               "const": "map",
               "description": "A wide map started with `POST .../maps` or `.../maps/{name}/resume`."
+            },
+            {
+              "type": "string",
+              "const": "check",
+              "description": "A branch's check run with `POST .../check`: nothing is merged and no\nturn runs."
             }
           ]
         },
@@ -18161,6 +18706,17 @@
                 }
               ],
               "description": "A map's rows and progress once it ended; its `branches` above are\nthe branches that answered or were tried last, where they remain."
+            },
+            "check_report": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CheckReport"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A check's report: whether the branch's work would get past its\ncheck, the way `by check` prints it. A check that fails is a\nsucceeded operation whose report says `failed`; the operation\nfails only when the check could not be run at all."
             }
           },
           "description": "What a finished operation produced."
@@ -18722,6 +19278,21 @@
               "format": "double",
               "description": "What is left of `max_usd` after its own spend, what its live\nchildren hold (`reserved_usd`) and what its settled and removed\nchildren spent (`settled_children_usd`): what it can still spend or\ngrant."
             },
+            "tree_remaining_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "What the cost limits above it leave it: the least, over its\nancestors that have a limit, of that limit less everything its tree\nhas spent (the ancestor's own spend and all its descendants').\nWhen it reaches zero, the tree has spent that limit: nothing more\nis spawned below that ancestor and the turns running below it are\nstopped over budget. Omitted when no ancestor has a limit."
+            },
+            "tree_capped_by": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The ancestor whose limit `tree_remaining_usd` is."
+            },
             "reserved_usd": {
               "type": "number",
               "format": "double",
@@ -18800,6 +19371,20 @@
                 }
               ],
               "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
+            },
+            "result_contract": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
+            },
+            "result": {
+              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
             },
             "seat": {
               "type": [
@@ -19012,6 +19597,24 @@
             }
           ],
           "description": "What a harness says it is doing."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
         },
         "Dependency": {
           "type": "object",
@@ -19289,6 +19892,72 @@
             "at_ms"
           ],
           "description": "The reduce turn's outcome, as `reduce.json` records it."
+        },
+        "CheckReport": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch checked."
+            },
+            "check": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "Its check, as its argv: its own, or the one it inherited. `None`\nwhen it has none: nothing ran, and integrating it runs none."
+            },
+            "inherited_from": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The parent whose check it is, when the branch inherited it."
+            },
+            "work": {
+              "type": "string",
+              "description": "Its current work as a commit: its worktree's files as they are,\ncommitted nowhere, or its git branch's head when it has no worktree."
+            },
+            "target": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The git branch the work was merged into first, as integrating it\nwould: its parent's. `None` for a branch without a parent, whose\nwork was checked alone."
+            },
+            "checked": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The commit the check ran on: the merge of `work` into `target`'s\nhead, or `work` itself. `None` when the check did not run."
+            },
+            "outcome": {
+              "$ref": "#/$defs/CheckVerdict",
+              "description": "How it ended; `not_run` when there is no check or the merge\nconflicted."
+            },
+            "conflicts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Files where the work conflicts with `target`: integrating it would\nfail before its check."
+            },
+            "output_tail": {
+              "type": "string",
+              "description": "The last [`branchyard_workspace::OUTPUT_TAIL_BYTES`] bytes of its\noutput, or why it could not start.",
+              "default": ""
+            }
+          },
+          "required": [
+            "branch",
+            "work",
+            "outcome"
+          ],
+          "description": "A branch's check run on its current work, as integrating the branch\nwould run it, with nothing integrated; see [`Delegate::check`]."
         },
         "ErrorBody": {
           "type": "object",
@@ -19593,6 +20262,17 @@
                       "anyOf": [
                         {
                           "$ref": "#/$defs/ManagedWritten"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "permissions": {
+                      "description": "The permission rules written into the harness's own settings,\nfrom the branch's policy, for a harness that enforces its own\nrather than asking Branchyard (Antigravity); see\n`docs/provisioning.md#antigravity-permission-rules`. Rules only.",
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/PermissionsWritten"
                         },
                         {
                           "type": "null"
@@ -20041,6 +20721,27 @@
               ],
               "additionalProperties": false,
               "description": "The harness's own account of what it is doing, from its\n`report_status` tool or `by report-status`: a claim beside the\nprotocol's status, never a replacement for it. See\n`docs/delegation.md#self-reported-status`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "result": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "description": "The result, as the child gave it."
+                    }
+                  },
+                  "required": [
+                    "value"
+                  ]
+                }
+              },
+              "required": [
+                "result"
+              ],
+              "additionalProperties": false,
+              "description": "The result the branch reported with `report`, a JSON value that\nmatched its parent's [`contract::ResultContract`] when it had one:\nthe latest is the branch's [`Inspection::result`]. See\n`docs/delegation.md#result-contract`."
             },
             {
               "type": "object",
@@ -21299,6 +22000,33 @@
             "bypass_disabled"
           ],
           "description": "The managed settings a sandboxed Claude Code turn wrote into its sandbox,\nas recorded in the turn's `Provisioned` activity: names and flags, never\nthe file's content. See `docs/provisioning.md#managed-settings`."
+        },
+        "PermissionsWritten": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "The settings file, relative to the home."
+            },
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The rules that let the harness's tools run without asking."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The rules that refuse them."
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "description": "The permission rules a provisioner wrote into a harness's own settings,\nas recorded in the turn's `Provisioned` activity and in the home, so a\nlater turn removes the ones it no longer writes. Rules only; the file\nholds nothing secret."
         },
         "Message": {
           "type": "object",
@@ -24583,6 +25311,17 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "permissions": {
+                      "description": "The permission rules written into the harness's own settings,\nfrom the branch's policy, for a harness that enforces its own\nrather than asking Branchyard (Antigravity); see\n`docs/provisioning.md#antigravity-permission-rules`. Rules only.",
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/PermissionsWritten"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -25026,6 +25765,27 @@
               ],
               "additionalProperties": false,
               "description": "The harness's own account of what it is doing, from its\n`report_status` tool or `by report-status`: a claim beside the\nprotocol's status, never a replacement for it. See\n`docs/delegation.md#self-reported-status`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "result": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "description": "The result, as the child gave it."
+                    }
+                  },
+                  "required": [
+                    "value"
+                  ]
+                }
+              },
+              "required": [
+                "result"
+              ],
+              "additionalProperties": false,
+              "description": "The result the branch reported with `report`, a JSON value that\nmatched its parent's [`contract::ResultContract`] when it had one:\nthe latest is the branch's [`Inspection::result`]. See\n`docs/delegation.md#result-contract`."
             },
             {
               "type": "object",
@@ -26284,6 +27044,33 @@
             "bypass_disabled"
           ],
           "description": "The managed settings a sandboxed Claude Code turn wrote into its sandbox,\nas recorded in the turn's `Provisioned` activity: names and flags, never\nthe file's content. See `docs/provisioning.md#managed-settings`."
+        },
+        "PermissionsWritten": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "The settings file, relative to the home."
+            },
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The rules that let the harness's tools run without asking."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The rules that refuse them."
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "description": "The permission rules a provisioner wrote into a harness's own settings,\nas recorded in the turn's `Provisioned` activity and in the home, so a\nlater turn removes the ones it no longer writes. Rules only; the file\nholds nothing secret."
         },
         "Message": {
           "type": "object",
@@ -29828,6 +30615,11 @@
               "type": "string",
               "const": "map",
               "description": "A wide map started with `POST .../maps` or `.../maps/{name}/resume`."
+            },
+            {
+              "type": "string",
+              "const": "check",
+              "description": "A branch's check run with `POST .../check`: nothing is merged and no\nturn runs."
             }
           ]
         },
@@ -29912,6 +30704,17 @@
                 }
               ],
               "description": "A map's rows and progress once it ended; its `branches` above are\nthe branches that answered or were tried last, where they remain."
+            },
+            "check_report": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CheckReport"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A check's report: whether the branch's work would get past its\ncheck, the way `by check` prints it. A check that fails is a\nsucceeded operation whose report says `failed`; the operation\nfails only when the check could not be run at all."
             }
           },
           "description": "What a finished operation produced."
@@ -30473,6 +31276,21 @@
               "format": "double",
               "description": "What is left of `max_usd` after its own spend, what its live\nchildren hold (`reserved_usd`) and what its settled and removed\nchildren spent (`settled_children_usd`): what it can still spend or\ngrant."
             },
+            "tree_remaining_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "What the cost limits above it leave it: the least, over its\nancestors that have a limit, of that limit less everything its tree\nhas spent (the ancestor's own spend and all its descendants').\nWhen it reaches zero, the tree has spent that limit: nothing more\nis spawned below that ancestor and the turns running below it are\nstopped over budget. Omitted when no ancestor has a limit."
+            },
+            "tree_capped_by": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The ancestor whose limit `tree_remaining_usd` is."
+            },
             "reserved_usd": {
               "type": "number",
               "format": "double",
@@ -30551,6 +31369,20 @@
                 }
               ],
               "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
+            },
+            "result_contract": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
+            },
+            "result": {
+              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
             },
             "seat": {
               "type": [
@@ -30763,6 +31595,24 @@
             }
           ],
           "description": "What a harness says it is doing."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
         },
         "Dependency": {
           "type": "object",
@@ -31040,6 +31890,72 @@
             "at_ms"
           ],
           "description": "The reduce turn's outcome, as `reduce.json` records it."
+        },
+        "CheckReport": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string",
+              "description": "The branch checked."
+            },
+            "check": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "Its check, as its argv: its own, or the one it inherited. `None`\nwhen it has none: nothing ran, and integrating it runs none."
+            },
+            "inherited_from": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The parent whose check it is, when the branch inherited it."
+            },
+            "work": {
+              "type": "string",
+              "description": "Its current work as a commit: its worktree's files as they are,\ncommitted nowhere, or its git branch's head when it has no worktree."
+            },
+            "target": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The git branch the work was merged into first, as integrating it\nwould: its parent's. `None` for a branch without a parent, whose\nwork was checked alone."
+            },
+            "checked": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The commit the check ran on: the merge of `work` into `target`'s\nhead, or `work` itself. `None` when the check did not run."
+            },
+            "outcome": {
+              "$ref": "#/$defs/CheckVerdict",
+              "description": "How it ended; `not_run` when there is no check or the merge\nconflicted."
+            },
+            "conflicts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Files where the work conflicts with `target`: integrating it would\nfail before its check."
+            },
+            "output_tail": {
+              "type": "string",
+              "description": "The last [`branchyard_workspace::OUTPUT_TAIL_BYTES`] bytes of its\noutput, or why it could not start.",
+              "default": ""
+            }
+          },
+          "required": [
+            "branch",
+            "work",
+            "outcome"
+          ],
+          "description": "A branch's check run on its current work, as integrating the branch\nwould run it, with nothing integrated; see [`Delegate::check`]."
         },
         "ErrorBody": {
           "type": "object",
@@ -32183,6 +33099,21 @@
           "format": "double",
           "description": "What is left of `max_usd` after its own spend, what its live\nchildren hold (`reserved_usd`) and what its settled and removed\nchildren spent (`settled_children_usd`): what it can still spend or\ngrant."
         },
+        "tree_remaining_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "What the cost limits above it leave it: the least, over its\nancestors that have a limit, of that limit less everything its tree\nhas spent (the ancestor's own spend and all its descendants').\nWhen it reaches zero, the tree has spent that limit: nothing more\nis spawned below that ancestor and the turns running below it are\nstopped over budget. Omitted when no ancestor has a limit."
+        },
+        "tree_capped_by": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The ancestor whose limit `tree_remaining_usd` is."
+        },
         "reserved_usd": {
           "type": "number",
           "format": "double",
@@ -32261,6 +33192,20 @@
             }
           ],
           "description": "The branch's own latest account of what it is doing, from its\n`report_status` tool: a claim beside `status`, which comes from the\nprotocol and may disagree with it. Not cleared by a new turn;\n`at_ms` says how old it is. Omitted until the branch reports one."
+        },
+        "result_contract": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResultContract"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
+        },
+        "result": {
+          "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
         },
         "seat": {
           "type": [
@@ -32685,6 +33630,24 @@
             }
           ],
           "description": "What a harness says it is doing."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
         },
         "Dependency": {
           "type": "object",
@@ -33371,6 +34334,17 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "permissions": {
+                      "description": "The permission rules written into the harness's own settings,\nfrom the branch's policy, for a harness that enforces its own\nrather than asking Branchyard (Antigravity); see\n`docs/provisioning.md#antigravity-permission-rules`. Rules only.",
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/PermissionsWritten"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -33814,6 +34788,27 @@
               ],
               "additionalProperties": false,
               "description": "The harness's own account of what it is doing, from its\n`report_status` tool or `by report-status`: a claim beside the\nprotocol's status, never a replacement for it. See\n`docs/delegation.md#self-reported-status`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "result": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "description": "The result, as the child gave it."
+                    }
+                  },
+                  "required": [
+                    "value"
+                  ]
+                }
+              },
+              "required": [
+                "result"
+              ],
+              "additionalProperties": false,
+              "description": "The result the branch reported with `report`, a JSON value that\nmatched its parent's [`contract::ResultContract`] when it had one:\nthe latest is the branch's [`Inspection::result`]. See\n`docs/delegation.md#result-contract`."
             },
             {
               "type": "object",
@@ -35072,6 +36067,33 @@
             "bypass_disabled"
           ],
           "description": "The managed settings a sandboxed Claude Code turn wrote into its sandbox,\nas recorded in the turn's `Provisioned` activity: names and flags, never\nthe file's content. See `docs/provisioning.md#managed-settings`."
+        },
+        "PermissionsWritten": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "The settings file, relative to the home."
+            },
+            "allow": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The rules that let the harness's tools run without asking."
+            },
+            "deny": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The rules that refuse them."
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "description": "The permission rules a provisioner wrote into a harness's own settings,\nas recorded in the turn's `Provisioned` activity and in the home, so a\nlater turn removes the ones it no longer writes. Rules only; the file\nholds nothing secret."
         },
         "Message": {
           "type": "object",

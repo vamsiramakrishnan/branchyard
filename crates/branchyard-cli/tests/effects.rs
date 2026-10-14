@@ -5,7 +5,7 @@
 //! unknown that `by effects reconcile` settles through its lookup, and an
 //! undo rewinds the files and performs the chosen inverse. Hermetic.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 #[path = "../../branchyard/tests/mock_gateway/mod.rs"]
 mod mock_gateway;
 
@@ -351,7 +351,7 @@ fn an_ask_is_answered_from_another_by_and_a_killed_engine_is_reconciled() {
     run = repo.spawn_run(&repo.call("gmail__send", r#"{"to": "x@"}"#), "crash");
     repo.mock.wait_held();
     run.kill().unwrap();
-    let _ = run.wait();
+    run.wait().unwrap();
     repo.mock.release();
     let entry = &repo.json(&["effects", "--branch", "crash", "--json"])[0];
     assert_eq!(entry["state"], "unknown", "{entry}");

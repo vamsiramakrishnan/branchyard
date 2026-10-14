@@ -19,6 +19,13 @@ cannot create children of your own, but `by` (on your PATH, and in
   its answer; `by report "<text>"` tells it how you are doing;
   `by escalate "<text>"` raises a problem; `by inbox` lists what was sent
   to you.
+- If `by inspect` shows a `result_contract`, your parent asked for your
+  answer in a shape. Report it with `by report "<text>" --result '<JSON>'`
+  (or `--result-file PATH`): the JSON is checked against the contract's
+  schema, and a mismatch is refused naming the path (`result.files[2]:
+  expected string, got number`), so fix it and report again. When the
+  contract is `required`, a `by report` without `--result` is refused.
+  Your parent reads your latest result as your `result`.
 - `by report-status <state> "<one line>" [--link URL]` states your own
   status beside the one Branchyard derives, where your parent and the
   person watching see it. `<state>` is `working`, `idle`, `blocked`,

@@ -10,23 +10,38 @@
 //! start when PostgreSQL reports a serialization failure or a deadlock, so
 //! they behave as SQLite's serialized `BEGIN IMMEDIATE` transactions do: a
 //! fence check and the write it guards commit together, and two engines
-//! never both take a lease. Records, leases, steps, processes, cancels and
-//! steered input commit with `synchronous_commit = on`; event appends with `off`, which
+//! never both take a lease. A retry waits a random pause below a ceiling
+//! that doubles from 2 ms to 100 ms, without holding the connection, so
+//! the engine's other calls (a lease's renewal) go between attempts; after
+//! 50 attempts or 10 seconds the write fails with an error saying so.
+//! Records, leases, steps, processes, cancels and steered input commit
+//! with `synchronous_commit = on`; event appends with `off`, which
 //! survives a crash of this process but may lose the last appends to a
 //! database crash, as SQLite's `synchronous=NORMAL` does. A later
 //! synchronous commit makes every earlier one durable too.
 //!
-//! Feed positions come from a per-repository counter row that each append
-//! updates, so appends to one repository serialize on it and positions are
-//! assigned in commit order: a reader that sees position N sees every
-//! position before it. Readers wait by polling, as with SQLite across
-//! processes; nothing listens for `NOTIFY`.
+//! Feed positions come from a per-repository counter row (`by_feed_heads`)
+//! that each append increments in its own transaction, so every appended
+//! event gets exactly one position, positions are dense from 1, and they
+//! are assigned in commit order: a reader that sees position N sees every
+//! position before it. A transaction that appends first takes the
+//! repository's feed lock, a session-level advisory lock taken before
+//! `BEGIN` and released after the commit or rollback. Its snapshot is
+//! therefore taken after the previous append committed, so appends to one
+//! repository run one at a time and never fail on the counter row. Without
+//! the lock, a serializable transaction that read anything before
+//! incrementing the row failed whenever another append committed in
+//! between ("could not serialize access due to concurrent update"), and
+//! several engines appending at once retried in a storm. Readers wait by
+//! polling, as with SQLite across processes; nothing listens for `NOTIFY`.
 //!
 //! Lease expiry compares times from the engines' own clocks, as with
 //! SQLite. Engines on several hosts need synchronized clocks.
 
+use branchyard_support::rng::SplitMix64;
 use branchyard_support::LockExt as _;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -53,8 +68,24 @@ use branchyard_support::time::now_ms;
 
 /// 2: grants bound to incarnations (see `crate::storage::LegacyBinder`).
 const SCHEMA: i64 = 2;
-/// How long a write keeps retrying serialization failures.
-const RETRY_FOR: Duration = Duration::from_secs(30);
+/// How many times a write is attempted before a conflict is an error.
+const MAX_ATTEMPTS: u32 = 50;
+/// How long a write keeps retrying conflicts: well inside a lease's life
+/// (`state::LEASE_TTL`, 30 seconds), so a write that cannot get through
+/// fails while its engine still holds the branch.
+const RETRY_FOR: Duration = Duration::from_secs(10);
+/// The ceiling of the first retry's random pause, in milliseconds; it
+/// doubles for each later retry, up to [`MAX_PAUSE_MS`].
+const FIRST_PAUSE_MS: u64 = 2;
+/// The highest ceiling of a retry's pause, in milliseconds.
+const MAX_PAUSE_MS: u64 = 100;
+/// Take the repository's feed lock: a session-level advisory lock on the
+/// scope, in the one-key space the server's own locks use, each named by a
+/// text prefix. See the module documentation.
+const FEED_LOCK: &str = "SELECT pg_advisory_lock(hashtextextended('branchyard feed ' || $1, 0))";
+/// Release [`FEED_LOCK`]: `true` when this session held it.
+const FEED_UNLOCK: &str =
+    "SELECT pg_advisory_unlock(hashtextextended('branchyard feed ' || $1, 0))";
 
 const TABLES: &str = "
 CREATE TABLE IF NOT EXISTS by_meta (
@@ -432,6 +463,8 @@ pub(crate) struct Postgres {
     url: String,
     repo: String,
     conn: Mutex<Option<Client>>,
+    /// How many attempts at a write conflicted and were retried.
+    retried: AtomicU64,
 }
 
 impl fmt::Debug for Postgres {
@@ -493,7 +526,9 @@ fn redact_text(url: &str) -> String {
 
 /// Why a transaction's work stopped: a conflict to retry, or a failure.
 enum Fail {
-    Retry(postgres::Error),
+    /// A conflict with a concurrent transaction, in the named step: the
+    /// whole transaction is tried again.
+    Retry(&'static str, postgres::Error),
     Error(Error),
 }
 
@@ -515,8 +550,8 @@ type R<T> = Result<T, Fail>;
 /// failure or a deadlock.
 fn db(context: &'static str) -> impl FnOnce(postgres::Error) -> Fail {
     move |error| match error.code() {
-        Some(code) if *code == SqlState::T_R_SERIALIZATION_FAILURE => Fail::Retry(error),
-        Some(code) if *code == SqlState::T_R_DEADLOCK_DETECTED => Fail::Retry(error),
+        Some(code) if *code == SqlState::T_R_SERIALIZATION_FAILURE => Fail::Retry(context, error),
+        Some(code) if *code == SqlState::T_R_DEADLOCK_DETECTED => Fail::Retry(context, error),
         _ => Fail::Error(state(context, &error)),
     }
 }
@@ -533,6 +568,92 @@ fn fenced(fence: &Fence, why: &str) -> Error {
         "{}'s lease generation {} {why}; another engine owns the branch now",
         fence.branch, fence.generation
     ))
+}
+
+/// Proof that the transaction holds the repository's feed lock, which
+/// [`Postgres::insert_event`] asks for: only [`Postgres::appending`] makes
+/// one.
+struct FeedLocked(());
+
+/// Run `f` in one serializable transaction on `client`, committed when it
+/// returns `Ok` and rolled back otherwise.
+fn transaction<T>(
+    client: &mut Client,
+    full: bool,
+    f: &(dyn Fn(&mut Transaction<'_>) -> R<T> + Sync),
+) -> R<T> {
+    let mut tx = client
+        .build_transaction()
+        .isolation_level(postgres::IsolationLevel::Serializable)
+        .start()
+        .map_err(db("begin"))?;
+    if !full {
+        tx.batch_execute("SET LOCAL synchronous_commit = off")
+            .map_err(db("begin"))?;
+    }
+    let value = f(&mut tx)?;
+    tx.commit().map_err(db("commit"))?;
+    Ok(value)
+}
+
+/// When a conflicting write is tried again, and when it gives up: at most
+/// [`MAX_ATTEMPTS`] attempts within [`RETRY_FOR`], each retry after a pause
+/// drawn at random below a ceiling that doubles from [`FIRST_PAUSE_MS`] to
+/// [`MAX_PAUSE_MS`] ("full jitter"), so writers that conflicted together do
+/// not come back together.
+struct Retry {
+    /// Attempts made so far.
+    attempts: u32,
+    started: Instant,
+    /// Seeded on the first retry; most writes never need it.
+    rng: Option<SplitMix64>,
+}
+
+impl Retry {
+    fn new() -> Retry {
+        Retry {
+            attempts: 1,
+            started: Instant::now(),
+            rng: None,
+        }
+    }
+
+    /// The pause before the next attempt, or `None` once the attempts or
+    /// the time are spent.
+    fn pause(&mut self) -> Option<Duration> {
+        if self.attempts >= MAX_ATTEMPTS || self.started.elapsed() >= RETRY_FOR {
+            return None;
+        }
+        let ceiling = pause_ceiling_ms(self.attempts);
+        self.attempts += 1;
+        let rng = self.rng.get_or_insert_with(SplitMix64::from_entropy);
+        Some(Duration::from_micros(
+            rng.below_or_at(ceiling.saturating_mul(1000)),
+        ))
+    }
+
+    /// The error a write fails with once [`Retry::pause`] gave up, naming
+    /// the step that conflicted last.
+    fn exhausted(&self, context: &str, error: &postgres::Error) -> Error {
+        state(
+            &format!(
+                "{context}: still conflicting with concurrent writes after {} attempts in \
+                 {:.1} s; the last conflict",
+                self.attempts,
+                self.started.elapsed().as_secs_f64()
+            ),
+            error,
+        )
+    }
+}
+
+/// The ceiling of the pause after attempt `attempt` (from 1), in
+/// milliseconds.
+fn pause_ceiling_ms(attempt: u32) -> u64 {
+    let doublings = attempt.saturating_sub(1).min(20);
+    FIRST_PAUSE_MS
+        .saturating_mul(1u64 << doublings)
+        .min(MAX_PAUSE_MS)
 }
 
 /// Run `f`, on another thread when this one is inside a Tokio runtime,
@@ -579,6 +700,7 @@ impl Postgres {
             url: url.to_owned(),
             repo: repo.to_owned(),
             conn: Mutex::new(Some(connect(url)?)),
+            retried: AtomicU64::new(0),
         };
         store.tx(true, |tx| {
             // Concurrent CREATE TABLE IF NOT EXISTS can collide; one at a
@@ -665,47 +787,108 @@ impl Postgres {
         Ok(guard.as_mut().expect("connected above"))
     }
 
-    /// Run `f` in a serializable transaction, retrying it from the start
-    /// on a serialization failure or deadlock. `full` chooses whether the
-    /// commit waits for the database's durable flush.
+    /// Run `f` in a serializable transaction, retried from the start on a
+    /// conflict as [`Retry`] decides. `full` chooses whether the commit
+    /// waits for the database's durable flush. A transaction that appends
+    /// events uses [`Postgres::appending`] instead.
     fn tx<T: Send>(
         &self,
         full: bool,
         f: impl Fn(&mut Transaction<'_>) -> R<T> + Send + Sync,
     ) -> Result<T, Error> {
-        let mut guard = self.lock();
-        let client = self.client(&mut guard)?;
+        self.run(full, false, &f)
+    }
+
+    /// [`Postgres::tx`] for a transaction that appends events: each attempt
+    /// holds the repository's feed lock from before its snapshot until
+    /// after it ends, so appends to one repository run one at a time and
+    /// none conflicts on the feed head (see the module documentation).
+    fn appending<T: Send>(
+        &self,
+        full: bool,
+        f: impl Fn(&mut Transaction<'_>, &FeedLocked) -> R<T> + Send + Sync,
+    ) -> Result<T, Error> {
+        self.run(full, true, &|tx: &mut Transaction<'_>| {
+            f(tx, &FeedLocked(()))
+        })
+    }
+
+    /// Attempt `f` until it commits, fails, or [`Retry`] gives up. The
+    /// connection is held for one attempt at a time: between attempts the
+    /// engine's other calls, a lease's renewal among them, go first.
+    fn run<T: Send>(
+        &self,
+        full: bool,
+        feed: bool,
+        f: &(dyn Fn(&mut Transaction<'_>) -> R<T> + Sync),
+    ) -> Result<T, Error> {
         off_runtime(|| {
-            let deadline = Instant::now() + RETRY_FOR;
-            let mut pause = Duration::from_millis(1);
+            let mut retry = Retry::new();
             loop {
-                let attempt = (|| {
-                    let mut tx = client
-                        .build_transaction()
-                        .isolation_level(postgres::IsolationLevel::Serializable)
-                        .start()
-                        .map_err(db("begin"))?;
-                    if !full {
-                        tx.batch_execute("SET LOCAL synchronous_commit = off")
-                            .map_err(db("begin"))?;
-                    }
-                    let value = f(&mut tx)?;
-                    tx.commit().map_err(db("commit"))?;
-                    Ok(value)
-                })();
+                let attempt = {
+                    let mut guard = self.lock();
+                    self.client(&mut guard)?;
+                    self.attempt(&mut guard, full, feed, f)
+                };
                 match attempt {
                     Ok(value) => return Ok(value),
                     Err(Fail::Error(error)) => return Err(error),
-                    Err(Fail::Retry(error)) if Instant::now() >= deadline => {
-                        return Err(state("a transaction kept conflicting", &error))
-                    }
-                    Err(Fail::Retry(_)) => {
-                        std::thread::sleep(pause);
-                        pause = (pause * 2).min(Duration::from_millis(50));
+                    Err(Fail::Retry(context, error)) => {
+                        self.retried.fetch_add(1, Ordering::Relaxed);
+                        match retry.pause() {
+                            Some(pause) => std::thread::sleep(pause),
+                            None => return Err(retry.exhausted(context, &error)),
+                        }
                     }
                 }
             }
         })
+    }
+
+    /// One attempt at `f` on the connection in `slot`, behind the feed lock
+    /// when `feed`. A feed lock that cannot be released, or whose
+    /// transaction panicked, is let go by closing the connection: the
+    /// session that holds it ends, and the next call reconnects.
+    fn attempt<T>(
+        &self,
+        slot: &mut Option<Client>,
+        full: bool,
+        feed: bool,
+        f: &(dyn Fn(&mut Transaction<'_>) -> R<T> + Sync),
+    ) -> R<T> {
+        let Some(client) = slot.as_mut() else {
+            return Err(Error::State("PostgreSQL: not connected".into()).into());
+        };
+        if !feed {
+            return transaction(client, full, f);
+        }
+        client
+            .execute(FEED_LOCK, &[&self.repo])
+            .map_err(db("feed lock"))?;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            transaction(client, full, f)
+        }));
+        let released = match &outcome {
+            Ok(_) => match client.query_one(FEED_UNLOCK, &[&self.repo]) {
+                Ok(row) if row.get::<_, bool>(0) => Ok(()),
+                Ok(_) => Err("this session did not hold it".to_owned()),
+                Err(error) => Err(error.to_string()),
+            },
+            Err(_) => Err("its transaction panicked".to_owned()),
+        };
+        if released.is_err() {
+            if let Some(client) = slot.take() {
+                close(client);
+            }
+        }
+        branchyard_support::best_effort(
+            "release the repository's feed lock (the connection is closed instead)",
+            released,
+        );
+        match outcome {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 
     /// Run a read outside any explicit transaction.
@@ -810,8 +993,16 @@ impl Postgres {
     }
 
     /// Append `event` to `name`'s log at the next feed position; returns
-    /// its sequence number in the branch.
-    fn insert_event(&self, tx: &mut Transaction<'_>, name: &str, event: &RecordedEvent) -> R<u64> {
+    /// its sequence number in the branch. The feed lock (`_feed`) is what
+    /// keeps the counter row's increment from conflicting with another
+    /// engine's append.
+    fn insert_event(
+        &self,
+        tx: &mut Transaction<'_>,
+        _feed: &FeedLocked,
+        name: &str,
+        event: &RecordedEvent,
+    ) -> R<u64> {
         let activity = encode("event", &event.activity)?;
         let incarnation = self
             .incarnation(tx, name)?
@@ -1247,13 +1438,10 @@ impl Backend for Postgres {
         record: Option<&Record>,
         event: Option<&RecordedEvent>,
     ) -> Result<(), Error> {
-        self.tx(true, |tx| {
+        let release = |tx: &mut Transaction<'_>| -> R<()> {
             self.check(tx, fence)?;
             if let Some(record) = record {
                 self.put(tx, record)?;
-            }
-            if let Some(event) = event {
-                self.insert_event(tx, &fence.branch, event)?;
             }
             tx.execute(
                 "UPDATE by_leases SET owner = NULL, expires_ms = 0 WHERE repo = $1 AND branch = $2",
@@ -1261,7 +1449,15 @@ impl Backend for Postgres {
             )
             .map_err(db("release"))?;
             Ok(())
-        })
+        };
+        match event {
+            Some(event) => self.appending(true, |tx, feed| {
+                release(tx)?;
+                self.insert_event(tx, feed, &fence.branch, event)?;
+                Ok(())
+            }),
+            None => self.tx(true, release),
+        }
     }
 
     fn leases(&self) -> Result<Vec<LeaseRow>, Error> {
@@ -1715,11 +1911,11 @@ impl Backend for Postgres {
         event: &RecordedEvent,
         fence: Option<&Fence>,
     ) -> Result<u64, Error> {
-        self.tx(false, |tx| {
+        self.appending(false, |tx, feed| {
             if let Some(fence) = fence {
                 self.check(tx, fence)?;
             }
-            self.insert_event(tx, name, event)
+            self.insert_event(tx, feed, name, event)
         })
     }
 
@@ -2198,7 +2394,7 @@ impl PortBackend for Postgres {
             .map_err(|error| match error.code() {
                 // Another reservation took it first: try again from the
                 // start, which sees that one.
-                Some(code) if *code == SqlState::UNIQUE_VIOLATION => Fail::Retry(error),
+                Some(code) if *code == SqlState::UNIQUE_VIOLATION => Fail::Retry("port", error),
                 _ => db("port")(error),
             })?;
             Ok(port)
@@ -2336,7 +2532,8 @@ impl GraphBackend for Postgres {
 
     fn commit_graph(&self, commit: &GraphCommit) -> Result<u64, Error> {
         let parent = &commit.parent;
-        self.tx(true, |tx| {
+        // Appending: a dependent it reopens is recorded waiting.
+        self.appending(true, |tx, feed| {
             let current = self.graph_revision_in(tx, parent)?;
             if let Some(expected) = commit.expected.filter(|e| *e != current) {
                 return Err(Error::StaleRevision {
@@ -2387,6 +2584,7 @@ impl GraphBackend for Postgres {
                     self.put(tx, &record)?;
                     self.insert_event(
                         tx,
+                        feed,
                         name,
                         &RecordedEvent {
                             at_ms: now_ms(),
@@ -2473,7 +2671,7 @@ impl GraphBackend for Postgres {
         from: fn(&BranchStatus) -> bool,
     ) -> Result<bool, Error> {
         let name = &record.info.name;
-        self.tx(true, |tx| {
+        self.appending(true, |tx, feed| {
             let waiting = self
                 .stored_record(tx, name)?
                 .is_some_and(|stored| from(&stored.info.status));
@@ -2482,7 +2680,7 @@ impl GraphBackend for Postgres {
             }
             self.put(tx, record)?;
             for event in events {
-                self.insert_event(tx, name, event)?;
+                self.insert_event(tx, feed, name, event)?;
             }
             Ok(true)
         })
@@ -2662,7 +2860,7 @@ impl StorageBackend for Postgres {
                         &new.name,
                         &new.owner,
                         &ancestry,
-                        &to_db("now_ms", now_ms())?,
+                        &to_db("created_ms", new.created_ms)?,
                         &new.owner_incarnation,
                         &ancestry_incarnations,
                     ],
@@ -3501,6 +3699,132 @@ mod redact_tests {
         assert_eq!(
             redact("postgres://by@db/yard?application_name=x"),
             "postgres://by@db/yard?application_name=x"
+        );
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::{pause_ceiling_ms, Retry, MAX_ATTEMPTS, MAX_PAUSE_MS, RETRY_FOR};
+    use branchyard_support::rng::SplitMix64;
+    use std::time::{Duration, Instant};
+
+    fn seeded(seed: u64) -> Retry {
+        Retry {
+            rng: Some(SplitMix64::new(seed)),
+            ..Retry::new()
+        }
+    }
+
+    #[test]
+    fn the_pause_ceiling_doubles_to_its_cap() {
+        let ceilings: Vec<u64> = (1..=9).map(pause_ceiling_ms).collect();
+        assert_eq!(ceilings, [2, 4, 8, 16, 32, 64, 100, 100, 100]);
+        assert_eq!(pause_ceiling_ms(u32::MAX), MAX_PAUSE_MS);
+    }
+
+    #[test]
+    fn retries_stop_after_the_last_attempt_each_below_its_ceiling() {
+        let mut retry = seeded(7);
+        let mut pauses = Vec::new();
+        while let Some(pause) = retry.pause() {
+            pauses.push(pause);
+        }
+        assert_eq!(pauses.len(), MAX_ATTEMPTS as usize - 1);
+        assert_eq!(retry.attempts, MAX_ATTEMPTS);
+        for (n, pause) in (1..).zip(&pauses) {
+            let ceiling = Duration::from_millis(pause_ceiling_ms(n));
+            assert!(*pause <= ceiling, "retry {n}: {pause:?} over {ceiling:?}");
+        }
+        assert_eq!(retry.pause(), None, "spent stays spent");
+    }
+
+    #[test]
+    fn writers_that_conflicted_together_do_not_retry_together() {
+        // Eight writers on their third retry, each with its own seed: the
+        // pauses spread below the ceiling rather than repeating one value,
+        // as the doubling without jitter did.
+        let mut pauses: Vec<Duration> = (0..8)
+            .map(|seed| {
+                let mut retry = seeded(seed);
+                retry.pause().unwrap();
+                retry.pause().unwrap();
+                retry.pause().unwrap()
+            })
+            .collect();
+        pauses.sort();
+        pauses.dedup();
+        assert!(pauses.len() >= 6, "{pauses:?}");
+    }
+
+    #[test]
+    fn retries_stop_once_the_time_is_spent() {
+        let mut retry = Retry {
+            started: Instant::now().checked_sub(RETRY_FOR).unwrap(),
+            ..seeded(1)
+        };
+        assert_eq!(retry.pause(), None);
+        assert_eq!(retry.attempts, 1);
+    }
+}
+
+/// Run by CI's `postgres` job, which sets `BY_TEST_POSTGRES_URL`; skipped
+/// without it.
+#[cfg(test)]
+mod contention_tests {
+    use super::{connect, Postgres};
+    use crate::conformance::{contend, postgres_at, postgres_url, unique, CONTENDERS};
+    use crate::state::Backend;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    /// Engines appending to one repository's feed at once never conflict:
+    /// the feed lock runs their transactions one at a time, each with a
+    /// snapshot taken after the previous one committed, so none fails on
+    /// the feed head and none is retried. Without the lock, eight engines
+    /// appending twenty events each were retried over two hundred times.
+    ///
+    /// In a schema of its own: the other tests' transactions on shared
+    /// tables can conflict with these through serializable isolation's
+    /// page-level read locks, which is retried, not avoided.
+    #[test]
+    fn contended_appends_are_never_retried() {
+        let Some(base) = postgres_url() else {
+            eprintln!("skipped: set BY_TEST_POSTGRES_URL to run the PostgreSQL conformance tests");
+            return;
+        };
+        let schema = format!("by_contention_{}", unique("x").replace('-', "_"));
+        let mut admin = connect(&base).unwrap();
+        admin
+            .batch_execute(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}"
+            ))
+            .unwrap();
+        let separator = if base.contains('?') { '&' } else { '?' };
+        let url = format!("{base}{separator}options=-csearch_path%3D{schema}");
+        let opened = postgres_at(url.clone(), "contention");
+        let scope = opened.scope.clone().unwrap();
+        let engines: Vec<Arc<Postgres>> = (0..CONTENDERS)
+            .map(|_| Arc::new(Postgres::open(&url, &scope).unwrap()))
+            .collect();
+        contend(
+            &opened,
+            engines
+                .iter()
+                .map(|engine| engine.clone() as Arc<dyn Backend>)
+                .collect(),
+        );
+        let retried: Vec<u64> = engines
+            .iter()
+            .map(|engine| engine.retried.load(Ordering::Relaxed))
+            .collect();
+        drop((opened, engines));
+        admin
+            .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+            .unwrap();
+        assert!(
+            retried.iter().all(|r| *r == 0),
+            "appends were retried: {retried:?}"
         );
     }
 }

@@ -2,7 +2,7 @@
 //! fake `herdr` on `PATH` that records every call and hands out pane IDs.
 //! Hermetic; requires `git`, `sh`, `mkdir`, `sleep` and `kill`.
 
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use branchyard_testkit::{wait, Scratch};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -266,15 +266,16 @@ impl Served {
     }
 
     fn stop(&mut self) {
-        let _ = Command::new("kill")
+        Command::new("kill")
             .args(["-TERM", &self.child.id().to_string()])
-            .status();
+            .status()
+            .unwrap();
         let exited = wait::try_until_for(Duration::from_secs(20), || {
             self.child.try_wait().unwrap().is_some()
         });
         if exited.is_err() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            self.child.kill().unwrap();
+            self.child.wait().unwrap();
         }
     }
 
@@ -318,8 +319,8 @@ struct Killed(Child);
 
 impl Drop for Killed {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        branchyard_support::best_effort("kill a test process", self.0.kill());
+        branchyard_support::best_effort("reap a test process", self.0.wait());
     }
 }
 

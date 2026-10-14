@@ -2,7 +2,7 @@
 //! with their context, poisoning is reported once with the lock's name, and a
 //! thread's panic reaches the sink it was given.
 
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
@@ -64,11 +64,12 @@ fn a_healthy_lock_logs_nothing() {
 fn rwlock_and_owned_access_recover_too() {
     let rw = Arc::new(RwLock::new(String::from("kept")));
     let held = rw.clone();
-    let _ = std::thread::spawn(move || {
+    assert!(std::thread::spawn(move || {
         let _w = held.write().unwrap();
         panic!("poisoning on purpose");
     })
-    .join();
+    .join()
+    .is_err());
     let (text, events) = capture(|| rw.read_recovering("fixture rw").clone());
     assert_eq!(text, "kept");
     assert_eq!(events.len(), 1, "{events:?}");
@@ -84,11 +85,12 @@ fn rwlock_and_owned_access_recover_too() {
 fn condvar_waits_recover_from_poison() {
     let pair = Arc::new((Mutex::new(0u32), Condvar::new()));
     let held = pair.clone();
-    let _ = std::thread::spawn(move || {
+    assert!(std::thread::spawn(move || {
         let _guard = held.0.lock().unwrap();
         panic!("poisoning on purpose");
     })
-    .join();
+    .join()
+    .is_err());
     let (state, wake) = &*pair;
     let guard = state.lock_recovering("pair");
     let (guard, timed_out) = wake.wait_timeout_recovering(guard, Duration::from_millis(5), "pair");

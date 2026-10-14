@@ -1,0 +1,69 @@
+{
+  "profile": "deepseek-harness-acp",
+  "harness": "deepseek-harness",
+  "harness_version": "0.2.0-rc.2",
+  "driver_version": "0.0.1",
+  "command": "dsh --profile acp",
+  "execution": "local process with scrubbed environment and private home; not a Branchyard sandbox",
+  "host": "Linux 6.18.44-fc-v114 x86_64",
+  "date": "2026-10-11",
+  "installed_from": "npm @deepseek-ai/dsh@0.2.0-rc.2, routed to Gemini (gemini-3.5-flash) through its OpenAI-compatible endpoint by a $DSH_HOME/cordis.patch.yml provider with compat.supportsStore false",
+  "seconds": 511.0,
+  "harness_estimated_cost_usd": "not reported by the harness; the cost cap did not apply",
+  "scenarios": [
+    {
+      "name": "fresh_turn",
+      "passed": true,
+      "detail": "session dabf61b8-cdd5-48ed-9e8a-954019e54dcc; replied \"OK\"",
+      "seconds": 2.9
+    },
+    {
+      "name": "permission_denied",
+      "passed": false,
+      "detail": "no permission request reached the driver",
+      "seconds": 7.8
+    },
+    {
+      "name": "permission_allowed",
+      "passed": false,
+      "detail": "outcome Failed { message: \"Internal error: turn failed: 400 status code (no body)\" }",
+      "seconds": 8.1
+    },
+    {
+      "name": "interrupt_during_permission",
+      "passed": false,
+      "detail": "timed out after 240s",
+      "seconds": 240.0
+    },
+    {
+      "name": "interrupt_during_tool",
+      "passed": false,
+      "detail": "timed out after 240s",
+      "seconds": 240.0
+    },
+    {
+      "name": "clean_close",
+      "passed": true,
+      "detail": "closed cleanly; no descendants outlived the harness; session cost $0.0000",
+      "seconds": 0.1
+    },
+    {
+      "name": "resume",
+      "passed": true,
+      "detail": "session dabf61b8-cdd5-48ed-9e8a-954019e54dcc; remembered PELICAN-7; cost $0.0000",
+      "seconds": 9.0
+    },
+    {
+      "name": "fork",
+      "passed": true,
+      "detail": "rejected before launch as declared: unsupported: ACP session/fork is an unstable method",
+      "seconds": 0.0
+    },
+    {
+      "name": "connection_lost",
+      "passed": true,
+      "detail": "killed mid-turn; outcome reported unknown",
+      "seconds": 3.5
+    }
+  ]
+}

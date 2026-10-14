@@ -206,7 +206,6 @@ fn drain(conn: &mut Connection, out: &mut Vec<u8>, buf: &mut [u8]) -> bool {
 
 /// Move bytes between the TLS session on `tcp` and the local end `app`
 /// until both directions have ended.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 fn pump(mut conn: Connection, mut tcp: TcpStream, mut app: UnixStream) {
     if tcp.set_nonblocking(true).is_err() || app.set_nonblocking(true).is_err() {
         return;
@@ -232,11 +231,17 @@ fn pump(mut conn: Connection, mut tcp: TcpStream, mut app: UnixStream) {
             to_app.clear();
         }
         if deliver && !peer_open && to_app.is_empty() && !app_shut {
-            let _ = app.shutdown(Shutdown::Write);
+            branchyard_support::best_effort(
+                "shut down the application's write side",
+                app.shutdown(Shutdown::Write),
+            );
             app_shut = true;
         }
         if !app_open && !tcp_shut && !conn.wants_write() {
-            let _ = tcp.shutdown(Shutdown::Write);
+            branchyard_support::best_effort(
+                "shut down the TCP write side",
+                tcp.shutdown(Shutdown::Write),
+            );
             tcp_shut = true;
         }
         if tcp_shut && !peer_open && (to_app.is_empty() || !deliver) {
@@ -302,7 +307,10 @@ fn pump(mut conn: Connection, mut tcp: TcpStream, mut app: UnixStream) {
                 Ok(_) => {
                     if conn.process_new_packets().is_err() {
                         // Send the alert rustls queued, then give up.
-                        let _ = tcp.set_nonblocking(false);
+                        branchyard_support::best_effort(
+                            "restore blocking mode to send the TLS alert",
+                            tcp.set_nonblocking(false),
+                        );
                         while conn.wants_write() && conn.write_tls(&mut tcp).is_ok() {}
                         return;
                     }
@@ -441,5 +449,34 @@ mod tests {
 
         assert!(ClientTls::from_ca_pem(b"not a certificate").is_err());
         assert!(ServerTls::from_pem(cert.as_bytes(), b"no key").is_err());
+    }
+
+    #[test]
+    fn a_ca_file_is_read_and_a_missing_or_malformed_one_is_named() {
+        let (ca_pem, ca) = authority();
+        let scratch = branchyard_testkit::Scratch::new("bridge-tls");
+        let path = scratch.join("ca.pem");
+        std::fs::write(&path, &ca_pem).unwrap();
+        let tls = ClientTls::from_ca_file(&path).unwrap();
+        // Debug output names the type, never the trust store.
+        assert_eq!(format!("{tls:?}"), "ClientTls { .. }");
+        let (cert, key) = identity(&ca);
+        let server_tls = ServerTls::from_pem(cert.as_bytes(), key.as_bytes()).unwrap();
+        assert_eq!(format!("{server_tls:?}"), "ServerTls { .. }");
+
+        std::fs::write(&path, "not a certificate").unwrap();
+        let error = ClientTls::from_ca_file(&path).unwrap_err();
+        assert!(error.to_string().starts_with("CA file "), "{error}");
+        assert!(error.to_string().contains("ca.pem"), "{error}");
+
+        let missing = scratch.join("absent.pem");
+        let error = ClientTls::from_ca_file(&missing).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(
+            error.to_string().starts_with("could not read the CA file "),
+            "{error}"
+        );
+        assert!(error.to_string().contains("absent.pem"), "{error}");
+        scratch.close();
     }
 }

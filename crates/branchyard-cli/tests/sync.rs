@@ -4,7 +4,7 @@
 //! collected and scrubbed; then the same through an encrypted remote.
 //! Hermetic: no network. Requires `git` and `sh`.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -27,7 +27,9 @@ impl World {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(&dir).unwrap();
         let dir = fs::canonicalize(dir).unwrap();
         let config = dir.join("config.toml");
@@ -124,7 +126,7 @@ impl World {
 
 impl Drop for World {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+        branchyard_support::cleanup_dir(&self.dir);
     }
 }
 

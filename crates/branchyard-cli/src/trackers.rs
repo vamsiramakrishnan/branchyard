@@ -680,7 +680,6 @@ pub fn gateway_call(url: &str, token: &str, tool: &str, arguments: Value) -> Res
     }
 }
 
-#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,13 +783,16 @@ mod tests {
                     .unwrap();
                 let framing = wire::request_framing(&head.headers).unwrap();
                 let body = wire::read_body(&mut reader, framing, 1 << 20).unwrap();
-                let _ = sender.send(Seen {
-                    method: head.method,
-                    target: head.target,
-                    headers: head.headers,
-                    body,
-                });
-                let _ = out.write_all(&reply);
+                branchyard_support::best_effort(
+                    "report a request to the test",
+                    sender.send(Seen {
+                        method: head.method,
+                        target: head.target,
+                        headers: head.headers,
+                        body,
+                    }),
+                );
+                branchyard_support::best_effort("answer the test request", out.write_all(&reply));
             }
         });
         (url, seen)

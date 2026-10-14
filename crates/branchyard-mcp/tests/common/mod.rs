@@ -2,7 +2,7 @@
 //! server's stdio. Hermetic: requires `git`; no real harness, no network.
 
 #![allow(dead_code)]
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -184,7 +184,7 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        branchyard_support::best_effort("kill the MCP server", self.child.kill());
+        branchyard_support::best_effort("reap the MCP server", self.child.wait());
     }
 }

@@ -4,7 +4,7 @@
 //! records its arguments and answers with canned JSON. Hermetic: nothing
 //! reaches GitHub, and no credential is read. Requires `git` and `sh`.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -619,8 +619,8 @@ struct Killed(std::process::Child);
 
 impl Drop for Killed {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        branchyard_support::best_effort("kill the test process", self.0.kill());
+        branchyard_support::best_effort("reap the test process", self.0.wait());
     }
 }
 

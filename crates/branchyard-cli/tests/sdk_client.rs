@@ -1,4 +1,4 @@
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 //! The Python HTTP client, `sdk/python/branchyard_client.py`, against a
 //! real `by serve`: the fake ACP agent is the harness, a fake Anvil
 //! packages the connector bundles, delegation is allowed, and
@@ -65,8 +65,8 @@ struct Served {
 
 impl Drop for Served {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        branchyard_support::best_effort("kill the test child", self.child.kill());
+        branchyard_support::best_effort("reap the test child", self.child.wait());
     }
 }
 

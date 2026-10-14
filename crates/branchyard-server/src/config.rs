@@ -572,9 +572,11 @@ pub struct ConnectorsConfig {
     /// Whether each turn calls the gateway through the effect ledger's
     /// proxy (docs/effects.md). Default on.
     pub effects_proxy: Option<bool>,
-    /// What each turn's ledger proxy binds. Default loopback.
+    /// What each turn's ledger proxy, and a sandboxed turn's delegation
+    /// endpoint, binds. Default loopback.
     pub effects_listen: Option<std::net::IpAddr>,
-    /// How a sandboxed harness reaches its ledger proxy.
+    /// How a sandboxed harness reaches this host: its ledger proxy and its
+    /// delegation endpoint.
     pub effects_sandbox_host: Option<String>,
 }
 
@@ -1256,12 +1258,14 @@ pub(crate) struct FileConnectors {
     /// decides approvals and writes every effectful call to the ledger
     /// before it is made (docs/effects.md). Default true.
     effects_proxy: Option<bool>,
-    /// The address each turn's ledger proxy binds. Default `127.0.0.1`.
+    /// The address each turn's ledger proxy, and a sandboxed turn's
+    /// delegation endpoint, binds. Default `127.0.0.1`.
     effects_listen: Option<std::net::IpAddr>,
-    /// How a sandboxed harness reaches its ledger proxy (a host address
-    /// its guest routes to). Without it, a sandboxed turn calls the
-    /// gateway directly and its effects reach the ledger only from the
-    /// audit log.
+    /// How a sandboxed harness reaches this host (a host address its guest
+    /// routes to), where its ledger proxy and its delegation endpoint
+    /// listen. Without it, a sandboxed turn calls the gateway directly and
+    /// its effects reach the ledger only from the audit log, and a
+    /// sandboxed harness gets no delegation tools.
     effects_sandbox_host: Option<String>,
 }
 

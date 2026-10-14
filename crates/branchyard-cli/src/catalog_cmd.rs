@@ -92,7 +92,7 @@ pub fn harnesses(env: &Env, target: &Target, as_json: bool) -> Outcome {
         },
         Column {
             header: "API KEY",
-            max: 28,
+            max: 32,
             right: false,
         },
     ];
@@ -286,6 +286,9 @@ pub fn live(action: &crate::args::CatalogAction, as_json: bool) -> Outcome {
         }
         CatalogAction::Status => {
             let loaded = live_catalog::load(&dir).map_err(Failure::Message)?;
+            // The model listings of `by models list` share the cache; a
+            // file that does not match its checksum is refused here too.
+            live_catalog::load_models(&dir).map_err(Failure::Message)?;
             let Some(loaded) = loaded else {
                 return match as_json {
                     true => print(&json::text(&json!({"dir": dir, "cached": false}))),
@@ -310,6 +313,7 @@ pub fn live(action: &crate::args::CatalogAction, as_json: bool) -> Outcome {
             for (what, part) in [
                 ("connectors", &loaded.manifest.connectors),
                 ("harnesses", &loaded.manifest.harnesses),
+                ("models", &loaded.manifest.models),
             ] {
                 if let Some(part) = part {
                     out.push_str(&format!(

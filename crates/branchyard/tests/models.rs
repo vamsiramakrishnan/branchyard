@@ -9,7 +9,7 @@
 //! cost. Under a required egress policy the confined harness reaches the
 //! gateway and nothing else. Hermetic: nothing leaves this host.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -122,19 +122,25 @@ fn serve(stream: std::net::TcpStream, behavior: Behavior, sender: mpsc::Sender<S
     // A request that offers tools gets an answer that calls some, as a
     // model would.
     let tools = body["tools"].as_array().is_some_and(|t| !t.is_empty());
-    let _ = sender.send(Seen {
-        path: path.clone(),
-        headers,
-        body,
-        raw,
-    });
+    branchyard_support::best_effort(
+        "report the request to the test",
+        sender.send(Seen {
+            path: path.clone(),
+            headers,
+            body,
+            raw,
+        }),
+    );
     if let Behavior::Status(code) = behavior {
         let body = format!(r#"{{"error":{{"type":"upstream_{code}","message":"mock"}}}}"#);
-        let _ = write!(
-            out,
-            "HTTP/1.1 {code} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+        branchyard_support::best_effort(
+            "answer the mock request",
+            write!(
+                out,
+                "HTTP/1.1 {code} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
              Connection: close\r\n\r\n{body}",
-            body.len()
+                body.len()
+            ),
         );
         return;
     }
@@ -265,16 +271,22 @@ fn serve(stream: std::net::TcpStream, behavior: Behavior, sender: mpsc::Sender<S
     };
     if !events.is_empty() {
         // Streamed in chunks, each written on its own.
-        let _ = write!(
+        branchyard_support::best_effort(
+            "start the mock event stream",
+            write!(
             out,
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\
              Connection: close\r\n\r\n"
+        ),
         );
         for event in events {
-            let _ = write!(out, "{:x}\r\n{event}\r\n", event.len());
-            let _ = out.flush();
+            branchyard_support::best_effort(
+                "write a mock event",
+                write!(out, "{:x}\r\n{event}\r\n", event.len()),
+            );
+            branchyard_support::best_effort("flush a mock event", out.flush());
         }
-        let _ = write!(out, "0\r\n\r\n");
+        branchyard_support::best_effort("end the mock event stream", write!(out, "0\r\n\r\n"));
         return;
     }
     let body = match (path.as_str(), tools) {
@@ -311,17 +323,22 @@ fn serve(stream: std::net::TcpStream, behavior: Behavior, sender: mpsc::Sender<S
                 "prompt_tokens_details": {"cached_tokens": 60}}}),
     }
     .to_string();
-    let _ = write!(
-        out,
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+    branchyard_support::best_effort(
+        "answer the mock request",
+        write!(
+            out,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",
-        body.len()
+            body.len()
+        ),
     );
 }
 
 /// The fake harness: `harness.py direct|proxy CALL...`. A call is
-/// `API,PATH,MODEL,json|stream|tools|toolstream[,KEY]` (PATH after the base
-/// URL), sent the way that provider's SDK sends it, printing `call MODEL
+/// `API,PATH,MODEL,json|stream|tools|toolstream|extras[,KEY]` (PATH after
+/// the base URL), sent the way that provider's SDK sends it (`extras` is
+/// `json` with what SDKs add: Claude Code's `metadata.user_id`, an OpenAI
+/// SDK's `store` and `user`), printing `call MODEL
 /// MODE: STATUS events=N [ERROR TYPE] [retry=SECONDS]`; `tools` and
 /// `toolstream` are `json` and `stream` offering the tools Read, Edit and
 /// Bash, with a marker in the prompt ([`MARKER`]); `token=FILE` writes the
@@ -377,6 +394,12 @@ for spec in sys.argv[2:]:
             body["tools"] = [{"type": "function", "function": {"name": n, "parameters": {"type": "object"}}} for n in names]
     if kind in ("stream", "toolstream"):
         body["stream"] = True
+    if kind == "extras":
+        if api == "anthropic":
+            body["metadata"] = {"user_id": "user_1"}
+        else:
+            body["store"] = False
+            body["user"] = "user_1"
     headers["content-type"] = "application/json"
     payload = json.dumps(body).encode() if kind != "broken" else b'{"model": "' + model.encode()
     if sent:
@@ -1308,6 +1331,75 @@ fn a_claude_request_is_translated_for_an_openai_backend() {
     );
 }
 
+/// `compat = "gemini"`: Gemini's OpenAI-compatible endpoint is sent its
+/// own path under its versioned base URL, and none of the OpenAI-only
+/// fields it refuses, whether a Claude request was translated for it or an
+/// OpenAI one passed through.
+#[test]
+fn a_gemini_backend_gets_its_own_path_and_none_of_the_fields_it_refuses() {
+    let f = Fixture::new();
+    let gemini = mock(Behavior::Answer);
+    use_gateway(
+        &f,
+        json!({
+            "backends": {"gemini": {"api": "openai", "key": "openai", "compat": "gemini",
+                "url": format!("{}/v1beta/openai", gemini.url())}},
+            "routes": [
+                {"model": "gemini-*", "backends": ["gemini"]},
+                {"model": "claude-*", "backends": ["gemini"], "backend_model": "gemini-3.5-flash"}
+            ]
+        }),
+    );
+    let script = harness(&f.dir);
+    let branch = f
+        .task(&prompt(
+            &script,
+            "direct",
+            &[
+                "anthropic,/v1/messages,claude-sonnet-4-6,extras",
+                "openai,/chat/completions,gemini-3.5-flash,extras",
+            ],
+        ))
+        .options(options(&f, on_gateway(&["claude-sonnet-*", "gemini-*"])))
+        .name("on-gemini")
+        .run()
+        .unwrap();
+    let events = branch.events().unwrap();
+    said(
+        &events,
+        &[
+            "call claude-sonnet-4-6 extras: 200",
+            "call gemini-3.5-flash extras: 200",
+        ],
+    );
+    let seen = gemini.seen();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    for request in &seen {
+        assert_eq!(request.path, "/v1beta/openai/chat/completions");
+        assert_eq!(request.body["model"], "gemini-3.5-flash");
+        for refused in ["store", "user", "metadata"] {
+            assert!(
+                request.body.get(refused).is_none(),
+                "{refused}: {request:?}"
+            );
+        }
+        let bearer = format!("Bearer {OPENAI_KEY}");
+        assert_eq!(request.header("authorization"), Some(bearer.as_str()));
+    }
+    assert_eq!(seen[0].body["max_completion_tokens"], 16);
+    let recorded = calls(&events);
+    assert_eq!(
+        recorded
+            .iter()
+            .map(|c| (c.backend.as_deref(), c.translated.as_deref()))
+            .collect::<Vec<_>>(),
+        [
+            (Some("gemini"), Some("gemini-3.5-flash")),
+            (Some("gemini"), None)
+        ]
+    );
+}
+
 fn digest_of(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
@@ -1668,4 +1760,152 @@ fn a_translated_call_is_read_in_the_backends_shape() {
     let (_, message) = exchange(&sent, 1);
     let message: Value = serde_json::from_str(&message).unwrap();
     assert_eq!(message["stop_reason"], "tool_use");
+}
+
+/// A call that would start with the branch's spend already at its limit is
+/// refused before it is forwarded, not only one that starts over it: a
+/// branch limited to exactly what one call costs makes that call, and the
+/// ones after it are refused. Nothing was forwarded for them, the cost is
+/// exactly the one call, and the turn ends over budget, stopped as the
+/// call's end took it to the limit.
+#[test]
+fn a_call_that_would_start_at_the_branchs_limit_is_refused() {
+    let f = Fixture::new();
+    let upstream = mock(Behavior::Answer);
+    use_gateway(
+        &f,
+        json!({"backends": {"anthropic": {"api": "anthropic", "url": upstream.url(),
+            "key": "anthropic"}}}),
+    );
+    let script = harness(&f.dir);
+    let one_call = "anthropic,/v1/messages,claude-sonnet-4-6,json";
+    let probe = f
+        .task(&prompt(&script, "direct", &[one_call]))
+        .options(options(&f, on_gateway(&["*"])))
+        .name("probe")
+        .run()
+        .unwrap();
+    let one = probe.info().cost_usd.unwrap();
+    assert!(one > 0.0);
+    let mut opts = options(&f, on_gateway(&["*"]));
+    opts.budget.max_usd = Some(one);
+    let branch = f
+        .task(&prompt(&script, "direct", &[one_call, one_call, one_call]))
+        .options(opts)
+        .name("exact")
+        .run()
+        .unwrap();
+    let decisions: Vec<String> = calls(&branch.events().unwrap())
+        .iter()
+        .map(|c| c.decision.clone())
+        .collect();
+    assert_eq!(decisions, ["allowed", "budget", "budget"]);
+    // The probe's call, and the first of this branch's.
+    assert_eq!(upstream.seen().len(), 2);
+    assert_eq!(branch.info().cost_usd, Some(one));
+    assert_eq!(
+        branch.info().status,
+        branchyard::BranchStatus::BudgetExceeded {
+            limit: "max_usd".into()
+        }
+    );
+}
+
+/// A cost limit above a branch bounds its calls through the gateway, which
+/// counts what the whole tree under that limit has spent: the child was
+/// given $0.0005 but the tree has only $0.0003 left (its parent spent the
+/// rest itself), so its calls stop at the one that takes the tree to the
+/// parent's limit, though its own is far off.
+#[test]
+fn a_childs_calls_stop_at_the_limit_its_tree_shares() {
+    use branchyard::{Envelope, Spawn};
+    let f = Fixture::new();
+    let anthropic = mock(Behavior::Answer);
+    use_gateway(
+        &f,
+        json!({"backends": {"anthropic": {"api": "anthropic", "url": anthropic.url(),
+            "key": "anthropic"}}}),
+    );
+    let script = harness(&f.dir);
+    // Haiku 4.5's call costs $0.0001025 (see the first test).
+    let options = TaskOptions {
+        budget: Budget {
+            max_usd: Some(0.0006),
+            ..Budget::default()
+        },
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![common::fake_agent().display().to_string()]),
+        ..options(&f, on_gateway(&["claude-*"]))
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(options.clone())
+        .name("parent")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options).unwrap();
+    // `waiter` ends at once, when the test says; the child that calls the
+    // gateway waits for it, so the parent's spending is in place before.
+    let go = f.dir.join("go");
+    delegate
+        .spawn(Spawn {
+            prompt: format!("SH while [ ! -e {} ]; do sleep 0.05; done", go.display()),
+            name: Some("waiter".into()),
+            budget: Budget::usd(0.0001),
+            ..Spawn::default()
+        })
+        .unwrap();
+    let call = "anthropic,/v1/messages,claude-haiku-4-5,json";
+    delegate
+        .spawn(Spawn {
+            prompt: prompt(&script, "direct", &[call, call, call, call]),
+            name: Some("caller".into()),
+            budget: Budget::usd(0.0005),
+            depends_on: vec!["waiter".into()],
+            ..Spawn::default()
+        })
+        .unwrap();
+    // The parent spent $0.0003 of its $0.0006 by itself.
+    common::edit_record(&f.root, "parent", |r| {
+        r["info"]["cost_usd"] = 0.0003.into();
+    });
+    std::fs::write(&go, "").unwrap();
+    branchyard_testkit::wait::until("the caller to settle", || {
+        let info = f.yard.branch("caller").ok()?.info().clone();
+        (!matches!(
+            info.status,
+            branchyard::BranchStatus::Running | branchyard::BranchStatus::Waiting
+        ))
+        .then_some(())
+    });
+    // Three calls started under the limit; the fourth would start over it
+    // and was refused, or never made as the engine stopped the turn first.
+    let events = f.yard.branch("caller").unwrap().events().unwrap();
+    let recorded = calls(&events);
+    assert!((3..=4).contains(&recorded.len()), "{recorded:?}");
+    assert!(recorded[..3].iter().all(|c| c.decision == "allowed"));
+    if let Some(fourth) = recorded.get(3) {
+        assert_eq!(fourth.decision, "budget");
+        assert!(
+            fourth
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("the cost limit above this branch is spent"),
+            "{fourth:?}"
+        );
+    }
+    assert_eq!(anthropic.seen().len(), 3);
+    let rows: Vec<_> = f
+        .yard
+        .model_usage(0)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.branch == "caller")
+        .collect();
+    assert_eq!(rows.len(), 3);
+    let spent: f64 = rows.iter().filter_map(|r| r.cost_usd).sum();
+    assert!(spent < 0.0005, "far from its own limit: {spent}");
+    assert!(0.0003 + spent >= 0.0006, "the tree's limit: {spent}");
 }

@@ -20,6 +20,11 @@
 //!   reserves its whole limit, or what its subtree has spent if that is
 //!   more, so a subtree never spends past its root's limit through
 //!   children that report their costs.
+//! - A parent's cost limit bounds everything below it: what its tree has
+//!   spent (its own cost and its descendants', as each turn writes it to
+//!   its record) counts against the limit, a spawn is refused once the
+//!   tree has spent it, and every turn running below it stops over budget
+//!   ([`caps_above`]).
 //! - A child runs under its parent's permission policy, narrowed by any
 //!   denials the parent adds; nothing a child asks for widens it.
 //!
@@ -41,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::broker::Remote;
+use crate::contract::{self, ResultContract};
 use crate::engine::{self, Turn};
 use crate::graph::{
     self, After, Binding, Dependency, DependencyRef, Graph, GraphApplied, GraphCommit, GraphEdit,
@@ -68,7 +74,7 @@ const EVENTS_MAX: usize = 200;
 /// Characters of the last message `inspect` returns.
 const LAST_MESSAGE_MAX: usize = 4000;
 /// Cost comparisons tolerate float rounding of this much.
-const EPSILON_USD: f64 = 1e-9;
+pub(crate) const EPSILON_USD: f64 = 1e-9;
 /// How often [`Delegate::wait`] looks.
 const WAIT_POLL: Duration = Duration::from_millis(100);
 /// How often a wait for a turn in another process looks again for a
@@ -308,6 +314,12 @@ pub struct Spawn {
     /// harness, else its harness's default. A harness whose driver cannot
     /// choose a model refuses it.
     pub model: Option<String>,
+    /// The shape of the answer the child must report with `report`: a JSON
+    /// Schema in the subset [`crate::contract`] supports, and whether a
+    /// result is required. Refused when the schema uses a keyword outside
+    /// the subset. The parent reads the result as
+    /// [`Inspection::result`]. See `docs/delegation.md#result-contract`.
+    pub result: Option<ResultContract>,
 }
 
 impl Spawn {
@@ -562,6 +574,17 @@ pub struct Inspection {
     /// children spent (`settled_children_usd`): what it can still spend or
     /// grant.
     pub remaining_usd: Option<f64>,
+    /// What the cost limits above it leave it: the least, over its
+    /// ancestors that have a limit, of that limit less everything its tree
+    /// has spent (the ancestor's own spend and all its descendants').
+    /// When it reaches zero, the tree has spent that limit: nothing more
+    /// is spawned below that ancestor and the turns running below it are
+    /// stopped over budget. Omitted when no ancestor has a limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_remaining_usd: Option<f64>,
+    /// The ancestor whose limit `tree_remaining_usd` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_capped_by: Option<String>,
     /// What its live children (running, waiting, blocked or awaiting plan
     /// approval) hold of its budget: each one's whole limit, or what its
     /// subtree spent if that is more, since it may spend that much without
@@ -608,6 +631,16 @@ pub struct Inspection {
     /// `at_ms` says how old it is. Omitted until the branch reports one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported: Option<StatusReport>,
+    /// What its parent asked of the answer it reports: the schema and
+    /// whether a result is required, as the spawn gave them. Omitted when
+    /// the spawn gave none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_contract: Option<ResultContract>,
+    /// The latest result the branch reported with `report`, a JSON value
+    /// that matched `result_contract` when it has one. Omitted until it
+    /// reports one; a result of JSON `null` counts as none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
     /// The rig seat the branch occupies, if it is in a rig.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seat: Option<String>,
@@ -1126,6 +1159,16 @@ impl Delegate {
         self.typed("report", json!({"text": text}))
     }
 
+    /// [`Delegate::report`] with a `result`: a JSON value that must match
+    /// the branch's result contract when its parent gave one (a mismatch
+    /// is refused naming the place and the rule, and nothing is
+    /// recorded). It is recorded on this branch as [`Activity::Result`]
+    /// and is its parent's [`Inspection::result`]. A branch whose
+    /// contract requires a result must report with one.
+    pub fn report_result(&self, text: &str, result: &Value) -> Result<Message, Error> {
+        self.typed("report", json!({"text": text, "result": result}))
+    }
+
     /// Escalate to this branch's parent, or, when its rig seat's
     /// `escalates_to` names one, an ancestor further up.
     pub fn escalate(&self, text: &str) -> Result<Message, Error> {
@@ -1558,6 +1601,141 @@ fn limit_usd(record: &Record) -> Option<f64> {
 /// (from each parent's ledger); unreported counts as 0.
 fn subtree_spent(store: &Store, record: &Record) -> f64 {
     record.subtree_spent(&mut |name| store.read(name).ok())
+}
+
+/// A cost limit, and what the tree under the branch that holds it has
+/// spent. A parent's limit bounds its whole subtree: when the tree has
+/// spent it, nothing more is spawned below that branch, and every turn
+/// running below it is stopped ([`caps_above`]).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TreeCap {
+    /// The branch that holds the limit.
+    pub branch: String,
+    /// Its cost limit (`max_usd`).
+    pub limit_usd: f64,
+    /// What it and everything below it has spent, removed descendants
+    /// included; unreported costs count as zero.
+    pub spent_usd: f64,
+}
+
+impl TreeCap {
+    /// Whether the tree has spent the limit, or all but float rounding.
+    pub fn reached(&self) -> bool {
+        self.spent_usd >= self.limit_usd - EPSILON_USD
+    }
+
+    /// What the tree may still spend.
+    pub fn left(&self) -> f64 {
+        (self.limit_usd - self.spent_usd).max(0.0)
+    }
+
+    /// What the tree has spent, in words.
+    pub fn spent_text(&self) -> String {
+        format!(
+            "{} and everything below it has spent ${:.4} of its {} ${:.4}",
+            self.branch,
+            self.spent_usd,
+            crate::operations::limit_text("max_usd"),
+            self.limit_usd
+        )
+    }
+
+    /// What the stopped branch's own log says.
+    pub fn stop_note(&self) -> String {
+        format!(
+            "stopped at the cost limit of {}, which bounds this branch's tree: {}",
+            self.branch,
+            self.spent_text()
+        )
+    }
+}
+
+/// The cost limits on the branches above `name` in the delegation tree,
+/// nearest first, each with what its tree has spent. A branch counts as
+/// an ancestor only through the children its parent lists: a fork names
+/// the branch it came from as its parent too, and that one bounds it by
+/// nothing. A limit is the one the ancestor's turns run under: the limits
+/// its last turn was given, narrowed by its own parent's.
+///
+/// Spend is read from the branches' records, which a running turn keeps
+/// current (it writes its cost as the harness reports it, or as the model
+/// gateway meters it), and each descendant is read once for all the limits.
+/// `own` is what `name` itself has spent when the caller knows it better
+/// than its record does (a model call just metered, a report just
+/// arrived): the larger of the two counts.
+pub(crate) fn caps_above(store: &Store, name: &str, own: Option<f64>) -> Vec<TreeCap> {
+    let Ok(mut below) = store.read(name) else {
+        return Vec::new();
+    };
+    let mut path = Vec::new();
+    let mut seen = BTreeSet::from([name.to_owned()]);
+    while let Some(parent) = below.info.parent.clone() {
+        if !seen.insert(parent.clone()) {
+            break;
+        }
+        let Ok(above) = store.read(&parent) else {
+            break;
+        };
+        if !above.info.children.contains(&below.info.name) {
+            break;
+        }
+        path.push(above.clone());
+        below = above;
+    }
+    let mut read: BTreeMap<String, Option<Record>> = BTreeMap::new();
+    let mut caps = Vec::new();
+    for above in path {
+        let Some(limit_usd) = effective_budget(&above, &Budget::default()).max_usd else {
+            continue;
+        };
+        let spent_usd = above.subtree_spent(&mut |child| {
+            read.entry(child.to_owned())
+                .or_insert_with(|| {
+                    let mut record = store.read(child).ok()?;
+                    if let (true, Some(own)) = (child == name, own) {
+                        record.info.cost_usd = Some(record.info.cost_usd.unwrap_or(0.0).max(own));
+                    }
+                    Some(record)
+                })
+                .clone()
+        });
+        caps.push(TreeCap {
+            branch: above.info.name.clone(),
+            limit_usd,
+            spent_usd,
+        });
+    }
+    caps
+}
+
+/// The nearest cost limit above `name` whose tree has spent it, if any.
+pub(crate) fn capped_above(store: &Store, name: &str, own: Option<f64>) -> Option<TreeCap> {
+    caps_above(store, name, own)
+        .into_iter()
+        .find(TreeCap::reached)
+}
+
+/// Record on the branch that holds `cap` that `stopped`'s turn was stopped
+/// at its limit, so the stop is visible from the parent as well as from
+/// the child (whose own log says it too: see [`TreeCap::stop_note`]).
+/// Best-effort: the stop itself does not depend on it.
+pub(crate) fn note_tree_stop(
+    store: &Store,
+    stopped: &str,
+    cap: &TreeCap,
+    observer: Option<crate::Observer>,
+) {
+    let note = format!(
+        "stopped {stopped}'s turn: the tree under {} has spent its cost limit ({})",
+        cap.branch,
+        cap.spent_text()
+    );
+    if let Ok(mut recorder) = Recorder::open(store, &cap.branch, observer) {
+        branchyard_support::best_effort(
+            "record a stop at the cost limit of an ancestor",
+            recorder.record(Activity::Warning(note)),
+        );
+    }
 }
 
 /// Whether any direct child of `name` is currently running a turn. Read
@@ -2210,6 +2388,24 @@ impl Local {
     /// parent with nothing left, or no room for another live child,
     /// refuses the send.
     fn reserve_again(&self, name: &str) -> Result<Option<(f64, f64, String)>, Error> {
+        let narrowed = self.reserve_within_parent(name)?;
+        // A settled child under a cost limit its tree has spent runs
+        // nothing more, whatever its parent has left of its own.
+        let store = self.store();
+        let settled = store
+            .read(name)
+            .is_ok_and(|child| !is_live(&child.info.status));
+        if let (true, Some(cap)) = (settled, capped_above(&store, name, None)) {
+            return Err(Error::Denied(format!(
+                "{name} cannot run again: {}",
+                cap.spent_text()
+            )));
+        }
+        Ok(narrowed)
+    }
+
+    /// What [`Local::reserve_again`] checks against the child's parent.
+    fn reserve_within_parent(&self, name: &str) -> Result<Option<(f64, f64, String)>, Error> {
         let store = self.store();
         let child = store.read(name)?;
         if is_live(&child.info.status) {
@@ -2586,6 +2782,9 @@ impl Local {
         if request.prompt.trim().is_empty() {
             return Err(Error::Denied("a child needs a prompt".into()));
         }
+        if let Some(result) = &request.result {
+            result.check()?;
+        }
         let seated = self.seat(caller, grant, request, planned)?;
         let filled;
         let request = match &seated {
@@ -2623,6 +2822,15 @@ impl Local {
         if child_grant.can_spawn() {
             crate::projection::tools(&self.options)?;
         }
+        let seat = seated.as_ref().map(|(_, seat, _)| seat);
+        let isolated =
+            caller.home.is_some() || self.options.isolated || seat.is_some_and(|s| s.isolated);
+        // Every child is given the delegation tools; refuse one whose
+        // harness could not take them where it would run.
+        harness::check_delegation_tools(
+            profile,
+            isolated || crate::placement::sandboxed(caller.provider.as_ref()),
+        )?;
         // The same harness keeps the parent's executable override.
         let command = match profile.id == own.id {
             true => caller.command.clone(),
@@ -2631,9 +2839,6 @@ impl Local {
         let launch = harness::command(profile, command.as_deref());
         harness::check_approvals(profile, self.options.unapproved_tools)?;
         harness::check_available(profile.harness, &launch)?;
-        let seat = seated.as_ref().map(|(_, seat, _)| seat);
-        let isolated =
-            caller.home.is_some() || self.options.isolated || seat.is_some_and(|s| s.isolated);
         let seated_provision = seat.and_then(|s| s.provision.as_ref());
         let model = child_model(
             request.model.as_deref(),
@@ -2778,6 +2983,7 @@ impl Local {
         record.info.status = BranchStatus::Waiting;
         record.check_inherited = request.check.is_none() && record.check.is_some();
         record.bindings = request.bindings.clone();
+        record.result_contract = request.result.clone();
         record.start_base = base;
         if request.plan {
             crate::plan::check_profile(profile)?;
@@ -2874,7 +3080,32 @@ impl Local {
         Ok(Some((name, seat, below)))
     }
 
-    /// The child's limits, checked against what this branch has left.
+    /// The cost limits that bound a child of this branch, each with what
+    /// its tree has spent: this branch's own, then those of the branches
+    /// above it, nearest first.
+    fn tree_caps(&self, caller: &Record) -> Vec<TreeCap> {
+        let store = self.store();
+        let mut caps = Vec::new();
+        if let Some(limit_usd) = self.options.budget.max_usd {
+            caps.push(TreeCap {
+                branch: self.branch.clone(),
+                limit_usd,
+                spent_usd: subtree_spent(&store, caller)
+                    .max(self.own_spent(caller) + held(&store, caller).settled_usd),
+            });
+        }
+        caps.extend(caps_above(
+            &store,
+            &self.branch,
+            Some(self.own_spent(caller)),
+        ));
+        caps
+    }
+
+    /// The child's limits, checked against what this branch has left, and
+    /// against what the cost limits above it leave their trees: a child
+    /// is refused once any of those trees has spent its limit, and its
+    /// own limit may not be more than the least of them has left.
     fn child_limits(
         &self,
         caller: &Record,
@@ -2882,6 +3113,14 @@ impl Local {
         planned_usd: f64,
     ) -> Result<Limits, Error> {
         let bounds = &self.options.budget;
+        let caps = self.tree_caps(caller);
+        if let Some(cap) = caps.iter().find(|cap| cap.reached()) {
+            return Err(Error::Denied(format!(
+                "{} cannot spawn: {}",
+                self.branch,
+                cap.spent_text()
+            )));
+        }
         let max_usd = match (bounds.max_usd, asked.max_usd) {
             (_, Some(ask)) if !(ask.is_finite() && ask > 0.0) => {
                 return Err(Error::Denied(format!(
@@ -2911,6 +3150,24 @@ impl Local {
             }
             (None, ask) => ask,
         };
+        if let Some(ask) = max_usd {
+            // What this branch has left is checked above; the limits above
+            // it count what everything below them has spent, so a child
+            // is refused when an ancestor's tree has less left than it
+            // asks for, even if this branch's own reservation allows it.
+            if let Some(cap) = caps
+                .iter()
+                .find(|cap| ask + planned_usd > cap.left() + EPSILON_USD)
+            {
+                return Err(Error::Denied(format!(
+                    "{} {ask} exceeds what the tree under {} has left, ${:.4}: {}",
+                    crate::operations::limit_text("max_usd"),
+                    cap.branch,
+                    (cap.left() - planned_usd).max(0.0),
+                    cap.spent_text()
+                )));
+            }
+        }
         let max_turns = match (bounds.max_turns, asked.max_turns) {
             (Some(limit), Some(ask)) if ask > limit => {
                 return Err(Error::Denied(format!(
@@ -3025,7 +3282,12 @@ impl Local {
             .as_ref()
             .map(|g| g.envelope.allowed(&info.profile))
             .unwrap_or_default();
+        let tightest = caps_above(&store, branch, own.then(|| self.own_spent(&record)))
+            .into_iter()
+            .min_by(|a, b| a.left().total_cmp(&b.left()));
         Ok(Inspection {
+            tree_remaining_usd: tightest.as_ref().map(TreeCap::left),
+            tree_capped_by: tightest.map(|cap| cap.branch),
             subtree_cost_usd: subtree_spent(&store, &record).max(if own {
                 self.own_spent(&record) + held.settled_usd
             } else {
@@ -3065,6 +3327,8 @@ impl Local {
             allowed_harnesses,
             last_message: last_message(&events),
             reported: reported::latest(&events),
+            result_contract: record.result_contract,
+            result: contract::latest(&events),
             seat,
             seats: may_spawn,
             stalled: info.stalled,
@@ -3469,13 +3733,40 @@ impl Local {
     /// Send `kind` from this branch to its parent (`question`, `report` or
     /// `escalation`).
     fn send_to_parent(&self, kind: MessageKind, text: &str) -> Result<Message, Error> {
-        let parent = self
-            .store()
-            .read(&self.branch)?
+        let record = self.store().read(&self.branch)?;
+        let parent = self.parent_to(&record, kind)?;
+        self.send_message(kind, &parent, text, None)
+    }
+
+    /// `record`'s parent, or why there is none to send `kind` to.
+    fn parent_to(&self, record: &Record, kind: MessageKind) -> Result<String, Error> {
+        record
             .info
             .parent
-            .ok_or_else(|| Error::Denied(format!("{} has no parent to {kind}", self.branch)))?;
-        self.send_message(kind, &parent, text, None)
+            .clone()
+            .ok_or_else(|| Error::Denied(format!("{} has no parent to {kind}", self.branch)))
+    }
+
+    /// Report to this branch's parent. With a `result`, it is checked
+    /// against the branch's result contract first (a branch whose contract
+    /// requires one must give it), then recorded on this branch before the
+    /// message is sent, so a parent woken by the message finds it in
+    /// `inspect`. Nothing is recorded or sent when either is refused.
+    fn report(&self, text: &str, result: Option<Value>) -> Result<Message, Error> {
+        let store = self.store();
+        let record = store.read(&self.branch)?;
+        let Some(value) = contract::accept(record.result_contract.as_ref(), result)? else {
+            let parent = self.parent_to(&record, MessageKind::Report)?;
+            return self.send_message(MessageKind::Report, &parent, text, None);
+        };
+        let parent = self.parent_to(&record, MessageKind::Report)?;
+        if text.trim().is_empty() {
+            return Err(Error::Denied("a report needs text".into()));
+        }
+        inbox::authorize(&store, &self.branch, MessageKind::Report, &parent)?;
+        Recorder::open(&store, &self.branch, self.options.observer.clone())?
+            .record(Activity::Result { value })?;
+        self.send_message(MessageKind::Report, &parent, text, None)
     }
 
     /// Record this branch's own status report, and escalate a `blocked` or
@@ -3707,6 +3998,7 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
         connectors: request.connectors.clone(),
         plan: request.plan,
         model: request.model.clone(),
+        result: request.result.clone(),
     })
 }
 
@@ -3903,6 +4195,16 @@ struct PublishArtifactArgs {
 #[serde(deny_unknown_fields)]
 struct TextArgs {
     text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReportArgs {
+    text: String,
+    /// The branch's result: a JSON value, checked against its contract.
+    /// `null` counts as none.
+    #[serde(default)]
+    result: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -4197,8 +4499,8 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
             to_json(&Asked { message, answer })
         }
         "report" => {
-            let args: TextArgs = parse(tool, arguments)?;
-            to_json(&local.send_to_parent(MessageKind::Report, &args.text)?)
+            let args: ReportArgs = parse(tool, arguments)?;
+            to_json(&local.report(&args.text, args.result)?)
         }
         "escalate" => {
             let args: TextArgs = parse(tool, arguments)?;
@@ -4251,7 +4553,6 @@ fn child_model(
     })
 }
 
-#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4479,14 +4780,13 @@ Checks on the merged result: \
     use crate::{
         CheckVerdict, IntegrationCheck, PermissionDecision, PermissionKey, PermissionRequest,
     };
-    use std::fs;
     use std::path::PathBuf;
 
     struct Temp(PathBuf);
 
     impl Drop for Temp {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            branchyard_support::cleanup_dir(&self.0);
         }
     }
 
@@ -4560,6 +4860,9 @@ Checks on the merged result: \
             goal: None,
             deny: Vec::new(),
             removed: Vec::new(),
+            metered_from: None,
+
+            result_contract: None,
         }
     }
 

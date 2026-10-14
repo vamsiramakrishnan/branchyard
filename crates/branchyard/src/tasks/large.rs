@@ -747,7 +747,6 @@ pub(crate) fn chunks_reachable(dir: &Path, rev: &str) -> Result<BTreeSet<String>
     Ok(chunks)
 }
 
-#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -847,7 +846,9 @@ mod tests {
     #[test]
     fn the_store_deduplicates_and_verifies() {
         let dir = std::env::temp_dir().join(format!("by-chunks-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         let store = ChunkStore::new(&dir);
         let data = noise(3 * 1024 * 1024, 3);
         let file = dir.join("in.bin");
@@ -868,6 +869,6 @@ mod tests {
         let error = store.restore_file(&first, &again, false).unwrap_err();
         assert!(error.to_string().contains("corrupt"), "{error}");
         assert!(!again.exists());
-        let _ = fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

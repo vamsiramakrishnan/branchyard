@@ -64,6 +64,38 @@ pub(crate) fn denied_tools(policy: &Policy) -> Vec<String> {
     tools
 }
 
+/// `policy` as data, for a harness that enforces its own permission rules
+/// instead of asking Branchyard (Antigravity's CLI): its rules in order and
+/// its fallback, with an asking fallback kept as asking, which such a
+/// harness cannot do. `by` is the `by` the turn's harness runs, if any.
+/// See `docs/provisioning.md#antigravity-permission-rules`.
+pub(crate) fn permissions(
+    policy: &Policy,
+    by: Option<String>,
+) -> branchyard_provision::Permissions {
+    use branchyard_provision::permissions::{Fallback as Native, PermissionRule};
+    branchyard_provision::Permissions {
+        rules: policy
+            .rules
+            .iter()
+            .map(|rule| PermissionRule {
+                tool: rule.tool.clone(),
+                allow: rule.allow,
+                delegation_by: rule
+                    .delegation_by
+                    .as_ref()
+                    .map(|by| by.display().to_string()),
+            })
+            .collect(),
+        fallback: match policy.fallback {
+            Fallback::Allow => Native::Allow,
+            Fallback::Deny => Native::Deny,
+            Fallback::Ask(_) => Native::Ask,
+        },
+        by,
+    }
+}
+
 /// Tools that change files, by the names the harnesses give them.
 pub const EDIT_TOOLS: &[&str] = &[
     "Edit",
@@ -73,6 +105,11 @@ pub const EDIT_TOOLS: &[&str] = &[
     "fileChange",
     "write_file",
     "replace",
+    "edit",
+    // An ACP agent's call by its kind, when it names no tool.
+    "acp:edit",
+    "acp:delete",
+    "acp:move",
 ];
 
 /// Tools that run commands.
@@ -85,10 +122,18 @@ pub const SHELL_TOOLS: &[&str] = &[
     "run_shell_command",
     "shell",
     "exec_command",
+    "bash",
+    "acp:execute",
 ];
 
 /// Tools that fetch from or search the web.
-pub const WEB_TOOLS: &[&str] = &["WebFetch", "WebSearch", "web_fetch", "google_web_search"];
+pub const WEB_TOOLS: &[&str] = &[
+    "WebFetch",
+    "WebSearch",
+    "web_fetch",
+    "google_web_search",
+    "acp:fetch",
+];
 
 /// A named permission policy that stands for explicit rules: usable
 /// wherever explicit rules are (`by run --permissions`, a rig seat's
@@ -356,6 +401,31 @@ mod tests {
         assert!(denied_tools(&scoped).is_empty());
     }
 
+    /// The policy as data decides as the policy does without asking:
+    /// Antigravity's shell (`run_command`) and file writes under each
+    /// preset, an asking fallback kept as asking, and the delegation rule
+    /// with the `by` it names.
+    #[test]
+    fn a_policy_as_data_decides_as_the_policy_does() {
+        let decide = |policy: &Policy, tool: &str| permissions(policy, None).decide(tool);
+        let read_only = PolicyPreset::ReadOnly.policy();
+        assert_eq!(decide(&read_only, "run_command"), Some(false));
+        assert_eq!(decide(&read_only, "write_file"), Some(false));
+        let worktree = PolicyPreset::EditWorktree.policy();
+        assert_eq!(decide(&worktree, "run_command"), Some(false));
+        assert_eq!(decide(&worktree, "write_file"), Some(true));
+        let full = PolicyPreset::Full.policy();
+        assert_eq!(decide(&full, "run_command"), Some(true));
+        let asking = Policy::ask(|_, _| PermissionDecision::Allow).allow("Read");
+        assert_eq!(decide(&asking, "run_command"), None);
+        assert_eq!(decide(&asking, "Read"), Some(true));
+        let scoped = Policy::deny_all().allow_delegation_commands("/opt/by/bin/by");
+        let data = permissions(&scoped, Some("/opt/by/bin/by".into()));
+        assert_eq!(data.delegation_by("run_command"), Some("/opt/by/bin/by"));
+        assert_eq!(data.decide("run_command"), Some(false));
+        assert_eq!(data.by.as_deref(), Some("/opt/by/bin/by"));
+    }
+
     #[test]
     fn presets_expand_to_explicit_rules() {
         let decide = |preset: PolicyPreset, tool: &str| {
@@ -364,15 +434,30 @@ mod tests {
                 PermissionDecision::Allow
             )
         };
-        for tool in ["Read", "Grep", "read_file"] {
+        for tool in ["Read", "Grep", "read_file", "acp:read", "acp:search"] {
             assert!(decide(PolicyPreset::ReadOnly, tool), "{tool}");
             assert!(decide(PolicyPreset::EditWorktree, tool), "{tool}");
         }
-        for tool in ["Edit", "Write", "fileChange", "write_file"] {
+        for tool in [
+            "Edit",
+            "Write",
+            "fileChange",
+            "write_file",
+            "acp:edit",
+            "edit",
+        ] {
             assert!(!decide(PolicyPreset::ReadOnly, tool), "{tool}");
             assert!(decide(PolicyPreset::EditWorktree, tool), "{tool}");
         }
-        for tool in ["Bash", "commandExecution", "WebFetch", "mcp__anything"] {
+        for tool in [
+            "Bash",
+            "commandExecution",
+            "WebFetch",
+            "mcp__anything",
+            "acp:execute",
+            "acp:fetch",
+            "bash",
+        ] {
             assert!(!decide(PolicyPreset::ReadOnly, tool), "{tool}");
             assert!(!decide(PolicyPreset::EditWorktree, tool), "{tool}");
         }

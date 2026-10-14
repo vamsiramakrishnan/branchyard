@@ -665,6 +665,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml_edit",
+ "tracing",
  "url",
  "webpki-roots",
 ]
@@ -823,6 +824,7 @@ version = "0.0.1"
 dependencies = [
  "branchyard-harness",
  "branchyard-runtime",
+ "branchyard-support",
  "clap",
  "serde_json",
 ]

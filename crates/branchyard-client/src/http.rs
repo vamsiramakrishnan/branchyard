@@ -317,7 +317,7 @@ pub fn decode_form_bytes(value: &[u8]) -> Vec<u8> {
     percent_encoding::percent_decode(&spaced).collect()
 }
 
-#[allow(clippy::let_underscore_must_use, clippy::unwrap_in_result)] // tests: a panic is the failure report
+#[allow(clippy::unwrap_in_result)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,7 +409,7 @@ mod tests {
         client
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
-        let _ = server.write_all(bytes);
+        server.write_all(bytes).unwrap();
         drop(server);
         let mut response = read_response(BufReader::new(Stream::Plain(client)), head_only)?;
         let mut body = Vec::new();

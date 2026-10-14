@@ -337,7 +337,6 @@ fn reason(status: u16) -> &'static str {
     }
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 fn respond(out: &mut TcpStream, status: u16, headers: &[(String, String)], body: &[u8]) {
     let mut head = format!("HTTP/1.1 {status} {}\r\n", reason(status));
     for (name, value) in headers {
@@ -354,9 +353,9 @@ fn respond(out: &mut TcpStream, status: u16, headers: &[(String, String)], body:
         "Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     ));
-    let _ = out.write_all(head.as_bytes());
-    let _ = out.write_all(body);
-    let _ = out.flush();
+    best_effort("send the response head", out.write_all(head.as_bytes()));
+    best_effort("send the response body", out.write_all(body));
+    best_effort("flush the response", out.flush());
 }
 
 /// Answer a JSON-RPC request without forwarding it: a tool result,

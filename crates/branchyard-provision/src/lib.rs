@@ -53,6 +53,7 @@ pub mod edit;
 pub mod instructions;
 pub mod models;
 pub mod network;
+pub mod permissions;
 pub mod toml;
 
 mod antigravity;
@@ -62,6 +63,7 @@ mod copilot;
 mod gemini;
 mod generic;
 mod hermes;
+mod oh_my_pi;
 mod opencode;
 
 use std::collections::BTreeMap;
@@ -74,6 +76,7 @@ use serde::{Deserialize, Serialize};
 
 pub use claude::{managed_settings, ManagedSettings, MANAGED_SETTINGS};
 pub use edit::{Edit, JsonEdit, TomlEdit};
+pub use permissions::{Permissions, PermissionsWritten};
 
 /// The Scion revision the translated provisioners follow.
 pub const SCION_REVISION: &str = "d9b9e6a2e1e29e428e6f8e72c2d5ab0df0475338";
@@ -588,6 +591,10 @@ pub struct Context {
     pub model: Option<String>,
     pub effort: Option<Effort>,
     pub telemetry: Option<Telemetry>,
+    /// The branch's permission policy, for a harness that enforces its own
+    /// rules rather than asking Branchyard (Antigravity); see
+    /// [`permissions`]. `None`: no policy to translate.
+    pub permissions: Option<Permissions>,
     /// What an earlier provisioning of this home installed in native
     /// configuration, from [`apply::installed`].
     pub installed: Installed,
@@ -617,6 +624,7 @@ impl Context {
             model: None,
             effort: None,
             telemetry: None,
+            permissions: None,
             installed: Installed::default(),
         }
     }
@@ -644,9 +652,9 @@ impl Context {
 }
 
 /// What Branchyard installed in a home, recorded there at
-/// [`INSTALLED_PATH`]: native MCP entries, so a later provisioning removes
-/// the ones no longer asked for and nothing else, and the credentials it
-/// wrote, so removing the branch removes them
+/// [`INSTALLED_PATH`]: native MCP entries and permission rules, so a later
+/// provisioning removes the ones no longer asked for and nothing else, and
+/// the credentials it wrote, so removing the branch removes them
 /// ([`apply::remove_credentials`]).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -655,6 +663,9 @@ pub struct Installed {
     pub mcp_servers: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<Credential>,
+    /// The permission rules written into the harness's own settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<PermissionsWritten>,
 }
 
 /// A credential Branchyard wrote in a home: a file holding a secret, by
@@ -916,6 +927,11 @@ pub struct Plan {
     /// The native MCP entries now installed, when the provisioner manages
     /// them; recorded in the home by [`plan`].
     pub installed_mcp_servers: Option<Vec<String>>,
+    /// The permission rules the plan writes into the harness's own
+    /// settings, when its provisioner translates the branch's policy
+    /// ([`Context::permissions`]); recorded in the home by [`plan`], and in
+    /// the turn's `Provisioned` activity when it holds any.
+    pub permissions: Option<PermissionsWritten>,
 }
 
 impl Plan {
@@ -1004,6 +1020,7 @@ static PROVISIONERS: &[&dyn Provisioner] = &[
     &copilot::Copilot,
     &hermes::Hermes,
     &antigravity::Antigravity,
+    &oh_my_pi::OhMyPi,
 ];
 
 /// Every translated provisioner.
@@ -1024,6 +1041,52 @@ pub const NOT_PORTED: &[(&str, &str)] = &[
          could not be tested",
     ),
 ];
+
+/// A login a harness keeps in a file in its home, and the secret its
+/// provisioner takes that file's whole content as (its `auth-file`
+/// method): how a device-code login reaches a branch with a private home.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileLogin {
+    /// Branchyard's harness ID.
+    pub harness: &'static str,
+    /// The file, relative to the home: `.codex/auth.json`.
+    pub path: &'static str,
+    /// The secret it is provisioned as: `CODEX_AUTH`.
+    pub secret: &'static str,
+}
+
+/// Every login kept in a file that a provisioner can carry into a private
+/// home, from the provisioners' own authentication methods.
+pub fn file_logins() -> Vec<FileLogin> {
+    [
+        (&claude::AUTH, claude::CREDENTIALS),
+        (&codex::AUTH, codex::AUTH_FILE),
+        (&gemini::AUTH, gemini::OAUTH_CREDS),
+    ]
+    .into_iter()
+    .flat_map(|(spec, path)| {
+        spec.methods.iter().filter_map(move |m| match m.kind {
+            auth::Kind::File { secret } => Some(FileLogin {
+                harness: spec.harness,
+                path,
+                secret,
+            }),
+            auth::Kind::Env { .. } => None,
+        })
+    })
+    .collect()
+}
+
+/// Whether `harness`'s provisioner takes a reasoning effort for a branch
+/// whose home is (`private_home`) or is not its own: Codex writes it into
+/// its `config.toml` and Oh My Pi into its `config.yml`, which need a
+/// private home; the others have no setting for it and refuse one.
+pub fn takes_effort(harness: &str, protocol: Protocol, private_home: bool) -> bool {
+    let mut context = Context::new(harness, protocol, "/home", "/work");
+    context.private_home = private_home;
+    context.effort = Some(Effort::Medium);
+    plan(&context).is_ok()
+}
 
 /// The provisioner for a harness: a translated one, or one that only
 /// passes session items through and refuses anything else.
@@ -1051,12 +1114,16 @@ pub fn plan(context: &Context) -> Result<Plan, Refused> {
         telemetry.check().map_err(Refused)?;
     }
     if let Some(server) = context.remote_mcp_servers.first() {
-        if !matches!(context.protocol, Protocol::ClaudeStreamJson | Protocol::Acp) {
+        let takes = matches!(
+            context.protocol,
+            Protocol::ClaudeStreamJson | Protocol::Acp | Protocol::AntigravityStreamJson
+        );
+        if !takes {
             return Err(unsupported(
                 context,
                 &format!("the HTTP or SSE MCP server {}", server.name),
-                "only Claude Code's stream-json driver and ACP agents that advertise them \
-                 take one",
+                "only Claude Code's stream-json driver, ACP agents that advertise them and \
+                 Antigravity (an HTTP one, in a private home) take one",
             ));
         }
     }
@@ -1072,8 +1139,9 @@ pub fn plan(context: &Context) -> Result<Plan, Refused> {
     Ok(plan)
 }
 
-/// Record in the home what the plan installs: its native MCP entries and,
-/// with what earlier turns recorded, every credential file it writes.
+/// Record in the home what the plan installs: its native MCP entries and
+/// permission rules and, with what earlier turns recorded, every
+/// credential file it writes.
 #[allow(clippy::expect_used)] // ratchet: branchyard-provision
 fn record_installed(context: &Context, plan: &mut Plan) {
     let mut credentials = context.installed.credentials.clone();
@@ -1119,6 +1187,10 @@ fn record_installed(context: &Context, plan: &mut Plan) {
             .clone()
             .unwrap_or_else(|| context.installed.mcp_servers.clone()),
         credentials,
+        permissions: match &plan.permissions {
+            Some(written) => Some(written.clone()).filter(|w| !w.is_empty()),
+            None => context.installed.permissions.clone(),
+        },
     };
     if installed != context.installed || plan.installed_mcp_servers.is_some() {
         let record = serde_json::to_value(&installed).expect("serializes");
@@ -1179,6 +1251,40 @@ pub(crate) fn json_text(value: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_logins_are_the_auth_file_methods_and_where_each_file_is() {
+        let logins: Vec<(&str, &str, &str)> = file_logins()
+            .iter()
+            .map(|l| (l.harness, l.path, l.secret))
+            .collect();
+        assert_eq!(
+            logins,
+            [
+                ("claude-code", ".claude/.credentials.json", "CLAUDE_AUTH"),
+                ("codex", ".codex/auth.json", "CODEX_AUTH"),
+                (
+                    "gemini-cli",
+                    ".gemini/oauth_creds.json",
+                    "GEMINI_OAUTH_CREDS"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_codex_takes_an_effort_and_only_into_a_private_home() {
+        assert!(takes_effort("codex", Protocol::CodexAppServer, true));
+        assert!(!takes_effort("codex", Protocol::CodexAppServer, false));
+        for (harness, protocol) in [
+            ("claude-code", Protocol::ClaudeStreamJson),
+            ("gemini-cli", Protocol::Acp),
+            ("antigravity", Protocol::AntigravityStreamJson),
+            ("goose", Protocol::Acp),
+        ] {
+            assert!(!takes_effort(harness, protocol, true), "{harness}");
+        }
+    }
 
     #[test]
     fn secret_sources_parse_names_variables_and_files() {

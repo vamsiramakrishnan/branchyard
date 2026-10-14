@@ -103,9 +103,12 @@ mod compare;
 #[cfg(test)]
 mod conformance;
 pub mod connectors;
+pub mod contract;
 mod delegation;
+pub mod doctor;
 pub mod effects;
 mod egress;
+mod endpoint;
 mod engine;
 mod environments;
 mod fleet;
@@ -190,11 +193,13 @@ pub use checkpoint::{
     Rewound,
 };
 pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, AttemptCheck};
+pub use contract::ResultContract;
 pub use delegation::{
     nest_graph_budgets, Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage,
     Inbox, Inspection, Sent, Spawn, Spawned, Waited, DEFAULT_MAX_WAKES,
 };
 pub use egress::{EgressActivity, Enforcement as EgressEnforcement};
+pub use endpoint::SandboxHost;
 pub use environments::{
     EnvironmentBuild, EnvironmentInfo, EnvironmentInput, EnvironmentOrigin, EnvironmentSnapshot,
     EnvironmentState, EnvironmentUse, Pruned as EnvironmentsPruned,
@@ -202,10 +207,11 @@ pub use environments::{
     DEFAULT_MAX_AGE as ENVIRONMENT_DEFAULT_MAX_AGE,
 };
 pub use fleet::{
-    classify, credit, fresh_seed as fleet_seed, harness_fault, recorded_route,
-    stats as fleet_stats, BranchOutcome, CandidateStats, Classification, Excluded, Fleet,
-    FleetActivity, FleetCandidate, FleetEntry, JudgeMark, JudgeSpec, OutcomeRecord, Route,
-    RouteDecision, RouteOptions, RoutePick, Routed, TaskKind, DEFAULT_EXPLORATION,
+    classify, credit, entry_label as fleet_entry_label, fresh_seed as fleet_seed, harness_fault,
+    inventory_default, recorded_route, stats as fleet_stats, BranchOutcome, CandidateStats,
+    Classification, Excluded, Fleet, FleetActivity, FleetCandidate, FleetEntry, InventoryDefault,
+    JudgeMark, JudgeSpec, OutcomeRecord, Route, RouteDecision, RouteOptions, RoutePick, Routed,
+    TaskKind, DEFAULT_EXPLORATION, INVENTORY_ENTRY,
 };
 pub use goal::{
     follow_up_prompt as goal_follow_up_prompt, from_events as goal_from_events,
@@ -825,6 +831,31 @@ impl Yard {
     /// `branchyard_sandbox::fake::FakeProvider`.
     pub fn use_sandbox_provider(&self, provider: Arc<dyn branchyard_sandbox::SandboxProvider>) {
         *projection::lock(&self.hub.sandbox_provider) = Some(provider);
+    }
+
+    /// Tell this yard (and its clones) where its sandboxes reach this
+    /// host: a sandboxed turn that may delegate is served the delegation
+    /// tools over HTTP there, with a token of its own, for as long as the
+    /// turn runs. See `docs/delegation.md#sandboxed-harnesses`. Replaces
+    /// any set before.
+    pub fn use_sandbox_host(&self, host: SandboxHost) {
+        *projection::lock(&self.hub.sandbox_host) = Some(host);
+    }
+
+    /// Where this yard's sandboxes reach this host: what
+    /// [`Yard::use_sandbox_host`] set, else the connector gateway's
+    /// effect-ledger proxy address ([`connectors::EffectsProxy`]) when it
+    /// names a host for sandboxes; `None` when neither does.
+    pub fn sandbox_host(&self) -> Option<SandboxHost> {
+        if let Some(host) = projection::lock(&self.hub.sandbox_host).clone() {
+            return Some(host);
+        }
+        let gateway = self.connectors()?;
+        let host = gateway.effects.sandbox_host.clone()?;
+        Some(SandboxHost {
+            listen: gateway.effects.listen,
+            host,
+        })
     }
 
     /// The named branches side by side: status, turns, cost, tokens, time,
@@ -2451,6 +2482,12 @@ pub enum Activity {
         /// flags only.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         managed: Option<branchyard_provision::ManagedWritten>,
+        /// The permission rules written into the harness's own settings,
+        /// from the branch's policy, for a harness that enforces its own
+        /// rather than asking Branchyard (Antigravity); see
+        /// `docs/provisioning.md#antigravity-permission-rules`. Rules only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permissions: Option<branchyard_provision::PermissionsWritten>,
     },
     /// Input from `by` was written into the running turn; see
     /// [`Branch::steer`]. The harness's `steer_accepted` or
@@ -2568,6 +2605,14 @@ pub enum Activity {
         /// Where to read more, an `http` or `https` URL.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         link: Option<String>,
+    },
+    /// The result the branch reported with `report`, a JSON value that
+    /// matched its parent's [`contract::ResultContract`] when it had one:
+    /// the latest is the branch's [`Inspection::result`]. See
+    /// `docs/delegation.md#result-contract`.
+    Result {
+        /// The result, as the child gave it.
+        value: serde_json::Value,
     },
     /// A branch that a trigger keeps alive moved through its lifecycle: it
     /// went idle (its kept sandbox released), dormant (its next run starts

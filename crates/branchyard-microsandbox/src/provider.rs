@@ -144,7 +144,6 @@ impl MicrosandboxProvider {
 }
 
 impl Drop for MicrosandboxProvider {
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-microsandbox
     fn drop(&mut self) {
         let kept = std::mem::take(&mut *self.kept.lock_recovering("kept"));
         let held: Vec<Arc<Sandbox>> = self
@@ -155,9 +154,15 @@ impl Drop for MicrosandboxProvider {
             .collect();
         if let Some(runtime) = self.runtime.take() {
             for sandbox in held {
-                let _ = runtime.block_on(async {
-                    tokio::time::timeout(STOP_TIMEOUT, sandbox.destroy()).await
-                });
+                branchyard_support::best_effort(
+                    "destroy a sandbox on shutdown",
+                    runtime
+                        .block_on(async {
+                            tokio::time::timeout(STOP_TIMEOUT, sandbox.destroy()).await
+                        })
+                        .map_err(|elapsed| elapsed.to_string())
+                        .and_then(|destroyed| destroyed.map_err(|error| error.to_string())),
+                );
             }
             runtime.shutdown_timeout(Duration::from_secs(5));
         }

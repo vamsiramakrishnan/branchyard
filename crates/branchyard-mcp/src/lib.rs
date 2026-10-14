@@ -13,7 +13,10 @@
 //! through [`branchyard::Delegate`] to the engine running that turn, where
 //! children run on the engine's threads. `by spawn` and its siblings, and
 //! the Python module, reach the same operations the same way; this server
-//! is for harnesses that cannot run commands.
+//! is for harnesses that cannot run commands. For a harness in a sandbox,
+//! which cannot start it, the engine runs it on the host, one process per
+//! MCP session, behind an HTTP endpoint of the turn's
+//! (`docs/delegation.md#sandboxed-harnesses`).
 //!
 //! Guarantees:
 //!
@@ -80,8 +83,8 @@ on your descendants. A branch that may not delegate (its envelope's max_depth is
 inspect, check, the artifact and scratch tools, and ask, report, escalate, report_status and inbox; the other tools \
 refuse it. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
 may spawn. You can also message: ask your parent a question (optionally waiting for its \
-answer), report to it, escalate to it or, if your rig seat allows, further up; answer a \
-descendant's message; state your own status in a line with report_status (working, idle, blocked, complete or failure; blocked and failure also reach your parent's inbox), which is a claim shown beside the status Branchyard derives, not a message; and read your own inbox. A child spawned with plan: true writes a plan read-only and escalates it to you: approve_plan runs it (as proposed or edited), reject_plan ends it or, with replan, has it plan again. When a descendant's tool or connector call needs approval, the ask is escalated to you: answer_approval allows or denies it.";
+answer), report to it (with a result, a JSON value, when your parent gave you a result_contract in inspect: it is checked against the contract's schema, and it is what your parent reads back), escalate to it or, if your rig seat allows, further up; answer a \
+descendant's message; state your own status in a line with report_status (working, idle, blocked, complete or failure; blocked and failure also reach your parent's inbox), which is a claim shown beside the status Branchyard derives, not a message; and read your own inbox. To read a child's answer as JSON, give spawn a result contract ({schema, required}): the child reports a result matching it, and you read it as the result of inspect or of each settled child in wait. A child spawned with plan: true writes a plan read-only and escalates it to you: approve_plan runs it (as proposed or edited), reject_plan ends it or, with replan, has it plan again. When a descendant's tool or connector call needs approval, the ask is escalated to you: answer_approval allows or denies it.";
 
 fn schema(value: Value) -> Arc<Map<String, Value>> {
     match value {
@@ -105,8 +108,11 @@ pub fn tools() -> Vec<Tool> {
     };
     let mut inspect = Tool::new(
         "inspect",
-        "A branch's status, candidate diffstat, cost, budget, children and last message. \
-         Omit branch for your own, including what budget you have left to grant.",
+        "A branch's status, candidate diffstat, cost, budget, children and last message, and \
+         its result: the JSON it reported with report, beside the result_contract it was \
+         spawned with. Omit branch for your own, including what budget you have left to \
+         grant, what the cost limits above you leave you (tree_remaining_usd), and the \
+         contract you must answer in.",
         schema(json!({
             "type": "object",
             "properties": {"branch": branch_property("Your own branch or a descendant; defaults to your own")},
@@ -202,6 +208,16 @@ pub fn tools() -> Vec<Tool> {
         "connectors": {"type": "array", "items": {"type": "string"}, "description": "Connector grants, as --connector takes them (github:read, 'github:write:issues.*'); narrowed to yours. Unset: yours, or the seat's"},
         "plan": {"type": "boolean", "description": "Plan first: the child's first turn is read-only and proposes a plan, escalated to your inbox; it changes nothing until you approve_plan"},
         "model": {"type": "string", "description": "The model the child's harness runs, or a size alias (small, medium, large, extra-large) where it defines one; a cheaper one suits mechanical work. Unset: the seat's, or yours. Refused for a harness that cannot choose one"},
+        "result": {
+            "type": "object",
+            "description": "The shape of the answer the child must give: it reports a JSON result with report, checked against this schema (a mismatch is refused, naming the path and the rule), and you read it as inspect's or wait's result. The child sees the contract in its own inspect as result_contract",
+            "properties": {
+                "schema": {"type": "object", "description": "A JSON Schema using only type (object, array, string, number, integer, boolean, null), properties, required, additionalProperties (false), items, enum, minimum, maximum, minLength, maxLength and description; any other keyword, such as pattern, is refused"},
+                "required": {"type": "boolean", "description": "true: a report without a result is refused, and you get a warning in your log when the child ends its turn without one. Default false"},
+            },
+            "required": ["schema"],
+            "additionalProperties": false,
+        },
     });
     let mut spawn_edit = spawn_properties.clone();
     spawn_edit["kind"] = json!({"const": "spawn"});
@@ -226,9 +242,13 @@ pub fn tools() -> Vec<Tool> {
             "spawn",
             "Create a child branch and start a harness on it with a prompt. It starts from your \
              current work (your uncommitted changes are committed to your branch first) or from \
-             base. Its budget must fit in what you have left. Returns the child's name once it \
+             base. Its budget must fit in what you have left and in what the cost limits above you \
+             leave their trees (inspect shows both); it is refused by name when it does not, and \
+             once your tree has spent your limit. A child is stopped over budget when the tree \
+             under a limit above it has spent that limit. Returns the child's name once it \
              has started; it runs in parallel with you. With depends_on it is created waiting, \
-             and starts once those children have settled.",
+             and starts once those children have settled. With result, the child must answer \
+             in the shape you give, and you read its answer back as JSON from inspect or wait.",
             schema(json!({
                 "type": "object",
                 "properties": spawn_properties,
@@ -331,7 +351,8 @@ pub fn tools() -> Vec<Tool> {
                 "Block until descendants settle (stop running, or waiting for prerequisites or \
                  on their own children): all of them, or with any the first. Without branches, \
                  your children that are still running. Returns each settled one's inspection and \
-                 those still pending; timed_out is true when timeout_seconds passed first. You \
+                 those still pending (a settled child's result is in its inspection); timed_out \
+                 is true when timeout_seconds passed first. You \
                  may instead end your turn: you are woken when every child has settled.",
                 schema(json!({
                     "type": "object",
@@ -502,10 +523,18 @@ pub fn tools() -> Vec<Tool> {
         ),
         Tool::new(
             "report",
-            "Report to your parent; no answer is expected.",
+            "Report to your parent; no answer is expected. Give result, a JSON value, to \
+             answer in the shape your parent asked for: if your inspect shows a \
+             result_contract, result is checked against its schema (a mismatch is refused, \
+             naming the path and the rule, and nothing is recorded), and when the contract is \
+             required, a report without one is refused. The latest result is what your parent \
+             reads as your inspect's result.",
             schema(json!({
                 "type": "object",
-                "properties": {"text": {"type": "string"}},
+                "properties": {
+                    "text": {"type": "string"},
+                    "result": {"description": "Your answer as a JSON value (an object, array, string, number or boolean), matching result_contract when you have one. null counts as none"},
+                },
                 "required": ["text"],
                 "additionalProperties": false,
             })),

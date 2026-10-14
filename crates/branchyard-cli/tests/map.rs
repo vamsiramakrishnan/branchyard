@@ -8,7 +8,7 @@
 //! through `by serve` with `--remote`. Hermetic: no model is called.
 //! Requires `git`, `sh` and `kill`.
 
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -870,17 +870,20 @@ impl Served {
 
 impl Drop for Served {
     fn drop(&mut self) {
-        let _ = Command::new("kill")
-            .args(["-TERM", &self.child.id().to_string()])
-            .status();
+        branchyard_support::best_effort(
+            "send the kill signal",
+            Command::new("kill")
+                .args(["-TERM", &self.child.id().to_string()])
+                .status(),
+        );
         let exited = wait::try_until_for(Duration::from_secs(20), || {
             self.child.try_wait().unwrap().is_some()
         });
         if exited.is_ok() {
             return;
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        branchyard_support::best_effort("kill the test server", self.child.kill());
+        branchyard_support::best_effort("reap the test server", self.child.wait());
     }
 }
 

@@ -44,7 +44,6 @@ impl DirLock {
         Self::acquire_within(dir, what, WAIT)
     }
 
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
     fn acquire_within(dir: &Path, what: &str, wait: Duration) -> Result<DirLock, Error> {
         std::fs::create_dir_all(dir)
             .map_err(|e| Error::State(format!("create {}: {e}", dir.display())))?;
@@ -66,7 +65,7 @@ impl DirLock {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
                 let mut holder = String::new();
-                let _ = file.read_to_string(&mut holder);
+                best_effort("read the lock holder", file.read_to_string(&mut holder));
                 let holder = match holder.trim() {
                     "" => "another process".to_owned(),
                     held => held.to_owned(),
@@ -88,7 +87,10 @@ impl DirLock {
         // not depend on this.
         best_effort("truncate the lock file", file.set_len(0));
         best_effort("rewind the lock file", file.seek(SeekFrom::Start(0)));
-        let _ = writeln!(file, "{what} (pid {})", std::process::id());
+        best_effort(
+            "record the lock holder",
+            writeln!(file, "{what} (pid {})", std::process::id()),
+        );
         best_effort("sync the lock file", file.sync_data());
         Ok(DirLock { path, _file: file })
     }

@@ -3,9 +3,17 @@
 //! enforce the budget, snapshot the candidate and close the harness.
 //!
 //! A delegating branch's turn also gets Branchyard's MCP server and a token
-//! that lives exactly as long as the turn. Its cost limit counts what its
+//! that lives exactly as long as the turn; a sandboxed one gets the server
+//! over HTTP from this host (`crate::endpoint`). Its cost limit counts what its
 //! children reserved, and a cancel request from an ancestor interrupts it
 //! like a budget limit does.
+//!
+//! A cost limit is a limit, not accounting: as each usage report arrives
+//! (or each model call the gateway meters ends) the turn is compared with
+//! its limit and stopped at once when the report took it to the limit or
+//! past it, not at the turn's end; and a branch below a parent with a
+//! cost limit is stopped, over budget, as soon as the tree under that
+//! parent has spent the limit ([`delegation::caps_above`]).
 //!
 //! The turn runs under its branch's lease (see [`crate::state`]), renewed by
 //! while it is held; every record write and event append is fenced by it.
@@ -30,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::delegation;
+use crate::endpoint::Reach;
 use crate::graph;
 use crate::placement::{Placement, SandboxPlan};
 use crate::projection::{ENV_BRANCH, ENV_ROOT};
@@ -51,6 +60,11 @@ const CLOSE_GRACE: Duration = Duration::from_secs(10);
 const INTERRUPT_GRACE: Duration = Duration::from_secs(30);
 /// How often limits are checked while the harness is quiet.
 const TICK: Duration = Duration::from_millis(100);
+/// How often a delegated branch's turn looks at what the trees above it
+/// have spent, besides when its own spending changes: the other branches
+/// of a tree spend on their own, and this is how soon one notices that
+/// the tree has spent its parent's limit.
+const TREE_POLL: Duration = Duration::from_secs(1);
 /// How long a turn with no duration limit may be held open after the
 /// harness answered it, for its background tasks and the harness's answer
 /// to their notification ([`branchyard_harness::Driver::held`]), before
@@ -205,6 +219,19 @@ impl LiveCost {
     }
 }
 
+/// Whether a branch that has spent `own`, with `held` of its cost limit
+/// held by its children, has used up `max`: past it, or, for a report that
+/// added spend (`grew`), to it. A report that added nothing cannot use up
+/// a limit whose whole remainder the branch handed to its children, so a
+/// parent that reserved everything it had left is not stopped for it.
+fn used_up(max: Option<f64>, own: f64, held: f64, grew: bool) -> bool {
+    max.is_some_and(|max| {
+        let committed = own + held;
+        committed > max + delegation::EPSILON_USD
+            || (grew && committed >= max - delegation::EPSILON_USD)
+    })
+}
+
 /// What one model call's tokens cost by the catalog, when the usage names
 /// a model it prices.
 fn priced(usage: &branchyard_harness::Usage) -> Option<f64> {
@@ -268,6 +295,9 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
     let store = turn.yard.store();
     let fence = lease.fence().clone();
     let mut record = turn.record.clone();
+    // A turn recovery did not conclude counted its metered calls in the
+    // cost it left; this turn starts from that figure.
+    record.metered_from = None;
     let mut recorder = Recorder::fenced(&store, &fence, turn.options.observer.clone());
     let bounds = Bounds {
         budget: delegation::effective_budget(&record, &turn.options.budget),
@@ -293,6 +323,19 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
             record.info.status = BranchStatus::Interrupted;
         } else if let Some(limit) = exhausted(&store, &record, &bounds.budget) {
             record.info.status = BranchStatus::BudgetExceeded { limit };
+        } else if let Some(cap) = delegation::capped_above(&store, &record.info.name, None) {
+            // The tree under a parent has spent the parent's limit: this
+            // branch does not run, whoever sent it.
+            recorder.record(Activity::Warning(cap.stop_note()))?;
+            delegation::note_tree_stop(
+                &store,
+                &record.info.name,
+                &cap,
+                turn.options.observer.clone(),
+            );
+            record.info.status = BranchStatus::BudgetExceeded {
+                limit: "max_usd".into(),
+            };
         } else if let Err(reason) = match crate::placement::sandboxed(record.provider.as_ref()) {
             // A sandboxed branch's setup runs in its sandbox, in the turn.
             true => Ok(()),
@@ -383,6 +426,9 @@ pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
         );
         // A delegated child's plan awaiting approval goes to its parent.
         crate::plan::settled(turn.yard, &fence.branch);
+        // A child that owed its parent a result and gave none is noted in
+        // the parent's log.
+        crate::contract::settled(turn.yard, &fence.branch, turn.options.observer.clone());
         if matches!(&result, Ok(b) if b.info.status == BranchStatus::Ready) {
             crate::knowledge::on_end(
                 turn.yard,
@@ -506,16 +552,23 @@ fn run(
         live_cost: None,
         held_on: Vec::new(),
     };
-    let sandboxed = crate::placement::sandboxed(record.provider.as_ref());
     // Revoked when this function returns, after the harness and its
-    // sandbox are gone. The delegation tools reach the engine over a host
-    // socket with the host's `by`, so a sandboxed harness does not get them
-    // yet.
-    let projection = match sandboxed {
-        true => Err(Error::Unsupported(
-            "delegation is not yet available to a sandboxed harness".into(),
-        )),
-        false => crate::projection::project(
+    // sandbox are gone. A local harness runs the delegation tools itself;
+    // a sandboxed one is served them over HTTP from this host, below, when
+    // its sandbox can reach this host (`crate::endpoint`).
+    let reach = crate::endpoint::reach(turn.yard, record);
+    let projection = match &reach {
+        Reach::Never(why) => {
+            if record.grant.is_some() {
+                recorder.record(Activity::Warning(format!(
+                    "delegation is unavailable in this sandbox: {why}, so this turn runs \
+                     without delegation tools"
+                )))?;
+            }
+            Ok(None)
+        }
+        Reach::Unset(why) => Err(Error::Unsupported(why.clone())),
+        Reach::Local | Reach::Host(_) => crate::projection::project(
             turn.yard,
             record,
             turn.options,
@@ -523,7 +576,7 @@ fn run(
             bounds.policy.clone(),
         ),
     };
-    let projection = match projection {
+    let mut projection = match projection {
         Ok(projection) => projection,
         // Asked for now: the turn cannot run as asked.
         Err(error) if turn.options.delegation.is_some() => {
@@ -552,6 +605,35 @@ fn run(
         recorder.record(Activity::Access(Box::new(narrowed)))?;
     }
     let scopes = crate::access::TokenScopes::of(&scoped);
+    // A sandboxed harness's delegation tools, served from this host for
+    // this turn with a token of its own; stopped, with each session's
+    // server, when this function returns, after the harness is gone.
+    let serving = match (&reach, projection.as_mut()) {
+        (Reach::Host(host), Some(offered)) => Some(crate::endpoint::Endpoint::start(
+            turn.yard,
+            record,
+            host,
+            offered,
+            &scopes,
+            deadline_ms,
+        )),
+        _ => None,
+    };
+    let _endpoint = match serving {
+        None => None,
+        Some(Ok(endpoint)) => Some(endpoint),
+        Some(Err(error)) if turn.options.delegation.is_some() => {
+            driven.end = End::failed(format!("could not offer delegation: {error}"));
+            return Ok(driven);
+        }
+        Some(Err(error)) => {
+            recorder.record(Activity::Warning(format!(
+                "this turn runs without delegation tools: {error}"
+            )))?;
+            projection = None;
+            None
+        }
+    };
     let mut connectors = match crate::connectors::prepare(turn.yard, &scoped, deadline_ms, &scopes)
     {
         Ok(connectors) => connectors,
@@ -651,6 +733,7 @@ fn run(
         projection.as_ref(),
         connectors.as_ref(),
         Some(&briefing),
+        &bounds.policy,
         store.dir(),
     ) {
         Ok(provisioned) => provisioned,
@@ -984,6 +1067,10 @@ fn run(
     // the branch inspecting itself, sees a figure and not "unknown".
     let mut live = LiveCost::new(record.info.cost_usd.unwrap_or(0.0));
     let shown: Cell<Option<f64>> = Cell::new(None);
+    // On the model gateway the record's cost also counts the turn's
+    // metered calls as they end; `metered_from` is what to add the turn's
+    // total to when it ends.
+    let on_gateway = model_gateway.is_some();
     let write = |stalled: Option<bool>| -> Result<(), Error> {
         let mut updated = record.clone();
         if let Some(value) = stalled {
@@ -991,9 +1078,17 @@ fn run(
         }
         if let Some(cost) = shown.get() {
             updated.info.cost_usd = Some(cost);
+            if on_gateway {
+                updated.metered_from = Some(record.info.cost_usd.unwrap_or(0.0));
+            }
         }
         store.write_fenced(&updated, fence)
     };
+    // The trees above this branch are looked at when its own spending
+    // changes, and every `TREE_POLL` besides.
+    let delegated = record.info.parent.is_some();
+    let mut tree_check = false;
+    let mut tree_polled = Instant::now();
     let write_stalled = |value: bool| write(Some(value));
     let fail = |confirmed: bool, detail: String| -> End {
         End::failed(match (&turn.mode, confirmed) {
@@ -1075,15 +1170,51 @@ fn run(
             if driven.metered != Some(metered) && metered > 0.0 {
                 driven.metered = Some(metered);
                 let own = record.info.cost_usd.unwrap_or(0.0) + metered;
+                // Written at once, so a parent, an ancestor's limit and
+                // `by show` see the spend as it happens.
+                shown.set(Some(own));
+                write(None)?;
+                tree_check = true;
                 if let Some(projection) = &projection {
                     projection.observe_cost(own);
                 }
-                let over = bounds
-                    .budget
-                    .max_usd
-                    .is_some_and(|max| own + delegation::reserved(&store, record) > max);
+                let over = used_up(
+                    bounds.budget.max_usd,
+                    own,
+                    delegation::reserved(&store, record),
+                    true,
+                );
                 if let (true, Phase::Running(n)) = (over, &phase) {
                     let n = *n;
+                    if let Err(error) = stop(&mut session) {
+                        recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
+                        kill = true;
+                        break End::budget("max_usd");
+                    }
+                    phase = Phase::Stopping {
+                        turn: n,
+                        why: Stop::Limit("max_usd"),
+                        since: Instant::now(),
+                    };
+                }
+            }
+        }
+        // The tree this branch is in: stop as soon as the tree under a
+        // parent with a cost limit has spent it, whichever branch spent it.
+        if let (true, Phase::Running(n)) = (delegated, &phase) {
+            if tree_check || now.duration_since(tree_polled) >= TREE_POLL {
+                tree_check = false;
+                tree_polled = now;
+                if let Some(cap) = delegation::capped_above(&store, &record.info.name, shown.get())
+                {
+                    let n = *n;
+                    recorder.record(Activity::Warning(cap.stop_note()))?;
+                    delegation::note_tree_stop(
+                        &store,
+                        &record.info.name,
+                        &cap,
+                        turn.options.observer.clone(),
+                    );
                     if let Err(error) = stop(&mut session) {
                         recorder.record(Activity::Warning(format!("interrupt failed: {error}")))?;
                         kill = true;
@@ -1358,6 +1489,7 @@ fn run(
                 if model_gateway.is_some() {
                     continue;
                 }
+                let before = live.total();
                 if usage.cumulative {
                     let Some(cost) = usage.cost_usd else { continue };
                     driven.cost = Some(driven.cost.map_or(cost, |c: f64| c.max(cost)));
@@ -1374,14 +1506,20 @@ fn run(
                 if shown.get() != Some(own) {
                     shown.set(Some(own));
                     write(None)?;
+                    tree_check = true;
                 }
                 if let Some(projection) = &projection {
                     projection.observe_cost(own);
                 }
-                let over = bounds
-                    .budget
-                    .max_usd
-                    .is_some_and(|max| own + delegation::reserved(&store, record) > max);
+                // Checked as the report arrives, not when the turn ends: a
+                // report that took the branch to its limit, or past it,
+                // stops the turn now.
+                let over = used_up(
+                    bounds.budget.max_usd,
+                    own,
+                    delegation::reserved(&store, record),
+                    own > before + delegation::EPSILON_USD,
+                );
                 if let (true, Phase::Running(n)) = (over, &phase) {
                     let n = *n;
                     if let Err(error) = stop(&mut session) {
@@ -1915,8 +2053,14 @@ pub(crate) fn conclude(
         info.session = Some(session.to_string());
         record.cost_session = Some(session.to_string());
     }
+    // A turn on the model gateway wrote its metered calls into the cost as
+    // they ended; what it had spent before is what they are added to.
+    let before_metered = record.metered_from.take();
     match (driven.metered, driven.cost) {
-        (Some(metered), _) => info.cost_usd = Some(info.cost_usd.unwrap_or(0.0) + metered),
+        (Some(metered), _) => {
+            let before = before_metered.unwrap_or_else(|| info.cost_usd.unwrap_or(0.0));
+            info.cost_usd = Some(before + metered);
+        }
         (None, Some(cost)) => info.cost_usd = Some(spent(cost, record.cost_baseline)),
         (None, None) => {
             if let Some(live) = driven.live_cost {
@@ -2107,6 +2251,32 @@ impl End {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A report stops a turn when it takes the branch to its limit or past
+    /// it; one that spent nothing new does not stop a branch whose whole
+    /// remaining budget its children hold, and no limit never stops one.
+    #[test]
+    fn a_report_that_reaches_the_limit_stops_the_turn() {
+        assert!(!used_up(None, 5.0, 0.0, true), "no limit");
+        assert!(!used_up(Some(1.0), 0.9, 0.0, true), "under it");
+        assert!(used_up(Some(1.0), 1.0, 0.0, true), "to it");
+        assert!(
+            used_up(Some(1.0), 0.1 + 0.2 + 0.7, 0.0, true),
+            "to it, rounded"
+        );
+        assert!(used_up(Some(1.0), 1.2, 0.0, true), "past it");
+        assert!(
+            used_up(Some(1.0), 0.4, 0.7, true),
+            "children's share counts"
+        );
+        // Everything left handed to children: spending more is over, a
+        // report that spent nothing is not.
+        assert!(!used_up(Some(1.0), 0.4, 0.6, false));
+        assert!(used_up(Some(1.0), 0.41, 0.6, true));
+        // Past the limit stops it whether or not the report added spend: a
+        // child that overshot took the parent over.
+        assert!(used_up(Some(1.0), 0.4, 0.7, false));
+    }
 
     #[test]
     fn a_forks_cost_excludes_its_parents() {

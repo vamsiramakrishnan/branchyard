@@ -94,7 +94,6 @@ enum Plugin {
 /// `BRANCHYARD_LOG_FORMAT`, else `pretty` ([`LogFormat::resolve`]). Writes
 /// to stderr, same as the rest of this plugin's diagnostics, so a Herdr
 /// pane still shows them.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-herdr
 fn init_logging(format: Option<LogFormat>) {
     use tracing_subscriber::EnvFilter;
     let filter = std::env::var("BRANCHYARD_LOG")
@@ -108,14 +107,16 @@ fn init_logging(format: Option<LogFormat>) {
         .with_env_filter(filter)
         .with_target(false)
         .with_writer(std::io::stderr);
-    let _ = if json {
-        builder.json().try_init()
-    } else {
-        builder.try_init()
-    };
+    branchyard_support::best_effort(
+        "install the log subscriber",
+        if json {
+            builder.json().try_init()
+        } else {
+            builder.try_init()
+        },
+    );
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-herdr
 fn main() -> ExitCode {
     let cli = <Cli as clap::Parser>::parse();
     init_logging(cli.log_format);
@@ -144,7 +145,10 @@ fn main() -> ExitCode {
             // reason on screen.
             if cli.command == Plugin::Bridge && std::io::stdin().is_terminal() {
                 eprint!("press Enter to close ");
-                let _ = std::io::stdin().read_line(&mut String::new());
+                branchyard_support::best_effort(
+                    "wait for Enter before the pane closes",
+                    std::io::stdin().read_line(&mut String::new()),
+                );
             }
             ExitCode::FAILURE
         }

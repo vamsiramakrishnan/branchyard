@@ -18,6 +18,10 @@
 //! (`$BRANCHYARD_CATALOG_DIR`, else `~/.cache/branchyard/catalog`) keeps a
 //! manifest with the SHA-256 of every file it names; a reader verifies
 //! each file against it and refuses one that does not match.
+//!
+//! The same cache holds the model listings `by models list` fetched from
+//! the providers' own APIs (`models.json`, named in the manifest like the
+//! rest, with its time): see [`load_models`] and [`store_models`].
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -25,6 +29,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use branchyard::models::discover::Listing;
 use branchyard_client::http;
 use branchyard_controls::catalog;
 use serde::{Deserialize, Serialize};
@@ -68,6 +73,9 @@ pub struct Manifest {
     pub connectors: Option<Derived>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harnesses: Option<Derived>,
+    /// The model listings of `by models list`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Derived>,
 }
 
 /// A connector from the MCP registry, pinned at the version read.
@@ -201,9 +209,39 @@ pub fn load(dir: &Path) -> Result<Option<Loaded>, String> {
     }))
 }
 
+/// The model listings `by models list` cached, verified against the
+/// manifest: `None` when it never cached any. An error when the file does
+/// not match its checksum.
+pub fn load_models(dir: &Path) -> Result<Option<(Derived, Vec<Listing>)>, String> {
+    let Some(derived) = read_manifest(dir)?.and_then(|m| m.models) else {
+        return Ok(None);
+    };
+    let bytes = verified(dir, &derived.file, &derived.sha256)
+        .map_err(|why| why.replace("`by catalog refresh`", "`by models list --refresh`"))?;
+    let listings = serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", derived.file))?;
+    Ok(Some((derived, listings)))
+}
+
+/// Cache `listings` as the models fetched at `now_ms`, beside what the
+/// manifest already names.
+pub fn store_models(dir: &Path, listings: &[Listing], now_ms: u64) -> Result<(), String> {
+    let mut manifest = read_manifest(dir).unwrap_or_default().unwrap_or_default();
+    manifest.version = 1;
+    let bytes = serde_json::to_vec_pretty(listings).map_err(|e| e.to_string())?;
+    write_private(&dir.join("models.json"), &bytes)?;
+    manifest.models = Some(Derived {
+        file: "models.json".into(),
+        sha256: sha256(&bytes),
+        registry: "the providers' model APIs".into(),
+        fetched_at_ms: now_ms,
+        count: listings.iter().map(|l| l.models.len()).sum(),
+    });
+    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?;
+    write_private(&dir.join("manifest.json"), &bytes)
+}
+
 /// A GET of `url` with `If-None-Match` from `cached` when its file still
 /// verifies: the body, and the response as the manifest records it.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn fetch(dir: &Path, url: &str, cached: Option<&Cached>) -> Result<(Vec<u8>, Cached), String> {
     let (base, query) = match url.split_once('?') {
         Some((base, query)) => (base, Some(query)),
@@ -278,7 +316,10 @@ fn fetch(dir: &Path, url: &str, cached: Option<&Cached>) -> Result<(Vec<u8>, Cac
         }
         status => {
             let mut text = String::new();
-            let _ = response.body.take(500).read_to_string(&mut text);
+            branchyard_support::best_effort(
+                "read the catalog's error text",
+                response.body.take(500).read_to_string(&mut text),
+            );
             Err(format!("{url} answered {status}: {}", text.trim()))
         }
     }

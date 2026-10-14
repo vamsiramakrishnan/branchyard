@@ -113,7 +113,6 @@ fn main() -> ExitCode {
     }
 }
 
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-bridge
 fn serve(args: ServeArgs) -> Result<(), String> {
     // Before any thread starts, so every thread leaves these signals to
     // the bridge's supervisor.
@@ -138,8 +137,11 @@ fn serve(args: ServeArgs) -> Result<(), String> {
     .map_err(|e| format!("could not start: {e}"))?;
     let address = bridge.local_addr().map_err(|e| e.to_string())?;
     let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "listening {address}");
-    let _ = stdout.flush();
+    branchyard_support::best_effort(
+        "print the listening address",
+        writeln!(stdout, "listening {address}"),
+    );
+    branchyard_support::best_effort("flush stdout", stdout.flush());
     drop(stdout);
     bridge.serve().map_err(|e| e.to_string())
 }

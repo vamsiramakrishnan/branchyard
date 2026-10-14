@@ -843,7 +843,6 @@ impl Runner {
     }
 
     /// Run `invocation`, reporting on `done` from another thread.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
     fn run(&self, invocation: tui::Invocation, done: &Sender<tui::Msg>) {
         let finished = |ok: bool, output: String| tui::Msg::Done {
             action: invocation.action,
@@ -854,7 +853,10 @@ impl Runner {
         let mut command = match self.command(&invocation) {
             Ok(command) => command,
             Err(error) => {
-                let _ = done.send(finished(false, error));
+                branchyard_support::best_effort(
+                    "report a failed command to the dashboard",
+                    done.send(finished(false, error)),
+                );
                 return;
             }
         };
@@ -876,7 +878,10 @@ impl Runner {
                 ),
                 Err(error) => finished(false, format!("could not start by: {error}")),
             };
-            let _ = done.send(msg);
+            branchyard_support::best_effort(
+                "report a finished command to the dashboard",
+                done.send(msg),
+            );
             return;
         }
         let done = done.clone();
@@ -900,7 +905,10 @@ impl Runner {
                         output: format!("could not run by: {error}"),
                     },
                 };
-                let _ = done.send(msg);
+                branchyard_support::best_effort(
+                    "report a finished command to the dashboard",
+                    done.send(msg),
+                );
             });
             return;
         }
@@ -932,26 +940,35 @@ impl Runner {
         let mut child = match started {
             Ok(child) => child,
             Err(error) => {
-                let _ = done.send(finished(false, format!("could not start by: {error}")));
+                branchyard_support::best_effort(
+                    "report a failed start to the dashboard",
+                    done.send(finished(false, format!("could not start by: {error}"))),
+                );
                 return;
             }
         };
-        let _ = done.send(tui::Msg::Started {
-            action: invocation.action,
-            branch: invocation.branch.clone(),
-            log: log.display().to_string(),
-        });
+        branchyard_support::best_effort(
+            "report a started command to the dashboard",
+            done.send(tui::Msg::Started {
+                action: invocation.action,
+                branch: invocation.branch.clone(),
+                log: log.display().to_string(),
+            }),
+        );
         std::thread::spawn(move || {
             let ok = child.wait().is_ok_and(|status| status.success());
             let text = std::fs::read_to_string(&log).unwrap_or_default();
             let lines: Vec<&str> = text.lines().collect();
             let tail = lines[lines.len().saturating_sub(LOG_TAIL)..].join("\n");
-            let _ = done.send(tui::Msg::Done {
-                action: invocation.action,
-                branch: invocation.branch,
-                ok,
-                output: tail,
-            });
+            branchyard_support::best_effort(
+                "report a finished command to the dashboard",
+                done.send(tui::Msg::Done {
+                    action: invocation.action,
+                    branch: invocation.branch,
+                    ok,
+                    output: tail,
+                }),
+            );
         });
     }
 }
@@ -980,7 +997,6 @@ impl tui::Effects for Cockpit {
         })
     }
 
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
     fn perform(&mut self, cmd: tui::Cmd, done: &Sender<tui::Msg>) {
         match cmd {
             tui::Cmd::Quit => {}
@@ -993,11 +1009,14 @@ impl tui::Effects for Cockpit {
                     actions::PaneKind::Compare => self.source.compare(&branch),
                     actions::PaneKind::Output => Err("nothing to load".into()),
                 };
-                let _ = done.send(tui::Msg::Loaded {
-                    kind,
-                    branch,
-                    result,
-                });
+                branchyard_support::best_effort(
+                    "report a loaded pane to the dashboard",
+                    done.send(tui::Msg::Loaded {
+                        kind,
+                        branch,
+                        result,
+                    }),
+                );
             }
             tui::Cmd::Notify(notice) => {
                 // The dashboard's own terminal.
@@ -1008,9 +1027,11 @@ impl tui::Effects for Cockpit {
             tui::Cmd::Open(_) => {}
             tui::Cmd::Copy(text) => {
                 let mut stdout = io::stdout();
-                let _ =
-                    stdout.write_all(osc52(&text, std::env::var_os("TMUX").is_some()).as_bytes());
-                let _ = stdout.flush();
+                branchyard_support::best_effort(
+                    "send the clipboard copy",
+                    stdout.write_all(osc52(&text, std::env::var_os("TMUX").is_some()).as_bytes()),
+                );
+                branchyard_support::best_effort("flush the clipboard copy", stdout.flush());
             }
         }
     }

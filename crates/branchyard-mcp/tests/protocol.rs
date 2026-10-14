@@ -1,6 +1,6 @@
 //! `branchyard-mcp` over stdio, speaking JSON-RPC as an MCP client would.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::process::{Command, Stdio};
@@ -97,7 +97,7 @@ fn initialize_lists_the_tools_and_calls_answer_without_an_engine() {
         .as_str()
         .unwrap()
         .contains("no tool named rm"));
-    let _ = std::fs::remove_dir_all(&root);
+    std::fs::remove_dir_all(&root).unwrap();
     assert!(client.finish().success());
 }
 
@@ -124,7 +124,7 @@ fn a_token_that_matches_no_running_turn_or_another_branch_is_refused_locally() {
     let (error, text) = claimed.call("inspect", json!({}));
     assert!(error);
     assert!(text.contains("issued to b, not other"), "{text}");
-    let _ = std::fs::remove_dir_all(&root);
+    std::fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]

@@ -39,7 +39,7 @@ use std::collections::HashMap;
 
 use agent_client_protocol_schema::v1::{
     ContentBlock, InitializeResponse, PermissionOption, PermissionOptionKind, PromptResponse,
-    RequestPermissionRequest, SessionNotification, SessionUpdate, StopReason,
+    RequestPermissionRequest, SessionNotification, SessionUpdate, StopReason, ToolKind,
 };
 use serde_json::json;
 
@@ -101,6 +101,9 @@ pub struct Acp {
     next_id: u64,
     pending: HashMap<u64, Pending>,
     permissions: HashMap<String, (Value, Vec<PermissionOption>)>,
+    /// Tool names by tool call id, from `tool_call` updates, so a later
+    /// permission request for the call is matched by name.
+    tool_names: HashMap<String, String>,
     turns: Turns,
     /// Agent-specific `_meta` sent when opening a session.
     session_meta: Option<Value>,
@@ -123,6 +126,7 @@ impl Acp {
             next_id: 0,
             pending: HashMap::new(),
             permissions: HashMap::new(),
+            tool_names: HashMap::new(),
             turns: Turns::default(),
             session_meta: None,
             preamble: None,
@@ -339,11 +343,22 @@ impl Acp {
                 }),
                 _ => Output::default(),
             },
-            SessionUpdate::ToolCall(call) => Output::event(Event::ToolStarted {
-                turn,
-                call_id: call.tool_call_id.to_string(),
-                name: call.name.unwrap_or(call.title),
-            }),
+            SessionUpdate::ToolCall(call) => {
+                if self.tool_names.len() >= 256 {
+                    self.tool_names.clear();
+                }
+                self.tool_names.insert(
+                    call.tool_call_id.to_string(),
+                    call.name
+                        .clone()
+                        .unwrap_or_else(|| kind_name(call.kind).to_owned()),
+                );
+                Output::event(Event::ToolStarted {
+                    turn,
+                    call_id: call.tool_call_id.to_string(),
+                    name: call.name.unwrap_or(call.title),
+                })
+            }
             _ => Output::default(),
         }
     }
@@ -355,10 +370,18 @@ impl Acp {
                 serde_json::from_value::<RequestPermissionRequest>(message["params"].clone())
             {
                 let fields = &request.tool_call.fields;
+                let call_id = request.tool_call.tool_call_id.to_string();
+                // The tool's name when the agent gives one, here or in the
+                // call's earlier update; else its kind under a name the
+                // permission presets know; else its title, which no preset
+                // matches ("Writing to notes/x.md" is not a tool).
                 let tool = fields
-                    .title
+                    .name
                     .clone()
-                    .unwrap_or_else(|| request.tool_call.tool_call_id.to_string());
+                    .or_else(|| self.tool_names.remove(&call_id))
+                    .or_else(|| fields.kind.map(|kind| kind_name(kind).to_owned()))
+                    .or_else(|| fields.title.clone())
+                    .unwrap_or_else(|| call_id.clone());
                 let input = fields
                     .raw_input
                     .clone()
@@ -386,6 +409,23 @@ impl Acp {
             }],
             frames: vec![frame(&reply)],
         }
+    }
+}
+
+/// A tool call's kind as a name the permission presets know
+/// (`docs/egress.md#permission-presets`): `acp:edit`, `acp:execute`, ...
+fn kind_name(kind: ToolKind) -> &'static str {
+    match kind {
+        ToolKind::Read => "acp:read",
+        ToolKind::Edit => "acp:edit",
+        ToolKind::Delete => "acp:delete",
+        ToolKind::Move => "acp:move",
+        ToolKind::Search => "acp:search",
+        ToolKind::Execute => "acp:execute",
+        ToolKind::Think => "acp:think",
+        ToolKind::Fetch => "acp:fetch",
+        ToolKind::SwitchMode => "acp:switch_mode",
+        _ => "acp:other",
     }
 }
 

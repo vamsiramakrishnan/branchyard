@@ -41,6 +41,7 @@ use std::collections::BTreeSet;
 use branchyard_support::best_effort;
 use serde::{Deserialize, Serialize};
 
+use crate::contract;
 use crate::delegation::{self, Limits};
 use crate::projection::lock;
 use crate::record::{self, Recorder};
@@ -53,6 +54,8 @@ pub(crate) const RECOVERED_OPEN: &str = "<branchyard-recovered>";
 
 /// Characters of each child's last message a wake prompt quotes.
 const LAST_MESSAGE_MAX: usize = 600;
+/// Characters of a child's result the wake shows; `by inspect` has all of it.
+const RESULT_SHOWN: usize = 2000;
 
 /// What a parked branch's turn ended with, stored with it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -457,6 +460,14 @@ pub(crate) fn summary(
             };
             text.push_str(&format!("  last message: {}", quoted.replace('\n', "\n  ")));
             text.push('\n');
+        }
+        if let Some(line) = contract::wake_line(
+            child,
+            found.result_contract.as_ref(),
+            contract::latest(&events).as_ref(),
+            RESULT_SHOWN,
+        ) {
+            text.push_str(&format!("  {line}\n"));
         }
         let cut = delegation::background_at_end(&events);
         if !cut.is_empty() {

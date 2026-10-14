@@ -583,7 +583,6 @@ impl SandboxProvider for FakeProvider {
     }
 }
 
-#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,7 +637,11 @@ mod tests {
             Err(error) => error.to_string(),
             Ok(mut process) => {
                 let mut out = String::new();
-                let _ = process.take_stdout().unwrap().read_to_string(&mut out);
+                process
+                    .take_stdout()
+                    .unwrap()
+                    .read_to_string(&mut out)
+                    .unwrap();
                 let _: ExitStatus = process.wait().unwrap();
                 out
             }
@@ -700,7 +703,7 @@ mod tests {
         assert!(said.contains("/host/c2/src"), "{said}");
         assert!(said.contains("\"/host/c2/home\""), "{said}");
         assert!(said.contains(ROOTFS_ENV), "{said}");
-        let _ = fs::remove_dir_all(root);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -739,6 +742,6 @@ mod tests {
         ));
         live.vanish("b");
         assert_eq!(live.inspect("b").unwrap(), None);
-        let _ = fs::remove_dir_all(root);
+        fs::remove_dir_all(root).unwrap();
     }
 }

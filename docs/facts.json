@@ -64,19 +64,19 @@
     }
   },
   "tests": {
-    "total": 2048,
+    "total": 2227,
     "ignored": 29,
     "by_crate": {
       "branchyard": {
-        "tests": 633,
+        "tests": 726,
         "ignored": 15
       },
       "branchyard-bridge": {
-        "tests": 28,
+        "tests": 41,
         "ignored": 0
       },
       "branchyard-cli": {
-        "tests": 395,
+        "tests": 441,
         "ignored": 3
       },
       "branchyard-client": {
@@ -88,7 +88,7 @@
         "ignored": 0
       },
       "branchyard-harness": {
-        "tests": 139,
+        "tests": 140,
         "ignored": 0
       },
       "branchyard-herdr": {
@@ -96,7 +96,7 @@
         "ignored": 0
       },
       "branchyard-mcp": {
-        "tests": 24,
+        "tests": 25,
         "ignored": 0
       },
       "branchyard-microsandbox": {
@@ -104,7 +104,7 @@
         "ignored": 7
       },
       "branchyard-provision": {
-        "tests": 134,
+        "tests": 154,
         "ignored": 0
       },
       "branchyard-qualify": {
@@ -124,11 +124,11 @@
         "ignored": 0
       },
       "branchyard-server": {
-        "tests": 263,
+        "tests": 265,
         "ignored": 0
       },
       "branchyard-setup": {
-        "tests": 58,
+        "tests": 61,
         "ignored": 0
       },
       "branchyard-substrate": {
@@ -158,7 +158,7 @@
     }
   },
   "http": {
-    "route_count": 87,
+    "route_count": 89,
     "routes": [
       "/.well-known/branchyard",
       "/.well-known/jwks.json",
@@ -189,6 +189,7 @@
       "/v1/repos/{repo}/branches/{branch}/artifacts/{id}/share",
       "/v1/repos/{repo}/branches/{branch}/ask",
       "/v1/repos/{repo}/branches/{branch}/cancel",
+      "/v1/repos/{repo}/branches/{branch}/check",
       "/v1/repos/{repo}/branches/{branch}/children",
       "/v1/repos/{repo}/branches/{branch}/diff",
       "/v1/repos/{repo}/branches/{branch}/discard",
@@ -207,6 +208,7 @@
       "/v1/repos/{repo}/branches/{branch}/plan/reject",
       "/v1/repos/{repo}/branches/{branch}/reincarnate",
       "/v1/repos/{repo}/branches/{branch}/report",
+      "/v1/repos/{repo}/branches/{branch}/report-status",
       "/v1/repos/{repo}/branches/{branch}/scratch",
       "/v1/repos/{repo}/branches/{branch}/scratch/{name}/lock",
       "/v1/repos/{repo}/branches/{branch}/scratch/{name}/share",

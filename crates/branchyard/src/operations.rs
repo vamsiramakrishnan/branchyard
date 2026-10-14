@@ -178,6 +178,16 @@ const FLAT_BUDGET: &str = "the tool also takes the flat limits the CLI and Pytho
                            it is refused";
 const PERMISSIONS: &str = "a child runs under its parent's policy, and only a person answers \
                            permission requests";
+/// `result.required` beside `result.schema`: Python gives both in the one
+/// `result` dict.
+const RESULT_REQUIRED: Param = Param {
+    cli: Some("--result-required"),
+    tool: Some("result.required"),
+    python: None,
+    why:
+        "Python gives the schema and this together, as result={\"schema\": ..., \"required\": True}",
+    inside: None,
+};
 
 /// A delegation operation and its name on each surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -265,11 +275,6 @@ impl Operation {
         self
     }
 
-    const fn not_remote(mut self, why: &'static str) -> Operation {
-        self.contexts.remote = Context::No(why);
-        self
-    }
-
     const fn no_python(mut self, why: &'static str) -> Operation {
         self.python = None;
         self.why = why;
@@ -321,6 +326,13 @@ pub const OPERATIONS: &[Operation] = &[
             Param::all("--connector", "connectors", "connectors"),
             Param::all("--plan", "plan", "plan"),
             Param::all("--model", "model", "model"),
+            Param::all("--result-schema", "result.schema", "result"),
+            RESULT_REQUIRED,
+            Param::cli(
+                "--result-schema-file",
+                "a tool call and a Python dict carry a schema of any size; only a shell command \
+                 line needs a file",
+            ),
             PROMPT_FILE,
             Param::cli(
                 "--issue",
@@ -442,10 +454,6 @@ pub const OPERATIONS: &[Operation] = &[
         "check",
         Capability::Own,
         &[TARGET, JSON],
-    )
-    .not_remote(
-        "the server has no check route; a check runs on the repository's host, so run by check \
-         there or inside the branch's harness",
     ),
     op(
         "cancel",
@@ -692,7 +700,17 @@ pub const OPERATIONS: &[Operation] = &[
         "report",
         "report",
         Capability::Message,
-        &[Param::all("<TEXT>", "text", "text"), ACT_AS, JSON],
+        &[
+            Param::all("<TEXT>", "text", "text"),
+            Param::all("--result", "result", "result"),
+            Param::cli(
+                "--result-file",
+                "a tool call and a Python value carry a result of any size; only a shell \
+                 command line needs a file",
+            ),
+            ACT_AS,
+            JSON,
+        ],
     ),
     op(
         "escalate",
@@ -717,9 +735,6 @@ pub const OPERATIONS: &[Operation] = &[
             ACT_AS,
             JSON,
         ],
-    )
-    .not_remote(
-        "a harness states its own status from inside its turn, and the server has no route for it",
     ),
     op(
         "answer",

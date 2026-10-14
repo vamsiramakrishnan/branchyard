@@ -3,9 +3,10 @@
 //! session is closed, a cost limit crossed by the turn's last message, the
 //! cost of a turn while it runs, the spending limit the harness is given
 //! and stops at itself (none on the model gateway), the cost of a fresh
-//! session after spending, and the harness's private temporary
-//! directory. No
-//! model is called.
+//! session after spending, the harness's private temporary directory, a
+//! cost limit that stops a turn at the usage report that takes it to the
+//! limit, and a parent's limit that stops the children of a tree that has
+//! spent it. No model is called.
 
 #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
@@ -1160,5 +1161,231 @@ fn a_harness_stopping_at_its_own_limit_is_recorded() {
             ],
             "{name}"
         );
+    }
+}
+
+/// What `input` and `output` tokens of Sonnet 4.5 cost by the catalog, as
+/// the engine prices one model call of a turn.
+fn priced(input: u64, output: u64) -> f64 {
+    branchyard::models::pricing::cost(
+        branchyard::models::Api::Anthropic,
+        "claude-sonnet-4-5",
+        &branchyard::models::Tokens {
+            input,
+            output,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+/// Shell for a stand-in turn that makes model calls: `call ID INPUT
+/// OUTPUT` prints one call's usage frame as Claude Code prints it, and
+/// `until_interrupted` answers control requests until the engine
+/// interrupts, then notes it in `interrupted.txt` and ends the turn, so a
+/// turn that nothing interrupts never ends.
+const MODEL_CALLS: &str = r#"call() { printf '{"type":"assistant","message":{"id":"m%s","model":"claude-sonnet-4-5","content":[{"type":"text","text":"call %s"}],"usage":{"input_tokens":%s,"output_tokens":%s,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}\n' "$1" "$1" "$2" "$3"; }
+until_interrupted() {
+  while read -r line; do
+    reply "$line"
+    case "$line" in *interrupt*)
+      echo interrupted > interrupted.txt
+      echo '{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_streaming"}'
+      return;;
+    esac
+  done
+}"#;
+
+/// The status of a turn stopped at its cost limit.
+fn over_the_limit() -> BranchStatus {
+    BranchStatus::BudgetExceeded {
+        limit: "max_usd".into(),
+    }
+}
+
+/// A usage report that takes the branch to its limit, or past it, stops
+/// the turn when it arrives, not when the turn ends: the stand-in reports
+/// one model call and then works until it is interrupted, and ends
+/// nothing by itself. The harness was given the limit and did not stop
+/// itself (the stand-in ignores it), so Branchyard did.
+#[test]
+fn a_report_that_takes_a_branch_to_its_limit_stops_the_turn_at_once() {
+    let f = Fixture::new();
+    let one = priced(1000, 2000);
+    for (name, limit) in [("at", one), ("past", one / 2.0)] {
+        let turn = format!(
+            "printf '%s\\n' \"$@\" > args.txt\n{MODEL_CALLS}\ncall 1 1000 2000\nuntil_interrupted\nexit 0"
+        );
+        let started = Instant::now();
+        let branch = f
+            .yard
+            .task("go")
+            .options(TaskOptions {
+                budget: Budget::usd(limit),
+                ..stand_in(&f, &turn)
+            })
+            .name(name)
+            .run()
+            .unwrap();
+        assert_eq!(branch.info().status, over_the_limit(), "{name}");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{name}: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            branch.info().worktree.join("interrupted.txt").exists(),
+            "{name}: the engine interrupted the turn"
+        );
+        let cost = branch.info().cost_usd.unwrap();
+        assert!((cost - one).abs() < 1e-9, "{name}: one call: {cost}");
+        let given = harness_budget(&f, name).unwrap();
+        assert!((given - limit).abs() < 1e-9, "{name}: {given}");
+        assert_eq!(warnings(&f, name), Vec::<String>::new(), "{name}");
+    }
+}
+
+/// Under its limit a turn runs on; at the report that crosses it, it is
+/// stopped and no later call is made: calls come a second apart, the limit
+/// falls between the first and the second, and the third is never reported.
+#[test]
+fn a_turn_stops_at_the_report_that_crosses_its_limit_and_no_later_one() {
+    let f = Fixture::new();
+    let one = priced(1000, 2000);
+    let turn = format!(
+        "{MODEL_CALLS}\n( sleep 1; call 2 1000 2000; sleep 1; call 3 1000 2000 ) &\nbg=$!\n\
+         call 1 1000 2000\nuntil_interrupted\nkill $bg\nexit 0"
+    );
+    let branch = f
+        .yard
+        .task("go")
+        .options(TaskOptions {
+            budget: Budget::usd(one * 1.5),
+            ..stand_in(&f, &turn)
+        })
+        .name("between")
+        .run()
+        .unwrap();
+    assert_eq!(branch.info().status, over_the_limit());
+    let cost = branch.info().cost_usd.unwrap();
+    assert!((cost - 2.0 * one).abs() < 1e-9, "two calls: {cost}");
+    // Two calls were reported; the third never was. (The aborted turn's
+    // own `result` carries a cumulative report with no cost, not counted.)
+    let reports = branch
+        .events()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            matches!(&e.activity,
+                Activity::Harness(branchyard::Event::UsageObserved { usage, .. }) if !usage.cumulative)
+        })
+        .count();
+    assert_eq!(reports, 2);
+    assert!(branch.info().worktree.join("interrupted.txt").exists());
+}
+
+/// A parent's cost limit bounds its whole tree: a child that overshot its
+/// own limit (one big call) took part of what its sibling was given, so
+/// when the tree has spent the parent's limit the sibling is stopped over
+/// budget, though it is far from its own, and the stop is recorded on the
+/// parent and on the child. Nothing more can then be spawned.
+#[test]
+fn a_tree_that_spends_its_parents_limit_stops_the_children_still_running() {
+    let f = Fixture::new();
+    let big = priced(50_000, 10_000);
+    let small = priced(1000, 2000);
+    let limit = 0.5;
+    assert!(big > 0.25 && big < 0.35 && small < 0.04, "{big} {small}");
+    let turn = format!(
+        r#"{MODEL_CALLS}
+case "$prompt" in
+*BIG*) call 1 50000 10000; until_interrupted; exit 0;;
+*STEADY*)
+  ( for n in 1 2 3 4 5 6 7 8 9 10; do call $n 1000 2000; sleep 0.3; done ) &
+  bg=$!
+  until_interrupted
+  kill $bg
+  exit 0;;
+esac
+{}"#,
+        result(0.0)
+    );
+    let first = TaskOptions {
+        budget: Budget::usd(limit),
+        delegation: Some(Envelope::default()),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        ..stand_in(&f, &turn)
+    };
+    let root = f
+        .yard
+        .task("say hi")
+        .options(first.clone())
+        .name("meta")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(first).unwrap();
+    // 0.1 and 0.4 are all that meta has: the first child's limit is far
+    // below its one big call.
+    for (name, prompt, usd) in [("big", "BIG", 0.1), ("steady", "STEADY", 0.4)] {
+        delegate
+            .spawn(Spawn {
+                prompt: prompt.into(),
+                name: Some(name.into()),
+                budget: Budget::usd(usd),
+                ..Spawn::default()
+            })
+            .unwrap();
+    }
+    wait::until("both children to stop", || {
+        ["big", "steady"]
+            .iter()
+            .all(|name| f.yard.branch(name).unwrap().info().status != BranchStatus::Running)
+    });
+    let cost = |name: &str| f.yard.branch(name).unwrap().info().cost_usd.unwrap();
+    for name in ["big", "steady"] {
+        assert_eq!(
+            f.yard.branch(name).unwrap().info().status,
+            over_the_limit(),
+            "{name}"
+        );
+    }
+    assert!((cost("big") - big).abs() < 1e-9, "{}", cost("big"));
+    // It was stopped by the tree's limit, not by its own $0.40.
+    assert!(cost("steady") < 0.4 - small, "{}", cost("steady"));
+    assert!(cost("big") + cost("steady") >= limit - 1e-9);
+    let steady = f.yard.branch("steady").unwrap();
+    assert!(steady.info().worktree.join("interrupted.txt").exists());
+    // Recorded on the child, and on the parent that holds the limit.
+    assert!(
+        warnings(&f, "steady")
+            .iter()
+            .any(|w| w.contains("stopped at the cost limit of meta")),
+        "{:?}",
+        warnings(&f, "steady")
+    );
+    assert!(
+        warnings(&f, "meta")
+            .iter()
+            .any(|w| w.contains("stopped steady's turn: the tree under meta has spent")),
+        "{:?}",
+        warnings(&f, "meta")
+    );
+    // The inspection says what the limit above the child leaves it, and
+    // the parent spawns nothing more.
+    let inspected = delegate.inspect("steady").unwrap();
+    assert_eq!(inspected.tree_remaining_usd, Some(0.0));
+    assert_eq!(inspected.tree_capped_by.as_deref(), Some("meta"));
+    let refused = delegate.spawn(Spawn {
+        prompt: "more".into(),
+        name: Some("late".into()),
+        budget: Budget::usd(0.01),
+        ..Spawn::default()
+    });
+    match refused {
+        Err(branchyard::Error::Denied(why)) => assert!(
+            why.contains("meta cannot spawn: meta and everything below it has spent"),
+            "{why}"
+        ),
+        other => panic!("expected a denial, got {other:?}"),
     }
 }

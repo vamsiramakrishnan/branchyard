@@ -924,7 +924,6 @@ impl Signals {
 
 /// Run the server with `args` (after the program name); `program` names it
 /// in messages.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-server
 pub fn main(args: &[String], program: &str) -> ExitCode {
     let flags = match parse_cli(args, program) {
         Ok(Cli {
@@ -964,7 +963,7 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
         // Help and --version come this way too, to stdout with exit 0;
         // usage errors go to stderr with exit 2.
         Err(error) => {
-            let _ = error.print();
+            best_effort("print the usage message", error.print());
             return ExitCode::from(error.exit_code() as u8);
         }
     };
@@ -1028,7 +1027,7 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
         };
         if running.is_worker() {
             println!("working on {}", repos.join(", "));
-            let _ = std::io::stdout().flush();
+            best_effort("flush stdout", std::io::stdout().flush());
             tracing::info!(
                 repos = %repos.join(", "),
                 "running operations queued in the database; harnesses run as this user, \
@@ -1036,7 +1035,7 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
             );
         } else {
             println!("listening on {}", running.url());
-            let _ = std::io::stdout().flush();
+            best_effort("flush stdout", std::io::stdout().flush());
             tracing::info!(
                 repos = %repos.join(", "),
                 url = %running.url(),
@@ -1068,7 +1067,6 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
     code
 }
 
-#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1237,7 +1235,9 @@ mod tests {
     fn a_configuration_files_tenants_and_credentials_reach_the_server() {
         let dir =
             std::env::temp_dir().join(format!("branchyard-cli-tenants-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
         std::fs::create_dir_all(&dir).unwrap();
         let hash = crate::config::sha256_hex(b"acme-token-0123456789");
         let file = dir.join("config.json");
@@ -1276,13 +1276,15 @@ mod tests {
         assert!(config.tokens.is_empty() && config.credentials.is_empty());
         assert!(!dir.join("data/token").exists());
         assert!(config.validate().is_ok());
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn check_validates_without_writing_anything() {
         let dir = std::env::temp_dir().join(format!("branchyard-cli-check-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
         std::fs::create_dir_all(dir.join("app")).unwrap();
         let file = dir.join("config.json");
         std::fs::write(
@@ -1309,7 +1311,7 @@ mod tests {
             .unwrap()
             .iter()
             .any(|w| w.contains("WARNING")));
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

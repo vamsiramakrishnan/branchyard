@@ -220,7 +220,6 @@ pub fn receive(root: &Path, next: &mut dyn FnMut() -> io::Result<Frame>) -> io::
     Ok(())
 }
 
-#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -233,7 +232,9 @@ mod tests {
             "branchyard-bridge-tree-{}-{name}",
             std::process::id()
         ));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(&dir).unwrap();
         dir
     }

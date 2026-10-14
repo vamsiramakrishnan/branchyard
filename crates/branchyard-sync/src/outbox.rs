@@ -75,7 +75,6 @@ CREATE TABLE IF NOT EXISTS counters (
 ";
 
 impl Outbox {
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
     pub fn open(path: &Path) -> Result<Outbox> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -84,7 +83,10 @@ impl Outbox {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            branchyard_support::best_effort(
+                "restrict the outbox file to its owner",
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)),
+            );
         }
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;

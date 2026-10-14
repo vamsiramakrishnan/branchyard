@@ -20,10 +20,11 @@ use branchyard::{
     Yard,
 };
 use branchyard_client::api::{
-    BranchEvents, BranchList, CancelRequest, CancelResult, Diff, DiscardRequest, FeedEntry,
-    ForkRequest, GraphRequest, HarnessList, IntegrateRequest, InventoryReport, MergeRequest,
-    Operation, OperationKind, PolicySpec, ReincarnateRequest, Removed, RepoEntry, RepoList,
-    SendRequest, SpawnRequest, SteerRequest, TaskRequest, WaitRequest, WorkerInventory,
+    BranchEvents, BranchList, CancelRequest, CancelResult, CheckRequest, Diff, DiscardRequest,
+    FeedEntry, ForkRequest, GraphRequest, HarnessList, IntegrateRequest, InventoryReport,
+    MergeRequest, Operation, OperationKind, PolicySpec, ReincarnateRequest, Removed, RepoEntry,
+    RepoList, ReportStatusRequest, SendRequest, SpawnRequest, SteerRequest, TaskRequest,
+    WaitRequest, WorkerInventory,
 };
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::de::DeserializeOwned;
@@ -720,6 +721,10 @@ pub fn router(app: Shared) -> Router {
             axum::routing::post(post_cancel),
         )
         .route(
+            "/v1/repos/{repo}/branches/{branch}/check",
+            axum::routing::post(post_check),
+        )
+        .route(
             "/v1/repos/{repo}/branches/{branch}/discard",
             axum::routing::post(post_discard),
         )
@@ -760,6 +765,10 @@ pub fn router(app: Shared) -> Router {
         .route(
             "/v1/repos/{repo}/branches/{branch}/escalate",
             axum::routing::post(post_escalate),
+        )
+        .route(
+            "/v1/repos/{repo}/branches/{branch}/report-status",
+            axum::routing::post(post_report_status),
         )
         .route(
             "/v1/repos/{repo}/branches/{branch}/answer",
@@ -1752,6 +1761,48 @@ async fn post_merge(
     admit(&app, new, Work::Merge { branch, target }).await
 }
 
+/// Run the branch's check on its current work, as `by check` does: its
+/// files as they are, merged into its parent's branch in a private
+/// temporary worktree, with nothing integrated. The check can run as long
+/// as an integration's, so it is an operation, found again by its
+/// idempotency key; its result holds the report, which says `failed` for a
+/// check that failed (the operation fails only when the check could not be
+/// run). It takes no branch lock and runs no turn: like the local command,
+/// it can run while the branch works, and like a merge it counts toward the
+/// tenant's `max_running` without being refused by it. Needs the `run`
+/// scope, since it runs the branch's check command on the server.
+async fn post_check(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
+    headers: HeaderMap,
+    JsonBody(CheckRequest {}, canonical): JsonBody<CheckRequest>,
+) -> Result<Response, ApiError> {
+    let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
+    let route = format!("POST /v1/repos/{}/branches/{branch}/check", repo.name);
+    let idem = idempotency(&headers, &caller, &route, &canonical)?;
+    if let Some(response) = replayed(&app, &caller, idem.as_ref()).await? {
+        return Ok(response);
+    }
+    existing(&repo.yard, &branch).await?;
+    let cursor = sync_feed(&repo.feed).await?;
+    let new = NewOperation {
+        repo: repo.name.clone(),
+        kind: OperationKind::Check,
+        branches: vec![branch.clone()],
+        cursor,
+        locks: Vec::new(),
+        idempotency: idem,
+        principal: caller.0.clone(),
+        creates: Vec::new(),
+        quota: AdmissionQuota::default(),
+        requires: Vec::new(),
+        priority: 0,
+        trace: incoming_trace(&headers),
+    };
+    admit(&app, new, Work::Check { branch }).await
+}
+
 /// Ask the branch's running turn and every running turn below it to stop.
 /// Not an operation and not subject to branch locks: it is quick,
 /// idempotent, and meant for exactly the branches an operation holds. The
@@ -2206,14 +2257,22 @@ async fn post_report(
     State(app): State<Shared>,
     Path((repo, branch)): Path<(String, String)>,
     Extension(caller): Extension<Caller>,
-    JsonBody(request, _): JsonBody<branchyard_client::api::TextRequest>,
+    JsonBody(request, _): JsonBody<branchyard_client::api::ReportRequest>,
 ) -> Result<Json<branchyard::Message>, ApiError> {
     if request.text.trim().is_empty() {
         return Err(ApiError::bad_request("text is empty"));
     }
-    as_person(&app, &caller, &repo, branch, "run", move |d, _| {
-        d.report(&request.text)
-    })
+    as_person(
+        &app,
+        &caller,
+        &repo,
+        branch,
+        "run",
+        move |d, _| match &request.result {
+            Some(result) => d.report_result(&request.text, result),
+            None => d.report(&request.text),
+        },
+    )
     .await
     .map(Json)
 }
@@ -2229,6 +2288,32 @@ async fn post_escalate(
     }
     as_person(&app, &caller, &repo, branch, "run", move |d, _| {
         d.escalate(&request.text)
+    })
+    .await
+    .map(Json)
+}
+
+/// State the branch's own status, as the person or surface acting for it
+/// (`by report-status --as`), with the same rules as the tool. A field that
+/// breaks one is `400 invalid_request` with `detail.field`; the answer is
+/// the engine's `Reported`. Not for the branch's own harness, which reaches
+/// the engine through its broker. Needs the `run` scope, as `escalate`
+/// does, since a `blocked` or `failure` report is escalated to the parent.
+async fn post_report_status(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
+    JsonBody(request, _): JsonBody<ReportStatusRequest>,
+) -> Result<Json<branchyard::Reported>, ApiError> {
+    app.authorized_repo(&caller, &repo, "run")?;
+    let (state, summary, link) =
+        branchyard::reported::validate(&request.state, &request.summary, request.link.as_deref())
+            .map_err(|refusal| {
+            ApiError::bad_request(refusal.message)
+                .detail(serde_json::json!({ "field": refusal.field }))
+        })?;
+    as_person(&app, &caller, &repo, branch, "run", move |d, _| {
+        d.report_status(state, &summary, link.as_deref())
     })
     .await
     .map(Json)

@@ -11,7 +11,7 @@
 //! Requires `git` and `sh`; the port tests also `python3`, and say so and
 //! pass without it.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::collections::BTreeMap;
 use std::fs;
 use std::net::TcpListener;
@@ -43,7 +43,9 @@ impl Repo {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(dir.join("repo")).unwrap();
         fs::create_dir_all(dir.join("home")).unwrap();
         let dir = fs::canonicalize(dir).unwrap();
@@ -131,7 +133,7 @@ impl Repo {
 
 impl Drop for Repo {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+        branchyard_support::cleanup_dir(&self.dir);
     }
 }
 
@@ -815,7 +817,7 @@ fn listening_ports_belong_to_their_branch_and_can_be_browsed_and_stopped() {
     assert!(stderr(&out).contains("pass --yes"), "{}", stderr(&out));
     let killed = repo.json(&["workspace", "kill", "srv", "--yes", "--json"]);
     assert_eq!(killed["stopped"].as_array().unwrap().len(), 3);
-    let _ = manual.wait();
+    manual.wait().unwrap();
     wait::until("the servers to stop", || {
         repo.json(&["workspace", "ports", "srv", "--json"])
             .as_array()

@@ -43,6 +43,10 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "search_file_content",
     "grep",
     "view",
+    // An ACP agent's call by its kind, when it names no tool.
+    "acp:read",
+    "acp:search",
+    "acp:think",
 ];
 
 /// The policy every planning turn runs under: [`READ_ONLY_TOOLS`]

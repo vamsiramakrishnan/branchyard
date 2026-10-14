@@ -1661,7 +1661,6 @@ impl Tail {
     }
 }
 
-#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1823,6 +1822,6 @@ mod tests {
         .unwrap();
         assert!(!slow.ok);
         assert!(slow.error.as_deref().unwrap().contains("timed out"));
-        let _ = fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

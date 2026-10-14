@@ -114,6 +114,8 @@ The types are in `schema/contract.json` (`RegisterServiceRequest`, `ServiceList`
 
 The cache is `$BRANCHYARD_CATALOG_DIR`, else `~/.cache/branchyard/catalog`: every response under `responses/`, the derived `connectors.json` and `harnesses.json`, and `manifest.json` with each file's SHA-256 and each response's ETag. A refresh sends `If-None-Match` for a response whose file still verifies; a `304` reuses it. Every reader verifies each file against the manifest and refuses one that does not match: `by catalog status` fails, and `by connectors catalog` prints the baseline alone with a warning. A refresh mends it.
 
+`by models list` keeps its answer in the same cache as `models.json`, named in `manifest.json` like the rest (SHA-256, time, count) and refused when it does not match: the models each provider's own API says a key can call ([model gateway](model-gateway.md#listing-models)). `by catalog refresh` leaves it as it is, and `by catalog status` shows it. Unlike `by catalog refresh`, `by models list` goes through `HTTPS_PROXY` and trusts `SSL_CERT_FILE`.
+
 Nothing is fetched unless asked: no command on the hot path reads the network, and no test does. The HTTP client is Branchyard's own and does not use `HTTPS_PROXY`.
 
 ## Security

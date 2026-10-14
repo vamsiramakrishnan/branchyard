@@ -23,6 +23,16 @@ pub fn bridge_binary() -> &'static Path {
     )
 }
 
+/// The `branchyard-mcp` binary, built once per target directory: the stdio
+/// server a sandboxed turn's delegation endpoint runs on this host.
+pub fn mcp_server() -> &'static Path {
+    branchyard_testkit::built(
+        "branchyard-mcp",
+        "branchyard-mcp",
+        &std::env::current_exe().unwrap(),
+    )
+}
+
 static HERMETIC: Once = Once::new();
 
 /// A temporary directory holding a repository at `repo/` with one commit

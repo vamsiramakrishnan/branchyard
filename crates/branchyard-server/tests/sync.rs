@@ -5,7 +5,7 @@
 //! sync series in `/metrics`; and a run whose lease is taken over
 //! cancelled, failed with `sync_lease_lost` and no longer pushed.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::sync::Arc;
@@ -221,7 +221,11 @@ fn a_run_that_loses_its_lease_is_cancelled_not_accepted_and_not_pushed() {
     let mut taken = None;
     for _ in 0..50 {
         if let Some(entry) = files.stat(&key).unwrap() {
-            let _ = files.delete_if_match(&key, &entry.generation);
+            // A conflict means the lease moved since the stat: the next pass reads it again.
+            branchyard_support::best_effort(
+                "delete the lease to take it over",
+                files.delete_if_match(&key, &entry.generation),
+            );
         }
         if let Ok(lease) =
             elsewhere.acquire_lease(&task_id, "run", "laptop:2", Duration::from_secs(300))

@@ -39,7 +39,6 @@ pub(crate) fn run(check: &Check, dir: &Path) -> io::Result<(CheckOutcome, String
 /// [`run`], but asking `abandoned` as it waits: once it says so, the check's
 /// process group is killed and `None` returned, as nobody waits for the
 /// result any more.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-workspace
 pub(crate) fn run_until(
     check: &Check,
     dir: &Path,
@@ -84,7 +83,10 @@ pub(crate) fn run_until(
                 let excess = tail.len().saturating_sub(OUTPUT_TAIL_BYTES);
                 tail.drain(..excess);
             }
-            let _ = done_tx.send(());
+            branchyard_support::best_effort(
+                "report that the check's output closed",
+                done_tx.send(()),
+            );
         });
     }
 
@@ -117,7 +119,10 @@ pub(crate) fn run_until(
     // window.
     kill_group(child.id());
     // A process that escaped the group may hold the pipe open; do not wait on it.
-    let _ = done_rx.recv_timeout(Duration::from_secs(1));
+    branchyard_support::best_effort(
+        "wait briefly for the check's output to close",
+        done_rx.recv_timeout(Duration::from_secs(1)),
+    );
     let bytes: Vec<u8> = tail.lock_recovering("tail").iter().copied().collect();
     let tail = String::from_utf8_lossy(&bytes).into_owned();
     Ok(outcome.map(|outcome| (outcome, tail)))

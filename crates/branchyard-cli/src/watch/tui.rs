@@ -1968,7 +1968,6 @@ pub trait Effects {
 /// mode off, the main screen back) until it exits, and the dashboard is
 /// redrawn from scratch; a graphical one starts on another thread. The
 /// result comes back as [`Msg::Done`].
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 fn open_editor(
     terminal: &mut ratatui::DefaultTerminal,
     plan: Result<crate::open::Plan, String>,
@@ -1992,7 +1991,10 @@ fn open_editor(
     let plan = match plan {
         Ok(plan) => plan,
         Err(error) => {
-            let _ = done.send(finished(Err(crate::commands::Failure::Message(error)), &[]));
+            branchyard_support::best_effort(
+                "report a failed command to the dashboard",
+                done.send(finished(Err(crate::commands::Failure::Message(error)), &[])),
+            );
             return Ok(());
         }
     };
@@ -2000,7 +2002,10 @@ fn open_editor(
         let done = done.clone();
         std::thread::spawn(move || {
             let result = crate::open::launch(&plan);
-            let _ = done.send(finished(result, &plan.argv));
+            branchyard_support::best_effort(
+                "report a finished command to the dashboard",
+                done.send(finished(result, &plan.argv)),
+            );
         });
         return Ok(());
     }
@@ -2011,7 +2016,10 @@ fn open_editor(
     enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     terminal.clear()?;
-    let _ = done.send(finished(result, &plan.argv));
+    branchyard_support::best_effort(
+        "report a finished command to the dashboard",
+        done.send(finished(result, &plan.argv)),
+    );
     Ok(())
 }
 
@@ -2020,7 +2028,6 @@ const TICK: Duration = Duration::from_millis(100);
 
 /// Run the dashboard until the viewer quits. A refresh error ends the
 /// dashboard (after the terminal is restored) and is returned.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 pub fn run<F: Effects>(
     label: String,
     remote: bool,
@@ -2035,15 +2042,20 @@ pub fn run<F: Effects>(
     let mut terminal = ratatui::try_init()?;
     struct Restore;
     impl Drop for Restore {
-        #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
         fn drop(&mut self) {
-            let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+            branchyard_support::best_effort(
+                "disable bracketed paste",
+                execute!(std::io::stdout(), DisableBracketedPaste),
+            );
             ratatui::restore();
         }
     }
     let _restore = Restore;
     // A paste then arrives whole, so a newline in it does not send early.
-    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+    branchyard_support::best_effort(
+        "enable bracketed paste",
+        execute!(std::io::stdout(), EnableBracketedPaste),
+    );
     let (tx, rx) = mpsc::channel();
     let mut model = Model::new(label);
     model.remote = remote;

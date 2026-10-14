@@ -2,7 +2,7 @@
 //! the corpus every consumer runs applies to them too: a request the
 //! codec refuses is answered 400 and never reaches a handler.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
@@ -21,10 +21,16 @@ fn send(server: &MockServer, bytes: &[u8]) -> String {
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(10)))
         .unwrap();
-    let _ = stream.write_all(bytes);
-    let _ = stream.shutdown(Shutdown::Write);
+    branchyard_support::best_effort(
+        "send a corpus request (the server may answer and close first)",
+        stream.write_all(bytes),
+    );
+    branchyard_support::best_effort(
+        "half-close a corpus request",
+        stream.shutdown(Shutdown::Write),
+    );
     let mut answer = Vec::new();
-    let _ = stream.read_to_end(&mut answer);
+    branchyard_support::best_effort("read a corpus answer", stream.read_to_end(&mut answer));
     String::from_utf8_lossy(&answer).into_owned()
 }
 

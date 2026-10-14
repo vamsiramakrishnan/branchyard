@@ -39,6 +39,7 @@ struct Config {
     max_cost_usd: f64,
     keep_env: BTreeSet<String>,
     report: Option<PathBuf>,
+    installed_from: Option<String>,
 }
 
 /// The command line, before the profile and work directory are checked.
@@ -70,6 +71,10 @@ struct Args {
     /// Write the JSON report to FILE
     #[arg(long, value_name = "FILE")]
     report: Option<PathBuf>,
+    /// How the harness was installed, recorded in the report as `installed_from`,
+    /// such as "npm @openai/codex@0.157.1"
+    #[arg(long, value_name = "TEXT")]
+    installed_from: Option<String>,
 }
 
 fn parse_args() -> Result<Config, String> {
@@ -87,6 +92,7 @@ fn parse_args() -> Result<Config, String> {
         max_cost_usd: args.max_cost_usd,
         keep_env: args.keep_env.into_iter().collect(),
         report: args.report,
+        installed_from: args.installed_from,
     })
 }
 
@@ -665,6 +671,9 @@ fn report(run: &Run, elapsed: Duration) {
         "harness_version": version(run.config, &run.env),
         "driver_version": env!("CARGO_PKG_VERSION"),
         "host": host(),
+        // The UTC day of the run, as docs/compatibility.md's matrix dates it.
+        "date": &branchyard_support::time::rfc3339(branchyard_support::time::now_ms())[..10],
+        "installed_from": run.config.installed_from,
         "execution": "local process with scrubbed environment and private home; not a Branchyard sandbox",
         "seconds": elapsed.as_secs_f64().round(),
         "harness_estimated_cost_usd": if run.cost_observed {

@@ -60,11 +60,13 @@ struct State {
 
 impl State {
     /// Output is best effort: a closed stdout must not fail the branch.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
     fn write(&mut self, text: &str) {
         if !text.is_empty() {
-            let _ = self.out.write_all(text.as_bytes());
-            let _ = self.out.flush();
+            branchyard_support::best_effort(
+                "write the console output",
+                self.out.write_all(text.as_bytes()),
+            );
+            branchyard_support::best_effort("flush the console output", self.out.flush());
         }
     }
 }

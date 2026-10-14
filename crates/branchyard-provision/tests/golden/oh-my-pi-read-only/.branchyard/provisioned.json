@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "deny": [
+      "write",
+      "edit",
+      "web_search",
+      "browser"
+    ],
+    "path": ".omp/agent/config.yml"
+  }
+}

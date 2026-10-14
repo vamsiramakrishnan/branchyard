@@ -21,7 +21,7 @@ use branchyard::connectors::{self, AnvilPackager, Gateway, KeyRing};
 use branchyard::services::{
     Endpoint, Health, Query, Reclaim, Service, ServiceOwner, ServiceStore, KIND_CONNECTOR_GATEWAY,
 };
-use branchyard::Yard;
+use branchyard::{SandboxHost, Yard};
 use branchyard_setup::config::{split_words, Connectors};
 use serde_json::json;
 
@@ -120,10 +120,8 @@ fn local_gateway(yard: &Yard, config: &Connectors, found: &Found) -> Result<Gate
     if let Some(enabled) = config.effects_proxy {
         gateway.effects.enabled = enabled;
     }
-    if let Some(listen) = config.effects_listen.as_deref() {
-        gateway.effects.listen = listen
-            .parse()
-            .map_err(|_| Failure::Message(format!("connectors.effects_listen: {listen:?}")))?;
+    if let Some(listen) = effects_listen(config)? {
+        gateway.effects.listen = listen;
     }
     gateway.effects.sandbox_host = config.effects_sandbox_host.clone();
     gateway.sandbox_url = config.sandbox_gateway.clone().or_else(|| match found {
@@ -146,10 +144,42 @@ pub fn configured(yard: &Yard) -> Result<Option<Gateway>, Failure> {
     }
 }
 
-/// Give `yard` its gateway, pinned or registered, if it has one.
+/// `[connectors] effects_listen`, parsed.
+fn effects_listen(config: &Connectors) -> Result<Option<std::net::IpAddr>, Failure> {
+    config
+        .effects_listen
+        .as_deref()
+        .map(|listen| {
+            listen
+                .parse()
+                .map_err(|_| Failure::Message(format!("connectors.effects_listen: {listen:?}")))
+        })
+        .transpose()
+}
+
+/// Where a sandbox reaches this host, from `[connectors] effects_sandbox_host`
+/// and `effects_listen`: the effect-ledger proxy's address, which a
+/// sandboxed turn's delegation endpoint shares (docs/delegation.md), with
+/// or without a gateway.
+fn sandbox_host(config: &Connectors) -> Result<Option<SandboxHost>, Failure> {
+    let Some(host) = config.effects_sandbox_host.clone() else {
+        return Ok(None);
+    };
+    let listen = effects_listen(config)?.unwrap_or(std::net::Ipv4Addr::LOCALHOST.into());
+    Ok(Some(SandboxHost { listen, host }))
+}
+
+/// Give `yard` its gateway, pinned or registered, if it has one, and the
+/// address its sandboxes reach this host at, if one is configured.
 pub fn configure(yard: &Yard) -> Result<(), Failure> {
-    if let Some(gateway) = configured(yard)? {
-        yard.use_connectors(gateway);
+    let Some(config) = settings(yard.root())? else {
+        return Ok(());
+    };
+    if let Some(host) = sandbox_host(&config)? {
+        yard.use_sandbox_host(host);
+    }
+    if let Some(found) = find(yard, &config)? {
+        yard.use_connectors(local_gateway(yard, &config, &found)?);
     }
     Ok(())
 }
@@ -541,7 +571,13 @@ fn supervise(
                 health = now;
             }
         }
-        std::thread::sleep(Duration::from_secs(1));
+        // Looked at every 100 ms until the gateway is seen listening, so a
+        // record turns healthy promptly; once a second after that.
+        let pause = match registration.is_some() && health != Health::Healthy {
+            true => Duration::from_millis(100),
+            false => Duration::from_secs(1),
+        };
+        std::thread::sleep(pause);
     }
 }
 
@@ -679,4 +715,42 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
         .open(path)?;
     file.write_all(bytes)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `effects_sandbox_host` is this host's address for a sandbox, bound
+    /// on `effects_listen` (loopback by default), with or without a
+    /// gateway; a listen address that does not parse is refused by name.
+    #[test]
+    fn the_sandbox_host_is_the_ledger_proxys_address() {
+        assert_eq!(sandbox_host(&Connectors::default()).unwrap(), None);
+        let config = Connectors {
+            effects_sandbox_host: Some("192.168.127.1".into()),
+            ..Connectors::default()
+        };
+        assert_eq!(
+            sandbox_host(&config).unwrap(),
+            Some(SandboxHost {
+                listen: std::net::Ipv4Addr::LOCALHOST.into(),
+                host: "192.168.127.1".into(),
+            })
+        );
+        let config = Connectors {
+            effects_listen: Some("0.0.0.0".into()),
+            ..config
+        };
+        assert_eq!(
+            sandbox_host(&config).unwrap().unwrap().listen,
+            std::net::IpAddr::from([0, 0, 0, 0])
+        );
+        let config = Connectors {
+            effects_listen: Some("everywhere".into()),
+            ..config
+        };
+        let refused = sandbox_host(&config).unwrap_err().to_string();
+        assert!(refused.contains("connectors.effects_listen"), "{refused}");
+    }
 }

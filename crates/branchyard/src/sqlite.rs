@@ -43,7 +43,7 @@ use branchyard_support::time::now_ms;
 /// How long a write waits for another process's transaction.
 const BUSY: Duration = Duration::from_secs(30);
 /// 2: grants bound to incarnations (see `crate::storage::LegacyBinder`).
-const SCHEMA: i64 = 2;
+pub(crate) const SCHEMA: i64 = 2;
 
 const TABLES: &str = "
 CREATE TABLE IF NOT EXISTS meta (
@@ -2554,7 +2554,7 @@ impl StorageBackend for Sqlite {
                         new.name,
                         new.owner,
                         encode("ancestry", &new.ancestry)?,
-                        to_db("now_ms", now_ms())?,
+                        to_db("created_ms", new.created_ms)?,
                         new.owner_incarnation,
                         encode("ancestry", &new.ancestry_incarnations)?,
                     ],
@@ -3448,7 +3448,6 @@ impl PoolBackend for Sqlite {
     }
 }
 
-#[allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3458,7 +3457,7 @@ mod tests {
 
     impl Drop for Temp {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            branchyard_support::cleanup_dir(&self.0);
         }
     }
 
@@ -3469,7 +3468,9 @@ mod tests {
                 "branchyard-sqlite-{}-race-{round}",
                 std::process::id()
             ));
-            let _ = fs::remove_dir_all(&dir);
+            if dir.exists() {
+                fs::remove_dir_all(&dir).unwrap();
+            }
             fs::create_dir_all(&dir).unwrap();
             let _temp = Temp(dir.clone());
             let openers: Vec<_> = (0..4)
@@ -3487,7 +3488,9 @@ mod tests {
     fn open(name: &str) -> (Temp, Sqlite) {
         let dir =
             std::env::temp_dir().join(format!("branchyard-sqlite-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(&dir).unwrap();
         let store = Sqlite::open(&dir).unwrap();
         (Temp(dir), store)

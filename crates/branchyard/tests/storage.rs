@@ -4,7 +4,6 @@
 //! [`Yard`] handles on one repository, as other durability tests use to
 //! stand in for two engines).
 
-#![allow(clippy::let_underscore_must_use)] // tests: a panic is the failure report
 mod common;
 
 use std::collections::BTreeMap;
@@ -162,12 +161,12 @@ fn scratch_areas_need_an_explicit_share_for_a_sibling() {
     assert_eq!(area.owner_branch, "a");
     assert!(f.yard.scratch_path("cache").is_dir());
 
-    assert!(f
-        .yard
-        .scratch_areas("root")
-        .unwrap()
-        .iter()
-        .any(|s| s.name == "cache"));
+    // What create returned is what a read finds, creation time included.
+    assert_eq!(
+        f.yard.scratch_areas("root").unwrap(),
+        std::slice::from_ref(&area)
+    );
+    assert_eq!(f.yard.scratch_areas("a").unwrap(), [area]);
     assert!(!f
         .yard
         .scratch_areas("b")
@@ -415,7 +414,10 @@ fn published_bytes_are_the_bytes_that_were_hashed() {
                 "the first open must read to the end before the second",
                 std::time::Duration::from_millis(300),
             );
-            let _ = fs::write(&fifo, b"second");
+            branchyard_support::best_effort(
+                "write the second FIFO payload",
+                fs::write(&fifo, b"second"),
+            );
         })
     };
     let published = f

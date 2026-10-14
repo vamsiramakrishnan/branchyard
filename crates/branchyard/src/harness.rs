@@ -43,12 +43,32 @@ pub(crate) fn is_parent_session_variable(name: &str) -> bool {
 /// this list against `docs/qualification/`.
 pub(crate) const REPORTS: &[(&str, &str)] = &[
     (
+        "antigravity-stream-json",
+        include_str!("../../../docs/qualification/antigravity-stream-json.json"),
+    ),
+    (
         "claude-code-acp",
         include_str!("../../../docs/qualification/claude-code-acp.json"),
     ),
     (
         "claude-code-stream-json",
         include_str!("../../../docs/qualification/claude-code-stream-json.json"),
+    ),
+    (
+        "codex-app-server",
+        include_str!("../../../docs/qualification/codex-app-server.json"),
+    ),
+    (
+        "deepseek-harness-acp",
+        include_str!("../../../docs/qualification/deepseek-harness-acp.json"),
+    ),
+    (
+        "gemini-cli-acp",
+        include_str!("../../../docs/qualification/gemini-cli-acp.json"),
+    ),
+    (
+        "oh-my-pi-acp",
+        include_str!("../../../docs/qualification/oh-my-pi-acp.json"),
     ),
 ];
 
@@ -109,6 +129,32 @@ pub(crate) fn check_model(profile: &Profile, model: &str, private_home: bool) ->
     Err(refuse(
         reasons.first().map_or("not verified", |(_, why)| why),
     ))
+}
+
+/// Refuse a delegated branch on `profile` that could not be given
+/// Branchyard's delegation tools, which every delegated turn is given: its
+/// provisioner decides, as the turn's provisioning would. A harness that
+/// takes MCP servers only in its configuration (Antigravity) needs a home
+/// private to the branch for them, so a child of a parent without one is
+/// refused when it is spawned rather than failing its first turn.
+pub(crate) fn check_delegation_tools(profile: &Profile, private_home: bool) -> Result<(), Error> {
+    let mut context =
+        branchyard_provision::Context::new(profile.harness, profile.protocol, "/home", "/work");
+    context.private_home = private_home;
+    context.mcp_servers = vec![branchyard_harness::McpServer {
+        name: crate::projection::SERVER_NAME.into(),
+        command: "/by".into(),
+        args: Vec::new(),
+        env: Vec::new(),
+    }];
+    branchyard_provision::plan(&context)
+        .map(drop)
+        .map_err(|why| {
+            Error::Unsupported(format!(
+                "{} cannot be given Branchyard's delegation tools here: {}",
+                profile.id, why.0
+            ))
+        })
 }
 
 /// Fail with [`Error::HarnessUnavailable`] unless `command[0]` is an
@@ -289,7 +335,16 @@ mod tests {
             assert!(profiles::by_id(id).is_some(), "{id} is not a profile");
         }
         assert_eq!(qualification("claude-code-acp").unwrap(), "9/9 on 0.81.2");
-        assert_eq!(qualification("codex-app-server"), None);
+        assert_eq!(qualification("gemini-cli-acp").unwrap(), "8/9 on 0.63.0");
+        assert_eq!(
+            qualification("antigravity-stream-json").unwrap(),
+            "4/9 on 1.3.3"
+        );
+        assert_eq!(
+            qualification("codex-app-server").unwrap(),
+            "6/9 on codex-cli 0.157.1"
+        );
+        assert_eq!(qualification("oh-my-pi-acp").unwrap(), "9/9 on omp/18.10.3");
     }
 
     #[test]

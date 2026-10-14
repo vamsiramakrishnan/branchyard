@@ -697,3 +697,48 @@ fn an_agent_without_the_steering_extension_refuses_it() {
         ))
     );
 }
+
+#[test]
+fn permission_requests_name_the_tool_by_name_kind_or_title() {
+    // A preset matches tool names, so a request carries the agent's name
+    // for the tool when it gives one (in the request, or in the call's
+    // earlier update), else its kind under the `acp:` names, and only then
+    // its title.
+    let mut driver = ready();
+    driver.submit("edit").unwrap();
+    let request = |id: u64, tool_call: Value| {
+        json!({"jsonrpc": "2.0", "id": id, "method": "session/request_permission", "params": {
+            "sessionId": "s1", "toolCall": tool_call,
+            "options": [{"optionId": "once", "name": "Allow", "kind": "allow_once"}]}})
+    };
+    let tool_of = |driver: &mut Acp, message: &Value| {
+        let (events, _) = feed(driver, message);
+        let Event::PermissionRequested { request, .. } = &events[0] else {
+            panic!("{events:?}")
+        };
+        request.tool.clone()
+    };
+    let named = request(
+        50,
+        json!({"toolCallId": "c-1", "title": "Writing to notes/x.md", "name": "write_file", "kind": "edit"}),
+    );
+    assert_eq!(tool_of(&mut driver, &named), "write_file");
+    let by_kind = request(
+        51,
+        json!({"toolCallId": "c-2", "title": "Running tests", "kind": "execute"}),
+    );
+    assert_eq!(tool_of(&mut driver, &by_kind), "acp:execute");
+    // The call's update named it, the request does not: the name wins.
+    feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1",
+            "update": {"sessionUpdate": "tool_call", "toolCallId": "c-3", "title": "Edit", "kind": "edit", "name": "replace"}}}),
+    );
+    let announced = request(
+        52,
+        json!({"toolCallId": "c-3", "title": "Editing src/lib.rs"}),
+    );
+    assert_eq!(tool_of(&mut driver, &announced), "replace");
+    let only_title = request(53, json!({"toolCallId": "c-4", "title": "Edit src/lib.rs"}));
+    assert_eq!(tool_of(&mut driver, &only_title), "Edit src/lib.rs");
+}

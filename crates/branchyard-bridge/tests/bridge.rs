@@ -5,14 +5,10 @@
 //! Requires `sh` and `sleep`; the tests of process 1 and of another user
 //! run only as root, and the first also needs `unshare`.
 
-#![allow(
-    clippy::expect_used,
-    clippy::let_underscore_must_use,
-    clippy::panic,
-    clippy::unwrap_used
-)] // tests: a panic is the failure report
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -55,7 +51,9 @@ impl Bridge {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = fs::remove_dir_all(&dir);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(dir.join("identity")).unwrap();
         fs::create_dir_all(dir.join("work")).unwrap();
         for (file, value) in [("atespace", "tenant"), ("name", "actor"), ("uid", "uid-1")] {
@@ -167,7 +165,7 @@ impl Bridge {
 impl Drop for Bridge {
     fn drop(&mut self) {
         self.stop();
-        let _ = fs::remove_dir_all(&self.dir);
+        branchyard_support::cleanup_dir(&self.dir);
     }
 }
 
@@ -461,7 +459,9 @@ fn scratch(name: &str) -> PathBuf {
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    let _ = fs::remove_dir_all(&dir);
+    if dir.exists() {
+        fs::remove_dir_all(&dir).unwrap();
+    }
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -532,7 +532,7 @@ fn the_bridge_serves_tls_and_a_client_trusting_another_authority_is_refused() {
         public.health().unwrap_err().kind(),
         io::ErrorKind::InvalidData
     );
-    let _ = fs::remove_dir_all(pki);
+    fs::remove_dir_all(pki).unwrap();
 }
 
 #[test]
@@ -544,7 +544,7 @@ fn orphans_of_an_exec_are_reparented_to_the_bridge_and_reaped() {
     let mut process = endpoint
         .exec(&sh(
             &bridge.work(),
-            "sh -c 'sleep 1 >/dev/null 2>&1 & echo $!'; exit 0",
+            "sh -c 'sleep 300 >/dev/null 2>&1 & echo $!'; exit 0",
         ))
         .unwrap();
     let mut out = String::new();
@@ -556,10 +556,16 @@ fn orphans_of_an_exec_are_reparented_to_the_bridge_and_reaped() {
     assert!(process.wait().unwrap().success());
     let orphan: u32 = out.trim().parse().unwrap();
     let bridge_pid = bridge.pid();
-    if let Some((parent, _)) = stat_of(orphan) {
-        assert_eq!(parent, bridge_pid, "the orphan went elsewhere");
-    }
-    // It exits on its own and is reaped: no zombie is left.
+    // Still running, so its parent can be read: the bridge, not the shell.
+    assert_eq!(
+        stat_of(orphan).map(|(parent, _)| parent),
+        Some(bridge_pid),
+        "the orphan went elsewhere"
+    );
+    // End it from outside, rather than wait out its sleep: the bridge
+    // reaps it, and no zombie is left.
+    // SAFETY: plain syscall on a child of the exec this test started.
+    assert_eq!(unsafe { libc::kill(orphan as i32, libc::SIGTERM) }, 0);
     wait::until(&format!("orphan {orphan} to be reaped"), || {
         !Path::new(&format!("/proc/{orphan}")).exists()
     });
@@ -633,6 +639,7 @@ fn sigterm_delivers_an_execs_last_output_and_status_before_the_bridge_exits() {
              exec 3>&-; while :; do sleep 0.05; done",
         ))
         .unwrap();
+    let shell: u32 = process.id().parse().unwrap();
     let mut stdout = BufReader::new(process.take_stdout().unwrap());
     let mut stderr = process.take_stderr().unwrap();
     let mut line = String::new();
@@ -647,8 +654,9 @@ fn sigterm_delivers_an_execs_last_output_and_status_before_the_bridge_exits() {
     wait::settle("the pipes fill", Duration::from_millis(500));
     // SAFETY: plain syscall.
     assert_eq!(unsafe { libc::kill(bridge.pid() as i32, libc::SIGTERM) }, 0);
-    // The trap has run and the shell has exited well before stderr is read.
-    wait::settle("the shell exits", Duration::from_millis(300));
+    // The trap has run and the shell has exited before stderr is read. A
+    // zombie, not yet reaped by the bridge, counts as exited.
+    wait::gone(shell);
     let drained = thread::spawn(move || io::copy(&mut stderr, &mut io::sink()).unwrap());
     line.clear();
     stdout.read_line(&mut line).unwrap();
@@ -685,7 +693,7 @@ fn as_process_1_it_reaps_orphans_and_only_the_runtime_can_stop_it() {
     let mut process = endpoint
         .exec(&sh(
             &bridge.work(),
-            "sh -c 'sleep 1 >/dev/null 2>&1 & echo $!'; exit 0",
+            "sh -c 'sleep 300 >/dev/null 2>&1 & echo $!'; exit 0",
         ))
         .unwrap();
     let mut out = String::new();
@@ -702,6 +710,12 @@ fn as_process_1_it_reaps_orphans_and_only_the_runtime_can_stop_it() {
         &format!("awk '{{print $4}}' /proc/{orphan}/stat 2>/dev/null || echo 1"),
     );
     assert_eq!(parent, "1\n");
+    // End it from inside, rather than wait out its sleep: process 1 reaps
+    // it, and no zombie is left.
+    assert_eq!(
+        run(&endpoint, &bridge.work(), &format!("kill -TERM {orphan}")).0,
+        Some(0)
+    );
     let zombies =
         "for s in /proc/[0-9]*/stat; do awk '$3 == \"Z\" {print $1}' $s; done 2>/dev/null";
     wait::until(&format!("orphan {orphan} to be reaped"), || {
@@ -857,4 +871,94 @@ fn status_names_the_running_execs_and_what_they_run() {
     wait::until("the exec to stop being reported", || {
         endpoint.status().unwrap().execs.is_empty()
     });
+}
+
+#[test]
+fn keygen_writes_the_key_for_its_owner_only_and_prints_the_public_key() {
+    let dir = scratch("keygen");
+    let path = dir.join("bridge.key");
+    let keygen = || {
+        branchyard_testkit::hermetic(&mut Command::new(env!("CARGO_BIN_EXE_branchyard-bridge")))
+            .args(["keygen", "--out"])
+            .arg(&path)
+            .output()
+            .unwrap()
+    };
+    let output = keygen();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let printed = String::from_utf8(output.stdout).unwrap();
+    let public_key = Signer::read(&path).unwrap().public_key();
+    assert_eq!(printed, format!("{public_key}\n"));
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // Never replacing a file: a second run fails and leaves the key alone.
+    let again = keygen();
+    assert!(!again.status.success());
+    let stderr = String::from_utf8(again.stderr).unwrap();
+    assert!(
+        stderr.starts_with("branchyard-bridge: could not write"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("bridge.key"), "{stderr}");
+    assert_eq!(Signer::read(&path).unwrap().public_key(), public_key);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_malformed_run_as_is_refused_before_the_bridge_starts() {
+    let output =
+        branchyard_testkit::hermetic(&mut Command::new(env!("CARGO_BIN_EXE_branchyard-bridge")))
+            .args(["serve", "--run-as", "nobody"])
+            .output()
+            .unwrap();
+    assert_eq!(output.status.code(), Some(2), "a usage error");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("needs numeric UID:GID such as 1000:1000"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn requests_that_are_not_bridge_upgrades_are_answered_with_http_errors() {
+    let bridge = Bridge::start();
+    let address = bridge
+        .url
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_owned();
+    let answer = |request: &str| {
+        let mut stream = TcpStream::connect(&address).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    };
+    let response = answer("GET /elsewhere HTTP/1.1\r\nHost: bridge\r\n\r\n");
+    assert!(
+        response.starts_with("HTTP/1.1 404 Not Found\r\n"),
+        "{response}"
+    );
+    assert!(
+        response.ends_with("\r\n\r\nnot a bridge endpoint\n"),
+        "{response}"
+    );
+    let response = answer(
+        "GET / HTTP/1.1\r\nHost: bridge\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+         Sec-WebSocket-Key: AQIDBAUGBwgJCgsMDQ4PEA==\r\nSec-WebSocket-Version: 8\r\n\r\n",
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 426 Upgrade Required\r\n"),
+        "{response}"
+    );
+    assert!(
+        response.contains("WebSocket 13 with subprotocol branchyard-bridge.v2"),
+        "{response}"
+    );
 }

@@ -64,6 +64,14 @@ pub(crate) trait ProviderKind {
         true
     }
 
+    /// Whether a harness in this provider's sandbox can open a connection
+    /// to this host, so that it can be served the delegation tools over
+    /// HTTP (`crate::endpoint`). A sandbox that cannot runs a delegating
+    /// turn without them, and the turn says so.
+    fn reaches_host(&self) -> bool {
+        false
+    }
+
     /// Whether a network policy can be enforced on this host for a
     /// harness run by this provider, rather than only for a local one.
     fn confines_egress(&self) -> bool {

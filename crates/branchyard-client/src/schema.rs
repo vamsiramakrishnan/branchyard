@@ -88,6 +88,10 @@ pub fn contract() -> Value {
     entry::<branchyard::GraphApplied>("GraphApplied", &mut types);
     entry::<api::IntegrateRequest>("IntegrateRequest", &mut types);
     entry::<api::SteerRequest>("SteerRequest", &mut types);
+    entry::<api::CheckRequest>("CheckRequest", &mut types);
+    entry::<branchyard::CheckReport>("CheckReport", &mut types);
+    entry::<api::ReportStatusRequest>("ReportStatusRequest", &mut types);
+    entry::<branchyard::Reported>("Reported", &mut types);
     entry::<api::CancelRequest>("CancelRequest", &mut types);
     entry::<api::CancelResult>("CancelResult", &mut types);
     entry::<api::DiscardRequest>("DiscardRequest", &mut types);
@@ -95,6 +99,7 @@ pub fn contract() -> Value {
     entry::<branchyard::Waited>("Waited", &mut types);
     entry::<api::AskRequest>("AskRequest", &mut types);
     entry::<api::TextRequest>("TextRequest", &mut types);
+    entry::<api::ReportRequest>("ReportRequest", &mut types);
     entry::<api::AnswerRequest>("AnswerRequest", &mut types);
     entry::<api::OperationKind>("OperationKind", &mut types);
     entry::<api::OperationState>("OperationState", &mut types);

@@ -418,11 +418,13 @@ pub fn list(root: &Path) -> Vec<EnvironmentInfo> {
 }
 
 /// Note that `info` was used now.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn touch(root: &Path, info: &EnvironmentInfo) {
     let mut info = info.clone();
     info.last_used_ms = now_ms();
-    let _ = write(&manifest_path(root, &info.key), &info);
+    best_effort(
+        "record that an environment was used",
+        write(&manifest_path(root, &info.key), &info),
+    );
 }
 
 /// An advisory lock on one key, held while its environment is built, and
@@ -561,7 +563,6 @@ pub(crate) struct Failed<'a> {
 
 /// Record that `key`'s build by `branch` failed because `reason`. A good
 /// environment of the key, if any, is left alone.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard
 pub(crate) fn record_failure(root: &Path, spec: &WorkspaceSpec, failed: Failed<'_>) {
     let Failed {
         key,
@@ -588,7 +589,10 @@ pub(crate) fn record_failure(root: &Path, spec: &WorkspaceSpec, failed: Failed<'
         reason: Some(reason.to_owned()),
         snapshot: None,
     };
-    let _ = write(&failed_path(root, key), &info);
+    best_effort(
+        "record a failed environment build",
+        write(&failed_path(root, key), &info),
+    );
 }
 
 /// A shared path of `spec` that `path` is, or is under.

@@ -4,7 +4,7 @@
 //! `crates/branchyard-recipe/tests/fixtures/fake-ssh`. No cloud, no sshd.
 //! Requires `git`, `sh`, `python3`, `ps`.
 
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -533,7 +533,7 @@ fn defaults_can_choose_a_recipe_and_a_changed_recipe_is_refused_again() {
         "{}",
         workdir.display()
     );
-    let _ = fs::remove_dir_all(workdir.parent().unwrap());
+    fs::remove_dir_all(workdir.parent().unwrap()).unwrap();
 
     // A recipe changed since it was trusted is refused again.
     fs::write(

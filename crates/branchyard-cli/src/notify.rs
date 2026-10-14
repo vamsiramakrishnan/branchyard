@@ -391,7 +391,6 @@ impl Notifier {
 
 /// Show `notice` on `out` and, when configured, on the desktop. Best
 /// effort: a notification never fails the command.
-#[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-cli
 pub fn show(settings: &Settings, notice: &Notice, out: &mut Option<Box<dyn Write + Send>>) {
     if !settings.enabled {
         return;
@@ -399,8 +398,11 @@ pub fn show(settings: &Settings, notice: &Notice, out: &mut Option<Box<dyn Write
     if let Some(out) = out {
         let text = encode(notice, settings.escape, settings.tmux);
         if !text.is_empty() {
-            let _ = out.write_all(text.as_bytes());
-            let _ = out.flush();
+            branchyard_support::best_effort(
+                "write the notification",
+                out.write_all(text.as_bytes()),
+            );
+            branchyard_support::best_effort("flush the notification", out.flush());
         }
     }
     if settings.desktop {

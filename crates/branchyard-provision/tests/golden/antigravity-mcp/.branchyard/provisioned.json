@@ -9,6 +9,10 @@
         [
           "mcpServers",
           "search"
+        ],
+        [
+          "mcpServers",
+          "branchyard"
         ]
       ],
       "kind": "json",
@@ -17,6 +21,18 @@
   ],
   "mcp_servers": [
     "docs",
-    "search"
-  ]
+    "search",
+    "branchyard"
+  ],
+  "permissions": {
+    "allow": [
+      "command(regex:git .*)",
+      "command(regex:by .*)",
+      "command(regex:/usr/local/bin/by .*)",
+      "mcp(docs/*)",
+      "mcp(search/*)",
+      "mcp(branchyard/*)"
+    ],
+    "path": ".gemini/antigravity-cli/settings.json"
+  }
 }

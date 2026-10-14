@@ -3,7 +3,7 @@
 //! binary, running the ignored `rewind_child` or `try_child` test) aborts at
 //! an injected fault point between an intent and its effect.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::collections::BTreeMap;
@@ -349,7 +349,10 @@ fn rewind_child() {
         return;
     };
     let yard = Yard::open(root).unwrap();
-    let _ = yard.branch(&name).unwrap().rewind(to.parse().unwrap());
+    branchyard_support::best_effort(
+        "rewind in the crash child",
+        yard.branch(&name).unwrap().rewind(to.parse().unwrap()),
+    );
 }
 
 /// Try `BY_CHILD_BRANCH` in `BY_CHILD_ROOT`; `BRANCHYARD_FAULT` makes it
@@ -364,10 +367,13 @@ fn try_child() {
         return;
     };
     let yard = Yard::open(root).unwrap();
-    let _ = match name.as_str() {
-        "--off" => yard.try_off(false).map(|_| ()),
-        _ => yard.try_on(&name).map(|_| ()),
-    };
+    branchyard_support::best_effort(
+        "run the try in the crash child",
+        match name.as_str() {
+            "--off" => yard.try_off(false).map(|_| ()),
+            _ => yard.try_on(&name).map(|_| ()),
+        },
+    );
 }
 
 fn crash(f: &Fixture, test: &str, env: &[(&str, &str)]) {

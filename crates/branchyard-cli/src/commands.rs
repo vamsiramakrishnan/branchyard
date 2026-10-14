@@ -925,6 +925,20 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         },
     };
     let checkpoints = crate::attempts::checkpoints(target, &info)?;
+    // What it may still spend, and what its tree has spent (docs/delegation.md
+    // "Budgets"); a server that cannot inspect it, or a branch that cannot be
+    // inspected, shows neither.
+    let budget = match target {
+        Target::Local => open().ok().and_then(|yard| {
+            yard.branch(&info.name)
+                .ok()?
+                .delegate(TaskOptions::default())
+                .ok()?
+                .inspect(&info.name)
+                .ok()
+        }),
+        Target::Remote(remote) => remote::inspect(remote, &info.name).ok(),
+    };
     let (readiness, line) = crate::pr::show_readiness(&info, &events, env.style());
     // The task it is an attempt of (docs/task-repos.md); a server too old
     // to say has none.
@@ -942,6 +956,15 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
             value["task"] = task.clone();
         }
         value["checkpoints"] = serde_json::to_value(&checkpoints).unwrap_or_default();
+        if let Some(i) = &budget {
+            value["subtree_cost_usd"] = serde_json::json!(i.subtree_cost_usd);
+            value["max_usd"] = serde_json::json!(i.max_usd);
+            value["remaining_usd"] = serde_json::json!(i.remaining_usd);
+            if let (Some(left), Some(by)) = (i.tree_remaining_usd, &i.tree_capped_by) {
+                value["tree_remaining_usd"] = serde_json::json!(left);
+                value["tree_capped_by"] = serde_json::json!(by);
+            }
+        }
         value["merge_readiness"] = readiness;
         // Only when something listens, so local and remote `show --json`
         // agree for a branch with no servers.
@@ -994,6 +1017,7 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
     extra.extend(crate::plan_cmd::show_lines(&info.name, &events));
     let mut text = render::details(
         &info,
+        budget.as_ref(),
         branchyard_support::time::now_ms() / 1000,
         env.style(),
         extra,
@@ -1426,8 +1450,53 @@ pub fn read_prompt_file(path: &str) -> Result<String, Failure> {
     }
 }
 
+/// A JSON value given as text (`--result '{...}'`) or in a file
+/// (`--result-file PATH`, `-` for standard input); `None` when neither was
+/// given.
+fn json_flag(
+    flag: &str,
+    given: (Option<&str>, Option<&str>),
+) -> Result<Option<serde_json::Value>, branchyard::Error> {
+    let denied = |why: String| branchyard::Error::Denied(why);
+    let text = match given {
+        (Some(text), _) => text.to_owned(),
+        (None, Some("-")) => {
+            let mut text = String::new();
+            io::Read::read_to_string(&mut io::stdin(), &mut text)
+                .map_err(|e| denied(format!("{flag}-file -: {e}")))?;
+            text
+        }
+        (None, Some(path)) => {
+            std::fs::read_to_string(path).map_err(|e| denied(format!("{flag}-file {path}: {e}")))?
+        }
+        (None, None) => return Ok(None),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| denied(format!("{flag} is not JSON: {e}")))
+}
+
+/// `by spawn`'s result contract: its schema, from `--result-schema` or
+/// `--result-schema-file`, checked against the subset the contract
+/// supports.
+fn result_contract(
+    args: &SpawnArgs,
+) -> Result<Option<branchyard::ResultContract>, branchyard::Error> {
+    let given = (
+        args.result_schema.as_deref(),
+        args.result_schema_file.as_deref(),
+    );
+    json_flag("--result-schema", given)?
+        .map(|schema| branchyard::ResultContract::new(schema, args.result_required))
+        .transpose()
+}
+
 pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outcome {
     let json = args.json;
+    let result = match result_contract(args) {
+        Ok(result) => result,
+        Err(error) => return fail(json, &error),
+    };
     // A child's issue link lives in its prompt's header: a harness has no
     // yard of its own to record it in.
     let (prompt, task, _) = crate::pr::issue_task(prompt, &args.task, None)?;
@@ -1462,6 +1531,7 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         connectors: (!args.connectors.is_empty()).then(|| args.connectors.clone()),
         plan: args.plan,
         model: args.model.clone(),
+        result,
     };
     if let Some(delegate) = harness_delegate(json)? {
         if args.parent.is_some()
@@ -1517,7 +1587,7 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         Err(error) => return fail(json, &error),
     };
     if let Target::Remote(remote) = target {
-        let result = remote::spawn(env, remote, &parent, prompt, args);
+        let result = remote::spawn(env, remote, &parent, prompt, args, request.result.clone());
         return emit(json, result, |i| render::inspection(i, env.style()));
     }
     let live = Live::start_to(env, task, true, json, None);
@@ -1579,16 +1649,17 @@ pub fn events(
 
 /// Run a branch's check on its current work as integrating it would:
 /// inside a harness, on itself or a descendant; otherwise on any branch,
-/// with yours. Exits 1 when the work would not get past its check.
+/// with yours, or the server's with `--remote`. Exits 1 when the work
+/// would not get past its check.
 pub fn check(env: &Env, target: &Target, branch: Option<String>, json: bool) -> Outcome {
     let result = match (harness_delegate(json)?, target) {
         (Some(delegate), _) => {
             let branch = branch.unwrap_or_else(|| delegate.branch().to_owned());
             delegate.check(&branch)
         }
-        (None, Target::Remote(_)) => Err(branchyard::Error::Unsupported(
-            "the server has no check route; run by check on the repository's host".into(),
-        )),
+        (None, Target::Remote(remote)) => {
+            required_outside(branch, "check").and_then(|b| remote::check(remote, &b))
+        }
         (None, Target::Local) => required_outside(branch, "check")
             .and_then(|b| as_user(&b, TaskOptions::default())?.check(&b)),
     };
@@ -1963,18 +2034,45 @@ pub fn ask(
     })
 }
 
-pub fn report(target: &Target, as_branch: Option<String>, text: &str, json: bool) -> Outcome {
+/// `by report`, with the result `--result` or `--result-file` gave, if any:
+/// checked against the branch's result contract and recorded before the
+/// message is sent.
+pub fn report(
+    target: &Target,
+    as_branch: Option<String>,
+    text: &str,
+    result: (Option<&str>, Option<&str>),
+    json: bool,
+) -> Outcome {
+    let value = match json_flag("--result", result) {
+        Ok(value) => value,
+        Err(error) => return fail(json, &error),
+    };
     let result = match (harness_delegate(json)?, target) {
         (Some(delegate), _) => {
-            as_itself(&delegate, as_branch.as_deref(), "--as").and_then(|()| delegate.report(text))
+            as_itself(&delegate, as_branch.as_deref(), "--as").and_then(|()| match &value {
+                Some(value) => delegate.report_result(text, value),
+                None => delegate.report(text),
+            })
         }
-        (None, Target::Remote(remote)) => as_branch_required(as_branch, "report")
-            .and_then(|b| remote.repo.report(&b, text).map_err(remote::sdk_error)),
-        (None, Target::Local) => as_branch_required(as_branch, "report")
-            .and_then(|b| as_user(&b, TaskOptions::default())?.report(text)),
+        (None, Target::Remote(remote)) => as_branch_required(as_branch, "report").and_then(|b| {
+            remote
+                .repo
+                .report_result(&b, text, value.clone())
+                .map_err(remote::sdk_error)
+        }),
+        (None, Target::Local) => as_branch_required(as_branch, "report").and_then(|b| {
+            let delegate = as_user(&b, TaskOptions::default())?;
+            match &value {
+                Some(value) => delegate.report_result(text, value),
+                None => delegate.report(text),
+            }
+        }),
     };
-    emit(json, result, |m| {
-        format!("reported #{}: {}\n", m.id, m.text)
+    let with_result = value.is_some();
+    emit(json, result, |m| match with_result {
+        true => format!("reported #{} with a result: {}\n", m.id, m.text),
+        false => format!("reported #{}: {}\n", m.id, m.text),
     })
 }
 
@@ -1992,10 +2090,6 @@ pub fn escalate(target: &Target, as_branch: Option<String>, text: &str, json: bo
     })
 }
 
-/// Why `by --remote report-status` is refused.
-const REPORT_STATUS_REMOTE: &str = "by report-status acts on a local repository: a harness \
-    states its own status from inside its turn, and the server has no route for it";
-
 /// `by report-status`: record the branch's own status beside the protocol's.
 pub fn report_status(
     target: &Target,
@@ -2010,8 +2104,17 @@ pub fn report_status(
     let result = match (delegate, target) {
         (Some(delegate), _) => as_itself(&delegate, as_branch.as_deref(), "--as")
             .and_then(|()| delegate.report_status(state?, summary, link)),
-        (None, Target::Remote(_)) => {
-            Err(branchyard::Error::Unsupported(REPORT_STATUS_REMOTE.into()))
+        // The rules are the engine's, checked here as well so a refusal
+        // reads as a local one does; the server checks them again.
+        (None, Target::Remote(remote)) => {
+            as_branch_required(as_branch, "report-status").and_then(|b| {
+                let state = state?;
+                branchyard::reported::check(summary, link)?;
+                remote
+                    .repo
+                    .report_status(&b, state, summary, link)
+                    .map_err(remote::sdk_error)
+            })
         }
         (None, Target::Local) => as_branch_required(as_branch, "report-status").and_then(|b| {
             as_user(&b, TaskOptions::default())?.report_status(state?, summary, link)

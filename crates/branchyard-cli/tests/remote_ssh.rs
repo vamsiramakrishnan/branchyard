@@ -10,7 +10,7 @@
 //! No sshd is involved: none is installed here (docs/remote-ssh.md says
 //! what a real one would add). Requires `git`, `sh`, `python3`.
 
-#![allow(clippy::let_underscore_must_use, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use branchyard_testkit::fake_agent;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -149,7 +149,10 @@ impl Drop for World {
         if let Ok(base) = fs::read_dir(self.remote_home.join(".branchyard/remote")) {
             for entry in base.flatten() {
                 if let Ok(pid) = fs::read_to_string(entry.path().join("run/by.pid")) {
-                    let _ = Command::new("kill").args(["-9", pid.trim()]).status();
+                    branchyard_support::best_effort(
+                        "send the kill signal",
+                        Command::new("kill").args(["-9", pid.trim()]).status(),
+                    );
                 }
             }
         }

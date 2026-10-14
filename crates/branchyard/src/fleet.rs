@@ -349,16 +349,157 @@ pub struct Fleet {
 }
 
 impl Fleet {
-    /// The entry for `kind`, else `default`, with the key it was found at.
+    /// The entry for `kind`, else `default`, else the [inventory
+    /// default](inventory_default)'s, with the key it was found at.
     pub fn entry(&self, kind: TaskKind) -> Option<(&str, &FleetEntry)> {
         self.entries
             .get_key_value(kind.as_str())
             .or_else(|| self.entries.get_key_value("default"))
+            .or_else(|| self.entries.get_key_value(INVENTORY_ENTRY))
             .map(|(k, v)| (k.as_str(), v))
     }
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The inventory default
+
+/// The entry a route from the [inventory default](inventory_default)
+/// records. No `[fleet.<kind>]` can have this name, so a route, `by log`
+/// and `by fleet route` can say where it came from.
+pub const INVENTORY_ENTRY: &str = "inventory";
+
+/// How people read a route's entry: `[fleet.bugfix]`, or `the inventory
+/// default`.
+pub fn entry_label(entry: &str) -> String {
+    match entry {
+        INVENTORY_ENTRY => "the inventory default".into(),
+        entry => format!("[fleet.{entry}]"),
+    }
+}
+
+/// The fleet `--auto` routes among when the configuration has no `[fleet]`,
+/// built from what this machine has at that moment; see
+/// [`inventory_default`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct InventoryDefault {
+    /// Its one entry, under [`INVENTORY_ENTRY`]: the candidates and a
+    /// judge, with the documented defaults for the rest (one attempt, no
+    /// failover of its own, exploration 0.1, no limits).
+    pub entry: FleetEntry,
+    /// Installed harnesses left out, and why: logged out, a login
+    /// Branchyard cannot tell, not on `PATH`, at a usage limit, or no
+    /// profile to drive it with.
+    pub excluded: Vec<Excluded>,
+}
+
+impl InventoryDefault {
+    /// As a fleet table: its entry for every kind.
+    pub fn fleet(&self) -> Fleet {
+        Fleet {
+            entries: [(INVENTORY_ENTRY.to_owned(), self.entry.clone())].into(),
+        }
+    }
+
+    /// The candidates' labels, in order: `codex, gemini-cli`.
+    pub fn names(&self) -> Vec<String> {
+        self.entry
+            .candidates
+            .iter()
+            .map(FleetCandidate::label)
+            .collect()
+    }
+}
+
+/// The inventory default: every installed harness Branchyard has a profile
+/// for whose login is likely or verified and that can run here (on `PATH`,
+/// not at a usage limit), in catalog order, with `preferred` (`[defaults]
+/// harness`, a harness or profile ID) first when it is among them.
+///
+/// Each candidate runs with no model of its own, and with effort `medium`
+/// where its provisioner takes one for a branch whose home is
+/// (`private_home`) or is not its own: Codex, isolated. Elsewhere an effort
+/// would be refused, so the harness keeps its own. The judge is the first
+/// candidate that routes tool permission requests to Branchyard, since a
+/// judge runs with every tool denied; with none, judging is deterministic.
+pub fn inventory_default(
+    inventory: &crate::inventory::Inventory,
+    preferred: Option<&str>,
+    private_home: bool,
+) -> InventoryDefault {
+    use crate::inventory::{harness_of, LoginState};
+    let preferred_harness = preferred.and_then(harness_of);
+    let mut candidates: Vec<FleetCandidate> = Vec::new();
+    let mut excluded = Vec::new();
+    for state in &inventory.harnesses {
+        let id = state.id.as_str();
+        // `[defaults] harness` may name one of this harness's profiles.
+        let named = match (preferred_harness == Some(id), preferred) {
+            (true, Some(preferred)) => preferred,
+            _ => id,
+        };
+        let why = match harness::select(Some(named)) {
+            Err(_) => Err(format!(
+                "Branchyard has no profile that drives {id} (by harnesses --profiles)"
+            )),
+            Ok(profile) => match (state.ready(), state.login.state) {
+                (Err(why), _) => Err(why),
+                (Ok(()), LoginState::LoggedIn) => Ok(profile),
+                (Ok(()), _) => Err(format!(
+                    "{id}'s login cannot be told ({}); log in and check with `by harnesses`, \
+                     or name it in a [fleet]",
+                    state.login.detail
+                )),
+            },
+        };
+        match why {
+            Ok(profile) => candidates.push(FleetCandidate {
+                harness: named.to_owned(),
+                model: None,
+                effort: branchyard_provision::takes_effort(
+                    profile.harness,
+                    profile.protocol,
+                    private_home,
+                )
+                .then_some(Effort::Medium),
+                command: None,
+            }),
+            Err(reason) => excluded.push(Excluded {
+                candidate: FleetCandidate::new(id),
+                reason,
+            }),
+        }
+    }
+    if let Some(at) = candidates
+        .iter()
+        .position(|c| preferred_harness.is_some() && harness_of(&c.harness) == preferred_harness)
+    {
+        let first = candidates.remove(at);
+        candidates.insert(0, first);
+    }
+    let judge = candidates
+        .iter()
+        .find(|c| {
+            harness::select(Some(&c.harness))
+                .is_ok_and(|profile| harness::check_approvals(profile, false).is_ok())
+        })
+        .map(|c| JudgeSpec {
+            harness: c.harness.clone(),
+            model: None,
+            effort: c.effort,
+            command: None,
+            rubric: None,
+        });
+    InventoryDefault {
+        entry: FleetEntry {
+            candidates,
+            judge,
+            ..FleetEntry::default()
+        },
+        excluded,
     }
 }
 
@@ -451,9 +592,10 @@ impl FleetActivity {
         match self {
             FleetActivity::Routed(d) => match &d.entry {
                 Some(entry) => format!(
-                    "routed {} ({}) by [fleet.{entry}] to {}{}: {}",
+                    "routed {} ({}) by {} to {}{}: {}",
                     d.kind,
                     d.kind_source,
+                    entry_label(entry),
                     d.candidate.label(),
                     match d.attempts {
                         1 => String::new(),
@@ -901,7 +1043,7 @@ pub(crate) fn plan(
             .map(|e| format!("{}: {}", e.candidate.label(), e.reason))
             .collect();
         return Err(Error::HarnessUnavailable {
-            harness: format!("[fleet.{entry_name}]"),
+            harness: entry_label(entry_name),
             reason: match why.is_empty() {
                 true => "it lists no candidates".into(),
                 false => format!("no candidate can run: {}", why.join("; ")),
@@ -1740,6 +1882,202 @@ mod tests {
                 limit: "max_usd".into()
             }),
             None
+        );
+    }
+
+    fn installed(
+        id: &str,
+        state: crate::inventory::LoginState,
+        evidence: crate::inventory::Evidence,
+        detail: &str,
+    ) -> crate::inventory::HarnessState {
+        crate::inventory::HarnessState {
+            id: id.into(),
+            path: format!("/usr/local/bin/{id}"),
+            on_path: true,
+            version: Some("1.0.0".into()),
+            login: crate::inventory::Login {
+                state,
+                evidence,
+                detail: detail.into(),
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Today's machine: Codex verified, Antigravity and Gemini CLI by
+    /// GEMINI_API_KEY, Claude Code logged out, Goose unknown, Aider with no
+    /// profile, Qwen Code off PATH, OpenCode at its limit.
+    fn machine() -> crate::inventory::Inventory {
+        use crate::inventory::{Evidence, LoginState, Quota};
+        let mut qwen = installed("qwen-code", LoginState::LoggedIn, Evidence::Likely, "");
+        qwen.on_path = false;
+        let mut opencode = installed("opencode", LoginState::LoggedIn, Evidence::Likely, "");
+        opencode.quota = Some(Quota {
+            limit_reached: true,
+            ..Quota::default()
+        });
+        crate::inventory::Inventory {
+            host: "here".into(),
+            harnesses: vec![
+                installed(
+                    "claude-code",
+                    LoginState::LoggedOut,
+                    Evidence::Likely,
+                    "no ~/.claude/.credentials.json and no ANTHROPIC_API_KEY",
+                ),
+                installed(
+                    "codex",
+                    LoginState::LoggedIn,
+                    Evidence::Verified,
+                    "codex login status: Logged in using ChatGPT",
+                ),
+                installed(
+                    "antigravity",
+                    LoginState::LoggedIn,
+                    Evidence::Likely,
+                    "GEMINI_API_KEY is set (an API key; not checked)",
+                ),
+                installed(
+                    "gemini-cli",
+                    LoginState::LoggedIn,
+                    Evidence::Likely,
+                    "GEMINI_API_KEY is set (an API key; not checked)",
+                ),
+                opencode,
+                installed(
+                    "goose",
+                    LoginState::Unknown,
+                    Evidence::None,
+                    "no way to tell",
+                ),
+                installed("aider", LoginState::LoggedIn, Evidence::Likely, "a key"),
+                qwen,
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_inventory_default_routes_among_what_is_logged_in_here() {
+        let built = inventory_default(&machine(), None, false);
+        assert_eq!(built.names(), ["codex", "antigravity", "gemini-cli"]);
+        // Safe defaults: no model; no effort where it would be refused
+        // (Codex writes it into a home only an isolated branch has).
+        assert!(built
+            .entry
+            .candidates
+            .iter()
+            .all(|c| c.model.is_none() && c.effort.is_none() && c.command.is_none()));
+        let e = &built.entry;
+        assert_eq!(
+            (e.attempts, e.failover, e.exploration, e.budget.max_usd),
+            (1, false, DEFAULT_EXPLORATION, None)
+        );
+        // The judge is the first candidate, and one that can be denied
+        // every tool.
+        assert_eq!(e.judge.as_ref().map(|j| j.harness.as_str()), Some("codex"));
+        let why: BTreeMap<&str, &str> = built
+            .excluded
+            .iter()
+            .map(|x| (x.candidate.harness.as_str(), x.reason.as_str()))
+            .collect();
+        assert_eq!(
+            why.keys().copied().collect::<Vec<_>>(),
+            ["aider", "claude-code", "goose", "opencode", "qwen-code"]
+        );
+        assert!(
+            why["claude-code"].contains("logged out (no ~/.claude/.credentials.json"),
+            "{why:?}"
+        );
+        assert!(why["goose"].contains("login cannot be told (no way to tell)"));
+        assert!(why["aider"].contains("no profile"));
+        assert!(why["qwen-code"].contains("not on PATH"));
+        assert!(why["opencode"].contains("usage limit"));
+
+        // Isolated, Codex takes effort medium.
+        let isolated = inventory_default(&machine(), None, true);
+        assert_eq!(
+            isolated.names(),
+            ["codex effort=medium", "antigravity", "gemini-cli"]
+        );
+        assert_eq!(
+            isolated.entry.judge.as_ref().and_then(|j| j.effort),
+            Some(Effort::Medium)
+        );
+
+        // [defaults] harness goes first, by harness or profile ID; a judge
+        // that cannot route permission requests is passed over.
+        let preferred = inventory_default(&machine(), Some("antigravity"), false);
+        assert_eq!(preferred.names(), ["antigravity", "codex", "gemini-cli"]);
+        assert_eq!(
+            preferred.entry.judge.map(|j| j.harness),
+            Some("codex".to_owned())
+        );
+        let profile = inventory_default(&machine(), Some("gemini-cli-acp"), false);
+        assert_eq!(profile.names(), ["gemini-cli-acp", "codex", "antigravity"]);
+        // One that is not logged in changes nothing.
+        let absent = inventory_default(&machine(), Some("claude-code"), false);
+        assert_eq!(absent.names(), built.names());
+
+        // Its fleet answers every kind from the one entry, and says so.
+        let fleet = built.fleet();
+        for kind in TaskKind::ALL {
+            assert_eq!(
+                fleet.entry(kind).map(|(name, _)| name),
+                Some(INVENTORY_ENTRY)
+            );
+        }
+        assert_eq!(entry_label(INVENTORY_ENTRY), "the inventory default");
+        assert_eq!(entry_label("docs"), "[fleet.docs]");
+        let routed = FleetActivity::Routed(Box::new(RouteDecision {
+            kind: TaskKind::Bugfix,
+            kind_source: "classifier".into(),
+            entry: Some(INVENTORY_ENTRY.into()),
+            candidate: FleetCandidate::new("codex"),
+            attempt: 1,
+            attempts: 1,
+            reason: "sampled".into(),
+            failover: true,
+            fallbacks: Vec::new(),
+            tried: Vec::new(),
+            budget_usd: None,
+            spent_usd: 0.0,
+            from: None,
+            environment: None,
+            connectors: Vec::new(),
+        }));
+        assert_eq!(
+            routed.describe(),
+            "routed bugfix (classifier) by the inventory default to codex: sampled"
+        );
+
+        // Nothing logged in: no candidates, and the router says why.
+        let none = inventory_default(
+            &crate::inventory::Inventory {
+                harnesses: machine().harnesses[..1].to_vec(),
+                ..Default::default()
+            },
+            None,
+            false,
+        );
+        assert!(none.entry.candidates.is_empty() && none.entry.judge.is_none());
+        let err = plan(
+            TaskKind::Other,
+            "flag",
+            Vec::new(),
+            INVENTORY_ENTRY,
+            &none.entry,
+            &[],
+            &all_ok,
+            1,
+            1,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("the inventory default is unavailable"),
+            "{err}"
         );
     }
 

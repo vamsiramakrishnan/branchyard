@@ -922,3 +922,122 @@ fn a_harness_states_its_own_status_and_its_parent_sees_it() {
         .collect();
     assert_eq!(texts, ["status blocked: needs the API key"]);
 }
+
+/// A parent says at spawn what shape its child's answer must take. The
+/// child reads the contract in its own `inspect`; a result that does not
+/// match and a report with none come back as tool errors, recording
+/// nothing; and the parent reads the accepted result as JSON from `inspect`
+/// and from `wait`. A schema keyword outside the contract's subset is
+/// refused at spawn, by name.
+#[test]
+fn a_parent_asks_for_a_shape_and_reads_the_childs_answer_as_json() {
+    let f = Fixture::new();
+    let contract = json!({
+        "schema": {
+            "type": "object",
+            "required": ["files", "ok"],
+            "additionalProperties": false,
+            "properties": {
+                "files": {"type": "array", "items": {"type": "string"}},
+                "ok": {"type": "boolean"}
+            }
+        },
+        "required": true
+    });
+    let answer = json!({"files": ["a.rs", "b.rs"], "ok": true});
+    let kid = [
+        "MCP inspect {}".to_owned(),
+        r#"MCP report {"text": "wrong", "result": {"files": ["a.rs", 3], "ok": true}}"#.to_owned(),
+        r#"MCP report {"text": "no result"}"#.to_owned(),
+        format!(
+            "MCP report {}",
+            json!({"text": "found two", "result": answer})
+        ),
+    ]
+    .join("\n");
+    let prompt = [
+        r#"MCP spawn {"prompt": "x", "name": "bad", "result": {"schema": {"type": "string", "pattern": "^a"}}}"#.to_owned(),
+        format!(
+            "MCP spawn {}",
+            json!({"prompt": kid, "name": "kid", "result": contract})
+        ),
+        r#"MCP wait {"branches": ["kid"]}"#.to_owned(),
+        r#"MCP inspect {"branch": "kid"}"#.to_owned(),
+    ]
+    .join("\n");
+    let root = f
+        .yard
+        .task(prompt)
+        .options(f.delegating(Envelope::default()))
+        .name("root")
+        .run()
+        .unwrap();
+    root.wait_subtree().unwrap();
+
+    // The child: the contract in its inspect, two refusals, one report.
+    let said = reply(&f, "kid");
+    assert_eq!(result(&said, "inspect")["result_contract"], contract);
+    let errors: Vec<&str> = said
+        .lines()
+        .filter(|line| line.contains("mcp report error: "))
+        .collect();
+    assert_eq!(errors.len(), 2, "{said}");
+    assert!(
+        errors[0].contains("denied: result.files[1]: expected string, got number"),
+        "{said}"
+    );
+    assert!(
+        errors[1].contains("denied: this branch's result contract requires a result"),
+        "{said}"
+    );
+    let sent = result(&said, "report");
+    assert_eq!(sent["kind"], "report");
+    assert_eq!(sent["text"], "found two");
+    let recorded: Vec<Value> = f
+        .yard
+        .branch("kid")
+        .unwrap()
+        .events()
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.activity {
+            Activity::Result { value } => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        recorded,
+        std::slice::from_ref(&answer),
+        "only the accepted result"
+    );
+
+    // The parent: the result with the settled child in `wait`, and in `inspect`.
+    let parent = reply(&f, "root");
+    assert!(
+        parent.lines().any(|line| line.contains(
+            "mcp spawn error: denied: result.schema uses `pattern`, which the contract does not support"
+        )),
+        "{parent}"
+    );
+    assert!(f.yard.branch("bad").is_err(), "no child for a bad contract");
+    let waited = result(&parent, "wait");
+    assert_eq!(waited["settled"][0]["name"], "kid");
+    assert_eq!(waited["settled"][0]["result"], answer);
+    assert_eq!(waited["settled"][0]["result_contract"], contract);
+    // The line that starts `mcp inspect: `, not the child's last message
+    // in `wait`'s result, which quotes the child's own inspect.
+    let line = parent.find("\nmcp inspect: ").unwrap() + "\nmcp inspect: ".len();
+    let seen: Value = serde_json::Deserializer::from_str(&parent[line..])
+        .into_iter::<Value>()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert_eq!(seen["result"], answer);
+    assert_eq!(seen["result_contract"], contract);
+    // It reported in its turn, so the parent's log has no warning for it.
+    assert!(root
+        .events()
+        .unwrap()
+        .iter()
+        .all(|e| !matches!(&e.activity, Activity::Warning(w) if w.contains("without the result"))));
+}

@@ -18,37 +18,11 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
-      - run: python tools/verify_vendor.py
-      - run: python tests/test_verify_vendor.py
-      - run: python tests/test_vendor_pin.py
-      - run: python tools/verify_derivatives.py
-      - run: python tools/check_catalog.py
-      # No hand-rolled percent/hex/base64/shell/tar codecs (tools/handrolled_banlist.toml).
-      - run: python tools/check_handrolled.py
-      - run: python tests/test_check_handrolled.py
-      - run: python tools/check_docs.py
-      - run: python tools/check_test_hygiene.py
-      - run: python tests/test_check_test_hygiene.py
-      - run: python tools/check_silent_failures.py
-      - run: python tests/test_check_silent_failures.py
-      # The lint table's exceptions only fall, and every crate inherits the table.
-      - name: Lint ratchet and workspace lint inheritance
-        run: python tools/check_lint_ratchet.py
-      - run: python tests/test_check_lint_ratchet.py
-      - name: HTTP framing is parsed only in branchyard-wire
-        run: python tools/check_wire.py
-      - run: python tests/test_check_wire.py
-      - name: Verify the facts in the docs are generated from the code
-        run: python tools/docs_facts.py --check
-      - run: python tests/test_docs_facts.py
-      # Dependency versions are declared once, in [workspace.dependencies].
-      - run: python tools/check_workspace_deps.py
-      - run: python tests/test_check_workspace_deps.py
-      # The delegation battery's evaluator.
-      - run: python tests/test_qualify_score.py
-      - run: python tools/test_scion.py --qualified
-      - name: Verify the recorded upstream Claude compatibility
-        run: python tools/check_scion_compatibility.py
+      # The Python gates, their tests, ruff and mypy, run in tools/check.py's order. The
+      # cargo steps of tools/check.py run locally (`python3 tools/check.py`); the ones CI
+      # keeps stay below, where they were.
+      - run: pip install ruff==0.15.8 mypy==2.4.0
+      - run: python3 tools/check.py --fast --keep-going
       - run: cargo fmt --all -- --check
       # Resolve crates from Cargo.lock once; every later cargo step runs offline.
       - run: cargo fetch --locked
@@ -70,9 +44,6 @@ jobs:
       - name: Verify schema/rig.json is generated and fresh
         run: cargo test -p branchyard-cli --locked --offline --features schema rig
       - run: cargo clippy -p branchyard-cli --all-targets --locked --offline --features schema -- -D warnings
-      - run: python tests/test_distribution.py
-      - run: python tests/test_schema_validation.py
-      - run: python tests/test_sdk_client.py
   postgres:
     # The PostgreSQL store: the shared backend conformance suite, the engine
     # and the server against a real database. The job above stays offline

@@ -19,8 +19,10 @@
 //! The stream carries no permission requests and no control messages:
 //! control frames end the session with an error, and a tool that needs
 //! approval is soft-denied under the permission rules in the private
-//! `~/.gemini/antigravity-cli/settings.json`. Branchyard must write those
-//! rules (`permissions.allow`) into the harness's home and must never pass
+//! `~/.gemini/antigravity-cli/settings.json`. Provisioning writes those
+//! rules (`permissions.allow`, `permissions.deny`) into the harness's
+//! private home from the branch's policy (`branchyard-provision`'s
+//! Antigravity provisioner), and this driver never passes
 //! `--dangerously-skip-permissions`. There is no in-band cancellation;
 //! SIGINT ends the whole process.
 //!

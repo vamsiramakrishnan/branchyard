@@ -59,6 +59,9 @@ url = { workspace = true }
 branchyard-wire = { path = "../branchyard-wire" }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
+# The gateway's debug log of what it adapts for a backend (src/models/gemini.rs).
+# Already in Cargo.lock, through branchyard-support.
+tracing = { workspace = true }
 toml_edit = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]

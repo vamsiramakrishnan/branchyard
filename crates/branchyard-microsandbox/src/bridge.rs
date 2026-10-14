@@ -215,9 +215,8 @@ impl Write for Stdin {
 }
 
 impl Drop for Stdin {
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-microsandbox
     fn drop(&mut self) {
-        let _ = self.control.close_stdin();
+        branchyard_support::best_effort("close the guest's stdin", self.control.close_stdin());
     }
 }
 

@@ -73,7 +73,6 @@ impl FileStore {
 
     /// Rename `temp` over `key` if `check` passes on the current
     /// generation, under the lock.
-    #[allow(clippy::let_underscore_must_use)] // ratchet: branchyard-sync
     fn commit(
         &self,
         key: &str,
@@ -93,7 +92,10 @@ impl FileStore {
         fs::rename(temp, &path)?;
         if let Some(parent) = path.parent() {
             if let Ok(dir) = File::open(parent) {
-                let _ = dir.sync_all();
+                branchyard_support::best_effort(
+                    "sync the directory of a renamed file",
+                    dir.sync_all(),
+                );
             }
         }
         generation_of(&path)?.ok_or_else(|| Error::local(format!("{key} vanished")))

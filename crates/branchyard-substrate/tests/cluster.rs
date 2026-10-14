@@ -24,7 +24,7 @@
 //! `BY_SUBSTRATE_BRIDGE_TLS_CERT` and `BY_SUBSTRATE_BRIDGE_TLS_KEY` (paths
 //! in the image, for a router that passes TLS through).
 
-#![allow(clippy::let_underscore_must_use, clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -183,5 +183,5 @@ fn cluster_worktree_round_trip() {
     provider.destroy(&name).unwrap();
     assert!(pulled.changed);
     assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "two");
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).unwrap();
 }

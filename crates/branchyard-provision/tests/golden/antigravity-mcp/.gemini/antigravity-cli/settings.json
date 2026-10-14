@@ -1,0 +1,14 @@
+{
+  "modelProvider": "gemini",
+  "permissions": {
+    "allow": [
+      "command(regex:make .*)",
+      "command(regex:git .*)",
+      "command(regex:by .*)",
+      "command(regex:/usr/local/bin/by .*)",
+      "mcp(docs/*)",
+      "mcp(search/*)",
+      "mcp(branchyard/*)"
+    ]
+  }
+}

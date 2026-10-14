@@ -19,10 +19,16 @@ use serde_json::{json, Value};
 use crate::commands::{open, print, Env, Failure, Outcome, Target};
 use crate::{render, setup_io};
 
+/// Whether this process runs inside a harness on a branch, where its
+/// environment holds the turn's token and `by` acts through its engine.
+pub(crate) fn inside_branch() -> bool {
+    std::env::var_os("BRANCHYARD_BRANCH").is_some_and(|v| !v.is_empty())
+}
+
 /// The configuration of the yard at `root`: `None` without a file, or
 /// inside a harness on a branch (whose `by` acts through its engine).
-fn config(root: &Path) -> Result<Option<ProjectConfig>, Failure> {
-    if std::env::var_os("BRANCHYARD_BRANCH").is_some_and(|v| !v.is_empty()) {
+pub(crate) fn config(root: &Path) -> Result<Option<ProjectConfig>, Failure> {
+    if inside_branch() {
         return Ok(None);
     }
     let located = setup_io::locate(root);
