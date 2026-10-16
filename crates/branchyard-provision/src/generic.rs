@@ -4,9 +4,10 @@
 //! and nothing else would hand one over, so a secret the task names that is
 //! one (`--secret NAME`, `NAME` ending in `_API_KEY`) is set in the
 //! harness's environment under its own name, and in that of its tool
-//! commands: DeepSeek Harness reads `DEEPSEEK_API_KEY`, or the variable a
-//! provider in its `cordis.patch.yml` names with `apiKeyEnv`. Any other
-//! secret is reported unused.
+//! commands (Pi reads `ANTHROPIC_API_KEY`, Goose whichever provider's).
+//! Any other secret is reported unused. DeepSeek Harness did the same here
+//! until it got a provisioner of its own ([`crate::deepseek_harness`]),
+//! which keeps this handling of keys.
 
 use crate::{pass_session, unsupported, unused, Context, Plan, Provisioner, Refused};
 

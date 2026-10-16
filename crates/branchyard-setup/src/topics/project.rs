@@ -608,6 +608,9 @@ fn detected_backends(facts: &Facts) -> Vec<(&'static str, &'static str, &'static
     if set("GEMINI_API_KEY") {
         backends.push(("gemini", "openai", "GEMINI_API_KEY"));
     }
+    if set("ZAI_API_KEY") {
+        backends.push(("zai", "openai", "ZAI_API_KEY"));
+    }
     backends
 }
 
@@ -707,11 +710,18 @@ fn models_tables(facts: &Facts, answers: &Answers) -> (Value, Value) {
     let has = |name: &str| backends.iter().any(|(n, _, _)| *n == name);
     let mut tables = serde_json::Map::new();
     for (name, api, key) in &backends {
+        let (url, compat) = match *name {
+            "gemini" => (Some(config::GEMINI_OPENAI_URL), Some("gemini")),
+            // The GLM Coding Plan's endpoint; a standard key's is
+            // https://api.z.ai/api/paas/v4 (docs/model-gateway.md, "Z.ai").
+            "zai" => (Some(config::ZAI_OPENAI_URL), Some("versioned")),
+            _ => (None, None),
+        };
         let backend = config::ModelBackendConfig {
             api: (*api).to_owned(),
             key: Some((*key).to_owned()),
-            url: (*name == "gemini").then(|| config::GEMINI_OPENAI_URL.to_owned()),
-            compat: (*name == "gemini").then(|| "gemini".to_owned()),
+            url: url.map(str::to_owned),
+            compat: compat.map(str::to_owned),
             ..config::ModelBackendConfig::default()
         };
         tables.insert(
@@ -746,6 +756,9 @@ fn models_tables(facts: &Facts, answers: &Answers) -> (Value, Value) {
     }
     if has("gemini") {
         routes.push(route("gemini-*", "gemini"));
+    }
+    if has("zai") {
+        routes.push(route("glm-*", "zai"));
     }
     (
         Value::Object(tables),
@@ -1360,7 +1373,12 @@ mod tests {
     /// GEMINI_API_KEY and CODEX_API_KEY set.
     fn machine() -> FakeProbe {
         let mut probe = FakeProbe::typical();
-        probe.variables = ["GEMINI_API_KEY".to_owned(), "CODEX_API_KEY".to_owned()].into();
+        probe.variables = [
+            "GEMINI_API_KEY".to_owned(),
+            "CODEX_API_KEY".to_owned(),
+            "ZAI_API_KEY".to_owned(),
+        ]
+        .into();
         for h in &mut probe.harnesses {
             (h.installed, h.login) = match h.harness.as_str() {
                 "claude-code" => (true, login("logged_out", "likely")),
@@ -1543,8 +1561,13 @@ mod tests {
         let models = config_of(&facts, &state.answers, &probe).models;
         assert_eq!(
             models.backends.keys().collect::<Vec<_>>(),
-            ["gemini", "openai"]
+            ["gemini", "openai", "zai"]
         );
+        let zai = &models.backends["zai"];
+        assert_eq!(zai.api, "openai");
+        assert_eq!(zai.url.as_deref(), Some(config::ZAI_OPENAI_URL));
+        assert_eq!(zai.key.as_deref(), Some("ZAI_API_KEY"));
+        assert_eq!(zai.compat.as_deref(), Some("versioned"));
         let gemini = &models.backends["gemini"];
         assert_eq!(gemini.api, "openai");
         assert_eq!(gemini.url.as_deref(), Some(config::GEMINI_OPENAI_URL));
@@ -1565,7 +1588,8 @@ mod tests {
             [
                 ("gpt-*", "openai"),
                 ("codex-*", "openai"),
-                ("gemini-*", "gemini")
+                ("gemini-*", "gemini"),
+                ("glm-*", "zai")
             ]
         );
         assert!(models.allow.is_none(), "branches are not put on it");

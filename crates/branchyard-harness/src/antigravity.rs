@@ -23,8 +23,11 @@
 //! rules (`permissions.allow`, `permissions.deny`) into the harness's
 //! private home from the branch's policy (`branchyard-provision`'s
 //! Antigravity provisioner), and this driver never passes
-//! `--dangerously-skip-permissions`. There is no in-band cancellation;
-//! SIGINT ends the whole process.
+//! `--dangerously-skip-permissions`. A tool denied that way does not fail
+//! the turn: the CLI goes on without it, ends the turn `SUCCESS` and lists
+//! it under the result's `denied_actions`, which this driver reports as a
+//! warning per action before the turn's end. There is no in-band
+//! cancellation; SIGINT ends the whole process.
 //!
 //! `result.usage` covers the whole session, not the turn, so usage is
 //! reported as cumulative.
@@ -196,6 +199,18 @@ impl Antigravity {
             },
         };
         let mut events = Vec::new();
+        // A tool the CLI soft-denied: the turn went on without it and ends
+        // SUCCESS, so the denial is only visible here.
+        for denied in result["denied_actions"].as_array().into_iter().flatten() {
+            let action = denied["action"].as_str().unwrap_or("tool");
+            let name = denied["display_name"].as_str().unwrap_or(action);
+            events.push(Event::Warning {
+                message: format!(
+                    "the CLI soft-denied a {action} ({name}): no permissions.allow rule in its \
+                     settings lets it run; the turn went on without it"
+                ),
+            });
+        }
         if result["usage"].is_object() {
             let usage = &result["usage"];
             events.push(Event::UsageObserved {

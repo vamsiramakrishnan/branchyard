@@ -60,6 +60,7 @@ mod antigravity;
 mod claude;
 mod codex;
 mod copilot;
+mod deepseek_harness;
 mod gemini;
 mod generic;
 mod hermes;
@@ -598,6 +599,10 @@ pub struct Context {
     /// What an earlier provisioning of this home installed in native
     /// configuration, from [`apply::installed`].
     pub installed: Installed,
+    /// The turn's model gateway, when the branch is on one, for a harness
+    /// whose provider endpoint is a file in its home rather than the
+    /// environment's base URL variables ([`models::ModelGateway`]).
+    pub model_gateway: Option<models::ModelGateway>,
 }
 
 impl Context {
@@ -626,6 +631,7 @@ impl Context {
             telemetry: None,
             permissions: None,
             installed: Installed::default(),
+            model_gateway: None,
         }
     }
 
@@ -1021,6 +1027,7 @@ static PROVISIONERS: &[&dyn Provisioner] = &[
     &hermes::Hermes,
     &antigravity::Antigravity,
     &oh_my_pi::OhMyPi,
+    &deepseek_harness::DeepSeekHarness,
 ];
 
 /// Every translated provisioner.

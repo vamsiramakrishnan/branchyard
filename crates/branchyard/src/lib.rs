@@ -211,7 +211,7 @@ pub use fleet::{
     inventory_default, recorded_route, stats as fleet_stats, BranchOutcome, CandidateStats,
     Classification, Excluded, Fleet, FleetActivity, FleetCandidate, FleetEntry, InventoryDefault,
     JudgeMark, JudgeSpec, OutcomeRecord, Route, RouteDecision, RouteOptions, RoutePick, Routed,
-    TaskKind, DEFAULT_EXPLORATION, INVENTORY_ENTRY,
+    TaskKind, DEFAULT_EXPLORATION, DEFAULT_STALL, INVENTORY_ENTRY,
 };
 pub use goal::{
     follow_up_prompt as goal_follow_up_prompt, from_events as goal_from_events,

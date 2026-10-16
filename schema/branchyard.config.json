@@ -685,6 +685,22 @@
           "description": "Interrupt an attempt's turn after this many minutes.",
           "minimum": 0.0
         },
+        "stall_minutes": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "Mark an attempt stalled after this many minutes without harness\nactivity, and act as `stall_action` says. A routed branch gets 15\nwhen neither it nor its command line sets one; 0 turns it off.",
+          "minimum": 0.0
+        },
+        "stall_action": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What a stall does: `interrupt` (the default: the turn is interrupted\nand, with `failover`, the task moves on) or `notify` (the branch is\nonly marked stalled)."
+        },
         "judge": {
           "anyOf": [
             {
@@ -1342,7 +1358,7 @@
             "string",
             "null"
           ],
-          "description": "What the gateway adapts for an endpoint that imitates OpenAI's API\nwith differences: `gemini` for Gemini's OpenAI-compatible endpoint\n(the fields it refuses stripped, the thought signatures it puts on\ntool calls kept and put back when a request replays them), or\n`none`. Default: `gemini` for an `openai` backend whose URL's host is\n`generativelanguage.googleapis.com`, else `none`."
+          "description": "What the gateway adapts for an endpoint that imitates OpenAI's API\nwith differences: `gemini` for Gemini's OpenAI-compatible endpoint\n(the fields it refuses stripped, the thought signatures it puts on\ntool calls kept and put back when a request replays them),\n`versioned` for an endpoint whose URL already names the API's\nversion, as Z.ai's do (a path's leading `/v1` is dropped, nothing\nelse changes), or `none`. Default: `gemini` for an `openai` backend\nwhose URL's host is `generativelanguage.googleapis.com`, `versioned`\nfor one whose host is `api.z.ai`, else `none`."
         }
       },
       "required": [

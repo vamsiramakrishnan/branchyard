@@ -12,12 +12,13 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     harness, placement, run, Activity, Branch, BranchStatus, Budget, Effort, Error, Provisioning,
-    RecordedEvent, TaskOptions, Yard,
+    RecordedEvent, StallAction, TaskOptions, Yard,
 };
 use branchyard_support::rng::SplitMix64;
 use branchyard_support::time::now_ms;
@@ -341,6 +342,15 @@ impl Default for FleetEntry {
 
 /// The exploration floor when an entry sets none.
 pub const DEFAULT_EXPLORATION: f64 = 0.1;
+
+/// The stall window of a routed branch whose command line and entry set
+/// none: no harness activity for this long interrupts its turn
+/// ([`crate::StallAction::Interrupt`]), and with failover the task moves to
+/// the next candidate. A harness that hangs on a search, a prompt nobody
+/// answers or a dead connection otherwise holds the attempt until
+/// `max_minutes`, or for good. `stall_minutes = 0` on the entry turns it
+/// off; `--stall-after` on the command line replaces it.
+pub const DEFAULT_STALL: Duration = Duration::from_secs(15 * 60);
 
 /// The fleet table: entries by task kind, and `default`.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1194,14 +1204,22 @@ fn provision_for(base: Option<&Provisioning>, candidate: &FleetCandidate) -> Opt
     (!spec.is_empty()).then_some(spec)
 }
 
-/// The task's limits, with the entry's where the task sets none.
+/// The task's limits, with the entry's where the task sets none, and a
+/// stall window where neither does ([`DEFAULT_STALL`]); an entry's zero
+/// window turns stall detection off.
 fn budget_for(task: &Budget, entry: &Budget) -> Budget {
+    let (stall_after, stall_action) = match (task.stall_after, entry.stall_after) {
+        (Some(window), _) => (Some(window), task.stall_action),
+        (None, Some(window)) if window.is_zero() => (None, entry.stall_action),
+        (None, Some(window)) => (Some(window), entry.stall_action),
+        (None, None) => (Some(DEFAULT_STALL), StallAction::Interrupt),
+    };
     Budget {
         max_usd: task.max_usd.or(entry.max_usd),
         max_turns: task.max_turns.or(entry.max_turns),
         max_duration: task.max_duration.or(entry.max_duration),
-        stall_after: task.stall_after.or(entry.stall_after),
-        stall_action: task.stall_action,
+        stall_after,
+        stall_action,
         hold_cap: task.hold_cap.or(entry.hold_cap),
         follow_up_grace: None,
     }
@@ -1419,6 +1437,18 @@ fn chain(yard: &Yard, mut branch: Branch, options: &TaskOptions) -> Result<Chain
     Ok((branch, moved))
 }
 
+/// A stall the engine interrupted is the harness's fault too: it stopped
+/// answering, which is what the stall window is for. Told from a cancel,
+/// which also ends `interrupted`, by the warning the engine records
+/// (`engine::STALL_WARNING`). `None` for every other status.
+pub fn stall_fault(status: &BranchStatus, events: &[RecordedEvent]) -> Option<String> {
+    let stalled = matches!(status, BranchStatus::Interrupted)
+        && events.iter().rev().any(|e| {
+            matches!(&e.activity, Activity::Warning(text) if text == crate::engine::STALL_WARNING)
+        });
+    stalled.then(|| "stalled: no harness activity for its stall window".to_owned())
+}
+
 /// Why a branch's status is its harness's fault rather than the task's:
 /// the harness could not start, exited, never completed its handshake,
 /// was rate-limited, could not authenticate, or was unavailable. `None`
@@ -1517,10 +1547,12 @@ pub(crate) fn failover(
 ) -> Result<Option<Branch>, Error> {
     let store = yard.store();
     let record = store.read(name)?;
-    let Some(fault) = harness_fault(&record.info.status) else {
+    let events = crate::record::read(&store, name)?;
+    let Some(fault) =
+        harness_fault(&record.info.status).or_else(|| stall_fault(&record.info.status, &events))
+    else {
         return Ok(None);
     };
-    let events = crate::record::read(&store, name)?;
     let Some(decision) = recorded_route(&events).filter(|d| d.failover) else {
         return Ok(None);
     };
@@ -1883,6 +1915,47 @@ mod tests {
             }),
             None
         );
+    }
+
+    /// A stall the engine interrupted fails over; a cancel, which also
+    /// ends interrupted, does not.
+    #[test]
+    fn a_stall_fails_over_and_a_cancel_does_not() {
+        let event = |activity: Activity| RecordedEvent { at_ms: 0, activity };
+        let stalled = [event(Activity::Warning(
+            crate::engine::STALL_WARNING.into(),
+        ))];
+        assert_eq!(
+            stall_fault(&BranchStatus::Interrupted, &stalled),
+            Some("stalled: no harness activity for its stall window".into())
+        );
+        let cancelled = [event(Activity::Warning("cancelled by alice".into()))];
+        assert_eq!(stall_fault(&BranchStatus::Interrupted, &cancelled), None);
+        assert_eq!(stall_fault(&BranchStatus::Ready, &stalled), None);
+    }
+
+    /// A routed branch gets the default stall window unless its task or
+    /// entry sets one, and an entry's zero window turns it off.
+    #[test]
+    fn routed_branches_stall_by_default() {
+        let none = Budget::default();
+        let routed = budget_for(&none, &none);
+        assert_eq!(routed.stall_after, Some(DEFAULT_STALL));
+        assert_eq!(routed.stall_action, StallAction::Interrupt);
+        let entry = Budget::default()
+            .stall_after(Duration::from_secs(60))
+            .stall_action(StallAction::Notify);
+        let routed = budget_for(&none, &entry);
+        assert_eq!(routed.stall_after, Some(Duration::from_secs(60)));
+        assert_eq!(routed.stall_action, StallAction::Notify);
+        let off = Budget::default().stall_after(Duration::ZERO);
+        assert_eq!(budget_for(&none, &off).stall_after, None);
+        let task = Budget::default()
+            .stall_after(Duration::from_secs(30))
+            .stall_action(StallAction::Interrupt);
+        let routed = budget_for(&task, &off);
+        assert_eq!(routed.stall_after, Some(Duration::from_secs(30)));
+        assert_eq!(routed.stall_action, StallAction::Interrupt);
     }
 
     fn installed(

@@ -426,6 +426,21 @@ pub fn fleet(config: &ProjectConfig) -> Result<branchyard::Fleet, String> {
                     max_duration: entry
                         .max_minutes
                         .and_then(|m| Duration::try_from_secs_f64(m * 60.0).ok()),
+                    // 0 keeps a zero window, which the router reads as off;
+                    // an action alone takes the default window.
+                    stall_after: entry
+                        .stall_minutes
+                        .and_then(|m| Duration::try_from_secs_f64(m * 60.0).ok())
+                        .or_else(|| {
+                            entry
+                                .stall_action
+                                .is_some()
+                                .then_some(branchyard::DEFAULT_STALL)
+                        }),
+                    stall_action: match entry.stall_action.as_deref() {
+                        Some("notify") => branchyard::StallAction::Notify,
+                        _ => branchyard::StallAction::Interrupt,
+                    },
                     ..branchyard::Budget::default()
                 },
                 judge,
@@ -530,9 +545,17 @@ attempts = 3
 budget_usd = 2
 max_minutes = 1
 failover = true
+stall_minutes = 4
+stall_action = "notify"
 judge = { harness = "claude-code", rubric = "short" }
 environment = "rust"
 connectors = ["github"]
+[fleet.docs]
+candidates = [{ harness = "codex" }]
+stall_minutes = 0
+[fleet.tests]
+candidates = [{ harness = "codex" }]
+stall_action = "interrupt"
 "#,
         );
         let mut task = TaskArgs::default();
@@ -543,6 +566,21 @@ connectors = ["github"]
         let entry = &fleet.entries["default"];
         assert_eq!(entry.attempts, 3);
         assert_eq!(entry.budget.max_usd, Some(2.0));
+        assert_eq!(entry.budget.stall_after, Some(Duration::from_secs(240)));
+        assert_eq!(entry.budget.stall_action, branchyard::StallAction::Notify);
+        // 0 is off (a zero window), and an action alone takes the default.
+        assert_eq!(
+            fleet.entries["docs"].budget.stall_after,
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            fleet.entries["tests"].budget.stall_after,
+            Some(branchyard::DEFAULT_STALL)
+        );
+        assert_eq!(
+            fleet.entries["tests"].budget.stall_action,
+            branchyard::StallAction::Interrupt
+        );
         assert_eq!(entry.budget.max_duration, Some(Duration::from_secs(60)));
         assert!(entry.failover);
         assert_eq!(entry.exploration, branchyard::DEFAULT_EXPLORATION);

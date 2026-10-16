@@ -4,7 +4,7 @@ A harness normally calls its model provider itself, with a key in its environmen
 
 The same token carries the turn's other scopes: its connector grant, its network policy and what it may delegate. What a turn may reach is the intersection of its seat's ceiling, its person's ceiling and what the person approved. See [one scope](#one-scope).
 
-Status, 11 October 2026: built and tested hermetically against mock Anthropic and OpenAI servers on loopback, with a fake harness (a Python script the fake ACP agent runs), including a Claude request translated for an OpenAI backend both ways and the per-call [interception records](#interception-records), and against a mock of [Gemini's OpenAI-compatible endpoint](#gemini-through-the-openai-compatible-endpoint) as strict as the real one was measured to be. No real provider was called and no real harness has used it.
+Status, 16 October 2026: built and tested hermetically against mock Anthropic and OpenAI servers on loopback, with a fake harness (a Python script the fake ACP agent runs), including a Claude request translated for an OpenAI backend both ways and the per-call [interception records](#interception-records), and against a mock of [Gemini's OpenAI-compatible endpoint](#gemini-through-the-openai-compatible-endpoint) as strict as the real one was measured to be. One real harness has used it against a real provider: DeepSeek Harness 0.2.0-rc.2, provisioned with a `branchyard` provider at the turn's gateway ([provisioning](provisioning.md#harnesses)), completed a file-editing turn on `gemini-2.5-flash-lite` through a `gemini` backend, ten calls metered `allowed via gemini (200, …)` with the compatibility layer on, on a machine whose outbound TLS goes through an intercepting proxy ([upstream proxies](#what-is-not-done)). GLM through a `zai` backend is wired but has not run ([Z.ai](#zai-glm)).
 
 ## Turning it on
 
@@ -59,6 +59,11 @@ header = "x-api-key"                     # default: authorization, as Bearer <ke
 api = "openai"                           # by its host (compat = "gemini"); see below
 url = "https://generativelanguage.googleapis.com/v1beta/openai"
 key = "GEMINI_API_KEY"
+
+[models.backends.zai]                    # Z.ai's GLM Coding Plan (glm-5.3, glm-5.3-flash);
+api = "openai"                           # its URL names the API's version, so the path's
+url = "https://api.z.ai/api/coding/paas/v4"   # /v1 is dropped (compat = "versioned", by its host)
+key = "ZAI_API_KEY"
 
 [[models.routes]]
 model = "claude-*"                       # a glob over the requested model; first match wins
@@ -197,6 +202,30 @@ The endpoint differs from OpenAI's in two ways that break those harnesses, so th
 
 A Claude request translated for the endpoint gets the same. A tool call's id is the id of the `tool_use` block Claude Code is given, and Claude Code sends it back as the `tool_use` id that becomes the call's id again, so the kept signature is found by it. The signature itself never reaches Claude Code.
 
+### Z.ai (GLM)
+
+Z.ai serves its GLM models on three endpoints, each for the same key: Anthropic Messages at `https://api.z.ai/api/anthropic`, OpenAI chat completions at `https://api.z.ai/api/coding/paas/v4` (the GLM Coding Plan) or `https://api.z.ai/api/paas/v4` (the standard, pay-as-you-go API), and OpenAI Responses at `https://api.z.ai/api/v1`. A Coding Plan key and a standard key are not interchangeable: each answers `401` on the other's chat endpoint. The OpenAI-shaped URLs already name the API's version, so a harness's `/v1/chat/completions` cannot be appended to them; an `openai` backend whose URL's host is `api.z.ai` gets the `versioned` compatibility layer by default (`compat = "versioned"` sets it for a proxy in front of the same endpoints; `compat = "none"` turns it off), which drops the path's leading `/v1` and changes nothing else. The Anthropic endpoint is an ordinary `anthropic` backend, with no layer:
+
+```toml
+[models.backends.zai]                    # OpenAI chat completions, for Codex, OpenCode, DeepSeek Harness
+api = "openai"
+url = "https://api.z.ai/api/coding/paas/v4"
+key = "ZAI_API_KEY"
+
+[models.backends.zai-anthropic]          # Anthropic Messages, for Claude Code
+api = "anthropic"
+url = "https://api.z.ai/api/anthropic"
+key = "ZAI_API_KEY"
+
+[[models.routes]]
+model = "glm-*"
+backends = ["zai"]
+```
+
+`by init project` proposes the `zai` backend and the `glm-*` route when `ZAI_API_KEY` is set. Oh My Pi reads the same variable for its `zai` provider (`--model zai/glm-5.3`) and needs no gateway for it.
+
+**Status, 16 October 2026.** Checked with a Coding Plan key against the real endpoints: `GET /models` answered `200` on all three (11 GLM models, `glm-4.5` to `glm-5.3-flashx`), which is what `by models list` reads; every completion request answered `429` `1113 Insufficient balance or no resource package`, so no GLM turn has run through the gateway or a harness yet, and the layer is tested hermetically only (the path rule, the inference by host, the refusal on a non-OpenAI backend).
+
 The signatures are kept in the process that runs the turns, by the repository's gateway, so a conversation keeps them from turn to turn: at most 4096 of them, and 32 MiB together, the least recently used forgotten first. What the layer changed is logged once per call at debug level (`BRANCHYARD_LOG=branchyard::models=debug`), with the backend and model: `gemini compatibility: stripped store; thought signatures attached: 1 recorded, 0 placeholder`. The log names fields and counts calls; it never holds a signature.
 
 Limits:
@@ -282,7 +311,7 @@ Privacy: `contents` writes prompts, the source files and tool results a harness 
 
 ## Subscription logins and direct mode
 
-A harness logged in by subscription (Claude Code's or Codex's OAuth login, a ChatGPT login) sends a token tied to that login, which only the provider accepts; the gateway cannot replace it with a key. Branchyard recognizes this when the branch's secrets include `CLAUDE_CODE_OAUTH_TOKEN` or `CODEX_AUTH`, or its `--auth` is `oauth-token`. A `CODEX_AUTH` file is taken for a login even when it holds a key. Such a turn runs **direct**: no gateway, its harness calls its provider itself, and when its harness is Claude Code or Codex its provider's hosts are added to its egress policy for the turn (`api.anthropic.com:443` and `console.anthropic.com:443`; `api.openai.com:443`, `chatgpt.com:443` and `auth.openai.com:443`). A harness whose API no backend serves (Codex with only Anthropic backends) runs direct the same way.
+A harness logged in by subscription (Claude Code's or Codex's OAuth login, a ChatGPT login) sends a token tied to that login, which only the provider accepts; the gateway cannot replace it with a key. Branchyard recognizes this when the branch's secrets include the login its harness reads, `CLAUDE_CODE_OAUTH_TOKEN` for Claude Code or `CODEX_AUTH` for Codex, or its `--auth` is `oauth-token`; a login meant for another harness (a fan hands every candidate the same secrets, and the other harness's provisioner reports it unused) leaves the branch on the gateway. A `CODEX_AUTH` file is taken for a login even when it holds a key. Such a turn runs **direct**: no gateway, its harness calls its provider itself, and when its harness is Claude Code or Codex its provider's hosts are added to its egress policy for the turn (`api.anthropic.com:443` and `console.anthropic.com:443`; `api.openai.com:443`, `chatgpt.com:443` and `auth.openai.com:443`). A harness whose API no backend serves (Codex with only Anthropic backends) runs direct the same way.
 
 Direct is recorded (`models direct: claude-code is logged in by subscription (CLAUDE_CODE_OAUTH_TOKEN), which cannot take an injected key`) and shown by `by show`. Its calls are not metered: its cost is the harness's own estimate.
 
@@ -360,7 +389,8 @@ What turns share is shared through the store, not a process: usage records, so p
 | Gemini | `GEMINI_API_KEY`, else `GOOGLE_API_KEY` | `GET https://generativelanguage.googleapis.com/v1beta/models?pageSize=100` with `x-goog-api-key`, following `nextPageToken`; only models whose `supportedGenerationMethods` has `generateContent`, named without `models/` |
 | OpenAI | `OPENAI_API_KEY`, else `CODEX_API_KEY` | `GET https://api.openai.com/v1/models` with a bearer token |
 | Anthropic | `ANTHROPIC_API_KEY` | `GET https://api.anthropic.com/v1/models?limit=1000` with `x-api-key` and `anthropic-version: 2023-06-01`, following `last_id` while `has_more` (a page holds 20 models unless asked for more) |
-| A `[models.backends]` entry | its `key` | `GET {url}/v1/models`, or `{url}/models` when the URL already ends in `/v1` or `/openai`, with the key where the gateway sends it (`x-api-key` for an `anthropic` backend; a bearer token, or the generic backend's `header`, otherwise); an entry that repeats a source above (same endpoint, same key) is skipped as a repeat |
+| Z.ai | `ZAI_API_KEY` | `GET https://api.z.ai/api/coding/paas/v4/models` with a bearer token (OpenAI's list shape; the same list is served at `…/paas/v4/models` and `…/anthropic/v1/models`) |
+| A `[models.backends]` entry | its `key` | `GET {url}/v1/models`, or `{url}/models` when the URL already ends in `/v1` or `/openai` or the backend has the `versioned` layer, with the key where the gateway sends it (`x-api-key` for an `anthropic` backend; a bearer token, or the generic backend's `header`, otherwise); an entry that repeats a source above (same endpoint, same key) is skipped as a repeat |
 
 The same Gemini key serves Gemini's OpenAI-compatible endpoint, `https://generativelanguage.googleapis.com/v1beta/openai` (chat completions only; it rejects the OpenAI-only `store` field), which `by models list` and its JSON (`openai_compatible`) name beside Gemini's models. A backend at that URL lists at `/v1beta/openai/models`.
 
@@ -384,7 +414,7 @@ Requests go through `HTTPS_PROXY` (then `https_proxy`, `ALL_PROXY`) as a `CONNEC
 - **Cost after a turn ends.** A call still running five seconds after its turn ends is stored and recorded, but not added to the branch's cost.
 - **A call in flight.** The gateway cannot know what a call costs before it ends, so the call that takes a branch to its limit is always paid for, and calls made in parallel can each start under it. A limit is a bound on when calls may start, not a cap on one call's cost.
 - **A cost limit on a direct turn** is only as good as the harness's reports; see above.
-- **Upstream proxies.** The gateway connects to backends directly; it does not use `HTTPS_PROXY` itself. Only [`by models list`](#listing-models) does.
+- **Upstream proxies.** The gateway reaches its backends the way [`by models list`](#listing-models) does: through `HTTPS_PROXY` (then `https_proxy`, `ALL_PROXY`) as a `CONNECT` tunnel unless `NO_PROXY` or loopback exempts the host, trusting the bundle `SSL_CERT_FILE` (then `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`) names beside the Mozilla roots. The variables are read once, when the yard's gateway is built (`Gateway::new`), from the process that runs the turns. Until 16 October 2026 the gateway connected directly and ignored them, which a machine behind a TLS-intercepting proxy showed as `could not connect (TLS: invalid peer certificate: UnknownIssuer)` on every backend.
 - **Gemini's own API, Bedrock and Vertex** are generic pass-through only: no usage is read from their shapes unless they match the ones above, and their paths name the model, which the scope does not check. Gemini through its [OpenAI-compatible endpoint](#gemini-through-the-openai-compatible-endpoint) is an `openai` backend, metered as one.
 - **A server** fails a turn on the gateway when it has no `models` backends, rather than refusing the request at admission.
 - **The pricing tables** are a copy of the ones `by usage` uses, read from the same file; the model-name rules are duplicated in `branchyard::models::pricing`.

@@ -106,6 +106,7 @@ pub fn main(env: &Env, target: &Target, action: &ModelsAction, as_json: bool) ->
         gemini: gemini_url.clone(),
         openai: openai_url.clone(),
         anthropic: anthropic_url.clone(),
+        zai: discover::ZAI_URL.to_owned(),
     };
     let mut sources = discover::sources(&engine, &bases, |name| {
         models_cmd::key_source(&root, &secrets, name)

@@ -2146,8 +2146,8 @@ mod tests {
         assert_eq!(
             nothing.login.detail,
             "no login stored in ~/.omp/agent/agent.db and none of GEMINI_API_KEY, \
-             OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENROUTER_API_KEY is set; set one, or run omp \
-             login"
+             OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENROUTER_API_KEY, ZAI_API_KEY is set; set one, \
+             or run omp login"
         );
         // The database is there but nothing on the machine can read it.
         let unread = found("oh-my-pi", &["fact oh-my-pi login-store unread"]);

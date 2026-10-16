@@ -21,9 +21,10 @@
 //! settings.
 //!
 //! Provider keys are read from its environment (`GEMINI_API_KEY`,
-//! `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, ...), so
-//! each secret named like one (`*_API_KEY`) is set there under its own
-//! name, as for a harness without a provisioner. Its stored logins (`omp
+//! `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`,
+//! `ZAI_API_KEY` for its `zai` provider, ...), so each secret named like
+//! one (`*_API_KEY`) is set there under its own name, as for a harness
+//! without a provisioner. Its stored logins (`omp
 //! login PROVIDER`, kept in `~/.omp/agent/agent.db`) are not provisioned:
 //! `omp auth export` writes them as JSON for `omp auth import`, and neither
 //! is a file Branchyard can place.

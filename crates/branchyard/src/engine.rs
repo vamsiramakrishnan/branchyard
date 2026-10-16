@@ -151,6 +151,12 @@ pub(crate) enum End {
     Stalled,
 }
 
+/// The warning a branch records when the engine interrupts its turn after
+/// a stall ([`StallAction::Interrupt`]); the fleet reads it back to fail
+/// over (`fleet::stall_fault`).
+pub(crate) const STALL_WARNING: &str =
+    "interrupted after a stall: no harness activity for its stall window";
+
 /// The journaled steps of a turn.
 pub(crate) const STEP_START: &str = "start";
 pub(crate) const STEP_SUBMIT: &str = "submit";
@@ -686,6 +692,9 @@ fn run(
     let mut egress_extra = Vec::new();
     let mut model_env = Vec::new();
     let mut model_scrub = Vec::new();
+    // The gateway as a provisioner sees it, for a harness whose provider
+    // endpoint is a file in its home.
+    let mut provisioned_gateway = None;
     match models {
         None => {}
         Some(crate::models::Prepared::Direct { hosts, activity }) => {
@@ -699,6 +708,13 @@ fn run(
             url,
             activity,
         }) => {
+            if let crate::models::ModelActivity::Gateway { apis, .. } = &activity {
+                provisioned_gateway = Some(branchyard_provision::models::ModelGateway {
+                    url: url.trim_end_matches('/').to_owned(),
+                    anthropic: apis.contains(&crate::models::Api::Anthropic),
+                    openai: apis.contains(&crate::models::Api::Openai),
+                });
+            }
             recorder.record(Activity::Model(Box::new(activity)))?;
             egress_extra.extend(crate::egress::gateway_rule(&url));
             model_env = env;
@@ -733,7 +749,10 @@ fn run(
         projection.as_ref(),
         connectors.as_ref(),
         Some(&briefing),
-        &bounds.policy,
+        crate::provisioning::Access {
+            policy: &bounds.policy,
+            model_gateway: provisioned_gateway,
+        },
         store.dir(),
     ) {
         Ok(provisioned) => provisioned,
@@ -2196,9 +2215,7 @@ pub(crate) fn conclude(
             BranchStatus::Interrupted
         }
         End::Stalled => {
-            recorder.record(Activity::Warning(
-                "interrupted after a stall: no harness activity for its stall window".into(),
-            ))?;
+            recorder.record(Activity::Warning(STALL_WARNING.into()))?;
             BranchStatus::Interrupted
         }
     };

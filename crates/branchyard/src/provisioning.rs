@@ -290,18 +290,30 @@ fn own_instructions(
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
+/// What the turn grants its harness, for the provisioners that write it
+/// into the home: the permission policy, which a harness that enforces its
+/// own rules (Antigravity) is given as rules; and the turn's model gateway,
+/// for a harness whose provider endpoint is a file (DeepSeek Harness).
+pub(crate) struct Access<'a> {
+    pub policy: &'a crate::Policy,
+    pub model_gateway: Option<branchyard_provision::models::ModelGateway>,
+}
+
 /// Plan and apply the turn's provisioning. A failure is the turn's failure
-/// reason. `policy` is the turn's permission policy, which a harness that
-/// enforces its own rules (Antigravity) is given as rules in its home.
+/// reason.
 pub(crate) fn prepare(
     record: &Record,
     profile: &branchyard_harness::profiles::Profile,
     projection: Option<&Projection>,
     connectors: Option<&crate::connectors::Prepared>,
     knowledge: Option<&crate::knowledge::Briefing>,
-    policy: &crate::Policy,
+    access: Access<'_>,
     state: &Path,
 ) -> Result<Provisioned, String> {
+    let Access {
+        policy,
+        model_gateway,
+    } = access;
     let spec = record.provision.clone().unwrap_or_default();
     let (workspace, home) = placement::guest_paths(record);
     let secrets = resolve(&spec.secrets)?;
@@ -368,6 +380,7 @@ pub(crate) fn prepare(
         telemetry: spec.telemetry.clone(),
         permissions: Some(crate::policy::permissions(policy, by)),
         installed: private.map(apply::installed).unwrap_or_default(),
+        model_gateway,
     };
     let plan = branchyard_provision::plan(&context).map_err(|r| r.to_string())?;
     let applied = match (private, plan.files.is_empty()) {

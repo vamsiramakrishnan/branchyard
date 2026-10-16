@@ -2,7 +2,7 @@
 
 A **fleet table** in `branchyard.toml` says which harnesses, models and efforts run each kind of task, how many attempts to start, what each may spend and who judges them. `by run` without `--harness` (or with `--auto`) asks a **router** to pick from it, learning from how earlier branches turned out. `by fan --auto` starts several attempts, and `by judge` (or `by fan --judge`) scores them and proposes one to merge. When a harness itself fails (it exits, never completes its handshake, is rate-limited or cannot log in), the task **fails over** to the next candidate. This is the *judge and router* track of the [roadmap](roadmap.md).
 
-> **Status.** Implemented in local mode and tested hermetically against the fake ACP agent, with a judge harness answering a canned verdict. No model has judged anything and the router has learned from no real outcomes yet: see [what needs a model](#what-is-deterministic-and-what-needs-a-model). `by --remote` refuses routing and judging with a message.
+> **Status.** Implemented in local mode and tested hermetically against the fake ACP agent, with a judge harness answering a canned verdict, and run twice on real harnesses on 16 October 2026 ([the run](#a-routed-fan-on-real-harnesses-16-october-2026)): the router picked three of four candidates, two attempts ran, one of three ended ready and was the deterministic judge's pick, and the router's recorded outcomes moved its next pick. No model's verdict has been used yet: the judge harness's own turn failed both times (a Gemini quota error), and the deterministic score stood in. `by --remote` refuses routing and judging with a message.
 
 ## Task kinds
 
@@ -38,6 +38,8 @@ attempts = 2            # by fan --auto starts two; by run starts one
 budget_usd = 3          # per attempt; a failover chain shares it
 max_turns = 20
 max_minutes = 30
+stall_minutes = 15      # the default for a routed branch; 0 turns it off
+stall_action = "interrupt"  # the default; "notify" only marks the branch stalled
 failover = true         # by run --auto always fails over
 exploration = 0.1       # the chance of a random pick (default 0.1)
 judge = { harness = "claude-code", model = "large", rubric = "Prefer the smallest correct change." }
@@ -54,6 +56,7 @@ connectors = ["github"]     # recorded, not acted on yet
 | `candidates` | At least one; each a `harness` (harness or profile ID, as `by harnesses` lists them) with an optional `model`, `effort` (`low`, `medium`, `high`, `xhigh` or 0-100) and `command` (an executable replacing the profile's, as `--command`; for development and tests). Listed twice is refused |
 | `attempts` | 1 to 16; how many branches `by fan --auto` starts (default 1) |
 | `budget_usd`, `max_turns`, `max_minutes` | Each attempt's limits, filling only what the command line leaves unset |
+| `stall_minutes`, `stall_action` | Each attempt's stall window and what a stall does, filling what `--stall-after` and `--stall-action` leave unset. A routed branch that sets neither gets 15 minutes and `interrupt`: no harness activity for that long (no protocol event, no permission answer; never while a permission or a child is waited on) interrupts the turn, and with `failover` the task moves to the next candidate. `stall_minutes = 0` turns detection off for the entry; `notify` only marks the branch `stalled`. An unrouted `by run` keeps no stall window unless `--stall-after` gives one |
 | `failover` | Fail over when a harness fails; implied by `--auto` |
 | `exploration` | 0 to 1 |
 | `judge` | A judge harness: `harness`, optional `model`, `effort`, `command`, `rubric` |
@@ -160,13 +163,23 @@ A routed branch fails over when its turn ended `failed` **because of its harness
 | Fails over | Never fails over |
 |---|---|
 | The harness could not start or was unavailable (`could not start`, `not found on PATH`) | A check that failed (checks run at merge or judging, not in a turn) |
-| It exited, or the connection closed (`the harness exited`, `the turn's outcome is unknown`, a broken pipe writing to it) | A limit (`budget_exceeded`), a cancel or interrupt (`interrupted`) |
+| It exited, or the connection closed (`the harness exited`, `the turn's outcome is unknown`, a broken pipe writing to it) | A limit (`budget_exceeded`), a cancel (`interrupted`, without the stall warning) |
 | It did not complete its handshake (`open failed`, `timed out`) | The model refusing, provisioning or a driver refusing the task's configuration, workspace setup, a lost lease, a denial |
+| It stalled and was interrupted (`stall_action = "interrupt"`, the routed default: the branch is `interrupted` with the warning `interrupted after a stall`) | A cancel, which is also `interrupted`, without that warning |
 | Rate limits and overload (`429`, `rate limit`, `overloaded`, `quota`) and authentication (`401`, `403`, `invalid api key`, `not logged in`), as the driver reports them | Anything else |
 
 Failing over starts a new branch on the next remaining candidate that is available, through reincarnation: from the failed branch's candidate with a handoff brief, or, when it has none, from its base with its original prompt (or a brief, when a turn ran). The new branch is named `<branch>-<harness>`, records a `routed` event with `from`, and the failed branch records `failing over to …: the harness exited: …` and is `superseded_by` the new one. A chain is bounded: each candidate is tried at most once, and the chain stops once its cost reaches the entry's `budget_usd` (the next branch gets what is left). Every branch of a chain stays in its entry and runs under the limits the first attempt did, the task's filled from the entry's (`max_turns`, `max_minutes`); only the cost limit is shared. A chain moves only to candidates the router found eligible: one it excluded for its recorded cost or its login's usage never joins the chain, even if it is available by then. When nothing is left the failed branch says why (`not failing over: no candidate left (…)`). `by run --auto` and `by fan --auto` fail over until a branch succeeds or the chain ends, and print each move; `by send` on a routed branch fails over the same way after its turn (`Yard::failover`), under the send's own limits.
 
 A judge's pick (and a merge) also proposes [repository knowledge](knowledge.md) from the branch's corrections, for a person to adopt; nothing is used before that. A goal's judge ([plans and goals](plans-and-goals.md#goals)) is the same machinery with another verdict: `{met, evidence, missing}`.
+
+## A routed fan on real harnesses, 16 October 2026
+
+In a scratch clone with the table above's shape (`candidates`: Gemini CLI, Oh My Pi on `google/gemini-3.5-flash`, Codex, DeepSeek Harness on `gemini-2.5-flash-lite`; `attempts = 3`; `failover = true`; a `gemini` [gateway backend](model-gateway.md#gemini-through-the-openai-compatible-endpoint); `judge` Oh My Pi on `google/gemini-3.5-flash`), `by fan --auto --judge --isolated --permissions full --allow-unapproved-tools --secret GEMINI_API_KEY --secret CODEX_AUTH=@~/.codex/auth.json --check "python3 -m unittest tests.test_check"` on a code task (a `--quiet` flag for `tools/check.py` with a unit test), twice:
+
+- **Routing.** The classifier read the prompt as `tests`; the router picked three of the four candidates by sampled success (`by fleet route` previews the same), and on the second run leaned on the first's outcomes: Codex, the only candidate with a recorded success, was sampled at 0.86 and 0.74, DeepSeek Harness, which had failed, at 0.14 and 0.67. `by fleet stats` shows the posterior each candidate's picks are sampled around (`P(OK)` 0.70 for Codex after two picks judged best).
+- **Attempts.** Codex (a ChatGPT login, run direct) completed the task both times in under a minute: two files, the 24 tests passing, the check passing, judged 95 and proposed as the pick. Oh My Pi's turn ended with Google's `429 RESOURCE_EXHAUSTED` on `gemini-3.5-flash` both times, reported by the harness as a completed turn with no changes, which the fan records as failed. DeepSeek Harness failed the first run because a secret meant for Codex took it off the gateway (fixed: [subscription logins](model-gateway.md#subscription-logins-and-direct-mode) are read per harness), and on the second edited `tools/check.py` through the gateway (four calls metered) before `gemini-2.5-flash-lite` answered `MALFORMED_FUNCTION_CALL`, a flaw of that model seen in qualification too.
+- **Judging.** The judge harness's scratch branch failed both times on the same quota error, and the deterministic judge stood in (`judged by deterministic (fallback from harness oh-my-pi …)`), ranking the ready attempt first by its passed check and diff; `by judge <fan> --deterministic` gives the same table. So the verdict path is exercised up to the model's answer, and the fallback is proven; a model's verdict is not.
+- **Failover.** None fired: a model's quota error and a malformed call are the task's outcomes as the harnesses report them (a completed turn, a failed turn with a model message), not harness faults, so the chain did not move. The default [stall window](#the-fleet-table) was in force and no attempt reached it.
 
 ## What is deterministic, and what needs a model
 

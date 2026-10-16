@@ -4,66 +4,66 @@
   "command": "codex",
   "harness_version": "codex-cli 0.157.1",
   "driver_version": "0.0.1",
-  "host": "Linux 6.18.44-fc-v114 x86_64",
-  "date": "2026-10-12",
-  "installed_from": "npm @openai/codex@0.157.1",
+  "host": "Linux 6.18.44-fc-v139 x86_64",
+  "date": "2026-10-16",
+  "installed_from": null,
   "execution": "local process with scrubbed environment and private home; not a Branchyard sandbox",
-  "seconds": 512.0,
+  "seconds": 56.0,
   "harness_estimated_cost_usd": "not reported by the harness; the cost cap did not apply",
   "scenarios": [
     {
       "name": "fresh_turn",
       "passed": true,
-      "detail": "session 01a131ef-3755-7ea3-b7e2-816b21a1b1c6; replied \"OK\"",
-      "seconds": 5.8
+      "detail": "session 01a146a4-882a-7ba3-9e66-068f3d3a81f4; replied \"OK\"",
+      "seconds": 19.6
     },
     {
       "name": "permission_denied",
-      "passed": false,
-      "detail": "no permission request reached the driver",
-      "seconds": 5.1
+      "passed": true,
+      "detail": "1 request(s) denied; marker absent; turn Completed",
+      "seconds": 7.2
     },
     {
       "name": "permission_allowed",
       "passed": true,
       "detail": "request allowed; command ran",
-      "seconds": 5.1
+      "seconds": 6.4
     },
     {
       "name": "interrupt_during_permission",
-      "passed": false,
-      "detail": "timed out after 240s",
-      "seconds": 240.0
+      "passed": true,
+      "detail": "stopped 0.0s after interrupt; acknowledged: true; pending request withdrawn by harness: false",
+      "seconds": 2.4
     },
     {
       "name": "interrupt_during_tool",
-      "passed": false,
-      "detail": "timed out after 240s",
-      "seconds": 240.0
+      "passed": true,
+      "detail": "stopped 0.0s after interrupt; acknowledged: true",
+      "seconds": 7.3
     },
     {
       "name": "clean_close",
       "passed": true,
       "detail": "closed cleanly; no descendants outlived the harness; session cost $0.0000",
-      "seconds": 0.0
+      "seconds": 0.1
     },
     {
       "name": "resume",
       "passed": true,
-      "detail": "session 01a131ef-3755-7ea3-b7e2-816b21a1b1c6; remembered PELICAN-7; cost $0.0000",
-      "seconds": 4.2
+      "detail": "session 01a146a4-882a-7ba3-9e66-068f3d3a81f4; remembered PELICAN-7; cost $0.0000",
+      "seconds": 4.8
     },
     {
       "name": "fork",
       "passed": true,
-      "detail": "session 01a131f6-d5fe-79f0-a92f-8daa81146809; remembered PELICAN-7; cost $0.0000",
-      "seconds": 4.1
+      "detail": "session 01a146a5-1737-7331-914f-3385964ea514; remembered PELICAN-7; cost $0.0000",
+      "seconds": 3.8
     },
     {
       "name": "connection_lost",
       "passed": true,
       "detail": "killed mid-turn; outcome reported unknown",
-      "seconds": 7.2
+      "seconds": 4.4
     }
   ]
 }

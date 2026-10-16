@@ -1,57 +1,57 @@
 {
   "profile": "antigravity-stream-json",
   "harness": "antigravity",
-  "harness_version": "1.3.3",
-  "driver_version": "0.0.1",
   "command": "agy",
+  "harness_version": "1.4.0",
+  "driver_version": "0.0.1",
+  "host": "Linux 6.18.44-fc-v139 x86_64",
+  "date": "2026-10-16",
+  "installed_from": null,
   "execution": "local process with scrubbed environment and private home; not a Branchyard sandbox",
-  "host": "Linux 6.18.44-fc-v114 x86_64",
-  "date": "2026-10-11",
-  "installed_from": "curl -fsSL https://antigravity.google/cli/install.sh | bash (Antigravity CLI 1.3.3)",
-  "seconds": 527.0,
+  "seconds": 43.0,
   "harness_estimated_cost_usd": "not reported by the harness; the cost cap did not apply",
   "scenarios": [
     {
       "name": "fresh_turn",
       "passed": true,
-      "detail": "session 972ed42d-3004-4162-bbc8-b717d6900c2b; replied \"OK\"",
-      "seconds": 4.5
+      "detail": "session 4a747b13-5bc1-4704-a5fa-9d602327e71c; replied \"OK\"",
+      "seconds": 17.0
     },
     {
       "name": "permission_denied",
-      "passed": false,
-      "detail": "no permission request reached the driver",
-      "seconds": 4.2
+      "passed": true,
+      "detail": "declared: the profile has no tool approvals; the harness's own rules decide, never a Branchyard policy, and its profile needs --allow-unapproved-tools",
+      "seconds": 0.0
     },
     {
       "name": "permission_allowed",
-      "passed": false,
-      "detail": "the allowed command did not run",
-      "seconds": 3.8
+      "passed": true,
+      "detail": "request allowed; command ran",
+      "seconds": 12.8
     },
     {
       "name": "interrupt_during_permission",
-      "passed": false,
-      "detail": "timed out after 240s",
-      "seconds": 240.0
+      "passed": true,
+      "detail": "declared: the profile has no tool approvals, so no request is ever pending",
+      "seconds": 0.0
     },
     {
       "name": "interrupt_during_tool",
-      "passed": false,
-      "detail": "timed out after 240s",
-      "seconds": 240.0
+      "passed": true,
+      "detail": "declared: no cancellation; the driver rejects an interrupt and a signal ends the process (see connection_lost)",
+      "seconds": 0.0
     },
     {
       "name": "clean_close",
       "passed": true,
       "detail": "closed cleanly; no descendants outlived the harness; session cost $0.0000",
-      "seconds": 1.5
+      "seconds": 0.2
     },
     {
       "name": "resume",
       "passed": true,
-      "detail": "session 972ed42d-3004-4162-bbc8-b717d6900c2b; remembered PELICAN-7; cost $0.0000",
-      "seconds": 22.9
+      "detail": "session 4a747b13-5bc1-4704-a5fa-9d602327e71c; remembered PELICAN-7; cost $0.0000",
+      "seconds": 5.8
     },
     {
       "name": "fork",
@@ -61,9 +61,9 @@
     },
     {
       "name": "connection_lost",
-      "passed": false,
-      "detail": "events after kill: [UsageObserved { turn: Some(1), usage: Usage { cumulative: true, input_tokens: Some(12355), output_tokens: Some(931), cached_input_tokens: Some(0), cost_usd: None, cache_write_tokens: None, cache_write_1h_tokens: None, model: None } }, TurnEnded { turn: 1, outcome: Completed }, SessionClosed]",
-      "seconds": 9.5
+      "passed": true,
+      "detail": "killed mid-turn; outcome reported unknown",
+      "seconds": 6.9
     }
   ]
 }
