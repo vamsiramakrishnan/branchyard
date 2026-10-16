@@ -338,11 +338,11 @@ mod tests {
         assert_eq!(qualification("gemini-cli-acp").unwrap(), "8/9 on 0.63.0");
         assert_eq!(
             qualification("antigravity-stream-json").unwrap(),
-            "4/9 on 1.3.3"
+            "9/9 on 1.4.0"
         );
         assert_eq!(
             qualification("codex-app-server").unwrap(),
-            "6/9 on codex-cli 0.157.1"
+            "9/9 on codex-cli 0.157.1"
         );
         assert_eq!(qualification("oh-my-pi-acp").unwrap(), "9/9 on omp/18.10.3");
     }
