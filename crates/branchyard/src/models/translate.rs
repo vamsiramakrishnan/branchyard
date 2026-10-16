@@ -209,6 +209,15 @@ pub(crate) fn request_to_chat(request: &Value, model: &str) -> Result<Value, Str
             }
             ("user", Value::Array(blocks)) => user_turn(blocks, &mut messages)?,
             ("assistant", Value::Array(blocks)) => assistant_turn(blocks, &mut messages)?,
+            // Claude Code 2.1.301 put a message with role "system" (text, or
+            // text blocks) among its messages, which Anthropic's API does
+            // not document; a chat completion takes a system message in
+            // place, so it goes through as one (seen 16 October 2026,
+            // Claude Code on GLM through a zai backend).
+            ("system", content) => {
+                let text = text_of(content).map_err(|e| format!("a system message: {e}"))?;
+                messages.push(json!({"role": "system", "content": text}));
+            }
             _ => return Err(format!("a message with role {role:?} cannot be translated")),
         }
     }
@@ -769,6 +778,27 @@ mod tests {
             json!({"role": "system", "content": "Be brief.\nBe kind."})
         );
         assert_eq!(messages[1], json!({"role": "user", "content": "hi"}));
+        // A message with role "system" among the turns (Claude Code sends
+        // one) is a system message in place, as text or text blocks.
+        let mid = request_to_chat(
+            &json!({"model": "m", "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": [{"type": "text", "text": "Note A."}, {"type": "text", "text": "Note B."}]},
+                {"role": "system", "content": "Note C."},
+                {"role": "user", "content": "go"}
+            ]}),
+            "m",
+        )
+        .unwrap();
+        assert_eq!(
+            mid["messages"],
+            json!([
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "Note A.\nNote B."},
+                {"role": "system", "content": "Note C."},
+                {"role": "user", "content": "go"}
+            ])
+        );
         assert_eq!(
             messages[2],
             json!({"role": "assistant", "content": "I will read it.", "tool_calls": [
@@ -836,8 +866,12 @@ mod tests {
                 "document",
             ),
             (
-                json!({"model": "m", "messages": [{"role": "system", "content": "x"}]}),
-                "role \"system\"",
+                json!({"model": "m", "messages": [{"role": "tool", "content": "x"}]}),
+                "role \"tool\"",
+            ),
+            (
+                json!({"model": "m", "messages": [{"role": "system", "content": [{"type": "document", "source": {}}]}]}),
+                "a system message",
             ),
             (json!({"model": "m"}), "no messages"),
             (json!([]), "not a JSON object"),

@@ -4,7 +4,7 @@ A harness normally calls its model provider itself, with a key in its environmen
 
 The same token carries the turn's other scopes: its connector grant, its network policy and what it may delegate. What a turn may reach is the intersection of its seat's ceiling, its person's ceiling and what the person approved. See [one scope](#one-scope).
 
-Status, 16 October 2026: built and tested hermetically against mock Anthropic and OpenAI servers on loopback, with a fake harness (a Python script the fake ACP agent runs), including a Claude request translated for an OpenAI backend both ways and the per-call [interception records](#interception-records), and against a mock of [Gemini's OpenAI-compatible endpoint](#gemini-through-the-openai-compatible-endpoint) as strict as the real one was measured to be. One real harness has used it against a real provider: DeepSeek Harness 0.2.0-rc.2, provisioned with a `branchyard` provider at the turn's gateway ([provisioning](provisioning.md#harnesses)), completed a file-editing turn on `gemini-2.5-flash-lite` through a `gemini` backend, ten calls metered `allowed via gemini (200, …)` with the compatibility layer on, on a machine whose outbound TLS goes through an intercepting proxy ([upstream proxies](#what-is-not-done)). GLM through a `zai` backend is wired but has not run ([Z.ai](#zai-glm)).
+Status, 16 October 2026: built and tested hermetically against mock Anthropic and OpenAI servers on loopback, with a fake harness (a Python script the fake ACP agent runs), including a Claude request translated for an OpenAI backend both ways and the per-call [interception records](#interception-records), and against a mock of [Gemini's OpenAI-compatible endpoint](#gemini-through-the-openai-compatible-endpoint) as strict as the real one was measured to be. Two real harnesses have used it against real providers: DeepSeek Harness 0.2.0-rc.2, provisioned with a `branchyard` provider at the turn's gateway ([provisioning](provisioning.md#harnesses)), completed file-editing turns on `gemini-2.5-flash-lite` through a `gemini` backend (ten calls metered `allowed via gemini (200, …)` with the compatibility layer on) and on `glm-5.3` through a `zai` backend (five calls, the `versioned` layer), on a machine whose outbound TLS goes through an intercepting proxy ([upstream proxies](#what-is-not-done)); and Claude Code 2.1.301 completed the same edit on `glm-5.3` through an `anthropic` backend at Z.ai's endpoint, six calls passed through ([Z.ai](#zai-glm)).
 
 ## Turning it on
 
@@ -156,6 +156,7 @@ Coder's anyclaude (MIT, vendored under `vendor/anyclaude`) is the reference for 
 | Anthropic | OpenAI chat |
 |---|---|
 | `system` (text or text blocks) | a `system` message |
+| a message with role `system` among the messages (text or text blocks; Claude Code 2.1.301 sends one, though Anthropic's API does not document it) | a `system` message in its place |
 | `messages`: text, `image` (base64 or URL), `tool_use`, `tool_result` | `content` (string, or text and `image_url` parts), `tool_calls`, `tool` messages placed before the rest of their user turn, as OpenAI requires |
 | `tools` with an `input_schema`; `tool_choice` `auto`, `any`, `none`, `tool`; `disable_parallel_tool_use` | functions; `auto`, `required`, `none`, that function; `parallel_tool_calls: false` |
 | `max_tokens`, `stop_sequences`, `temperature`, `top_p`, `metadata.user_id`, `stream` | `max_completion_tokens`, `stop`, the same, `user`, `stream` with `stream_options.include_usage` |
@@ -224,7 +225,14 @@ backends = ["zai"]
 
 `by init project` proposes the `zai` backend and the `glm-*` route when `ZAI_API_KEY` is set. Oh My Pi reads the same variable for its `zai` provider (`--model zai/glm-5.3`) and needs no gateway for it.
 
-**Status, 16 October 2026.** Checked with a Coding Plan key against the real endpoints: `GET /models` answered `200` on all three (11 GLM models, `glm-4.5` to `glm-5.3-flashx`), which is what `by models list` reads; every completion request answered `429` `1113 Insufficient balance or no resource package`, so no GLM turn has run through the gateway or a harness yet, and the layer is tested hermetically only (the path rule, the inference by host, the refusal on a non-OpenAI backend).
+**Status, 16 October 2026.** Run against the real endpoints with a GLM Coding Plan key (a key created under the plan: a standard key of the same account listed the models but answered every completion `429` `1113 Insufficient balance or no resource package`, since the two kinds of key are not interchangeable):
+
+- `by models list` lists the `zai` source: 11 models, `glm-4.5` to `glm-5.3-flashx`.
+- **DeepSeek Harness on `glm-5.3` through a `zai` backend** (`api = "openai"`, the Coding Plan chat endpoint, the `versioned` layer implied by the host): `by run --harness deepseek-harness --isolated --model-gateway --model glm-5.3` completed a one-line README edit in five calls, each metered `allowed via zai (200, …)` and sent to `/chat/completions` under the base URL.
+- **Claude Code on `glm-5.3` through a `zai-anthropic` backend** (`api = "anthropic"`, `https://api.z.ai/api/anthropic`, a route `glm-*` to it): the same edit in six calls (`Bash`, `Read`, `Edit`, `end_turn`), passed through with the key in `x-api-key`. The same request routed to the `openai` backend with `backend_model` first failed translation on a message with role `system` among Claude Code's messages, which the [translation](#translation) now carries as a system message in place.
+- **Oh My Pi on `zai/glm-5.3`** needs no gateway: `ZAI_API_KEY` alone, and the `oh-my-pi-acp` profile qualified 9 of 9 on it in 67 seconds ([qualification](qualification/README.md#results-16-october-2026)).
+
+GLM-5.3 spends its first tokens on reasoning (`reasoning_tokens` in the usage; a `max_tokens` of 20 returns no text), which the gateway's metering records as output tokens.
 
 The signatures are kept in the process that runs the turns, by the repository's gateway, so a conversation keeps them from turn to turn: at most 4096 of them, and 32 MiB together, the least recently used forgotten first. What the layer changed is logged once per call at debug level (`BRANCHYARD_LOG=branchyard::models=debug`), with the backend and model: `gemini compatibility: stripped store; thought signatures attached: 1 recorded, 0 placeholder`. The log names fields and counts calls; it never holds a signature.
 
