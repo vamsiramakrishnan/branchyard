@@ -218,10 +218,17 @@ api = "anthropic"
 url = "https://api.z.ai/api/anthropic"
 key = "ZAI_API_KEY"
 
+[models.backends.zai-responses]          # OpenAI Responses, for Codex
+api = "openai"
+url = "https://api.z.ai/api/v1"
+key = "ZAI_API_KEY"
+
 [[models.routes]]
 model = "glm-*"
-backends = ["zai"]
+backends = ["zai"]                       # one backend per route: pick the one the harness's API needs
 ```
+
+A route names one backend (with fallbacks of the same kind), so a yard serving several harnesses on GLM gives each its route by model name: the harnesses send the model they are given, and `--model glm-5.3` on every candidate would meet the same route. Give Codex and DeepSeek Harness distinct names where both run (`glm-5.3` and `glm-5.3-flash`, say), or run them from configurations of their own.
 
 `by init project` proposes the `zai` backend and the `glm-*` route when `ZAI_API_KEY` is set. Oh My Pi reads the same variable for its `zai` provider (`--model zai/glm-5.3`) and needs no gateway for it.
 
@@ -229,7 +236,8 @@ backends = ["zai"]
 
 - `by models list` lists the `zai` source: 11 models, `glm-4.5` to `glm-5.3-flashx`.
 - **DeepSeek Harness on `glm-5.3` through a `zai` backend** (`api = "openai"`, the Coding Plan chat endpoint, the `versioned` layer implied by the host): `by run --harness deepseek-harness --isolated --model-gateway --model glm-5.3` completed a one-line README edit in five calls, each metered `allowed via zai (200, …)` and sent to `/chat/completions` under the base URL.
-- **Claude Code on `glm-5.3` through a `zai-anthropic` backend** (`api = "anthropic"`, `https://api.z.ai/api/anthropic`, a route `glm-*` to it): the same edit in six calls (`Bash`, `Read`, `Edit`, `end_turn`), passed through with the key in `x-api-key`. The same request routed to the `openai` backend with `backend_model` first failed translation on a message with role `system` among Claude Code's messages, which the [translation](#translation) now carries as a system message in place.
+- **Claude Code on `glm-5.3` through a `zai-anthropic` backend** (`api = "anthropic"`, `https://api.z.ai/api/anthropic`, a route `glm-*` to it): the same edit in six calls (`Bash`, `Read`, `Edit`, `end_turn`), passed through with the key in `x-api-key`. Routed to the `openai` backend with `backend_model = "glm-5.3"` instead, so that the [translation](#translation) carries it: the first request failed on a message with role `system` among Claude Code's messages, which the translation now carries as a system message in place, after which the same edit completed in three translated calls (`allowed via zai as glm-5.3`); Claude Code's `POST /v1/messages/count_tokens` is answered `502` `not translated` on an OpenAI backend, twice per turn, and Claude Code goes on without it.
+- **Codex on `glm-5.3` through a `zai-responses` backend** (`api = "openai"`, `https://api.z.ai/api/v1`, Z.ai's Responses endpoint, the `versioned` layer by its host): the same edit in four calls (`exec_command` three times, then `completed`), each `allowed via zai-responses (200, …)`, sent to `/responses` under the base URL. Codex reaches the gateway through the `[model_providers.branchyard]` entry its [provisioner writes](provisioning.md#harnesses) (`wire_api = "responses"`, the only one codex-cli 0.157.1 accepts); before that entry existed, Codex ignored the gateway's environment and called `api.openai.com` with no key. Codex warns `Model metadata for glm-5.3 not found` and runs on fallback metadata.
 - **Oh My Pi on `zai/glm-5.3`** needs no gateway: `ZAI_API_KEY` alone, and the `oh-my-pi-acp` profile qualified 9 of 9 on it in 67 seconds ([qualification](qualification/README.md#results-16-october-2026)).
 
 GLM-5.3 spends its first tokens on reasoning (`reasoning_tokens` in the usage; a `max_tokens` of 20 returns no text), which the gateway's metering records as output tokens.
@@ -412,7 +420,7 @@ Requests go through `HTTPS_PROXY` (then `https_proxy`, `ALL_PROXY`) as a `CONNEC
 
 ## What is not done
 
-- **No real provider or harness.** Every test uses mock upstreams on loopback. Whether Claude Code, Codex or any other harness honors the base URL variables for everything it does, and with which paths, is untested.
+- **Which harnesses honor the base URL variables.** Claude Code 2.1.301 does (`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`: its turns on GLM above, `count_tokens` included); codex-cli 0.157.1 does not read `OPENAI_BASE_URL` or `OPENAI_API_KEY` for its own calls, so its [provisioner writes the gateway as a provider](provisioning.md#harnesses) in `config.toml`; DeepSeek Harness takes its endpoint from `cordis.patch.yml`, which its provisioner writes. Every other harness is untested: whether it honors the variables for everything it does, and with which paths.
 - **Subscription logins** cannot go through the gateway (above). A login Branchyard does not see is not detected.
 - **Provider features not proxied.** The gateway passes the body through unchanged except for `stream_options.include_usage`, and [translation](#translation) when a route asks for it; it does not pass batch, file, realtime or WebSocket APIs anything special. Translation goes one way, Anthropic's Messages API onto OpenAI's chat completions: an OpenAI request is never translated for an Anthropic backend, and the `/v1/responses` API is not a translation target. No real Claude Code has run through it; what Claude Code sends that the table above does not cover (a `document` block, `count_tokens`) is refused rather than guessed.
 - **Prompt caching** passes through: the harness's `cache_control` blocks and headers go to the backend as they are, and cache reads and writes are metered and priced. A weighted choice can send a conversation's next call to another backend, whose cache is cold; give a route one backend (and fallbacks) to keep caches warm. No responses are cached by the gateway.

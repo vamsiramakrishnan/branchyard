@@ -101,6 +101,11 @@ impl Judge for HarnessJudge {
         let events = events?;
         match status {
             BranchStatus::Ready | BranchStatus::NoChanges => Ok(message(&events)),
+            // The branch is gone, so its failure reason travels in the
+            // error: the only place it can be read from afterwards.
+            BranchStatus::Failed { reason } => Err(Error::Harness(format!(
+                "the judge's branch {name} failed: {reason}"
+            ))),
             other => Err(Error::Harness(format!(
                 "the judge's branch {name} ended {}",
                 serde_json::to_value(&other)

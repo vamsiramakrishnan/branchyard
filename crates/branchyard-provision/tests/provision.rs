@@ -659,6 +659,43 @@ fn codex_api_key_effort_and_telemetry_reconcile_config_toml() {
 }
 
 #[test]
+fn codex_on_the_model_gateway_gets_a_provider_in_config_toml() {
+    // The gateway as a `model_providers` entry Codex is told to use, keyed
+    // by the variable the engine sets to the turn's token; the model on the
+    // session for the App Server profile.
+    let temp = Temp::new();
+    temp.seed(
+        ".codex/config.toml",
+        "model = \"gpt-5.6-sol\"\n\n[projects.\"/workspace\"]\ntrust_level = \"trusted\"\n",
+    );
+    let mut context = context("codex", Protocol::CodexAppServer);
+    context.model = Some("glm-5.3".into());
+    context.effort = Some(Effort::Medium);
+    context.model_gateway = Some(branchyard_provision::models::ModelGateway {
+        url: "http://192.168.127.1:41100".into(),
+        anthropic: false,
+        openai: true,
+    });
+    let plan = provision(&temp, &context);
+    golden("codex-gateway", &temp, &plan);
+    assert_eq!(plan.session.model.as_deref(), Some("glm-5.3"));
+    let config = temp.read(".codex/config.toml");
+    assert!(
+        config.contains("model_provider = \"branchyard\""),
+        "{config}"
+    );
+    assert!(config.contains("[model_providers.branchyard]"), "{config}");
+    assert!(
+        config.contains("base_url = \"http://192.168.127.1:41100/openai/v1\""),
+        "{config}"
+    );
+    assert!(
+        config.contains("[projects.\"/workspace\"]"),
+        "the seed's table stays: {config}"
+    );
+}
+
+#[test]
 fn codex_acp_takes_its_model_from_config_toml_and_auth_file_is_checked() {
     let temp = Temp::new();
     let mut context = context("codex", Protocol::Acp);

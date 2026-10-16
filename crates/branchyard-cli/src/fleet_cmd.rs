@@ -223,18 +223,28 @@ fn chosen_judge(
     Ok(fleet.entry(kind).and_then(|(_, e)| e.judge.clone()))
 }
 
-/// Judge `names` and record the scores.
+/// Judge `names` and record the scores. A judge harness runs its scratch
+/// branch with `options`, the task's: its isolation, provider, secrets and
+/// tool approvals, with the policy replaced by one that denies every tool
+/// and no observer (the caller's console has finished). Until 16 October
+/// 2026 the judge ran with default options, so an isolated fan's judge ran
+/// in local mode without the fan's secrets and its provisioning failed.
 pub fn judge_names(
     yard: &Yard,
     names: &[String],
     spec: Option<JudgeSpec>,
     rubric: Option<String>,
     fleet: Option<&Fleet>,
+    options: &TaskOptions,
 ) -> Result<Judgement, Failure> {
     let spec = chosen_judge(yard, names, spec, fleet)?;
+    let judge_options = TaskOptions {
+        observer: None,
+        ..options.clone()
+    };
     let judge: Option<Arc<dyn Judge>> = spec
         .as_ref()
-        .map(|s| branchyard::harness_judge(s, &TaskOptions::default()));
+        .map(|s| branchyard::harness_judge(s, &judge_options));
     match &judge {
         Some(judge) => eprintln!(
             "by: running each attempt's check, then asking {} for a verdict",
@@ -350,7 +360,18 @@ pub fn judge(env: &Env, target: &Target, args: &JudgeArgs, fleet: Option<&Fleet>
         rubric: None,
     });
     let fleet = if args.deterministic { None } else { fleet };
-    let judgement = judge_names(&yard, &names, spec, args.rubric.clone(), fleet)?;
+    // The judge's branch runs as `by run` would here: the configuration's
+    // defaults (isolation, provider, secrets by name) with no flags.
+    let mut task = TaskArgs::default();
+    let cwd = std::env::current_dir().map_err(|e| Failure::Message(e.to_string()))?;
+    if let Some(config) = crate::defaults::config_at(&cwd, &|name| std::env::var(name).ok())
+        .map_err(Failure::Message)?
+    {
+        crate::defaults::apply_task(&config, &mut task, crate::defaults::Scope::NewBranch)
+            .map_err(Failure::Message)?;
+    }
+    let options = crate::commands::Live::start(env, &task, false, None).options(&task)?;
+    let judgement = judge_names(&yard, &names, spec, args.rubric.clone(), fleet, &options)?;
     if !args.json {
         print(&judgement_table(&judgement, style(env)))?;
     }

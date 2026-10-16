@@ -487,6 +487,8 @@ pub fn fan(
         ..live.options(task)?
     };
     let options = crate::plan_cmd::with_fleet(options, task, prompt);
+    // The judge's branch runs with the attempts' options.
+    let judge_options = options.clone();
     let result = match routed {
         true => {
             match crate::fleet_cmd::routed(&yard, prompt, &options, task, true, route.attempts) {
@@ -531,8 +533,14 @@ pub fn fan(
     let summary = fan_summary(env, &infos);
     if route.judge {
         let names: Vec<String> = branches.iter().map(|b| b.info().name.clone()).collect();
-        let judgement =
-            crate::fleet_cmd::judge_names(&yard, &names, None, None, task.fleet.as_ref())?;
+        let judgement = crate::fleet_cmd::judge_names(
+            &yard,
+            &names,
+            None,
+            None,
+            task.fleet.as_ref(),
+            &judge_options,
+        )?;
         print(&format!(
             "\n{}",
             crate::fleet_cmd::judgement_table(&judgement, env.style())

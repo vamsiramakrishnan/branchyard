@@ -422,30 +422,21 @@ fn antigravity_gets_its_grant_the_delegation_tools_and_its_policy_as_rules() {
     );
     assert!(instructions.contains("by spawn"), "{instructions}");
 
-    // `full` as the CLI's rules: git, `by` by name and by path, and the
-    // delegation tools; never every command.
+    // `full` as the CLI's rules: every command, which covers `by`, and the
+    // delegation tools.
     let settings: serde_json::Value =
         serde_json::from_str(&read(".gemini/antigravity-cli/settings.json")).unwrap();
     let allow = rules_in(&settings, "allow");
-    for rule in [
-        "command(regex:git .*)",
-        "command(regex:by .*)",
-        "mcp(branchyard/*)",
-    ] {
+    for rule in ["command(*)", "mcp(branchyard/*)"] {
         assert!(
             allow.contains(&rule.to_owned()),
             "{rule} missing from {allow:?}"
         );
     }
     assert!(
-        allow
-            .iter()
-            .any(|r| r.starts_with("command(regex:/") && r.ends_with("fake-acp-agent .*)")),
-        "{allow:?}"
+        !allow.iter().any(|r| r.starts_with("command(regex:")),
+        "the shell is allowed outright, so no command is named: {allow:?}"
     );
-    assert!(!allow
-        .iter()
-        .any(|r| r == "command(*)" || r == "command(regex:.*)"));
     assert!(rules_in(&settings, "deny").is_empty());
 
     // Recorded with the turn: the rules and the grant, never the token.
