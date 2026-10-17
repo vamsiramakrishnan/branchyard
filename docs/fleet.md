@@ -113,9 +113,33 @@ A routed fan names its branches `<name>-<harness>` as `by fan` does, and a harne
 
 **A session stays on its model.** A candidate's model and effort are stored with the branch. A send that names no model keeps the branch's (before, a send's provisioning replaced the branch's whole, dropping its model), and a send naming a different model is refused once a turn has run: switching models is not a continuation. Reincarnate or fork with a fresh session to change it.
 
+## Advice
+
+A delegating harness picks its children's harnesses itself (`by spawn --harness`, `--model`); the router routes only top-level runs. **Advice** gives that harness the data the router has, inside its turn, without running anything:
+
+```text
+by fleet advise "<the subtask, as by spawn will get it>" [--kind KIND] [--seed N] [--json]
+branchyard.advise(prompt, kind=None)        # Python
+advise {prompt, kind?}                      # MCP
+Delegate::advise, Yard::advise              # Rust
+```
+
+Inside a harness it acts as the harness's branch: the candidates are its task's `[fleet]` entry for the subtask's kind (`by run` passes the configuration's table to the task, and a child inherits it), or, with no table, the harnesses its envelope allows (`entry` is `envelope`), its own harness carrying its model. Outside a harness it uses the configuration's `[fleet]` or the inventory default, and what this machine has of each harness, as `by fleet route` does. `by --remote` refuses it. The answer (`Advice`):
+
+| Field | Meaning |
+|---|---|
+| `kind`, `kind_source`, `matched` | The classifier's kind (or `--kind`), and the words that decided it |
+| `entry` | `bugfix`, `default`, `inventory`, or `envelope` |
+| `candidates[]` | Each candidate: `available` (with `reason` when not: not in the envelope, not installed, logged out, over the entry's budget), `stats` (its recorded outcomes for this kind: a candidate naming a model and effort gets its own arm, a bare harness every arm of that harness pooled) and `expected`, the posterior mean P(OK) the router samples around, 0.50 with no outcomes |
+| `pick` | The router's own pick among the available candidates: the highest sampled success rate under `seed`, with no exploration. One opinion from the same data |
+| `own`, `remaining_usd`, `tree_remaining_usd` | Inside a harness: its harness and model, what it may still give children, and what the cost limits above it leave its tree |
+| `risk_words`, `notes` | Words of the task on `RISK_WORDS` (production, delete, migration, security, payment, …), and deterministic hints: no outcomes yet, risk words present, nothing can run |
+
+The skill tells the harness how to read it: prefer the cheapest candidate whose P(OK) for the kind clears what the subtask can afford to get wrong, never the cheapest tier for a risk word, escalate on evidence. Then **say why**: `by spawn ... --why "mechanical rename, cargo test checks it"` (`why` in the MCP tool, a graph edit, Python's `spawn` and the HTTP body). The choice is recorded on the child as a `chosen` fleet event (`ParentChoice`: the kind its prompt classifies as, the candidate, the parent and the reason), shown by `by log` (`chosen by root for refactor (classifier): codex model=small: mechanical rename ...`), and the child's outcome row says `decided_by: parent`, so the next advice counts it. A parent's choices are learned from exactly as the router's are; nothing routes a child automatically.
+
 ## Outcomes
 
-When a turn of a top-level branch ends, when it merges, and when it is judged, its row in the **outcome store** is written or replaced: `repo`, `branch`, `kind`, `harness`, `model`, `effort`, `outcome`, `score`, `cost_usd`, `duration_ms`, `turns`, whether it was routed, and when. A judge's scratch branch and delegated children are not recorded. Rows outlive their branches: they are what the router learns from.
+When a turn of a branch ends, when it merges or is integrated into its parent, and when it is judged, its row in the **outcome store** is written or replaced: `repo`, `branch`, `kind`, `harness`, `model`, `effort`, `outcome`, `score`, `cost_usd`, `duration_ms`, `turns`, whether it was routed, `decided_by` (`router` for a routed branch, `parent` for a delegated child, unset for one a person named) and when. Delegated children are recorded like top-level branches, with the kind their prompt classified as; a judge's scratch branch is not. Rows outlive their branches: they are what the router, and the advice, learn from.
 
 | Outcome | When | Credit |
 |---|---|---|
@@ -127,7 +151,7 @@ When a turn of a top-level branch ends, when it merges, and when it is judged, i
 
 A candidate's successes are the sum of its credits and its failures the sum of one minus each. The store is the `outcomes` table in SQLite and `by_outcomes` in PostgreSQL (scoped by the repository like every other table), behind `OutcomeBackend`, with the same conformance test on both. A row is committed as an event append is, without a synchronous commit of its own: it is statistics derived from the branch, and the next turn or merge rewrites it.
 
-`by fleet stats [--kind K] [--json]` prints them per kind and candidate: runs, merged, judged best, ready, failed, interrupted, the posterior mean success `P(OK)` = (1 + successes) / (2 + successes + failures), and mean cost, time, turns and score. `Yard::outcomes` and `branchyard::fleet_stats` give the same in the SDK.
+`by fleet stats [--kind K] [--json]` prints them per kind and candidate: runs, merged, judged best, ready, failed, interrupted, how many a delegating parent chose (`PARENT`, `delegated`), the posterior mean success `P(OK)` = (1 + successes) / (2 + successes + failures), and mean cost, time, turns and score. `Yard::outcomes` and `branchyard::fleet_stats` give the same in the SDK.
 
 ## Judging
 
@@ -206,6 +230,8 @@ A third run, with a GLM Coding Plan key: Oh My Pi on `zai/glm-5.3` and DeepSeek 
 | Fail over after a turn | `Yard::failover` | after `send` on a routed branch | no |
 | Judge | `Yard::judge`, `Judge`, `HarnessJudge`, `parse_verdict`, `deterministic_scores` | `judge`, `fan --judge` | no: refused |
 | Outcomes | `Yard::outcomes`, `fleet_stats` | `fleet stats` | no: refused |
+| Advice before choosing a harness ([above](#advice)) | `Yard::advise`, `Delegate::advise`, `Advice`, `AdviceScope`, `fleet_pooled`, `risk_words` | `fleet advise`, inside a harness too; MCP `advise`; Python `advise` | no: refused |
+| Record why a child's harness was chosen | `Spawn::why`, `ParentChoice`, `recorded_choice` | `spawn --why`; MCP and graph-edit `why`; Python `spawn(why=)` | yes: `why` in the spawn body |
 | What can run here | `RouteOptions::harnesses` (`inventory::HarnessGate`, `LocalGate`) | consulted by `run --auto`, `fan --auto`, `fleet route` | no |
 | The inventory default | `inventory_default`, `InventoryDefault`, `INVENTORY_ENTRY` | `run --auto`, `fan --auto`, `map --auto`, `fleet route` with no `[fleet]` | no |
 
@@ -216,6 +242,7 @@ A third run, with a GLM Coding Plan key: Oh My Pi on `zai/glm-5.3` and DeepSeek 
 - **No real outcomes.** The router starts from uniform priors; with a few outcomes per candidate it explores by design.
 - **Costs** come from harnesses that report them; a candidate without cost reports is never excluded for cost.
 - **Failover of delegated children** and of rig seats: only branches started by `run`, `fan` and `send` with a route fail over.
+- **Children are advised, not routed.** `by spawn` has no `--auto`: the parent chooses with the advice and says why. Whether its choices beat the router's is what the recorded `decided_by` lets us measure.
 - **`environment` and `connectors`** are recorded only, for the tracks that will act on them.
 
 ## Code and tests
@@ -223,6 +250,7 @@ A third run, with a GLM Coding Plan key: Oh My Pi on `zai/glm-5.3` and DeepSeek 
 | Where | What |
 |---|---|
 | [`fleet.rs`](../crates/branchyard/src/fleet.rs) | Kinds and the classifier, the table, routing events, outcomes and `OutcomeBackend`, the router, routed runs and fans, failover; unit tests: classification, determinism under a seed, learning, the exploration floor, exclusion, rounds, Beta's mean, failure classification, credit, the inventory default (candidates, safe defaults, judge, what is left out and why, its entry and wording) |
+| [`fleet.rs`](../crates/branchyard/src/fleet.rs) (advice) | `advise`, `Advice`, `AdviceScope`, `pooled`, `RISK_WORDS` and `risk_words`, the `chosen` event (`ParentChoice`) and `decided_by`; unit tests: pooled arms, risk words, an advice from an envelope and from a fleet entry |
 | [`judge.rs`](../crates/branchyard/src/judge.rs) | The deterministic score, the prompt, strict verdicts, `Judge` and `HarnessJudge`, ranking and recording; unit tests for each |
 | [`run.rs`](../crates/branchyard/src/run.rs) | `run_attempts` (a run or fan with per-attempt harness, command, provisioning, budget and events), `reincarnate_with` (from the base when there is no candidate), a send keeping its model |
 | [`sqlite.rs`](../crates/branchyard/src/sqlite.rs), [`pg.rs`](../crates/branchyard/src/pg.rs), [`conformance.rs`](../crates/branchyard/src/conformance.rs) | The `outcomes` tables and their conformance test on both |

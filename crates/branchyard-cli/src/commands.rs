@@ -284,6 +284,7 @@ impl Live {
             trace_parent: None,
             plan: task.plan,
             goal: crate::plan_cmd::goal(task),
+            fleet: task.fleet.clone(),
             join_task: None,
             deny: task.deny.clone(),
         })
@@ -1540,6 +1541,7 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         plan: args.plan,
         model: args.model.clone(),
         result,
+        why: args.why.clone(),
     };
     if let Some(delegate) = harness_delegate(json)? {
         if args.parent.is_some()

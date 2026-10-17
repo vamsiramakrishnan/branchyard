@@ -320,6 +320,11 @@ pub struct Spawn {
     /// the subset. The parent reads the result as
     /// [`Inspection::result`]. See `docs/delegation.md#result-contract`.
     pub result: Option<ResultContract>,
+    /// Why this harness and model for this subtask, in the parent's words.
+    /// Recorded on the child as a `chosen` fleet event with the kind the
+    /// classifier gives its prompt, so `by log` shows the choice and the
+    /// outcome store learns from it ([`crate::ParentChoice`]).
+    pub why: Option<String>,
 }
 
 impl Spawn {
@@ -782,6 +787,22 @@ impl Delegate {
         match &self.via {
             Via::Local(local) => local.spawn(&spawn),
             Via::Remote(_) => self.typed("spawn", spawn.arguments()),
+        }
+    }
+
+    /// What to know before picking a harness for a subtask: the candidates
+    /// (the task's fleet entry for its kind, or the harnesses this branch's
+    /// envelope allows), each with its availability and recorded outcomes,
+    /// the router's pick, the budget left, and notes. `kind` overrides the
+    /// classifier. Nothing runs.
+    pub fn advise(
+        &self,
+        prompt: &str,
+        kind: Option<crate::TaskKind>,
+    ) -> Result<crate::Advice, Error> {
+        match &self.via {
+            Via::Local(local) => local.advise(prompt, kind),
+            Via::Remote(_) => self.typed("advise", json!({ "prompt": prompt, "kind": kind })),
         }
     }
 
@@ -2073,6 +2094,8 @@ struct Planned {
     seat: Option<String>,
     depends_on: Vec<String>,
     after: After,
+    /// The parent's reason for the child's harness and model.
+    why: Option<String>,
 }
 
 /// `record`'s siblings that share its check and may still be integrated:
@@ -2706,6 +2729,35 @@ impl Local {
             add,
             remove,
         })?;
+        // The parent's choice of each child's harness and model, with the
+        // kind its prompt classifies as: shown by `by log`, learned from by
+        // the outcome store.
+        for child in &planned {
+            let info = &child.record.info;
+            let provision = child.record.provision.as_ref();
+            let choice = crate::fleet::ParentChoice {
+                kind: crate::fleet::classify(&info.prompt).kind,
+                kind_source: "classifier".into(),
+                candidate: crate::fleet::FleetCandidate {
+                    harness: info.harness.clone(),
+                    model: provision.and_then(|p| p.model.clone()),
+                    effort: provision.and_then(|p| p.effort),
+                    command: None,
+                },
+                by: self.branch.clone(),
+                why: child.why.clone(),
+            };
+            store.append(
+                &info.name,
+                &RecordedEvent {
+                    at_ms: branchyard_support::time::now_ms(),
+                    activity: Activity::Fleet(Box::new(crate::fleet::FleetActivity::Chosen(
+                        Box::new(choice),
+                    ))),
+                },
+                None,
+            )?;
+        }
         lock(&self.yard.hub.graph_options).insert(self.branch.clone(), self.child_options());
         let mut consider: Vec<String> =
             planned.iter().map(|p| p.record.info.name.clone()).collect();
@@ -3006,6 +3058,7 @@ impl Local {
             seat: seated.map(|(name, _, _)| name),
             depends_on,
             after: request.after,
+            why: request.why.clone(),
         })
     }
 
@@ -3234,6 +3287,44 @@ impl Local {
     fn graph(&self, branch: &str) -> Result<Graph, Error> {
         self.require_descendant(branch, true)?;
         graph::show(&self.store(), branch)
+    }
+
+    /// The advice for a subtask, as this branch: the candidates are its
+    /// task's fleet entry for the kind, or the harnesses its envelope
+    /// allows, with what it may still spend.
+    fn advise(&self, prompt: &str, kind: Option<crate::TaskKind>) -> Result<crate::Advice, Error> {
+        let store = self.store();
+        let record = store.read(&self.branch)?;
+        let provision = record.provision.as_ref();
+        // A child on this branch's own profile inherits its command; one on
+        // another profile runs that profile's executable, so each candidate
+        // is checked as a spawn would run it.
+        let own = crate::fleet::FleetCandidate {
+            harness: record.info.harness.clone(),
+            model: provision.and_then(|p| p.model.clone()),
+            effort: provision.and_then(|p| p.effort),
+            command: record.command.clone(),
+        };
+        let options = TaskOptions {
+            command: None,
+            ..self.options.clone()
+        };
+        let tightest = caps_above(&store, &self.branch, Some(self.own_spent(&record)))
+            .into_iter()
+            .min_by(|a, b| a.left().total_cmp(&b.left()));
+        let scope = crate::AdviceScope {
+            fleet: self.options.fleet.as_ref(),
+            allowed: record
+                .grant
+                .as_ref()
+                .map(|g| g.envelope.allowed(&record.info.profile)),
+            own: Some(own),
+            remaining_usd: self.remaining(&record).map(|r| r.max(0.0)),
+            tree_remaining_usd: tightest.map(|cap| cap.left()),
+            seed: None,
+            harnesses: None,
+        };
+        crate::fleet::advise(&self.yard, &options, prompt, kind, scope)
     }
 
     fn inspect(&self, branch: &str) -> Result<Inspection, Error> {
@@ -3549,6 +3640,11 @@ impl Local {
         // any other child this branch now contains is merged too.
         for branch in branches {
             graph::settled(&self.yard, branch, Some(&self.options));
+            // The outcome store learns the merge; best-effort.
+            branchyard_support::best_effort(
+                "record the fleet outcome",
+                crate::fleet::observe(&self.yard, branch, None),
+            );
         }
         integrate::reconcile_children(&self.yard, &self.branch);
         Ok(merged)
@@ -3999,6 +4095,7 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
         plan: request.plan,
         model: request.model.clone(),
         result: request.result.clone(),
+        why: request.why.clone(),
     })
 }
 
@@ -4092,6 +4189,14 @@ struct ApplyGraphArgs {
 #[serde(deny_unknown_fields)]
 struct TargetArgs {
     branch: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdviseArgs {
+    prompt: String,
+    #[serde(default)]
+    kind: Option<crate::TaskKind>,
 }
 
 #[derive(Deserialize)]
@@ -4359,6 +4464,10 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
             let args: TargetArgs = parse(tool, arguments)?;
             let branch = args.branch.unwrap_or_else(|| local.branch.clone());
             to_json(&local.inspect(&branch)?)
+        }
+        "advise" => {
+            let args: AdviseArgs = parse(tool, arguments)?;
+            to_json(&local.advise(&args.prompt, args.kind)?)
         }
         "events" => {
             let args: EventsArgs = parse(tool, arguments)?;

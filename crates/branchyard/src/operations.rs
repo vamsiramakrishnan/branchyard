@@ -275,6 +275,17 @@ impl Operation {
         self
     }
 
+    /// Runs inside a harness and locally, not through a server, for this
+    /// reason.
+    const fn no_remote(mut self, why: &'static str) -> Operation {
+        self.contexts = Contexts {
+            inside: Context::Yes,
+            outside: Context::Yes,
+            remote: Context::No(why),
+        };
+        self
+    }
+
     const fn no_python(mut self, why: &'static str) -> Operation {
         self.python = None;
         self.why = why;
@@ -326,6 +337,7 @@ pub const OPERATIONS: &[Operation] = &[
             Param::all("--connector", "connectors", "connectors"),
             Param::all("--plan", "plan", "plan"),
             Param::all("--model", "model", "model"),
+            Param::all("--why", "why", "why"),
             Param::all("--result-schema", "result.schema", "result"),
             RESULT_REQUIRED,
             Param::cli(
@@ -547,6 +559,25 @@ pub const OPERATIONS: &[Operation] = &[
         Capability::Own,
         &[TARGET, JSON],
     ),
+    op(
+        "advise",
+        &["fleet", "advise"],
+        "advise",
+        "advise",
+        "advise",
+        Capability::Own,
+        &[
+            Param::all("<PROMPT>", "prompt", "prompt"),
+            Param::all("--kind", "kind", "kind"),
+            Param::cli(
+                "--seed",
+                "a seed reproduces the router's pick for a person reading it; a harness takes a \
+                 fresh one",
+            ),
+            JSON,
+        ],
+    )
+    .no_remote("routing is local only: a server has no fleet table or outcome endpoints yet"),
     op(
         "publish_artifact",
         &["artifact", "publish"],

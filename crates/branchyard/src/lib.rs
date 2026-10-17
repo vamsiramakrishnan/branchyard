@@ -208,10 +208,12 @@ pub use environments::{
 };
 pub use fleet::{
     classify, credit, entry_label as fleet_entry_label, fresh_seed as fleet_seed, harness_fault,
-    inventory_default, recorded_route, stats as fleet_stats, BranchOutcome, CandidateStats,
+    inventory_default, pooled as fleet_pooled, recorded_choice, recorded_route, risk_words,
+    stats as fleet_stats, Advice, AdviceScope, Advised, BranchOutcome, CandidateStats,
     Classification, Excluded, Fleet, FleetActivity, FleetCandidate, FleetEntry, InventoryDefault,
-    JudgeMark, JudgeSpec, OutcomeRecord, Route, RouteDecision, RouteOptions, RoutePick, Routed,
-    TaskKind, DEFAULT_EXPLORATION, DEFAULT_STALL, INVENTORY_ENTRY,
+    JudgeMark, JudgeSpec, OutcomeRecord, ParentChoice, Route, RouteDecision, RouteOptions,
+    RoutePick, Routed, TaskKind, DECIDED_BY_PARENT, DECIDED_BY_ROUTER, DEFAULT_EXPLORATION,
+    DEFAULT_STALL, ENVELOPE_ENTRY, INVENTORY_ENTRY, RISK_WORDS,
 };
 pub use goal::{
     follow_up_prompt as goal_follow_up_prompt, from_events as goal_from_events,
@@ -898,6 +900,21 @@ impl Yard {
         fleet::route(self, prompt, options, fleet, how, attempts).map(|(route, _)| route)
     }
 
+    /// What to know before picking a harness for `prompt`: the candidates
+    /// (`scope`'s fleet entry for the task's kind, or the harnesses the
+    /// caller may run), each with its availability and recorded outcomes,
+    /// the router's own pick, the budget left, and notes. Nothing runs.
+    /// `kind` overrides the classifier. See `docs/fleet.md#advice`.
+    pub fn advise(
+        &self,
+        prompt: &str,
+        options: &TaskOptions,
+        kind: Option<TaskKind>,
+        scope: AdviceScope<'_>,
+    ) -> Result<Advice, Error> {
+        fleet::advise(self, options, prompt, kind, scope)
+    }
+
     /// Run `prompt` on the candidate the router picks from `fleet`, failing
     /// over to the next while its harness fails, when the entry (or `how`)
     /// asks for failover. `options.harness` is ignored.
@@ -1396,6 +1413,11 @@ pub struct TaskOptions {
     /// branch is created by `run`, `run_on` or a routed run; stored with
     /// it, except a custom judge.
     pub goal: Option<Goal>,
+    /// The fleet table the task was started under, for the advice a
+    /// delegating harness asks for ([`Yard::advise`], `by fleet advise`):
+    /// its entry for a subtask's kind lists the candidates. Carried to
+    /// children. `None` lists the harnesses the envelope allows instead.
+    pub fleet: Option<Fleet>,
     /// The task a new top-level branch joins as another attempt (its ID);
     /// `None` starts a task of its own (a fan's branches share one, and a
     /// fork joins its parent's). Read only when a branch is created; see

@@ -453,6 +453,20 @@ pub enum FleetAction {
         #[arg(long, value_name = "N")]
         seed: Option<u64>,
     },
+    /// What to know before picking a harness for a task: the candidates with whether they can
+    /// run here, their recorded outcomes for its kind and the router's own pick. Inside a
+    /// harness, as its branch: its task's fleet entry, or the harnesses it may run, and its
+    /// budget left
+    Advise {
+        /// The task
+        prompt: String,
+        /// The task's kind instead of the classifier's
+        #[arg(long, value_name = "KIND", value_parser = task_kind)]
+        kind: Option<branchyard::TaskKind>,
+        /// Seed the router's pick for a reproducible advice
+        #[arg(long, value_name = "N")]
+        seed: Option<u64>,
+    },
 }
 
 /// Options for `--provider microsandbox`.
@@ -559,6 +573,9 @@ pub struct SpawnArgs {
     pub plan: bool,
     /// `--model`: the child's model. Unset: its seat's or its parent's.
     pub model: Option<String>,
+    /// `--why`: the parent's reason for the harness and model, recorded on
+    /// the child.
+    pub why: Option<String>,
     /// `--result-schema`: the child's result contract's schema, as JSON
     /// text.
     pub result_schema: Option<String>,
@@ -4234,6 +4251,10 @@ pub struct SpawnGraph {
     /// parent's inbox; it changes nothing until `by plan approve`
     #[arg(long)]
     plan: bool,
+    /// Why this harness and model for this subtask, in a few words: recorded on the child, shown
+    /// by `by log`, and counted by `by fleet stats` beside how the child turned out
+    #[arg(long, value_name = "TEXT", value_parser = non_blank)]
+    why: Option<String>,
     /// The shape of the answer the child must report with `by report --result`, as a JSON Schema
     /// using only type, properties, required, additionalProperties (false), items, enum,
     /// minimum, maximum, minLength, maxLength and description; anything else is refused. You
@@ -4290,6 +4311,7 @@ impl Flags for SpawnFlags {
             bindings: self.graph.bindings,
             connectors: self.graph.connectors,
             plan: self.graph.plan,
+            why: self.graph.why,
             model: self.model,
             result_schema: self.graph.result_schema,
             result_schema_file: self.graph.result_schema_file,

@@ -79,6 +79,8 @@ A person acts with their own authority, or the server's, bounded by the branch's
 | Integrate several children together, checked once, all or none ([delegation](delegation.md#integrating-several-children)) | `Delegate::integrate_all` → `MergedAll` | `integrate a b c` | yes | `POST …/integrate` with `with`; the result's `merged_all` | `integrate_all` |
 | Wait for branches to settle, all or the first ([delegation](delegation.md#waiting-on-children)) | `Yard::wait_for`, `Delegate::wait_for` → `Waited` | `wait BRANCH... [--any] [--timeout S]` | yes; each request capped at 30s, asked again past it | `POST /v1/repos/{repo}/wait` | `wait_for` |
 | Children | `Branch::descendants`, `Delegate::children` | `children` | yes | `GET …/children` | `children` |
+| Advice before choosing a child's harness ([fleet](fleet.md#advice)) | `Delegate::advise`, `Yard::advise` → `Advice` | `fleet advise "<subtask>" [--kind K]` | no: routing is local only | none | none |
+| Say why a child's harness was chosen, recorded on it | `Spawn::why` | `spawn --why TEXT` | yes | `why` in the spawn | `why` |
 | A branch's graph: children, dependencies, revision ([task graphs](graph.md)) | `Yard::graph`, `Delegate::graph` | `graph show` | yes | `GET …/graph` | `graph` |
 | Apply a graph proposal, all or nothing | `Delegate::apply_graph` | `graph apply --parent` | yes; server opt-in `--allow-delegation` for spawns | `POST …/graph`; `409 stale_revision` | `apply_graph` |
 | Spawn a child that waits for siblings | `Spawn::depends_on`, `after` | `spawn --depends-on [--after integrated]` | yes | `depends_on`, `after` in the spawn | yes |

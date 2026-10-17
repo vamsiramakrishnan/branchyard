@@ -153,6 +153,24 @@ pub fn tools() -> Vec<Tool> {
         })),
     );
     graph.annotations = Some(read_only("Show a branch's graph"));
+    let mut advise = Tool::new(
+        "advise",
+        "What to know before picking a harness for a subtask: the candidates (your task's fleet \
+         entry for its kind, or the harnesses you may run), each with whether it can run here, \
+         its recorded outcomes for this kind and the success rate the router samples around, \
+         the router's own pick, your budget left, and notes (no outcomes yet, risk words). Call \
+         it before spawn, choose with it, and pass your reason as spawn's why.",
+        schema(json!({
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "The subtask, as you would give it to spawn"},
+                "kind": {"type": "string", "description": "Its kind instead of the classifier's: bugfix, feature, refactor, review, research, docs, migration, tests or other"},
+            },
+            "required": ["prompt"],
+            "additionalProperties": false,
+        })),
+    );
+    advise.annotations = Some(read_only("Advise on a harness for a subtask"));
     let mut check = Tool::new(
         "check",
         "Run a branch's check (its own, or the one it inherited) on its current work the way \
@@ -208,6 +226,7 @@ pub fn tools() -> Vec<Tool> {
         "connectors": {"type": "array", "items": {"type": "string"}, "description": "Connector grants, as --connector takes them (github:read, 'github:write:issues.*'); narrowed to yours. Unset: yours, or the seat's"},
         "plan": {"type": "boolean", "description": "Plan first: the child's first turn is read-only and proposes a plan, escalated to your inbox; it changes nothing until you approve_plan"},
         "model": {"type": "string", "description": "The model the child's harness runs, or a size alias (small, medium, large, extra-large) where it defines one; a cheaper one suits mechanical work. Unset: the seat's, or yours. Refused for a harness that cannot choose one"},
+        "why": {"type": "string", "description": "Why this harness and model for this subtask, in a few words: recorded on the child and learned from by the outcome store beside how it turns out. Ask advise first"},
         "result": {
             "type": "object",
             "description": "The shape of the answer the child must give: it reports a JSON result with report, checked against this schema (a mismatch is refused, naming the path and the rule), and you read it as inspect's or wait's result. The child sees the contract in its own inspect as result_contract",
@@ -399,6 +418,7 @@ pub fn tools() -> Vec<Tool> {
             })),
         ),
         graph,
+        advise,
         Tool::new(
             "publish_artifact",
             "Publish a file at a path in your worktree as a new immutable artifact of your \

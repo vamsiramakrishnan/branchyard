@@ -14464,6 +14464,13 @@
           ],
           "description": "The child's model, like [`branchyard::Spawn::model`]; unset is its\nseat's or its parent's."
         },
+        "why": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Why this harness and model for this subtask, in the parent's words;\nrecorded on the child and learned from by the outcome store."
+        },
         "result": {
           "anyOf": [
             {
@@ -14913,6 +14920,13 @@
                     }
                   ],
                   "description": "The shape of the answer the child must report: a schema in the\nsubset `crate::contract` supports, and whether a result is\nrequired. See `docs/delegation.md#result-contract`."
+                },
+                "why": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why this harness and model, in the parent's words; recorded on the\nchild. See `docs/fleet.md#advice`."
                 },
                 "kind": {
                   "type": "string",
@@ -23410,6 +23424,20 @@
               "description": "The router chose this branch's harness, or the kind was recorded."
             },
             {
+              "$ref": "#/$defs/ParentChoice",
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "chosen"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "description": "A delegating parent chose this child's harness and model, with the\nreason it gave ([`ParentChoice`])."
+            },
+            {
               "type": "object",
               "properties": {
                 "reason": {
@@ -23627,6 +23655,41 @@
             "failover"
           ],
           "description": "What the router decided for a branch, recorded on it before its first\nturn as [`FleetActivity::Routed`]."
+        },
+        "ParentChoice": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/TaskKind",
+              "description": "The kind the classifier gave the child's prompt."
+            },
+            "kind_source": {
+              "type": "string",
+              "description": "`classifier`, always: a spawn names no kind."
+            },
+            "candidate": {
+              "$ref": "#/$defs/FleetCandidate",
+              "description": "The child's harness, model and effort as the parent chose them."
+            },
+            "by": {
+              "type": "string",
+              "description": "The parent branch."
+            },
+            "why": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The parent's reason, from `by spawn --why` or its equivalents."
+            }
+          },
+          "required": [
+            "kind",
+            "kind_source",
+            "candidate",
+            "by"
+          ],
+          "description": "A delegating parent's choice of a child's harness and model, recorded\non the child as [`FleetActivity::Chosen`] when it is spawned: the kind\nthe classifier gave its prompt, the candidate, the parent, and the\nreason the parent gave (`by spawn --why`), so the outcome store can\nlearn from the choice as it learns from the router's."
         },
         "JudgeMark": {
           "type": "object",
@@ -28454,6 +28517,20 @@
               "description": "The router chose this branch's harness, or the kind was recorded."
             },
             {
+              "$ref": "#/$defs/ParentChoice",
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "chosen"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "description": "A delegating parent chose this child's harness and model, with the\nreason it gave ([`ParentChoice`])."
+            },
+            {
               "type": "object",
               "properties": {
                 "reason": {
@@ -28671,6 +28748,41 @@
             "failover"
           ],
           "description": "What the router decided for a branch, recorded on it before its first\nturn as [`FleetActivity::Routed`]."
+        },
+        "ParentChoice": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/TaskKind",
+              "description": "The kind the classifier gave the child's prompt."
+            },
+            "kind_source": {
+              "type": "string",
+              "description": "`classifier`, always: a spawn names no kind."
+            },
+            "candidate": {
+              "$ref": "#/$defs/FleetCandidate",
+              "description": "The child's harness, model and effort as the parent chose them."
+            },
+            "by": {
+              "type": "string",
+              "description": "The parent branch."
+            },
+            "why": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The parent's reason, from `by spawn --why` or its equivalents."
+            }
+          },
+          "required": [
+            "kind",
+            "kind_source",
+            "candidate",
+            "by"
+          ],
+          "description": "A delegating parent's choice of a child's harness and model, recorded\non the child as [`FleetActivity::Chosen`] when it is spawned: the kind\nthe classifier gave its prompt, the candidate, the parent, and the\nreason the parent gave (`by spawn --why`), so the outcome store can\nlearn from the choice as it learns from the router's."
         },
         "JudgeMark": {
           "type": "object",
@@ -37477,6 +37589,20 @@
               "description": "The router chose this branch's harness, or the kind was recorded."
             },
             {
+              "$ref": "#/$defs/ParentChoice",
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "chosen"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "description": "A delegating parent chose this child's harness and model, with the\nreason it gave ([`ParentChoice`])."
+            },
+            {
               "type": "object",
               "properties": {
                 "reason": {
@@ -37694,6 +37820,41 @@
             "failover"
           ],
           "description": "What the router decided for a branch, recorded on it before its first\nturn as [`FleetActivity::Routed`]."
+        },
+        "ParentChoice": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/TaskKind",
+              "description": "The kind the classifier gave the child's prompt."
+            },
+            "kind_source": {
+              "type": "string",
+              "description": "`classifier`, always: a spawn names no kind."
+            },
+            "candidate": {
+              "$ref": "#/$defs/FleetCandidate",
+              "description": "The child's harness, model and effort as the parent chose them."
+            },
+            "by": {
+              "type": "string",
+              "description": "The parent branch."
+            },
+            "why": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The parent's reason, from `by spawn --why` or its equivalents."
+            }
+          },
+          "required": [
+            "kind",
+            "kind_source",
+            "candidate",
+            "by"
+          ],
+          "description": "A delegating parent's choice of a child's harness and model, recorded\non the child as [`FleetActivity::Chosen`] when it is spawned: the kind\nthe classifier gave its prompt, the candidate, the parent, and the\nreason the parent gave (`by spawn --why`), so the outcome store can\nlearn from the choice as it learns from the router's."
         },
         "JudgeMark": {
           "type": "object",
