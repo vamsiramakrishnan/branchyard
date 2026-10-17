@@ -12,12 +12,13 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     harness, placement, run, Activity, Branch, BranchStatus, Budget, Effort, Error, Provisioning,
-    RecordedEvent, TaskOptions, Yard,
+    RecordedEvent, StallAction, TaskOptions, Yard,
 };
 use branchyard_support::rng::SplitMix64;
 use branchyard_support::time::now_ms;
@@ -342,6 +343,15 @@ impl Default for FleetEntry {
 /// The exploration floor when an entry sets none.
 pub const DEFAULT_EXPLORATION: f64 = 0.1;
 
+/// The stall window of a routed branch whose command line and entry set
+/// none: no harness activity for this long interrupts its turn
+/// ([`crate::StallAction::Interrupt`]), and with failover the task moves to
+/// the next candidate. A harness that hangs on a search, a prompt nobody
+/// answers or a dead connection otherwise holds the attempt until
+/// `max_minutes`, or for good. `stall_minutes = 0` on the entry turns it
+/// off; `--stall-after` on the command line replaces it.
+pub const DEFAULT_STALL: Duration = Duration::from_secs(15 * 60);
+
 /// The fleet table: entries by task kind, and `default`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Fleet {
@@ -575,6 +585,9 @@ pub struct JudgeMark {
 pub enum FleetActivity {
     /// The router chose this branch's harness, or the kind was recorded.
     Routed(Box<RouteDecision>),
+    /// A delegating parent chose this child's harness and model, with the
+    /// reason it gave ([`ParentChoice`]).
+    Chosen(Box<ParentChoice>),
     /// This branch's harness failed, and the task moves to `next`.
     FailedOver {
         reason: String,
@@ -605,6 +618,17 @@ impl FleetActivity {
                 ),
                 None => format!("kind {} ({})", d.kind, d.kind_source),
             },
+            FleetActivity::Chosen(c) => format!(
+                "chosen by {} for {} ({}): {}{}",
+                c.by,
+                c.kind,
+                c.kind_source,
+                c.candidate.label(),
+                c.why
+                    .as_deref()
+                    .map(|w| format!(": {w}"))
+                    .unwrap_or_default()
+            ),
             FleetActivity::FailedOver { reason, next } => {
                 format!("failing over to {}: {reason}", next.label())
             }
@@ -632,6 +656,38 @@ pub fn recorded_route(events: &[RecordedEvent]) -> Option<RouteDecision> {
     events.iter().rev().find_map(|e| match &e.activity {
         Activity::Fleet(activity) => match activity.as_ref() {
             FleetActivity::Routed(decision) => Some(decision.as_ref().clone()),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// A delegating parent's choice of a child's harness and model, recorded
+/// on the child as [`FleetActivity::Chosen`] when it is spawned: the kind
+/// the classifier gave its prompt, the candidate, the parent, and the
+/// reason the parent gave (`by spawn --why`), so the outcome store can
+/// learn from the choice as it learns from the router's.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ParentChoice {
+    /// The kind the classifier gave the child's prompt.
+    pub kind: TaskKind,
+    /// `classifier`, always: a spawn names no kind.
+    pub kind_source: String,
+    /// The child's harness, model and effort as the parent chose them.
+    pub candidate: FleetCandidate,
+    /// The parent branch.
+    pub by: String,
+    /// The parent's reason, from `by spawn --why` or its equivalents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+/// The parent's choice recorded on a branch, if it was spawned by one.
+pub fn recorded_choice(events: &[RecordedEvent]) -> Option<ParentChoice> {
+    events.iter().rev().find_map(|e| match &e.activity {
+        Activity::Fleet(activity) => match activity.as_ref() {
+            FleetActivity::Chosen(choice) => Some(choice.as_ref().clone()),
             _ => None,
         },
         _ => None,
@@ -709,8 +765,19 @@ pub struct OutcomeRecord {
     pub turns: u32,
     /// Whether the router chose its harness.
     pub routed: bool,
+    /// Who chose its harness: [`DECIDED_BY_ROUTER`] (a fleet entry),
+    /// [`DECIDED_BY_PARENT`] (a delegating parent's spawn), or `None` for
+    /// one a person named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<String>,
     pub recorded_ms: u64,
 }
+
+/// [`OutcomeRecord::decided_by`] of a branch the router routed.
+pub const DECIDED_BY_ROUTER: &str = "router";
+/// [`OutcomeRecord::decided_by`] of a delegated child whose parent chose
+/// its harness.
+pub const DECIDED_BY_PARENT: &str = "parent";
 
 /// The outcome store: one row per created top-level branch, replaced as
 /// it goes on. Rows outlive their branches.
@@ -727,9 +794,10 @@ fn outcome_id(branch: &str, created_ms: u64) -> String {
 }
 
 /// Record or update `name`'s outcome after a turn or a merge: top-level
-/// branches only, not a judge's scratch branch. `judged` sets the score
-/// and, when picked, `judged_best`. Best-effort for callers: it never
-/// changes what happened to the branch.
+/// branches and delegated children alike (a child's row says its parent
+/// decided its harness), not a judge's scratch branch. `judged` sets the
+/// score and, when picked, `judged_best`. Best-effort for callers: it
+/// never changes what happened to the branch.
 pub(crate) fn observe(
     yard: &Yard,
     name: &str,
@@ -737,9 +805,6 @@ pub(crate) fn observe(
 ) -> Result<Option<OutcomeRecord>, Error> {
     let store = yard.store();
     let record = store.read(name)?;
-    if record.info.depth != 0 {
-        return Ok(None);
-    }
     let events = crate::record::read(&store, name)?;
     if events.iter().any(|e| {
         matches!(&e.activity, Activity::Fleet(a) if matches!(a.as_ref(), FleetActivity::Judging { .. }))
@@ -752,9 +817,17 @@ pub(crate) fn observe(
     let id = outcome_id(name, record.created_ms);
     let previous = store.outcomes().outcome(&id)?;
     let route = recorded_route(&events);
+    let choice = recorded_choice(&events);
     let kind = route
         .as_ref()
-        .map_or_else(|| classify(&record.info.prompt).kind, |d| d.kind);
+        .map(|d| d.kind)
+        .or_else(|| choice.as_ref().map(|c| c.kind))
+        .unwrap_or_else(|| classify(&record.info.prompt).kind);
+    let decided_by = match (&route, &choice) {
+        (Some(d), _) if d.entry.is_some() => Some(DECIDED_BY_ROUTER.to_owned()),
+        (_, Some(_)) => Some(DECIDED_BY_PARENT.to_owned()),
+        _ => None,
+    };
     let mut score = previous.as_ref().and_then(|p| p.score);
     if let Some((judge_score, picked)) = judged {
         score = Some(judge_score);
@@ -783,6 +856,7 @@ pub(crate) fn observe(
         duration_ms: crate::compare::attempt(&record.info, &events, Vec::new()).duration_ms,
         turns: record.info.turns,
         routed: route.as_ref().is_some_and(|d| d.entry.is_some()),
+        decided_by,
         recorded_ms: now_ms(),
     };
     store.outcomes().put_outcome(&row)?;
@@ -816,6 +890,9 @@ pub struct CandidateStats {
     pub ready: u32,
     pub failed: u32,
     pub interrupted: u32,
+    /// Runs whose harness a delegating parent chose ([`DECIDED_BY_PARENT`]).
+    #[serde(default)]
+    pub delegated: u32,
     /// Summed [`credit`]: the Beta posterior is (1 + successes, 1 + failures).
     pub successes: f64,
     pub failures: f64,
@@ -876,6 +953,10 @@ pub fn stats(rows: &[OutcomeRecord]) -> Vec<CandidateStats> {
                 ready: count(BranchOutcome::Ready),
                 failed: count(BranchOutcome::Failed),
                 interrupted: count(BranchOutcome::Interrupted),
+                delegated: rows
+                    .iter()
+                    .filter(|r| r.decided_by.as_deref() == Some(DECIDED_BY_PARENT))
+                    .count() as u32,
                 successes: credits.iter().sum(),
                 failures: credits.iter().map(|c| 1.0 - c).sum(),
                 mean_cost_usd: mean(rows.iter().filter_map(|r| r.cost_usd).collect()),
@@ -1194,14 +1275,22 @@ fn provision_for(base: Option<&Provisioning>, candidate: &FleetCandidate) -> Opt
     (!spec.is_empty()).then_some(spec)
 }
 
-/// The task's limits, with the entry's where the task sets none.
+/// The task's limits, with the entry's where the task sets none, and a
+/// stall window where neither does ([`DEFAULT_STALL`]); an entry's zero
+/// window turns stall detection off.
 fn budget_for(task: &Budget, entry: &Budget) -> Budget {
+    let (stall_after, stall_action) = match (task.stall_after, entry.stall_after) {
+        (Some(window), _) => (Some(window), task.stall_action),
+        (None, Some(window)) if window.is_zero() => (None, entry.stall_action),
+        (None, Some(window)) => (Some(window), entry.stall_action),
+        (None, None) => (Some(DEFAULT_STALL), StallAction::Interrupt),
+    };
     Budget {
         max_usd: task.max_usd.or(entry.max_usd),
         max_turns: task.max_turns.or(entry.max_turns),
         max_duration: task.max_duration.or(entry.max_duration),
-        stall_after: task.stall_after.or(entry.stall_after),
-        stall_action: task.stall_action,
+        stall_after,
+        stall_action,
         hold_cap: task.hold_cap.or(entry.hold_cap),
         follow_up_grace: None,
     }
@@ -1240,6 +1329,315 @@ pub(crate) fn route(
         how.seed.unwrap_or_else(fresh_seed),
     )?;
     Ok((route, entry.clone()))
+}
+
+// ---------------------------------------------------------------------------
+// Advice
+
+/// The entry an advice names when it has no fleet table and lists the
+/// harnesses the caller's envelope allows instead.
+pub const ENVELOPE_ENTRY: &str = "envelope";
+
+/// Stems of words that mark a task as one not to hand to the cheapest
+/// tier: production, destructive and compliance-sensitive work. A prompt's
+/// lowercase words are matched whole, or by prefix for a stem of six
+/// letters or more; [`risk_words`] lists the ones found.
+pub const RISK_WORDS: &[&str] = &[
+    "production",
+    "deploy",
+    "release",
+    "delete",
+    "drop",
+    "wipe",
+    "purge",
+    "truncate",
+    "destructive",
+    "irreversible",
+    "migrat",
+    "security",
+    "secret",
+    "credential",
+    "payment",
+    "billing",
+    "legal",
+    "compliance",
+    "privacy",
+    "encrypt",
+];
+
+/// The words of `prompt` that match [`RISK_WORDS`], in order, each once.
+pub fn risk_words(prompt: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for word in prompt
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+    {
+        let risky = RISK_WORDS
+            .iter()
+            .any(|stem| word == *stem || (stem.len() >= 6 && word.starts_with(stem)));
+        if risky && !found.contains(&word) {
+            found.push(word);
+        }
+    }
+    found
+}
+
+/// `candidate`'s recorded `kind` outcomes as one arm: its own arm when it
+/// names a model and effort, else every arm of its harness pooled, which
+/// is what an envelope's bare harness ID has to go on.
+pub fn pooled(
+    rows: &[OutcomeRecord],
+    kind: TaskKind,
+    candidate: &FleetCandidate,
+) -> Option<CandidateStats> {
+    let effort = candidate.effort.map(effort_text);
+    let normalized: Vec<OutcomeRecord> = rows
+        .iter()
+        .filter(|r| r.kind == kind && r.harness == candidate.harness)
+        .filter(|r| {
+            candidate
+                .model
+                .as_ref()
+                .is_none_or(|m| r.model.as_deref() == Some(m))
+        })
+        .filter(|r| {
+            effort
+                .as_ref()
+                .is_none_or(|e| r.effort.as_deref() == Some(e))
+        })
+        .map(|r| OutcomeRecord {
+            model: candidate.model.clone(),
+            effort: effort.clone(),
+            ..r.clone()
+        })
+        .collect();
+    stats(&normalized).into_iter().next()
+}
+
+/// One candidate an advice describes.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Advised {
+    /// The harness, model and effort, as the fleet entry or the envelope
+    /// lists them.
+    pub candidate: FleetCandidate,
+    /// Whether it can run here now; `reason` says why not.
+    pub available: bool,
+    /// Why it cannot run: outside the envelope, not installed, logged out,
+    /// or over the entry's budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Its recorded outcomes for this kind ([`pooled`]), when it has any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<CandidateStats>,
+    /// The posterior mean success rate the router samples around: 0.5 with
+    /// no outcomes.
+    pub expected: f64,
+}
+
+/// What a caller should know before choosing a harness for a task: the
+/// candidates with their availability and recorded outcomes, the router's
+/// own pick among them, the budget left, and notes. See
+/// `docs/fleet.md#advice`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Advice {
+    /// The task's kind, from `kind_source`.
+    pub kind: TaskKind,
+    /// `flag` or `classifier`.
+    pub kind_source: String,
+    /// The words that decided a classified kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched: Vec<String>,
+    /// Where the candidates came from: a fleet entry (`bugfix`, `default`,
+    /// [`INVENTORY_ENTRY`]), or [`ENVELOPE_ENTRY`] for the harnesses the
+    /// caller may run when no fleet table is known.
+    pub entry: String,
+    /// Every candidate, in the entry's (or the envelope's) order.
+    pub candidates: Vec<Advised>,
+    /// The router's pick among the available candidates: the highest
+    /// sampled success rate under `seed`, with no exploration; its `index`
+    /// counts the available candidates only. `None` when none can run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pick: Option<RoutePick>,
+    /// The seed the pick was sampled under; `--seed` reproduces it.
+    pub seed: u64,
+    /// The caller's own harness and model, inside a delegating turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own: Option<FleetCandidate>,
+    /// What the caller may still spend on children, and what the cost
+    /// limits above it leave its tree; inside a delegating turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_usd: Option<f64>,
+    /// What the cost limits above the caller leave its tree, when one
+    /// bounds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_remaining_usd: Option<f64>,
+    /// [`risk_words`] of the task.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub risk_words: Vec<String>,
+    /// Deterministic hints: no outcomes yet, risk words, nothing can run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
+/// Where an advice's candidates come from, and what the caller has.
+#[derive(Clone, Default)]
+pub struct AdviceScope<'a> {
+    /// The fleet table, when one is known: its entry for the kind gives the
+    /// candidates. Without one, `allowed` does.
+    pub fleet: Option<&'a Fleet>,
+    /// Harness or profile IDs the caller may run (its envelope); a fleet
+    /// candidate outside it is listed as unavailable.
+    pub allowed: Option<Vec<String>>,
+    /// The caller's own harness and model.
+    pub own: Option<FleetCandidate>,
+    /// What the caller may still give children ([`Advice::remaining_usd`]).
+    pub remaining_usd: Option<f64>,
+    /// What the cost limits above the caller leave its tree
+    /// ([`Advice::tree_remaining_usd`]).
+    pub tree_remaining_usd: Option<f64>,
+    /// Seed the pick for a reproducible advice; a fresh one otherwise.
+    pub seed: Option<u64>,
+    /// What this machine has of each harness, as [`RouteOptions::harnesses`].
+    pub harnesses: Option<&'a dyn crate::inventory::HarnessGate>,
+}
+
+/// The advice for `prompt`: see [`Advice`].
+pub(crate) fn advise(
+    yard: &Yard,
+    options: &TaskOptions,
+    prompt: &str,
+    kind: Option<TaskKind>,
+    scope: AdviceScope<'_>,
+) -> Result<Advice, Error> {
+    let (kind, source, matched) = kind_of(prompt, kind);
+    let (entry, mut candidates): (String, Vec<FleetCandidate>) =
+        match scope.fleet.and_then(|f| f.entry(kind)) {
+            Some((name, found)) => (name.to_owned(), found.candidates.clone()),
+            None => (
+                ENVELOPE_ENTRY.to_owned(),
+                scope
+                    .allowed
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(FleetCandidate::new)
+                    .collect(),
+            ),
+        };
+    // The caller's own harness, listed by name alone, carries its model, and
+    // its command (a child on it inherits that; `None` for a real harness).
+    if let Some(own) = &scope.own {
+        for candidate in &mut candidates {
+            if candidate.harness != own.harness {
+                continue;
+            }
+            if candidate.model.is_none() && candidate.effort.is_none() {
+                candidate.model = own.model.clone();
+            }
+            if candidate.command.is_none() {
+                candidate.command = own.command.clone();
+            }
+        }
+    }
+    let rows = yard.store().outcomes().outcomes(Some(kind))?;
+    let history: Vec<CandidateStats> = candidates
+        .iter()
+        .filter_map(|c| pooled(&rows, kind, c))
+        .collect();
+    let allowed = |c: &FleetCandidate| -> Result<(), String> {
+        let Some(list) = &scope.allowed else {
+            return Ok(());
+        };
+        let profile = harness::select(Some(&c.harness)).map_err(|e| e.to_string())?;
+        match list.iter().any(|h| h == profile.id || h == profile.harness) {
+            true => Ok(()),
+            false => Err(format!(
+                "not in this branch's envelope ({})",
+                list.join(", ")
+            )),
+        }
+    };
+    let mut advised = Vec::new();
+    let mut eligible = Vec::new();
+    for candidate in &candidates {
+        let reason = allowed(candidate)
+            .and_then(|()| availability(yard, options, candidate, scope.harnesses))
+            .err();
+        let stats = history
+            .iter()
+            .find(|s| candidate.same_arm(&s.harness, s.model.as_deref(), s.effort.as_deref()))
+            .cloned();
+        if reason.is_none() {
+            eligible.push(candidate.clone());
+        }
+        advised.push(Advised {
+            candidate: candidate.clone(),
+            available: reason.is_none(),
+            reason,
+            expected: stats.as_ref().map_or(0.5, CandidateStats::expected),
+            stats,
+        });
+    }
+    let seed = scope.seed.unwrap_or_else(fresh_seed);
+    let pick = match eligible.is_empty() {
+        true => None,
+        false => {
+            let among = FleetEntry {
+                candidates: eligible,
+                exploration: 0.0,
+                ..FleetEntry::default()
+            };
+            plan(
+                kind,
+                source,
+                matched.clone(),
+                &entry,
+                &among,
+                &history,
+                &|_| Ok(()),
+                1,
+                seed,
+            )?
+            .picks
+            .into_iter()
+            .next()
+        }
+    };
+    let risk = risk_words(prompt);
+    let mut notes = Vec::new();
+    if history.is_empty() {
+        notes.push(format!(
+            "no recorded {kind} outcomes in this repository: every P(OK) is the 0.50 prior, so \
+             prefer the cheapest candidate that can do the work, and say why"
+        ));
+    }
+    if !risk.is_empty() {
+        notes.push(format!(
+            "the task mentions {}: do not give it to the cheapest tier; prefer a candidate with \
+             recorded successes",
+            risk.join(", ")
+        ));
+    }
+    if pick.is_none() {
+        notes.push("no candidate can run here now".into());
+    }
+    Ok(Advice {
+        kind,
+        kind_source: source.to_owned(),
+        matched,
+        entry,
+        candidates: advised,
+        pick,
+        seed,
+        own: scope.own,
+        remaining_usd: scope.remaining_usd,
+        tree_remaining_usd: scope.tree_remaining_usd,
+        risk_words: risk,
+        notes,
+    })
 }
 
 /// Start `prompt` on the candidates the router picks: one branch, or with
@@ -1419,6 +1817,18 @@ fn chain(yard: &Yard, mut branch: Branch, options: &TaskOptions) -> Result<Chain
     Ok((branch, moved))
 }
 
+/// A stall the engine interrupted is the harness's fault too: it stopped
+/// answering, which is what the stall window is for. Told from a cancel,
+/// which also ends `interrupted`, by the warning the engine records
+/// (`engine::STALL_WARNING`). `None` for every other status.
+pub fn stall_fault(status: &BranchStatus, events: &[RecordedEvent]) -> Option<String> {
+    let stalled = matches!(status, BranchStatus::Interrupted)
+        && events.iter().rev().any(|e| {
+            matches!(&e.activity, Activity::Warning(text) if text == crate::engine::STALL_WARNING)
+        });
+    stalled.then(|| "stalled: no harness activity for its stall window".to_owned())
+}
+
 /// Why a branch's status is its harness's fault rather than the task's:
 /// the harness could not start, exited, never completed its handshake,
 /// was rate-limited, could not authenticate, or was unavailable. `None`
@@ -1517,10 +1927,12 @@ pub(crate) fn failover(
 ) -> Result<Option<Branch>, Error> {
     let store = yard.store();
     let record = store.read(name)?;
-    let Some(fault) = harness_fault(&record.info.status) else {
+    let events = crate::record::read(&store, name)?;
+    let Some(fault) =
+        harness_fault(&record.info.status).or_else(|| stall_fault(&record.info.status, &events))
+    else {
         return Ok(None);
     };
-    let events = crate::record::read(&store, name)?;
     let Some(decision) = recorded_route(&events).filter(|d| d.failover) else {
         return Ok(None);
     };
@@ -1688,6 +2100,7 @@ mod tests {
             duration_ms: Some(10),
             turns: 1,
             routed: true,
+            decided_by: Some(DECIDED_BY_ROUTER.to_owned()),
             recorded_ms: 0,
         }
     }
@@ -1883,6 +2296,47 @@ mod tests {
             }),
             None
         );
+    }
+
+    /// A stall the engine interrupted fails over; a cancel, which also
+    /// ends interrupted, does not.
+    #[test]
+    fn a_stall_fails_over_and_a_cancel_does_not() {
+        let event = |activity: Activity| RecordedEvent { at_ms: 0, activity };
+        let stalled = [event(Activity::Warning(
+            crate::engine::STALL_WARNING.into(),
+        ))];
+        assert_eq!(
+            stall_fault(&BranchStatus::Interrupted, &stalled),
+            Some("stalled: no harness activity for its stall window".into())
+        );
+        let cancelled = [event(Activity::Warning("cancelled by alice".into()))];
+        assert_eq!(stall_fault(&BranchStatus::Interrupted, &cancelled), None);
+        assert_eq!(stall_fault(&BranchStatus::Ready, &stalled), None);
+    }
+
+    /// A routed branch gets the default stall window unless its task or
+    /// entry sets one, and an entry's zero window turns it off.
+    #[test]
+    fn routed_branches_stall_by_default() {
+        let none = Budget::default();
+        let routed = budget_for(&none, &none);
+        assert_eq!(routed.stall_after, Some(DEFAULT_STALL));
+        assert_eq!(routed.stall_action, StallAction::Interrupt);
+        let entry = Budget::default()
+            .stall_after(Duration::from_secs(60))
+            .stall_action(StallAction::Notify);
+        let routed = budget_for(&none, &entry);
+        assert_eq!(routed.stall_after, Some(Duration::from_secs(60)));
+        assert_eq!(routed.stall_action, StallAction::Notify);
+        let off = Budget::default().stall_after(Duration::ZERO);
+        assert_eq!(budget_for(&none, &off).stall_after, None);
+        let task = Budget::default()
+            .stall_after(Duration::from_secs(30))
+            .stall_action(StallAction::Interrupt);
+        let routed = budget_for(&task, &off);
+        assert_eq!(routed.stall_after, Some(Duration::from_secs(30)));
+        assert_eq!(routed.stall_action, StallAction::Interrupt);
     }
 
     fn installed(
@@ -2102,5 +2556,37 @@ mod tests {
             Some(BranchOutcome::Failed)
         );
         assert_eq!(BranchOutcome::of(&BranchStatus::Running), None);
+    }
+
+    /// A bare harness pools every arm of its outcomes; a candidate naming
+    /// a model gets its own arm; another kind or harness gives nothing.
+    #[test]
+    fn pooled_arms_and_risk_words() {
+        let bugfix = |harness: &str, outcome, cost, model: Option<&str>| OutcomeRecord {
+            kind: TaskKind::Bugfix,
+            model: model.map(str::to_owned),
+            ..row(harness, outcome, cost)
+        };
+        let rows = vec![
+            bugfix("codex", BranchOutcome::Merged, Some(2.0), Some("large")),
+            bugfix("codex", BranchOutcome::Failed, Some(0.5), Some("small")),
+            bugfix("gemini-cli", BranchOutcome::Ready, Some(1.0), None),
+        ];
+        let bare = pooled(&rows, TaskKind::Bugfix, &FleetCandidate::new("codex")).unwrap();
+        assert_eq!((bare.runs, bare.merged, bare.failed), (2, 1, 1));
+        assert_eq!(bare.model, None);
+        assert_eq!(bare.mean_cost_usd, Some(1.25));
+        let mut small = FleetCandidate::new("codex");
+        small.model = Some("small".into());
+        let own = pooled(&rows, TaskKind::Bugfix, &small).unwrap();
+        assert_eq!((own.runs, own.failed), (1, 1));
+        assert_eq!(own.model.as_deref(), Some("small"));
+        assert!(pooled(&rows, TaskKind::Docs, &FleetCandidate::new("codex")).is_none());
+        assert!(pooled(&rows, TaskKind::Bugfix, &FleetCandidate::new("amp")).is_none());
+        assert_eq!(
+            risk_words("Delete the production migration before the payment release"),
+            ["delete", "production", "migration", "payment", "release"]
+        );
+        assert!(risk_words("Fix the dropdown on the product page").is_empty());
     }
 }

@@ -117,12 +117,14 @@ pub fn remote_entry(server: &RemoteMcpServer) -> Value {
 ///
 /// - The policy's own rules already in the CLI's form (`command(cargo
 ///   test)`, `mcp(docs/search)`, ...), allowed or denied as the policy says.
-/// - Commands, when the policy allows the shell ([`SHELL_TOOL`]): `git`, and
-///   `by` when the turn's harness has it. When it allows only Branchyard's
-///   delegation commands: `by` alone. Each as a regular expression over the
-///   line from the program on (`command(regex:git .*)`), never a bare
-///   program prefix, which agy 1.3.3 did not match against a line with a
-///   redirection; a `by` path holding whitespace gets no rule of its own.
+/// - Commands, when the policy allows the shell ([`SHELL_TOOL`]):
+///   `command(*)`, every command, as the policy says (`full` and `--yes`
+///   allow the shell outright, and the CLI's `run_command` is the shell).
+///   When it allows only Branchyard's delegation commands: `by` alone, and
+///   `by`'s path, each as a regular expression over the line from the
+///   program on (`command(regex:by .*)`), never a bare program prefix, which
+///   agy 1.3.3 did not match against a line with a redirection; a `by` path
+///   holding whitespace gets no rule of its own.
 /// - Each MCP server the turn gives the harness: `mcp(<server>/*)` when the
 ///   policy allows all its tools (`mcp__<server>__*`, `mcp__*`, the
 ///   fallback; for Branchyard's own server, also its delegation-command
@@ -145,13 +147,11 @@ pub fn rules(context: &Context, permissions: &Permissions) -> PermissionsWritten
     let shell = permissions.decide(SHELL_TOOL) == Some(true);
     let delegation = permissions.delegation_by(SHELL_TOOL);
     if shell {
-        allow.extend(command("git"));
-    }
-    if let Some(by) = permissions
-        .by
-        .as_deref()
-        .filter(|_| shell || delegation.is_some())
-    {
+        // The policy allows the shell, so every command: a narrower list
+        // (`git` and `by`, until 16 October 2026) left a `full` branch
+        // unable to run its tests headless, where the CLI soft-denies.
+        allow.push("command(*)".into());
+    } else if let Some(by) = permissions.by.as_deref().filter(|_| delegation.is_some()) {
         allow.extend(command("by"));
         allow.extend(command(by));
         allow.extend(delegation.and_then(command));
@@ -416,10 +416,9 @@ mod tests {
     }
 
     /// `full`, with Branchyard's server and `by` on the harness's path:
-    /// git and `by` as regular expressions, never `command(regex:.*)`, and
-    /// every tool of each server.
+    /// every command, which covers `by`, and every tool of each server.
     #[test]
-    fn an_allowed_shell_gets_git_and_by_never_every_command() {
+    fn an_allowed_shell_gets_every_command() {
         let permissions = Permissions {
             by: Some("/opt/by.d/bin/by".into()),
             ..Permissions::new(Fallback::Allow)
@@ -427,16 +426,9 @@ mod tests {
         let written = rules(&context(&[DELEGATION_SERVER, "docs"]), &permissions);
         assert_eq!(
             written.allow,
-            [
-                "command(regex:git .*)",
-                "command(regex:by .*)",
-                "command(regex:/opt/by\\.d/bin/by .*)",
-                "mcp(branchyard/*)",
-                "mcp(docs/*)",
-            ]
+            ["command(*)", "mcp(branchyard/*)", "mcp(docs/*)"]
         );
         assert!(written.deny.is_empty());
-        assert!(!written.allow.iter().any(|r| r.contains("regex:.*")));
     }
 
     /// The delegation rule alone allows `by` and Branchyard's tools, not

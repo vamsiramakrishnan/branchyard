@@ -284,6 +284,7 @@ impl Live {
             trace_parent: None,
             plan: task.plan,
             goal: crate::plan_cmd::goal(task),
+            fleet: task.fleet.clone(),
             join_task: None,
             deny: task.deny.clone(),
         })
@@ -487,6 +488,8 @@ pub fn fan(
         ..live.options(task)?
     };
     let options = crate::plan_cmd::with_fleet(options, task, prompt);
+    // The judge's branch runs with the attempts' options.
+    let judge_options = options.clone();
     let result = match routed {
         true => {
             match crate::fleet_cmd::routed(&yard, prompt, &options, task, true, route.attempts) {
@@ -531,8 +534,14 @@ pub fn fan(
     let summary = fan_summary(env, &infos);
     if route.judge {
         let names: Vec<String> = branches.iter().map(|b| b.info().name.clone()).collect();
-        let judgement =
-            crate::fleet_cmd::judge_names(&yard, &names, None, None, task.fleet.as_ref())?;
+        let judgement = crate::fleet_cmd::judge_names(
+            &yard,
+            &names,
+            None,
+            None,
+            task.fleet.as_ref(),
+            &judge_options,
+        )?;
         print(&format!(
             "\n{}",
             crate::fleet_cmd::judgement_table(&judgement, env.style())
@@ -1532,6 +1541,7 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         plan: args.plan,
         model: args.model.clone(),
         result,
+        why: args.why.clone(),
     };
     if let Some(delegate) = harness_delegate(json)? {
         if args.parent.is_some()

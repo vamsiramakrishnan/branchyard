@@ -26,9 +26,7 @@
   ],
   "permissions": {
     "allow": [
-      "command(regex:git .*)",
-      "command(regex:by .*)",
-      "command(regex:/usr/local/bin/by .*)",
+      "command(*)",
       "mcp(docs/*)",
       "mcp(search/*)",
       "mcp(branchyard/*)"

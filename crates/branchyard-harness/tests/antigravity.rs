@@ -256,6 +256,29 @@ fn streams_text_tools_and_cumulative_usage() {
             outcome: TurnOutcome::Interrupted
         }]
     );
+
+    // A command the CLI soft-denied: recorded against agy 1.3.3, which ran
+    // on without it and ended the turn SUCCESS with the action listed.
+    driver.submit("Run sleep 60.").unwrap();
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"event": "result", "result": {"conversation_id": "c1", "status": "SUCCESS", "response": "",
+            "denied_actions": [{"action": "command", "display_name": "RunCommand"}]}}),
+    );
+    assert_eq!(
+        events,
+        vec![
+            Event::Warning {
+                message: "the CLI soft-denied a command (RunCommand): no permissions.allow rule \
+                          in its settings lets it run; the turn went on without it"
+                    .into()
+            },
+            Event::TurnEnded {
+                turn: 3,
+                outcome: TurnOutcome::Completed
+            }
+        ]
+    );
 }
 
 #[test]

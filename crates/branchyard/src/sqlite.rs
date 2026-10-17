@@ -234,7 +234,8 @@ CREATE TABLE IF NOT EXISTS outcomes (
     duration_ms INTEGER,
     turns INTEGER NOT NULL,
     routed INTEGER NOT NULL,
-    recorded_ms INTEGER NOT NULL
+    recorded_ms INTEGER NOT NULL,
+    decided_by TEXT
 );
 CREATE INDEX IF NOT EXISTS outcomes_kind ON outcomes (kind, recorded_ms);
 CREATE TABLE IF NOT EXISTS model_usage (
@@ -743,6 +744,20 @@ impl Sqlite {
         };
         store.tx(true, |tx| {
             tx.execute_batch(TABLES).map_err(|e| db("schema", e))?;
+            // A column added after its table shipped is added to a store
+            // from before it; the schema number stays, since nothing else
+            // changed and an older version still reads the rows.
+            let has_decided_by = tx
+                .prepare("PRAGMA table_info(outcomes)")
+                .map_err(|e| db("schema", e))?
+                .query_map([], |r| r.get::<_, String>(1))
+                .map_err(|e| db("schema", e))?
+                .filter_map(Result::ok)
+                .any(|name| name == "decided_by");
+            if !has_decided_by {
+                tx.execute("ALTER TABLE outcomes ADD COLUMN decided_by TEXT", [])
+                    .map_err(|e| db("schema", e))?;
+            }
             let version: Option<String> = tx
                 .query_row("SELECT value FROM meta WHERE key = 'schema'", [], |r| {
                     r.get(0)
@@ -2730,7 +2745,7 @@ impl StorageBackend for Sqlite {
 }
 
 const OUTCOME_COLUMNS: &str = "id, repository, branch, kind, harness, model, effort, outcome, \
-     score, cost_usd, duration_ms, turns, routed, recorded_ms";
+     score, cost_usd, duration_ms, turns, routed, recorded_ms, decided_by";
 
 type OutcomeColumns = (
     String,
@@ -2747,6 +2762,7 @@ type OutcomeColumns = (
     i64,
     bool,
     i64,
+    Option<String>,
 );
 
 fn outcome_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutcomeColumns> {
@@ -2765,6 +2781,7 @@ fn outcome_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutcomeColumns> {
         r.get(11)?,
         r.get(12)?,
         r.get(13)?,
+        r.get(14)?,
     ))
 }
 
@@ -2787,6 +2804,7 @@ fn outcome_record(c: OutcomeColumns) -> Result<crate::fleet::OutcomeRecord, Erro
         turns: from_db_u32("turns", c.11)?,
         routed: c.12,
         recorded_ms: from_db("recorded_ms", c.13)?,
+        decided_by: c.14,
     })
 }
 
@@ -2798,7 +2816,7 @@ impl crate::fleet::OutcomeBackend for Sqlite {
             tx.execute(
                 &format!(
                     "INSERT OR REPLACE INTO outcomes ({OUTCOME_COLUMNS}) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
                 ),
                 params![
                     row.id,
@@ -2814,7 +2832,8 @@ impl crate::fleet::OutcomeBackend for Sqlite {
                     to_db_opt("duration_ms", row.duration_ms)?,
                     i64::from(row.turns),
                     row.routed,
-                    to_db("recorded_ms", row.recorded_ms)?
+                    to_db("recorded_ms", row.recorded_ms)?,
+                    row.decided_by
                 ],
             )
             .map_err(|e| db("outcome", e))?;

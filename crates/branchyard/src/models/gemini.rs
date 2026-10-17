@@ -758,6 +758,38 @@ mod tests {
             ),
             Ok(Compat::Off)
         );
+        // Z.ai's OpenAI-compatible endpoints name their version in the URL:
+        // the path's /v1 is dropped and nothing else is adapted.
+        for url in [
+            "https://api.z.ai/api/coding/paas/v4",
+            "https://api.z.ai/api/paas/v4",
+            "https://api.z.ai/api/v1",
+        ] {
+            assert_eq!(
+                compat_of(json!({"api": "openai", "url": url})),
+                Ok(Compat::Versioned),
+                "{url}"
+            );
+        }
+        assert_eq!(
+            compat_of(
+                json!({"api": "openai", "url": "https://api.z.ai/api/paas/v4", "compat": "none"})
+            ),
+            Ok(Compat::Off)
+        );
+        assert_eq!(
+            compat_of(
+                json!({"api": "openai", "url": "https://proxy.example/v4", "compat": "versioned"})
+            ),
+            Ok(Compat::Versioned)
+        );
+        // Its Anthropic endpoint is an anthropic backend, with no layer.
+        assert_eq!(
+            compat_of(json!({"api": "anthropic", "url": "https://api.z.ai/api/anthropic"})),
+            Ok(Compat::Off)
+        );
+        let refused = compat_of(json!({"api": "anthropic", "compat": "versioned"})).unwrap_err();
+        assert!(refused.contains("openai backend"), "{refused}");
         let refused = compat_of(json!({"api": "anthropic", "compat": "gemini"})).unwrap_err();
         assert!(
             refused.contains("models.backends.b.compat") && refused.contains("openai backend"),

@@ -1,8 +1,9 @@
 //! The gateway's side toward a backend: one HTTP/1.1 request per
 //! connection, over TCP or TLS (rustls with the Mozilla roots), and a
-//! response whose body is read as it arrives. [`Transport`] is the same
-//! over the operator's HTTP proxy and root certificates, for the requests
-//! `by models list` makes.
+//! response whose body is read as it arrives. A [`Transport`] carries them
+//! over the operator's HTTP proxy and root certificates when the
+//! environment names them (`HTTPS_PROXY`, `SSL_CERT_FILE`): the gateway's
+//! calls to its backends and the requests `by models list` makes alike.
 
 use std::io::{self, BufReader, Read, Write};
 
@@ -22,7 +23,7 @@ const MAX_HEAD: usize = 64 * 1024;
 const CONNECT: Duration = Duration::from_secs(10);
 /// How long a response may go quiet: a model may think for minutes
 /// between streamed events.
-const QUIET: Duration = Duration::from_secs(600);
+pub(crate) const QUIET: Duration = Duration::from_secs(600);
 
 /// A backend's base URL, parsed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -169,6 +170,7 @@ fn handshake(tcp: TcpStream, host: &str, config: Arc<ClientConfig>) -> Result<St
     Ok(Stream::Tls(Box::new(stream)))
 }
 
+/// A direct connection to `target`: TCP, or TLS trusting the Mozilla roots.
 fn connect(target: &Target) -> Result<Stream, Failure> {
     let tcp = dial(&target.host, target.port, QUIET)?;
     if !target.tls {
@@ -194,8 +196,10 @@ impl Response {
     }
 }
 
-/// Send `method target` with `headers` and `body` to `target`'s host, and
-/// read the response head.
+/// Send `method target` with `headers` and `body` to `target`'s host over a
+/// direct connection, and read the response head. For the effect ledger's
+/// calls to MCP servers and proxies; the gateway's calls to its backends go
+/// through a [`Transport`].
 pub fn send(
     target: &Target,
     method: &str,
@@ -400,11 +404,12 @@ struct Setup {
 /// How a request gets to a provider's host: through the operator's HTTP
 /// proxy for `https` hosts when `HTTPS_PROXY` names one (a `CONNECT`
 /// tunnel; `NO_PROXY` and loopback are reached directly), trusting the
-/// bundle `SSL_CERT_FILE` names beside the Mozilla roots. The gateway's own
-/// calls to its backends use neither (see `send`); a [`Transport`] is for
-/// the calls the operator makes by hand, such as `by models list`. A
-/// problem with the proxy or the bundle fails the `https` requests it
-/// would have affected, and no others.
+/// bundle `SSL_CERT_FILE` names beside the Mozilla roots. The gateway's
+/// calls to its backends go this way ([`Transport::from_env`], read once
+/// when the yard's gateway is built), as do the calls the operator makes
+/// by hand, such as `by models list`. A problem with the proxy or the
+/// bundle fails the `https` requests it would have affected, and no
+/// others.
 #[derive(Clone)]
 pub struct Transport {
     setup: Result<Setup, String>,

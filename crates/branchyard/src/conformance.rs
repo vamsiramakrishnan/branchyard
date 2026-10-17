@@ -2115,6 +2115,7 @@ pub(crate) fn outcomes(s: Opened) {
         duration_ms: Some(1500),
         turns: 2,
         routed: true,
+        decided_by: Some("router".into()),
         recorded_ms: at,
     };
     rows.put_outcome(&row("a#1", TaskKind::Bugfix, BranchOutcome::Ready, 10))
@@ -2128,6 +2129,7 @@ pub(crate) fn outcomes(s: Opened) {
         cost_usd: None,
         duration_ms: None,
         routed: false,
+        decided_by: None,
         ..row("c#3", TaskKind::Bugfix, BranchOutcome::Interrupted, 20)
     };
     rows.put_outcome(&plain).unwrap();
@@ -2416,6 +2418,7 @@ pub(crate) fn limits(s: Opened) {
         duration_ms: None,
         turns: 1,
         routed: false,
+        decided_by: None,
         recorded_ms: too_large,
     };
     refuses(s.outcomes.put_outcome(&outcome), "recorded_ms");
@@ -2527,6 +2530,7 @@ pub(crate) fn corrupt(s: Opened) {
         duration_ms: None,
         turns: 1,
         routed: false,
+        decided_by: None,
         recorded_ms: 5,
     };
     s.outcomes.put_outcome(&outcome).unwrap();

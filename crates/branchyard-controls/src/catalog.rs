@@ -280,7 +280,8 @@ pub(crate) mod tests {
             // or newer on PATH (its installer installs or upgrades Bun;
             // `bun install -g` needs it there already). `omp login PROVIDER`
             // stores an OAuth login; provider keys are read from the
-            // environment. Its resume flag is `--resume` (`-r`), not the
+            // environment, `ZAI_API_KEY` for its `zai` provider (GLM) among
+            // them. Its resume flag is `--resume` (`-r`), not the
             // `--session` the vendored sources recorded.
             "oh-my-pi" => {
                 e.login = Some("omp login".into());
@@ -289,6 +290,7 @@ pub(crate) mod tests {
                     "OPENAI_API_KEY",
                     "ANTHROPIC_API_KEY",
                     "OPENROUTER_API_KEY",
+                    "ZAI_API_KEY",
                 ]);
                 e.resume_flag = Some("--resume".into());
             }

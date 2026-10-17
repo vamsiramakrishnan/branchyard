@@ -710,6 +710,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 };
                 (gemini::path(&send_path), send_body)
             }
+            Compat::Versioned => (gemini::path(&send_path), send_body),
             Compat::Off => (send_path, send_body),
         };
         let recording = backend.compat == Compat::Gemini && chat;
@@ -717,7 +718,10 @@ fn handle(stream: TcpStream, state: &TurnState) {
         if as_model.is_some() {
             headers.retain(|(n, _)| !n.to_ascii_lowercase().starts_with("anthropic-"));
         }
-        match upstream::send(&target, &request.method, &send_path, &headers, &send_body) {
+        match gateway
+            .transport
+            .send(&target, &request.method, &send_path, &headers, &send_body)
+        {
             Err(Failure::Connect(why)) => {
                 call.failed_over
                     .push(format!("{}: could not connect ({why})", backend.name));

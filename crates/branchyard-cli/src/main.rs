@@ -291,6 +291,15 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         Command::Knowledge { json, action } => knowledge_cmd::main(env, target, &action, json),
         Command::Fleet { json, action } => match action {
             args::FleetAction::Stats { kind } => fleet_cmd::stats(env, target, kind, json),
+            args::FleetAction::Advise { prompt, kind, seed } => fleet_cmd::advise(
+                env,
+                target,
+                &prompt,
+                kind,
+                seed,
+                fleet_table()?.as_ref(),
+                json,
+            ),
             args::FleetAction::Route {
                 prompt,
                 kind,

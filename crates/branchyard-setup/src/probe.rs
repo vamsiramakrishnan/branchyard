@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 
 /// Variables whose presence setup reports, by name only: the credentials
 /// harnesses read (`DEEPSEEK_API_KEY` for DeepSeek Harness, `GEMINI_API_KEY` for
-/// Gemini CLI and Antigravity), and Branchyard's own.
+/// Gemini CLI and Antigravity, `ZAI_API_KEY` for Oh My Pi's Z.ai provider),
+/// and Branchyard's own.
 pub const KNOWN_VARIABLES: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "BRANCHYARD_REMOTE",
@@ -26,6 +27,7 @@ pub const KNOWN_VARIABLES: &[&str] = &[
     "GOOGLE_API_KEY",
     "GOOGLE_CLOUD_PROJECT",
     "OPENAI_API_KEY",
+    "ZAI_API_KEY",
 ];
 
 /// Tools whose presence and version setup reports.

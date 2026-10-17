@@ -544,6 +544,17 @@ pub struct FleetConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0.0))]
     pub max_minutes: Option<f64>,
+    /// Mark an attempt stalled after this many minutes without harness
+    /// activity, and act as `stall_action` says. A routed branch gets 15
+    /// when neither it nor its command line sets one; 0 turns it off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0))]
+    pub stall_minutes: Option<f64>,
+    /// What a stall does: `interrupt` (the default: the turn is interrupted
+    /// and, with `failover`, the task moves on) or `notify` (the branch is
+    /// only marked stalled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_action: Option<String>,
     /// A judge harness for `by judge` and `by fan --judge`; without one the
     /// judge is deterministic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -653,6 +664,24 @@ impl FleetConfig {
         }
         if self.max_turns == Some(0) {
             return fail("max_turns", "must be at least 1".into());
+        }
+        if let Some(minutes) = self.stall_minutes {
+            if !(minutes.is_finite() && minutes >= 0.0) {
+                return fail(
+                    "stall_minutes",
+                    format!(
+                        "must be a number of minutes, 0 to turn stall detection off, not {minutes}"
+                    ),
+                );
+            }
+        }
+        if let Some(action) = self.stall_action.as_deref() {
+            if !["interrupt", "notify"].contains(&action) {
+                return fail(
+                    "stall_action",
+                    format!("must be interrupt or notify, not {action:?}"),
+                );
+            }
         }
         if let Some(exploration) = self.exploration {
             if !(0.0..=1.0).contains(&exploration) {
@@ -931,9 +960,12 @@ pub struct ModelBackendConfig {
     /// What the gateway adapts for an endpoint that imitates OpenAI's API
     /// with differences: `gemini` for Gemini's OpenAI-compatible endpoint
     /// (the fields it refuses stripped, the thought signatures it puts on
-    /// tool calls kept and put back when a request replays them), or
-    /// `none`. Default: `gemini` for an `openai` backend whose URL's host is
-    /// `generativelanguage.googleapis.com`, else `none`.
+    /// tool calls kept and put back when a request replays them),
+    /// `versioned` for an endpoint whose URL already names the API's
+    /// version, as Z.ai's do (a path's leading `/v1` is dropped, nothing
+    /// else changes), or `none`. Default: `gemini` for an `openai` backend
+    /// whose URL's host is `generativelanguage.googleapis.com`, `versioned`
+    /// for one whose host is `api.z.ai`, else `none`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<String>,
 }
@@ -941,6 +973,12 @@ pub struct ModelBackendConfig {
 /// Gemini's OpenAI-compatible endpoint, which `by init project` proposes
 /// for `GEMINI_API_KEY`.
 pub const GEMINI_OPENAI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
+
+/// Z.ai's OpenAI-compatible chat completions endpoint for its GLM Coding
+/// Plan, which `by init project` proposes for `ZAI_API_KEY`; a standard
+/// (pay-as-you-go) key uses `https://api.z.ai/api/paas/v4` instead, and the
+/// two kinds of key are not interchangeable.
+pub const ZAI_OPENAI_URL: &str = "https://api.z.ai/api/coding/paas/v4";
 
 /// `[[models.routes]]`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1052,17 +1090,17 @@ impl ModelsConfig {
             }
             match backend.compat.as_deref() {
                 None | Some("none") => {}
-                Some("gemini") if backend.api == "openai" => {}
-                Some("gemini") => {
+                Some("gemini" | "versioned") if backend.api == "openai" => {}
+                Some(layer @ ("gemini" | "versioned")) => {
                     return fail(
                         &format!("backends.{name}.compat"),
-                        format!("gemini is for an openai backend, not {:?}", backend.api),
+                        format!("{layer} is for an openai backend, not {:?}", backend.api),
                     )
                 }
                 Some(other) => {
                     return fail(
                         &format!("backends.{name}.compat"),
-                        format!("{other:?} is not gemini or none"),
+                        format!("{other:?} is not gemini, versioned or none"),
                     )
                 }
             }

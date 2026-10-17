@@ -1,8 +1,11 @@
 name: Qualify drivers
 # Live protocol qualification against pinned harness releases. Each matrix job
 # spends real model credits and runs only when its credential secret is
-# configured. A job whose secret is missing is "skipped", and a skipped profile
-# is not qualified.
+# configured: ANTHROPIC_API_KEY for the Claude Code profiles, OPENAI_API_KEY
+# for Codex, GEMINI_API_KEY for Gemini CLI and Oh My Pi. A job whose secret is
+# missing is "skipped", and a skipped profile is not qualified. Antigravity
+# and DeepSeek Harness have no leg: their homes need preparing by hand
+# (docs/qualification/README.md).
 #
 # Every matrix job records its outcome in the run's step summary and uploads it
 # as the artifact qualify-outcome-<profile>. The summary job reads those
@@ -39,8 +42,18 @@ jobs:
           - profile: codex-app-server
             package: '@openai/codex@0.157.1'
             secret: OPENAI_API_KEY
+          - profile: gemini-cli-acp
+            package: '@google/gemini-cli@0.63.0'
+            secret: GEMINI_API_KEY
+          # omp is a Bun script that needs Bun 1.3.14 or newer on PATH.
+          - profile: oh-my-pi-acp
+            package: 'bun@1.4.3 @oh-my-pi/pi-coding-agent@18.10.3'
+            secret: GEMINI_API_KEY
     env:
       CREDENTIAL: ${{ secrets[matrix.secret] }}
+      # Gemini CLI's headless mode refuses an untrusted directory without it;
+      # the other harnesses do not read it. Kept through the runner's scrub.
+      GEMINI_CLI_TRUST_WORKSPACE: 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Skip without credentials
@@ -60,6 +73,7 @@ jobs:
             --profile ${{ matrix.profile }} \
             --workdir "$RUNNER_TEMP/qual" \
             --keep-env ${{ matrix.secret }} \
+            --keep-env GEMINI_CLI_TRUST_WORKSPACE \
             --max-cost-usd 3 \
             --report "$RUNNER_TEMP/${{ matrix.profile }}.json"
       - name: Upload report

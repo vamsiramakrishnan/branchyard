@@ -1101,6 +1101,7 @@ class Repo:
         model: Optional[str] = None,
         priority: Optional[int] = None,
         result: Optional[JSON] = None,
+        why: Optional[str] = None,
         key: Optional[str] = None,
         **extra: Any,
     ) -> Operation:
@@ -1132,6 +1133,7 @@ class Repo:
             "model": model,
             "priority": priority,
             "result": result,
+            "why": why,
         }
         body.update(extra)
         return self.client._operation(self._branch(parent, "/spawn"), body, key)

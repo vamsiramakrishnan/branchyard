@@ -195,12 +195,17 @@ pub struct SpawnSpec {
     /// required. See `docs/delegation.md#result-contract`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<crate::contract::ResultContract>,
+    /// Why this harness and model, in the parent's words; recorded on the
+    /// child. See `docs/fleet.md#advice`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
 }
 
 impl SpawnSpec {
     pub(crate) fn to_spawn(&self) -> Result<Spawn, Error> {
         Ok(Spawn {
             prompt: self.prompt.clone(),
+            why: self.why.clone(),
             harness: self.harness.clone(),
             name: self.name.clone(),
             base: self.base.clone(),
@@ -242,6 +247,7 @@ impl SpawnSpec {
             plan: spawn.plan,
             model: spawn.model.clone(),
             result: spawn.result.clone(),
+            why: spawn.why.clone(),
         }
     }
 }
@@ -537,6 +543,7 @@ pub(crate) fn child_options(options: &TaskOptions) -> TaskOptions {
         observer: options.observer.clone(),
         delegation_cli: options.delegation_cli.clone(),
         delegation_server: options.delegation_server.clone(),
+        fleet: options.fleet.clone(),
         ..TaskOptions::default()
     }
 }

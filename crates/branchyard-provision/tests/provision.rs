@@ -659,6 +659,43 @@ fn codex_api_key_effort_and_telemetry_reconcile_config_toml() {
 }
 
 #[test]
+fn codex_on_the_model_gateway_gets_a_provider_in_config_toml() {
+    // The gateway as a `model_providers` entry Codex is told to use, keyed
+    // by the variable the engine sets to the turn's token; the model on the
+    // session for the App Server profile.
+    let temp = Temp::new();
+    temp.seed(
+        ".codex/config.toml",
+        "model = \"gpt-5.6-sol\"\n\n[projects.\"/workspace\"]\ntrust_level = \"trusted\"\n",
+    );
+    let mut context = context("codex", Protocol::CodexAppServer);
+    context.model = Some("glm-5.3".into());
+    context.effort = Some(Effort::Medium);
+    context.model_gateway = Some(branchyard_provision::models::ModelGateway {
+        url: "http://192.168.127.1:41100".into(),
+        anthropic: false,
+        openai: true,
+    });
+    let plan = provision(&temp, &context);
+    golden("codex-gateway", &temp, &plan);
+    assert_eq!(plan.session.model.as_deref(), Some("glm-5.3"));
+    let config = temp.read(".codex/config.toml");
+    assert!(
+        config.contains("model_provider = \"branchyard\""),
+        "{config}"
+    );
+    assert!(config.contains("[model_providers.branchyard]"), "{config}");
+    assert!(
+        config.contains("base_url = \"http://192.168.127.1:41100/openai/v1\""),
+        "{config}"
+    );
+    assert!(
+        config.contains("[projects.\"/workspace\"]"),
+        "the seed's table stays: {config}"
+    );
+}
+
+#[test]
 fn codex_acp_takes_its_model_from_config_toml_and_auth_file_is_checked() {
     let temp = Temp::new();
     let mut context = context("codex", Protocol::Acp);
@@ -759,6 +796,27 @@ fn delegation_endpoint() -> RemoteMcpServer {
 }
 
 #[test]
+fn deepseek_harness_on_the_gateway_gets_a_provider_in_its_patch_file() {
+    // The turn's gateway as a provider of dsh's llm-pi-ai plugin, and the
+    // model as the agent's and ACP's default; keys as the generic path.
+    let temp = Temp::new();
+    let mut context = context("deepseek-harness", Protocol::Acp);
+    context.secrets = secrets(&[("GEMINI_API_KEY", "g-secret")]);
+    context.model = Some("gemini-2.5-flash-lite".into());
+    context.model_gateway = Some(branchyard_provision::models::ModelGateway {
+        url: "http://192.168.127.1:41100".into(),
+        anthropic: true,
+        openai: true,
+    });
+    context.mcp_servers = vec![server("docs")];
+    let plan = provision(&temp, &context);
+    golden("deepseek-harness-gateway", &temp, &plan);
+    assert_eq!(plan.session.model, None);
+    assert_eq!(plan.session.mcp_servers.len(), 1);
+    assert_eq!(plan.auth.as_deref(), Some("api-key"));
+}
+
+#[test]
 fn antigravity_gets_mcp_servers_instructions_and_rules_in_its_configuration() {
     // Scion's antigravity/provision.py: AGY_MCP_MAPPING and the
     // instructions file, merged instead of replaced; the branch's policy as
@@ -840,19 +898,11 @@ fn antigravity_rules_follow_the_policy_and_never_touch_a_home_that_is_yours() {
     let settings = |temp: &Temp| -> serde_json::Value {
         serde_json::from_str(&temp.read(".gemini/antigravity-cli/settings.json")).unwrap()
     };
+    // `full` allows the shell, so every command, which covers `by`.
     assert_eq!(
         settings(&temp)["permissions"]["allow"],
-        serde_json::json!([
-            "command(regex:git .*)",
-            "command(regex:by .*)",
-            "command(regex:/usr/local/bin/by .*)",
-            "mcp(branchyard/*)"
-        ])
+        serde_json::json!(["command(*)", "mcp(branchyard/*)"])
     );
-    // No rule allows every command.
-    assert!(!temp
-        .read(".gemini/antigravity-cli/settings.json")
-        .contains("regex:.*\""));
 
     // `read-only`: nothing allowed, writes denied.
     context.installed = installed(&temp.home());

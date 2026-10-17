@@ -624,7 +624,7 @@ fn a_sandboxed_antigravity_turn_is_given_the_delegation_endpoint_and_rules_for_i
     .unwrap();
     assert_eq!(
         settings["permissions"]["allow"],
-        serde_json::json!(["command(regex:git .*)", "mcp(branchyard/*)"]),
+        serde_json::json!(["command(*)", "mcp(branchyard/*)"]),
         "{settings}"
     );
     // The token is in the 0600 configuration only, not in the log.

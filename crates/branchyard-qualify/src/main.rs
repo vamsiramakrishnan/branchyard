@@ -371,7 +371,21 @@ fn scenarios(run: &mut Run) {
     run.record("fresh_turn", t, result);
 
     let t = Instant::now();
-    if run.over_budget_with(&main) {
+    if !capabilities.tool_approvals {
+        // The harness decides its own tools and asks nobody (Antigravity):
+        // there is no request for the policy to deny, which its profile
+        // declares (it needs --allow-unapproved-tools) and provisioning
+        // answers with the harness's own rules.
+        run.record(
+            "permission_denied",
+            t,
+            Ok(
+                "declared: the profile has no tool approvals; the harness's own rules decide, \
+                never a Branchyard policy, and its profile needs --allow-unapproved-tools"
+                    .into(),
+            ),
+        );
+    } else if run.over_budget_with(&main) {
         run.skip_over_budget("permission_denied", t);
     } else {
         let marker = run.cwd().join("deny-marker.txt");
@@ -421,7 +435,13 @@ fn scenarios(run: &mut Run) {
     }
 
     let t = Instant::now();
-    if run.over_budget_with(&main) {
+    if !capabilities.tool_approvals {
+        run.record(
+            "interrupt_during_permission",
+            t,
+            Ok("declared: the profile has no tool approvals, so no request is ever pending".into()),
+        );
+    } else if run.over_budget_with(&main) {
         run.skip_over_budget("interrupt_during_permission", t);
     } else {
         let marker = run.cwd().join("hold-marker.txt");
@@ -451,7 +471,20 @@ fn scenarios(run: &mut Run) {
     }
 
     let t = Instant::now();
-    if run.over_budget_with(&main) {
+    if !capabilities.cancellation {
+        // No in-band interrupt: a signal ends the whole process, which
+        // connection_lost exercises.
+        let rejected = main.interrupt();
+        let result = match rejected {
+            Err(_) => Ok(
+                "declared: no cancellation; the driver rejects an interrupt and a signal \
+                          ends the process (see connection_lost)"
+                    .into(),
+            ),
+            Ok(()) => Err("the profile declares no cancellation but accepted an interrupt".into()),
+        };
+        run.record("interrupt_during_tool", t, result);
+    } else if run.over_budget_with(&main) {
         run.skip_over_budget("interrupt_during_tool", t);
     } else {
         let result = (|| {

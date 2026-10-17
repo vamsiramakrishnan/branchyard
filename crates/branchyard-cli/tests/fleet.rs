@@ -7,7 +7,7 @@
 //! the refusals. Hermetic: no model is called, and no harness of the
 //! machine running the tests is found. Requires `git` and `sh`.
 
-#![allow(clippy::expect_used, clippy::unwrap_used)] // tests: a panic is the failure report
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)] // tests: a panic is the failure report
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -438,4 +438,134 @@ fn without_a_fleet_auto_routes_among_the_harnesses_logged_in_here() {
     let route = repo.json(&["fleet", "route", "Fix the bug", "--seed", "1", "--json"]);
     assert_eq!(route["entry"], "default", "{route}");
     assert!(route["excluded"].as_array().unwrap().is_empty(), "{route}");
+}
+
+/// The JSON value a `SH ... --json` line printed in a harness's reply,
+/// after the `sh: <status>` line for the `n`th command.
+fn sh_json(reply: &str, n: usize) -> (i32, Value) {
+    let mut parts = reply.split("sh: ").skip(1 + n);
+    let part = parts
+        .next()
+        .unwrap_or_else(|| panic!("no command {n} in {reply}"));
+    let (status, rest) = part.split_once('\n').unwrap();
+    let mut values = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
+    (status.parse().unwrap(), values.next().unwrap().unwrap())
+}
+
+/// The harness's reply on `branch`'s last turn.
+fn reply(repo: &Repo, branch: &str) -> String {
+    repo.json(&["log", branch, "--json"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["event"]["type"] == "message_delta")
+        .map(|e| e["event"]["text"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// `by fleet advise` outside a harness reads the configuration's table;
+/// inside, it acts as the harness's branch (the same table, filtered by its
+/// envelope, with its budget); a spawn's `--why` is recorded on the child,
+/// whose outcome the store learns and the next advice counts.
+#[test]
+fn fleet_advise_informs_a_choice_that_is_recorded_and_learned() {
+    let repo = Repo::new();
+    repo.config(TWO);
+    let advice = repo.json(&[
+        "fleet",
+        "advise",
+        "Fix the typo in a.txt",
+        "--seed",
+        "3",
+        "--json",
+    ]);
+    assert_eq!(advice["kind"], "bugfix");
+    assert_eq!(advice["entry"], "default");
+    let candidates = advice["candidates"].as_array().unwrap();
+    let harnesses: Vec<&str> = candidates
+        .iter()
+        .map(|c| c["candidate"]["harness"].as_str().unwrap())
+        .collect();
+    assert_eq!(harnesses, ["gemini-cli", "qwen-code"]);
+    assert!(
+        candidates
+            .iter()
+            .all(|c| c["available"] == true && c["expected"] == 0.5 && c.get("stats").is_none()),
+        "{advice}"
+    );
+    assert!(
+        advice["pick"]["candidate"]["harness"].is_string(),
+        "{advice}"
+    );
+    assert!(advice["own"].is_null());
+    let notes = advice["notes"].to_string();
+    assert!(notes.contains("no recorded bugfix outcomes"), "{notes}");
+    let out = repo.by(&["fleet", "advise", "Fix the typo in a.txt", "--seed", "3"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("by: bugfix (classifier: fix) among [fleet.default], seed 3"),
+        "{text}"
+    );
+    assert!(text.contains("by: pick: "), "{text}");
+    // Inside a harness: the branch's own profile is all its envelope allows.
+    let prompt = [
+        "SH by fleet advise 'Fix the typo WRITE kid.txt=k' --json",
+        "SH by spawn 'Fix the typo WRITE kid.txt=k' --name kid --budget-usd 0.5 --why 'the check covers it' --wait --json",
+        "SH by fleet advise 'Fix another typo' --json",
+    ]
+    .join("\n");
+    let out = repo.by_agent(&[
+        "run",
+        &prompt,
+        "--name",
+        "root",
+        "--delegate",
+        "--yes",
+        "--budget-usd",
+        "2",
+    ]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    let (code, before) = sh_json(&said, 0);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(before["entry"], "default", "{before}");
+    assert_eq!(before["own"]["harness"], "gemini-cli");
+    assert_eq!(before["remaining_usd"], 2.0, "{before}");
+    let qwen = &before["candidates"][1];
+    assert_eq!(qwen["candidate"]["harness"], "qwen-code");
+    assert_eq!(qwen["available"], false);
+    assert!(
+        qwen["reason"].as_str().unwrap().contains("envelope"),
+        "{before}"
+    );
+    assert_eq!(before["pick"]["candidate"]["harness"], "gemini-cli");
+    let (code, kid) = sh_json(&said, 1);
+    assert_eq!(
+        (code, kid["status"]["state"].as_str()),
+        (0, Some("ready")),
+        "{said}"
+    );
+    let (_, after) = sh_json(&said, 2);
+    assert_eq!(after["candidates"][0]["stats"]["runs"], 1, "{after}");
+    assert_eq!(after["candidates"][0]["stats"]["delegated"], 1);
+    // The choice is on the child's log and in the store.
+    let log = repo.by(&["log", "kid"]);
+    assert!(
+        stdout(&log)
+            .contains("chosen by root for bugfix (classifier): gemini-cli: the check covers it"),
+        "{}",
+        stdout(&log)
+    );
+    let stats = repo.json(&["fleet", "stats", "--json"]);
+    let row = stats
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["harness"] == "gemini-cli" && s["kind"] == "bugfix")
+        .unwrap_or_else(|| panic!("{stats}"));
+    assert_eq!(row["delegated"], 1, "{stats}");
+    // The root too: its prompt says "Fix", so it is a bugfix a person named.
+    assert_eq!(row["runs"], 2, "{stats}");
+    assert_eq!(row["decided_by"], Value::Null, "stats rows pool decisions");
 }
