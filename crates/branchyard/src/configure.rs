@@ -449,7 +449,7 @@ pub fn task_options(config: &ProjectConfig) -> Result<TaskOptions, Error> {
         .map_err(|e| section("defaults.check", e))?;
     let provider = match (d.provider, &config.microsandbox) {
         (Some(ProviderKind::Microsandbox), Some(sandbox)) => {
-            Some(Provider::Microsandbox(sandbox_options(sandbox)))
+            Some(Provider::microsandbox(sandbox_options(sandbox)))
         }
         _ => None,
     };
@@ -477,14 +477,10 @@ pub fn task_options(config: &ProjectConfig) -> Result<TaskOptions, Error> {
 }
 
 /// Whether `options` give a new branch a home of its own, where secrets
-/// and connector grants can be placed: isolated, or on a sandbox
-/// provider.
+/// and connector grants can be placed: isolated, or on a provider that
+/// runs the harness in a sandbox.
 pub fn private_home(options: &TaskOptions) -> bool {
-    options.isolated
-        || matches!(
-            options.provider,
-            Some(Provider::Microsandbox(_) | Provider::Substrate(_) | Provider::Recipe(_))
-        )
+    options.isolated || crate::providers::of(options.provider.as_ref()).sandboxed()
 }
 
 /// Fill what `spec` leaves unset from `config`, for a new branch: the
@@ -679,16 +675,16 @@ live_branch = true
                 ][..]
             )
         );
-        match options.provider {
-            Some(Provider::Microsandbox(sandbox)) => {
-                assert_eq!(sandbox.image, "ghcr.io/acme/harness:1");
-                assert_eq!(sandbox.cpus, Some(2));
-                assert_eq!(sandbox.keep, SandboxKeep::Pause);
-                assert_eq!(sandbox.max_kept_secs, Some(180));
-                assert!(sandbox.live_branch);
-            }
-            other => panic!("not a sandbox: {other:?}"),
-        }
+        // The provider, by its kind and its serialized options: only the
+        // providers directory names a variant.
+        let provider = options.provider.unwrap();
+        assert_eq!(provider.kind().name(), "microsandbox");
+        let sandbox = serde_json::to_value(&provider).unwrap();
+        assert_eq!(sandbox["image"], "ghcr.io/acme/harness:1");
+        assert_eq!(sandbox["cpus"], 2);
+        assert_eq!(sandbox["keep"], "pause");
+        assert_eq!(sandbox["max_kept_secs"], 180);
+        assert_eq!(sandbox["live_branch"], true);
     }
 
     #[test]
@@ -812,11 +808,12 @@ key = "ZAI_KEY"
             ..TaskOptions::default()
         }));
         assert!(private_home(&TaskOptions {
-            provider: Some(Provider::Microsandbox(SandboxOptions::default())),
+            provider: Some(Provider::microsandbox(SandboxOptions::default())),
             ..TaskOptions::default()
         }));
+        let local: Provider = serde_json::from_value(serde_json::json!({"kind": "local"})).unwrap();
         assert!(!private_home(&TaskOptions {
-            provider: Some(Provider::Local),
+            provider: Some(local),
             ..TaskOptions::default()
         }));
     }
