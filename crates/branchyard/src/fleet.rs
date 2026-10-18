@@ -1074,6 +1074,18 @@ pub struct Route {
 /// its approvals, or its recorded mean cost is over `max_usd`.
 pub(crate) type Availability<'a> = &'a dyn Fn(&FleetCandidate) -> Result<(), String>;
 
+/// Why a candidate's recorded cost keeps it out of an entry with a cost
+/// limit: its mean recorded cost for the kind is over `max_usd`. `None`
+/// without a limit, without cost reports, or within it.
+fn over_budget(max_usd: Option<f64>, stats: Option<&CandidateStats>) -> Option<String> {
+    match (max_usd, stats.and_then(|s| s.mean_cost_usd)) {
+        (Some(max), Some(mean)) if mean > max => Some(format!(
+            "its mean recorded cost ${mean:.2} is over the ${max:.2} budget"
+        )),
+        _ => None,
+    }
+}
+
 /// Choose `attempts` candidates from `entry`: each available and within
 /// budget; with probability `entry.exploration` one at random, otherwise
 /// the highest draw from Beta(1 + successes, 1 + failures) of its recorded
@@ -1101,15 +1113,7 @@ pub(crate) fn plan(
     let mut eligible = Vec::new();
     let mut excluded = Vec::new();
     for (index, candidate) in entry.candidates.iter().enumerate() {
-        let over = match (
-            entry.budget.max_usd,
-            find(candidate).and_then(|s| s.mean_cost_usd),
-        ) {
-            (Some(max), Some(mean)) if mean > max => Some(format!(
-                "its mean recorded cost ${mean:.2} is over the ${max:.2} budget"
-            )),
-            _ => None,
-        };
+        let over = over_budget(entry.budget.max_usd, find(candidate));
         match available(candidate).err().or(over) {
             Some(reason) => excluded.push(Excluded {
                 candidate: candidate.clone(),
@@ -1513,11 +1517,18 @@ pub(crate) fn advise(
     scope: AdviceScope<'_>,
 ) -> Result<Advice, Error> {
     let (kind, source, matched) = kind_of(prompt, kind);
-    let (entry, mut candidates): (String, Vec<FleetCandidate>) =
+    // The entry's candidates and its cost limit, which keeps a candidate
+    // whose recorded cost is over it out, as the router's plan does.
+    let (entry, max_usd, mut candidates): (String, Option<f64>, Vec<FleetCandidate>) =
         match scope.fleet.and_then(|f| f.entry(kind)) {
-            Some((name, found)) => (name.to_owned(), found.candidates.clone()),
+            Some((name, found)) => (
+                name.to_owned(),
+                found.budget.max_usd,
+                found.candidates.clone(),
+            ),
             None => (
                 ENVELOPE_ENTRY.to_owned(),
+                None,
                 scope
                     .allowed
                     .clone()
@@ -1563,13 +1574,14 @@ pub(crate) fn advise(
     let mut advised = Vec::new();
     let mut eligible = Vec::new();
     for candidate in &candidates {
-        let reason = allowed(candidate)
-            .and_then(|()| availability(yard, options, candidate, scope.harnesses))
-            .err();
         let stats = history
             .iter()
             .find(|s| candidate.same_arm(&s.harness, s.model.as_deref(), s.effort.as_deref()))
             .cloned();
+        let reason = allowed(candidate)
+            .and_then(|()| availability(yard, options, candidate, scope.harnesses))
+            .and_then(|()| over_budget(max_usd, stats.as_ref()).map_or(Ok(()), Err))
+            .err();
         if reason.is_none() {
             eligible.push(candidate.clone());
         }
@@ -1588,6 +1600,10 @@ pub(crate) fn advise(
             let among = FleetEntry {
                 candidates: eligible,
                 exploration: 0.0,
+                budget: Budget {
+                    max_usd,
+                    ..Budget::default()
+                },
                 ..FleetEntry::default()
             };
             plan(
@@ -1820,12 +1836,18 @@ fn chain(yard: &Yard, mut branch: Branch, options: &TaskOptions) -> Result<Chain
 /// A stall the engine interrupted is the harness's fault too: it stopped
 /// answering, which is what the stall window is for. Told from a cancel,
 /// which also ends `interrupted`, by the warning the engine records
-/// (`engine::STALL_WARNING`). `None` for every other status.
+/// (`engine::STALL_WARNING`) in the latest turn: a stall an earlier turn
+/// was interrupted for says nothing about why this one ended. `None` for
+/// every other status.
 pub fn stall_fault(status: &BranchStatus, events: &[RecordedEvent]) -> Option<String> {
     let stalled = matches!(status, BranchStatus::Interrupted)
-        && events.iter().rev().any(|e| {
-            matches!(&e.activity, Activity::Warning(text) if text == crate::engine::STALL_WARNING)
-        });
+        && events
+            .iter()
+            .rev()
+            .take_while(|e| !matches!(e.activity, Activity::Prompt(_)))
+            .any(|e| {
+                matches!(&e.activity, Activity::Warning(text) if text == crate::engine::STALL_WARNING)
+            });
     stalled.then(|| "stalled: no harness activity for its stall window".to_owned())
 }
 
@@ -2313,6 +2335,100 @@ mod tests {
         let cancelled = [event(Activity::Warning("cancelled by alice".into()))];
         assert_eq!(stall_fault(&BranchStatus::Interrupted, &cancelled), None);
         assert_eq!(stall_fault(&BranchStatus::Ready, &stalled), None);
+        // Only the latest turn counts: a branch that stalled once, was
+        // resumed and then cancelled was not stalled this time.
+        let resumed_then_cancelled = [
+            event(Activity::Prompt("first".into())),
+            event(Activity::Warning(crate::engine::STALL_WARNING.into())),
+            event(Activity::Prompt("again".into())),
+            event(Activity::Warning("cancelled by alice".into())),
+        ];
+        assert_eq!(
+            stall_fault(&BranchStatus::Interrupted, &resumed_then_cancelled),
+            None
+        );
+        let stalled_again = [
+            event(Activity::Prompt("first".into())),
+            event(Activity::Warning("cancelled by alice".into())),
+            event(Activity::Prompt("again".into())),
+            event(Activity::Warning(crate::engine::STALL_WARNING.into())),
+        ];
+        assert!(stall_fault(&BranchStatus::Interrupted, &stalled_again).is_some());
+    }
+
+    /// The advice keeps the entry's cost limit: a candidate whose mean
+    /// recorded cost is over it is listed as unavailable with that reason
+    /// and never picked, as the router's plan excludes it; without a
+    /// limit, or without cost reports, nothing is excluded for cost.
+    #[test]
+    fn advice_keeps_the_entrys_cost_limit() {
+        let dir = tempfile::Builder::new()
+            .prefix("by-advice-")
+            .tempdir()
+            .unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let yard = Yard::open(dir.path()).unwrap();
+        for (harness, cost) in [("codex", 3.0), ("claude-code", 0.5)] {
+            let mut row = row(harness, BranchOutcome::Merged, Some(cost));
+            row.id = format!("{harness}-row");
+            yard.store().outcomes().put_outcome(&row).unwrap();
+        }
+        // Every candidate's executable is this shell, so availability
+        // passes and only the cost decides.
+        let options = TaskOptions {
+            command: Some(vec!["/bin/sh".into()]),
+            ..TaskOptions::default()
+        };
+        let advise_with = |max_usd: Option<f64>| {
+            let mut e = entry(&["codex", "claude-code"]);
+            e.budget.max_usd = max_usd;
+            let table = Fleet {
+                entries: [("bugfix".to_owned(), e)].into_iter().collect(),
+            };
+            let scope = AdviceScope {
+                fleet: Some(&table),
+                allowed: None,
+                own: None,
+                remaining_usd: None,
+                tree_remaining_usd: None,
+                seed: Some(7),
+                harnesses: None,
+            };
+            advise(
+                &yard,
+                &options,
+                "Fix the flaky parser test",
+                Some(TaskKind::Bugfix),
+                scope,
+            )
+            .unwrap()
+        };
+        let limited = advise_with(Some(1.0));
+        let codex = &limited.candidates[0];
+        assert!(!codex.available, "{codex:?}");
+        assert_eq!(
+            codex.reason.as_deref(),
+            Some("its mean recorded cost $3.00 is over the $1.00 budget")
+        );
+        assert!(
+            limited.candidates[1].available,
+            "{:?}",
+            limited.candidates[1]
+        );
+        assert_eq!(
+            limited.pick.as_ref().map(|p| p.candidate.harness.as_str()),
+            Some("claude-code")
+        );
+        let unlimited = advise_with(None);
+        assert!(
+            unlimited.candidates.iter().all(|c| c.available),
+            "{unlimited:?}"
+        );
     }
 
     /// A routed branch gets the default stall window unless its task or

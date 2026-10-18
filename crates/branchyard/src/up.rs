@@ -398,11 +398,22 @@ impl Machine for LocalMachine {
         }
         let value: serde_json::Value = serde_json::from_slice(&output.stdout)
             .map_err(|e| format!("`by gateway start --json` printed no JSON: {e}"))?;
-        value
+        let url = value
             .get("url")
             .and_then(|u| u.as_str())
             .map(str::to_owned)
-            .ok_or_else(|| "`by gateway start --json` named no url".to_owned())
+            .ok_or_else(|| "`by gateway start --json` named no url".to_owned())?;
+        // A supervisor that started but whose gateway never answered.
+        if value.get("listening").and_then(|l| l.as_bool()) == Some(false) {
+            return Err(format!(
+                "the gateway's supervisor runs but nothing listens at {url} yet; see {}",
+                value
+                    .get("log")
+                    .and_then(|l| l.as_str())
+                    .unwrap_or(".branchyard/gateway/gateway.log")
+            ));
+        }
+        Ok(url)
     }
 
     fn recipe(&self, _yard: &Yard, _name: &str) -> Readiness {
@@ -903,7 +914,16 @@ fn apply(
             Action::StartGateway => {
                 let name = step.name.clone();
                 *step = match machine.start_gateway(yard, &config.connectors) {
-                    Ok(url) => Step::ready(name, format!("gateway started at {url}")),
+                    // Started is not up: the step is ready only once
+                    // something answers at the URL.
+                    Ok(url) if machine.listening(&url) => {
+                        Step::ready(name, format!("gateway started at {url}"))
+                    }
+                    Ok(url) => Step::blocked(
+                        name,
+                        format!("the gateway was started but nothing listens at {url} yet"),
+                        "see .branchyard/gateway/gateway.log, then `by gateway status`",
+                    ),
                     Err(why) => Step::blocked(
                         name,
                         format!("the gateway did not start: {why}"),
@@ -944,6 +964,8 @@ mod tests {
         /// What `detect` finds after an install, by harness.
         installed: BTreeMap<String, HarnessState>,
         gateway: Result<String, String>,
+        /// Whether a gateway `start_gateway` reports started comes up.
+        gateway_listens: bool,
         recipe: Readiness,
         workspace: Readiness,
         runs: Vec<String>,
@@ -960,6 +982,7 @@ mod tests {
                 listening: BTreeSet::new(),
                 installed: BTreeMap::new(),
                 gateway: Err("not started".into()),
+                gateway_listens: true,
                 recipe: Readiness::Unknown,
                 workspace: Readiness::Unknown,
                 runs: Vec::new(),
@@ -1002,7 +1025,11 @@ mod tests {
         }
 
         fn start_gateway(&mut self, _yard: &Yard, _config: &Connectors) -> Result<String, String> {
-            self.gateway.clone()
+            let started = self.gateway.clone()?;
+            if self.gateway_listens {
+                self.listening.insert(started.clone());
+            }
+            Ok(started)
         }
 
         fn recipe(&self, _yard: &Yard, _name: &str) -> Readiness {
@@ -1330,6 +1357,14 @@ key = "ZAI_KEY"
         let gateway = step(&applied, "connectors");
         assert_eq!(gateway.state, State::Blocked);
         assert!(gateway.detail.contains("status 3"));
+        // A start that reports a URL nothing answers at is not ready either.
+        machine.gateway = Ok("http://127.0.0.1:7/mcp".to_owned());
+        machine.gateway_listens = false;
+        let applied = yard.up(&config, &Options::default(), &mut machine).unwrap();
+        let gateway = step(&applied, "connectors");
+        assert_eq!(gateway.state, State::Blocked);
+        assert!(gateway.detail.contains("nothing listens"), "{gateway:?}");
+        assert!(!applied.ready());
     }
 
     #[test]

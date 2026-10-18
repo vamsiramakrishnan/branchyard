@@ -57,9 +57,20 @@ impl Machine for Here {
     }
 
     fn start_gateway(&mut self, yard: &Yard, config: &Connectors) -> Result<String, String> {
-        gateway_cmd::start_background(yard, config)
-            .map(|started| started.url().to_owned())
-            .map_err(|e| e.to_string())
+        match gateway_cmd::start_background(yard, config).map_err(|e| e.to_string())? {
+            // The supervisor runs, but its gateway never answered within
+            // the start's wait: not up. The engine checks the rest listen.
+            gateway_cmd::Started::Spawned {
+                listening: false,
+                url,
+                log,
+                ..
+            } => Err(format!(
+                "the gateway's supervisor runs but nothing listens at {url} yet; see {}",
+                log.display()
+            )),
+            started => Ok(started.url().to_owned()),
+        }
     }
 
     fn recipe(&self, yard: &Yard, name: &str) -> Readiness {

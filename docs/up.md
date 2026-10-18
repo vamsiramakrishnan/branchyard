@@ -24,7 +24,7 @@ Each step has a stable dotted name, a state, what was found in one line and, for
 | `login.<id>` | the harness's login as `by harnesses` detects it | | logged out: the catalog's login command, or the key variable to set | |
 | `secret.<NAME>` | each `[secrets]` entry and each `[models]` backend's key: its variable set, or its file present, by name | | the variable is unset or the file is missing | |
 | `models` | the model gateway `[models]` describes, which starts with each turn | | | `[models]` does not convert for the gateway |
-| `connectors` | the connector gateway, when `[connectors]` is set or the repository has bundles: the URL `gateway` pins, else the one registered for this repository ([registry](registry.md)) | nothing listens and Anvil is on `PATH` (or at `[connectors] anvil`): started in the background, as `by gateway start` does | | Anvil is not installed |
+| `connectors` | the connector gateway, when `[connectors]` is set or the repository has bundles: the URL `gateway` pins, else the one registered for this repository ([registry](registry.md)) | nothing listens and Anvil is on `PATH` (or at `[connectors] anvil`): started in the background, as `by gateway start` does, and ready only once something answers at its URL | | Anvil is not installed, or the started gateway does not answer (its log says why) |
 | `provider` | `[defaults] provider` when it is not `local`: Microsandbox, as the engine checks it; a recipe, as your trust decision says | | a recipe you have not trusted as it is now (`by recipe trust NAME`) | no `[microsandbox]` or a build without the feature; no `[recipes.NAME]` |
 | `workspace` | the `[workspace]` scripts, when there are any | | not trusted as they are now (`by workspace trust`) | |
 
