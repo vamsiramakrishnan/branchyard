@@ -993,17 +993,16 @@ pub(super) fn models_prices(ctx: &Context) -> Vec<Check> {
             },
         )];
     }
-    let engine: branchyard::models::Config =
-        match serde_json::to_value(&config.models).and_then(serde_json::from_value) {
-            Ok(engine) => engine,
-            Err(error) => {
-                return vec![Check::fail(
-                    NAME,
-                    format!("[models] does not convert for the gateway: {error}"),
-                    "check [models] with `by config validate`",
-                )]
-            }
-        };
+    let engine = match branchyard::configure::models_config(&config.models) {
+        Ok(engine) => engine,
+        Err(error) => {
+            return vec![Check::fail(
+                NAME,
+                format!("[models] does not convert for the gateway: {error}"),
+                "check [models] with `by config validate`",
+            )]
+        }
+    };
     let mut unpriced: Vec<String> = Vec::new();
     let mut patterns = Vec::new();
     for route in &engine.routes {

@@ -845,3 +845,14 @@ Codex's approval policy, Antigravity's soft-denials and `command(*)`, a stall de
 | The judge harness's scratch branch (`by fan --judge`, `by judge`) | default task options: local mode, no secrets, no provider, whatever the fan ran with (its provisioning failed on every real run) | the task's options (`by judge`: the configuration's defaults), the policy replaced by deny-all, no observer |
 | Codex's `config.toml` on the model gateway | nothing: Codex ignored `OPENAI_BASE_URL` and `OPENAI_API_KEY` and called `api.openai.com` with no key | `model_provider = "branchyard"` and `[model_providers.branchyard]` (`base_url` at the gateway's `/openai/v1`, `env_key = "OPENAI_API_KEY"`, `wire_api = "responses"`, the only one codex-cli 0.157.1 accepts) |
 | `.github/workflows/qualify.yml` | three legs: the two Claude Code profiles and Codex | five: also `gemini-cli-acp` (`@google/gemini-cli@0.63.0`) and `oh-my-pi-acp` (`bun@1.4.3 @oh-my-pi/pi-coding-agent@18.10.3`), both on `GEMINI_API_KEY`, with `GEMINI_CLI_TRUST_WORKSPACE=true` kept for the runner |
+
+## Added with the SDK-first round
+
+See [up](up.md) and [configuration](setup.md#configuration).
+
+| Operation | SDK | by | by --remote | HTTP | client | delegation |
+|---|---|---|---|---|---|---|
+| Open a repository with what its configuration files describe | `Yard::open_configured(root)`; `Yard::configuration()`, `Yard::configure(&config)`, `Yard::configured()`; `branchyard::config` (the files) and `branchyard::configure` (what they give a yard) | every command outside a harness | n/a | n/a: a server's own JSON configuration, its model gateway built with the same code | n/a | no: a harness's `by` reads no configuration |
+| Bring the configured backends up | `Yard::up_plan`, `Yard::up_apply`, `Yard::up` over `branchyard::up::Machine` (`LocalMachine` is this machine) | `up [--plan] [--yes] [--json]` | refused: a server brings up its own machine | none | Python `Local(root).up()`, `doctor()`, `harnesses()`, `run()` | refused inside a harness |
+| A server of the process's own | n/a | `serve` | n/a | n/a | Python `Client.local(root)`: `by serve` on a free loopback port with a fresh token, stopped on `close()` | n/a |
+

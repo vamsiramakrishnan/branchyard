@@ -1,14 +1,12 @@
 //! `by approvals`, `by effects` and `by undo`, locally, on a server and
-//! inside a harness, and the `[approvals]` settings a local yard runs
-//! with. See docs/effects.md.
+//! inside a harness. The `[approvals]` settings a local yard runs with are
+//! the engine's (`branchyard::configure`). See docs/effects.md.
 
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 
 use branchyard::effects::undo::{self as plan_text, UndoOutcome, UndoPlan};
-use branchyard::effects::{
-    short_id, ApprovalAsk, ApprovalSettings, EffectActivity, EffectEntry, EffectState,
-};
+use branchyard::effects::{short_id, ApprovalAsk, EffectActivity, EffectEntry, EffectState};
 use branchyard::{Activity, RecordedEvent, Yard};
 use branchyard_client::effects_api::{ApprovalAnswerRequest, UndoRequest};
 use serde_json::{json, Value};
@@ -16,35 +14,6 @@ use serde_json::{json, Value};
 use crate::args::{ApprovalsAction, EffectsAction, UndoArgs};
 use crate::commands::{self, emit, harness_delegate, print, Env, Failure, Outcome, Target};
 use crate::plan_cmd::person;
-use crate::setup_io;
-
-/// Give `yard` your `[approvals]`: the person layer.
-pub fn configure(yard: &Yard) -> Result<(), Failure> {
-    if std::env::var_os("BRANCHYARD_BRANCH").is_some_and(|v| !v.is_empty()) {
-        return Ok(());
-    }
-    let located = setup_io::locate(yard.root());
-    if !located.project_exists && !located.user.is_file() {
-        return Ok(());
-    }
-    let effective = setup_io::load(yard.root(), None).map_err(|e| {
-        Failure::Message(format!(
-            "{e}\n(fix it, or check it with `by config validate`)"
-        ))
-    })?;
-    let person = effective
-        .config
-        .approvals
-        .policy()
-        .map_err(|e| Failure::Message(e.to_string()))?;
-    if person.is_some() {
-        yard.use_approvals(ApprovalSettings {
-            person,
-            ..ApprovalSettings::default()
-        });
-    }
-    Ok(())
-}
 
 /// One line per ask.
 fn approvals_table(asks: &[ApprovalAsk]) -> String {

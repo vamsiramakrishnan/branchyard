@@ -8,7 +8,7 @@ Branchyard has three programmatic surfaces besides `by` itself. Which one you us
 |---|---|---|---|
 | a harness turn inside a branch (Claude Code, Codex, Gemini CLI, ... running a task) | [`sdk/python/branchyard.py`](../sdk/python/branchyard.py), the MCP tools, or `by` in the shell ([delegation](delegation.md#python)) | `by ... --json`, found from `BRANCHYARD_BY` or `PATH` | that branch, on its own descendants only |
 | a service outside: a Slack, Discord or Teams bot, a web app, a scheduler, a connector's own back end | [`sdk/python/branchyard_client.py`](../sdk/python/branchyard_client.py), **this page** | HTTP to `by serve` ([server](server.md)) with a bearer token | the token's principal, within its scopes, tenant and repositories |
-| a Rust program | the [`branchyard-client`](../crates/branchyard-client/src/lib.rs) crate (HTTP), or the `branchyard` crate in-process ([architecture](design.md)) | HTTP, or the engine itself | the same as above, or the yard's own authority |
+| a Rust program | the [`branchyard-client`](../crates/branchyard-client/src/lib.rs) crate (HTTP), or the `branchyard` crate in-process ([architecture](design.md)): `Yard::open_configured` reads `branchyard.toml` as `by` does ([configuration](setup.md#configuration)), `Yard::up` brings the configured backends up ([up](up.md)) | HTTP, or the engine itself | the same as above, or the yard's own authority |
 | anything else | the HTTP API directly, against [`schema/contract.json`](../schema/contract.json) | HTTP | the token's principal |
 
 Both Python modules ship in `branchyard-sdk-<version>.zip` ([distribution](distribution.md)) and need nothing but the standard library (Python 3.9 or newer). Everything a module returns is the Rust type's serde form, the same bytes on every surface ([surfaces](surfaces.md)), so a result read through `by --json`, the HTTP API or either module is one shape.
@@ -143,6 +143,24 @@ for child in app.children("slack-c0123"):      # every branch it delegated to, d
 
 **Asking for a result in a shape.** `app.spawn(parent, prompt, result={"schema": {...}, "required": True})` gives the child a [result contract](delegation.md#result-contract): a JSON Schema in a small subset, which the server checks when it is asked for. The child's `report` carries a `result` that is checked against it, and `app.inspect(child).result` (also `.result_contract`) reads the latest back as JSON, as does each settled child of `wait_for`. `app.report(branch, text, result=...)` reports as `branch`; a result that does not match raises `DeniedError` naming the path and the rule.
 
+## Local mode
+
+A program that is not `by` and has no server to talk to can run one of its own. `Client.local(root, name="app")` starts `by serve` on the repository at `root`, on a free loopback port with a fresh token in a private data directory, and returns a client on it; `close()`, or leaving the `with`, stops the server and removes the directory. The server reads the repository's configuration as every `by` command does and keeps its branches in the repository's `.branchyard/`; only its operation registry is in the private directory. `by` is `BRANCHYARD_BY`, else `by` on `PATH`, else the `by=` argument; `args` are more `by serve` flags.
+
+```python
+from branchyard_client import Client, Local
+
+if not Local(".").up().ready:         # install, start the gateway, list what only you can do
+    raise SystemExit("run `by up` and do what it lists")
+
+with Client.local(".") as client:     # a by serve of this process's own
+    app = client.repo("app")
+    op = app.task("Make the flaky parser test deterministic", harness="codex", budget_usd=2)
+    print(client.wait(op).state)
+```
+
+`Local(root)` is this machine's `by` for what a server does not do: `up(plan=False, yes=False)` returns a `Plan` (`steps`, `todo`, `ready`, `step(name)`; [up](up.md)), `doctor()` a `Report` (`checks`, `failed`, `status`), `harnesses(refresh=False)` the inventory, and `run(*args)` any command with `--json`. A `by` that cannot run or prints no JSON is a `LocalError` carrying what it said; `by`'s own `{"error": {"kind", "message"}}` is a `BranchyardError` with that kind, such as `config` for a configuration file that does not load.
+
 ## The rest of the API
 
 `Repo` also covers what the routes cover: `branches`, `branch`, `exists`, `remove`, `diff`, `children`, `graph`, `apply_graph`, `operations`, `event_page`, `wait_for` (asks again past the server's 30 s cap), the inbox as a branch (`inbox`, `ask`, `report`, `escalate`, `answer`), plans (`plan`, `approve_plan`, `reject_plan`), artifacts and scratch areas, and `Client` covers `repos`, `harnesses`, `me`, `healthy` and triggers (`triggers`, `trigger`, `create_trigger`, `delete_trigger`, `enable_trigger`, `test_trigger`, `trigger_runs`). `client.request(method, path, body, key=...)` is the escape hatch for a route the client has no method for; it returns the parsed JSON and raises the same typed errors. The module's docstrings are the reference; `docs/server.md` is the wire's.
@@ -156,3 +174,4 @@ It adds no authority: what a token may do, the server decides, and a `DeniedErro
 - `tests/test_sdk_client.py`: the client against a fake server scripted per route (stdlib only): the token, the idempotency key and a replay, the grant with its private home, every error code's class and detail, `wait` and `wait_for`, the stream's parsing, filtering, resumption after a cut and idle hook, a reply's text between the operation's cursors and while running, the first message creating and the next continuing a branch, the three busy policies and a refused steer's fallback, approvals and effects, grant round trips and refusals, branch names.
 - `crates/branchyard-cli/tests/sdk_client.rs` runs `tests/sdk_client_e2e.py` against a real `by serve` with the fake agent, a fake Anvil packager and delegation allowed: a surface's conversation created with a grant and an envelope, its harness spawning a child that asks for more than the parent holds and getting the intersection (visible in `inspect().grants`), a second message continuing the branch and keeping the grant, both turns' text on the stream, `skip` and `queue` against a slow turn, a replayed and a reused idempotency key, and the server's refusals (`unknown_branch`, a grant without a home, a child granted a connector its parent lacks) as typed errors.
 - `tests/test_schema_validation.py` and `crates/branchyard-client/tests/contract.rs`: the wire contract, with a grant entry in either form.
+- Local mode: `tests/test_sdk_client.py` over a fake `by` (the server started with the arguments `Client.local` documents, its token read, stopped and removed on close; a server that does not start reported with what it said; `Local.up`, `doctor`, `harnesses` and `run` with their flags, `by`'s own error as the typed error, a missing answer as `LocalError`), and `crates/branchyard-cli/tests/sdk_client.rs` starting the real `by serve` through `Client.local` and stopping it.

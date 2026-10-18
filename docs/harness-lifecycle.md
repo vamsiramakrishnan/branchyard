@@ -89,6 +89,7 @@ This machine's inventory is kept for a minute in `harness-inventory.json` beside
 by harnesses install codex                # asks on a terminal
 by harnesses install codex --yes
 by harnesses update codex --version 0.200.0 --yes --on ssh://me@build.example
+by up                                     # installs every harness the configuration names, under the same policy (docs/up.md)
 ```
 
 `by catalog refresh` reads the npm registry's latest release of every catalog harness installed with `npm install -g`, pinned with its integrity hash and cached with a checksum ([live catalogs](registry.md#live-catalogs)). `by harnesses` then notes a newer release beside an installed harness, and `by harnesses update ID` without `--version` names it. Nothing is fetched unless asked, and the cached release is only a suggestion: `--version` takes it.

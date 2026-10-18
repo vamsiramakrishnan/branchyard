@@ -1065,6 +1065,29 @@ Examples:
   by config validate ~/.config/branchyard/config.toml
   by config schema > branchyard.config.json";
 
+const UP_EXAMPLES: &str = "\
+Steps, each ready, planned, needs_person or blocked, with a line on what to do:
+  store            .branchyard/, made by opening the repository
+  harness.<id>     each harness the configuration names ([defaults], [fleet], [knowledge];
+                   claude-code when none): installed, or installed here when [harnesses]
+                   in your user file allows it (ask on a terminal, --yes, or auto)
+  login.<id>       logged in, or how to (the login command, the key variable)
+  secret.<NAME>    each [secrets] entry and [models] key: its variable set or file present
+  models           the model gateway [models] describes
+  connectors       the connector gateway: listening, started here, or without Anvil
+  provider         [defaults] provider: a build that runs it, a recipe you trust
+  workspace        [workspace] scripts trusted (by workspace trust)
+Exit 0 when every step is ready, 1 otherwise. Nothing prints a secret's value.
+
+Examples:
+  by up                    # install what is allowed, start the gateway, list the rest
+  by up --plan             # what it would do and what is missing; changes nothing
+  by up --yes              # confirm the installs the policy asks about
+  by up --json             # the steps as JSON, for a script or the Python SDK
+
+See docs/up.md.
+";
+
 const DOCTOR_EXAMPLES: &str = "\
 Checks, each ok, warn or fail with a line on what to do:
   repository       a repository; .branchyard/ and its store; the store's schema
@@ -2017,6 +2040,19 @@ pub enum Command {
         /// Check the repository at PATH instead of the one around the current directory
         #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         path: Option<String>,
+    },
+    /// Bring this repository's configured backends up: install harnesses, start the gateway, and say what only you can do
+    #[command(display_order = 605, after_help = UP_EXAMPLES)]
+    Up {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+        /// Say what would be done and what is missing; change nothing
+        #[arg(long)]
+        plan: bool,
+        /// Confirm the installs the [harnesses] policy would ask about
+        #[arg(long)]
+        yes: bool,
     },
     /// Run, stop or inspect this repository's connector gateway (Anvil), and its keys
     #[command(display_order = 403, subcommand_required = true, after_help = GATEWAY_EXAMPLES)]
@@ -6718,6 +6754,18 @@ mod tests {
         }
         assert!(err("config shwo").contains("a similar subcommand exists: 'show'"));
         assert!(help("config").contains("BRANCHYARD_USER_CONFIG"));
+    }
+
+    #[test]
+    fn up_takes_plan_yes_and_json() {
+        let up = |line: &str| match parse_str(line).unwrap() {
+            Command::Up { json, plan, yes } => (json, plan, yes),
+            other => panic!("{line}: parsed as {other:?}"),
+        };
+        assert_eq!(up("up"), (false, false, false));
+        assert_eq!(up("up --plan --json"), (true, true, false));
+        assert_eq!(up("up --yes"), (false, false, true));
+        assert!(parse_str("up extra").is_err());
     }
 
     #[test]

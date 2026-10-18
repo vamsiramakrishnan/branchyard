@@ -1,14 +1,14 @@
 //! `by knowledge`: review, adopt, reject, edit, add, remove, distill and
-//! export repository knowledge, locally or on a server, and the
-//! `[knowledge]` settings a local yard runs with. See docs/knowledge.md.
+//! export repository knowledge, locally or on a server. The `[knowledge]`
+//! settings a local yard runs with are the engine's
+//! (`branchyard::configure`). See docs/knowledge.md.
 
 use std::io::{self, BufRead, Write};
-use std::path::Path;
 use std::sync::Arc;
 
 use branchyard::{
-    Distilled, JudgeSpec, KnowledgeEdit, KnowledgeEntry, KnowledgeScope, KnowledgeSettings,
-    KnowledgeStatus, NewKnowledge, TaskKind, TaskOptions, Yard,
+    Distilled, JudgeSpec, KnowledgeEdit, KnowledgeEntry, KnowledgeScope, KnowledgeStatus,
+    NewKnowledge, TaskKind, TaskOptions, Yard,
 };
 use branchyard_client::knowledge_api::{KnowledgeAddRequest, KnowledgeEditRequest};
 
@@ -16,91 +16,6 @@ use crate::args::KnowledgeAction;
 use crate::commands::{self, print, Env, Failure, Outcome, Target};
 use crate::plan_cmd::{edit_text, person};
 use crate::render::{self, Tone};
-use crate::setup_io;
-
-/// The `[knowledge]` table under `root`, or `None` without one (or inside
-/// a harness's branch, which reads no configuration).
-fn config(root: &Path) -> Result<Option<branchyard_setup::config::KnowledgeConfig>, Failure> {
-    if std::env::var_os("BRANCHYARD_BRANCH").is_some_and(|v| !v.is_empty()) {
-        return Ok(None);
-    }
-    let located = setup_io::locate(root);
-    if !located.project_exists && !located.user.is_file() {
-        return Ok(None);
-    }
-    let effective = setup_io::load(root, None).map_err(|e| {
-        Failure::Message(format!(
-            "{e}\n(fix it, or check it with `by config validate`)"
-        ))
-    })?;
-    let knowledge = effective.config.knowledge;
-    Ok((!knowledge.is_empty()).then_some(knowledge))
-}
-
-/// The distiller `[knowledge] distiller` names, as a judge.
-fn distiller(
-    config: &branchyard_setup::config::DistillerConfig,
-) -> Result<Arc<dyn branchyard::Judge>, Failure> {
-    let effort = config
-        .effort
-        .as_deref()
-        .map(branchyard::Effort::parse)
-        .transpose()
-        .map_err(|e| Failure::Message(format!("knowledge.distiller.effort: {e}")))?;
-    let command = config
-        .command
-        .as_deref()
-        .map(branchyard_setup::config::split_words)
-        .transpose()
-        .map_err(|e| Failure::Message(format!("knowledge.distiller.command: {e}")))?;
-    Ok(Arc::new(branchyard::HarnessJudge {
-        spec: JudgeSpec {
-            harness: config.harness.clone(),
-            model: config.model.clone(),
-            effort,
-            command,
-            rubric: None,
-        },
-        options: TaskOptions::default(),
-    }))
-}
-
-/// The settings `[knowledge]` describes.
-pub fn settings(
-    config: &branchyard_setup::config::KnowledgeConfig,
-) -> Result<KnowledgeSettings, Failure> {
-    let defaults = KnowledgeSettings::default();
-    let distill_on = match &config.distill_on {
-        None => defaults.distill_on,
-        Some(names) => names
-            .iter()
-            .map(|name| match name.as_str() {
-                "merged" => Ok(branchyard::DistillTrigger::Merged),
-                "judged_best" => Ok(branchyard::DistillTrigger::JudgedBest),
-                "ready" => Ok(branchyard::DistillTrigger::Ready),
-                other => Err(Failure::Message(format!(
-                    "knowledge.distill_on: {other:?} is not merged, judged_best or ready"
-                ))),
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-    };
-    Ok(KnowledgeSettings {
-        provision: config.provision.unwrap_or(defaults.provision),
-        budget_tokens: config
-            .budget_tokens
-            .map_or(defaults.budget_tokens, |t| t as usize),
-        distill_on,
-        distiller: config.distiller.as_ref().map(distiller).transpose()?,
-    })
-}
-
-/// Give `yard` the settings `[knowledge]` configures, if any.
-pub fn configure(yard: &Yard) -> Result<(), Failure> {
-    if let Some(config) = config(yard.root())? {
-        yard.use_knowledge(settings(&config)?);
-    }
-    Ok(())
-}
 
 fn status_tone(status: KnowledgeStatus) -> Tone {
     match status {

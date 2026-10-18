@@ -16,6 +16,11 @@ Standard library only (`urllib`, `json`, `ssl`); Python 3.9 or newer.
     client = Client("http://127.0.0.1:8421", token_file=".branchyard/server/token")
     app = client.repo("app")
 
+    # Or local mode: a `by serve` of this process's own, on the repository
+    # here, stopped when the client is closed (`docs/sdk.md#local-mode`).
+    with Client.local(".") as client:
+        app = client.repo("app")
+
     # One branch per conversation, as a chat assistant keeps a session.
     chat = app.surface("slack", harness="claude-code", budget_usd=5,
                        connectors=[Grant.parse("github:write:issues.*")])
@@ -31,6 +36,11 @@ stable error `code` (`docs/server.md#errors`); a connection failure is a
 `Idempotency-Key`, generated unless given, so a retry with the same key
 never starts a second operation.
 
+`Local` is this machine's `by` for what a server does not do: `by up`
+brings the configured backends up (harnesses installed, the gateway
+started, and what only a person can do listed), `by doctor` and `by
+harnesses` report; each as the JSON `by --json` prints.
+
 Not guaranteed: anything the server does not. This module adds no
 authority; what a token may do, the server decides.
 """
@@ -38,9 +48,15 @@ authority; what a token may do, the server decides.
 import contextlib
 import dataclasses
 import json
+import os
 import re
+import select
+import shutil
 import socket
 import ssl
+import subprocess
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -68,21 +84,26 @@ __all__ = [
     "IdempotencyKeyReusedError",
     "Inspection",
     "InvalidRequestError",
+    "Local",
+    "LocalError",
     "Message",
     "NotAllowedError",
     "NotFoundError",
     "Operation",
     "OperationFailedError",
+    "Plan",
     "QuotaExceededError",
     "Record",
     "Reply",
     "Repo",
+    "Report",
     "Reported",
     "RunningError",
     "ServerError",
     "Status",
     "StatusReport",
     "Steer",
+    "Step",
     "Surface",
     "TransportError",
     "UnauthorizedError",
@@ -199,6 +220,15 @@ class IdempotencyKeyReusedError(BranchyardError):
 class ServerError(BranchyardError):
     """A server-side failure (`internal`, `git_error`, ...) or
     `shutting_down`."""
+
+
+class LocalError(BranchyardError):
+    """`local`: `by` on this machine could not be run, did not start its
+    server, or printed no JSON (`Client.local`, `Local`). The message
+    carries what it said."""
+
+    def __init__(self, message: str):
+        super().__init__("local", message)
 
 
 class OperationFailedError(BranchyardError):
@@ -725,6 +755,98 @@ class Client:
             self._context = ssl.create_default_context(cafile=ca_file)
         elif ca_file is not None:
             raise ValueError("ca_file needs an https:// url")
+        # Set by `Client.local`: the server this client started, its data
+        # directory and its log; `close` stops it and removes them.
+        self.server: Optional[subprocess.Popen] = None
+        self.server_dir: Optional[str] = None
+        self.server_log: Optional[str] = None
+        self.local_name: Optional[str] = None
+
+    @classmethod
+    def local(
+        cls,
+        root: str = ".",
+        *,
+        name: str = "app",
+        by: Optional[str] = None,
+        listen: str = "127.0.0.1:0",
+        args: Sequence[str] = (),
+        start_timeout: float = 60.0,
+        timeout: float = 30.0,
+    ) -> "Client":
+        """Local mode: a `by serve` of this process's own, serving the
+        repository at `root` as `name` on a free loopback port (`listen`),
+        with a fresh token and a private data directory, and a client on
+        it. `by` is the executable (default: `BRANCHYARD_BY`, else `by` on
+        `PATH`); `args` are more `by serve` flags (`--allow-delegation`,
+        `--harness-command`). The server reads the repository's
+        configuration as every `by` command does and keeps its branches in
+        the repository's `.branchyard/`; only its operation registry is in
+        the private directory, which goes when the client is closed.
+        `close()` stops the server; use `with Client.local(...) as client`.
+        Raises `LocalError` when `by` cannot run or the server does not
+        start, with what it said."""
+        program = _by_command(by)
+        root = os.path.abspath(root)
+        data_dir = tempfile.mkdtemp(prefix="branchyard-local-")
+        log_path = os.path.join(data_dir, "server.log")
+        command = [
+            program,
+            "serve",
+            "--listen",
+            listen,
+            "--repo",
+            f"{name}={root}",
+            "--data-dir",
+            data_dir,
+            "--quiet",
+            *args,
+        ]
+        try:
+            with open(log_path, "ab") as log:
+                process = subprocess.Popen(
+                    command, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=log
+                )
+        except OSError as error:
+            shutil.rmtree(data_dir, ignore_errors=True)
+            raise LocalError(f"could not run {program}: {error}") from None
+        line = _first_line(process, start_timeout)
+        if not line.startswith("listening on "):
+            _stop(process)
+            said = _tail(log_path) or line.strip() or "nothing"
+            shutil.rmtree(data_dir, ignore_errors=True)
+            raise LocalError(f"`{program} serve` did not start; it said: {said}")
+        _drain(process)
+        try:
+            client = cls(
+                line[len("listening on ") :].strip(), token_file=os.path.join(data_dir, "token"), timeout=timeout
+            )
+        except (OSError, ValueError) as error:
+            _stop(process)
+            shutil.rmtree(data_dir, ignore_errors=True)
+            raise LocalError(f"`{program} serve` started but gave no token: {error}") from None
+        client.server = process
+        client.server_dir = data_dir
+        client.server_log = log_path
+        client.local_name = name
+        return client
+
+    def close(self) -> None:
+        """Stop the server `Client.local` started and remove its directory;
+        nothing to do for a client made with a URL."""
+        process, self.server = self.server, None
+        if process is not None:
+            _stop(process)
+        directory, self.server_dir = self.server_dir, None
+        if directory is not None:
+            shutil.rmtree(directory, ignore_errors=True)
+        self.server_log = None
+
+    def __enter__(self) -> "Client":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     # -- transport ---------------------------------------------------------
 
@@ -912,6 +1034,207 @@ def _json_or_text(content: bytes) -> Any:
         return json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return content.decode("utf-8", "replace")
+
+
+# ---------------------------------------------------------------------------
+# Local mode: a server of this process's own, and this machine's `by`
+
+
+def _by_command(by: Optional[str]) -> str:
+    """The `by` to run: `by` as given, else `BRANCHYARD_BY`, else `by` on
+    `PATH`."""
+    return by or os.environ.get("BRANCHYARD_BY") or "by"
+
+
+def _first_line(process: subprocess.Popen, timeout: float) -> str:
+    """The first line `process` prints on its stdout, or what it printed
+    before it exited or `timeout` ran out."""
+    stdout = process.stdout
+    if stdout is None:
+        return ""
+    deadline = time.monotonic() + timeout
+    buffer = bytearray()
+    while b"\n" not in buffer:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        ready, _, _ = select.select([stdout], [], [], min(remaining, 0.5))
+        if not ready:
+            if process.poll() is not None:
+                break
+            continue
+        chunk = os.read(stdout.fileno(), 4096)
+        if not chunk:
+            break
+        buffer += chunk
+    return buffer.split(b"\n", 1)[0].decode("utf-8", "replace")
+
+
+def _drain(process: subprocess.Popen) -> None:
+    """Read and drop whatever else `process` prints, so a full pipe never
+    stops it."""
+    stdout = process.stdout
+    if stdout is None:
+        return
+
+    def run() -> None:
+        with contextlib.suppress(OSError, ValueError):
+            while stdout.read(4096):
+                pass
+
+    threading.Thread(target=run, name="branchyard-local-stdout", daemon=True).start()
+
+
+def _stop(process: subprocess.Popen) -> None:
+    """Stop `process`: a signal, then force after ten seconds."""
+    if process.poll() is None:
+        with contextlib.suppress(OSError):
+            process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                process.kill()
+            with contextlib.suppress(OSError):
+                process.wait(timeout=10)
+    if process.stdout is not None:
+        with contextlib.suppress(OSError):
+            process.stdout.close()
+
+
+def _tail(path: str, lines: int = 5) -> str:
+    """The last `lines` lines of the file at `path`, as one line."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return ""
+    return " / ".join(line.strip() for line in text.strip().splitlines()[-lines:] if line.strip())
+
+
+class Step(Record):
+    """One step of `by up` (`docs/up.md`): `name` (`harness.codex`,
+    `secret.OPENAI_API_KEY`, `connectors`, ...), `state` (`ready`,
+    `planned`, `needs_person` or `blocked`), `detail`; `todo` for a step
+    that is not ready; `action` (`{"kind": "install", "plan": ...}` or
+    `{"kind": "start_gateway"}`) for one `up` does, or may do with your
+    yes."""
+
+    @property
+    def ready(self) -> bool:
+        return self.get("state") == "ready"
+
+
+class Plan(Record):
+    """What `by up` found and did: `steps`, `state` (the worst of them) and
+    `ready`. Nothing in it is a secret's value."""
+
+    @property
+    def steps(self) -> list[Step]:
+        return [Step(s) for s in self.get("steps") or []]
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.get("ready"))
+
+    @property
+    def todo(self) -> list[Step]:
+        """The steps that are not ready, in report order."""
+        return [s for s in self.steps if not s.ready]
+
+    def step(self, name: str) -> Optional[Step]:
+        return next((s for s in self.steps if s.get("name") == name), None)
+
+
+class Report(Record):
+    """`by doctor --json` (`docs/doctor.md`): `checks` (`name`, `status`,
+    `detail`, `fix`) and `status`, the worst of them."""
+
+    @property
+    def checks(self) -> list[Record]:
+        return [Record(c) for c in self.get("checks") or []]
+
+    @property
+    def failed(self) -> list[Record]:
+        return [c for c in self.checks if c.get("status") == "fail"]
+
+    def check(self, name: str) -> Optional[Record]:
+        return next((c for c in self.checks if c.get("name") == name), None)
+
+
+class Local:
+    """This machine's `by`, run in the repository at `root` with `--json`,
+    for what a server does not do (`docs/sdk.md#local-mode`): `up` brings
+    the configured backends up, `doctor` and `harnesses` report. `by` is
+    the executable (default: `BRANCHYARD_BY`, else `by` on `PATH`);
+    `timeout` bounds each run, an install included. Every method raises
+    `LocalError` when `by` cannot run or prints no JSON, and the
+    `BranchyardError` of `by`'s own `{"error": {"kind", "message"}}`
+    answer, such as a configuration file that does not load (`config`)."""
+
+    def __init__(self, root: str = ".", *, by: Optional[str] = None, timeout: float = 900.0):
+        self.root = os.path.abspath(root)
+        self.by = _by_command(by)
+        self.timeout = timeout
+
+    def run(self, *args: str) -> tuple[int, Any]:
+        """`by <args> --json` in the repository: its exit status and the
+        JSON it printed. The escape hatch for a command without a method."""
+        command = [self.by, *args, "--json"]
+        try:
+            done = subprocess.run(
+                command,
+                cwd=self.root,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=self.timeout,
+                check=False,
+            )
+        except OSError as error:
+            raise LocalError(f"could not run {self.by}: {error}") from None
+        except subprocess.TimeoutExpired:
+            raise LocalError(f"`{' '.join(command)}` did not finish in {self.timeout:g}s") from None
+        try:
+            value = json.loads(done.stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            said = done.stderr.decode("utf-8", "replace").strip() or "nothing"
+            raise LocalError(f"`{' '.join(command)}` exited {done.returncode} without JSON; it said: {said}") from None
+        if isinstance(value, dict) and set(value) == {"error"} and isinstance(value["error"], dict):
+            refusal = value["error"]
+            raise BranchyardError(
+                str(refusal.get("kind") or "error"), str(refusal.get("message") or ""), refusal.get("detail")
+            )
+        return done.returncode, value
+
+    def up(self, *, plan: bool = False, yes: bool = False) -> Plan:
+        """`by up`: install what the `[harnesses]` policy allows, start the
+        connector gateway, and list what only you can do; `plan` changes
+        nothing and says what would be done; `yes` confirms the installs
+        the policy would ask about. `Plan.ready` says whether everything
+        is in place."""
+        args = ["up"]
+        if plan:
+            args.append("--plan")
+        if yes:
+            args.append("--yes")
+        _, value = self.run(*args)
+        return Plan(value)
+
+    def doctor(self) -> Report:
+        """`by doctor`: is this machine and repository ready, check by
+        check."""
+        _, value = self.run("doctor")
+        return Report(value)
+
+    def harnesses(self, *, refresh: bool = False) -> Record:
+        """`by harnesses`: this machine's inventory (`harnesses`, each with
+        `id`, `path`, `version`, `login`; `tools`), from the last minute's
+        detection unless `refresh`."""
+        args = ["harnesses"]
+        if refresh:
+            args.append("--refresh")
+        _, value = self.run(*args)
+        return Record(value)
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,9 @@ Run: `python tests/test_sdk_client.py`.
 """
 
 import json
+import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -1121,6 +1123,166 @@ class ModuleSpawnAndReport(unittest.TestCase):
         _, bare = self.run_by(lambda: bm.inspect("kid"), {"name": "kid", "status": {"state": "running"}})
         self.assertIsNone(bare.result)
         self.assertIsNone(bare.result_contract)
+
+
+FAKE_BY = f"""#!{sys.executable}
+import json, os, signal, sys, time
+args = sys.argv[1:]
+with open(os.environ["FAKE_BY_LOG"], "a") as f:
+    f.write(json.dumps(args) + "\\n")
+if args and args[0] == "serve":
+    data = args[args.index("--data-dir") + 1]
+    with open(os.path.join(data, "token"), "w") as f:
+        f.write(os.environ["FAKE_BY_TOKEN"] + "\\n")
+    if os.environ.get("FAKE_BY_FAIL"):
+        print("by serve: boom", file=sys.stderr)
+        sys.exit(3)
+    print("listening on " + os.environ["FAKE_BY_URL"], flush=True)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    while True:
+        time.sleep(1)
+answers = json.loads(os.environ.get("FAKE_BY_ANSWERS", "{{}}"))
+answer = answers.get(args[0]) if args else None
+if answer is None:
+    print("by: no such command", file=sys.stderr)
+    sys.exit(2)
+print(json.dumps(answer["body"]))
+sys.exit(answer.get("code", 0))
+"""
+
+
+class LocalMode(ServerCase):
+    """`Client.local` and `Local` over a fake `by`: a script that starts a
+    "server" (this case's fake, by URL), answers `up`, `doctor` and
+    `harnesses` as scripted, and records every call."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.by = self.root / "by"
+        self.by.write_text(FAKE_BY)
+        self.by.chmod(0o755)
+        self.log = self.root / "calls.log"
+        self.env = mock.patch.dict(
+            os.environ,
+            {"FAKE_BY_LOG": str(self.log), "FAKE_BY_TOKEN": TOKEN, "FAKE_BY_URL": self.url},
+        )
+        self.env.start()
+
+    def tearDown(self) -> None:
+        self.env.stop()
+        self.tmp.cleanup()
+        super().tearDown()
+
+    def calls(self) -> list[list[str]]:
+        text = self.log.read_text() if self.log.exists() else ""
+        return [json.loads(line) for line in text.splitlines() if line]
+
+    def test_local_starts_by_serve_reads_its_token_and_stops_it(self):
+        self.fake.answer("GET", "/v1/repos", (200, {"repos": [{"name": "app", "root": str(self.root)}]}))
+        with bc.Client.local(str(self.root), by=str(self.by), name="app", args=["--allow-delegation"]) as client:
+            self.assertEqual(client.url, self.url)
+            self.assertEqual(client.token, TOKEN)
+            self.assertEqual(client.local_name, "app")
+            self.assertIsNotNone(client.server)
+            self.assertIsNone(client.server.poll(), "the server runs while the client is open")
+            self.assertTrue(client.server_dir and Path(client.server_dir).is_dir())
+            self.assertEqual([r.name for r in client.repos()], ["app"])
+            self.assertEqual(self.requests("GET", "/v1/repos")[0][2].get("authorization"), f"Bearer {TOKEN}")
+            data_dir = client.server_dir
+            process = client.server
+        self.assertIsNotNone(process.poll(), "closed: the server is stopped")
+        self.assertFalse(Path(data_dir).exists(), "closed: its directory is gone")
+        serve = self.calls()[0]
+        self.assertEqual(serve[:6], ["serve", "--listen", "127.0.0.1:0", "--repo", f"app={self.root}", "--data-dir"])
+        self.assertEqual(serve[6], data_dir)
+        self.assertEqual(serve[7:], ["--quiet", "--allow-delegation"])
+        # A plain client has nothing to close.
+        plain = bc.Client(self.url, TOKEN)
+        plain.close()
+        self.assertIsNone(plain.server)
+
+    def test_local_reports_a_server_that_does_not_start_with_what_it_said(self):
+        with mock.patch.dict(os.environ, {"FAKE_BY_FAIL": "1"}), self.assertRaises(bc.LocalError) as raised:
+            bc.Client.local(str(self.root), by=str(self.by))
+        self.assertEqual(raised.exception.code, "local")
+        self.assertIn("boom", str(raised.exception))
+        self.assertIn("did not start", str(raised.exception))
+        with self.assertRaises(bc.LocalError) as raised:
+            bc.Client.local(str(self.root), by=str(self.root / "no-such-by"))
+        self.assertIn("could not run", str(raised.exception))
+
+    def test_local_runs_up_doctor_and_harnesses_with_json(self):
+        plan = {
+            "steps": [
+                {"name": "store", "state": "ready", "detail": "/r/.branchyard"},
+                {
+                    "name": "harness.codex",
+                    "state": "planned",
+                    "detail": "not installed",
+                    "action": {"kind": "install", "plan": {"harness": "codex", "command": "npm i -g @openai/codex"}},
+                },
+                {"name": "login.codex", "state": "needs_person", "detail": "not logged in", "todo": "codex login"},
+            ],
+            "state": "needs_person",
+            "ready": False,
+        }
+        report = {
+            "checks": [
+                {"name": "repository.git", "status": "ok", "detail": "main", "fix": None},
+                {"name": "config.project", "status": "fail", "detail": "line 3", "fix": "fix it"},
+            ],
+            "status": "fail",
+        }
+        inventory = {"harnesses": [{"id": "codex", "version": "0.157.1", "login": {"state": "logged_in"}}], "tools": {}}
+        answers = {
+            "up": {"body": plan, "code": 1},
+            "doctor": {"body": report, "code": 1},
+            "harnesses": {"body": inventory},
+        }
+        with mock.patch.dict(os.environ, {"FAKE_BY_ANSWERS": json.dumps(answers)}):
+            local = bc.Local(str(self.root), by=str(self.by))
+            got = local.up(plan=True, yes=True)
+            self.assertIsInstance(got, bc.Plan)
+            self.assertFalse(got.ready)
+            self.assertEqual(got.state, "needs_person")
+            self.assertEqual([s.name for s in got.steps], ["store", "harness.codex", "login.codex"])
+            self.assertEqual([s.name for s in got.todo], ["harness.codex", "login.codex"])
+            self.assertEqual(got.step("harness.codex").action["kind"], "install")
+            self.assertTrue(got.step("store").ready)
+            self.assertIsNone(got.step("nope"))
+            doctor = local.doctor()
+            self.assertEqual(doctor.status, "fail")
+            self.assertEqual([c.name for c in doctor.failed], ["config.project"])
+            self.assertEqual(doctor.check("repository.git").detail, "main")
+            found = local.harnesses(refresh=True)
+            self.assertEqual(found.harnesses[0]["id"], "codex")
+            code, raw = local.run("up")
+            self.assertEqual((code, raw["ready"]), (1, False))
+        self.assertEqual(
+            self.calls(),
+            [
+                ["up", "--plan", "--yes", "--json"],
+                ["doctor", "--json"],
+                ["harnesses", "--refresh", "--json"],
+                ["up", "--json"],
+            ],
+        )
+
+    def test_local_raises_bys_own_error_and_a_missing_answer(self):
+        refused = {"error": {"kind": "config", "message": "branchyard.toml:3: unknown key"}}
+        answers = {"up": {"body": refused, "code": 1}}
+        with mock.patch.dict(os.environ, {"FAKE_BY_ANSWERS": json.dumps(answers)}):
+            local = bc.Local(str(self.root), by=str(self.by))
+            with self.assertRaises(bc.BranchyardError) as raised:
+                local.up()
+            self.assertEqual(raised.exception.code, "config")
+            self.assertIn("unknown key", raised.exception.message)
+            with self.assertRaises(bc.LocalError) as failed:
+                local.doctor()
+            self.assertIn("no such command", str(failed.exception))
+            self.assertIn("exited 2", str(failed.exception))
 
 
 if __name__ == "__main__":

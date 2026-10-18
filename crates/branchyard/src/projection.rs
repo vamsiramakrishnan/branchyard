@@ -134,6 +134,9 @@ pub(crate) struct Hub {
     pub approvals: Mutex<Arc<crate::effects::ApprovalSettings>>,
     /// Set by [`crate::Yard::use_sandbox_host`].
     pub sandbox_host: Mutex<Option<crate::SandboxHost>>,
+    /// Set by [`crate::Yard::configure`]: the configuration and the
+    /// options a new task starts from.
+    pub config: Mutex<Option<Arc<crate::configure::Configured>>>,
 }
 
 impl Default for Hub {
@@ -158,6 +161,7 @@ impl Default for Hub {
             services: Default::default(),
             approvals: Default::default(),
             sandbox_host: Default::default(),
+            config: Default::default(),
         }
     }
 }
@@ -270,7 +274,8 @@ pub(crate) fn by_path(options: &TaskOptions) -> Option<PathBuf> {
     }
 }
 
-fn found_by() -> Option<PathBuf> {
+/// The `by` this process is, or the one beside it, or the one on `PATH`.
+pub(crate) fn found_by() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
         .filter(|exe| exe.file_name().is_some_and(|n| n == "by"))

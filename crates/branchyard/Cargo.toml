@@ -25,6 +25,7 @@ schema = ["dep:schemars", "branchyard-provision/schema", "branchyard-harness/sch
 branchyard-support = { path = "../branchyard-support" }
 blake3 = { workspace = true }
 branchyard-bridge = { path = "../branchyard-bridge" }
+branchyard-config = { path = "../branchyard-config" }
 branchyard-controls = { path = "../branchyard-controls" }
 branchyard-harness = { path = "../branchyard-harness" }
 branchyard-microsandbox = { path = "../branchyard-microsandbox" }

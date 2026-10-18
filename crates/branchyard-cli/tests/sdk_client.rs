@@ -170,3 +170,64 @@ fn the_python_client_drives_a_granted_conversation_whose_child_inherits_a_narrow
     );
     drop(server);
 }
+
+/// `Client.local` starts its own `by serve` on a repository, reads the
+/// token the server made, serves it as `app`, and stops it when the client
+/// is closed.
+#[test]
+fn the_python_client_starts_its_own_by_serve_and_stops_it() {
+    let Some(python) = python() else {
+        eprintln!("skipped: no python3");
+        return;
+    };
+    let scratch = branchyard_testkit::Scratch::new("sdk-local");
+    let dir = scratch.path();
+    let root = dir.join("app");
+    fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "user.name", "Test"]);
+    git(&root, &["config", "user.email", "test@localhost"]);
+    git(&root, &["config", "commit.gpgsign", "false"]);
+    fs::write(root.join("a.txt"), "one\n").unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "initial"]);
+    let script = r#"
+import os, sys
+sys.path.insert(0, os.environ["SDK"])
+import branchyard_client as bc
+with bc.Client.local(os.environ["ROOT"], by=os.environ["BY"], name="app") as client:
+    assert client.url.startswith("http://127.0.0.1:"), client.url
+    assert client.healthy(), "healthz"
+    assert [r.name for r in client.repos()] == ["app"], client.repos()
+    assert client.repo("app").branches() == [], "no branches yet"
+    server = client.server
+    assert server is not None and server.poll() is None, "the server runs"
+    data_dir = client.server_dir
+    assert os.path.isfile(os.path.join(data_dir, "token"))
+assert server.poll() is not None, "closed: stopped"
+assert not os.path.exists(data_dir), "closed: removed"
+print("ok")
+"#;
+    let mut command = Command::new(python);
+    branchyard_testkit::hermetic(&mut command)
+        .args(["-I", "-c", script])
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("NO_COLOR", "1")
+        .env(
+            "BRANCHYARD_USER_CONFIG",
+            "/nonexistent/branchyard-config.toml",
+        )
+        .env("SDK", repo_root().join("sdk/python"))
+        .env("ROOT", &root)
+        .env("BY", BY)
+        .stdin(Stdio::null());
+    let out = command.output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.trim_end().ends_with("ok"),
+        "python local mode failed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}

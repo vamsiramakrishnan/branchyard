@@ -143,24 +143,20 @@ fn open_yard() -> Result<Yard, branchyard::Error> {
     configure(yard)
 }
 
-/// `yard` with the gateways and knowledge settings the configuration
-/// gives it, as [`open`] returns it.
+/// `yard` with what the configuration files give it (the gateways, the
+/// approvals, the knowledge settings and the task defaults;
+/// [`Yard::configure`]), as [`open`] returns it. A harness on a branch
+/// reads no configuration: its `by` acts for that branch, whose settings
+/// the engine already set.
 pub(crate) fn configure(yard: Yard) -> Result<Yard, branchyard::Error> {
-    // `[connectors]`: the gateway its branches' turns are given.
-    crate::gateway_cmd::configure(&yard)
-        .map_err(|e| branchyard::Error::Unsupported(format!("[connectors]: {e}")))?;
-    // `[approvals]`: your policy for tools and connector operations
-    // (docs/effects.md).
-    crate::effects_cmd::configure(&yard)
-        .map_err(|e| branchyard::Error::Unsupported(format!("[approvals]: {e}")))?;
-    // `[models]`: the model gateway its branches' turns may use
-    // (docs/model-gateway.md).
-    crate::models_cmd::configure(&yard)
-        .map_err(|e| branchyard::Error::Unsupported(format!("[models]: {e}")))?;
-    // `[knowledge]`: what its branches are given and when they are
-    // distilled (docs/knowledge.md).
-    crate::knowledge_cmd::configure(&yard)
-        .map_err(|e| branchyard::Error::Unsupported(format!("[knowledge]: {e}")))?;
+    if crate::models_cmd::inside_branch() {
+        return Ok(yard);
+    }
+    let config = yard
+        .configuration()?
+        .map(|effective| effective.config)
+        .unwrap_or_default();
+    yard.configure(&config)?;
     Ok(yard)
 }
 

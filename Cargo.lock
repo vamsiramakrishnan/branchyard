@@ -636,6 +636,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "branchyard-bridge",
+ "branchyard-config",
  "branchyard-controls",
  "branchyard-harness",
  "branchyard-microsandbox",
@@ -695,6 +696,7 @@ dependencies = [
  "branchyard",
  "branchyard-bridge",
  "branchyard-client",
+ "branchyard-config",
  "branchyard-controls",
  "branchyard-harness",
  "branchyard-mcp",
@@ -741,6 +743,23 @@ dependencies = [
  "serde_json",
  "uuid",
  "webpki-roots",
+]
+
+[[package]]
+name = "branchyard-config"
+version = "0.0.1"
+dependencies = [
+ "branchyard-harness",
+ "branchyard-provision",
+ "dirs",
+ "glob",
+ "hex",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "shlex",
+ "toml",
 ]
 
 [[package]]
@@ -909,9 +928,9 @@ dependencies = [
 name = "branchyard-setup"
 version = "0.0.1"
 dependencies = [
+ "branchyard-config",
  "branchyard-harness",
  "branchyard-provision",
- "glob",
  "hex",
  "schemars 1.2.2",
  "serde",

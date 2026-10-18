@@ -52,6 +52,7 @@ mod sync_cmd;
 mod task_cmd;
 mod trackers;
 mod trigger_cmd;
+mod up_cmd;
 mod usage;
 mod watch;
 mod wizard;
@@ -175,6 +176,8 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         Command::Doctor { json, path } => {
             return doctor_cmd::main(env, globals, path.as_deref(), json)
         }
+        // Up acts on this machine's repository, whatever [remote] says.
+        Command::Up { json, plan, yes } => return up_cmd::main(env, globals, plan, yes, json),
         // The meters read this machine's session files; no repository needed.
         Command::Usage { json } => return usage::show(env, json),
         // The ssh connection itself, not a server's API.
@@ -644,6 +647,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Init { .. }
         | Command::Config { .. }
         | Command::Doctor { .. }
+        | Command::Up { .. }
         | Command::Usage { .. }
         | Command::Remote { .. }
         | Command::Catalog { .. }

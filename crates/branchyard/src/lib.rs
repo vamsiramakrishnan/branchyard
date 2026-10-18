@@ -100,6 +100,7 @@ mod broker;
 mod bundle;
 mod checkpoint;
 mod compare;
+pub mod configure;
 #[cfg(test)]
 mod conformance;
 pub mod connectors;
@@ -159,6 +160,7 @@ mod storage;
 pub mod store_codec;
 mod tarball;
 pub mod tasks;
+pub mod up;
 mod wake;
 mod workspace;
 
@@ -169,6 +171,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The configuration file, `branchyard.toml` and the user file: its types,
+/// strict parser, layering and loader. See `docs/setup.md#configuration`.
+pub use branchyard_config as config;
 pub use git::current_branch;
 pub use lock::DirLock;
 pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
@@ -635,12 +640,22 @@ impl Yard {
         git::current_branch(&self.root)
     }
 
-    /// Start describing a task.
+    /// Start describing a task. On a yard given a configuration
+    /// ([`Yard::configure`], [`Yard::open_configured`]) the options start as
+    /// its `[defaults]` ([`configure::task_options`]) and the run fills in
+    /// its provisioning where the caller set nothing
+    /// ([`configure::fill_provisioning`]); otherwise they start as
+    /// [`TaskOptions::default`].
     pub fn task(&self, prompt: impl Into<String>) -> TaskBuilder {
+        let (defaults, options) = match self.task_defaults() {
+            Some((config, options)) => (Some(config), options),
+            None => (None, TaskOptions::default()),
+        };
         TaskBuilder {
             yard: self.clone(),
             prompt: prompt.into(),
-            options: TaskOptions::default(),
+            options,
+            defaults,
         }
     }
 
@@ -1693,6 +1708,8 @@ pub struct TaskBuilder {
     yard: Yard,
     prompt: String,
     options: TaskOptions,
+    /// The yard's configuration, when it has one: what a run fills in.
+    defaults: Option<Arc<config::ProjectConfig>>,
 }
 
 impl TaskBuilder {
@@ -1805,7 +1822,8 @@ impl TaskBuilder {
     /// candidate. Returns once the turn ends; the branch's status says how.
     /// Errors mean nothing ran: an unknown or missing harness, an invalid
     /// name or base, or unwritable state.
-    pub fn run(self) -> Result<Branch, Error> {
+    pub fn run(mut self) -> Result<Branch, Error> {
+        self.complete()?;
         let branch = run::run(&self.yard, &self.prompt, &self.options)?;
         goal::pursue(&self.yard, branch, &self.options)
     }
@@ -1814,9 +1832,19 @@ impl TaskBuilder {
     /// named `<name>-<harness>`. Every harness is resolved and found before
     /// any branch is created. A failure on one branch does not stop the
     /// others; it is recorded in that branch's status.
-    pub fn run_on(self, harnesses: &[&str]) -> Result<Vec<Branch>, Error> {
+    pub fn run_on(mut self, harnesses: &[&str]) -> Result<Vec<Branch>, Error> {
+        self.complete()?;
         let branches = run::run_on(&self.yard, &self.prompt, &self.options, harnesses)?;
         goal::pursue_all(&self.yard, branches, &self.options)
+    }
+
+    /// Fill what the options leave unset from the yard's configuration,
+    /// when it has one.
+    fn complete(&mut self) -> Result<(), Error> {
+        match &self.defaults {
+            Some(config) => configure::complete(&self.yard, config, &mut self.options),
+            None => Ok(()),
+        }
     }
 }
 
@@ -3058,6 +3086,10 @@ pub enum Error {
     },
     /// The requested operation needs a capability the harness lacks.
     Unsupported(String),
+    /// A configuration file, or a section of one, that describes nothing
+    /// usable: its message names the file and line, or the section
+    /// (`[models]`) or key (`defaults.check`).
+    Config(String),
     /// The branch has no candidate to merge or fork.
     NoCandidate(String),
     /// `actual` is `None` when the target branch no longer exists.
@@ -3180,6 +3212,7 @@ impl fmt::Display for Error {
                 write!(f, "{harness} is unavailable: {reason}")
             }
             Error::Unsupported(what) => write!(f, "unsupported: {what}"),
+            Error::Config(what) => f.write_str(what),
             Error::NoCandidate(name) => write!(f, "branch {name} has no candidate"),
             Error::TargetMoved {
                 expected,
@@ -3292,6 +3325,7 @@ impl Error {
             Error::UnknownHarness(_) => "unknown_harness",
             Error::HarnessUnavailable { .. } => "harness_unavailable",
             Error::Unsupported(_) => "unsupported",
+            Error::Config(_) => "config",
             Error::NoCandidate(_) => "no_candidate",
             Error::TargetMoved { .. } => "target_moved",
             Error::Conflict { .. } | Error::ConflictBetween { .. } => "conflict",
