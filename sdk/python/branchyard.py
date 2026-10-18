@@ -63,6 +63,7 @@ __all__ = [
     "Inbox",
     "Graph",
     "GraphApplied",
+    "Advice",
     "spawn",
     "inspect",
     "events",
@@ -75,6 +76,7 @@ __all__ = [
     "children",
     "graph",
     "apply_graph",
+    "advise",
     "wait",
     "wait_any",
     "wait_all",
@@ -454,6 +456,28 @@ class Children:
 
 
 @dataclasses.dataclass
+class Advice:
+    """What to know before picking a harness for a subtask: see `advise`."""
+
+    kind: str
+    kind_source: str
+    # Where the candidates came from: a fleet entry ("bugfix", "default"),
+    # "inventory", or "envelope" for the harnesses you may run.
+    entry: str
+    # Each {candidate: {harness, model?, effort?}, available, reason?, stats?, expected}.
+    candidates: List[Dict[str, Any]]
+    seed: int
+    matched: Optional[List[str]] = None
+    # The router's pick among the available candidates, {candidate, reason, ...}.
+    pick: Optional[Dict[str, Any]] = None
+    own: Optional[Dict[str, Any]] = None
+    remaining_usd: Optional[float] = None
+    tree_remaining_usd: Optional[float] = None
+    risk_words: Optional[List[str]] = None
+    notes: Optional[List[str]] = None
+
+
+@dataclasses.dataclass
 class Graph:
     """A branch's children, the dependencies among them, and its revision."""
 
@@ -633,6 +657,7 @@ def spawn(
     plan: bool = False,
     model: Optional[str] = None,
     result: Optional[Dict[str, Any]] = None,
+    why: Optional[str] = None,
 ) -> Spawned:
     """Create a child branch and start it; returns once it has started.
 
@@ -669,6 +694,10 @@ def spawn(
     `required` (default False) refuses a `report` without a result and
     notes in your log a child that ends its turn with none. See
     docs/delegation.md "Result contract".
+
+    `why` is why this harness and model for this subtask, in a few words:
+    it is recorded on the child and learned from by the outcome store, so
+    ask `advise()` first and say what decided you.
     """
     options = {
         "--seat": seat,
@@ -686,6 +715,7 @@ def spawn(
         "--depends-on": ",".join(depends_on) if depends_on else None,
         "--after": after,
         "--model": model,
+        "--why": why,
     }
     flags: List[str] = []
     for flag, value in options.items():
@@ -732,6 +762,24 @@ def apply_graph(edits: List[Dict[str, Any]], expected_revision: int) -> GraphApp
 def inspect(branch: Optional[str] = None) -> Inspection:
     """A branch's state: your own when `branch` is None, or a descendant's."""
     return _make(Inspection, _run(["inspect"] + ([branch] if branch else [])))
+
+
+def advise(prompt: str, kind: Optional[str] = None) -> Advice:
+    """What to know before picking a harness for a subtask.
+
+    The candidates are your task's fleet entry for the subtask's kind, or
+    the harnesses your envelope allows; each says whether it can run here,
+    its recorded outcomes for this kind and the success rate the router
+    samples around (`expected`, 0.5 with none). `pick` is the router's own
+    choice, `remaining_usd` what you may still give children, and `notes`
+    what to weigh (no outcomes yet, risk words in the task). `kind`
+    overrides the classifier. Nothing runs. Choose with it, then say why in
+    `spawn(..., why=...)`.
+    """
+    args = ["fleet", "advise", prompt]
+    if kind is not None:
+        args += ["--kind", kind]
+    return _make(Advice, _run(args))
 
 
 def events(branch: Optional[str] = None, cursor: Optional[int] = None,

@@ -9,9 +9,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use branchyard::{
-    harness_fault, Activity, BranchOutcome, BranchStatus, Budget, Error, Fleet, FleetActivity,
-    FleetCandidate, FleetEntry, Judge, JudgeOptions, JudgeSpec, JudgedBy, Provisioning,
-    RecordedEvent, RouteOptions, TaskKind, TaskOptions, Yard,
+    fleet_stats, harness_fault, Activity, BranchOutcome, BranchStatus, Budget, Envelope, Error,
+    Fleet, FleetActivity, FleetCandidate, FleetEntry, Judge, JudgeOptions, JudgeSpec, JudgedBy,
+    Policy, Provisioning, RecordedEvent, RouteOptions, Spawn, TaskKind, TaskOptions, Yard,
+    DECIDED_BY_PARENT, ENVELOPE_ENTRY,
 };
 use common::{fake_agent, Fixture};
 
@@ -679,4 +680,138 @@ fn a_judge_is_pluggable() {
         .unwrap()
         .iter()
         .all(|o| o.score.is_none()));
+}
+
+/// A delegating parent is advised from its task's fleet entry (filtered by
+/// its envelope) or, without one, from the harnesses it may run; its
+/// choice and reason are recorded on the child, whose outcome the store
+/// learns with `decided_by: parent`, so the next advice counts it.
+#[test]
+fn a_parent_is_advised_and_its_choice_is_recorded_and_learned() {
+    let f = Fixture::new();
+    let table = fleet(FleetEntry {
+        candidates: vec![
+            candidate("gemini-cli"),
+            candidate("qwen-code"),
+            candidate("amp"),
+        ],
+        ..FleetEntry::default()
+    });
+    let options = TaskOptions {
+        delegation: Some(Envelope::depth(1).harnesses(["gemini-cli", "qwen-code"])),
+        delegation_server: Some(vec![fake_agent().display().to_string()]),
+        policy: Policy::allow_all(),
+        fleet: Some(table),
+        ..f.options()
+    };
+    let root = f
+        .yard
+        .task("WRITE root.txt=r")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let delegate = root.delegate(options.clone()).unwrap();
+    // Before any outcome: the entry's candidates, the envelope's filter,
+    // uniform priors, and a pick among what can run.
+    let advice = delegate.advise("Fix the flaky parser test", None).unwrap();
+    assert_eq!(advice.kind, TaskKind::Bugfix);
+    assert_eq!(advice.entry, "default");
+    let labels: Vec<String> = advice
+        .candidates
+        .iter()
+        .map(|a| a.candidate.label())
+        .collect();
+    assert_eq!(labels, ["gemini-cli", "qwen-code", "amp"]);
+    // The own profile runs with the inherited command; another profile's
+    // executable must be on PATH, and qwen's is not here.
+    assert!(advice.candidates[0].available, "{:?}", advice.candidates[0]);
+    let qwen = &advice.candidates[1];
+    assert!(!qwen.available, "{qwen:?}");
+    assert!(qwen.reason.as_deref().unwrap().contains("PATH"), "{qwen:?}");
+    let amp = &advice.candidates[2];
+    assert!(!amp.available, "{amp:?}");
+    assert!(
+        amp.reason.as_deref().unwrap().contains("envelope"),
+        "{amp:?}"
+    );
+    assert!(advice
+        .candidates
+        .iter()
+        .all(|a| a.stats.is_none() && a.expected == 0.5));
+    let pick = advice.pick.as_ref().expect("a pick");
+    assert_eq!(pick.candidate.harness, "gemini-cli");
+    assert!(advice
+        .notes
+        .iter()
+        .any(|n| n.contains("no recorded bugfix outcomes")));
+    assert_eq!(
+        advice.own.as_ref().map(|o| o.harness.as_str()),
+        Some(root.info().harness.as_str())
+    );
+    assert!(advice.remaining_usd.is_none(), "no cost limit, no budget");
+    // The parent chooses and says why.
+    let kid = delegate
+        .spawn(Spawn {
+            prompt: "Fix the typo WRITE kid.txt=k".into(),
+            name: Some("kid".into()),
+            why: Some("cheap, and the check covers it".into()),
+            ..Spawn::default()
+        })
+        .unwrap();
+    assert_eq!(kid.harness, "gemini-cli");
+    root.wait_subtree().unwrap();
+    let activity = fleet_activity(&f.yard.branch("kid").unwrap().events().unwrap());
+    let FleetActivity::Chosen(choice) = &activity[0] else {
+        panic!("{activity:?}");
+    };
+    assert_eq!(choice.kind, TaskKind::Bugfix);
+    assert_eq!(choice.by, "root");
+    assert_eq!(choice.candidate.harness, "gemini-cli");
+    assert_eq!(
+        choice.why.as_deref(),
+        Some("cheap, and the check covers it")
+    );
+    let outcomes = f.yard.outcomes(Some(TaskKind::Bugfix)).unwrap();
+    let row = outcomes
+        .iter()
+        .find(|o| o.branch == "kid")
+        .expect("the child's outcome");
+    assert_eq!(row.outcome, BranchOutcome::Ready);
+    assert_eq!(row.decided_by.as_deref(), Some(DECIDED_BY_PARENT));
+    assert!(!row.routed);
+    // Integrating it records the merge; the next advice counts both.
+    delegate.integrate("kid").unwrap();
+    let outcomes = f.yard.outcomes(Some(TaskKind::Bugfix)).unwrap();
+    let row = outcomes.iter().find(|o| o.branch == "kid").unwrap();
+    assert_eq!(row.outcome, BranchOutcome::Merged);
+    let stats = fleet_stats(&outcomes);
+    let gemini = stats.iter().find(|s| s.harness == "gemini-cli").unwrap();
+    assert_eq!((gemini.runs, gemini.merged, gemini.delegated), (1, 1, 1));
+    let advice = delegate.advise("Fix another typo", None).unwrap();
+    let gemini = advice
+        .candidates
+        .iter()
+        .find(|a| a.candidate.harness == "gemini-cli")
+        .unwrap();
+    assert_eq!(gemini.stats.as_ref().map(|s| s.runs), Some(1));
+    assert!(gemini.expected > 0.5, "{gemini:?}");
+    assert!(advice.notes.iter().all(|n| !n.contains("no recorded")));
+    // With no fleet in the task, the envelope's harnesses are the candidates.
+    let plain = root
+        .delegate(TaskOptions {
+            fleet: None,
+            ..options
+        })
+        .unwrap();
+    let advice = plain.advise("Write the docs", None).unwrap();
+    assert_eq!(advice.kind, TaskKind::Docs);
+    assert_eq!(advice.entry, ENVELOPE_ENTRY);
+    let harnesses: Vec<&str> = advice
+        .candidates
+        .iter()
+        .map(|a| a.candidate.harness.as_str())
+        .collect();
+    assert_eq!(harnesses, ["gemini-cli", "qwen-code"]);
+    assert!(advice.pick.is_some());
 }

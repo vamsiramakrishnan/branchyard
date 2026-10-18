@@ -16,12 +16,26 @@
 // (thread configuration and `developerInstructions`, or ACP), so Scion's
 // `[mcp_servers.*]` writer and AGENTS.md projection are not used; the
 // model is set in `config.toml` only for the ACP profile, whose driver has
-// no model parameter (not from Scion). Scion's launch flags
+// no model parameter (not from Scion); the model gateway becomes a
+// `model_providers` entry (not from Scion either). Scion's launch flags
 // (`--dangerously-bypass-approvals-and-sandbox`, `--sandbox
 // danger-full-access`) and its seed `approval_policy = "never"` are not
 // ported: Branchyard's drivers route every approval.
 
 //! Codex: `codex-app-server` and `codex-acp`.
+//!
+//! On the model gateway ([`Context::model_gateway`]), the gateway is a
+//! provider of Codex's own in `config.toml`, `[model_providers.branchyard]`,
+//! and `model_provider` names it: codex-cli 0.157.1 took neither
+//! `OPENAI_BASE_URL` nor `OPENAI_API_KEY` from its environment (a turn on
+//! the gateway went to `api.openai.com` with no key, 16 October 2026), and
+//! a provider entry is how Codex is pointed at any OpenAI-compatible
+//! endpoint. Its key is the variable the engine sets to the turn's token,
+//! and its wire API is the Responses API, the only one codex-cli 0.157.1
+//! accepts (`wire_api = "chat"` is refused: "no longer supported", its
+//! discussion 7782), so the route for Codex's model must name a backend
+//! that serves `/responses` (OpenAI's, Z.ai's `https://api.z.ai/api/v1`), not
+//! a chat-completions-only endpoint such as Gemini's.
 
 use serde_json::json;
 
@@ -34,6 +48,18 @@ use crate::{
 
 pub(crate) const AUTH_FILE: &str = ".codex/auth.json";
 const CONFIG: &str = ".codex/config.toml";
+
+/// The provider written for the model gateway, and the `model_provider`.
+pub const GATEWAY_PROVIDER: &str = "branchyard";
+
+/// The `[model_providers.branchyard]` table for a gateway at `url`.
+fn gateway_provider(url: &str) -> String {
+    format!(
+        "[model_providers.{GATEWAY_PROVIDER}]\nname = \"Branchyard model gateway\"\nbase_url = {}\n\
+         env_key = \"OPENAI_API_KEY\"\nwire_api = \"responses\"\n",
+        toml::string(&format!("{}/openai/v1", url.trim_end_matches('/')))
+    )
+}
 
 /// Scion's `model_aliases` for Codex.
 pub const MODEL_ALIASES: &[(&str, &str)] = &[
@@ -154,6 +180,18 @@ impl Provisioner for Codex {
             toml_edits.push(TomlEdit::RemoveTables("otel".into()));
             toml_edits.push(TomlEdit::AppendTable(otel_section(telemetry)));
         }
+        // The gateway as a provider; a branch is on the gateway for its
+        // whole life, so nothing is taken back.
+        if let Some(gateway) = context.model_gateway.as_ref().filter(|g| g.openai) {
+            toml_edits.push(TomlEdit::RemoveTables(format!(
+                "model_providers.{GATEWAY_PROVIDER}"
+            )));
+            toml_edits.push(TomlEdit::SetKey {
+                key: "model_provider".into(),
+                literal: toml::string(GATEWAY_PROVIDER),
+            });
+            toml_edits.push(TomlEdit::AppendTable(gateway_provider(&gateway.url)));
+        }
         if !toml_edits.is_empty() {
             needs_private_home(context, "Codex's config.toml")?;
             plan.edit(CONFIG, false, Edit::Toml(toml_edits));
@@ -226,6 +264,42 @@ mod tests {
             assert!(out.contains(line), "{line}");
         }
         assert!(!out.contains("external.invalid"));
+    }
+
+    #[test]
+    fn the_model_gateway_is_a_provider_in_config_toml() {
+        let mut context = Context::new("codex", Protocol::CodexAppServer, "/h", "/w");
+        context.private_home = true;
+        context.model_gateway = Some(crate::models::ModelGateway {
+            url: "http://127.0.0.1:41100/".into(),
+            anthropic: true,
+            openai: true,
+        });
+        let plan = Codex.plan(&context).unwrap();
+        let file = plan.files.iter().find(|f| f.path == CONFIG).unwrap();
+        let edits = match &file.edits[..] {
+            [Edit::Toml(edits)] => edits.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert!(edits.contains(&TomlEdit::SetKey {
+            key: "model_provider".into(),
+            literal: "\"branchyard\"".into(),
+        }));
+        assert!(edits.contains(&TomlEdit::AppendTable(
+            "[model_providers.branchyard]\nname = \"Branchyard model gateway\"\n\
+             base_url = \"http://127.0.0.1:41100/openai/v1\"\nenv_key = \"OPENAI_API_KEY\"\n\
+             wire_api = \"responses\"\n"
+                .into()
+        )));
+        // The key reaches Codex through CODEX_HOME's config, not a file.
+        assert!(plan.env.iter().any(|v| v.name == "CODEX_HOME"));
+        // A gateway serving Anthropic alone is nothing Codex can use.
+        context.model_gateway = Some(crate::models::ModelGateway {
+            url: "http://127.0.0.1:41100".into(),
+            anthropic: true,
+            openai: false,
+        });
+        assert!(Codex.plan(&context).unwrap().files.is_empty());
     }
 
     #[test]

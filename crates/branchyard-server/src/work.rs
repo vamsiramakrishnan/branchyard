@@ -1049,6 +1049,7 @@ pub(crate) fn spawn_parts(
         plan: request.plan,
         model: request.model.clone(),
         result: request.result.clone(),
+        why: request.why.clone(),
     };
     Ok((options, spawn))
 }

@@ -138,6 +138,13 @@ impl Provider {
             Provider::Recipe(options) => options,
         }
     }
+
+    /// A Microsandbox provider with `options`: how a caller outside this
+    /// directory builds one (the configuration's `[microsandbox]` in
+    /// `crate::configure`), since only this directory names a variant.
+    pub fn microsandbox(options: crate::SandboxOptions) -> Provider {
+        Provider::Microsandbox(options)
+    }
 }
 
 #[cfg(test)]

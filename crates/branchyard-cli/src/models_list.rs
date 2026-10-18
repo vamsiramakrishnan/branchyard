@@ -94,9 +94,7 @@ pub fn main(env: &Env, target: &Target, action: &ModelsAction, as_json: bool) ->
     let project = models_cmd::config(&root)?;
     let (engine, secrets) = match &project {
         Some(project) => {
-            let engine: Config = serde_json::to_value(&project.models)
-                .and_then(serde_json::from_value)
-                .map_err(|e| Failure::Message(format!("[models]: {e}")))?;
+            let engine = branchyard::configure::models_config(&project.models)?;
             (engine, project.secrets.clone())
         }
         None => (Config::default(), Default::default()),
@@ -106,6 +104,7 @@ pub fn main(env: &Env, target: &Target, action: &ModelsAction, as_json: bool) ->
         gemini: gemini_url.clone(),
         openai: openai_url.clone(),
         anthropic: anthropic_url.clone(),
+        zai: discover::ZAI_URL.to_owned(),
     };
     let mut sources = discover::sources(&engine, &bases, |name| {
         models_cmd::key_source(&root, &secrets, name)

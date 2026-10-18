@@ -27,7 +27,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use branchyard_setup::config::{Effective, PermissionsMode, ProjectConfig, ProviderKind};
+use branchyard_setup::config::{PermissionsMode, ProjectConfig, ProviderKind};
 
 use crate::args::{Command, Globals, Permissions, SandboxArgs, TaskArgs};
 
@@ -53,6 +53,7 @@ pub fn apply(
         Command::Init { .. }
             | Command::Config { .. }
             | Command::Doctor { .. }
+            | Command::Up { .. }
             | Command::Mcp { .. }
             | Command::Completions { .. }
             | Command::Man
@@ -126,14 +127,9 @@ fn load(cwd: &Path, env: &dyn Fn(&str) -> Option<String>) -> Result<Option<Proje
     if env("BRANCHYARD_BRANCH").is_some_and(|v| !v.is_empty()) {
         return Ok(None);
     }
-    let located = crate::setup_io::locate(cwd);
-    if !located.project_exists && !located.user.is_file() {
-        return Ok(None);
-    }
     // Files only: the variables are already in `globals`, and win.
-    let Effective { config, .. } = crate::setup_io::load(cwd, None)
-        .map_err(|e| format!("{e}\n(fix it, or check it with `by config validate`)"))?;
-    Ok(Some(config))
+    let effective = branchyard::configure::configuration(cwd).map_err(|e| e.to_string())?;
+    Ok(effective.map(|effective| effective.config))
 }
 
 /// The merged configuration files under `cwd`, for commands that read a
@@ -277,105 +273,14 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
         task.instructions = d.instructions.clone();
     }
     // Provisioning: fill each unset part; add servers and secrets the
-    // flags did not name.
+    // flags did not name. Secrets and grants need a home private to the
+    // branch.
     let private_home = task.isolated
         || task.sandbox.is_some()
         || task.substrate.is_some()
         || task.recipe.is_some();
-    // The model gateway's default access, when `--model-gateway` gave
-    // none.
-    let models = config.models.access().map_err(|e| e.to_string())?;
-    let flag_models = task.provision.as_ref().is_some_and(|p| p.models.is_some());
-    let on_gateway = flag_models || models.is_some();
-    let secrets = match private_home {
-        true => config.secret_sources().map_err(|e| e.to_string())?,
-        false => Vec::new(),
-    };
-    // A branch on the model gateway is never given a provider's key: the
-    // gateway holds the backends' keys, and a harness with one could reach
-    // the provider around it.
-    let secrets: Vec<branchyard::SecretSource> = match on_gateway {
-        false => secrets,
-        true => secrets
-            .into_iter()
-            .filter(|s| {
-                !branchyard::models::PROVIDER_KEYS.contains(&s.name.as_str())
-                    && !config
-                        .models
-                        .backends
-                        .values()
-                        .any(|b| b.key.as_deref() == Some(s.name.as_str()))
-            })
-            .collect(),
-    };
-    let mcp: Vec<branchyard::McpServerSpec> = config
-        .mcp
-        .iter()
-        .map(|(name, command)| branchyard::McpServerSpec::parse(&format!("{name}={command}")))
-        .collect::<Result<_, _>>()
-        .map_err(|e| format!("mcp: {e}"))?;
-    let effort = match &d.effort {
-        Some(text) => {
-            Some(branchyard::Effort::parse(text).map_err(|e| format!("defaults.effort: {e}"))?)
-        }
-        None => None,
-    };
-    // Default grants, only where they can be placed and only when the
-    // flags gave none.
-    let grants = match private_home {
-        true => config
-            .connectors
-            .grant_entries()
-            .map_err(|e| e.to_string())?,
-        false => Vec::new(),
-    };
-    let flag_grants = task
-        .provision
-        .as_ref()
-        .is_some_and(|p| !p.connectors.is_empty());
-    // The network policy, when `--network` gave none.
-    let network = config.network.policy().map_err(|e| e.to_string())?;
-    let flag_network = task.provision.as_ref().is_some_and(|p| p.network.is_some());
-    let wanted = d.model.is_some()
-        || (network.is_some() && !flag_network)
-        || effort.is_some()
-        || d.auth.is_some()
-        || !secrets.is_empty()
-        || !mcp.is_empty()
-        || (!grants.is_empty() && !flag_grants)
-        || (models.is_some() && !flag_models);
-    if wanted {
-        let spec = task.provision.get_or_insert_with(Default::default);
-        if spec.model.is_none() {
-            spec.model = d.model.clone();
-        }
-        if spec.effort.is_none() {
-            spec.effort = effort;
-        }
-        if spec.auth.is_none() {
-            spec.auth = d.auth.clone();
-        }
-        for secret in secrets {
-            if !spec.secrets.iter().any(|s| s.name == secret.name) {
-                spec.secrets.push(secret);
-            }
-        }
-        for server in mcp {
-            if !spec.mcp_servers.iter().any(|s| s.name == server.name) {
-                spec.mcp_servers.push(server);
-            }
-        }
-        if spec.connectors.is_empty() {
-            spec.connectors = grants;
-        }
-        if spec.network.is_none() {
-            spec.network = network;
-        }
-        if spec.models.is_none() {
-            spec.models = models;
-        }
-    }
-    Ok(())
+    branchyard::configure::fill_provisioning(config, &mut task.provision, private_home)
+        .map_err(|e| e.to_string())
 }
 
 /// The configuration's `[fleet]` as the SDK takes it.
@@ -426,6 +331,21 @@ pub fn fleet(config: &ProjectConfig) -> Result<branchyard::Fleet, String> {
                     max_duration: entry
                         .max_minutes
                         .and_then(|m| Duration::try_from_secs_f64(m * 60.0).ok()),
+                    // 0 keeps a zero window, which the router reads as off;
+                    // an action alone takes the default window.
+                    stall_after: entry
+                        .stall_minutes
+                        .and_then(|m| Duration::try_from_secs_f64(m * 60.0).ok())
+                        .or_else(|| {
+                            entry
+                                .stall_action
+                                .is_some()
+                                .then_some(branchyard::DEFAULT_STALL)
+                        }),
+                    stall_action: match entry.stall_action.as_deref() {
+                        Some("notify") => branchyard::StallAction::Notify,
+                        _ => branchyard::StallAction::Interrupt,
+                    },
                     ..branchyard::Budget::default()
                 },
                 judge,
@@ -530,9 +450,17 @@ attempts = 3
 budget_usd = 2
 max_minutes = 1
 failover = true
+stall_minutes = 4
+stall_action = "notify"
 judge = { harness = "claude-code", rubric = "short" }
 environment = "rust"
 connectors = ["github"]
+[fleet.docs]
+candidates = [{ harness = "codex" }]
+stall_minutes = 0
+[fleet.tests]
+candidates = [{ harness = "codex" }]
+stall_action = "interrupt"
 "#,
         );
         let mut task = TaskArgs::default();
@@ -543,6 +471,21 @@ connectors = ["github"]
         let entry = &fleet.entries["default"];
         assert_eq!(entry.attempts, 3);
         assert_eq!(entry.budget.max_usd, Some(2.0));
+        assert_eq!(entry.budget.stall_after, Some(Duration::from_secs(240)));
+        assert_eq!(entry.budget.stall_action, branchyard::StallAction::Notify);
+        // 0 is off (a zero window), and an action alone takes the default.
+        assert_eq!(
+            fleet.entries["docs"].budget.stall_after,
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            fleet.entries["tests"].budget.stall_after,
+            Some(branchyard::DEFAULT_STALL)
+        );
+        assert_eq!(
+            fleet.entries["tests"].budget.stall_action,
+            branchyard::StallAction::Interrupt
+        );
         assert_eq!(entry.budget.max_duration, Some(Duration::from_secs(60)));
         assert!(entry.failover);
         assert_eq!(entry.exploration, branchyard::DEFAULT_EXPLORATION);

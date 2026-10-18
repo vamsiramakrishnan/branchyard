@@ -17,11 +17,15 @@
 //! Instructions go in `developerInstructions`, a string field of all three
 //! thread requests in the same schema.
 //!
-//! Threads start with `approvalPolicy: "on-request"` so command and file
-//! change approvals reach Branchyard as server requests, and Codex's own
-//! sandbox in `workspace-write` mode inside Branchyard's sandbox. Server
-//! requests this profile does not implement are answered with a JSON-RPC
-//! error rather than left pending.
+//! Threads start with `approvalPolicy: "untrusted"` so every command
+//! outside Codex's own trusted set (`ls`, `cat`, `sed -n` and the like) and
+//! every file change reach Branchyard as approval requests, and Codex's own
+//! sandbox in `workspace-write` mode inside Branchyard's sandbox. Under
+//! `on-request`, codex-cli 0.157.1 ran a write inside the workspace (`echo
+//! qualified > deny-marker.txt`) without asking, so a policy that denied the
+//! shell never got to deny it (`docs/qualification/README.md`, 12 October
+//! 2026); `untrusted` asks before it. Server requests this profile does not
+//! implement are answered with a JSON-RPC error rather than left pending.
 //!
 //! Steering is `turn/steer`, naming the turn in flight as
 //! `expectedTurnId`, so input meant for one turn never lands in another;
@@ -143,7 +147,7 @@ impl Codex {
         let open = self.open.clone().expect("the thread opens after open()");
         let mut params = json!({
             "cwd": open.cwd,
-            "approvalPolicy": "on-request",
+            "approvalPolicy": "untrusted",
             "sandbox": "workspace-write",
         });
         if let Some(model) = open.model {

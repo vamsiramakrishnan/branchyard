@@ -230,7 +230,8 @@ pub struct BackendConfig {
     /// What the gateway adapts for an endpoint that imitates OpenAI's API
     /// with differences ([`Compat`]). Default: [`Compat::Gemini`] for an
     /// `openai` backend whose URL's host is
-    /// `generativelanguage.googleapis.com`, else [`Compat::Off`].
+    /// `generativelanguage.googleapis.com`, [`Compat::Versioned`] for one
+    /// whose host is `api.z.ai`, else [`Compat::Off`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<Compat>,
 }
@@ -255,6 +256,31 @@ pub enum Compat {
     /// puts on tool calls are kept and put back on the calls a later
     /// request replays.
     Gemini,
+    /// An endpoint whose URL already names the API's version, as Z.ai's do
+    /// (`https://api.z.ai/api/coding/paas/v4` for chat completions,
+    /// `https://api.z.ai/api/v1` for responses): the OpenAI path's `/v1`
+    /// is dropped, and nothing else changes.
+    Versioned,
+}
+
+impl Compat {
+    /// The layer's name in `compat = "..."`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Compat::Off => "none",
+            Compat::Gemini => "gemini",
+            Compat::Versioned => "versioned",
+        }
+    }
+}
+
+/// Z.ai's API host, whose OpenAI-compatible endpoints name their version
+/// in the URL ([`Compat::Versioned`] by default).
+pub const ZAI_HOST: &str = "api.z.ai";
+
+/// Whether `host` is Z.ai's API.
+pub fn is_zai_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case(ZAI_HOST)
 }
 
 /// One route.
@@ -406,6 +432,10 @@ pub struct Gateway {
     /// The thought signatures Gemini put on tool calls, by person and
     /// call id, for the requests that replay them ([`Compat::Gemini`]).
     signatures: gemini::Signatures,
+    /// How calls reach the backends: through the operator's proxy and
+    /// root certificates when the environment names them
+    /// ([`upstream::Transport::from_env`]).
+    transport: upstream::Transport,
 }
 
 impl fmt::Debug for Gateway {
@@ -457,12 +487,14 @@ impl Gateway {
             let compat = match b.compat {
                 Some(compat) => compat,
                 None if b.api == Api::Openai && gemini::is_host(&target.host) => Compat::Gemini,
+                None if b.api == Api::Openai && is_zai_host(&target.host) => Compat::Versioned,
                 None => Compat::Off,
             };
-            if compat == Compat::Gemini && b.api != Api::Openai {
+            if compat != Compat::Off && b.api != Api::Openai {
                 return Err(format!(
-                    "models.backends.{name}.compat: gemini is for an openai backend \
-                     (Gemini's OpenAI-compatible endpoint), not {}",
+                    "models.backends.{name}.compat: {} is for an openai backend \
+                     (an endpoint that imitates OpenAI's API), not {}",
+                    compat.as_str(),
                     b.api
                 ));
             }
@@ -555,6 +587,7 @@ impl Gateway {
                 alerted: Vec::new(),
             }),
             signatures: gemini::Signatures::default(),
+            transport: upstream::Transport::from_env(upstream::QUIET),
         })
     }
 
@@ -995,9 +1028,20 @@ const SCRUB: &[&str] = &[
     "AZURE_OPENAI_API_KEY",
 ];
 
-/// Secrets that log a harness in by subscription, which the gateway
-/// cannot stand in for.
-const SUBSCRIPTION_SECRETS: &[&str] = &["CLAUDE_CODE_OAUTH_TOKEN", "CODEX_AUTH"];
+/// The secrets that log `harness` in by subscription, which the gateway
+/// cannot stand in for: Claude Code's OAuth token, Codex's login file. Only
+/// the harness that reads a secret is taken off the gateway by it: a fan
+/// hands every candidate the same secrets, and one meant for another
+/// harness (which its provisioner reports unused) leaves this one on the
+/// gateway. Until 16 October 2026 any of them did, and a fan with
+/// `--secret CODEX_AUTH` ran Oh My Pi and DeepSeek Harness direct.
+fn subscription_secrets(harness: &str) -> &'static [&'static str] {
+    match harness {
+        "claude-code" => &["CLAUDE_CODE_OAUTH_TOKEN"],
+        "codex" => &["CODEX_AUTH"],
+        _ => &[],
+    }
+}
 /// Provider keys a branch on the gateway may not be given: the gateway
 /// holds them.
 pub const PROVIDER_KEYS: &[&str] = &["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY"];
@@ -1035,7 +1079,7 @@ fn direct_reason(gateway: &Gateway, record: &Record, api: Option<Api>) -> Option
     let subscription = spec
         .secrets
         .iter()
-        .find(|s| SUBSCRIPTION_SECRETS.contains(&s.name.as_str()))
+        .find(|s| subscription_secrets(&record.info.harness).contains(&s.name.as_str()))
         .map(|s| s.name.clone())
         .or_else(|| {
             spec.auth
@@ -1433,6 +1477,17 @@ mod tests {
         // both variables.
         let other = record("gemini-cli", on);
         assert_eq!(direct_reason(&gateway, &other, None), None);
+        // A subscription secret meant for another harness (a fan hands
+        // every candidate the same ones) does not take this one off.
+        let shared = serde_json::json!({"models": {"allow": ["*"]},
+            "secrets": [{"name": "CODEX_AUTH"}, {"name": "CLAUDE_CODE_OAUTH_TOKEN"}]});
+        for harness in ["oh-my-pi", "deepseek-harness", "gemini-cli"] {
+            let other = record(harness, shared.clone());
+            assert_eq!(direct_reason(&gateway, &other, None), None, "{harness}");
+        }
+        let codex = record("codex", shared.clone());
+        let why = direct_reason(&gateway, &codex, harness_api("codex")).unwrap();
+        assert!(why.contains("subscription (CODEX_AUTH)"), "{why}");
         // Direct, its provider's hosts are allowed.
         let hosts = |h: &str| -> Vec<String> {
             direct_hosts(h, harness_api(h))

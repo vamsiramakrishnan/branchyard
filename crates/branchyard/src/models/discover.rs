@@ -19,9 +19,16 @@
 //! - **Anthropic**: `GET /v1/models?limit=1000`, `x-api-key` and
 //!   `anthropic-version`, paged by `has_more` and `last_id` (a page holds
 //!   20 models unless asked for more).
+//! - **Z.ai** (GLM): `GET /models` on the GLM Coding Plan's chat
+//!   completions endpoint, `https://api.z.ai/api/coding/paas/v4`, with
+//!   `ZAI_API_KEY` as a bearer token; OpenAI's list shape. The same
+//!   listing is served at `https://api.z.ai/api/paas/v4/models` (the
+//!   standard API) and `https://api.z.ai/api/anthropic/v1/models`; checked
+//!   16 October 2026 with a Coding Plan key, which listed 11 GLM models.
 //! - **A configured backend**: `GET {url}/v1/models`, or `{url}/models`
-//!   when the URL already ends in `/v1` or `/openai`, with its key in the
-//!   header the gateway sends it in.
+//!   when the URL already ends in `/v1` or `/openai`, or its backend has
+//!   the `versioned` compatibility layer (Z.ai's host, or set), with its
+//!   key in the header the gateway sends it in.
 //!
 //! Requests go through a [`Transport`], so `HTTPS_PROXY` and the bundle
 //! `SSL_CERT_FILE` names are honored. What prices a listed model is the
@@ -43,6 +50,9 @@ pub const GEMINI_URL: &str = "https://generativelanguage.googleapis.com";
 pub const OPENAI_URL: &str = "https://api.openai.com";
 /// Anthropic's API.
 pub const ANTHROPIC_URL: &str = "https://api.anthropic.com";
+/// Z.ai's GLM Coding Plan chat completions endpoint, which lists models at
+/// `/models` (it names its version in the URL).
+pub const ZAI_URL: &str = "https://api.z.ai/api/coding/paas/v4";
 
 /// The variables that hold a Gemini API key, in order of preference.
 pub const GEMINI_KEYS: [&str; 2] = ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
@@ -50,6 +60,8 @@ pub const GEMINI_KEYS: [&str; 2] = ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
 pub const OPENAI_KEYS: [&str; 2] = ["OPENAI_API_KEY", "CODEX_API_KEY"];
 /// The variable that holds an Anthropic API key.
 pub const ANTHROPIC_KEYS: [&str; 1] = ["ANTHROPIC_API_KEY"];
+/// The variable that holds a Z.ai API key (Oh My Pi's name for it).
+pub const ZAI_KEYS: [&str; 1] = ["ZAI_API_KEY"];
 
 /// The most pages followed from one source.
 const MAX_PAGES: usize = 50;
@@ -134,10 +146,14 @@ pub struct Source {
     pub backend: Option<String>,
     /// Another source with the same endpoint and key, listed instead.
     pub duplicate_of: Option<String>,
+    /// Whether the base URL already names the API's version, so models are
+    /// listed at `/models` rather than `/v1/models` (Z.ai; a backend with
+    /// the `versioned` layer).
+    pub versioned: bool,
 }
 
-/// The base URLs of the three providers' own sources; the public APIs
-/// unless a caller says otherwise.
+/// The base URLs of the providers' own sources; the public APIs unless a
+/// caller says otherwise.
 #[derive(Clone, Debug)]
 pub struct Bases {
     /// Gemini's API.
@@ -146,6 +162,8 @@ pub struct Bases {
     pub openai: String,
     /// Anthropic's API.
     pub anthropic: String,
+    /// Z.ai's chat completions endpoint.
+    pub zai: String,
 }
 
 impl Default for Bases {
@@ -154,13 +172,14 @@ impl Default for Bases {
             gemini: GEMINI_URL.to_owned(),
             openai: OPENAI_URL.to_owned(),
             anthropic: ANTHROPIC_URL.to_owned(),
+            zai: ZAI_URL.to_owned(),
         }
     }
 }
 
-/// The sources this machine could list: Gemini, OpenAI and Anthropic (their
-/// keys named by `key`, which resolves a variable or secret name to where
-/// it is), then each of `config`'s backends that names a key or is
+/// The sources this machine could list: Gemini, OpenAI, Anthropic and Z.ai
+/// (their keys named by `key`, which resolves a variable or secret name to
+/// where it is), then each of `config`'s backends that names a key or is
 /// reachable without one. A source whose endpoint and key an earlier one
 /// shares is marked, so it is not listed twice.
 pub fn sources(config: &Config, bases: &Bases, key: impl Fn(&str) -> KeySource) -> Vec<Source> {
@@ -173,6 +192,7 @@ pub fn sources(config: &Config, bases: &Bases, key: impl Fn(&str) -> KeySource) 
         header: None,
         backend: None,
         duplicate_of: None,
+        versioned: false,
     };
     let mut found = vec![
         provider("gemini", Kind::Gemini, &bases.gemini, named(&GEMINI_KEYS)),
@@ -183,6 +203,10 @@ pub fn sources(config: &Config, bases: &Bases, key: impl Fn(&str) -> KeySource) 
             &bases.anthropic,
             named(&ANTHROPIC_KEYS),
         ),
+        Source {
+            versioned: true,
+            ..provider("zai", Kind::Openai, &bases.zai, named(&ZAI_KEYS))
+        },
     ];
     for (name, backend) in &config.backends {
         let Some(url) = backend.url.as_deref().or(backend.api.default_url()) else {
@@ -193,6 +217,15 @@ pub fn sources(config: &Config, bases: &Bases, key: impl Fn(&str) -> KeySource) 
             Api::Openai => Kind::Openai,
             Api::Generic => Kind::Generic,
         };
+        // The `versioned` layer, set or implied by Z.ai's host, as the
+        // gateway infers it (`Gateway::new`).
+        let versioned = match backend.compat {
+            Some(compat) => compat == super::Compat::Versioned,
+            None => {
+                backend.api == Api::Openai
+                    && Target::parse(url).is_ok_and(|t| super::is_zai_host(&t.host))
+            }
+        };
         found.push(Source {
             id: format!("backend:{name}"),
             kind,
@@ -201,6 +234,7 @@ pub fn sources(config: &Config, bases: &Bases, key: impl Fn(&str) -> KeySource) 
             header: backend.header.clone(),
             backend: Some(name.clone()),
             duplicate_of: None,
+            versioned,
         });
     }
     for i in 1..found.len() {
@@ -316,10 +350,12 @@ impl Source {
                     None => format!("{root}/models?limit=1000"),
                 }
             }
-            Kind::Openai | Kind::Generic => match ends("/v1") || ends("/openai") {
-                true => "/models".to_owned(),
-                false => "/v1/models".to_owned(),
-            },
+            Kind::Openai | Kind::Generic => {
+                match self.versioned || ends("/v1") || ends("/openai") {
+                    true => "/models".to_owned(),
+                    false => "/v1/models".to_owned(),
+                }
+            }
         }
     }
 
@@ -563,7 +599,8 @@ pub fn merged(cache: &[Listing], resolved: &[Resolved]) -> Vec<Listing> {
 /// The built-in sources whose keys `harness` reads: those of the
 /// catalog's `auth_env` for it, and the ones its provisioning reads beyond
 /// that (Gemini CLI and Antigravity take `GEMINI_API_KEY` or
-/// `GOOGLE_API_KEY`; Hermes, `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`).
+/// `GOOGLE_API_KEY`; Hermes, `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`). Oh
+/// My Pi's `ZAI_API_KEY` is the Z.ai source.
 pub fn harness_sources(harness: &str, auth_env: &[String]) -> Vec<&'static str> {
     let extra: &[&str] = match harness {
         "gemini-cli" | "antigravity" => &GEMINI_KEYS,
@@ -579,6 +616,7 @@ pub fn harness_sources(harness: &str, auth_env: &[String]) -> Vec<&'static str> 
         ("gemini", &GEMINI_KEYS[..]),
         ("openai", &OPENAI_KEYS[..]),
         ("anthropic", &ANTHROPIC_KEYS[..]),
+        ("zai", &ZAI_KEYS[..]),
     ] {
         if reads(keys) {
             ids.push(id);
@@ -710,6 +748,7 @@ mod tests {
             header: None,
             backend: None,
             duplicate_of: None,
+            versioned: false,
         }
     }
 
@@ -1051,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn sources_are_the_three_providers_and_the_backends_with_the_duplicates_marked() {
+    fn sources_are_the_four_providers_and_the_backends_with_the_duplicates_marked() {
         let dir = tempfile::tempdir().unwrap();
         let shared = dir.path().join("shared");
         std::fs::write(&shared, "sk-shared").unwrap();
@@ -1082,6 +1121,7 @@ mod tests {
                 "gemini",
                 "openai",
                 "anthropic",
+                "zai",
                 "backend:anthropic",
                 "backend:local",
                 "backend:mirror",
@@ -1147,6 +1187,38 @@ mod tests {
             ["gemini", "openai", "anthropic"]
         );
         assert!(harness_sources("aider", &[]).is_empty());
+        // Oh My Pi's `zai` provider reads ZAI_API_KEY.
+        assert_eq!(
+            harness_sources("oh-my-pi", &env(&["GEMINI_API_KEY", "ZAI_API_KEY"])),
+            ["gemini", "zai"]
+        );
+    }
+
+    /// A source whose URL names the API's version lists at `/models`: the
+    /// Z.ai provider, a backend at Z.ai's host, and one given the layer.
+    #[test]
+    fn versioned_sources_list_at_models() {
+        let config: Config = serde_json::from_value(json!({"backends": {
+            "zai": {"api": "openai", "url": "https://api.z.ai/api/paas/v4", "key": "ZAI_API_KEY"},
+            "proxy": {"api": "openai", "url": "https://proxy.example/v4", "key": "P", "compat": "versioned"},
+            "plain": {"api": "openai", "url": "https://plain.example", "key": "P"},
+            "off": {"api": "openai", "url": "https://api.z.ai/api/paas/v4", "key": "P", "compat": "none"}
+        }}))
+        .unwrap();
+        let found = sources(&config, &Bases::default(), |name| {
+            KeySource::Env(name.to_owned())
+        });
+        let path = |id: &str| {
+            let source = found.iter().find(|s| s.id == id).unwrap();
+            let target = Target::parse(&source.base).unwrap();
+            source.page_path(&target, None)
+        };
+        assert_eq!(path("zai"), "/models");
+        assert_eq!(path("backend:zai"), "/models");
+        assert_eq!(path("backend:proxy"), "/models");
+        assert_eq!(path("backend:plain"), "/v1/models");
+        assert_eq!(path("backend:off"), "/v1/models");
+        assert_eq!(path("openai"), "/v1/models");
     }
 
     #[test]

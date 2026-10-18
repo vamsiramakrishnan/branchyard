@@ -1,5 +1,5 @@
-//! `by models`, and the configuration that gives the yard its model
-//! gateway. See docs/model-gateway.md.
+//! `by models`. The configuration that gives the yard its model gateway
+//! is the engine's (`branchyard::configure`). See docs/model-gateway.md.
 //!
 //! `[models]` in branchyard.toml names the backends (their API, base URL
 //! and the secret holding each key), the routes by model, the budgets and
@@ -11,13 +11,13 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use branchyard::models::{self, Config, Gateway, KeySource, ModelActivity, Signer, UsageRecord};
-use branchyard::{Activity, RecordedEvent, Yard};
+use branchyard::models::{self, Gateway, ModelActivity, UsageRecord};
+use branchyard::{Activity, RecordedEvent};
 use branchyard_setup::config::ProjectConfig;
 use serde_json::{json, Value};
 
 use crate::commands::{open, print, Env, Failure, Outcome, Target};
-use crate::{render, setup_io};
+use crate::render;
 
 /// Whether this process runs inside a harness on a branch, where its
 /// environment holds the turn's token and `by` acts through its engine.
@@ -31,62 +31,12 @@ pub(crate) fn config(root: &Path) -> Result<Option<ProjectConfig>, Failure> {
     if inside_branch() {
         return Ok(None);
     }
-    let located = setup_io::locate(root);
-    if !located.project_exists && !located.user.is_file() {
-        return Ok(None);
-    }
-    let effective = setup_io::load(root, None).map_err(|e| {
-        Failure::Message(format!(
-            "{e}\n(fix it, or check it with `by config validate`)"
-        ))
-    })?;
-    Ok(Some(effective.config))
+    Ok(branchyard::configure::configuration(root)?.map(|effective| effective.config))
 }
 
 /// Where the secret `name` is: its `[secrets]` entry's variable or file
 /// (relative to `root`, or `~/`), else the variable `name`.
-pub fn key_source(root: &Path, secrets: &BTreeMap<String, String>, name: &str) -> KeySource {
-    match secrets.get(name) {
-        Some(source) => match source.strip_prefix('@') {
-            Some(path) => KeySource::File(setup_io::resolve(root, path)),
-            None => KeySource::Env(source.clone()),
-        },
-        None => KeySource::Env(name.to_owned()),
-    }
-}
-
-/// The gateway `config`'s `[models]` describes for `yard`, signing with the
-/// connector gateway's keys when the yard has one; `None` when it names no
-/// backend.
-fn gateway(yard: &Yard, config: &ProjectConfig) -> Result<Option<Gateway>, Failure> {
-    if config.models.backends.is_empty() {
-        return Ok(None);
-    }
-    let engine: Config = serde_json::to_value(&config.models)
-        .and_then(serde_json::from_value)
-        .map_err(|e| Failure::Message(format!("[models]: {e}")))?;
-    let mut signer = Signer::local(yard)?;
-    if let Some(connectors) = yard.connectors() {
-        signer.issuer = connectors.issuer.clone();
-        signer.key_file = connectors.key_file.clone();
-        signer.jwks_file = connectors.jwks_file.clone();
-    }
-    let gateway = Gateway::new(&engine, signer, |name| {
-        key_source(yard.root(), &config.secrets, name)
-    })
-    .map_err(|e| Failure::Message(format!("[models]: {e}")))?;
-    Ok(Some(gateway))
-}
-
-/// Give `yard` the model gateway `[models]` configures, if any.
-pub fn configure(yard: &Yard) -> Result<(), Failure> {
-    if let Some(config) = config(yard.root())? {
-        if let Some(gateway) = gateway(yard, &config)? {
-            yard.use_models(gateway);
-        }
-    }
-    Ok(())
-}
+pub use branchyard::configure::key_source;
 
 /// `by models`: the routes, backends and budgets, and the yard's usage
 /// over `period`.
@@ -412,31 +362,4 @@ pub fn summary(events: &[RecordedEvent]) -> Option<(Value, String)> {
         "refused": refused,
     });
     Some((value, text))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn keys_are_found_through_secrets_else_by_variable() {
-        let secrets: BTreeMap<String, String> = [
-            ("anthropic".to_owned(), "MY_KEY".to_owned()),
-            ("file".to_owned(), "@/run/key".to_owned()),
-        ]
-        .into_iter()
-        .collect();
-        assert_eq!(
-            key_source(Path::new("/r"), &secrets, "anthropic"),
-            KeySource::Env("MY_KEY".into())
-        );
-        assert_eq!(
-            key_source(Path::new("/r"), &secrets, "file"),
-            KeySource::File("/run/key".into())
-        );
-        assert_eq!(
-            key_source(Path::new("/r"), &secrets, "OPENAI_API_KEY"),
-            KeySource::Env("OPENAI_API_KEY".into())
-        );
-    }
 }

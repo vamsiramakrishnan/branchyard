@@ -578,6 +578,10 @@ pub struct SpawnRequest {
     /// seat's or its parent's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Why this harness and model for this subtask, in the parent's words;
+    /// recorded on the child and learned from by the outcome store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
     /// The shape of the answer the child must report, like
     /// [`branchyard::Spawn::result`]: a schema in the contract's subset
     /// and whether a result is required. A keyword outside the subset is

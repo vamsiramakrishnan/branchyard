@@ -88,6 +88,7 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
         E::UnknownHarness(_) => (S::BAD_REQUEST, "unknown_harness"),
         E::HarnessUnavailable { .. } => (S::UNPROCESSABLE_ENTITY, "harness_unavailable"),
         E::Unsupported(_) => (S::UNPROCESSABLE_ENTITY, "unsupported"),
+        E::Config(_) => (S::UNPROCESSABLE_ENTITY, "config_error"),
         E::NoCandidate(_) => (S::CONFLICT, "no_candidate"),
         E::TargetMoved { .. } => (S::CONFLICT, "target_moved"),
         E::Conflict { .. } | E::ConflictBetween { .. } => (S::CONFLICT, "conflict"),

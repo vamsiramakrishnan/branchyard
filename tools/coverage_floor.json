@@ -5,6 +5,7 @@
     "branchyard-bridge": 90.3,
     "branchyard-cli": 83.8,
     "branchyard-client": 92.5,
+    "branchyard-config": 83.0,
     "branchyard-controls": 93.1,
     "branchyard-harness": 92.2,
     "branchyard-herdr": 53.4,
@@ -32,7 +33,7 @@
     "crates/branchyard-sync/src/replicator.rs": 93.0,
     "crates/branchyard/src/tasks/repo.rs": 88.8,
     "crates/branchyard-cli/src/sync_cmd.rs": 60.7,
-    "crates/branchyard-cli/src/effects_cmd.rs": 58.4,
+    "crates/branchyard-cli/src/effects_cmd.rs": 56.0,
     "crates/branchyard-cli/src/task_cmd.rs": 83.6,
     "crates/branchyard-cli/src/map_cmd.rs": 95.3,
     "crates/branchyard-cli/src/recipe_cmd.rs": 80.6

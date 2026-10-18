@@ -245,6 +245,8 @@ The refresh token in it keeps the login valid from one run to the next without l
 
 `branchyard.toml` at the repository root, and the user file `~/.config/branchyard/config.toml` (`$XDG_CONFIG_HOME` if set; `BRANCHYARD_USER_CONFIG` names another path), share one format. The project file overrides the user file key by key; `BRANCHYARD_REMOTE`, `BRANCHYARD_TOKEN_FILE`, `BRANCHYARD_REPO` and `BRANCHYARD_CA_FILE` override both; flags override everything. Relative paths resolve against the file's directory, and `~/` against the home directory.
 
+The format, its strict parser, the layering and the loader are one crate, [`branchyard-config`](../crates/branchyard-config/src/lib.rs), which the setup engine re-exports as `branchyard_setup::config` and the engine as `branchyard::config`. What the merged file gives a yard is the engine's too ([`branchyard::configure`](../crates/branchyard/src/configure.rs)): `Yard::open_configured(root)` opens a repository and gives it the connector gateway (`[connectors]`), the person's approvals (`[approvals]`), the model gateway (`[models]` with `[secrets]`), the knowledge settings (`[knowledge]`) and the `[defaults]` every task then starts from, with `[secrets]`, `[mcp]`, `[network]`, the default grants and the model access filled in when a task runs and left nothing by its caller. `by` opens every repository that way outside a harness, a server builds its model gateway with the same code, and a Rust program gets the same yard from the same files. A harness on a branch (`BRANCHYARD_BRANCH` set) reads no configuration, and `Yard::open` gives a yard with no defaults.
+
 ```toml
 #:schema https://raw.githubusercontent.com/vamsiramakrishnan/branchyard/main/schema/branchyard.config.json
 version = 1

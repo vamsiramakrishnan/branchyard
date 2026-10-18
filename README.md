@@ -51,6 +51,7 @@ Local mode runs the engine in-process and each harness as a local process in its
 
 ```sh
 by doctor                                             # is this machine and repository ready? (docs/doctor.md)
+by up                                                 # bring the configured backends up; list what only you can do (docs/up.md)
 by harnesses                                          # installed harnesses and their qualification
 by harnesses --all                                    # every harness CLI Branchyard knows of: install, login, API keys
 by run "Make the flaky parser test deterministic" --check "cargo test" --max-minutes 20 --ask

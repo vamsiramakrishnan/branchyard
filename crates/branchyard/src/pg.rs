@@ -305,6 +305,7 @@ CREATE TABLE IF NOT EXISTS by_outcomes (
     turns BIGINT NOT NULL,
     routed BOOLEAN NOT NULL,
     recorded_ms BIGINT NOT NULL,
+    decided_by TEXT,
     PRIMARY KEY (repo, id)
 );
 CREATE INDEX IF NOT EXISTS by_outcomes_kind ON by_outcomes (repo, kind, recorded_ms);
@@ -708,6 +709,13 @@ impl Postgres {
             tx.execute("SELECT pg_advisory_xact_lock(7390184325)", &[])
                 .map_err(db("schema"))?;
             tx.batch_execute(TABLES).map_err(db("schema"))?;
+            // A column added after its table shipped; the schema number
+            // stays, since an older version still reads the rows.
+            tx.execute(
+                "ALTER TABLE by_outcomes ADD COLUMN IF NOT EXISTS decided_by TEXT",
+                &[],
+            )
+            .map_err(db("schema"))?;
             let version: Option<String> = tx
                 .query_opt("SELECT value FROM by_meta WHERE key = 'schema'", &[])
                 .map_err(db("schema"))?
@@ -3037,7 +3045,7 @@ impl StorageBackend for Postgres {
 }
 
 const OUTCOME_COLUMNS: &str = "id, repository, branch, kind, harness, model, effort, outcome, \
-     score, cost_usd, duration_ms, turns, routed, recorded_ms";
+     score, cost_usd, duration_ms, turns, routed, recorded_ms, decided_by";
 
 fn outcome_row(r: &Row) -> Result<crate::fleet::OutcomeRecord, Error> {
     Ok(crate::fleet::OutcomeRecord {
@@ -3058,6 +3066,7 @@ fn outcome_row(r: &Row) -> Result<crate::fleet::OutcomeRecord, Error> {
         turns: from_db_u32("turns", r.get::<_, i64>(11))?,
         routed: r.get(12),
         recorded_ms: from_db("recorded_ms", r.get(13))?,
+        decided_by: r.get(14),
     })
 }
 
@@ -3069,14 +3078,15 @@ impl crate::fleet::OutcomeBackend for Postgres {
             tx.execute(
                 &format!(
                     "INSERT INTO by_outcomes (repo, {OUTCOME_COLUMNS}) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
                      ON CONFLICT (repo, id) DO UPDATE SET \
                      repository = EXCLUDED.repository, branch = EXCLUDED.branch, \
                      kind = EXCLUDED.kind, harness = EXCLUDED.harness, model = EXCLUDED.model, \
                      effort = EXCLUDED.effort, outcome = EXCLUDED.outcome, \
                      score = EXCLUDED.score, cost_usd = EXCLUDED.cost_usd, \
                      duration_ms = EXCLUDED.duration_ms, turns = EXCLUDED.turns, \
-                     routed = EXCLUDED.routed, recorded_ms = EXCLUDED.recorded_ms"
+                     routed = EXCLUDED.routed, recorded_ms = EXCLUDED.recorded_ms, \
+                     decided_by = EXCLUDED.decided_by"
                 ),
                 &[
                     &self.repo,
@@ -3094,6 +3104,7 @@ impl crate::fleet::OutcomeBackend for Postgres {
                     &i64::from(row.turns),
                     &row.routed,
                     &to_db("recorded_ms", row.recorded_ms)?,
+                    &row.decided_by,
                 ],
             )
             .map_err(db("outcome"))?;

@@ -149,7 +149,7 @@ Reuse the sandbox runtime's guest agent. Do not ship a new branchyard-guest.
 
 ### Local mode
 
-For development, the `by` CLI and the `branchyard` SDK embed the engine in-process and run harnesses through a local process provider: its own process group, a scrubbed environment and a private home per harness. Branches are git worktrees of the developer's repository. Task, branch, event, budget and merge semantics are identical to the server's; only the provider and the state store differ (a `.branchyard/` directory in the repository instead of PostgreSQL). Local mode provides no isolation beyond the operating-system user and must say so wherever it runs. Moving work to a server changes the provider and endpoint, not the program.
+For development, the `by` CLI and the `branchyard` SDK embed the engine in-process and run harnesses through a local process provider: its own process group, a scrubbed environment and a private home per harness. Branches are git worktrees of the developer's repository. Task, branch, event, budget and merge semantics are identical to the server's; only the provider and the state store differ (a `.branchyard/` directory in the repository instead of PostgreSQL). Local mode provides no isolation beyond the operating-system user and must say so wherever it runs. Moving work to a server changes the provider and endpoint, not the program. The configuration is the engine's as well: `Yard::open_configured` gives a yard what `branchyard.toml` describes, `by` and a server wire their gateways through the same code, and `Yard::up` brings the configured backends up ([up](up.md)); the Python client embeds `by serve` for a process that wants local mode without `by` ([SDKs](sdk.md#local-mode)).
 
 ### Developer vocabulary
 

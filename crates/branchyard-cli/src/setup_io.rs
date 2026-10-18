@@ -12,113 +12,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use branchyard_setup::config::{self, ConfigError, Effective, ProjectConfig, Source};
 use branchyard_setup::plan::{
     ArtifactKind, BuiltinValidator, FileAction, Plan, PlannedFile, Validation, Validator,
 };
 use branchyard_setup::probe::{Entropy, GitFact, HarnessFact, HarnessLogin, Platform, Probe};
 use branchyard_setup::protocol::Applied;
 
-/// The directory holding `.git` at or above `cwd`, else `cwd`.
-pub fn project_root(cwd: &Path) -> PathBuf {
-    cwd.ancestors()
-        .find(|dir| dir.join(".git").exists())
-        .unwrap_or(cwd)
-        .to_path_buf()
-}
-
-/// `branchyard.toml` at or above `cwd`, up to the repository root.
-pub fn project_file(cwd: &Path) -> Option<PathBuf> {
-    for dir in cwd.ancestors() {
-        let candidate = dir.join(config::PROJECT_FILE);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if dir.join(".git").exists() {
-            break;
-        }
-    }
-    None
-}
-
-pub fn home() -> Option<PathBuf> {
-    dirs::home_dir()
-}
-
-/// The user configuration: `BRANCHYARD_USER_CONFIG` when set, else
-/// `$XDG_CONFIG_HOME/branchyard/config.toml`, else
-/// `~/.config/branchyard/config.toml` (on every Unix, macOS included).
-pub fn user_file() -> PathBuf {
-    if let Some(path) = std::env::var_os("BRANCHYARD_USER_CONFIG").filter(|v| !v.is_empty()) {
-        return PathBuf::from(path);
-    }
-    let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None if cfg!(unix) => home().unwrap_or_default().join(".config"),
-        None => dirs::config_dir().unwrap_or_default(),
-    };
-    base.join("branchyard").join("config.toml")
-}
-
-/// A configuration file, parsed strictly, its paths made absolute.
-pub fn read_layer(path: &Path) -> Result<ProjectConfig, ConfigError> {
-    let text =
-        fs::read_to_string(path).map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
-    let mut parsed =
-        config::parse(&text).map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
-    parsed
-        .check_layer(config::Layer::of(path))
-        .map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
-    parsed.resolve_paths(path.parent().unwrap_or(Path::new(".")), home().as_deref());
-    Ok(parsed)
-}
-
-/// Where the files are, whether they exist.
-pub struct Located {
-    pub user: PathBuf,
-    /// The project file found, or where `by init project` would write it.
-    pub project: PathBuf,
-    pub project_exists: bool,
-}
-
-pub fn locate(cwd: &Path) -> Located {
-    let found = project_file(cwd);
-    Located {
-        user: user_file(),
-        project_exists: found.is_some(),
-        project: found.unwrap_or_else(|| project_root(cwd).join(config::PROJECT_FILE)),
-    }
-}
-
-/// Reads a variable by name.
-pub type EnvReader = dyn Fn(&str) -> Option<String>;
-
-/// The user and project files merged, with `env` for the `BRANCHYARD_*`
-/// variables; `None` for `env` leaves them out.
-pub fn load(cwd: &Path, env: Option<&EnvReader>) -> Result<Effective, ConfigError> {
-    let located = locate(cwd);
-    let mut layers = Vec::new();
-    if located.user.is_file() {
-        layers.push((
-            Source::User {
-                path: located.user.display().to_string(),
-            },
-            read_layer(&located.user)?,
-        ));
-    }
-    if located.project_exists {
-        layers.push((
-            Source::Project {
-                path: located.project.display().to_string(),
-            },
-            read_layer(&located.project)?,
-        ));
-    }
-    match env {
-        Some(env) => config::merge(&layers, env),
-        None => config::merge(&layers, |_| None),
-    }
-}
+pub use branchyard_config::{
+    home, load, locate, project_root, read_layer, resolve, user_file, Located,
+};
 
 /// This machine and repository.
 pub struct HostProbe {
@@ -139,18 +41,6 @@ impl HostProbe {
     /// A plan's path, as a path on this machine.
     pub fn resolve(&self, path: &str) -> PathBuf {
         resolve(&self.root, path)
-    }
-}
-
-/// `path` relative to `root`, with `~/` for the home directory.
-pub fn resolve(root: &Path, path: &str) -> PathBuf {
-    if let (Some(rest), Some(home)) = (path.strip_prefix("~/"), home()) {
-        return home.join(rest);
-    }
-    let path = Path::new(path);
-    match path.is_absolute() {
-        true => path.to_path_buf(),
-        false => root.join(path),
     }
 }
 

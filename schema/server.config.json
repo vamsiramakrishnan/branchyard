@@ -714,7 +714,7 @@
           ]
         },
         "compat": {
-          "description": "What the gateway adapts for an endpoint that imitates OpenAI's API\nwith differences: `gemini` for Gemini's OpenAI-compatible endpoint\n(the fields it refuses stripped, the thought signatures it puts on\ntool calls kept and put back when a request replays them), or\n`none`. Default: `gemini` for an `openai` backend whose URL's host is\n`generativelanguage.googleapis.com`, else `none`.",
+          "description": "What the gateway adapts for an endpoint that imitates OpenAI's API\nwith differences: `gemini` for Gemini's OpenAI-compatible endpoint\n(the fields it refuses stripped, the thought signatures it puts on\ntool calls kept and put back when a request replays them),\n`versioned` for an endpoint whose URL already names the API's\nversion, as Z.ai's do (a path's leading `/v1` is dropped, nothing\nelse changes), or `none`. Default: `gemini` for an `openai` backend\nwhose URL's host is `generativelanguage.googleapis.com`, `versioned`\nfor one whose host is `api.z.ai`, else `none`.",
           "type": [
             "string",
             "null"

@@ -5,7 +5,7 @@
 //! entry of the server's `secrets`, else a variable of the server's own
 //! environment. See `docs/model-gateway.md`.
 
-use branchyard::models::{Config as Engine, Gateway, KeySource, Signer};
+use branchyard::models::{Gateway, KeySource, Signer};
 use branchyard::SecretFrom;
 
 use crate::config::{Config, DEFAULT_TENANT};
@@ -25,9 +25,7 @@ pub fn gateway_for(config: &Config, repo: &str) -> Result<Option<Gateway>, Strin
     let Some(models) = config.models.as_ref().filter(|m| !m.backends.is_empty()) else {
         return Ok(None);
     };
-    let engine: Engine = serde_json::to_value(models)
-        .and_then(serde_json::from_value)
-        .map_err(|e| format!("models: {e}"))?;
+    let engine = branchyard::configure::models_config(models).map_err(|e| e.to_string())?;
     let signer = match config.connectors.as_ref() {
         Some(c) => Signer {
             issuer: crate::connectors::issuer(config, c),

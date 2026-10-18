@@ -15,6 +15,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::connectors::{glob_covers, glob_match};
 
+/// The turn's model gateway, for a provisioner that writes a provider
+/// pointing at it (DeepSeek Harness's `cordis.patch.yml`). The harness's
+/// environment already holds the gateway's `OPENAI_BASE_URL` and
+/// `ANTHROPIC_BASE_URL`, each API it serves, with the turn's token as
+/// `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`; this is for a harness that
+/// reads neither and takes its endpoint from a file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelGateway {
+    /// The gateway's URL as the harness reaches it, without a trailing
+    /// slash.
+    pub url: String,
+    /// Whether it serves Anthropic's Messages API, at `{url}/anthropic`.
+    pub anthropic: bool,
+    /// Whether it serves OpenAI's APIs, at `{url}/openai/v1`.
+    pub openai: bool,
+}
+
 /// What a branch may call through the model gateway.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

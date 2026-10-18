@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use branchyard::{
-    classify, fleet_stats, recorded_route, CandidateStats, Fleet, InventoryDefault, Judge,
-    JudgeOptions, JudgeSpec, Judgement, Route, RouteOptions, Routed, TaskKind, TaskOptions, Yard,
-    INVENTORY_ENTRY,
+    classify, fleet_stats, recorded_route, Advice, AdviceScope, Advised, CandidateStats, Fleet,
+    InventoryDefault, Judge, JudgeOptions, JudgeSpec, Judgement, Route, RouteOptions, Routed,
+    TaskKind, TaskOptions, Yard, ENVELOPE_ENTRY, INVENTORY_ENTRY,
 };
 use serde_json::json;
 
@@ -223,18 +223,28 @@ fn chosen_judge(
     Ok(fleet.entry(kind).and_then(|(_, e)| e.judge.clone()))
 }
 
-/// Judge `names` and record the scores.
+/// Judge `names` and record the scores. A judge harness runs its scratch
+/// branch with `options`, the task's: its isolation, provider, secrets and
+/// tool approvals, with the policy replaced by one that denies every tool
+/// and no observer (the caller's console has finished). Until 16 October
+/// 2026 the judge ran with default options, so an isolated fan's judge ran
+/// in local mode without the fan's secrets and its provisioning failed.
 pub fn judge_names(
     yard: &Yard,
     names: &[String],
     spec: Option<JudgeSpec>,
     rubric: Option<String>,
     fleet: Option<&Fleet>,
+    options: &TaskOptions,
 ) -> Result<Judgement, Failure> {
     let spec = chosen_judge(yard, names, spec, fleet)?;
+    let judge_options = TaskOptions {
+        observer: None,
+        ..options.clone()
+    };
     let judge: Option<Arc<dyn Judge>> = spec
         .as_ref()
-        .map(|s| branchyard::harness_judge(s, &TaskOptions::default()));
+        .map(|s| branchyard::harness_judge(s, &judge_options));
     match &judge {
         Some(judge) => eprintln!(
             "by: running each attempt's check, then asking {} for a verdict",
@@ -350,7 +360,18 @@ pub fn judge(env: &Env, target: &Target, args: &JudgeArgs, fleet: Option<&Fleet>
         rubric: None,
     });
     let fleet = if args.deterministic { None } else { fleet };
-    let judgement = judge_names(&yard, &names, spec, args.rubric.clone(), fleet)?;
+    // The judge's branch runs as `by run` would here: the configuration's
+    // defaults (isolation, provider, secrets by name) with no flags.
+    let mut task = TaskArgs::default();
+    let cwd = std::env::current_dir().map_err(|e| Failure::Message(e.to_string()))?;
+    if let Some(config) = crate::defaults::config_at(&cwd, &|name| std::env::var(name).ok())
+        .map_err(Failure::Message)?
+    {
+        crate::defaults::apply_task(&config, &mut task, crate::defaults::Scope::NewBranch)
+            .map_err(Failure::Message)?;
+    }
+    let options = crate::commands::Live::start(env, &task, false, None).options(&task)?;
+    let judgement = judge_names(&yard, &names, spec, args.rubric.clone(), fleet, &options)?;
     if !args.json {
         print(&judgement_table(&judgement, style(env)))?;
     }
@@ -431,6 +452,7 @@ pub fn stats_table(stats: &[CandidateStats], style: Style) -> String {
         column("READY", 5, true),
         column("FAILED", 6, true),
         column("INTR", 4, true),
+        column("PARENT", 6, true),
         column("P(OK)", 5, true),
         column("COST", 9, true),
         column("TIME", 8, true),
@@ -449,6 +471,7 @@ pub fn stats_table(stats: &[CandidateStats], style: Style) -> String {
                 Cell::plain(s.ready.to_string()),
                 Cell::plain(s.failed.to_string()),
                 Cell::plain(s.interrupted.to_string()),
+                Cell::plain(s.delegated.to_string()),
                 Cell::plain(format!("{:.2}", s.expected())),
                 Cell::plain(render::cost_text(s.mean_cost_usd)),
                 Cell::plain(attempts::duration_text(s.mean_duration_ms)),
@@ -461,8 +484,149 @@ pub fn stats_table(stats: &[CandidateStats], style: Style) -> String {
     text.push_str(
         "\nP(OK) is the posterior mean success the router samples around: merged and judged \
          best count 1, ready its judge score (or 0.5), failed 0; interrupted not at all. Costs, \
-         times, turns and scores are means.\n",
+         times, turns and scores are means. PARENT counts the runs whose harness a delegating \
+         parent chose (by spawn), recorded as the rest are.\n",
     );
+    text
+}
+
+/// `by fleet advise PROMPT`: inside a harness, as its branch through the
+/// engine running it (its task's fleet entry or the harnesses it may run,
+/// and its budget); outside, with the configuration's fleet or the
+/// inventory default and what this machine has of each harness.
+pub fn advise(
+    env: &Env,
+    target: &Target,
+    prompt: &str,
+    kind: Option<TaskKind>,
+    seed: Option<u64>,
+    fleet: Option<&Fleet>,
+    as_json: bool,
+) -> Outcome {
+    if let Target::Remote(_) = target {
+        return Err(local_only());
+    }
+    if let Some(delegate) = crate::commands::harness_delegate(as_json)? {
+        return match delegate.advise(prompt, kind) {
+            Ok(advice) => show_advice(env, &advice, as_json),
+            Err(error) => crate::commands::fail(as_json, &error),
+        };
+    }
+    // No [fleet]: the inventory default, as --auto would route.
+    let (fleet, excluded) = match fleet {
+        Some(fleet) => (fleet.clone(), Vec::new()),
+        None => {
+            let cwd = std::env::current_dir()?;
+            let isolated = crate::defaults::config_at(&cwd, &|name| std::env::var(name).ok())
+                .map_err(Failure::Message)?
+                .is_some_and(|c| c.defaults.isolated == Some(true));
+            let built = inventory_default(isolated)?;
+            (built.fleet(), built.excluded)
+        }
+    };
+    let yard = open()?;
+    let options = TaskOptions::default();
+    // What this machine has of each harness, installing nothing.
+    let gate = crate::harness_cmd::route_gate(&fleet, &options, true);
+    let scope = AdviceScope {
+        fleet: Some(&fleet),
+        seed,
+        harnesses: gate.as_deref(),
+        ..AdviceScope::default()
+    };
+    let mut advice = yard.advise(prompt, &options, kind, scope)?;
+    for left_out in excluded {
+        advice.candidates.push(Advised {
+            candidate: left_out.candidate,
+            available: false,
+            reason: Some(left_out.reason),
+            stats: None,
+            expected: 0.5,
+        });
+    }
+    show_advice(env, &advice, as_json)
+}
+
+fn show_advice(env: &Env, advice: &Advice, as_json: bool) -> Outcome {
+    match as_json {
+        true => print(&json::text(
+            &serde_json::to_value(advice).unwrap_or_default(),
+        )),
+        false => print(&advice_text(advice, style(env))),
+    }
+}
+
+/// The advice as a person reads it: the kind, a table of candidates, the
+/// router's pick, the caller's own harness and budget, and the notes.
+pub fn advice_text(advice: &Advice, style: Style) -> String {
+    let matched = match advice.matched.is_empty() {
+        true => String::new(),
+        false => format!(": {}", advice.matched.join(", ")),
+    };
+    let among = match advice.entry.as_str() {
+        ENVELOPE_ENTRY => "the harnesses this branch may run".to_owned(),
+        entry => branchyard::fleet_entry_label(entry),
+    };
+    let mut text = format!(
+        "by: {} ({}{matched}) among {among}, seed {}\n",
+        advice.kind, advice.kind_source, advice.seed
+    );
+    let column = |header, max, right| Column { header, max, right };
+    let columns = [
+        column("CANDIDATE", 40, false),
+        column("RUNS", 4, true),
+        column("P(OK)", 5, true),
+        column("COST", 9, true),
+        column("TIME", 8, true),
+        column("TURNS", 5, true),
+        column("AVAILABLE", 48, false),
+    ];
+    let rows: Vec<Vec<Cell>> = advice
+        .candidates
+        .iter()
+        .map(|a| {
+            let s = a.stats.as_ref();
+            vec![
+                Cell::plain(a.candidate.label()),
+                Cell::plain(s.map_or("0".to_owned(), |s| s.runs.to_string())),
+                Cell::plain(format!("{:.2}", a.expected)),
+                Cell::plain(render::cost_text(s.and_then(|s| s.mean_cost_usd))),
+                Cell::plain(attempts::duration_text(s.and_then(|s| s.mean_duration_ms))),
+                Cell::plain(
+                    s.and_then(|s| s.mean_turns)
+                        .map_or("-".to_owned(), |t| format!("{t:.1}")),
+                ),
+                match &a.reason {
+                    None => Cell::plain("yes"),
+                    Some(why) => Cell::toned(format!("no: {why}"), Tone::Yellow),
+                },
+            ]
+        })
+        .collect();
+    text.push_str(&render::table(&columns, &rows, style));
+    match &advice.pick {
+        Some(pick) => text.push_str(&format!(
+            "by: pick: {} — {}\n",
+            pick.candidate.label(),
+            pick.reason
+        )),
+        None => text.push_str("by: pick: none can run here now\n"),
+    }
+    if let Some(own) = &advice.own {
+        text.push_str(&format!("by: you: {}\n", own.label()));
+    }
+    if let Some(left) = advice.remaining_usd {
+        let tree = advice
+            .tree_remaining_usd
+            .map(|t| format!(" (${t:.2} under the cost limits above you)"))
+            .unwrap_or_default();
+        text.push_str(&format!(
+            "by: budget: ${left:.2} left to give children{tree}\n"
+        ));
+    }
+    for note in &advice.notes {
+        text.push_str(&format!("by: note: {note}\n"));
+    }
     text
 }
 

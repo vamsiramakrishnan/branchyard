@@ -636,6 +636,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "branchyard-bridge",
+ "branchyard-config",
  "branchyard-controls",
  "branchyard-harness",
  "branchyard-microsandbox",
@@ -695,6 +696,7 @@ dependencies = [
  "branchyard",
  "branchyard-bridge",
  "branchyard-client",
+ "branchyard-config",
  "branchyard-controls",
  "branchyard-harness",
  "branchyard-mcp",
@@ -741,6 +743,23 @@ dependencies = [
  "serde_json",
  "uuid",
  "webpki-roots",
+]
+
+[[package]]
+name = "branchyard-config"
+version = "0.0.1"
+dependencies = [
+ "branchyard-harness",
+ "branchyard-provision",
+ "dirs",
+ "glob",
+ "hex",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "shlex",
+ "toml",
 ]
 
 [[package]]
@@ -909,9 +928,9 @@ dependencies = [
 name = "branchyard-setup"
 version = "0.0.1"
 dependencies = [
+ "branchyard-config",
  "branchyard-harness",
  "branchyard-provision",
- "glob",
  "hex",
  "schemars 1.2.2",
  "serde",
@@ -5045,9 +5064,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -6056,7 +6075,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
