@@ -68,7 +68,13 @@ impl World {
 
     fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
         let mut command = Command::new(program);
-        branchyard_testkit::hermetic(command.env_clear())
+        command.env_clear();
+        // Under `cargo llvm-cov` the `by` run here is instrumented: keep
+        // the profile path, so what it covers counts.
+        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+            command.env("LLVM_PROFILE_FILE", profile);
+        }
+        branchyard_testkit::hermetic(&mut command)
             .current_dir(&self.repo)
             .env("PATH", self.path_var())
             .env("HOME", &self.home)
