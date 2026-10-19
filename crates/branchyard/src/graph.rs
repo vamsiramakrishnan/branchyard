@@ -199,6 +199,11 @@ pub struct SpawnSpec {
     /// child. See `docs/fleet.md#advice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// The paths the child owns: files, directories or globs relative to
+    /// the repository; its changes elsewhere are refused when it is
+    /// integrated. See `docs/delegation.md#ownership`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns: Vec<String>,
 }
 
 impl SpawnSpec {
@@ -223,6 +228,7 @@ impl SpawnSpec {
             plan: self.plan,
             model: self.model.clone(),
             result: self.result.clone(),
+            owns: self.owns.clone(),
         })
     }
 
@@ -248,6 +254,7 @@ impl SpawnSpec {
             model: spawn.model.clone(),
             result: spawn.result.clone(),
             why: spawn.why.clone(),
+            owns: spawn.owns.clone(),
         }
     }
 }

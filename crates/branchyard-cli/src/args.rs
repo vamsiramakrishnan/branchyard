@@ -584,6 +584,9 @@ pub struct SpawnArgs {
     pub result_schema_file: Option<String>,
     /// `--result-required`: the child must report a result.
     pub result_required: bool,
+    /// `--owns`, repeatable: the paths the child owns. Empty: none of its
+    /// own, bounded only by the scope its parent works under.
+    pub owns: Vec<String>,
     pub json: bool,
 }
 
@@ -4304,6 +4307,11 @@ pub struct SpawnGraph {
     /// ending a turn without one is noted in your log
     #[arg(long)]
     result_required: bool,
+    /// A path the child owns: a file, a directory (and everything below it) or a glob such as
+    /// tests/parser_*.rs, relative to the repository. Its changes anywhere else are refused when
+    /// it is integrated, and it is told them every turn. Repeatable, or comma-separated
+    #[arg(long, value_name = "PATH,PATH,...", value_parser = harness_list)]
+    owns: Vec<List>,
 }
 
 impl Flags for SpawnFlags {
@@ -4352,6 +4360,12 @@ impl Flags for SpawnFlags {
             result_schema: self.graph.result_schema,
             result_schema_file: self.graph.result_schema_file,
             result_required: self.graph.result_required,
+            owns: self
+                .graph
+                .owns
+                .into_iter()
+                .flat_map(|list| list.0)
+                .collect(),
             json: self.json,
         })
     }
@@ -5461,6 +5475,17 @@ mod tests {
         };
         let grants: Vec<String> = granted.connectors.iter().map(|g| g.to_string()).collect();
         assert_eq!(grants, ["github:read", "linear@work:write:issues.*"]);
+        let Command::Spawn { spawn: owner, .. } =
+            parse_str("spawn go --owns src/parser,tests/parser_*.rs --owns docs/parser.md")
+                .unwrap()
+        else {
+            panic!("not spawn")
+        };
+        assert_eq!(
+            owner.owns,
+            ["src/parser", "tests/parser_*.rs", "docs/parser.md"]
+        );
+        assert!(granted.owns.is_empty());
         assert_eq!(spawn.seat.as_deref(), Some("worker"));
         assert!(err("spawn go --after soon").contains("[possible values: settled, integrated]"));
         assert!(err("spawn go --bind cache").contains("--bind"));

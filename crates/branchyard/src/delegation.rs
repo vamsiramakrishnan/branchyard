@@ -239,6 +239,12 @@ pub(crate) struct Grant {
     /// branch spawns only by seat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seats: Option<Seats>,
+    /// The paths its parent gave it to own, normalized
+    /// ([`crate::scope::normalize`]); empty for none. Its changes outside
+    /// them, and outside every ancestor's, are refused when it is
+    /// integrated. See [`crate::scope`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns: Vec<String>,
 }
 
 impl Grant {
@@ -248,6 +254,7 @@ impl Grant {
             deny: Vec::new(),
             limits: None,
             seats: None,
+            owns: Vec::new(),
         }
     }
 
@@ -325,6 +332,12 @@ pub struct Spawn {
     /// classifier gives its prompt, so `by log` shows the choice and the
     /// outcome store learns from it ([`crate::ParentChoice`]).
     pub why: Option<String>,
+    /// The paths the child owns: files, directories or globs relative to
+    /// the repository. Its changes anywhere else are refused when it is
+    /// integrated, and it is told them every turn. Empty: it is bounded
+    /// only by the scope its parent works under, if any. See
+    /// [`crate::scope`].
+    pub owns: Vec<String>,
 }
 
 impl Spawn {
@@ -415,6 +428,9 @@ pub struct Spawned {
     /// false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub check_inherited: bool,
+    /// The paths it owns, as normalized. Omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns: Vec<String>,
 }
 
 /// A descendant whose next turn was started.
@@ -665,6 +681,16 @@ pub struct Inspection {
     /// The scratch areas it is bound to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<Binding>,
+    /// The paths its parent gave it to own; its changes elsewhere are
+    /// refused when it is integrated. Omitted when none. See
+    /// [`crate::scope`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns: Vec<String>,
+    /// The scopes of its ancestors that bound it too, nearest first: a path
+    /// is in its scope only when `owns` (if any) and each of these cover
+    /// it. Omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns_within: Vec<Vec<String>>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -2791,6 +2817,12 @@ impl Local {
                     depends_on: child.depends_on,
                     check: child.record.check.clone(),
                     check_inherited: child.check_inherited,
+                    owns: child
+                        .record
+                        .grant
+                        .as_ref()
+                        .map(|g| g.owns.clone())
+                        .unwrap_or_default(),
                 }
             })
             .collect();
@@ -2865,11 +2897,17 @@ impl Local {
         let limits = self.child_limits(caller, &request.budget, planned_usd)?;
         // The parent's own denials, those it was given, then the request's.
         let deny = run::with_denials(&run::with_denials(&grant.deny, &caller.deny), &request.deny);
+        // The paths it owns, which must be able to overlap the scope this
+        // branch works under; a path is in its scope only when every scope
+        // up to the root covers it.
+        let owns = crate::scope::normalize_all(&request.owns)?;
+        crate::scope::check_overlap(&self.branch, &owns, &crate::scope::chain(&store, caller)?)?;
         let child_grant = Grant {
             envelope,
             deny,
             limits: Some(limits.clone()),
             seats: seated.as_ref().map(|(_, _, below)| below.clone()),
+            owns,
         };
         if child_grant.can_spawn() {
             crate::projection::tools(&self.options)?;
@@ -3376,7 +3414,18 @@ impl Local {
         let tightest = caps_above(&store, branch, own.then(|| self.own_spent(&record)))
             .into_iter()
             .min_by(|a, b| a.left().total_cmp(&b.left()));
+        let owns = record
+            .grant
+            .as_ref()
+            .map(|g| g.owns.clone())
+            .unwrap_or_default();
+        let mut owns_within = crate::scope::chain(&store, &record)?;
+        if !owns.is_empty() {
+            owns_within.remove(0);
+        }
         Ok(Inspection {
+            owns,
+            owns_within,
             tree_remaining_usd: tightest.as_ref().map(TreeCap::left),
             tree_capped_by: tightest.map(|cap| cap.branch),
             subtree_cost_usd: subtree_spent(&store, &record).max(if own {
@@ -4096,6 +4145,7 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
         model: request.model.clone(),
         result: request.result.clone(),
         why: request.why.clone(),
+        owns: request.owns.clone(),
     })
 }
 
@@ -4953,6 +5003,7 @@ Checks on the merged result: \
                     ..Limits::default()
                 }),
                 seats: None,
+                owns: Vec::new(),
             }),
             bindings: Vec::new(),
             start_base: None,

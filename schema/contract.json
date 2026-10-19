@@ -14481,6 +14481,13 @@
             }
           ],
           "description": "The shape of the answer the child must report, like\n[`branchyard::Spawn::result`]: a schema in the contract's subset\nand whether a result is required. A keyword outside the subset is\nrefused. See `docs/delegation.md#result-contract`."
+        },
+        "owns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The paths the child owns, like [`branchyard::Spawn::owns`]: its\nchanges elsewhere are refused when it is integrated. See\n`docs/delegation.md#ownership`."
         }
       },
       "required": [
@@ -14927,6 +14934,13 @@
                     "null"
                   ],
                   "description": "Why this harness and model, in the parent's words; recorded on the\nchild. See `docs/fleet.md#advice`."
+                },
+                "owns": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The paths the child owns: files, directories or globs relative to\nthe repository; its changes elsewhere are refused when it is\nintegrated. See `docs/delegation.md#ownership`."
                 },
                 "kind": {
                   "type": "string",
@@ -15640,6 +15654,13 @@
             "check_inherited": {
               "type": "boolean",
               "description": "`check` is its parent's, inherited because the spawn gave none.\nSiblings under a parent's whole-suite check pass it only together:\nintegrate them together ([`Delegate::integrate_all`]). Omitted when\nfalse."
+            },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The paths it owns, as normalized. Omitted when none."
             }
           },
           "required": [
@@ -15991,6 +16012,13 @@
             "type": "string"
           },
           "description": "Files where the work conflicts with `target`: integrating it would\nfail before its check."
+        },
+        "outside_scope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Paths the work changes outside the paths the branch owns\n([`crate::scope`]): integrating it would be refused for them,\nwhatever its check says. Empty for a branch without a scope."
         },
         "output_tail": {
           "type": "string",
@@ -16549,6 +16577,23 @@
                 "$ref": "#/$defs/Binding"
               },
               "description": "The scratch areas it is bound to."
+            },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The paths its parent gave it to own; its changes elsewhere are\nrefused when it is integrated. Omitted when none. See\n[`crate::scope`]."
+            },
+            "owns_within": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "description": "The scopes of its ancestors that bound it too, nearest first: a path\nis in its scope only when `owns` (if any) and each of these cover\nit. Omitted when none."
             }
           },
           "required": [
@@ -17951,6 +17996,23 @@
                 "$ref": "#/$defs/Binding"
               },
               "description": "The scratch areas it is bound to."
+            },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The paths its parent gave it to own; its changes elsewhere are\nrefused when it is integrated. Omitted when none. See\n[`crate::scope`]."
+            },
+            "owns_within": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "description": "The scopes of its ancestors that bound it too, nearest first: a path\nis in its scope only when `owns` (if any) and each of these cover\nit. Omitted when none."
             }
           },
           "required": [
@@ -18472,6 +18534,13 @@
                 "type": "string"
               },
               "description": "Files where the work conflicts with `target`: integrating it would\nfail before its check."
+            },
+            "outside_scope": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths the work changes outside the paths the branch owns\n([`crate::scope`]): integrating it would be refused for them,\nwhatever its check says. Empty for a branch without a scope."
             },
             "output_tail": {
               "type": "string",
@@ -19438,6 +19507,23 @@
                 "$ref": "#/$defs/Binding"
               },
               "description": "The scratch areas it is bound to."
+            },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The paths its parent gave it to own; its changes elsewhere are\nrefused when it is integrated. Omitted when none. See\n[`crate::scope`]."
+            },
+            "owns_within": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "description": "The scopes of its ancestors that bound it too, nearest first: a path\nis in its scope only when `owns` (if any) and each of these cover\nit. Omitted when none."
             }
           },
           "required": [
@@ -19959,6 +20045,13 @@
                 "type": "string"
               },
               "description": "Files where the work conflicts with `target`: integrating it would\nfail before its check."
+            },
+            "outside_scope": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths the work changes outside the paths the branch owns\n([`crate::scope`]): integrating it would be refused for them,\nwhatever its check says. Empty for a branch without a scope."
             },
             "output_tail": {
               "type": "string",
@@ -31534,6 +31627,23 @@
                 "$ref": "#/$defs/Binding"
               },
               "description": "The scratch areas it is bound to."
+            },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The paths its parent gave it to own; its changes elsewhere are\nrefused when it is integrated. Omitted when none. See\n[`crate::scope`]."
+            },
+            "owns_within": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "description": "The scopes of its ancestors that bound it too, nearest first: a path\nis in its scope only when `owns` (if any) and each of these cover\nit. Omitted when none."
             }
           },
           "required": [
@@ -32055,6 +32165,13 @@
                 "type": "string"
               },
               "description": "Files where the work conflicts with `target`: integrating it would\nfail before its check."
+            },
+            "outside_scope": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths the work changes outside the paths the branch owns\n([`crate::scope`]): integrating it would be refused for them,\nwhatever its check says. Empty for a branch without a scope."
             },
             "output_tail": {
               "type": "string",
@@ -33357,6 +33474,23 @@
             "$ref": "#/$defs/Binding"
           },
           "description": "The scratch areas it is bound to."
+        },
+        "owns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The paths its parent gave it to own; its changes elsewhere are\nrefused when it is integrated. Omitted when none. See\n[`crate::scope`]."
+        },
+        "owns_within": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": "The scopes of its ancestors that bound it too, nearest first: a path\nis in its scope only when `owns` (if any) and each of these cover\nit. Omitted when none."
         }
       },
       "required": [

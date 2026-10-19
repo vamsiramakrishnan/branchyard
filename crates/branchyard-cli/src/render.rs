@@ -1392,6 +1392,9 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     ];
     pairs.extend(budget_lines(i, true));
     pairs.push(("check", check_text(i)));
+    if !i.owns.is_empty() || !i.owns_within.is_empty() {
+        pairs.push(("owns", owns_text(&i.owns, &i.owns_within)));
+    }
     if !i.grants.is_empty() {
         let grants: Vec<String> = i.grants.iter().map(|g| g.to_string()).collect();
         pairs.push(("connectors", grants.join(", ")));
@@ -1490,6 +1493,22 @@ pub fn check_report(r: &branchyard::CheckReport, style: Style) -> String {
         (Some(_), CheckVerdict::NotStarted) => ("could not start".to_owned(), Tone::Red),
         (Some(_), CheckVerdict::NotRun) => ("did not run".to_owned(), Tone::Red),
     };
+    // Outside its scope, integrating it is refused whatever the check says.
+    let (outcome, tone) = match r.outside_scope.is_empty() {
+        true => (outcome, tone),
+        false => (
+            format!(
+                "{outcome}; but it changes {} outside the paths it owns, so integrating it is \
+                 refused: {}",
+                match r.outside_scope.len() {
+                    1 => "1 file".to_owned(),
+                    n => format!("{n} files"),
+                },
+                r.outside_scope.join(", ")
+            ),
+            Tone::Red,
+        ),
+    };
     let mut pairs = vec![("branch", r.branch.clone())];
     if let Some(check) = &r.check {
         let source = match &r.inherited_from {
@@ -1508,6 +1527,18 @@ pub fn check_report(r: &branchyard::CheckReport, style: Style) -> String {
     if !r.passed() && !r.output_tail.trim().is_empty() {
         text.push_str(r.output_tail.trim_end());
         text.push('\n');
+    }
+    text
+}
+
+/// The paths a branch owns, and the scopes above it it works within.
+fn owns_text(owns: &[String], within: &[Vec<String>]) -> String {
+    let mut text = match owns.is_empty() {
+        true => "nothing of its own".to_owned(),
+        false => owns.join(", "),
+    };
+    for scope in within {
+        text.push_str(&format!("; within {}", scope.join(", ")));
     }
     text
 }

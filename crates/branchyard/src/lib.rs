@@ -96,6 +96,7 @@
 
 mod access;
 mod adopt;
+mod assignment;
 mod broker;
 mod bundle;
 mod checkpoint;
@@ -148,6 +149,7 @@ pub mod reported;
 mod run;
 #[cfg(test)]
 mod schema_parity;
+pub mod scope;
 mod seats;
 pub mod services;
 mod snapshots;
@@ -3483,6 +3485,11 @@ pub struct CheckReport {
     /// fail before its check.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<String>,
+    /// Paths the work changes outside the paths the branch owns
+    /// ([`crate::scope`]): integrating it would be refused for them,
+    /// whatever its check says. Empty for a branch without a scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outside_scope: Vec<String>,
     /// The last [`branchyard_workspace::OUTPUT_TAIL_BYTES`] bytes of its
     /// output, or why it could not start.
     #[serde(default)]
@@ -3491,12 +3498,14 @@ pub struct CheckReport {
 
 impl CheckReport {
     /// Whether integrating the work as it is would get past its check:
-    /// the check passed, or there is none and nothing conflicted.
+    /// nothing is outside its scope, and the check passed, or there is
+    /// none and nothing conflicted.
     pub fn passed(&self) -> bool {
-        match self.check {
-            Some(_) => self.outcome == CheckVerdict::Passed,
-            None => self.conflicts.is_empty(),
-        }
+        self.outside_scope.is_empty()
+            && match self.check {
+                Some(_) => self.outcome == CheckVerdict::Passed,
+                None => self.conflicts.is_empty(),
+            }
     }
 }
 

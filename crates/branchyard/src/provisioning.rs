@@ -265,19 +265,22 @@ pub(crate) const WORKSPACE_NOTE: &str = "Branchyard runs you on your own git bra
      Branchyard's, not someone else's. Put scratch files in $TMPDIR, a directory private to \
      this branch, not in /tmp, which other branches share.";
 
-/// The task's own instructions, then the repository knowledge given this
+/// The task's own instructions, then what its parent assigned it (the paths
+/// it owns, the shared brief), then the repository knowledge given this
 /// turn, then the connectors' line, then [`WORKSPACE_NOTE`]. The note
 /// alone is given only where a harness takes instructions apart from the
 /// prompt (`note_alone`): an ACP harness gets them prepended to its first
 /// prompt, which a note on its own should not change.
 fn own_instructions(
     own: Option<&str>,
+    assignment: Option<&str>,
     knowledge: Option<&str>,
     connectors: Option<&crate::connectors::Prepared>,
     note_alone: bool,
 ) -> Option<String> {
     let mut parts: Vec<&str> = [
         own.filter(|t| !t.trim().is_empty()),
+        assignment.filter(|t| !t.trim().is_empty()),
         knowledge.filter(|t| !t.trim().is_empty()),
         connectors.map(|c| c.instruction.as_str()),
     ]
@@ -299,6 +302,14 @@ pub(crate) struct Access<'a> {
     pub model_gateway: Option<branchyard_provision::models::ModelGateway>,
 }
 
+/// What a turn is told beyond its prompt, for its instructions: the
+/// repository knowledge given it, and what its parent assigned it (the
+/// paths it owns, the shared brief; [`crate::assignment`]).
+pub(crate) struct Standing<'a> {
+    pub knowledge: Option<&'a crate::knowledge::Briefing>,
+    pub assignment: Option<&'a str>,
+}
+
 /// Plan and apply the turn's provisioning. A failure is the turn's failure
 /// reason.
 pub(crate) fn prepare(
@@ -306,7 +317,7 @@ pub(crate) fn prepare(
     profile: &branchyard_harness::profiles::Profile,
     projection: Option<&Projection>,
     connectors: Option<&crate::connectors::Prepared>,
-    knowledge: Option<&crate::knowledge::Briefing>,
+    standing: Standing<'_>,
     access: Access<'_>,
     state: &Path,
 ) -> Result<Provisioned, String> {
@@ -314,6 +325,10 @@ pub(crate) fn prepare(
         policy,
         model_gateway,
     } = access;
+    let Standing {
+        knowledge,
+        assignment,
+    } = standing;
     let spec = record.provision.clone().unwrap_or_default();
     let (workspace, home) = placement::guest_paths(record);
     let secrets = resolve(&spec.secrets)?;
@@ -363,6 +378,7 @@ pub(crate) fn prepare(
         instructions: instructions(
             own_instructions(
                 spec.instructions.as_deref(),
+                assignment,
                 knowledge.and_then(|k| k.text.as_deref()),
                 connectors,
                 // A delegating branch has it in its skill.

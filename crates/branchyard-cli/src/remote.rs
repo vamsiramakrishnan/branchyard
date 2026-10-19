@@ -877,6 +877,7 @@ pub fn spawn(
         model: args.model.clone(),
         result: contract,
         why: args.why.clone(),
+        owns: args.owns.clone(),
     };
     let op = remote
         .repo

@@ -1538,6 +1538,7 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         model: args.model.clone(),
         result,
         why: args.why.clone(),
+        owns: args.owns.clone(),
     };
     if let Some(delegate) = harness_delegate(json)? {
         if args.parent.is_some()

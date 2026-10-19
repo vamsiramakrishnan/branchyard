@@ -263,6 +263,8 @@ class Spawned:
     check_inherited: Optional[bool] = None
     # The model its harness runs; None for the harness's default.
     model: Optional[str] = None
+    # The paths it owns, as normalized; None when it was given none.
+    owns: Optional[List[str]] = None
 
 
 @dataclasses.dataclass
@@ -290,6 +292,11 @@ class Inspection:
     graph_revision: Optional[int] = None
     depends_on: Optional[List[Dict[str, Any]]] = None
     bindings: Optional[List[Dict[str, Any]]] = None
+    # The paths its parent gave it to own, and the scopes of its ancestors
+    # that bound it too, nearest first: a path is in its scope only when all
+    # of them cover it. None when there are none.
+    owns: Optional[List[str]] = None
+    owns_within: Optional[List[List[str]]] = None
     stalled: Optional[bool] = None
     # What its live children (running, waiting, blocked, awaiting plan
     # approval) hold of its budget, how many they are, and what its settled
@@ -424,10 +431,15 @@ class CheckReport:
     checked: Optional[str] = None
     conflicts: Optional[List[str]] = None
     output_tail: str = ""
+    # Paths the work changes outside the paths the branch owns: integrating
+    # it would be refused for them, whatever its check says.
+    outside_scope: Optional[List[str]] = None
 
     @property
     def passed(self) -> bool:
         """Whether integrating the work as it is would get past its check."""
+        if self.outside_scope:
+            return False
         if self.check is None:
             return not self.conflicts
         return self.outcome == "passed"
@@ -658,6 +670,7 @@ def spawn(
     model: Optional[str] = None,
     result: Optional[Dict[str, Any]] = None,
     why: Optional[str] = None,
+    owns: Optional[List[str]] = None,
 ) -> Spawned:
     """Create a child branch and start it; returns once it has started.
 
@@ -698,6 +711,13 @@ def spawn(
     `why` is why this harness and model for this subtask, in a few words:
     it is recorded on the child and learned from by the outcome store, so
     ask `advise()` first and say what decided you.
+
+    `owns` are the paths the child owns: files, directories (and all below
+    them) or globs such as "tests/parser_*.rs", relative to the repository.
+    It is told them every turn, and its changes anywhere else are refused
+    when you integrate it; `check(child).outside_scope` lists them first.
+    Give siblings disjoint paths and they cannot conflict. See
+    docs/delegation.md "Ownership".
     """
     options = {
         "--seat": seat,
@@ -723,6 +743,8 @@ def spawn(
             flags += [flag, str(value)]
     for grant in connectors or []:
         flags += ["--connector", grant]
+    for path in owns or []:
+        flags += ["--owns", path]
     for scratch, access in (bindings or {}).items():
         flags += ["--bind", f"{scratch}:{access}"]
     if plan:

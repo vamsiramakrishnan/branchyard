@@ -298,6 +298,24 @@ Tested against the fake ACP agent through the SDK, the MCP server, the CLI and t
 
 Not done: a result is the child's claim, like a self-reported status, and nothing checks that it is true or that the work behind it exists; the contract cannot be changed after spawn, and a seat in a [rig](rigs.md) cannot carry one; a child does not pass its contract on to its own children; the subset has no `pattern`, `format`, `$ref`, `oneOf`, `anyOf`, `const`, `minItems`, `maxItems`, `uniqueItems`, exclusive bounds or annotations such as `title`; `null` cannot be a result; and nothing stops a child from ending its turn without one, a `required` contract only says so to its parent.
 
+## Ownership
+
+A parent that splits work should split it by ownership, as people do: each child is given the paths it owns, and siblings that own disjoint paths cannot conflict. Branchyard enforces the split rather than hoping for it.
+
+**Giving it.** `by spawn "..." --owns src/parser --owns 'tests/parser_*.rs'` (repeatable, or comma-separated), the MCP `spawn` tool's `owns`, `branchyard.spawn(..., owns=[...])`, `Spawn::owns`, a graph proposal's `spawn` edit and the server's `POST …/spawn` body all take a list of entries relative to the repository. A path without glob characters (`src/parser`, `docs/api.md`) is that file, or that directory and everything below it; a glob (`src/**/*.rs`, `tests/parser_*.rs`) matches with `*` and `?` inside one path component and `**` across them. Entries are stored normalized (`./src/parser/` is `src/parser`), and one that is empty, absolute, leaves the repository or is not a glob is refused before anything is created.
+
+**Bounded from above.** The scope is set by the parent, in the child's grant, never by the child. A path is in a branch's scope only when its own entries, if it has any, and every ancestor's cover it, so a scope only narrows from parent to child, exactly. A child given no entries of its own is bounded by its parent's. A spawn whose entries lie wholly outside the scope its parent works under is refused (``a child of lead may not own docs: it lies outside lead's scope (src)``), since nothing it changed could land.
+
+**Told every turn.** A branch with a scope finds it in its instructions each turn, under "The paths you own", with what happens to a change elsewhere and what to do instead: say what is needed and why in its final message, and let the parent make the change or give it to its owner.
+
+**Enforced at integration.** Integrating a child (`by integrate`, alone or with siblings) refuses it, before anything moves, when its candidate changes a path outside its scope: ``b changed 1 file outside the paths it owns (src/b): src/a/z.txt; nothing was integrated``. What counts is what it would bring into its parent. A path whose content in the child's candidate is already its parent's is not its change: a sibling's work it merged to reconcile with, once that sibling landed, or that lands before it in the same `by integrate a b`. `by check` reports the same paths first, as `outside_scope`, and does not pass while there are any.
+
+**Reading it.** `inspect` shows `owns`, the branch's own entries, and `owns_within`, the scopes of ancestors that bound it too, nearest first; `by inspect` prints an `owns` line, and a spawn's answer carries `owns`.
+
+Tested against the fake ACP agent through the SDK and the CLI's parser: a child in scope lands and one that strays is refused with its paths, a reconciling child's sibling work is not counted against it, a grandchild is bounded by its parent's scope, and a child is told its scope.
+
+Not done: a scope bounds what is integrated, not what a harness writes in its own worktree, where a shell can write anywhere, and its tool permissions do not yet deny writes outside it; a seat in a [rig](rigs.md) cannot carry one; files every child must touch, such as a lockfile, belong to no child's scope until the parent regenerates them itself.
+
 ## The envelope
 
 | Limit | Rule |
