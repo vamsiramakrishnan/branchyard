@@ -6,7 +6,7 @@ There is one set of operations and one authority model. Four surfaces reach them
 
 | Surface | Use it when |
 |---|---|
-| `by spawn`, `by inspect`, `by events`, `by send` (and `by send --steer`, or `by steer`), `by wait`, `by integrate`, `by check`, `by cancel`, `by discard`, `by children`, `by graph` | The harness can run shell commands. This is the primary path: every coding harness has a shell, and `--json` output composes in scripts. |
+| `by delegate`, `by brief`, `by spawn`, `by inspect`, `by events`, `by send` (and `by send --steer`, or `by steer`), `by wait`, `by integrate`, `by check`, `by cancel`, `by discard`, `by children`, `by graph` | The harness can run shell commands. This is the primary path: every coding harness has a shell, and `--json` output composes in scripts. |
 | The Python module `branchyard` | The harness writes Python to orchestrate: loops, fan-out, waiting. It runs `by --json` for you. |
 | The Rust SDK, `branchyard::Delegate` | You write the meta-harness in Rust, in or out of a harness. |
 | Branchyard's MCP server (`by mcp`) | The harness cannot run commands, or its shell cannot reach the repository, but it can call MCP tools. A harness in a sandbox gets it over HTTP from the engine's host ([sandboxed harnesses](#sandboxed-harnesses)). |
@@ -23,6 +23,30 @@ by run "Split the parser rewrite into tokenizer and formatter work, delegate bot
 `--delegate` lets the harness create children one level deep; `--delegate=2` allows grandchildren. In the SDK, set `TaskOptions::delegation` to an `Envelope`. The envelope is stored with the branch, so later sends keep it.
 
 `by run` waits until every branch it delegated has finished, whichever process runs it, says which are still running while it waits, and prints a table of them. When the harness ended its turn while its children ran, `by run` also waits for the turn that wakes it ([below](#waiting-on-children)) and summarizes the branch as that turn left it. A delegated branch whose engine stopped is recovered rather than waited for: `ready` with a warning when its lost turn had written work, else `interrupted` ([durability](durability.md#recovery)). `by ls` shows the tree.
+
+## Plans and the shared brief
+
+A harness that splits work should say the whole split once and end its turn, not orchestrate its children one call at a time. `by delegate` takes a plan: the subtasks, each as `spawn` takes a child, and a brief they all share.
+
+```sh
+by delegate --plan plan.json          # inside a harness; outside one, add --parent BRANCH
+```
+
+```json
+{"brief": "Parse with the Token type in src/token.rs. Add no crates.",
+ "tasks": [
+   {"name": "lexer", "prompt": "Write the lexer", "owns": ["src/lexer"]},
+   {"name": "parser", "prompt": "Write the parser", "owns": ["src/parser"],
+    "depends_on": ["lexer"], "after": "integrated"}]}
+```
+
+**One call.** The plan's tasks are created as one graph proposal, all or none, against the branch's graph as it is (the harness never handles a revision): a task the envelope or the budget refuses refuses the plan, and nothing is created. `depends_on` may name another task by its `name`, or an existing child. Tasks that wait for nothing start at once. The answer lists the children, in plan order, and what to do next: end the turn. The branch is then [woken](#waiting-on-children) when they have all settled. The same plan is the MCP `delegate` tool's arguments (`{"brief", "tasks"}`, each task as the `spawn` tool takes it, flat limits included), `branchyard.delegate(tasks, brief=...)` in Python, and `Delegate::delegate` with a `DelegationPlan` in Rust. `by delegate --brief TEXT` gives the brief in place of the plan's.
+
+**The shared brief.** A brief is the context every child shares and no prompt should repeat: the goal, the conventions, the interfaces between the parts. It is the branch's, kept as entries on its log (`Activity::Brief`), and every child it delegates to is given all of them each turn, oldest first, in its instructions under "The shared brief"; children it delegates to later get it too. A plan's brief is recorded after its children are created and before any of them starts, so every child's first turn has it, and a plan that is refused records none. A decision made later, such as an interface the parent settled after reading a child's question, is one more entry: `by brief "The tokenizer returns Spanned<Token>."` (or `--file PATH`, `-` for standard input), the `brief` tool's `text`, `branchyard.brief(text)`, `Delegate::brief`. Children running when an entry is added are sent it into their running turn, as `by steer` would, where their harness takes it; the rest read it at their next turn. `by brief` alone shows the entries. An entry may hold 16 KiB and a brief 64 KiB; put the detail in a file the children can read and name it in the brief.
+
+Tested against the fake ACP agent through the SDK: a plan creates its children with their dependencies and owned paths, refuses as a whole when one task is refused, and gives every child the brief, including an entry added later.
+
+Not done: a server has no route for a plan or a brief yet, so through `by --remote` spawn each child with `by spawn --parent` or the tasks as a proposal with `by graph apply --parent`; a child does not pass its parent's brief on to its own children, which have only their own parent's.
 
 ## Waiting on children
 

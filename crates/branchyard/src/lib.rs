@@ -202,8 +202,9 @@ pub use checkpoint::{
 pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, AttemptCheck};
 pub use contract::ResultContract;
 pub use delegation::{
-    nest_graph_budgets, Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage,
-    Inbox, Inspection, Sent, Spawn, Spawned, Waited, DEFAULT_MAX_WAKES,
+    nest_graph_budgets, nest_plan_budgets, Asked, Brief, Cancelled, ChildBudget, Children,
+    Delegate, Delegated, DelegationPlan, Envelope, EventPage, Inbox, Inspection, Sent, Spawn,
+    Spawned, Waited, BRIEF_ENTRY_MAX, BRIEF_MAX, DEFAULT_MAX_WAKES,
 };
 pub use egress::{EgressActivity, Enforcement as EgressEnforcement};
 pub use endpoint::SandboxHost;
@@ -2665,6 +2666,13 @@ pub enum Activity {
     Result {
         /// The result, as the child gave it.
         value: serde_json::Value,
+    },
+    /// An entry of the branch's shared brief, recorded on the delegating
+    /// branch: every child it delegates to is given all its entries each
+    /// turn, oldest first. See `docs/delegation.md#plans-and-the-shared-brief`.
+    Brief {
+        /// The entry, as the branch wrote it.
+        text: String,
     },
     /// A branch that a trigger keeps alive moved through its lifecycle: it
     /// went idle (its kept sandbox released), dormant (its next run starts

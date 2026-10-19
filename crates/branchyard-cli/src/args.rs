@@ -909,6 +909,20 @@ The child's check (--check) defaults to its parent's, and the spawn says which i
 inherits. It runs on the merge when the child is integrated, so siblings that share
 one test suite are integrated together: by integrate a b (checked once).";
 
+const DELEGATE_EXAMPLES: &str = "\
+Example, inside a harness (outside one, add --parent BRANCH):
+  by delegate --plan plan.json        # then end your turn
+  cat plan.json
+  {\"brief\": \"Parse with the Token type in src/token.rs; add no crates.\",
+   \"tasks\": [
+     {\"name\": \"lexer\", \"prompt\": \"Write the lexer\", \"owns\": [\"src/lexer\"]},
+     {\"name\": \"parser\", \"prompt\": \"Write the parser\", \"owns\": [\"src/parser\"],
+      \"depends_on\": [\"lexer\"]}]}
+
+The children are created all or none. Those that wait for nothing start at once, and
+you are woken with a summary of each when they have all settled. by brief TEXT adds a
+decision every child is given; by steer corrects one that is running.";
+
 const DISCARD_EXAMPLES: &str = "\
 Examples:
   by discard lru-linkedlist --reason \"the ordered-dict version won\"
@@ -1716,6 +1730,45 @@ pub enum Command {
         prompt_file: Option<String>,
         #[command(flatten)]
         spawn: Checked<SpawnFlags>,
+    },
+    /// Hand the engine a plan: several children at once, with the brief they share; then end
+    /// your turn, and you are woken with a summary when they have settled
+    #[command(display_order = 300, after_help = DELEGATE_EXAMPLES)]
+    Delegate {
+        /// The plan as JSON, `-` for standard input: {"brief": TEXT, "tasks": [TASK, ...]},
+        /// each task as the spawn tool takes a child ({"prompt", "name", "owns", "depends_on",
+        /// "budget_usd", "check", "harness", ...}); depends_on may name another task
+        #[arg(long, value_name = "PATH")]
+        plan: String,
+        /// The brief the children share, in place of the plan's: the goal, the conventions,
+        /// the interfaces between their parts
+        #[arg(long, value_name = "TEXT", value_parser = non_blank)]
+        brief: Option<String>,
+        /// The delegating branch (outside a harness; inside one, it is the harness's own)
+        #[arg(long, value_name = "BRANCH")]
+        parent: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        perms: Perms,
+    },
+    /// Show this branch's shared brief, which every child it delegates to is given each turn;
+    /// with TEXT, add an entry first, sent to the children running now
+    #[command(display_order = 300)]
+    Brief {
+        /// A new entry: a decision every child must follow, such as an interface you settled
+        #[arg(conflicts_with = "file")]
+        text: Option<String>,
+        /// Read the new entry from this file instead, `-` for standard input
+        #[arg(long, value_name = "PATH")]
+        file: Option<String>,
+        /// The delegating branch (outside a harness; inside one, it is the harness's own)
+        #[arg(long, value_name = "BRANCH")]
+        parent: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Show a branch's status, candidate, cost, budget and last message
     #[command(display_order = 301)]
@@ -3116,7 +3169,7 @@ pub struct Perms {
 }
 
 impl Perms {
-    fn apply(self, task: &mut TaskArgs) {
+    pub(crate) fn apply(self, task: &mut TaskArgs) {
         task.permissions = match (self.yes, self.ask, self.permissions) {
             (true, _, _) => Permissions::Yes,
             (false, true, _) => Permissions::Ask,

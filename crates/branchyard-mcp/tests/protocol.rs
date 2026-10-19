@@ -80,9 +80,13 @@ fn initialize_lists_the_tools_and_calls_answer_without_an_engine() {
         assert_eq!(schema["additionalProperties"], false, "{tool}");
         assert!(tool["description"].as_str().unwrap().len() > 20);
     }
-    let spawn = &tools[0];
-    assert_eq!(spawn["inputSchema"]["required"], json!(["prompt"]));
-    assert_eq!(tools[1]["annotations"]["readOnlyHint"], true);
+    let tool = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap();
+    assert_eq!(tool("spawn")["inputSchema"]["required"], json!(["prompt"]));
+    assert_eq!(
+        tool("delegate")["inputSchema"]["required"],
+        json!(["tasks"])
+    );
+    assert_eq!(tool("inspect")["annotations"]["readOnlyHint"], true);
 
     // No turn is running under this root, so every call is refused as a
     // tool error the model can read, not a protocol error.

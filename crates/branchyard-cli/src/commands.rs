@@ -2327,6 +2327,115 @@ pub fn graph(env: &Env, target: &Target, args: &GraphArgs) -> Outcome {
     }
 }
 
+/// `by delegate --plan FILE`: a plan of children, created all or none,
+/// with the brief they share.
+pub fn delegate(
+    env: &Env,
+    target: &Target,
+    plan: &str,
+    brief: Option<String>,
+    parent: Option<String>,
+    task: &TaskArgs,
+    json: bool,
+) -> Outcome {
+    let inside = harness_delegate(json)?;
+    if inside.is_some()
+        && (parent.is_some() || task.permissions != Permissions::Unset || task.unapproved_tools)
+    {
+        let error = branchyard::Error::Denied(
+            "inside a harness, the plan's children are the harness's own branch's and inherit \
+             its policy and approval routing; drop --parent, --yes, --ask, --permissions and \
+             --allow-unapproved-tools"
+                .into(),
+        );
+        return fail(json, &error);
+    }
+    let mut plan = match read_plan(plan) {
+        Ok(plan) => plan,
+        Err(error) => return fail(json, &error),
+    };
+    if let Some(brief) = brief {
+        plan.brief = Some(brief);
+    }
+    let result = match (inside, target) {
+        (Some(delegate), _) => delegate.delegate(plan),
+        (None, Target::Remote(_)) => Err(no_plan_route()),
+        (None, Target::Local) => {
+            let parent = match required_outside(parent, "delegate --parent") {
+                Ok(parent) => parent,
+                Err(error) => return fail(json, &error),
+            };
+            // The children run on this process's threads, so the command
+            // waits for them, and for what they start.
+            let live = Live::start_to(env, task, true, json, None);
+            let result = (|| {
+                let parent = open_yard()?.branch(&parent)?;
+                let delegate = parent.delegate(live.options(task)?)?;
+                let delegated = delegate.delegate(plan)?;
+                parent.wait_subtree()?;
+                Ok(delegated)
+            })();
+            live.console.finish();
+            result
+        }
+    };
+    emit(json, result, |d| render::delegated(d, env.style()))
+}
+
+/// `by brief [TEXT]`: the shared brief, after adding TEXT to it.
+pub fn brief(
+    env: &Env,
+    target: &Target,
+    text: Option<String>,
+    parent: Option<String>,
+    json: bool,
+) -> Outcome {
+    let inside = harness_delegate(json)?;
+    if inside.is_some() && parent.is_some() {
+        let error = branchyard::Error::Denied(
+            "inside a harness, the brief is the harness's own branch's; drop --parent".into(),
+        );
+        return fail(json, &error);
+    }
+    let result = match (inside, target) {
+        (Some(delegate), _) => delegate.brief(text.as_deref()),
+        (None, Target::Remote(_)) => Err(no_plan_route()),
+        (None, Target::Local) => required_outside(parent, "brief --parent")
+            .and_then(|parent| as_user(&parent, TaskOptions::default())?.brief(text.as_deref())),
+    };
+    emit(json, result, |b| render::brief(b, env.style()))
+}
+
+fn no_plan_route() -> branchyard::Error {
+    branchyard::Error::Unsupported(
+        "a server has no route for a plan or a brief yet: spawn each child with by spawn \
+         --parent, or the plan's tasks as a proposal with by graph apply --parent"
+            .into(),
+    )
+}
+
+/// The plan `by delegate --plan` was given: a JSON file, `-` for standard
+/// input, read as the `delegate` tool reads its arguments (a task may give
+/// its limits flat).
+fn read_plan(path: &str) -> Result<branchyard::DelegationPlan, branchyard::Error> {
+    let invalid = |why: String| branchyard::Error::Denied(format!("invalid plan: {why}"));
+    let text = match path {
+        "-" => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+            text
+        }
+        path => std::fs::read_to_string(path)
+            .map_err(|e| branchyard::Error::Denied(format!("--plan {path}: {e}")))?,
+    };
+    let mut plan: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| invalid(e.to_string()))?;
+    if let Some(tasks) = plan.get_mut("tasks") {
+        branchyard::nest_plan_budgets(tasks)?;
+    }
+    serde_json::from_value(plan).map_err(|e| invalid(e.to_string()))
+}
+
 /// The proposal `by graph apply` was given: a file (`-` for stdin) holding
 /// `{"expected_revision", "edits"}`, or `--edits` with
 /// `--expected-revision`, which also overrides a file's revision.

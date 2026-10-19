@@ -335,6 +335,10 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "activity": "result",
             "value": value,
         }),
+        Activity::Brief { text } => json!({
+            "activity": "brief",
+            "text": text,
+        }),
         Activity::Lifecycle {
             state,
             reason,

@@ -433,6 +433,124 @@ pub struct Spawned {
     pub owns: Vec<String>,
 }
 
+/// Most bytes one entry of a shared brief may hold.
+pub const BRIEF_ENTRY_MAX: usize = 16 * 1024;
+/// Most bytes a branch's whole shared brief may hold.
+pub const BRIEF_MAX: usize = 64 * 1024;
+
+/// A plan: the subtasks a delegating branch hands its engine in one call
+/// ([`Delegate::delegate`], `by delegate`, the `delegate` tool), with the
+/// brief they share. Its children are created as one graph proposal, all
+/// or none, and those that wait for nothing start at once; the branch then
+/// ends its turn and is woken when they have settled. See
+/// `docs/delegation.md#plans-and-the-shared-brief`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationPlan {
+    /// What every child shares: the goal, the conventions, the interfaces
+    /// between their parts. Added to the branch's shared brief before any
+    /// child starts, so every child of the branch, these and later ones,
+    /// is given it each turn. Later decisions are added with
+    /// [`Delegate::brief`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<String>,
+    /// The subtasks, each as `spawn` takes it. `depends_on` may name
+    /// another subtask by its `name`, or an existing child.
+    pub tasks: Vec<SpawnSpec>,
+}
+
+/// What a plan created.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Delegated {
+    /// The branch that delegated.
+    pub branch: String,
+    /// Its graph revision after the plan.
+    pub revision: u64,
+    /// The children the plan created, in plan order, as they were when it
+    /// returned: `running`, or `waiting` for their prerequisites.
+    pub spawned: Vec<Spawned>,
+    /// Every dependency among the branch's children after the plan.
+    pub dependencies: Vec<Dependency>,
+    /// How many entries the branch's shared brief has now.
+    pub brief_entries: usize,
+    /// Children that were already running and were sent the plan's brief.
+    /// Omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steered: Vec<String>,
+    /// What the branch does now, in a sentence or two.
+    pub next: String,
+}
+
+/// A branch's shared brief: the entries every child it delegates to is
+/// given each turn.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Brief {
+    /// The branch whose brief it is.
+    pub branch: String,
+    /// Its entries, oldest first.
+    pub entries: Vec<String>,
+    /// Children whose running turn was sent the entry just added; the rest
+    /// read it at their next turn. Omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steered: Vec<String>,
+}
+
+/// The entries of `branch`'s shared brief, oldest first.
+pub(crate) fn brief_entries(store: &Store, branch: &str) -> Result<Vec<String>, Error> {
+    Ok(record::read(store, branch)?
+        .into_iter()
+        .filter_map(|event| match event.activity {
+            Activity::Brief { text } => Some(text),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Refuse a brief entry that is empty, too long, or would make `branch`'s
+/// brief too long; the entry, trimmed.
+fn brief_entry(store: &Store, branch: &str, text: &str) -> Result<String, Error> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(Error::Denied("a brief entry needs text".into()));
+    }
+    if text.len() > BRIEF_ENTRY_MAX {
+        return Err(Error::Denied(format!(
+            "a brief entry may hold at most {} KiB, not {} bytes; put the detail in a file the \
+             children can read and name it in the brief",
+            BRIEF_ENTRY_MAX / 1024,
+            text.len()
+        )));
+    }
+    let held: usize = brief_entries(store, branch)?.iter().map(String::len).sum();
+    if held + text.len() > BRIEF_MAX {
+        return Err(Error::Denied(format!(
+            "{branch}'s shared brief would hold {} bytes, over its {} KiB; put the detail in a \
+             file the children can read and name it in the brief",
+            held + text.len(),
+            BRIEF_MAX / 1024
+        )));
+    }
+    Ok(text.to_owned())
+}
+
+/// What a branch that just delegated does now.
+fn next_after_delegating(spawned: &[Spawned]) -> String {
+    let live = spawned
+        .iter()
+        .any(|s| matches!(s.status, BranchStatus::Running | BranchStatus::Waiting));
+    match live {
+        true => "End your turn now: when every child has settled you are started again \
+                 with a summary of each (status, diff, cost, check, last message, result). Until \
+                 then, `by steer <child> \"<text>\"` corrects a running child, and `by brief \
+                 \"<text>\"` tells all of them a new decision."
+            .into(),
+        false => "No child is running; `by inspect <child>` says why each stopped.".into(),
+    }
+}
+
 /// A descendant whose next turn was started.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -813,6 +931,32 @@ impl Delegate {
         match &self.via {
             Via::Local(local) => local.spawn(&spawn),
             Via::Remote(_) => self.typed("spawn", spawn.arguments()),
+        }
+    }
+
+    /// Create the children of `plan` as one graph proposal, all or none,
+    /// with its brief added to this branch's shared brief before any of
+    /// them starts. Those that wait for nothing start at once; returns once
+    /// they have, with what to do next (end the turn: this branch is woken
+    /// when they have settled). See [`DelegationPlan`].
+    pub fn delegate(&self, plan: DelegationPlan) -> Result<Delegated, Error> {
+        match &self.via {
+            Via::Local(local) => local.delegate(&plan),
+            Via::Remote(_) => self.typed(
+                "delegate",
+                serde_json::to_value(&plan)
+                    .map_err(|e| Error::State(format!("unwritable plan: {e}")))?,
+            ),
+        }
+    }
+
+    /// This branch's shared brief, after adding `text` to it when given:
+    /// every child it delegates to is given the brief each turn, and those
+    /// running now are sent the new entry.
+    pub fn brief(&self, text: Option<&str>) -> Result<Brief, Error> {
+        match &self.via {
+            Via::Local(local) => local.brief(text),
+            Via::Remote(_) => self.typed("brief", json!({ "text": text })),
         }
     }
 
@@ -2538,7 +2682,7 @@ impl Local {
 
     fn spawn(&self, request: &Spawn) -> Result<Spawned, Error> {
         let result = self
-            .try_apply_graph(&[Edit::Spawn(Box::new(request.clone()))], None)
+            .try_apply_graph(&[Edit::Spawn(Box::new(request.clone()))], None, None)
             .and_then(|applied| {
                 applied
                     .spawned
@@ -2559,7 +2703,7 @@ impl Local {
             .iter()
             .map(Edit::from_graph)
             .collect::<Result<Vec<_>, _>>()
-            .and_then(|edits| self.try_apply_graph(&edits, Some(expected)));
+            .and_then(|edits| self.try_apply_graph(&edits, Some(expected), None));
         self.note("apply_graph", &self.branch, &result, |applied| {
             let spawned: Vec<String> = applied
                 .spawned
@@ -2574,14 +2718,127 @@ impl Local {
         result
     }
 
+    fn delegate(&self, plan: &DelegationPlan) -> Result<Delegated, Error> {
+        let result = (|| {
+            if plan.tasks.is_empty() {
+                return Err(Error::Denied(
+                    "a plan needs at least one task: give tasks, each as spawn takes it".into(),
+                ));
+            }
+            let store = self.store();
+            let brief = plan
+                .brief
+                .as_deref()
+                .map(|text| brief_entry(&store, &self.branch, text))
+                .transpose()?;
+            // Running before the plan: they are sent its brief.
+            let running = self.running_children()?;
+            let edits = plan
+                .tasks
+                .iter()
+                .map(|task| Ok(Edit::Spawn(Box::new(task.to_spawn()?))))
+                .collect::<Result<Vec<_>, Error>>()?;
+            let applied = self.try_apply_graph(&edits, None, brief.as_deref())?;
+            let steered = match &brief {
+                Some(text) => self.steer_brief(&running, text),
+                None => Vec::new(),
+            };
+            Ok(Delegated {
+                branch: applied.branch,
+                revision: applied.revision,
+                next: next_after_delegating(&applied.spawned),
+                spawned: applied.spawned,
+                dependencies: applied.dependencies,
+                brief_entries: brief_entries(&store, &self.branch)?.len(),
+                steered,
+            })
+        })();
+        self.note("delegate", &self.branch, &result, |d| {
+            let names: Vec<String> = d
+                .spawned
+                .iter()
+                .map(|s| format!("{} ({})", s.name, spawn_outcome(s)))
+                .collect();
+            format!("revision {}: {}", d.revision, names.join(", "))
+        });
+        result
+    }
+
+    fn brief(&self, text: Option<&str>) -> Result<Brief, Error> {
+        let result = (|| {
+            let store = self.store();
+            let mut steered = Vec::new();
+            if let Some(text) = text {
+                let text = brief_entry(&store, &self.branch, text)?;
+                let running = self.running_children()?;
+                Recorder::open(&store, &self.branch, self.options.observer.clone())?
+                    .record(Activity::Brief { text: text.clone() })?;
+                steered = self.steer_brief(&running, &text);
+            }
+            Ok(Brief {
+                branch: self.branch.clone(),
+                entries: brief_entries(&store, &self.branch)?,
+                steered,
+            })
+        })();
+        self.note("brief", &self.branch, &result, |b| match text {
+            Some(_) => format!(
+                "added entry {} of the shared brief{}",
+                b.entries.len(),
+                match b.steered.is_empty() {
+                    true => String::new(),
+                    false => format!("; sent to {}", b.steered.join(", ")),
+                }
+            ),
+            None => format!("the shared brief has {} entries", b.entries.len()),
+        });
+        result
+    }
+
+    /// This branch's children running a turn now.
+    fn running_children(&self) -> Result<Vec<String>, Error> {
+        let store = self.store();
+        Ok(store
+            .read(&self.branch)?
+            .info
+            .children
+            .iter()
+            .filter(|child| {
+                store
+                    .read(child)
+                    .is_ok_and(|r| r.info.status == BranchStatus::Running)
+            })
+            .cloned()
+            .collect())
+    }
+
+    /// Send `text`, a new entry of this branch's brief, into each of
+    /// `children`'s running turn; those whose harness takes it. A child
+    /// that cannot is given it at its next turn, in its instructions.
+    fn steer_brief(&self, children: &[String], text: &str) -> Vec<String> {
+        let message =
+            format!("Your parent added to the brief it shares with all its children:\n\n{text}");
+        children
+            .iter()
+            .filter(|child| {
+                crate::steer::request(&self.yard, child, &message, &self.branch).is_ok()
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Validate a whole proposal, then commit it in one store transaction
     /// and start the children whose prerequisites have settled. Nothing is
     /// written unless every edit is valid. `expected` is checked here and
-    /// again in the transaction; `None` (a plain spawn) skips it.
+    /// again in the transaction; `None` (a plain spawn) skips it. `brief`,
+    /// a checked entry of this branch's shared brief, is recorded once the
+    /// proposal commits and before any child starts, so every child's first
+    /// turn has it.
     fn try_apply_graph(
         &self,
         edits: &[Edit],
         expected: Option<u64>,
+        brief: Option<&str>,
     ) -> Result<GraphApplied, Error> {
         let store = self.store();
         let _spawning = lock(&self.yard.hub.spawning);
@@ -2755,6 +3012,13 @@ impl Local {
             add,
             remove,
         })?;
+        if let Some(text) = brief {
+            Recorder::open(&store, &self.branch, self.options.observer.clone())?.record(
+                Activity::Brief {
+                    text: text.to_owned(),
+                },
+            )?;
+        }
         // The parent's choice of each child's harness and model, with the
         // kind its prompt classifies as: shown by `by log`, learned from by
         // the outcome store.
@@ -4243,6 +4507,13 @@ struct TargetArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct BriefArgs {
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AdviseArgs {
     prompt: String,
     #[serde(default)]
@@ -4478,6 +4749,18 @@ pub fn nest_graph_budgets(edits: &mut Value) -> Result<(), Error> {
     Ok(())
 }
 
+/// Nest each task's flat limits (`budget_usd`, `max_turns`,
+/// `max_minutes`) into its `budget`, as the `spawn` tool reads a child: the
+/// `delegate` tool takes each task of a plan the same way.
+pub fn nest_plan_budgets(tasks: &mut Value) -> Result<(), Error> {
+    if let Some(tasks) = tasks.as_array_mut() {
+        for task in tasks {
+            *task = nest_budget(task.take())?;
+        }
+    }
+    Ok(())
+}
+
 fn required(tool: &str, branch: Option<String>) -> Result<String, Error> {
     branch.ok_or_else(|| Error::Denied(format!("{tool} needs a branch")))
 }
@@ -4496,6 +4779,18 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
         "spawn" => {
             let spec: SpawnSpec = parse(tool, nest_budget(arguments)?)?;
             to_json(&local.spawn(&spec.to_spawn()?)?)
+        }
+        "delegate" => {
+            let mut arguments = arguments;
+            if let Some(tasks) = arguments.get_mut("tasks") {
+                nest_plan_budgets(tasks)?;
+            }
+            let plan: DelegationPlan = parse(tool, arguments)?;
+            to_json(&local.delegate(&plan)?)
+        }
+        "brief" => {
+            let args: BriefArgs = parse(tool, arguments)?;
+            to_json(&local.brief(args.text.as_deref())?)
         }
         "apply_graph" => {
             let mut arguments = arguments;

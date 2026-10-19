@@ -63,8 +63,12 @@ __all__ = [
     "Inbox",
     "Graph",
     "GraphApplied",
+    "Delegated",
+    "Brief",
     "Advice",
     "spawn",
+    "delegate",
+    "brief",
     "inspect",
     "events",
     "send",
@@ -508,6 +512,32 @@ class GraphApplied:
 
 
 @dataclasses.dataclass
+class Delegated:
+    """What `delegate` created: the children, in plan order, and what to do next."""
+
+    branch: str
+    revision: int
+    spawned: List[Spawned]
+    dependencies: List[Dict[str, Any]]
+    # How many entries your shared brief has now.
+    brief_entries: int
+    # What to do now: usually, end your turn; you are woken when they settle.
+    next: str
+    # Children already running that were sent the plan's brief.
+    steered: Optional[List[str]] = None
+
+
+@dataclasses.dataclass
+class Brief:
+    """Your shared brief: what every child you delegate to is given each turn."""
+
+    branch: str
+    entries: List[str]
+    # Children whose running turn was sent the entry just added.
+    steered: Optional[List[str]] = None
+
+
+@dataclasses.dataclass
 class ArtifactRef:
     """An immutable published artifact's provenance; see `docs/storage.md`."""
 
@@ -758,6 +788,40 @@ def spawn(
     # On stdin, so a prompt of any length fits: a command-line argument is
     # limited to 128 KiB on Linux.
     return _make(Spawned, _run(["spawn", *flags, "--prompt-file", "-"], stdin=prompt))
+
+
+def delegate(tasks: List[Dict[str, Any]], brief: Optional[str] = None) -> Delegated:
+    """Hand your engine a plan: several children at once, with the brief they share.
+
+    Each task is a dict as `spawn` takes its arguments over the MCP tool:
+    {"prompt": ..., "name": ..., "harness": ..., "owns": [...],
+    "depends_on": [...], "budget_usd": ..., "check": [...], ...}, where
+    `depends_on` may name another task. They are created all or none, and
+    those that wait for nothing start at once. `brief` (the goal, the
+    conventions, the interfaces between their parts) is added to your shared
+    brief before any of them starts, so every child you delegate to is given
+    it each turn. Then end your turn: you are woken when they have settled.
+    See docs/delegation.md "Plans and the shared brief".
+    """
+    plan: Dict[str, Any] = {"tasks": tasks}
+    if brief is not None:
+        plan["brief"] = brief
+    value = _run(["delegate", "--plan", "-"], stdin=json.dumps(plan))
+    made = _make(Delegated, value)
+    made.spawned = [_make(Spawned, s) for s in value.get("spawned", [])]
+    return made
+
+
+def brief(text: Optional[str] = None) -> Brief:
+    """Your shared brief; with `text`, add it as a new entry first.
+
+    Every child you delegate to is given the whole brief each turn; those
+    running now are sent the new entry. Use it for a decision all of them
+    must follow, such as an interface you settled.
+    """
+    if text is None:
+        return _make(Brief, _run(["brief"]))
+    return _make(Brief, _run(["brief", "--file", "-"], stdin=text))
 
 
 def graph(branch: Optional[str] = None) -> Graph:

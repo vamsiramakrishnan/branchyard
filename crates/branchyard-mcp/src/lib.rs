@@ -67,7 +67,9 @@ pub fn tool_names() -> Vec<&'static str> {
 }
 
 const INSTRUCTIONS: &str = "Branchyard runs you on a git branch. These tools let you \
-delegate: spawn child branches with their own harness and budget, watch them with inspect \
+delegate. The shortest way: call delegate once with a plan (each task as spawn takes it, with \
+the paths it owns, and a brief they all share), then end your turn; you are woken with a summary \
+when the children have settled. Otherwise: spawn child branches with their own harness and budget, watch them with inspect \
 and events, continue them with send, add to a child's running turn with steer, merge a \
 finished child into your own branch with \
 propose_integration (its check must pass; give several in branches to merge them together and \
@@ -227,6 +229,7 @@ pub fn tools() -> Vec<Tool> {
         "plan": {"type": "boolean", "description": "Plan first: the child's first turn is read-only and proposes a plan, escalated to your inbox; it changes nothing until you approve_plan"},
         "model": {"type": "string", "description": "The model the child's harness runs, or a size alias (small, medium, large, extra-large) where it defines one; a cheaper one suits mechanical work. Unset: the seat's, or yours. Refused for a harness that cannot choose one"},
         "why": {"type": "string", "description": "Why this harness and model for this subtask, in a few words: recorded on the child and learned from by the outcome store beside how it turns out. Ask advise first"},
+        "owns": {"type": "array", "items": {"type": "string"}, "description": "The paths the child owns: files, directories (and all below them) or globs such as tests/parser_*.rs, relative to the repository. It is told them every turn, and its changes anywhere else are refused when you integrate it. Give siblings disjoint paths and they cannot conflict"},
         "result": {
             "type": "object",
             "description": "The shape of the answer the child must give: it reports a JSON result with report, checked against this schema (a mismatch is refused, naming the path and the rule), and you read it as inspect's or wait's result. The child sees the contract in its own inspect as result_contract",
@@ -272,6 +275,47 @@ pub fn tools() -> Vec<Tool> {
                 "type": "object",
                 "properties": spawn_properties,
                 "required": ["prompt"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "delegate",
+            "Hand your engine a plan: several children at once, each task as spawn takes it, \
+             with the brief they share. They are created all or none; those that wait for \
+             nothing (depends_on may name another task) start at once. The brief (the goal, \
+             the conventions, the interfaces between their parts) is added to your shared brief \
+             before any of them starts, and every child you delegate to is given it each turn. \
+             Give each task the paths it owns, disjoint from its siblings', so they cannot \
+             conflict. Then end your turn: you are started again with a summary of each child \
+             when they have all settled.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "brief": {"type": "string", "description": "What every child shares: the goal, the conventions, the interfaces between their parts. Added to your shared brief; add later decisions with brief"},
+                    "tasks": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": spawn_properties,
+                            "required": ["prompt"],
+                            "additionalProperties": false,
+                        },
+                        "description": "The subtasks, each as spawn takes a child; give each a name when another depends on it",
+                    },
+                },
+                "required": ["tasks"],
+                "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "brief",
+            "Your shared brief: what every child you delegate to is given each turn, oldest \
+             entry first. With text, add a new entry first, such as an interface you settled: \
+             children running now are sent it, the rest read it at their next turn.",
+            schema(json!({
+                "type": "object",
+                "properties": {"text": {"type": "string", "description": "A new entry to add; omit to read the brief"}},
                 "additionalProperties": false,
             })),
         ),

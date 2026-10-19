@@ -614,6 +614,13 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
                 branchyard::contract::one_line(value, RESULT_LINE)
             ),
         ),
+        Activity::Brief { text } => format!(
+            "brief: {}",
+            truncate(
+                &text.split_whitespace().collect::<Vec<_>>().join(" "),
+                RESULT_LINE
+            )
+        ),
         Activity::Message(message) => {
             let reply = match message.in_reply_to {
                 Some(id) => format!(" (re #{id})"),
@@ -1635,6 +1642,70 @@ pub fn graph(g: &branchyard::Graph, style: Style) -> String {
         }
         out.push_str(&line);
         out.push('\n');
+    }
+    out
+}
+
+/// `by delegate`: what the plan created, and what to do next.
+pub fn delegated(d: &branchyard::Delegated, style: Style) -> String {
+    let mut out = format!(
+        "{} delegated {} at revision {}\n",
+        d.branch,
+        match d.spawned.len() {
+            1 => "1 child".to_owned(),
+            n => format!("{n} children"),
+        },
+        d.revision
+    );
+    for spawned in &d.spawned {
+        let (status, tone) = status_text(&spawned.status);
+        let mut line = format!("  {} {}", spawned.name, style.paint(tone, &status));
+        if !spawned.depends_on.is_empty() {
+            line.push_str(&format!("  after {}", spawned.depends_on.join(", ")));
+        }
+        if !spawned.owns.is_empty() {
+            line.push_str(&format!("  owns {}", spawned.owns.join(", ")));
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    if d.brief_entries > 0 {
+        out.push_str(&format!(
+            "the shared brief has {} {}{}\n",
+            d.brief_entries,
+            match d.brief_entries {
+                1 => "entry",
+                _ => "entries",
+            },
+            match d.steered.is_empty() {
+                true => String::new(),
+                false => format!("; sent to {}", d.steered.join(", ")),
+            }
+        ));
+    }
+    out.push_str(&d.next);
+    out.push('\n');
+    out
+}
+
+/// `by brief`: the shared brief's entries, oldest first.
+pub fn brief(b: &branchyard::Brief, _style: Style) -> String {
+    if b.entries.is_empty() {
+        return format!(
+            "{} has no shared brief; by brief TEXT adds an entry every child it delegates to \
+             is given\n",
+            b.branch
+        );
+    }
+    let mut out = format!("{}'s shared brief:\n", b.branch);
+    for (index, entry) in b.entries.iter().enumerate() {
+        out.push_str(&format!("{}. {}\n", index + 1, entry.trim_end()));
+    }
+    if !b.steered.is_empty() {
+        out.push_str(&format!(
+            "the new entry was sent to {}\n",
+            b.steered.join(", ")
+        ));
     }
     out
 }

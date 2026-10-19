@@ -20853,6 +20853,28 @@
             {
               "type": "object",
               "properties": {
+                "brief": {
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "description": "The entry, as the branch wrote it.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ]
+                }
+              },
+              "required": [
+                "brief"
+              ],
+              "additionalProperties": false,
+              "description": "An entry of the branch's shared brief, recorded on the delegating\nbranch: every child it delegates to is given all its entries each\nturn, oldest first. See `docs/delegation.md#plans-and-the-shared-brief`."
+            },
+            {
+              "type": "object",
+              "properties": {
                 "lifecycle": {
                   "type": "object",
                   "properties": {
@@ -25942,6 +25964,28 @@
               ],
               "additionalProperties": false,
               "description": "The result the branch reported with `report`, a JSON value that\nmatched its parent's [`contract::ResultContract`] when it had one:\nthe latest is the branch's [`Inspection::result`]. See\n`docs/delegation.md#result-contract`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "brief": {
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "description": "The entry, as the branch wrote it.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ]
+                }
+              },
+              "required": [
+                "brief"
+              ],
+              "additionalProperties": false,
+              "description": "An entry of the branch's shared brief, recorded on the delegating\nbranch: every child it delegates to is given all its entries each\nturn, oldest first. See `docs/delegation.md#plans-and-the-shared-brief`."
             },
             {
               "type": "object",
@@ -35055,6 +35099,28 @@
               ],
               "additionalProperties": false,
               "description": "The result the branch reported with `report`, a JSON value that\nmatched its parent's [`contract::ResultContract`] when it had one:\nthe latest is the branch's [`Inspection::result`]. See\n`docs/delegation.md#result-contract`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "brief": {
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "description": "The entry, as the branch wrote it.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ]
+                }
+              },
+              "required": [
+                "brief"
+              ],
+              "additionalProperties": false,
+              "description": "An entry of the branch's shared brief, recorded on the delegating\nbranch: every child it delegates to is given all its entries each\nturn, oldest first. See `docs/delegation.md#plans-and-the-shared-brief`."
             },
             {
               "type": "object",
