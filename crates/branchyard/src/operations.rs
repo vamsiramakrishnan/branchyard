@@ -852,6 +852,7 @@ pub const OPERATIONS: &[Operation] = &[
             Param::all("<STATE>", "state", "state"),
             Param::all("<SUMMARY>", "summary", "summary"),
             Param::all("--link", "link", "link"),
+            Param::all("--ttl", "ttl_seconds", "ttl_seconds"),
             ACT_AS,
             JSON,
         ],

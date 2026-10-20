@@ -1,7 +1,7 @@
 //! A status a branch's harness states about itself, beside the one the
 //! protocol gives.
 //!
-//! A branch's [`BranchStatus`](crate::BranchStatus) comes from the harness
+//! A branch's [`BranchStatus`] comes from the harness
 //! protocol and the engine: running, ready, failed. A harness can also say
 //! what it is doing in its own words, with the `report_status` tool (or
 //! `by report-status`): a [state](ReportedState), a one-line summary, an

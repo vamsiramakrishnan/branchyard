@@ -100,7 +100,7 @@ pub struct WorkspaceSpec {
     /// A shell snippet (`nvm use`, `source .venv/bin/activate`) run with
     /// `/bin/sh` in the worktree before each turn's harness and before
     /// setup and teardown on this host; the variables it adds or changes
-    /// are given to them. See [`shell_env`].
+    /// are given to them. See `shell_env`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_setup: Option<String>,
     /// Variables the scripts and the harness get besides `BRANCHYARD_*`
