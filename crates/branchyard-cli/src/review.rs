@@ -427,15 +427,8 @@ fn detach(target: &Target, branch: &str, text: &str, task: &TaskArgs, draft: &Pa
     }
     command.args(["--", branch, text]);
     let log = draft.with_extension(format!("{}.log", branchyard_support::time::now_ms()));
-    let file = std::fs::File::create(&log)?;
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(file.try_clone()?)
-        .stderr(file);
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let before = last_turn(target, branch)?;
-    let mut child = command.spawn()?;
+    let mut child = crate::detach::spawn(&mut command, &log)?;
     eprintln!(
         "by: sending in the background; its output goes to {}",
         log.display()

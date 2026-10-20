@@ -260,7 +260,11 @@ impl Live {
             },
             policy,
             check: task.check.clone(),
-            observer: Some(Arc::new(move |event| console.event(event))),
+            observer: Some(Arc::new(move |event| {
+                // A `--detach` launcher waits for this turn to start.
+                crate::detach::observe(event);
+                console.event(event)
+            })),
             isolated: task.isolated,
             command: task.command.clone(),
             provider: provider(task)?,

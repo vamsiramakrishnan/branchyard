@@ -779,7 +779,15 @@ Examples:
   by run \"add a --verbose flag\" -n verbose --harness codex --budget-usd 2
   by run \"port the build\" --provider microsandbox --image ghcr.io/me/claude:1 \\
       --pass-env ANTHROPIC_API_KEY
-  by run -- \"--explain is a prompt here\"";
+  by run -- \"--explain is a prompt here\"
+  by run \"fix the flaky test\" --detach --yes     # in the background; prints the branch
+
+--detach (local mode) starts the turn in its own process group with no
+terminal and returns once the turn has started: follow it with by log -f
+BRANCH or by watch, wait with by wait BRANCH, stop it with by cancel BRANCH.
+Its output goes to a log under .branchyard/detached/. With no terminal, tool
+permission requests are denied unless --yes, --permissions or branchyard.toml
+allows them; --ask is refused. See docs/devex.md.";
 
 const FAN_EXAMPLES: &str = "\
 Examples:
@@ -831,7 +839,8 @@ const SEND_EXAMPLES: &str = "\
 Examples:
   by send fix-the-flaky-test \"now add a regression test\"
   by send fix-the-flaky-test \"also cover Windows\" --steer
-  by send fix-the-flaky-test --prompt-file review.md     # a long prompt, from a file (- for stdin)";
+  by send fix-the-flaky-test --prompt-file review.md     # a long prompt, from a file (- for stdin)
+  by send fix-the-flaky-test \"now the docs\" --detach --yes   # in the background, as by run --detach";
 
 const STEER_EXAMPLES: &str = "\
 Examples:
@@ -853,7 +862,8 @@ Examples:
 
 const FORK_EXAMPLES: &str = "\
 Examples:
-  by fork fix-the-flaky-test \"try a lock instead\" -n with-lock";
+  by fork fix-the-flaky-test \"try a lock instead\" -n with-lock
+  by fork fix-the-flaky-test \"try a lock instead\" --detach --yes   # in the background, as by run --detach";
 
 const TASK_EXAMPLES: &str = "\
 Every run is a task: `by run` starts one with one attempt, `by fan` one with an
@@ -1255,6 +1265,8 @@ pub enum Command {
         )]
         prompt: String,
         #[command(flatten)]
+        detached: Detached,
+        #[command(flatten)]
         task: Checked<RunFlags>,
     },
     /// Run a task on several harnesses in parallel, then compare
@@ -1324,6 +1336,10 @@ pub enum Command {
         /// Print JSON
         #[arg(long)]
         json: bool,
+        /// Run the turn in the background, detached from this terminal, and return once it has
+        /// started (local mode; see by run --help)
+        #[arg(long, conflicts_with_all = ["ask", "steer", "wait"])]
+        detach: bool,
         #[command(flatten)]
         task: Checked<SendFlags>,
     },
@@ -1379,6 +1395,8 @@ pub enum Command {
         /// session forks only if it ended there, else a fresh one starts with a summary
         #[arg(long, value_name = "N", conflicts_with = "fresh_session")]
         at: Option<u32>,
+        #[command(flatten)]
+        detached: Detached,
         #[command(flatten)]
         task: Checked<ForkFlags>,
     },
@@ -3706,6 +3724,19 @@ fn mcp_header(text: &str) -> Result<McpHeader, String> {
     })
 }
 
+/// `--detach` and its `--json`, for `by run` and `by fork` (`by send` has
+/// its own `--json`); see `crate::detach`.
+#[derive(Args, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Detached {
+    /// Run the turn in the background, detached from this terminal, and return once it has
+    /// started; its output goes to a log under .branchyard/detached/ (local mode)
+    #[arg(long, conflicts_with = "ask")]
+    pub detach: bool,
+    /// With --detach: print the branch and the log's path as JSON
+    #[arg(long, requires = "detach")]
+    pub json: bool,
+}
+
 /// `by run`'s options.
 #[derive(Args, Clone, Debug, Default, PartialEq)]
 pub struct RunFlags {
@@ -5079,7 +5110,7 @@ mod tests {
 
     #[test]
     fn run_takes_every_task_option() {
-        let Command::Run { prompt, task } = parse_str(
+        let Command::Run { prompt, task, .. } = parse_str(
             "run 'fix the flaky test' --harness codex --name flaky --base main \
              --check 'cargo test -p core' --budget-usd 2.5 --max-turns 3 --yes \
              --max-minutes 1.5 --isolated --command '/opt/codex/bin/codex --flag'",
@@ -5509,7 +5540,7 @@ mod tests {
     fn delegate_takes_an_optional_inline_depth() {
         assert_eq!(task("run go").delegate, None);
         assert_eq!(task("run go --delegate").delegate, Some(1));
-        let Command::Run { prompt, task } = parse_str("run --delegate go").unwrap() else {
+        let Command::Run { prompt, task, .. } = parse_str("run --delegate go").unwrap() else {
             panic!("not run")
         };
         assert_eq!(prompt, "go", "the prompt is not a depth");
@@ -5817,7 +5848,7 @@ mod tests {
 
     #[test]
     fn run_defaults_and_equals_form() {
-        let Command::Run { prompt, task } = parse_str("run --ask --name=x \"do it\"").unwrap()
+        let Command::Run { prompt, task, .. } = parse_str("run --ask --name=x \"do it\"").unwrap()
         else {
             panic!("not run")
         };
@@ -5872,6 +5903,7 @@ mod tests {
             retry,
             wait,
             json,
+            detach,
         } = parse_str("send flaky 'now add a test' --yes").unwrap()
         else {
             panic!("not send")
@@ -5887,7 +5919,7 @@ mod tests {
                 ..TaskArgs::default()
             }
         );
-        assert!(!steer && !retry && !wait && !json && prompt_file.is_none());
+        assert!(!steer && !retry && !wait && !json && !detach && prompt_file.is_none());
         // --retry takes the cut-off turn's prompt, so none is given with it.
         let Command::Send { retry, prompt, .. } = parse_str("send flaky --retry").unwrap() else {
             panic!("not send")
@@ -5902,6 +5934,7 @@ mod tests {
             fresh_session,
             at: None,
             task,
+            ..
         } = parse_str("fork flaky 'try another way' --fresh-session --name alt").unwrap()
         else {
             panic!("not fork")
@@ -5921,6 +5954,33 @@ mod tests {
         assert!(err("send flaky").contains("<PROMPT>"));
         assert!(err("fork").contains("<BRANCH>"));
         assert!(err("send flaky go --harness codex").contains("unexpected argument '--harness'"));
+    }
+
+    #[test]
+    fn detach_refuses_what_needs_a_terminal_or_a_wait() {
+        let Command::Run { detached, .. } = parse_str("run go --detach --json --yes").unwrap()
+        else {
+            panic!("not run")
+        };
+        assert_eq!(
+            detached,
+            Detached {
+                detach: true,
+                json: true
+            }
+        );
+        for line in [
+            "run go --detach --ask",
+            "fork b go --detach --ask",
+            "send b go --detach --ask",
+            "send b go --detach --steer",
+            "send b go --detach --wait",
+        ] {
+            assert_eq!(kind(line), ErrorKind::ArgumentConflict, "{line}");
+        }
+        // --json on run and fork is --detach's.
+        assert_eq!(kind("run go --json"), ErrorKind::MissingRequiredArgument);
+        assert_eq!(kind("fork b go --json"), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]
@@ -6582,7 +6642,7 @@ mod tests {
 
     #[test]
     fn double_dash_allows_prompts_that_look_like_flags() {
-        let Command::Run { prompt, task } = parse_str("run --yes -- --explain-flags").unwrap()
+        let Command::Run { prompt, task, .. } = parse_str("run --yes -- --explain-flags").unwrap()
         else {
             panic!("not run")
         };

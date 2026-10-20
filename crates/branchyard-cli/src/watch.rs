@@ -17,7 +17,6 @@ mod tui;
 
 use branchyard_support::time::now_ms;
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -926,17 +925,9 @@ impl Runner {
             actions::by_id(invocation.action).name.replace(' ', "-"),
             now_ms()
         ));
-        let started = std::fs::create_dir_all(&self.logs)
-            .and_then(|()| File::create(&log))
-            .and_then(|file| Ok((file.try_clone()?, file)))
-            .and_then(|(out, err)| {
-                command.stdout(out).stderr(err);
-                // Its own process group: the terminal's signals, and the
-                // dashboard quitting, leave it running.
-                #[cfg(unix)]
-                std::os::unix::process::CommandExt::process_group(&mut command, 0);
-                command.spawn()
-            });
+        // Its own process group: the terminal's signals, and the dashboard
+        // quitting, leave it running.
+        let started = crate::detach::spawn(&mut command, &log);
         let mut child = match started {
             Ok(child) => child,
             Err(error) => {

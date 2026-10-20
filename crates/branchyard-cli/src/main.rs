@@ -16,6 +16,7 @@ mod commands;
 mod config_cmd;
 mod console;
 mod defaults;
+mod detach;
 mod doctor_cmd;
 mod effects_cmd;
 mod env_cmd;
@@ -228,8 +229,17 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         true => fleet_cmd::with_inventory_default(task),
         false => Ok(()),
     };
+    // `--detach`: the same command line again, in the background; that
+    // command, which `detach` recognises, runs the turn as usual.
+    if let Some(launch) = detach::requested(&command) {
+        if !detach::become_child() {
+            return detach::launch(target, &launch);
+        }
+    }
     match command {
-        Command::Run { prompt, mut task } => {
+        Command::Run {
+            prompt, mut task, ..
+        } => {
             inventory_default(&mut task)?;
             commands::run(env, target, &prompt, &task)
         }
@@ -347,7 +357,10 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             retry,
             wait,
             json,
+            detach,
         } => {
+            // The background command of a `--detach` writes its log as text.
+            let json = json && !detach;
             let prompt = match prompt_file {
                 Some(path) => commands::read_prompt_file(&path)?,
                 None => prompt,
@@ -383,6 +396,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             fresh_session,
             at: None,
             task,
+            ..
         } => commands::fork(env, target, &branch, &prompt, fresh_session, &task),
         Command::Fork {
             branch,
