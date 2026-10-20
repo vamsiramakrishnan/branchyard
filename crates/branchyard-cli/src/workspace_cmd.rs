@@ -126,6 +126,7 @@ impl Resolved {
             copy: self.workspace.copy.clone(),
             setup: self.workspace.setup.commands(),
             teardown: self.workspace.teardown.commands(),
+            shell_setup: self.workspace.shell_setup.clone(),
             env: self.workspace.env.clone(),
             digest: Some(self.digest.clone()),
             prepare: self.workspace.prepare,
@@ -232,6 +233,11 @@ fn describe(resolved: &Resolved) -> String {
     );
     if !w.copy.is_empty() {
         text.push_str(&format!("  copy      {}\n", w.copy.join(", ")));
+    }
+    if let Some(snippet) = &w.shell_setup {
+        text.push_str(&format!(
+            "  shell     {snippet}   (before every turn and script)\n"
+        ));
     }
     for command in w.setup.commands() {
         text.push_str(&format!("  setup     {command}\n"));
@@ -390,6 +396,9 @@ fn show(branch: Option<&str>, json: bool) -> Outcome {
                 text.push_str(&format!("setup     {state}\n"));
                 if !spec.copy.is_empty() {
                     text.push_str(&format!("copy      {}\n", spec.copy.join(", ")));
+                }
+                if let Some(snippet) = &spec.shell_setup {
+                    text.push_str(&format!("shell     {snippet}\n"));
                 }
                 for command in &spec.setup {
                     text.push_str(&format!("setup     {command}\n"));

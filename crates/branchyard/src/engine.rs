@@ -866,8 +866,46 @@ fn run(
                 store.ports().port(&record.info.name)?,
             );
             vars.push((ENV_ROOT.to_owned(), turn.yard.root.display().to_string()));
-            for (name, value) in spec.expanded_env(&vars) {
-                placement.set_env(&name, &value);
+            let expanded = spec.expanded_env(&vars);
+            for (name, value) in &expanded {
+                placement.set_env(name, value);
+            }
+            // What `shell_setup` sets, run now, on every turn: over the
+            // workspace's variables, under the branch's (set below), and
+            // never what the harness's environment scrubs (an isolated
+            // harness's credentials, a secret's or the gateway's).
+            if let Some(snippet) = &spec.shell_setup {
+                if turn.yard.hub.scripts_denied() {
+                    driven.end = End::failed(format!(
+                        "workspace shell_setup was not run: {}",
+                        crate::workspace::DENIED
+                    ));
+                    return Ok(driven);
+                }
+                let mut start = expanded.clone();
+                start.extend(vars.iter().cloned());
+                let lost = || {
+                    lease
+                        .lost()
+                        .then(|| "the turn's lease was taken over".to_owned())
+                };
+                match crate::workspace::shell_env(snippet, &record.info.worktree, &start, &lost) {
+                    Ok(changed) => {
+                        for (name, value) in changed {
+                            let scrubbed = provisioned.scrub.contains(&name)
+                                || model_scrub.contains(&name.as_str())
+                                || !placement.admits(&name);
+                            if !scrubbed {
+                                placement.set_env(&name, &value);
+                            }
+                        }
+                    }
+                    Err(why) => {
+                        driven.end =
+                            End::failed(format!("workspace {why}; the harness was not started"));
+                        return Ok(driven);
+                    }
+                }
             }
         }
         placement.set_env(ENV_ROOT, &turn.yard.root.display().to_string());

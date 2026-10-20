@@ -820,17 +820,22 @@ impl Yard {
     /// The variables `branch`'s scripts and harness get:
     /// `BRANCHYARD_BRANCH`, `BRANCHYARD_WORKTREE`, `BRANCHYARD_ROOT` and
     /// `BRANCHYARD_PORT`, reserving the branch's port now if it has none
-    /// yet. For running a command in its worktree, as `by workspace run`
-    /// does.
+    /// yet, with its `[workspace.env]` and what its `shell_setup` adds or
+    /// changes (run now, in the worktree). For running a command in its
+    /// worktree, as `by workspace run` does. [`Error::Config`] when
+    /// `shell_setup` fails, saying why.
     pub fn workspace_env(&self, branch: &str) -> Result<Vec<(String, String)>, Error> {
         let store = self.store();
         let record = store.read(branch)?;
         let port = workspace::reserve_port(&store, &self.root, branch)?;
         let vars = workspace::variables(self, branch, &record.info.worktree, Some(port));
-        Ok(match record.workspace.as_ref() {
-            Some(state) => workspace::with_spec_env(&state.spec, vars),
-            None => vars,
-        })
+        match record.workspace.as_ref() {
+            Some(state) => {
+                workspace::script_env(&state.spec, &record.info.worktree, vars, &|| None)
+                    .map_err(Error::Config)
+            }
+            None => Ok(vars),
+        }
     }
 
     /// Append a workspace lifecycle report to `branch`'s event log, for a

@@ -690,6 +690,17 @@ impl Placement {
         !matches!(self.kind, Kind::Local(_))
     }
 
+    /// Whether the harness's environment would let a variable named
+    /// `name` through from this process's: not stripped (an isolated
+    /// harness's credential prefixes) nor removed. A sandbox's environment
+    /// is its own, so nothing from this host is admitted there.
+    pub fn admits(&self, name: &str) -> bool {
+        match &self.kind {
+            Kind::Local(env) => env.admits(name),
+            Kind::Sandbox { .. } | Kind::Substrate(_) => false,
+        }
+    }
+
     /// Add a variable to the harness's environment.
     pub fn set_env(&mut self, name: &str, value: &str) {
         match &mut self.kind {

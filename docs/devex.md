@@ -43,13 +43,13 @@ All three solve the same pain, which reviewers of Conductor call its main fricti
 
 **Branchyard: done** ([workspace](workspace.md)). `[workspace]` in `branchyard.toml` has:
 - `copy`: globs of untracked files carried from the repository root into each new worktree, never outside it, never a symbolic link, never tracked files, and never committed from the branch;
-- `setup` (one command or a list), named `[workspace.run.NAME]` scripts for `by workspace run` (a `default`), and `teardown` on `by rm` and `by merge --rm`.
+- `setup` (one command or a list), named `[workspace.run.NAME]` scripts for `by workspace run` (a `default`), and `teardown` on `by rm` and `by merge --rm`;
+- `shell_setup`: emdash's `shellSetup` (for example `nvm use`), run before every turn's harness and every script, which get the variables it sets.
 
 Scripts and the harness get `BRANCHYARD_BRANCH`, `BRANCHYARD_WORKTREE`, `BRANCHYARD_ROOT` and `BRANCHYARD_PORT`, a port reserved per branch in the store (SQLite or PostgreSQL), stable across turns and restarts, and released with the branch. The user file's `[projects."<root>".workspace]` replaces a repository's section, as Superset's mirrored path does. Setup is a journaled step: a crash mid-install kills what it started, ends the branch `interrupted`, and its next turn runs setup again from the start. A repository's scripts never run until you trust them: a per-user record keyed by repository root and the section's digest, asked once on a terminal or given with `by workspace trust`, and asked again when the scripts change; a server runs them only for repositories its operator lists in `allow_workspace_scripts`, never because a request asks. `by init project` suggests the section from lockfiles, `Cargo.toml`, `pyproject.toml`, `go.mod`, a Compose file and `.env` files, or imports it from a committed `.emdash.json`, `orca.yaml`, `.superset/config.json` or `.conductor/settings.toml` ([setup](setup.md#importing-another-tools-workspace-configuration)).
 
 **Still open:**
 - Conductor's `available_in`. **Done since** (Wave 2, [workspace](workspace.md#listening-ports)): its concurrent run mode, `by workspace run BRANCH A B --detach` starting several scripts at once, each with its own port; and the ports each branch's processes listen on, attributed by Branchyard's variables, working directory, process tree or command line (ported from Orca), in `by workspace ports`, `by show` and `by watch`'s detail pane, where `b` opens one in a browser and `K` stops them.
-- An emdash-style `shellSetup` (for example `nvm use`) applied to the harness's own shell.
 - Setup inside a sandbox: scripts run on the host, as you, even for isolated or sandboxed branches, and the Substrate provider's bundle does not carry files setup creates that git ignores.
 - Tested hermetically only: no real package manager, Docker stack or harness, and not on macOS.
 
@@ -194,12 +194,12 @@ In order of what a user would feel first:
    - `by init` and the `setup` skill (under way), which detect first and show files and commands before acting (§1).
    - `branchyard.toml` holding defaults, MCP servers (§8) and the workspace lifecycle below.
 2. **Workspace lifecycle** (§2), **done** ([workspace](workspace.md)):
-   - `copy`, `setup`, named `run` and `teardown`;
+   - `copy`, `setup`, named `run`, `teardown` and `shell_setup`;
    - Branchyard-given variables with an allocated port;
    - a per-repository trust decision;
    - setup journaled and recovered.
 
-   Left: a `shellSetup` for the harness, setup inside a sandbox. Concurrent run scripts and listening ports in `by watch` are done (Wave 2).
+   Left: setup inside a sandbox. Concurrent run scripts and listening ports in `by watch` are done (Wave 2).
 3. **From branch to merged PR** (§5, §9), done ([pull requests](pull-requests.md)):
    - `by run --issue`;
    - `by pr` and `by pr --watch`, which routes CI failures and review comments back into the branch;

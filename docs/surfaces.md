@@ -282,7 +282,7 @@ A repository's scripts are a trust decision, so each surface takes it where its 
 
 | Surface | Before | Now |
 |---|---|---|
-| `[workspace]` in `branchyard.toml`, `[projects."<root>".workspace]` in the user file | none | `copy`, `setup`, `run.NAME`, `teardown` (`schema/branchyard.config.json`); `by run`, `fan`, `fork`, `reincarnate` and `rig run` apply it once trusted; `send` and a harness's `by` never read it |
+| `[workspace]` in `branchyard.toml`, `[projects."<root>".workspace]` in the user file | none | `copy`, `setup`, `run.NAME`, `teardown`, `shell_setup` (`schema/branchyard.config.json`); `by run`, `fan`, `fork`, `reincarnate` and `rig run` apply it once trusted; `send` and a harness's `by` never read it |
 | `TaskOptions::workspace`, `WorkspaceSpec` | none | copy and setup before a new branch's first turn, teardown at removal; stored with the branch and inherited by forks, reincarnations and delegated children without one |
 | `BRANCHYARD_WORKTREE`, `BRANCHYARD_PORT` | none | given to a local harness on every turn, and to workspace scripts with `BRANCHYARD_BRANCH` and `BRANCHYARD_ROOT`; the port is reserved in the store per branch |
 | `Activity::Workspace` (`workspace` in `by log --json`) | none | each copy, setup, run and teardown, with its commands, exit code and output tail |

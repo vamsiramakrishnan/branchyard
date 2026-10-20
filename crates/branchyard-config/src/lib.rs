@@ -1155,6 +1155,14 @@ pub struct WorkspaceConfig {
     /// --rm`), best-effort.
     #[serde(default, skip_serializing_if = "Script::is_empty")]
     pub teardown: Script,
+    /// A shell snippet (`nvm use`, `source .venv/bin/activate`, `eval
+    /// "$(direnv export bash)"`) run with `/bin/sh` in the worktree before
+    /// each turn's harness and before setup, teardown and run scripts: the
+    /// variables it adds or changes are given to them (never Branchyard's
+    /// own, nor credentials an isolated harness is scrubbed of). A
+    /// repository script: it runs only once trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_setup: Option<String>,
     /// Variables setup, teardown and run scripts and the harness get
     /// besides `BRANCHYARD_*`, as `[workspace.env]`: a devcontainer's
     /// `containerEnv` and `remoteEnv`. A value's `$VAR`, `${VAR}` and
@@ -1349,6 +1357,10 @@ impl WorkspaceConfig {
         for (what, script) in [("setup", &self.setup), ("teardown", &self.teardown)] {
             check_script(script).or_else(|why| fail(what.into(), &why))?;
         }
+        if let Some(snippet) = &self.shell_setup {
+            check_script(&Script::One(snippet.clone()))
+                .or_else(|why| fail("shell_setup".into(), &why))?;
+        }
         for name in self.env.keys() {
             if let Err(why) = check_variable_name(name) {
                 return fail(format!("env.{name}"), &why);
@@ -1412,9 +1424,13 @@ impl WorkspaceConfig {
         Ok(())
     }
 
-    /// Whether it runs any command: setup, run scripts or teardown.
+    /// Whether it runs any command: setup, run scripts, teardown or
+    /// `shell_setup`.
     pub fn has_scripts(&self) -> bool {
-        !self.setup.is_empty() || !self.teardown.is_empty() || !self.run.is_empty()
+        !self.setup.is_empty()
+            || !self.teardown.is_empty()
+            || !self.run.is_empty()
+            || self.shell_setup.is_some()
     }
 
     /// The run script `by workspace run` runs for `name`, or, given none,
@@ -1482,6 +1498,9 @@ impl WorkspaceConfig {
         }
         if !self.env.is_empty() {
             canonical["env"] = serde_json::json!(self.env);
+        }
+        if let Some(snippet) = &self.shell_setup {
+            canonical["shell_setup"] = serde_json::json!(snippet);
         }
         hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
     }
@@ -2758,6 +2777,9 @@ fn render_workspace(out: &mut String, table: &str, workspace: &WorkspaceConfig) 
     if !workspace.teardown.is_empty() {
         out.push_str(&format!("teardown = {}\n", workspace.teardown.render()));
     }
+    if let Some(snippet) = &workspace.shell_setup {
+        out.push_str(&format!("shell_setup = {}\n", toml_string(snippet)));
+    }
     if workspace.prepare {
         out.push_str("prepare = true\n");
     }
@@ -3368,6 +3390,7 @@ classes = { compensable = "allow" }
 copy = [".env", ".env.*"]
 setup = "pnpm install"
 teardown = ["docker compose down", "rm -rf tmp"]
+shell_setup = "nvm use"
 [workspace.run.dev]
 command = "pnpm dev --port $BRANCHYARD_PORT"
 default = true
@@ -3382,6 +3405,7 @@ command = ["pnpm build", "pnpm worker"]
         assert_eq!(workspace.copy, [".env", ".env.*"]);
         assert_eq!(workspace.setup.commands(), ["pnpm install"]);
         assert_eq!(workspace.teardown.commands().len(), 2);
+        assert_eq!(workspace.shell_setup.as_deref(), Some("nvm use"));
         assert!(workspace.has_scripts());
         let rendered = render(&config, "test");
         assert_eq!(
@@ -3420,6 +3444,8 @@ command = ["pnpm build", "pnpm worker"]
             ("[workspace]\ncopy = [\"[\"]", "not a glob"),
             ("[workspace]\nsetup = \"  \"", "workspace.setup"),
             ("[workspace]\nsetup = 3", "line 2"),
+            ("[workspace]\nshell_setup = \" \"", "workspace.shell_setup"),
+            ("[workspace]\nshell_setup = [\"nvm use\"]", "line 2"),
             ("[workspace]\nstartup = \"x\"", "startup"),
             ("[workspace.run.dev]\ndefault = true", "command"),
             (
@@ -3491,6 +3517,19 @@ command = ["pnpm build", "pnpm worker"]
         let mut changed = base.clone();
         changed.run.get_mut("dev").unwrap().default = false;
         assert_ne!(changed.digest(), digest);
+        // The shell snippet is a script: changing or dropping it lapses
+        // trust, and a section without one keeps its earlier digest.
+        let mut changed = base.clone();
+        changed.shell_setup = Some("nvm use 20".into());
+        assert_ne!(changed.digest(), digest);
+        let mut without = base.clone();
+        without.shell_setup = None;
+        assert_ne!(without.digest(), digest);
+        let only = parse("[workspace]\nshell_setup = \"nvm use\"")
+            .unwrap()
+            .workspace
+            .unwrap();
+        assert!(only.has_scripts(), "a shell snippet alone needs trust");
         // One command or a list of one are the same script.
         let mut same = base;
         same.setup = Script::Many(vec!["pnpm install".into()]);

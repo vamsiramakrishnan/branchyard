@@ -97,6 +97,12 @@ pub struct WorkspaceSpec {
     /// removed, best-effort.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub teardown: Vec<String>,
+    /// A shell snippet (`nvm use`, `source .venv/bin/activate`) run with
+    /// `/bin/sh` in the worktree before each turn's harness and before
+    /// setup and teardown on this host; the variables it adds or changes
+    /// are given to them. See [`shell_env`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_setup: Option<String>,
     /// Variables the scripts and the harness get besides `BRANCHYARD_*`
     /// (`[workspace.env]`; a devcontainer's `containerEnv` and
     /// `remoteEnv`). A value's `$VAR`, `${VAR}` and `${VAR:-default}` are
@@ -129,7 +135,7 @@ pub struct WorkspaceSpec {
 impl WorkspaceSpec {
     /// Whether it runs any command.
     pub fn has_scripts(&self) -> bool {
-        !self.setup.is_empty() || !self.teardown.is_empty()
+        !self.setup.is_empty() || !self.teardown.is_empty() || self.shell_setup.is_some()
     }
 
     /// The spec's variables, expanded: `$VAR`, `${VAR}` and
@@ -346,11 +352,13 @@ impl WorkspaceReport {
 
     /// One line on why it failed, for a branch's status.
     pub fn failure(&self) -> String {
+        // No command ran when `shell_setup` failed first: its error says so.
         let what = match self.phase {
-            WorkspacePhase::Copy => "copying files".to_owned(),
-            WorkspacePhase::Setup | WorkspacePhase::Teardown | WorkspacePhase::Run => {
-                format!("`{}`", self.commands.last().map_or("", String::as_str))
-            }
+            WorkspacePhase::Copy => "copying files ".to_owned(),
+            WorkspacePhase::Setup | WorkspacePhase::Teardown | WorkspacePhase::Run => self
+                .commands
+                .last()
+                .map_or_else(String::new, |c| format!("`{c}` ")),
         };
         let how = match (&self.error, self.exit_code) {
             (Some(error), _) => error.clone(),
@@ -362,7 +370,7 @@ impl WorkspaceReport {
             WorkspacePhase::Teardown => "workspace teardown",
             WorkspacePhase::Run => "workspace run script",
         };
-        format!("{phase} failed: {what} {how}; its output is in the branch's log")
+        format!("{phase} failed: {what}{how}; its output is in the branch's log")
     }
 }
 
@@ -423,6 +431,168 @@ pub(crate) fn with_spec_env(
     let mut env = spec.expanded_env(&vars);
     env.extend(vars);
     env
+}
+
+/// [`with_spec_env`], with what the spec's `shell_setup` adds or changes
+/// between the spec's variables and the branch's: the environment a
+/// script on this host runs with. `Err` says why `shell_setup` failed.
+pub(crate) fn script_env(
+    spec: &WorkspaceSpec,
+    worktree: &Path,
+    vars: Vec<(String, String)>,
+    cancel: &dyn Fn() -> Option<String>,
+) -> Result<Vec<(String, String)>, String> {
+    let mut env = spec.expanded_env(&vars);
+    if let Some(snippet) = &spec.shell_setup {
+        let mut start = env.clone();
+        start.extend(vars.iter().cloned());
+        env.extend(shell_env(snippet, worktree, &start, cancel)?);
+    }
+    env.extend(vars);
+    Ok(env)
+}
+
+/// How long `shell_setup` may run before it is killed and what needed it
+/// fails.
+pub const SHELL_SETUP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The most of `shell_setup`'s standard error a failure quotes: the last
+/// bytes.
+const SHELL_SETUP_TAIL: usize = 2048;
+
+/// Variables `shell_setup` never sets: the shell's own bookkeeping, and
+/// `HOME`, which Branchyard decides for the harness.
+const SHELL_IGNORED: &[&str] = &["_", "SHLVL", "PWD", "OLDPWD", "HOME"];
+
+/// The script `shell_env` runs: the snippet, its output sent to standard
+/// error so standard output carries only the environment, then the
+/// environment, NUL-separated, so a value may hold a newline.
+const SHELL_CAPTURE: &str = "eval \"$1\" >&2 || exit; exec env -0";
+
+/// The variables `snippet` adds or changes: it runs with `/bin/sh -c` in
+/// `cwd`, with this process's environment (minus inherited Branchyard and
+/// parent-session variables) and `env` over it, and its resulting
+/// environment is compared with the one it started with. Never a
+/// Branchyard or parent-session variable, nor one of [`SHELL_IGNORED`];
+/// a variable it unsets is not reported. `Err` names the snippet, how it
+/// failed and the tail of its standard error: a non-zero exit, a timeout
+/// ([`SHELL_SETUP_TIMEOUT`]), a cancel, or no `sh` to run it.
+pub(crate) fn shell_env(
+    snippet: &str,
+    cwd: &Path,
+    env: &[(String, String)],
+    cancel: &dyn Fn() -> Option<String>,
+) -> Result<Vec<(String, String)>, String> {
+    use std::os::unix::process::CommandExt;
+    let mut start: BTreeMap<String, String> = std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .filter(|(name, _)| {
+            !harness::is_branchyard_variable(name) && !harness::is_parent_session_variable(name)
+        })
+        .collect();
+    for (name, value) in env {
+        start.insert(name.clone(), value.clone());
+    }
+    let fail = |how: String, stderr: &[u8]| {
+        let text = String::from_utf8_lossy(stderr);
+        let text = text.trim();
+        let cut = text
+            .char_indices()
+            .map(|(at, _)| at)
+            .find(|at| text.len() - at <= SHELL_SETUP_TAIL)
+            .unwrap_or(text.len());
+        match &text[cut..] {
+            "" => format!("shell_setup `{snippet}` {how}"),
+            tail => format!("shell_setup `{snippet}` {how}: {tail}"),
+        }
+    };
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(SHELL_CAPTURE)
+        .arg("by-shell-setup")
+        .arg(snippet)
+        .env_clear()
+        .envs(&start)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| fail(format!("could not start /bin/sh: {e}"), b""))?;
+    let pid = child.id();
+    let started = proc::start_time(pid).unwrap_or_default();
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                branchyard_support::best_effort("read shell_setup", pipe.read_to_end(&mut bytes));
+            }
+            bytes
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let deadline = Instant::now() + SHELL_SETUP_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {}
+            Err(e) => break Err(format!("could not be waited for: {e}")),
+        }
+        if Instant::now() >= deadline {
+            break Err(format!(
+                "timed out after {}s",
+                SHELL_SETUP_TIMEOUT.as_secs()
+            ));
+        }
+        if let Some(why) = cancel() {
+            break Err(format!("was stopped: {why}"));
+        }
+        std::thread::sleep(TICK);
+    };
+    // What it left running in its group would hold its output open.
+    proc::kill_group(pid, &started);
+    if status.is_err() {
+        branchyard_support::best_effort("reap shell_setup", child.wait());
+    }
+    let out = stdout.join().unwrap_or_default();
+    let err = stderr.join().unwrap_or_default();
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            let how = match status.code() {
+                Some(code) => format!("exited with status {code}"),
+                None => "was killed by a signal".to_owned(),
+            };
+            return Err(fail(how, &err));
+        }
+        Err(how) => return Err(fail(how, &err)),
+    }
+    let mut changed = Vec::new();
+    for entry in out.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        let entry = String::from_utf8_lossy(entry);
+        let Some((name, value)) = entry.split_once('=') else {
+            continue;
+        };
+        let ours = harness::is_branchyard_variable(name)
+            || harness::is_parent_session_variable(name)
+            || SHELL_IGNORED.contains(&name);
+        if !ours && start.get(name).map(String::as_str) != Some(value) {
+            changed.push((name.to_owned(), value.to_owned()));
+        }
+    }
+    Ok(changed)
 }
 
 /// The variables a branch's scripts and harness get.
@@ -701,10 +871,19 @@ impl Setup<'_> {
         match self.runner {
             Runner::Host => {
                 report.ran_in = Some(RanIn::Host);
-                let env = with_spec_env(
+                let env = match script_env(
                     self.spec,
+                    worktree,
                     variables(self.yard, self.name, worktree, Some(self.port)),
-                );
+                    self.cancel,
+                ) {
+                    Ok(env) => env,
+                    Err(why) => {
+                        report.ok = false;
+                        report.error = Some(why);
+                        return Ok(Vec::new());
+                    }
+                };
                 let on_spawn = |row: &ProcessRow| store.backend().record_process(self.fence, row);
                 run_commands(
                     report,
@@ -1137,10 +1316,19 @@ pub(crate) fn teardown(
         return Ok(Some(report));
     }
     report.ran_in = Some(RanIn::Host);
-    let env = with_spec_env(
+    let env = match script_env(
         &state.spec,
+        worktree,
         variables(yard, &record.info.name, worktree, port),
-    );
+        &|| None,
+    ) {
+        Ok(env) => env,
+        Err(why) => {
+            report.ok = false;
+            report.error = Some(why);
+            return Ok(Some(report));
+        }
+    };
     let on_spawn = |row: &ProcessRow| match fence {
         Some(fence) => store.backend().record_process(fence, row),
         None => Ok(()),
@@ -1777,6 +1965,63 @@ mod tests {
         let text = tail.text();
         assert_eq!(text.len(), OUTPUT_TAIL);
         assert!(text.ends_with("end"));
+    }
+
+    #[test]
+    fn shell_setup_reports_what_it_adds_or_changes_and_why_it_failed() {
+        let scratch = branchyard_testkit::Scratch::new("shell-env");
+        let dir = scratch.path();
+        let start = vec![
+            ("BY_UNIT_KEPT".to_owned(), "same".to_owned()),
+            ("BY_UNIT_CHANGED".to_owned(), "before".to_owned()),
+            ("BRANCHYARD_PORT".to_owned(), "20001".to_owned()),
+        ];
+        let changed = shell_env(
+            "echo noise; export BY_UNIT_NEW='two\nlines' BY_UNIT_CHANGED=after \
+             BY_UNIT_KEPT=same BRANCHYARD_PORT=1 HOME=/x; cd /; unset BY_UNIT_KEPT",
+            dir,
+            &start,
+            &|| None,
+        )
+        .unwrap();
+        let get = |name: &str| {
+            changed
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("BY_UNIT_NEW"), Some("two\nlines"));
+        assert_eq!(get("BY_UNIT_CHANGED"), Some("after"));
+        for name in ["BY_UNIT_KEPT", "BRANCHYARD_PORT", "HOME", "PWD", "OLDPWD"] {
+            assert_eq!(get(name), None, "{name}");
+        }
+        let error = shell_env("echo first >&2; echo 'boom' >&2; exit 4", dir, &[], &|| {
+            None
+        })
+        .unwrap_err();
+        assert!(error.starts_with("shell_setup `echo first"), "{error}");
+        assert!(
+            error.contains("exited with status 4: first\nboom"),
+            "{error}"
+        );
+        let stopped = shell_env("sleep 5", dir, &[], &|| Some("cancelled".into())).unwrap_err();
+        assert!(stopped.contains("was stopped: cancelled"), "{stopped}");
+        // `script_env`: the spec's variables, then the snippet's, then the
+        // branch's, which win.
+        let spec = WorkspaceSpec {
+            shell_setup: Some("export BY_UNIT_MODE=shell".into()),
+            env: [("BY_UNIT_MODE".to_owned(), "spec".to_owned())].into(),
+            ..WorkspaceSpec::default()
+        };
+        let env = script_env(&spec, dir, start.clone(), &|| None).unwrap();
+        let last = |name: &str| {
+            env.iter()
+                .rev()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(last("BY_UNIT_MODE"), Some("shell"));
+        assert_eq!(last("BRANCHYARD_PORT"), Some("20001"));
     }
 
     #[test]

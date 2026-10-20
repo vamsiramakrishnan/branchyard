@@ -164,6 +164,7 @@ fn import_as(file: &'static str, text: &str) -> Result<Imported, String> {
         setup,
         run,
         teardown: Vec::new(),
+        shell_setup: None,
         env,
         prepare,
         inputs: match prepare {

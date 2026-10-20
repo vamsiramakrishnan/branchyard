@@ -23,6 +23,14 @@ fn the_harness_sees_a_scrubbed_environment_and_a_private_home_unless_inheriting(
         .keep("ANTHROPIC_BRANCHYARD_TEST_KEPT")
         .strip("branchyard_test_custom")
         .set("BRANCHYARD_TEST_SET", "set");
+    // `admits` answers as the scrub does, for a variable from elsewhere.
+    assert!(!env.admits("ANTHROPIC_API_KEY"));
+    assert!(!env.admits("openai_api_key"));
+    assert!(env.admits("ANTHROPIC_BRANCHYARD_TEST_KEPT"));
+    assert!(!env.admits("BRANCHYARD_TEST_CUSTOM"));
+    assert!(env.admits("NODE_VERSION"));
+    assert!(!Environment::inherit().remove("X").admits("X"));
+    assert!(Environment::inherit().admits("ANTHROPIC_API_KEY"));
     let mut session = start_with(&dir, SessionMode::Fresh, &env);
     let report = session
         .run_turn(

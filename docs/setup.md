@@ -140,7 +140,7 @@ A repository already set up for emdash, Orca, Superset, Conductor or a Dev Conta
 
 | File | Tool | Imported | Not imported |
 |---|---|---|---|
-| `.emdash.json` | emdash | `preservePatterns` as `copy`; `scripts.prepare` then `scripts.setup` as `setup`; `scripts.run`; `scripts.teardown` | `shellSetup` (Branchyard has no per-shell setup for the harness yet) |
+| `.emdash.json` | emdash | `preservePatterns` as `copy`; `scripts.prepare` then `scripts.setup` as `setup`; `scripts.run`; `scripts.teardown`; `shellSetup` as `shell_setup` | nothing it defines |
 | `orca.yaml` | Orca | `scripts.setup`; `scripts.archive` as `teardown`; the first `defaultTabs` command as the run script | further tabs; `worktree.sharedDirectories` (links, not copies); environment recipes, `issueCommand` |
 | `.superset/config.json` | Superset | `setup`, `run` and `teardown` command lists, in `cwd` when set; `.superset/<key>.sh` when a key is absent | the per-user and `config.local.json` overrides, which are not committed |
 | `.conductor/settings.toml` | Conductor | `[scripts]` `setup`; `archive` as `teardown`; `run`, or the default (else first) `[scripts.run.NAME]` with its `args` and `options.cwd` | the other named run scripts; `run_mode`, `available_in` |

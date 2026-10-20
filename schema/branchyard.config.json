@@ -500,6 +500,13 @@
           "$ref": "#/$defs/Script",
           "description": "Run in the worktree when the branch is removed (`by rm`, `by merge\n--rm`), best-effort."
         },
+        "shell_setup": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A shell snippet (`nvm use`, `source .venv/bin/activate`, `eval\n\"$(direnv export bash)\"`) run with `/bin/sh` in the worktree before\neach turn's harness and before setup, teardown and run scripts: the\nvariables it adds or changes are given to them (never Branchyard's\nown, nor credentials an isolated harness is scrubbed of). A\nrepository script: it runs only once trusted."
+        },
         "env": {
           "type": "object",
           "additionalProperties": {
