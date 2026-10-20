@@ -818,7 +818,7 @@ fn a_harness_states_its_own_status_and_its_parent_sees_it() {
     let f = Fixture::new();
     let kid = [
         r#"MCP report_status {"state": "working", "summary": "reading the failing test", "link": "https://example.com/pull/7"}"#.to_owned(),
-        r#"MCP report_status {"state": "blocked", "summary": "needs the API key"}"#.to_owned(),
+        r#"MCP report_status {"state": "blocked", "summary": "needs the API key", "ttl_seconds": 600}"#.to_owned(),
         r#"MCP report_status {"state": "done", "summary": "x"}"#.to_owned(),
         format!(
             r#"MCP report_status {{"state": "working", "summary": "{}"}}"#,
@@ -828,6 +828,7 @@ fn a_harness_states_its_own_status_and_its_parent_sees_it() {
             .to_owned(),
         r#"MCP report_status {"state": "working", "summary": "x", "bogus": 1}"#.to_owned(),
         r#"MCP report_status {"state": "working"}"#.to_owned(),
+        r#"MCP report_status {"state": "working", "summary": "x", "ttl_seconds": 0}"#.to_owned(),
     ]
     .join("\n");
     let prompt = [
@@ -846,7 +847,7 @@ fn a_harness_states_its_own_status_and_its_parent_sees_it() {
         .unwrap();
     root.wait_subtree().unwrap();
 
-    // The child's calls: two recorded (the blocked one escalated), five refused.
+    // The child's calls: two recorded (the blocked one escalated), six refused.
     let said = reply(&f, "kid");
     let working = nth_result(&said, "report_status", 0);
     assert_eq!(working["report"]["state"], "working");
@@ -855,6 +856,12 @@ fn a_harness_states_its_own_status_and_its_parent_sees_it() {
     assert!(working.get("escalation").is_none(), "{working}");
     let blocked = nth_result(&said, "report_status", 1);
     assert_eq!(blocked["report"]["state"], "blocked");
+    assert_eq!(blocked["report"]["ttl_seconds"], 600);
+    assert_eq!(
+        blocked["report"]["expires_at_ms"].as_u64().unwrap(),
+        blocked["report"]["at_ms"].as_u64().unwrap() + 600_000
+    );
+    assert!(blocked["report"].get("stale").is_none(), "{blocked}");
     assert_eq!(blocked["escalation"]["kind"], "escalation");
     assert_eq!(blocked["escalation"]["from"], "kid");
     assert_eq!(blocked["escalation"]["to"], "root");
@@ -866,7 +873,7 @@ fn a_harness_states_its_own_status_and_its_parent_sees_it() {
         .lines()
         .filter(|line| line.contains("mcp report_status error: "))
         .collect();
-    assert_eq!(errors.len(), 5, "{said}");
+    assert_eq!(errors.len(), 6, "{said}");
     assert!(
         errors[0].contains(
             "denied: state must be one of working, idle, blocked, complete, failure, not \"done\""
@@ -880,6 +887,10 @@ fn a_harness_states_its_own_status_and_its_parent_sees_it() {
     assert!(errors[2].contains("http or https URL"), "{said}");
     assert!(errors[3].contains("unknown field `bogus`"), "{said}");
     assert!(errors[4].contains("missing field `summary`"), "{said}");
+    assert!(
+        errors[5].contains("denied: ttl_seconds must be a whole number of seconds"),
+        "{said}"
+    );
 
     // Only the two good calls were recorded on the child's branch.
     let recorded: Vec<(String, String)> = f
@@ -908,6 +919,8 @@ fn a_harness_states_its_own_status_and_its_parent_sees_it() {
     let seen = result(&parent, "inspect");
     assert_eq!(seen["reported"]["state"], "blocked");
     assert_eq!(seen["reported"]["summary"], "needs the API key");
+    assert_eq!(seen["reported"]["ttl_seconds"], 600);
+    assert!(seen["reported"].get("stale").is_none(), "{seen}");
     assert!(seen["reported"]["at_ms"].as_u64().unwrap() > 0);
     assert_ne!(
         seen["status"]["state"], "blocked",

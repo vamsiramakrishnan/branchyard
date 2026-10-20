@@ -1421,7 +1421,7 @@ fn draw_tree(
                 let activity = model
                     .doing
                     .get(&info.name)
-                    .map(Doing::summary)
+                    .map(|d| d.summary(model.now_ms))
                     .unwrap_or_default();
                 cells.push(Cell::from(Span::styled(
                     activity,
@@ -1628,23 +1628,31 @@ fn draw_detail(model: &Model, info: Option<&BranchInfo>, frame: &mut Frame, area
     if let Some(summary) = model
         .doing
         .get(&info.name)
-        .map(Doing::summary)
+        .map(|d| d.summary(model.now_ms))
         .filter(|s| !s.is_empty())
     {
         lines.push(Line::from(vec![label("now"), Span::raw(summary)]));
     }
-    // What the harness says of itself, beside the status above.
+    // What the harness says of itself, beside the status above; dimmed
+    // once stale.
     if let Some(report) = model
         .doing
         .get(&info.name)
-        .and_then(|d| d.reported.as_ref())
+        .and_then(|d| d.reported_at(model.now_ms))
     {
-        lines.push(Line::from(vec![
-            label("reported"),
-            Span::styled(
-                render::reported_text(report),
+        let (text, style) = match report.stale {
+            true => (
+                format!("{} (stale)", render::reported_text(&report)),
+                Style::new().fg(Color::DarkGray),
+            ),
+            false => (
+                render::reported_text(&report),
                 tone_style(reported_tone(report.state)),
             ),
+        };
+        lines.push(Line::from(vec![
+            label("reported"),
+            Span::styled(text, style),
         ]));
     }
     lines.push(Line::from(""));
@@ -2457,6 +2465,7 @@ mod tests {
             state,
             summary: summary.into(),
             link: None,
+            ttl_seconds: None,
         };
         for (state, tone) in [
             (ReportedState::Blocked, Tone::Bad),

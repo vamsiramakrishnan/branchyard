@@ -142,6 +142,7 @@ impl Tracker {
                 state,
                 summary,
                 link,
+                ..
             } => {
                 let again = self
                     .reported
@@ -559,6 +560,7 @@ mod tests {
             state,
             summary: summary.into(),
             link: None,
+            ttl_seconds: None,
         }
     }
 

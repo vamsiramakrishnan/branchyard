@@ -638,7 +638,10 @@ pub fn tools() -> Vec<Tool> {
              you gave up (failure). Your parent and the person watching see it next to your \
              status. Blocked and failure are also escalated to your parent's inbox. It is a \
              claim, not a result: it changes nothing about your branch, and report is still \
-             how you send your parent a message.",
+             how you send your parent a message. Give ttl_seconds when the claim holds only \
+             for a while: once it passes, the report is shown as stale. A report also goes \
+             stale when a later turn of yours finishes without a new one, or your branch \
+             ends.",
             schema(json!({
                 "type": "object",
                 "properties": {
@@ -649,6 +652,12 @@ pub fn tools() -> Vec<Tool> {
                     },
                     "summary": {"type": "string", "maxLength": branchyard::reported::SUMMARY_MAX, "description": "One line, at most 280 characters"},
                     "link": {"type": "string", "description": "Optional http(s) URL with more, such as a pull request or an issue"},
+                    "ttl_seconds": {
+                        "type": "integer",
+                        "minimum": branchyard::reported::TTL_MIN_SECONDS,
+                        "maximum": branchyard::reported::TTL_MAX_SECONDS,
+                        "description": "Optional: how long the claim holds, in whole seconds (1 to 604800, 7 days); after that it is shown as stale",
+                    },
                 },
                 "required": ["state", "summary"],
                 "additionalProperties": false,

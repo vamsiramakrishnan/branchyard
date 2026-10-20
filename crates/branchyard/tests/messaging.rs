@@ -471,6 +471,7 @@ fn a_childs_own_status_is_seen_by_its_parent_beside_its_protocol_status() {
             ReportedState::Working,
             "  reading the failing test ",
             Some(PULL),
+            None,
         )
         .unwrap();
     assert_eq!(first.report.state, ReportedState::Working);
@@ -503,7 +504,7 @@ fn a_childs_own_status_is_seen_by_its_parent_beside_its_protocol_status() {
 
     // The latest report is the one shown; the log keeps both, in order.
     let second = kid
-        .report_status(ReportedState::Complete, "done", None)
+        .report_status(ReportedState::Complete, "done", None, None)
         .unwrap();
     assert_eq!(
         parent.inspect("kid").unwrap().reported,
@@ -516,6 +517,7 @@ fn a_childs_own_status_is_seen_by_its_parent_beside_its_protocol_status() {
                 state,
                 summary,
                 link,
+                ..
             } => Some((state, summary, link, e.at_ms)),
             _ => None,
         })
@@ -556,7 +558,12 @@ fn a_blocked_or_failed_report_is_escalated_to_the_parent_once() {
         .unwrap();
 
     let blocked = kid
-        .report_status(ReportedState::Blocked, "needs the API key", Some(PULL))
+        .report_status(
+            ReportedState::Blocked,
+            "needs the API key",
+            Some(PULL),
+            None,
+        )
         .unwrap();
     let message = blocked.escalation.expect("a blocked report is escalated");
     assert_eq!(
@@ -584,7 +591,12 @@ fn a_blocked_or_failed_report_is_escalated_to_the_parent_once() {
 
     // The same report again is recorded, and the parent is not told twice.
     let again = kid
-        .report_status(ReportedState::Blocked, "needs the API key", Some(PULL))
+        .report_status(
+            ReportedState::Blocked,
+            "needs the API key",
+            Some(PULL),
+            None,
+        )
         .unwrap();
     assert!(again.escalation.is_none());
     assert_eq!(parent.inbox().unwrap().messages.len(), 1);
@@ -595,11 +607,11 @@ fn a_blocked_or_failed_report_is_escalated_to_the_parent_once() {
         ReportedState::Idle,
         ReportedState::Complete,
     ] {
-        let said = kid.report_status(state, "x", None).unwrap();
+        let said = kid.report_status(state, "x", None, None).unwrap();
         assert!(said.escalation.is_none(), "{state} escalated");
     }
     let failed = kid
-        .report_status(ReportedState::Failure, "gave up\non the parser", None)
+        .report_status(ReportedState::Failure, "gave up\non the parser", None, None)
         .unwrap();
     assert_eq!(
         failed.escalation.expect("failure is escalated").text,
@@ -620,6 +632,7 @@ fn a_bad_status_report_is_refused_and_a_root_has_no_one_to_escalate_to() {
         ReportedState::Working,
         summary,
         link,
+        None,
     ) {
         Err(Error::Denied(why)) => why,
         other => panic!("expected a denial, got {other:?}"),
@@ -631,12 +644,38 @@ fn a_bad_status_report_is_refused_and_a_root_has_no_one_to_escalate_to() {
         .iter()
         .any(|e| matches!(e.activity, Activity::StatusReport { .. })));
     // 280 characters is the limit, counted in characters, not bytes.
-    kid.report_status(ReportedState::Working, &"é".repeat(280), None)
+    kid.report_status(ReportedState::Working, &"é".repeat(280), None, None)
         .unwrap();
+
+    // A time-to-live is whole seconds from 1 to 7 days.
+    for bad in [
+        Duration::ZERO,
+        Duration::from_millis(1500),
+        Duration::from_secs(7 * 24 * 3600 + 1),
+    ] {
+        match kid.report_status(ReportedState::Working, "x", None, Some(bad)) {
+            Err(Error::Denied(why)) => assert!(why.contains("ttl_seconds"), "{why}"),
+            other => panic!("{bad:?} was not refused: {other:?}"),
+        }
+    }
+    let timed = kid
+        .report_status(
+            ReportedState::Blocked,
+            "waiting on CI",
+            None,
+            Some(Duration::from_secs(600)),
+        )
+        .unwrap()
+        .report;
+    assert_eq!(timed.ttl_seconds, Some(600));
+    assert_eq!(timed.expires_at_ms, Some(timed.at_ms + 600_000));
+    assert!(!timed.stale);
+    let shown = kid.inspect("kid").unwrap().reported.unwrap();
+    assert_eq!(shown, timed, "read well within its ttl, it is current");
 
     let root = f.yard.branch("root").unwrap().delegate(options).unwrap();
     let said = root
-        .report_status(ReportedState::Blocked, "needs a decision", None)
+        .report_status(ReportedState::Blocked, "needs a decision", None, None)
         .unwrap();
     assert!(said.escalation.is_none(), "root has no parent");
     assert_eq!(

@@ -40,7 +40,9 @@ pub struct Report {
 /// or while the harness says it is blocked; every settled status is `idle`,
 /// with what happened as the message. The harness's own summary is the
 /// message of a running branch, and a claim never moves a branch out of
-/// `working` except to `blocked`, nor outranks a settled status.
+/// `working` except to `blocked`, nor outranks a settled status. A stale
+/// claim is not passed here: [`Branches::expire`] forgets one whose
+/// time-to-live has passed, and a new turn or status forgets it too.
 pub fn report(status: &BranchStatus, pending: Option<&str>, said: Option<&Said>) -> Report {
     let (state, message) = match status {
         BranchStatus::Running => match (pending, said) {
@@ -97,6 +99,9 @@ pub struct Said {
     pub state: ReportedState,
     /// Its one-line summary.
     pub summary: String,
+    /// When it goes stale, from the report's time-to-live: milliseconds
+    /// since the Unix epoch. None when it gave none.
+    pub expires_at_ms: Option<u64>,
 }
 
 impl Said {
@@ -157,9 +162,36 @@ impl Branches {
         listed.iter().map(|info| info.name.clone()).collect()
     }
 
-    /// Apply one feed entry. Returns whether the branch's report may have
-    /// changed.
-    pub fn apply(&mut self, branch: &str, activity: &Activity) -> bool {
+    /// Forget every claim whose time-to-live has passed at `now_ms`, so
+    /// a pane is no longer marked blocked on a stale `blocked`. Returns
+    /// the branches whose report may have changed.
+    pub fn expire(&mut self, now_ms: u64) -> Vec<String> {
+        let mut expired = Vec::new();
+        for (name, tracked) in &mut self.branches {
+            if tracked
+                .said
+                .as_ref()
+                .and_then(|s| s.expires_at_ms)
+                .is_some_and(|at| now_ms >= at)
+            {
+                tracked.said = None;
+                expired.push(name.clone());
+            }
+        }
+        expired
+    }
+
+    /// When the next claim goes stale, if any has a time-to-live.
+    pub fn next_expiry(&self) -> Option<u64> {
+        self.branches
+            .values()
+            .filter_map(|t| t.said.as_ref().and_then(|s| s.expires_at_ms))
+            .min()
+    }
+
+    /// Apply one feed entry, recorded at `at_ms`. Returns whether the
+    /// branch's report may have changed.
+    pub fn apply(&mut self, branch: &str, at_ms: u64, activity: &Activity) -> bool {
         // A branch first seen through the feed started after the listing,
         // so it is running until its status says otherwise.
         let tracked = self
@@ -181,10 +213,17 @@ impl Branches {
                 tracked.pending = None;
                 tracked.said = None;
             }
-            Activity::StatusReport { state, summary, .. } => {
+            Activity::StatusReport {
+                state,
+                summary,
+                ttl_seconds,
+                ..
+            } => {
                 tracked.said = Some(Said {
                     state: *state,
                     summary: summary.clone(),
+                    expires_at_ms: ttl_seconds
+                        .map(|s| at_ms.saturating_add(s.saturating_mul(1000))),
                 });
             }
             Activity::Harness(Event::PermissionRequested { request, .. }) => {
@@ -282,10 +321,11 @@ mod tests {
         };
         let now = |b: &Branches| b.branches["b"].report().state;
 
-        assert!(branches.apply("b", &Activity::Prompt("go".into())));
+        assert!(branches.apply("b", 0, &Activity::Prompt("go".into())));
         assert_eq!(now(&branches), HerdrState::Working);
         assert!(branches.apply(
             "b",
+            0,
             &Activity::Harness(Event::PermissionRequested {
                 turn: Some(1),
                 request,
@@ -294,6 +334,7 @@ mod tests {
         assert_eq!(now(&branches), HerdrState::Blocked);
         assert!(branches.apply(
             "b",
+            0,
             &Activity::Decision {
                 tool: "shell".into(),
                 allowed: true,
@@ -302,8 +343,8 @@ mod tests {
             }
         ));
         assert_eq!(now(&branches), HerdrState::Working);
-        assert!(!branches.apply("b", &Activity::Warning("w".into())));
-        assert!(branches.apply("b", &Activity::Status(BranchStatus::Ready)));
+        assert!(!branches.apply("b", 0, &Activity::Warning("w".into())));
+        assert!(branches.apply("b", 0, &Activity::Status(BranchStatus::Ready)));
         assert_eq!(now(&branches), HerdrState::Idle);
         // A branch a trigger keeps alive going idle or dormant is still
         // idle to herdr: nothing to report.
@@ -317,7 +358,7 @@ mod tests {
                 reason: "r".into(),
                 idle_since_ms: 1,
             };
-            assert!(!branches.apply("b", &lifecycle));
+            assert!(!branches.apply("b", 0, &lifecycle));
         }
         assert_eq!(now(&branches), HerdrState::Idle);
     }
@@ -327,7 +368,42 @@ mod tests {
             state,
             summary: summary.into(),
             link: None,
+            ttl_seconds: None,
         }
+    }
+
+    /// A `blocked` claim with a time-to-live marks the pane blocked until
+    /// it passes, then the branch is plain working again.
+    #[test]
+    fn a_stale_blocked_claim_stops_blocking_the_pane() {
+        let mut branches = Branches::default();
+        let now = |b: &Branches| {
+            let r = b.branches["b"].report();
+            (r.state, r.message)
+        };
+        assert!(branches.apply("b", 0, &Activity::Prompt("go".into())));
+        assert_eq!(branches.next_expiry(), None);
+        let timed = Activity::StatusReport {
+            state: ReportedState::Blocked,
+            summary: "waiting on CI".into(),
+            link: None,
+            ttl_seconds: Some(60),
+        };
+        assert!(branches.apply("b", 10_000, &timed));
+        assert_eq!(branches.next_expiry(), Some(70_000));
+        assert!(branches.expire(69_999).is_empty());
+        assert_eq!(
+            now(&branches),
+            (HerdrState::Blocked, Some("blocked: waiting on CI".into()))
+        );
+        assert_eq!(branches.expire(70_000), ["b"]);
+        assert_eq!(now(&branches), (HerdrState::Working, None));
+        assert_eq!(branches.next_expiry(), None);
+        assert!(branches.expire(u64::MAX).is_empty(), "once");
+        // Without a ttl, nothing expires it.
+        assert!(branches.apply("b", 0, &said(ReportedState::Blocked, "stuck")));
+        assert!(branches.expire(u64::MAX).is_empty());
+        assert_eq!(now(&branches).0, HerdrState::Blocked);
     }
 
     /// What a harness says of itself is the message of a running branch,
@@ -341,8 +417,8 @@ mod tests {
             (r.state, r.message)
         };
 
-        assert!(branches.apply("b", &Activity::Prompt("go".into())));
-        assert!(branches.apply("b", &said(ReportedState::Working, "reading the test")));
+        assert!(branches.apply("b", 0, &Activity::Prompt("go".into())));
+        assert!(branches.apply("b", 0, &said(ReportedState::Working, "reading the test")));
         assert_eq!(
             now(&branches),
             (HerdrState::Working, Some("reading the test".into()))
@@ -355,6 +431,7 @@ mod tests {
         };
         assert!(branches.apply(
             "b",
+            0,
             &Activity::Harness(Event::PermissionRequested {
                 turn: Some(1),
                 request,
@@ -365,8 +442,8 @@ mod tests {
             now(&branches).1.as_deref(),
             Some("waiting for permission: shell")
         );
-        assert!(!branches.apply("b", &Activity::Warning("w".into())));
-        assert!(branches.apply("b", &said(ReportedState::Blocked, "needs a key")));
+        assert!(!branches.apply("b", 0, &Activity::Warning("w".into())));
+        assert!(branches.apply("b", 0, &said(ReportedState::Blocked, "needs a key")));
         assert_eq!(
             now(&branches),
             (
@@ -376,6 +453,7 @@ mod tests {
         );
         assert!(branches.apply(
             "b",
+            0,
             &Activity::Decision {
                 tool: "shell".into(),
                 allowed: true,
@@ -393,29 +471,29 @@ mod tests {
             ReportedState::Complete,
             ReportedState::Failure,
         ] {
-            assert!(branches.apply("b", &said(state, "x")));
+            assert!(branches.apply("b", 0, &said(state, "x")));
             assert_eq!(
                 now(&branches),
                 (HerdrState::Working, Some(format!("{state}: x")))
             );
         }
         // A settled status is the protocol's word, whatever was claimed.
-        assert!(branches.apply("b", &said(ReportedState::Working, "still going")));
-        assert!(branches.apply("b", &Activity::Status(BranchStatus::Ready)));
+        assert!(branches.apply("b", 0, &said(ReportedState::Working, "still going")));
+        assert!(branches.apply("b", 0, &Activity::Status(BranchStatus::Ready)));
         assert_eq!(
             now(&branches),
             (HerdrState::Idle, Some("ready to merge".into()))
         );
         // The next turn starts without it.
-        assert!(branches.apply("b", &said(ReportedState::Working, "again")));
-        assert!(branches.apply("b", &Activity::Prompt("more".into())));
+        assert!(branches.apply("b", 0, &said(ReportedState::Working, "again")));
+        assert!(branches.apply("b", 0, &Activity::Prompt("more".into())));
         assert_eq!(now(&branches), (HerdrState::Working, None));
     }
 
     #[test]
     fn a_branch_first_seen_in_the_feed_is_running() {
         let mut branches = Branches::default();
-        assert!(!branches.apply("new", &Activity::Warning("w".into())));
+        assert!(!branches.apply("new", 0, &Activity::Warning("w".into())));
         assert_eq!(branches.branches["new"].status, BranchStatus::Running);
     }
 }

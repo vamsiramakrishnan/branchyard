@@ -1967,6 +1967,10 @@ pub enum Command {
         /// An http(s) URL with more, such as a pull request or an issue
         #[arg(long, value_name = "URL")]
         link: Option<String>,
+        /// How long the claim holds (whole seconds, 1s to 7d, such as 10m or 2h); after it, the
+        /// report is shown as stale
+        #[arg(long, value_name = "DURATION", value_parser = report_ttl)]
+        ttl: Option<Duration>,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -4979,6 +4983,12 @@ fn max_minutes(text: &str) -> Result<Duration, String> {
 
 fn stall_after(text: &str) -> Result<Duration, String> {
     minutes(text)
+}
+
+/// `by report-status --ttl`: a duration such as `10m`; the engine checks
+/// its bounds, so a bad one is refused `denied` as the tool's is.
+fn report_ttl(text: &str) -> Result<Duration, String> {
+    branchyard_support::time::parse_duration(text).map_err(|e| e.to_string())
 }
 
 fn watch_interval(text: &str) -> Result<Duration, String> {

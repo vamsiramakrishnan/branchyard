@@ -2319,14 +2319,22 @@ async fn post_report_status(
     JsonBody(request, _): JsonBody<ReportStatusRequest>,
 ) -> Result<Json<branchyard::Reported>, ApiError> {
     app.authorized_repo(&caller, &repo, "run")?;
-    let (state, summary, link) =
-        branchyard::reported::validate(&request.state, &request.summary, request.link.as_deref())
-            .map_err(|refusal| {
-            ApiError::bad_request(refusal.message)
-                .detail(serde_json::json!({ "field": refusal.field }))
-        })?;
+    let checked = branchyard::reported::validate(
+        &request.state,
+        &request.summary,
+        request.link.as_deref(),
+        request.ttl_seconds,
+    )
+    .map_err(|refusal| {
+        ApiError::bad_request(refusal.message).detail(serde_json::json!({ "field": refusal.field }))
+    })?;
     as_person(&app, &caller, &repo, branch, "run", move |d, _| {
-        d.report_status(state, &summary, link.as_deref())
+        d.report_status(
+            checked.state,
+            &checked.summary,
+            checked.link.as_deref(),
+            checked.ttl_seconds.map(std::time::Duration::from_secs),
+        )
     })
     .await
     .map(Json)

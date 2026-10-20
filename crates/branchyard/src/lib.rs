@@ -2677,6 +2677,11 @@ pub enum Activity {
         /// Where to read more, an `http` or `https` URL.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         link: Option<String>,
+        /// How long the report holds, in whole seconds (1 to 7 days),
+        /// when the harness gave a time-to-live. See
+        /// [`reported::judge`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl_seconds: Option<u64>,
     },
     /// The result the branch reported with `report`, a JSON value that
     /// matched its parent's [`contract::ResultContract`] when it had one:

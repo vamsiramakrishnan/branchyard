@@ -127,10 +127,18 @@ pub fn run(config: &Config) -> Result<(), String> {
     let debounce = config.debounce();
     let mut due: Option<Instant> = None;
     loop {
+        // A claim whose time-to-live passed no longer marks its pane.
+        let now = branchyard_support::time::now_ms();
+        bridge.dirty.extend(bridge.branches.expire(now));
+        let expiry = bridge
+            .branches
+            .next_expiry()
+            .map(|at| Duration::from_millis(at.saturating_sub(now)));
         let wait = match due {
             Some(at) => at.saturating_duration_since(Instant::now()),
             None => Duration::from_secs(3600),
         };
+        let wait = expiry.map_or(wait, |expiry| wait.min(expiry));
         match rx.recv_timeout(wait) {
             Ok(Feed::Snapshot(listed)) => {
                 let names = bridge.branches.snapshot(&listed);
@@ -138,7 +146,10 @@ pub fn run(config: &Config) -> Result<(), String> {
             }
             Ok(Feed::Entry(entry)) => {
                 let entry = *entry;
-                if bridge.branches.apply(&entry.branch, &entry.activity) {
+                if bridge
+                    .branches
+                    .apply(&entry.branch, entry.at_ms, &entry.activity)
+                {
                     bridge.dirty.insert(entry.branch);
                 }
             }

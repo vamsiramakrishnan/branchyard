@@ -603,6 +603,7 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             state,
             summary,
             link,
+            ..
         } => style.paint(
             reported_tone(*state),
             &branchyard::reported::describe(*state, summary, link.as_deref()),
@@ -1446,7 +1447,10 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     if let Some(report) = &i.reported {
         pairs.push((
             "reported",
-            style.paint(reported_tone(report.state), &reported_text(report)),
+            match report.stale {
+                true => style.paint(Tone::Dim, &format!("{} (stale)", reported_text(report))),
+                false => style.paint(reported_tone(report.state), &reported_text(report)),
+            },
         ));
     }
     if let Some(wanted) = &i.result_contract {
@@ -2290,6 +2294,7 @@ mod tests {
             state,
             summary: summary.into(),
             link: link.map(Into::into),
+            ttl_seconds: None,
         };
         assert_eq!(
             activity_line(
@@ -2560,12 +2565,13 @@ mod tests {
         }))
         .unwrap();
         assert!(!inspection(&i, Style::PLAIN).contains("reported"));
-        i.reported = Some(branchyard::StatusReport {
-            state: branchyard::ReportedState::Blocked,
-            summary: "needs the\nAPI key".into(),
-            link: Some("https://example.com/i/1".into()),
-            at_ms: 5,
-        });
+        i.reported = Some(branchyard::StatusReport::new(
+            branchyard::ReportedState::Blocked,
+            "needs the\nAPI key".into(),
+            Some("https://example.com/i/1".into()),
+            None,
+            5,
+        ));
         let text = inspection(&i, Style::PLAIN);
         let line = text.lines().find(|l| l.starts_with("reported")).unwrap();
         assert_eq!(

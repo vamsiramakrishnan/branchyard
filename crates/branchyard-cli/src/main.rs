@@ -632,8 +632,15 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             state,
             summary,
             link,
+            ttl,
             json,
-        } => commands::report_status(target, as_branch, &state, &summary, link.as_deref(), json),
+        } => commands::report_status(
+            target,
+            as_branch,
+            (&state, &summary, link.as_deref()),
+            ttl,
+            json,
+        ),
         Command::Answer {
             as_branch,
             message_id,

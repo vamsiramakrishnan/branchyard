@@ -1432,20 +1432,26 @@ impl Delegate {
 
     /// State this branch's own status beside the one its protocol gives:
     /// what it is doing in `summary` (one line, at most 280 characters),
-    /// with an optional `link`. A `blocked` or `failure` report is also
-    /// escalated to this branch's parent, unless it repeats the report
-    /// before it exactly.
+    /// with an optional `link` and an optional time-to-live, `ttl`, after
+    /// which the report reads as stale (whole seconds, 1 second to 7
+    /// days). A `blocked` or `failure` report is also escalated to this
+    /// branch's parent, unless it repeats the current report before it
+    /// exactly.
     pub fn report_status(
         &self,
         state: ReportedState,
         summary: &str,
         link: Option<&str>,
+        ttl: Option<Duration>,
     ) -> Result<Reported, Error> {
+        let ttl_seconds = ttl.map(|t| t.as_secs_f64());
         match &self.via {
-            Via::Local(local) => local.report_status(state, summary, link),
+            Via::Local(local) => {
+                local.report_status(state, summary, link, reported::check_ttl(ttl_seconds)?)
+            }
             Via::Remote(_) => self.typed(
                 "report_status",
-                json!({"state": state, "summary": summary, "link": link}),
+                json!({"state": state, "summary": summary, "link": link, "ttl_seconds": ttl_seconds}),
             ),
         }
     }
@@ -3933,7 +3939,7 @@ impl Local {
             }),
             allowed_harnesses,
             last_message: last_message(&events),
-            reported: reported::latest(&events),
+            reported: reported::latest(&events, branchyard_support::time::now_ms()),
             result_contract: record.result_contract,
             result: contract::latest(&events),
             seat,
@@ -4382,31 +4388,34 @@ impl Local {
     }
 
     /// Record this branch's own status report, and escalate a `blocked` or
-    /// `failure` one to its parent's inbox.
+    /// `failure` one to its parent's inbox. `ttl_seconds` is checked
+    /// already.
     fn report_status(
         &self,
         state: ReportedState,
         summary: &str,
         link: Option<&str>,
+        ttl_seconds: Option<u64>,
     ) -> Result<Reported, Error> {
         let (summary, link) = reported::check(summary, link)?;
         let store = self.store();
-        let previous = reported::latest(&record::read(&store, &self.branch)?);
+        let previous = reported::latest(
+            &record::read(&store, &self.branch)?,
+            branchyard_support::time::now_ms(),
+        );
         let mut recorder = Recorder::open(&store, &self.branch, self.options.observer.clone())?;
         let at_ms = recorder.record_stamped(Activity::StatusReport {
             state,
             summary: summary.clone(),
             link: link.clone(),
+            ttl_seconds,
         })?;
-        let report = StatusReport {
-            state,
-            summary,
-            link,
-            at_ms,
-        };
-        // The parent was told of an identical report when it was first made.
+        let report = StatusReport::new(state, summary, link, ttl_seconds, at_ms);
+        // The parent was told of an identical report when it was first
+        // made, unless that one had gone stale since.
         let repeat = previous.is_some_and(|p| {
-            (p.state, &p.summary, &p.link) == (report.state, &report.summary, &report.link)
+            !p.stale
+                && (p.state, &p.summary, &p.link) == (report.state, &report.summary, &report.link)
         });
         let parent = store.read(&self.branch)?.info.parent;
         let escalation = match (state.needs_attention() && !repeat, parent) {
@@ -4848,6 +4857,9 @@ struct ReportStatusArgs {
     summary: String,
     #[serde(default)]
     link: Option<String>,
+    /// Checked by the handler, so a bad one is refused naming the rule.
+    #[serde(default)]
+    ttl_seconds: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -5168,8 +5180,20 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
         }
         "report_status" => {
             let args: ReportStatusArgs = parse(tool, arguments)?;
-            let state = ReportedState::parse(&args.state)?;
-            to_json(&local.report_status(state, &args.summary, args.link.as_deref())?)
+            // Each field in order, the first that breaks a rule refused.
+            let checked = reported::validate(
+                &args.state,
+                &args.summary,
+                args.link.as_deref(),
+                args.ttl_seconds,
+            )
+            .map_err(|refusal| Error::Denied(refusal.message))?;
+            to_json(&local.report_status(
+                checked.state,
+                &checked.summary,
+                checked.link.as_deref(),
+                checked.ttl_seconds,
+            )?)
         }
         "answer" => {
             let args: AnswerArgs = parse(tool, arguments)?;

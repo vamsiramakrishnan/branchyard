@@ -289,6 +289,7 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
             ReportedState::Working,
             "  reading the tests\n",
             Some("https://example.com/pull/7"),
+            None,
         )
         .unwrap();
     assert_eq!(working.report.state, ReportedState::Working);
@@ -305,7 +306,13 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
     );
     // `blocked` is escalated to the parent, once.
     let blocked = repo
-        .report_status("kid", ReportedState::Blocked, "needs the API key", None)
+        .report_status(
+            "kid",
+            ReportedState::Blocked,
+            "needs the API key",
+            None,
+            None,
+        )
         .unwrap();
     let escalation = blocked.escalation.clone().unwrap();
     assert_eq!(
@@ -323,13 +330,30 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
         Some(blocked.report.clone()),
         "the same value the SDK reads in the server's repository"
     );
+    // Repeated with a time-to-live: not escalated again, and it says when
+    // it expires.
     let repeated = repo
-        .report_status("kid", ReportedState::Blocked, "needs the API key", None)
+        .report_status(
+            "kid",
+            ReportedState::Blocked,
+            "needs the API key",
+            None,
+            Some(std::time::Duration::from_secs(3600)),
+        )
         .unwrap();
     assert!(repeated.escalation.is_none(), "{repeated:?}");
+    assert_eq!(repeated.report.ttl_seconds, Some(3600));
+    assert_eq!(
+        repeated.report.expires_at_ms,
+        Some(repeated.report.at_ms + 3_600_000)
+    );
+    assert_eq!(
+        repo.inspect("kid").unwrap().reported,
+        Some(repeated.report.clone())
+    );
     // A branch with no parent states its status with nobody to tell.
     let alone = repo
-        .report_status("root", ReportedState::Failure, "gave up", None)
+        .report_status("root", ReportedState::Failure, "gave up", None, None)
         .unwrap();
     assert!(alone.escalation.is_none(), "{alone:?}");
     // A field that breaks a rule is 400 invalid_request naming it; nothing
@@ -372,6 +396,18 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
             r#"{"state": "working", "summary": "x", "link": "javascript:alert(1)"}"#.to_owned(),
             "link",
         ),
+        (
+            r#"{"state": "working", "summary": "x", "ttl_seconds": 0}"#.to_owned(),
+            "ttl_seconds",
+        ),
+        (
+            r#"{"state": "working", "summary": "x", "ttl_seconds": 1.5}"#.to_owned(),
+            "ttl_seconds",
+        ),
+        (
+            r#"{"state": "working", "summary": "x", "ttl_seconds": 604801}"#.to_owned(),
+            "ttl_seconds",
+        ),
     ] {
         let (status, answer) = report(&body);
         assert_eq!(status, 400, "{body}: {answer}");
@@ -402,7 +438,7 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
     }
     assert_eq!(repo.events("kid", 0).unwrap().events.len(), before);
     let unknown = repo
-        .report_status("nope", ReportedState::Idle, "x", None)
+        .report_status("nope", ReportedState::Idle, "x", None, None)
         .unwrap_err();
     assert_eq!(unknown.code(), Some("unknown_branch"));
 
@@ -415,6 +451,13 @@ fn a_person_spawns_inspects_and_integrates_through_the_server() {
         ("kid", "by/root")
     );
     assert_eq!(common::git(&f.root, &["show", "by/root:kid.txt"]), "k\n");
+    // Merged since: its last report is stale, read through the route.
+    let after = repo.inspect("kid").unwrap().reported.unwrap();
+    assert!(after.stale, "{after:?}");
+    assert_eq!(
+        after.stale_because,
+        Some(branchyard::reported::StaleBecause::Ended)
+    );
 
     // A spawn locks its parent: a send to it or its removal is refused
     // while the child runs.

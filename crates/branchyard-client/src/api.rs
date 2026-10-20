@@ -670,7 +670,7 @@ pub struct CheckRequest {}
 /// own status beside the protocol's, like `by report-status --as`. The
 /// answer is a [`branchyard::Reported`].
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReportStatusRequest {
     /// One of `working`, `idle`, `blocked`, `complete` or `failure`. A
@@ -683,6 +683,10 @@ pub struct ReportStatusRequest {
     /// A blank one counts as none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+    /// How long the report holds, a whole number of seconds from 1 to
+    /// 604800 (7 days); after that it reads as stale. Omitted for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<f64>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/cancel`: no fields yet.
