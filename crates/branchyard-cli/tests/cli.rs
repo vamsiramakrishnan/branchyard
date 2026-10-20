@@ -1847,8 +1847,8 @@ fn a_delegating_harness_gets_tools_and_skill_outside_its_worktree() {
     assert!(tools.status.success(), "{}", stderr(&tools));
     assert!(
         reply(&repo, "mcp").contains(
-            "mcp tools: spawn,inspect,events,send,steer,propose_integration,check,cancel,discard,\
-             children"
+            "mcp tools: spawn,delegate,brief,inspect,events,send,steer,propose_integration,check,\
+             cancel,discard,children"
         ),
         "{}",
         reply(&repo, "mcp")
