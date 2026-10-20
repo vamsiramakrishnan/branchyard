@@ -190,7 +190,7 @@ pub fn tools() -> Vec<Tool> {
     check.annotations = Some(read_only("Run a branch's check"));
     let spawn_properties = json!({
         "prompt": {"type": "string", "description": "The child's task"},
-        "harness": {"type": "string", "description": "Harness or profile ID, such as codex; defaults to yours and must be allowed by your envelope"},
+        "harness": {"type": "string", "description": "Harness or profile ID, such as codex; defaults to yours and must be allowed by your envelope. auto: the router places the child among those you may delegate to that can run here, by their recorded outcomes for the task, preferring one with a free slot"},
         "name": {"type": "string", "description": "Branch name: lowercase [a-z0-9._-]; defaults to a slug of the prompt"},
         "base": {"type": "string", "description": "A git revision to start from instead of your current work"},
         "budget": {

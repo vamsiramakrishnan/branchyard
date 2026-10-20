@@ -274,6 +274,9 @@ class Spawned:
     # Its reviewer before it lands: {"harness", "model", "rubric",
     # "budget_usd"}; None when it has none.
     review: Optional[Dict[str, Any]] = None
+    # What it waits for when no prerequisite holds it: a free slot on its
+    # harness ([usage] max_running).
+    waiting_for: Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -716,6 +719,12 @@ def spawn(
     review: Union[str, Dict[str, Any], None] = None,
 ) -> Spawned:
     """Create a child branch and start it; returns once it has started.
+
+    `harness="auto"` has the router place the child among the harnesses
+    you may delegate to that can run here, by their recorded outcomes for
+    the task's kind, preferring one with a free slot (`[usage]
+    max_running`); `why` says what decided. A child whose harness is full
+    is created waiting and starts when a slot frees (`waiting_for`).
 
     In a rig, `seat` names the seat to fill: it sets the child's harness,
     limits, check and instructions, and the other arguments may only narrow

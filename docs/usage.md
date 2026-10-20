@@ -31,6 +31,7 @@ near_percent = 90              # a window this full counts as near its limit
 skip_over = 95                 # the router passes over a candidate this full
 claude_five_hour_tokens = 4000000
 claude_weekly_tokens = 40000000
+max_running = { codex = 4, "claude-code" = 2 }   # branches at once, per harness
 
 [usage.accounts.work]          # another login to meter, by its configuration directory
 harness = "claude-code"
@@ -40,6 +41,7 @@ dir = "~/.claude-work"
 - `by run` and `by fan` (not routed) look at each named harness's login before creating anything: near its limit (`near_percent`, default 90, of either window, or a limit message), `warn` (the default) says so on stderr and goes on; `refuse` stops with `the codex login has used 93% of its 5-hour window; it resets in 1h 0m; [usage] guard = "refuse" stops new branches on it`, and nothing is created; `off` does not look.
 - Routed (`--auto`, or a `[fleet]` and no `--harness`; [fleet](fleet.md)), a candidate whose login has used more than `skip_over` of a window is excluded like an unavailable one, and the route says why (`by:   not codex: the codex login has used 99% of its 5-hour window; …, over [usage] skip_over = 95`). With `guard = "refuse"`, `near_percent` excludes too; with `warn`, a near candidate is only warned about.
 - A harness maps to a login by its ID: `claude-code` and its profiles to the Claude Code login, `codex` and its profiles to Codex. The guard and the router check the default logins (the ones a harness uses unless its configuration directory is changed); `[usage.accounts]` adds named logins to `by usage`, not to the guard.
+- `max_running` caps how many branches run at once on each harness (or profile) in the repository, as many sessions as a subscription or key takes: a delegated child past it waits for a free slot and starts when one frees ([placement](delegation.md#placement)). Each value is at least 1; a harness left out has no limit.
 - `by watch`'s header ends with a summary, refreshed every minute: `usage claude-code 5h 50% wk 7.0k · codex 5h 93% wk 40%`, red when a window is full.
 
 **Named account profiles** are directories: Orca's managed accounts are separate `CLAUDE_CONFIG_DIR` or `CODEX_HOME` directories, and so are these. Which account a given branch's harness used is not recorded, so the guard and router see only the default login; per-branch account selection is deferred.

@@ -1572,7 +1572,10 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
                     branchyard::BranchStatus::Waiting => format!(
                         "created {} on {on}, waiting for {}\n",
                         s.name,
-                        s.depends_on.join(", ")
+                        match (&s.waiting_for, s.depends_on.is_empty()) {
+                            (Some(slot), true) => slot.clone(),
+                            _ => s.depends_on.join(", "),
+                        }
                     ),
                     branchyard::BranchStatus::Blocked { reason } => {
                         format!("created {}, blocked: {reason}\n", s.name)

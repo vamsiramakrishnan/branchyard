@@ -458,6 +458,10 @@ pub struct Spawned {
     /// The reviewer that reads its work before it lands. Omitted when none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<crate::ReviewSpec>,
+    /// What it waits for when no prerequisite holds it: a free slot on its
+    /// harness (`[usage] max_running`). Omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for: Option<String>,
 }
 
 /// Most bytes one entry of a shared brief may hold.
@@ -2547,7 +2551,10 @@ fn merged_outcome(merged: &Merged) -> String {
 /// What became of a spawned child, for its parent's event log.
 fn spawn_outcome(spawned: &Spawned) -> String {
     match &spawned.status {
-        BranchStatus::Waiting => format!("waiting for {}", spawned.depends_on.join(", ")),
+        BranchStatus::Waiting => match (&spawned.waiting_for, spawned.depends_on.is_empty()) {
+            (Some(slot), true) => format!("waiting for {slot}"),
+            _ => format!("waiting for {}", spawned.depends_on.join(", ")),
+        },
         BranchStatus::Blocked { reason } => format!("blocked: {reason}"),
         _ => {
             let on = profiles::label(&spawned.harness, &spawned.profile);
@@ -3139,12 +3146,18 @@ impl Local {
             .into_iter()
             .map(|child| {
                 let name = child.record.info.name.clone();
-                let info = started
+                let current = started
                     .iter()
                     .find(|r| r.info.name == name)
-                    .map(|r| r.info.clone())
-                    .or_else(|| store.read(&name).ok().map(|r| r.info))
-                    .unwrap_or(child.record.info);
+                    .cloned()
+                    .or_else(|| store.read(&name).ok());
+                let waiting_for = current
+                    .as_ref()
+                    .filter(|r| {
+                        r.info.status == BranchStatus::Waiting && child.depends_on.is_empty()
+                    })
+                    .and_then(|r| crate::capacity::full(&self.yard, r).ok().flatten());
+                let info = current.map(|r| r.info).unwrap_or(child.record.info);
                 Spawned {
                     name: info.name,
                     git_branch: info.git_branch,
@@ -3171,6 +3184,7 @@ impl Local {
                         .unwrap_or_default(),
                     land: child.record.grant.as_ref().is_some_and(|g| g.land),
                     review: child.record.grant.as_ref().and_then(|g| g.review.clone()),
+                    waiting_for,
                 }
             })
             .collect();
@@ -3217,6 +3231,15 @@ impl Local {
         if let Some(result) = &request.result {
             result.check()?;
         }
+        // `auto`: the router places it.
+        let placed;
+        let request = match request.harness.as_deref() {
+            Some(crate::capacity::AUTO) => {
+                placed = self.place(request)?;
+                &placed
+            }
+            _ => request,
+        };
         let seated = self.seat(caller, grant, request, planned)?;
         let filled;
         let request = match &seated {
@@ -3694,6 +3717,77 @@ impl Local {
     /// The advice for a subtask, as this branch: the candidates are its
     /// task's fleet entry for the kind, or the harnesses its envelope
     /// allows, with what it may still spend.
+    /// `request` with its harness chosen for `auto`: the router's pick among
+    /// the harnesses this branch may delegate to that can run here, by their
+    /// recorded outcomes for the task's kind, unless its harness is full and
+    /// another available one has a free slot; with no free slot anywhere, the
+    /// pick, which waits for one. Its model is the pick's unless it names
+    /// one, and its `why` says what decided unless it gives one.
+    fn place(&self, request: &Spawn) -> Result<Spawn, Error> {
+        if request.seat.is_some() {
+            return Err(Error::Denied(
+                "a seat sets the child's harness; drop harness auto, or the seat".into(),
+            ));
+        }
+        let advice = self.advise(&request.prompt, None)?;
+        let full =
+            |harness: &str| crate::capacity::full_for_child(&self.yard, harness, &self.branch);
+        let picked = advice
+            .pick
+            .as_ref()
+            .map(|p| (p.candidate.clone(), p.reason.clone()));
+        let chosen = match picked {
+            Some((candidate, reason)) => match full(&candidate.harness) {
+                None => (candidate, format!("placed by the router: {reason}")),
+                Some(slot) => {
+                    let room = advice
+                        .candidates
+                        .iter()
+                        .filter(|a| a.available && full(&a.candidate.harness).is_none())
+                        .max_by(|a, b| a.expected.total_cmp(&b.expected));
+                    match room {
+                        Some(other) => (
+                            other.candidate.clone(),
+                            format!(
+                                "placed on {} with a free slot: the router's pick, {}, waits for \
+                                 {slot}",
+                                other.candidate.label(),
+                                candidate.label()
+                            ),
+                        ),
+                        None => (
+                            candidate,
+                            format!("placed by the router ({reason}); it waits for {slot}"),
+                        ),
+                    }
+                }
+            },
+            None => {
+                let why: Vec<String> = advice
+                    .candidates
+                    .iter()
+                    .filter_map(|a| {
+                        a.reason
+                            .as_ref()
+                            .map(|r| format!("{}: {r}", a.candidate.label()))
+                    })
+                    .collect();
+                return Err(Error::Denied(format!(
+                    "no harness {} may delegate to can run here now ({}); name one with harness",
+                    self.branch,
+                    why.join("; ")
+                )));
+            }
+        };
+        let (candidate, why) = chosen;
+        Ok(Spawn {
+            harness: Some(candidate.harness.clone()),
+            model: request.model.clone().or(candidate.model.clone()),
+            why: request.why.clone().or(Some(why)),
+            ..request.clone()
+        })
+    }
+
     fn advise(&self, prompt: &str, kind: Option<crate::TaskKind>) -> Result<crate::Advice, Error> {
         let store = self.store();
         let record = store.read(&self.branch)?;

@@ -99,6 +99,7 @@ mod adopt;
 mod assignment;
 mod broker;
 mod bundle;
+mod capacity;
 mod checkpoint;
 mod compare;
 pub mod configure;
@@ -197,6 +198,7 @@ pub use branchyard_provision::{
 };
 use branchyard_workspace::Repository;
 pub use bundle::BundleEntry;
+pub use capacity::AUTO as AUTO_HARNESS;
 pub use checkpoint::{
     entries as checkpoint_entries, recorded as recorded_checkpoints, CheckpointEntry, Checkpoints,
     Rewound,

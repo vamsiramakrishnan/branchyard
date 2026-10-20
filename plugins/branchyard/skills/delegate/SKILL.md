@@ -69,7 +69,11 @@ run it, and end your turn; your next turn starts with the result.
    to, ideally another vendor's than the children's), a reviewer reads each
    child's work before it lands; its findings go back to the child as a turn
    to fix them. Give the review a `budget_usd` when you have a cost limit:
-   each review is a child of yours and spends from your budget.
+   each review is a child of yours and spends from your budget. A task may
+   name `"harness": "auto"`: the router places it on the harness you may run
+   whose recorded outcomes for that kind of task are best, preferring one
+   with a free slot, and records why. A child whose harness is full waits
+   for a free slot and starts by itself (`waiting_for` says so).
 4. **End your turn.** Do not wait, poll or integrate. When everything has
    settled, Branchyard starts your next turn with a summary: what landed in
    your branch (it is in your worktree and your candidate already), what

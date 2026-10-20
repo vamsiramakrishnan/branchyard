@@ -536,9 +536,13 @@ fn verdict(yard: &Yard, record: &Record) -> Result<Verdict, Error> {
             }
         }
     }
-    Ok(match wait {
-        true => Verdict::Wait,
-        false => Verdict::Start,
+    if wait {
+        return Ok(Verdict::Wait);
+    }
+    // Its prerequisites let it start; its harness may have no free slot.
+    Ok(match crate::capacity::full(yard, record)? {
+        Some(_) => Verdict::Wait,
+        None => Verdict::Start,
     })
 }
 
@@ -694,6 +698,30 @@ pub(crate) fn settled(yard: &Yard, name: &str, options: Option<&TaskOptions>) {
             "advance the dependent branches",
             advance(yard, &dependents, options),
         );
+    }
+    // A slot on its harness may have freed. Its siblings start under its
+    // turn's options, as dependents do; another tree's only under those its
+    // own graph was applied with here.
+    let parent = store
+        .backend()
+        .read(name)
+        .ok()
+        .flatten()
+        .and_then(|r| r.info.parent);
+    let (siblings, others): (Vec<_>, Vec<_>) = crate::capacity::queued_behind(yard, name)
+        .into_iter()
+        .partition(|r| r.info.parent.is_some() && r.info.parent == parent);
+    // `advance` starts the last named first: the oldest goes last.
+    let names = |records: Vec<Record>| -> Vec<String> {
+        records.into_iter().rev().map(|r| r.info.name).collect()
+    };
+    for (queued, given) in [(names(siblings), options), (names(others), None)] {
+        if !queued.is_empty() {
+            best_effort(
+                "start the branches waiting for a free slot",
+                advance(yard, &queued, given),
+            );
+        }
     }
     // A parked ancestor wakes once everything below it has settled.
     crate::wake::settled(yard, name, options);

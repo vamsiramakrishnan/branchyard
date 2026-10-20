@@ -162,6 +162,7 @@ fn apply(yard: &Yard, config: &ProjectConfig) -> Result<(), Error> {
     if let Some(knowledge) = knowledge {
         yard.use_knowledge(knowledge);
     }
+    yard.use_max_running(config.usage.max_running.clone());
     *projection::lock(&yard.hub.config) = Some(Arc::new(Configured {
         config: Arc::new(config.clone()),
         options,

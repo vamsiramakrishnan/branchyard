@@ -15776,6 +15776,13 @@
                 }
               ],
               "description": "The reviewer that reads its work before it lands. Omitted when none."
+            },
+            "waiting_for": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What it waits for when no prerequisite holds it: a free slot on its\nharness (`[usage] max_running`). Omitted otherwise."
             }
           },
           "required": [
@@ -17299,7 +17306,7 @@
                 "string",
                 "null"
               ],
-              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes ([`crate::review`])."
+              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes (`crate::review`)."
             }
           },
           "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
@@ -18599,7 +18606,7 @@
                 "string",
                 "null"
               ],
-              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes ([`crate::review`])."
+              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes (`crate::review`)."
             }
           },
           "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
@@ -20201,7 +20208,7 @@
                 "string",
                 "null"
               ],
-              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes ([`crate::review`])."
+              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes (`crate::review`)."
             }
           },
           "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
@@ -32456,7 +32463,7 @@
                 "string",
                 "null"
               ],
-              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes ([`crate::review`])."
+              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes (`crate::review`)."
             }
           },
           "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
@@ -34606,7 +34613,7 @@
                 "string",
                 "null"
               ],
-              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes ([`crate::review`])."
+              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes (`crate::review`)."
             }
           },
           "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
