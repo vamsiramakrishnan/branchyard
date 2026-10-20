@@ -1,28 +1,94 @@
 ---
 name: delegate
-description: Delegate parts of a coding task to child branches with Branchyard. Use when you run on a Branchyard branch (BRANCHYARD_BRANCH is set) and the work splits into independent pieces, needs a second harness, or should be tried more than one way. Covers `by spawn` (including children that wait for siblings), `by graph`, `by inspect`, `by wait`, `by integrate` (several children at once), `by check` (run your check before you finish), `by discard`, ending your turn while children run, artifacts, messaging your parent, the Python module and the MCP tools.
+description: Delegate parts of a coding task to child branches with Branchyard. Use when you run on a Branchyard branch (BRANCHYARD_BRANCH is set) and the work splits into pieces with separate files, needs a second harness or a reviewer from another vendor, or should be tried more than one way. Covers `by delegate` (a whole plan at once, with a shared brief, children the engine lands and reviews for you), `by brief`, `by spawn` (including children that wait for siblings), `by graph`, `by inspect`, `by wait`, `by integrate` (several children at once), `by check` (run your check before you finish), `by discard`, ending your turn while children run, artifacts, messaging your parent, the Python module and the MCP tools.
 ---
 
 # Delegating with Branchyard
 
 You are running on a Branchyard branch: your own git branch and worktree.
 You may create child branches, each with its own harness, budget and
-worktree, and merge their results into your branch. You act only as your
-own branch and only on your descendants. Branchyard enforces your envelope
-(depth, number of children, allowed harnesses) and your budget; a refusal
-says why.
+worktree, and have their work brought into your branch. You act only as
+your own branch and only on your descendants. Branchyard enforces your
+envelope (depth, number of children, allowed harnesses) and your budget; a
+refusal says why.
 
 ## When to delegate
 
 - The task splits into parts that touch different files or modules and can
   proceed in parallel.
 - A part suits another harness better, and your envelope allows it.
+- The work matters enough that someone else should review it before it
+  lands: a reviewer on another vendor's harness catches what its author
+  cannot.
 - You want two approaches to the same problem and will keep one.
 
 Do small or tightly coupled work yourself. Each child costs a harness
-session, and merging overlapping edits produces conflicts.
+session, and work split along lines that cross the same files conflicts.
 
-## The loop
+## The short way: delegate, end your turn, be resumed
+
+You do not have to orchestrate. Say the whole split once, let the engine
+run it, and end your turn; your next turn starts with the result.
+
+1. **Split by ownership.** Give each part the paths it owns (`owns`), so no
+   two children touch the same file: siblings that own disjoint paths cannot
+   conflict, and a change a child makes outside its paths is refused when it
+   lands. Files every part needs, such as a lockfile, belong to no child:
+   regenerate them yourself afterwards.
+2. **Settle the interfaces first, in a brief.** The brief is what every
+   child shares and no prompt should repeat: the goal, the conventions, and
+   the contracts between the parts (a type, a function signature, a file
+   format). Children are given it each turn. A decision you make later, such
+   as an interface settled after a child's question, is one more entry:
+   `by brief "The lexer returns Spanned<Token>."`; children running now are
+   sent it at once.
+3. **Delegate the plan, left to land.** One call creates every child, all
+   or none:
+
+   ```sh
+   by delegate --plan "$TMPDIR/plan.json" --land
+   ```
+
+   ```json
+   {"brief": "Tokens are the Token type in src/token.rs. Add no crates.",
+    "review": {"harness": "codex", "budget_usd": 0.50},
+    "tasks": [
+      {"name": "lexer", "prompt": "Write the lexer in src/lexer; run cargo test -p lexer",
+       "owns": ["src/lexer"]},
+      {"name": "parser", "prompt": "Write the parser in src/parser; run cargo test -p parser",
+       "owns": ["src/parser"], "depends_on": ["lexer"], "after": "integrated"}]}
+   ```
+
+   With `--land` (or `"land": true` in the plan), the engine integrates each
+   child into your branch when it is ready, as `by integrate` would, its
+   check on the exact merge included. A child that conflicts with your
+   branch is sent a turn to merge your branch and resolve it; one whose
+   check fails on the merge is sent the failure to fix; one that changed
+   paths it does not own is told to undo them. At most two such turns; then
+   it is left for you, with why. With `review` (a harness you may delegate
+   to, ideally another vendor's than the children's), a reviewer reads each
+   child's work before it lands; its findings go back to the child as a turn
+   to fix them. Give the review a `budget_usd` when you have a cost limit:
+   each review is a child of yours and spends from your budget.
+4. **End your turn.** Do not wait, poll or integrate. When everything has
+   settled, Branchyard starts your next turn with a summary: what landed in
+   your branch (it is in your worktree and your candidate already), what
+   was left for you and why, and each child's status, cost and last message.
+5. **Finish.** Read what landed, run `by check` on the whole, fix what is
+   left (`by send <child> "<fix>"`, or do it yourself; integrate a child
+   left for you with `by integrate <child>` once it is fixed), and end your
+   turn.
+
+`by delegate` is also the `delegate` tool's arguments (`{"tasks", "brief",
+"land", "review"}`), `branchyard.delegate(tasks, brief=..., land=True,
+review="codex")` in Python, and `Delegate::delegate` in Rust. A single child
+works the same way: `by spawn "..." --owns src/x --land --review codex`.
+`by inspect <child>` shows its `landing` (where it landed, or why not, and
+the turns sent to fix it) and its `review`.
+
+The rest of this skill is the long way: driving each child yourself.
+
+## The loop, by hand
 
 1. Decompose. Give each child a self-contained prompt: the goal, the files
    involved, the constraints, and how to check the result. A child sees
@@ -368,6 +434,21 @@ except branchyard.BranchyardError as error:
     print(error.kind, error.message)
 ```
 
+Or hand the engine the whole split and end your turn; your next turn says
+what landed:
+
+```python
+branchyard.delegate(
+    [
+        {"name": "tokenizer", "prompt": "Port the tokenizer; run its tests", "owns": ["src/tokenizer"]},
+        {"name": "formatter", "prompt": "Port the formatter; run its tests", "owns": ["src/formatter"]},
+    ],
+    brief="The new API is in src/api.rs; keep the public names.",
+    land=True,
+    review={"harness": "codex", "budget_usd": 0.50},
+)
+```
+
 `branchyard.wait_any(...)` returns when the first settles. Errors are
 `DeniedError` (envelope, budget or authority), `RunningError` (also a wait
 that timed out), `NotFoundError`, or `BranchyardError` with a `kind`.
@@ -375,7 +456,8 @@ that timed out), `NotFoundError`, or `BranchyardError` with a `kind`.
 ## Without a shell
 
 If you cannot run commands, the same operations are MCP tools on the
-`branchyard` server: `spawn` (with `depends_on` and `result`), `inspect`, `events`, `send`,
+`branchyard` server: `delegate` (`tasks`, `brief`, `land`, `review`), `brief`,
+`spawn` (with `depends_on`, `owns`, `land`, `review` and `result`), `inspect`, `events`, `send`,
 `steer`, `propose_integration` (`branch`, or `branches` to integrate several
 together), `check` (your own work before you finish, or a child's), `wait` (`branches`, `any`, `timeout_seconds`), `cancel`, `discard`,
 `children`, `graph`, `apply_graph`, the artifact and scratch tools, and `ask`,
