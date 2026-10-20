@@ -198,6 +198,11 @@ pub(crate) struct Record {
     /// its children are.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed: Vec<RemovedChild>,
+    /// For a child its parent left to the engine to land: what became of
+    /// that, and the turns the engine sent it to fix its work. See
+    /// `crate::land`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<crate::land::Landing>,
     /// While a turn on the model gateway runs: what the branch had spent
     /// before the turn. The record's `cost_usd` then also counts the
     /// turn's metered calls as they happen, so a parent, an ancestor's cap

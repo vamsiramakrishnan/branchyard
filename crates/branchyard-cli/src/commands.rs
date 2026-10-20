@@ -1539,6 +1539,7 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         result,
         why: args.why.clone(),
         owns: args.owns.clone(),
+        land: args.land,
     };
     if let Some(delegate) = harness_delegate(json)? {
         if args.parent.is_some()
@@ -1678,17 +1679,30 @@ pub fn check(env: &Env, target: &Target, branch: Option<String>, json: bool) -> 
     }
 }
 
-/// Which check a spawned child must pass when it is integrated.
+/// Which check a spawned child must pass when it is integrated, and who
+/// integrates it.
 fn check_note(spawned: &branchyard::Spawned) -> String {
-    match (&spawned.check, spawned.check_inherited) {
-        (Some(check), true) => format!(
+    let check = match (&spawned.check, spawned.check_inherited, spawned.land) {
+        (Some(check), true, false) => format!(
             "its check, inherited from its parent: {}; siblings that share it are integrated \
              together (by integrate a b), and a child that should land alone needs its own \
              (--check)\n",
             check.join(" ")
         ),
-        (Some(check), false) => format!("its check: {}\n", check.join(" ")),
-        (None, _) => String::new(),
+        (Some(check), true, true) => format!(
+            "its check, inherited from its parent: {}; siblings that share it land together\n",
+            check.join(" ")
+        ),
+        (Some(check), false, _) => format!("its check: {}\n", check.join(" ")),
+        (None, ..) => String::new(),
+    };
+    match spawned.land {
+        true => {
+            check
+                + "left to the engine to land: it is integrated into your branch when it is ready, \
+               and your next turn says what landed\n"
+        }
+        false => check,
     }
 }
 
@@ -2329,11 +2343,13 @@ pub fn graph(env: &Env, target: &Target, args: &GraphArgs) -> Outcome {
 
 /// `by delegate --plan FILE`: a plan of children, created all or none,
 /// with the brief they share.
+/// `by delegate`: `given` is `--brief` and `--land`, which override the
+/// plan's own.
 pub fn delegate(
     env: &Env,
     target: &Target,
     plan: &str,
-    brief: Option<String>,
+    given: (Option<String>, bool),
     parent: Option<String>,
     task: &TaskArgs,
     json: bool,
@@ -2354,9 +2370,11 @@ pub fn delegate(
         Ok(plan) => plan,
         Err(error) => return fail(json, &error),
     };
+    let (brief, land) = given;
     if let Some(brief) = brief {
         plan.brief = Some(brief);
     }
+    plan.land |= land;
     let result = match (inside, target) {
         (Some(delegate), _) => delegate.delegate(plan),
         (None, Target::Remote(_)) => Err(no_plan_route()),

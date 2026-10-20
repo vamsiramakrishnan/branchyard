@@ -593,6 +593,10 @@ pub struct SpawnRequest {
     /// `docs/delegation.md#ownership`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owns: Vec<String>,
+    /// Leave the child to the engine to land, like
+    /// [`branchyard::Spawn::land`]. See `docs/delegation.md#landing`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub land: bool,
 }
 
 fn is_settled(after: &After) -> bool {

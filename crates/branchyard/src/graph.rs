@@ -204,6 +204,9 @@ pub struct SpawnSpec {
     /// integrated. See `docs/delegation.md#ownership`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owns: Vec<String>,
+    /// Leave the child to the engine to land; see `docs/delegation.md#landing`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub land: bool,
 }
 
 impl SpawnSpec {
@@ -229,6 +232,7 @@ impl SpawnSpec {
             model: self.model.clone(),
             result: self.result.clone(),
             owns: self.owns.clone(),
+            land: self.land,
         })
     }
 
@@ -255,6 +259,7 @@ impl SpawnSpec {
             result: spawn.result.clone(),
             why: spawn.why.clone(),
             owns: spawn.owns.clone(),
+            land: spawn.land,
         }
     }
 }

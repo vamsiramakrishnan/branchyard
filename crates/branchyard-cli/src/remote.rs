@@ -878,6 +878,7 @@ pub fn spawn(
         result: contract,
         why: args.why.clone(),
         owns: args.owns.clone(),
+        land: args.land,
     };
     let op = remote
         .repo

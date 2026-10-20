@@ -587,6 +587,8 @@ pub struct SpawnArgs {
     /// `--owns`, repeatable: the paths the child owns. Empty: none of its
     /// own, bounded only by the scope its parent works under.
     pub owns: Vec<String>,
+    /// `--land`: leave the child to the engine to land.
+    pub land: bool,
     pub json: bool,
 }
 
@@ -1744,6 +1746,10 @@ pub enum Command {
         /// the interfaces between their parts
         #[arg(long, value_name = "TEXT", value_parser = non_blank)]
         brief: Option<String>,
+        /// Leave every task to the engine to land, as `spawn --land` does: each is integrated
+        /// into your branch when it is ready, and your next turn says what landed
+        #[arg(long)]
+        land: bool,
         /// The delegating branch (outside a harness; inside one, it is the harness's own)
         #[arg(long, value_name = "BRANCH")]
         parent: Option<String>,
@@ -4365,6 +4371,11 @@ pub struct SpawnGraph {
     /// it is integrated, and it is told them every turn. Repeatable, or comma-separated
     #[arg(long, value_name = "PATH,PATH,...", value_parser = harness_list)]
     owns: Vec<List>,
+    /// Leave the child to the engine to land: once its turn ends ready while you wait on your
+    /// children, it is integrated into your branch, its check on the merge included, and a child
+    /// that cannot land is sent a turn to fix its work; your next turn says what landed
+    #[arg(long)]
+    land: bool,
 }
 
 impl Flags for SpawnFlags {
@@ -4419,6 +4430,7 @@ impl Flags for SpawnFlags {
                 .into_iter()
                 .flat_map(|list| list.0)
                 .collect(),
+            land: self.graph.land,
             json: self.json,
         })
     }
@@ -5539,6 +5551,16 @@ mod tests {
             ["src/parser", "tests/parser_*.rs", "docs/parser.md"]
         );
         assert!(granted.owns.is_empty());
+        assert!(!owner.land);
+        let Command::Spawn { spawn: lander, .. } = parse_str("spawn go --land").unwrap() else {
+            panic!("not spawn")
+        };
+        assert!(lander.land);
+        let Command::Delegate { land, .. } = parse_str("delegate --plan p.json --land").unwrap()
+        else {
+            panic!("not delegate")
+        };
+        assert!(land);
         assert_eq!(spawn.seat.as_deref(), Some("worker"));
         assert!(err("spawn go --after soon").contains("[possible values: settled, integrated]"));
         assert!(err("spawn go --bind cache").contains("--bind"));

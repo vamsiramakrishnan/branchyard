@@ -14488,6 +14488,10 @@
             "type": "string"
           },
           "description": "The paths the child owns, like [`branchyard::Spawn::owns`]: its\nchanges elsewhere are refused when it is integrated. See\n`docs/delegation.md#ownership`."
+        },
+        "land": {
+          "type": "boolean",
+          "description": "Leave the child to the engine to land, like\n[`branchyard::Spawn::land`]. See `docs/delegation.md#landing`."
         }
       },
       "required": [
@@ -14941,6 +14945,10 @@
                     "type": "string"
                   },
                   "description": "The paths the child owns: files, directories or globs relative to\nthe repository; its changes elsewhere are refused when it is\nintegrated. See `docs/delegation.md#ownership`."
+                },
+                "land": {
+                  "type": "boolean",
+                  "description": "Leave the child to the engine to land; see `docs/delegation.md#landing`."
                 },
                 "kind": {
                   "type": "string",
@@ -15661,6 +15669,10 @@
                 "type": "string"
               },
               "description": "The paths it owns, as normalized. Omitted when none."
+            },
+            "land": {
+              "type": "boolean",
+              "description": "It was left to the engine to land. Omitted when false."
             }
           },
           "required": [
@@ -16594,6 +16606,21 @@
                 }
               },
               "description": "The scopes of its ancestors that bound it too, nearest first: a path\nis in its scope only when `owns` (if any) and each of these cover\nit. Omitted when none."
+            },
+            "land": {
+              "type": "boolean",
+              "description": "Its parent left it to the engine to land. Omitted when false."
+            },
+            "landing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Landing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What became of its landing: where it landed, or why it has not, and\nthe turns the engine sent it to fix its work. Omitted until the\nengine tried to land it."
             }
           },
           "required": [
@@ -17062,6 +17089,29 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "Landing": {
+          "type": "object",
+          "properties": {
+            "fixes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Turns the engine sent it to make its work land."
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Its latest landing: where it landed, or why it has not."
+            },
+            "left": {
+              "type": "boolean",
+              "description": "The engine stopped trying: its parent decides what to do with it."
+            }
+          },
+          "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
         }
       }
     },
@@ -18013,6 +18063,21 @@
                 }
               },
               "description": "The scopes of its ancestors that bound it too, nearest first: a path\nis in its scope only when `owns` (if any) and each of these cover\nit. Omitted when none."
+            },
+            "land": {
+              "type": "boolean",
+              "description": "Its parent left it to the engine to land. Omitted when false."
+            },
+            "landing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Landing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What became of its landing: where it landed, or why it has not, and\nthe turns the engine sent it to fix its work. Omitted until the\nengine tried to land it."
             }
           },
           "required": [
@@ -18271,6 +18336,29 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "Landing": {
+          "type": "object",
+          "properties": {
+            "fixes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Turns the engine sent it to make its work land."
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Its latest landing: where it landed, or why it has not."
+            },
+            "left": {
+              "type": "boolean",
+              "description": "The engine stopped trying: its parent decides what to do with it."
+            }
+          },
+          "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
         },
         "MapReport": {
           "type": "object",
@@ -19524,6 +19612,21 @@
                 }
               },
               "description": "The scopes of its ancestors that bound it too, nearest first: a path\nis in its scope only when `owns` (if any) and each of these cover\nit. Omitted when none."
+            },
+            "land": {
+              "type": "boolean",
+              "description": "Its parent left it to the engine to land. Omitted when false."
+            },
+            "landing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Landing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What became of its landing: where it landed, or why it has not, and\nthe turns the engine sent it to fix its work. Omitted until the\nengine tried to land it."
             }
           },
           "required": [
@@ -19782,6 +19885,29 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "Landing": {
+          "type": "object",
+          "properties": {
+            "fixes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Turns the engine sent it to make its work land."
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Its latest landing: where it landed, or why it has not."
+            },
+            "left": {
+              "type": "boolean",
+              "description": "The engine stopped trying: its parent decides what to do with it."
+            }
+          },
+          "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
         },
         "MapReport": {
           "type": "object",
@@ -31688,6 +31814,21 @@
                 }
               },
               "description": "The scopes of its ancestors that bound it too, nearest first: a path\nis in its scope only when `owns` (if any) and each of these cover\nit. Omitted when none."
+            },
+            "land": {
+              "type": "boolean",
+              "description": "Its parent left it to the engine to land. Omitted when false."
+            },
+            "landing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Landing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What became of its landing: where it landed, or why it has not, and\nthe turns the engine sent it to fix its work. Omitted until the\nengine tried to land it."
             }
           },
           "required": [
@@ -31946,6 +32087,29 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "Landing": {
+          "type": "object",
+          "properties": {
+            "fixes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Turns the engine sent it to make its work land."
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Its latest landing: where it landed, or why it has not."
+            },
+            "left": {
+              "type": "boolean",
+              "description": "The engine stopped trying: its parent decides what to do with it."
+            }
+          },
+          "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
         },
         "MapReport": {
           "type": "object",
@@ -33535,6 +33699,21 @@
             }
           },
           "description": "The scopes of its ancestors that bound it too, nearest first: a path\nis in its scope only when `owns` (if any) and each of these cover\nit. Omitted when none."
+        },
+        "land": {
+          "type": "boolean",
+          "description": "Its parent left it to the engine to land. Omitted when false."
+        },
+        "landing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Landing"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What became of its landing: where it landed, or why it has not, and\nthe turns the engine sent it to fix its work. Omitted until the\nengine tried to land it."
         }
       },
       "required": [
@@ -34005,6 +34184,29 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "Landing": {
+          "type": "object",
+          "properties": {
+            "fixes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Turns the engine sent it to make its work land."
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Its latest landing: where it landed, or why it has not."
+            },
+            "left": {
+              "type": "boolean",
+              "description": "The engine stopped trying: its parent decides what to do with it."
+            }
+          },
+          "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
         }
       }
     },

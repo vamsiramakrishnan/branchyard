@@ -245,6 +245,11 @@ pub(crate) struct Grant {
     /// integrated. See [`crate::scope`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owns: Vec<String>,
+    /// Its parent left it to the engine to land: integrated into the
+    /// parent's branch when its turn ends ready while the parent waits on
+    /// it. See [`crate::land`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub land: bool,
 }
 
 impl Grant {
@@ -255,6 +260,7 @@ impl Grant {
             limits: None,
             seats: None,
             owns: Vec::new(),
+            land: false,
         }
     }
 
@@ -338,6 +344,12 @@ pub struct Spawn {
     /// only by the scope its parent works under, if any. See
     /// [`crate::scope`].
     pub owns: Vec<String>,
+    /// Leave the child to the engine to land: once its turn ends ready
+    /// while this branch waits on its children, it is integrated into this
+    /// branch's git branch, its check on the merge included, and a child
+    /// that cannot land is sent a turn to fix its work. See
+    /// `docs/delegation.md#landing`.
+    pub land: bool,
 }
 
 impl Spawn {
@@ -431,6 +443,9 @@ pub struct Spawned {
     /// The paths it owns, as normalized. Omitted when none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owns: Vec<String>,
+    /// It was left to the engine to land. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub land: bool,
 }
 
 /// Most bytes one entry of a shared brief may hold.
@@ -458,6 +473,11 @@ pub struct DelegationPlan {
     /// The subtasks, each as `spawn` takes it. `depends_on` may name
     /// another subtask by its `name`, or an existing child.
     pub tasks: Vec<SpawnSpec>,
+    /// Leave every task to the engine to land, as each task's own `land`
+    /// does: integrated into this branch when it is ready, while this
+    /// branch waits on its children. See `docs/delegation.md#landing`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub land: bool,
 }
 
 /// What a plan created.
@@ -541,13 +561,20 @@ fn next_after_delegating(spawned: &[Spawned]) -> String {
     let live = spawned
         .iter()
         .any(|s| matches!(s.status, BranchStatus::Running | BranchStatus::Waiting));
-    match live {
-        true => "End your turn now: when every child has settled you are started again \
+    let landing = spawned.iter().any(|s| s.land);
+    match (live, landing) {
+        (true, true) => "End your turn now: the engine integrates each child into your branch \
+                 when it is ready (its check on the merge included), sends one that cannot land a \
+                 turn to fix it, and starts you again with what landed and what did not. Until \
+                 then, `by steer <child> \"<text>\"` corrects a running child, and `by brief \
+                 \"<text>\"` tells all of them a new decision."
+            .into(),
+        (true, false) => "End your turn now: when every child has settled you are started again \
                  with a summary of each (status, diff, cost, check, last message, result). Until \
                  then, `by steer <child> \"<text>\"` corrects a running child, and `by brief \
                  \"<text>\"` tells all of them a new decision."
             .into(),
-        false => "No child is running; `by inspect <child>` says why each stopped.".into(),
+        (false, _) => "No child is running; `by inspect <child>` says why each stopped.".into(),
     }
 }
 
@@ -809,6 +836,14 @@ pub struct Inspection {
     /// it. Omitted when none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owns_within: Vec<Vec<String>>,
+    /// Its parent left it to the engine to land. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub land: bool,
+    /// What became of its landing: where it landed, or why it has not, and
+    /// the turns the engine sent it to fix its work. Omitted until the
+    /// engine tried to land it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<crate::land::Landing>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -2087,7 +2122,7 @@ pub(crate) fn wait_subtree(yard: &Yard, name: &str) -> Result<Vec<BranchInfo>, E
             watched.push(own.info.clone());
         }
         let names: BTreeSet<String> = watched.iter().map(|info| info.name.clone()).collect();
-        let handles: Vec<JoinHandle<()>> = {
+        let mut handles: Vec<JoinHandle<()>> = {
             let mut running = lock(&yard.hub.running);
             let waiting: Vec<String> = running
                 .keys()
@@ -2099,6 +2134,14 @@ pub(crate) fn wait_subtree(yard: &Yard, name: &str) -> Result<Vec<BranchInfo>, E
                 .filter_map(|key| running.remove(key))
                 .collect()
         };
+        // And the ended turns still running their hooks, such as one
+        // landing its branch that started the branch's next turn.
+        {
+            let mut ending = lock(&yard.hub.ending);
+            for name in &names {
+                handles.extend(ending.remove(name).unwrap_or_default());
+            }
+        }
         if !handles.is_empty() {
             for handle in handles {
                 // A panic in a child's thread has already been reported by
@@ -2214,9 +2257,22 @@ pub(crate) fn start_turn(
     );
     match started {
         Ok(handle) => {
-            let previous = lock(&yard.hub.running).insert(name, handle);
-            if let Some(previous) = previous {
-                branchyard_support::join_reporting("previous turn", previous);
+            let previous = lock(&yard.hub.running).insert(name.clone(), handle);
+            match previous {
+                // The previous turn's own thread is starting this turn, from
+                // its hooks after its turn ended (the engine landing the
+                // branch sends it a turn to fix its work): it cannot wait for
+                // itself, and a wait joins it once its hooks return.
+                Some(previous) if previous.thread().id() == std::thread::current().id() => {
+                    lock(&yard.hub.ending)
+                        .entry(name)
+                        .or_default()
+                        .push(previous);
+                }
+                Some(previous) => {
+                    branchyard_support::join_reporting("previous turn", previous);
+                }
+                None => {}
             }
             Ok(())
         }
@@ -2736,7 +2792,11 @@ impl Local {
             let edits = plan
                 .tasks
                 .iter()
-                .map(|task| Ok(Edit::Spawn(Box::new(task.to_spawn()?))))
+                .map(|task| {
+                    let mut spawn = task.to_spawn()?;
+                    spawn.land |= plan.land;
+                    Ok(Edit::Spawn(Box::new(spawn)))
+                })
                 .collect::<Result<Vec<_>, Error>>()?;
             let applied = self.try_apply_graph(&edits, None, brief.as_deref())?;
             let steered = match &brief {
@@ -3087,6 +3147,7 @@ impl Local {
                         .as_ref()
                         .map(|g| g.owns.clone())
                         .unwrap_or_default(),
+                    land: child.record.grant.as_ref().is_some_and(|g| g.land),
                 }
             })
             .collect();
@@ -3172,6 +3233,7 @@ impl Local {
             limits: Some(limits.clone()),
             seats: seated.as_ref().map(|(_, _, below)| below.clone()),
             owns,
+            land: request.land,
         };
         if child_grant.can_spawn() {
             crate::projection::tools(&self.options)?;
@@ -3690,6 +3752,8 @@ impl Local {
         Ok(Inspection {
             owns,
             owns_within,
+            land: crate::land::wanted(&record),
+            landing: record.landing.clone(),
             tree_remaining_usd: tightest.as_ref().map(TreeCap::left),
             tree_capped_by: tightest.map(|cap| cap.branch),
             subtree_cost_usd: subtree_spent(&store, &record).max(if own {
@@ -4410,6 +4474,7 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
         result: request.result.clone(),
         why: request.why.clone(),
         owns: request.owns.clone(),
+        land: request.land,
     })
 }
 
@@ -5299,6 +5364,7 @@ Checks on the merged result: \
                 }),
                 seats: None,
                 owns: Vec::new(),
+                land: false,
             }),
             bindings: Vec::new(),
             start_base: None,
@@ -5308,6 +5374,7 @@ Checks on the merged result: \
             parked: None,
             wakes: 0,
             lost: None,
+            landing: None,
             sandbox_seed: None,
             merged: None,
             actor: None,

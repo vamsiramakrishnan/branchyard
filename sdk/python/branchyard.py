@@ -269,6 +269,8 @@ class Spawned:
     model: Optional[str] = None
     # The paths it owns, as normalized; None when it was given none.
     owns: Optional[List[str]] = None
+    # It was left to the engine to land; None when it was not.
+    land: Optional[bool] = None
 
 
 @dataclasses.dataclass
@@ -301,6 +303,11 @@ class Inspection:
     # of them cover it. None when there are none.
     owns: Optional[List[str]] = None
     owns_within: Optional[List[List[str]]] = None
+    # Its parent left it to the engine to land, and what became of that:
+    # {"fixes": turns sent to fix its work, "note": where it landed or why
+    # not, "left": True once its parent decides}. None when not.
+    land: Optional[bool] = None
+    landing: Optional[Dict[str, Any]] = None
     stalled: Optional[bool] = None
     # What its live children (running, waiting, blocked, awaiting plan
     # approval) hold of its budget, how many they are, and what its settled
@@ -701,6 +708,7 @@ def spawn(
     result: Optional[Dict[str, Any]] = None,
     why: Optional[str] = None,
     owns: Optional[List[str]] = None,
+    land: bool = False,
 ) -> Spawned:
     """Create a child branch and start it; returns once it has started.
 
@@ -748,6 +756,13 @@ def spawn(
     when you integrate it; `check(child).outside_scope` lists them first.
     Give siblings disjoint paths and they cannot conflict. See
     docs/delegation.md "Ownership".
+
+    `land=True` leaves the child to the engine to land: once its turn ends
+    ready while you wait on your children (end your turn), it is integrated
+    into your branch, its check on the merge included, and a child that
+    conflicts, fails its check or strays outside `owns` is sent a turn to
+    fix that. Your next turn says what landed. See docs/delegation.md
+    "Landing".
     """
     options = {
         "--seat": seat,
@@ -779,6 +794,8 @@ def spawn(
         flags += ["--bind", f"{scratch}:{access}"]
     if plan:
         flags.append("--plan")
+    if land:
+        flags.append("--land")
     if result is not None:
         if not isinstance(result, dict) or "schema" not in result or not set(result) <= {"schema", "required"}:
             raise ValueError('result must be {"schema": {...}, "required": bool}')
@@ -790,7 +807,9 @@ def spawn(
     return _make(Spawned, _run(["spawn", *flags, "--prompt-file", "-"], stdin=prompt))
 
 
-def delegate(tasks: List[Dict[str, Any]], brief: Optional[str] = None) -> Delegated:
+def delegate(
+    tasks: List[Dict[str, Any]], brief: Optional[str] = None, land: bool = False
+) -> Delegated:
     """Hand your engine a plan: several children at once, with the brief they share.
 
     Each task is a dict as `spawn` takes its arguments over the MCP tool:
@@ -801,11 +820,15 @@ def delegate(tasks: List[Dict[str, Any]], brief: Optional[str] = None) -> Delega
     conventions, the interfaces between their parts) is added to your shared
     brief before any of them starts, so every child you delegate to is given
     it each turn. Then end your turn: you are woken when they have settled.
-    See docs/delegation.md "Plans and the shared brief".
+    With `land=True` the engine integrates each into your branch when it is
+    ready, as `spawn(land=True)` does. See docs/delegation.md "Plans and the
+    shared brief".
     """
     plan: Dict[str, Any] = {"tasks": tasks}
     if brief is not None:
         plan["brief"] = brief
+    if land:
+        plan["land"] = True
     value = _run(["delegate", "--plan", "-"], stdin=json.dumps(plan))
     made = _make(Delegated, value)
     made.spawned = [_make(Spawned, s) for s in value.get("spawned", [])]

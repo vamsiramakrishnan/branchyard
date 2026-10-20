@@ -124,6 +124,7 @@ pub mod inventory;
 mod json_schema;
 mod judge;
 mod knowledge;
+mod land;
 mod lifecycle;
 mod lock;
 mod map;
@@ -244,6 +245,7 @@ pub use knowledge::{
     KnowledgeStatus, NewKnowledge, DEFAULT_BUDGET_TOKENS as KNOWLEDGE_DEFAULT_BUDGET_TOKENS,
     TEXT_MAX as KNOWLEDGE_TEXT_MAX,
 };
+pub use land::{Landing, FIXES as LAND_FIXES};
 pub use lifecycle::{Parked, Resting};
 pub use map::{
     check_spec as check_map_spec, default_name as map_default_name,

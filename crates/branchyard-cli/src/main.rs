@@ -550,13 +550,14 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         Command::Delegate {
             plan,
             brief,
+            land,
             parent,
             json,
             perms,
         } => {
             let mut task = args::TaskArgs::default();
             perms.apply(&mut task);
-            commands::delegate(env, target, &plan, brief, parent, &task, json)
+            commands::delegate(env, target, &plan, (brief, land), parent, &task, json)
         }
         Command::Brief {
             text,

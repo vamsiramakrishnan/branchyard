@@ -343,6 +343,7 @@ pub const OPERATIONS: &[Operation] = &[
             Param::all("--model", "model", "model"),
             Param::all("--why", "why", "why"),
             Param::all("--owns", "owns", "owns"),
+            Param::all("--land", "land", "land"),
             Param::all("--result-schema", "result.schema", "result"),
             RESULT_REQUIRED,
             Param::cli(
@@ -391,6 +392,7 @@ pub const OPERATIONS: &[Operation] = &[
         &[
             Param::all("--plan", "tasks", "tasks"),
             Param::all("--brief", "brief", "brief"),
+            Param::all("--land", "land", "land"),
             JSON,
             Param::outside(
                 "--parent",

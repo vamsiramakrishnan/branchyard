@@ -230,6 +230,7 @@ pub fn tools() -> Vec<Tool> {
         "model": {"type": "string", "description": "The model the child's harness runs, or a size alias (small, medium, large, extra-large) where it defines one; a cheaper one suits mechanical work. Unset: the seat's, or yours. Refused for a harness that cannot choose one"},
         "why": {"type": "string", "description": "Why this harness and model for this subtask, in a few words: recorded on the child and learned from by the outcome store beside how it turns out. Ask advise first"},
         "owns": {"type": "array", "items": {"type": "string"}, "description": "The paths the child owns: files, directories (and all below them) or globs such as tests/parser_*.rs, relative to the repository. It is told them every turn, and its changes anywhere else are refused when you integrate it. Give siblings disjoint paths and they cannot conflict"},
+        "land": {"type": "boolean", "description": "Leave the child to your engine to land: once its turn ends ready while you wait on your children, it is integrated into your branch, its check on the merge included; one that conflicts, fails its check or strays outside owns is sent a turn to fix that. Your next turn says what landed and what did not, so you integrate nothing yourself"},
         "result": {
             "type": "object",
             "description": "The shape of the answer the child must give: it reports a JSON result with report, checked against this schema (a mismatch is refused, naming the path and the rule), and you read it as inspect's or wait's result. The child sees the contract in its own inspect as result_contract",
@@ -286,8 +287,9 @@ pub fn tools() -> Vec<Tool> {
              the conventions, the interfaces between their parts) is added to your shared brief \
              before any of them starts, and every child you delegate to is given it each turn. \
              Give each task the paths it owns, disjoint from its siblings', so they cannot \
-             conflict. Then end your turn: you are started again with a summary of each child \
-             when they have all settled.",
+             conflict. With land, your engine integrates each child into your branch when it is \
+             ready, and sends one that cannot land a turn to fix it. Then end your turn: you are \
+             started again with a summary of each child when they have all settled.",
             schema(json!({
                 "type": "object",
                 "properties": {
@@ -303,6 +305,7 @@ pub fn tools() -> Vec<Tool> {
                         },
                         "description": "The subtasks, each as spawn takes a child; give each a name when another depends on it",
                     },
+                    "land": {"type": "boolean", "description": "Leave every task to your engine to land, as spawn's land does: each is integrated into your branch when it is ready, and your next turn says what landed"},
                 },
                 "required": ["tasks"],
                 "additionalProperties": false,

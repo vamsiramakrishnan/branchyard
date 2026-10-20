@@ -704,6 +704,45 @@ fn a_harness_delegates_a_plan_and_adds_to_its_brief() {
     assert!(log.contains("brief: Rule two: keep the old API."), "{log}");
 }
 
+/// A plan whose children are left to land: the harness ends its turn, the
+/// engine integrates each child into its branch, and its next turn starts
+/// with what landed, so the harness integrates nothing itself.
+#[test]
+fn a_harness_delegates_a_plan_whose_children_land_in_its_branch() {
+    let repo = Repo::new();
+    let plan = r#"{"land": true, "tasks": [
+        {"name": "a", "prompt": "WRITE src/a/x.txt=1", "owns": ["src/a"]},
+        {"name": "b", "prompt": "WRITE src/b/y.txt=2", "owns": ["src/b"]}]}"#
+        .replace('\n', " ");
+    let prompt = format!("SH printf '%s' '{plan}' | by delegate --plan - --json");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    let (code, delegated) = sh_json(&said, 0);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(delegated["spawned"][0]["land"], true, "{delegated}");
+    assert!(
+        delegated["next"]
+            .as_str()
+            .unwrap()
+            .starts_with("End your turn now: the engine integrates each child"),
+        "{delegated}"
+    );
+    for name in ["a", "b"] {
+        let shown = repo.json(&["show", name, "--json"]);
+        assert_eq!(shown["status"]["state"], "merged", "{shown}");
+        assert_eq!(shown["status"]["target"], "by/root", "{shown}");
+    }
+    assert_eq!(repo.0.git(&["show", "by/root:src/a/x.txt"]), "1\n");
+    assert_eq!(repo.0.git(&["show", "by/root:src/b/y.txt"]), "2\n");
+    let root = repo.json(&["show", "root", "--json"]);
+    assert_eq!(root["status"]["state"], "ready", "{root}");
+    assert_eq!(root["turns"], 2, "its own, and the wake: {root}");
+    let log = stdout(&repo.by(&["log", "root"]));
+    assert!(log.contains("Landed for you"), "{log}");
+    assert!(log.contains("land a: landed in by/root"), "{log}");
+}
+
 /// The battery's harness mismatch: `--harness claude-code` came back as
 /// `claude-code-stream-json` with nothing relating the two. Every surface
 /// names a harness by the ID typed and the profile it resolved to.

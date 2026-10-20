@@ -1051,6 +1051,7 @@ pub(crate) fn spawn_parts(
         result: request.result.clone(),
         why: request.why.clone(),
         owns: request.owns.clone(),
+        land: request.land,
     };
     Ok((options, spawn))
 }

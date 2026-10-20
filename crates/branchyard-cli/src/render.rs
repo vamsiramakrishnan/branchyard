@@ -1402,6 +1402,9 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     if !i.owns.is_empty() || !i.owns_within.is_empty() {
         pairs.push(("owns", owns_text(&i.owns, &i.owns_within)));
     }
+    if i.land {
+        pairs.push(("landing", landing_text(i.landing.as_ref())));
+    }
     if !i.grants.is_empty() {
         let grants: Vec<String> = i.grants.iter().map(|g| g.to_string()).collect();
         pairs.push(("connectors", grants.join(", ")));
@@ -1534,6 +1537,28 @@ pub fn check_report(r: &branchyard::CheckReport, style: Style) -> String {
     if !r.passed() && !r.output_tail.trim().is_empty() {
         text.push_str(r.output_tail.trim_end());
         text.push('\n');
+    }
+    text
+}
+
+/// What became of a branch left to the engine to land.
+fn landing_text(landing: Option<&branchyard::Landing>) -> String {
+    let Some(landing) = landing else {
+        return "left to the engine; not tried yet".to_owned();
+    };
+    let mut text = landing
+        .note
+        .clone()
+        .unwrap_or_else(|| "left to the engine".to_owned());
+    if landing.fixes > 0 {
+        text.push_str(&format!(
+            "; {} of {} turns to fix it sent",
+            landing.fixes,
+            branchyard::LAND_FIXES
+        ));
+    }
+    if landing.left {
+        text.push_str("; left for its parent");
     }
     text
 }
