@@ -14762,7 +14762,7 @@
           "additionalProperties": false,
           "properties": {
             "schema": {
-              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
             },
             "required": {
               "type": "boolean",
@@ -15210,7 +15210,7 @@
           "additionalProperties": false,
           "properties": {
             "schema": {
-              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
             },
             "required": {
               "type": "boolean",
@@ -16694,7 +16694,7 @@
               "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
             },
             "result": {
-              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
+              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one. It is JSON `null` only when the contract's schema\naccepts `null` and the branch reported it (written `\"result\": null`,\nwhich reads back as `Some(Null)`); otherwise a `null` counts as none."
             },
             "seat": {
               "type": [
@@ -17166,7 +17166,7 @@
           "additionalProperties": false,
           "properties": {
             "schema": {
-              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
             },
             "required": {
               "type": "boolean",
@@ -17360,7 +17360,7 @@
           "description": "What to tell the parent."
         },
         "result": {
-          "description": "The branch's result, a JSON value checked against its result\ncontract and recorded when it matches; see\n`docs/delegation.md#result-contract`. A `null` counts as none."
+          "description": "The branch's result, a JSON value checked against its result\ncontract and recorded when it matches; see\n`docs/delegation.md#result-contract`. A `null` is a result only\nunder a contract whose schema accepts `null`, and none otherwise."
         }
       },
       "required": [
@@ -18204,7 +18204,7 @@
               "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
             },
             "result": {
-              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
+              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one. It is JSON `null` only when the contract's schema\naccepts `null` and the branch reported it (written `\"result\": null`,\nwhich reads back as `Some(Null)`); otherwise a `null` counts as none."
             },
             "seat": {
               "type": [
@@ -18466,7 +18466,7 @@
           "additionalProperties": false,
           "properties": {
             "schema": {
-              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
             },
             "required": {
               "type": "boolean",
@@ -19806,7 +19806,7 @@
               "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
             },
             "result": {
-              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
+              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one. It is JSON `null` only when the contract's schema\naccepts `null` and the branch reported it (written `\"result\": null`,\nwhich reads back as `Some(Null)`); otherwise a `null` counts as none."
             },
             "seat": {
               "type": [
@@ -20068,7 +20068,7 @@
           "additionalProperties": false,
           "properties": {
             "schema": {
-              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
             },
             "required": {
               "type": "boolean",
@@ -32061,7 +32061,7 @@
               "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
             },
             "result": {
-              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
+              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one. It is JSON `null` only when the contract's schema\naccepts `null` and the branch reported it (written `\"result\": null`,\nwhich reads back as `Some(Null)`); otherwise a `null` counts as none."
             },
             "seat": {
               "type": [
@@ -32323,7 +32323,7 @@
           "additionalProperties": false,
           "properties": {
             "schema": {
-              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
             },
             "required": {
               "type": "boolean",
@@ -33999,7 +33999,7 @@
           "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
         },
         "result": {
-          "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
+          "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one. It is JSON `null` only when the contract's schema\naccepts `null` and the branch reported it (written `\"result\": null`,\nwhich reads back as `Some(Null)`); otherwise a `null` counts as none."
         },
         "seat": {
           "type": [
@@ -34473,7 +34473,7 @@
           "additionalProperties": false,
           "properties": {
             "schema": {
-              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
             },
             "required": {
               "type": "boolean",

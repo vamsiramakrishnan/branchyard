@@ -824,8 +824,14 @@ pub struct Inspection {
     pub result_contract: Option<ResultContract>,
     /// The latest result the branch reported with `report`, a JSON value
     /// that matched `result_contract` when it has one. Omitted until it
-    /// reports one; a result of JSON `null` counts as none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// reports one. It is JSON `null` only when the contract's schema
+    /// accepts `null` and the branch reported it (written `"result": null`,
+    /// which reads back as `Some(Null)`); otherwise a `null` counts as none.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "contract::present"
+    )]
     pub result: Option<Value>,
     /// The rig seat the branch occupies, if it is in a rig.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4827,8 +4833,9 @@ struct TextArgs {
 struct ReportArgs {
     text: String,
     /// The branch's result: a JSON value, checked against its contract.
-    /// `null` counts as none.
-    #[serde(default)]
+    /// A `null` is kept as `Some(Null)`: it is a result under a contract
+    /// whose schema accepts `null`, and none otherwise.
+    #[serde(default, deserialize_with = "contract::present")]
     result: Option<Value>,
 }
 

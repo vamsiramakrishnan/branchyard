@@ -64,6 +64,9 @@ webpki-roots = { workspace = true }
 # Already in Cargo.lock, through branchyard-support.
 tracing = { workspace = true }
 toml_edit = { workspace = true, features = ["serde"] }
+# `pattern` in the JSON Schema subset (src/json_schema.rs). Already in
+# Cargo.lock.
+regex = "1.13"
 
 [dev-dependencies]
 branchyard-testkit = { path = "../branchyard-testkit" }

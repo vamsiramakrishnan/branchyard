@@ -247,7 +247,7 @@ pub fn tools() -> Vec<Tool> {
             "type": "object",
             "description": "The shape of the answer the child must give: it reports a JSON result with report, checked against this schema (a mismatch is refused, naming the path and the rule), and you read it as inspect's or wait's result. The child sees the contract in its own inspect as result_contract",
             "properties": {
-                "schema": {"type": "object", "description": "A JSON Schema using only type (object, array, string, number, integer, boolean, null), properties, required, additionalProperties (false), items, enum, minimum, maximum, minLength, maxLength and description; any other keyword, such as pattern, is refused"},
+                "schema": {"type": "object", "description": "A JSON Schema using only type (object, array, string, number, integer, boolean, null, or a list), properties, required, additionalProperties, items, enum, const, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength, maxLength, pattern, minItems, maxItems, uniqueItems, anyOf, oneOf, and annotations such as title and description; any other keyword, such as $ref, allOf or format, is refused"},
                 "required": {"type": "boolean", "description": "true: a report without a result is refused, and you get a warning in your log when the child ends its turn without one. Default false"},
             },
             "required": ["schema"],
@@ -613,7 +613,7 @@ pub fn tools() -> Vec<Tool> {
                 "type": "object",
                 "properties": {
                     "text": {"type": "string"},
-                    "result": {"description": "Your answer as a JSON value (an object, array, string, number or boolean), matching result_contract when you have one. null counts as none"},
+                    "result": {"description": "Your answer as a JSON value (an object, array, string, number or boolean), matching result_contract when you have one. null counts as none, unless your result_contract's schema accepts null"},
                 },
                 "required": ["text"],
                 "additionalProperties": false,

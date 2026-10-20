@@ -4357,9 +4357,10 @@ pub struct SpawnGraph {
     #[arg(long, value_name = "TEXT", value_parser = non_blank)]
     why: Option<String>,
     /// The shape of the answer the child must report with `by report --result`, as a JSON Schema
-    /// using only type, properties, required, additionalProperties (false), items, enum,
-    /// minimum, maximum, minLength, maxLength and description; anything else is refused. You
-    /// read the result in `by inspect` and `by wait`
+    /// using only type, properties, required, additionalProperties, items, enum, const, minimum,
+    /// maximum, exclusiveMinimum, exclusiveMaximum, minLength, maxLength, pattern, minItems,
+    /// maxItems, uniqueItems, anyOf, oneOf and annotations such as title and description;
+    /// anything else is refused. You read the result in `by inspect` and `by wait`
     #[arg(long, value_name = "JSON", value_parser = non_blank, conflicts_with = "result_schema_file")]
     result_schema: Option<String>,
     /// Read the result schema from this file instead, `-` for standard input

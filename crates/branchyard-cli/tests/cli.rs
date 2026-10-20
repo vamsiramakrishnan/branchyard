@@ -4611,7 +4611,7 @@ fn a_child_answers_in_the_shape_its_parent_asked_for_and_by_shows_it() {
         "--name",
         "bad",
         "--result-schema",
-        r#"{"type": "string", "pattern": "^a"}"#,
+        r##"{"type": "string", "$ref": "#/a"}"##,
         "--yes",
         "--json",
     ]);
@@ -4620,7 +4620,7 @@ fn a_child_answers_in_the_shape_its_parent_asked_for_and_by_shows_it() {
     assert_eq!(outside["error"]["kind"], "denied", "{outside}");
     assert_eq!(
         outside["error"]["message"],
-        "denied: result.schema uses `pattern`, which the contract does not support"
+        "denied: result.schema uses `$ref`, which the contract does not support"
     );
     assert!(
         !repo.json(&["ls", "--json"]).to_string().contains("\"bad\""),

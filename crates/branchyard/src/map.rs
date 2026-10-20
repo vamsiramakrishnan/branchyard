@@ -1113,6 +1113,52 @@ mod tests {
         }
     }
 
+    /// A map's schema is the shared checker: the richer keywords check
+    /// answers, and one declared wrong refuses the map before it runs.
+    #[test]
+    fn a_maps_schema_checks_the_richer_keywords_and_refuses_a_bad_one() {
+        let mut spec = MapSpec::new("m", "Look at it", Vec::new());
+        spec.schema = Some(json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "pattern": "^[a-z]+$"},
+                "tags": {"type": "array", "minItems": 1, "uniqueItems": true},
+                "kind": {"oneOf": [{"const": "lib"}, {"const": "bin"}]},
+                "stars": {"exclusiveMinimum": 0}
+            }
+        }));
+        let schema = check(&spec, &MapOptions::default()).unwrap().unwrap();
+        let answer = map_input::parse_answer(
+            "```json\n{\"id\": \"ok\", \"tags\": [\"a\"], \"kind\": \"lib\", \"stars\": 1}\n```",
+        )
+        .unwrap();
+        assert!(schema.validate(&answer).is_empty());
+        let mut errors = schema.validate(
+            &json!({"id": "No", "tags": ["a", "a"], "kind": "app", "stars": 0, "x": null}),
+        );
+        // In the order serde_json keeps fields, so sorted.
+        errors.sort();
+        assert_eq!(
+            errors,
+            [
+                "$.id: \"No\" does not match the pattern \"^[a-z]+$\"",
+                "$.kind: matches none of the 2 alternatives in oneOf (closest, oneOf[0]: \
+                 $.kind: must be \"lib\")",
+                "$.stars: 0 must be more than 0",
+                "$.tags[1]: repeats the item at [0]",
+            ]
+        );
+        spec.schema = Some(json!({"properties": {"id": {"pattern": "(x"}}}));
+        let Err(Error::Unsupported(why)) = check(&spec, &MapOptions::default()) else {
+            panic!("a bad pattern was accepted");
+        };
+        assert_eq!(
+            why,
+            "map m: the schema: $.properties.id.pattern is not a valid regular expression: \
+             unclosed group"
+        );
+    }
+
     #[test]
     fn tables_hold_ids_statuses_fields_and_errors() {
         let rows = [

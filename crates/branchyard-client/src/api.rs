@@ -756,8 +756,13 @@ pub struct ReportRequest {
     pub text: String,
     /// The branch's result, a JSON value checked against its result
     /// contract and recorded when it matches; see
-    /// `docs/delegation.md#result-contract`. A `null` counts as none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `docs/delegation.md#result-contract`. A `null` is a result only
+    /// under a contract whose schema accepts `null`, and none otherwise.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "branchyard::contract::present"
+    )]
     pub result: Option<serde_json::Value>,
 }
 

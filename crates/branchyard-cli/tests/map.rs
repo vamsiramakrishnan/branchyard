@@ -742,9 +742,9 @@ fn mistakes_are_refused_before_any_branch_runs() {
                 "--items".into(),
                 items.clone(),
                 "--schema".into(),
-                repo.file("bad.json", r#"{"type": "string", "pattern": "x"}"#),
+                repo.file("bad.json", r##"{"type": "string", "$ref": "#/x"}"##),
             ],
-            "\"pattern\" is not supported",
+            "$ uses `$ref`, which a map's schema does not support",
         ),
         (
             vec![

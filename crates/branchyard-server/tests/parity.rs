@@ -879,7 +879,7 @@ fn a_result_contract_is_set_at_spawn_and_reported_against_through_the_server() {
 
     // A schema outside the subset is refused when it is asked for.
     let outside = ResultContract {
-        schema: json!({"type": "string", "pattern": "^a"}),
+        schema: json!({"type": "string", "$ref": "#/a"}),
         required: false,
     };
     let error = repo
@@ -888,7 +888,7 @@ fn a_result_contract_is_set_at_spawn_and_reported_against_through_the_server() {
     assert!(
         error
             .to_string()
-            .contains("result.schema uses `pattern`, which the contract does not support"),
+            .contains("result.schema uses `$ref`, which the contract does not support"),
         "{error}"
     );
     assert!(repo.branch("bad").is_err(), "no child was made");

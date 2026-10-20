@@ -956,7 +956,7 @@ fn a_parent_asks_for_a_shape_and_reads_the_childs_answer_as_json() {
     ]
     .join("\n");
     let prompt = [
-        r#"MCP spawn {"prompt": "x", "name": "bad", "result": {"schema": {"type": "string", "pattern": "^a"}}}"#.to_owned(),
+        r##"MCP spawn {"prompt": "x", "name": "bad", "result": {"schema": {"type": "string", "$ref": "#/a"}}}"##.to_owned(),
         format!(
             "MCP spawn {}",
             json!({"prompt": kid, "name": "kid", "result": contract})
@@ -1015,7 +1015,7 @@ fn a_parent_asks_for_a_shape_and_reads_the_childs_answer_as_json() {
     let parent = reply(&f, "root");
     assert!(
         parent.lines().any(|line| line.contains(
-            "mcp spawn error: denied: result.schema uses `pattern`, which the contract does not support"
+            "mcp spawn error: denied: result.schema uses `$ref`, which the contract does not support"
         )),
         "{parent}"
     );

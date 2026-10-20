@@ -361,10 +361,10 @@ fn a_contract_outside_the_subset_is_refused_at_spawn_and_creates_no_child() {
     let options = delegating(&f);
     let (_root, parent) = root(&f, &options);
     let unsupported = ResultContract {
-        schema: json!({"type": "object", "properties": {"id": {"type": "string", "pattern": "^a"}}}),
+        schema: json!({"type": "object", "properties": {"id": {"type": "string", "$ref": "#/a"}}}),
         required: false,
     };
-    let needle = "result.schema.properties.id uses `pattern`, which the contract does not support";
+    let needle = "result.schema.properties.id uses `$ref`, which the contract does not support";
     denied(
         parent.spawn(spawn("say hi", "bad", Some(unsupported.clone()))),
         needle,
@@ -447,4 +447,92 @@ fn the_tools_take_the_contract_and_the_result_as_json() {
     );
     parent.cancel("kid").unwrap();
     root.wait_subtree().unwrap();
+}
+
+/// A contract using the richer keywords end to end: refused at spawn when
+/// one is declared wrong, a matching result accepted and a non-matching one
+/// refused naming the place, and `null` a result, read back as `null`
+/// through the tools' JSON, because the schema accepts it.
+#[test]
+fn a_contract_with_the_richer_keywords_and_a_null_result_works_end_to_end() {
+    let f = Fixture::new();
+    let options = delegating(&f);
+    let (root, parent) = root(&f, &options);
+    let bad = ResultContract {
+        schema: json!({"properties": {"id": {"pattern": "(x"}}}),
+        required: false,
+    };
+    denied(
+        parent.spawn(spawn("say hi", "bad", Some(bad))),
+        "result.schema.properties.id.pattern is not a valid regular expression: unclosed group",
+    );
+    assert!(f.yard.branch("bad").is_err(), "no child was created");
+
+    let wanted = ResultContract::new(
+        json!({
+            "title": "Findings, or null when there are none",
+            "oneOf": [
+                {"type": "null"},
+                {
+                    "type": "object",
+                    "required": ["id", "files"],
+                    "properties": {
+                        "id": {"type": "string", "pattern": "^[A-Z]+-[0-9]+$"},
+                        "files": {"type": "array", "minItems": 1, "uniqueItems": true,
+                                  "items": {"type": "string"}},
+                        "score": {"exclusiveMinimum": 0, "exclusiveMaximum": 1},
+                        "kind": {"const": "bug"}
+                    }
+                }
+            ]
+        }),
+        true,
+    )
+    .unwrap();
+    spawn_waiting(&f, &parent, "kid", Some(wanted));
+    let kid = child(&f, &options, "kid");
+
+    let good = json!({"id": "BY-7", "files": ["a.rs"], "score": 0.5, "kind": "bug"});
+    kid.report_result("found one", &good).unwrap();
+    assert_eq!(parent.inspect("kid").unwrap().result, Some(good.clone()));
+    let Err(Error::Denied(why)) =
+        kid.report_result("again", &json!({"id": "by-7", "files": ["a.rs", "a.rs"]}))
+    else {
+        panic!("a result that does not match was accepted");
+    };
+    assert!(
+        why.starts_with("result: matches none of the 2 alternatives in oneOf (closest, oneOf[1]: "),
+        "{why}"
+    );
+    assert!(
+        why.contains("result.files[1]: repeats the item at [0]"),
+        "{why}"
+    );
+    assert!(
+        why.contains("result.id: \"by-7\" does not match the pattern \"^[A-Z]+-[0-9]+$\""),
+        "{why}"
+    );
+    assert_eq!(parent.inspect("kid").unwrap().result, Some(good));
+
+    // Null is a result here, through the tool's JSON as through the API,
+    // and it satisfies `required`.
+    kid.call("report", json!({"text": "none after all", "result": null}))
+        .unwrap();
+    assert_eq!(parent.inspect("kid").unwrap().result, Some(Value::Null));
+    let seen = parent.call("inspect", json!({"branch": "kid"})).unwrap();
+    assert_eq!(seen.get("result"), Some(&Value::Null), "{seen}");
+    let read: branchyard::Inspection = serde_json::from_value(seen).unwrap();
+    assert_eq!(read.result, Some(Value::Null));
+    // A report with no result at all is still refused: it is required.
+    denied(kid.report("done"), "requires a result");
+
+    parent.steer("kid", "finish").unwrap();
+    let waited = parent
+        .wait_for(&["kid"], false, Some(Duration::from_secs(60)))
+        .unwrap();
+    assert_eq!(waited.settled[0].result, Some(Value::Null));
+    root.wait_subtree().unwrap();
+    assert!(warnings(&f, "root")
+        .iter()
+        .all(|w| !w.contains("without the result")));
 }

@@ -751,9 +751,13 @@ def spawn(
 
     `result` says what shape the child's answer must take:
     `{"schema": {...}, "required": True}`, the schema a JSON Schema using
-    only type, properties, required, additionalProperties (False), items,
-    enum, minimum, maximum, minLength, maxLength and description (anything
-    else is refused, naming it). The child answers with `report(text,
+    only type, properties, required, additionalProperties, items, enum,
+    const, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength,
+    maxLength, pattern, minItems, maxItems, uniqueItems, anyOf, oneOf and
+    annotations such as title and description (anything else is refused,
+    naming it). `report(text, result=None)` reports no result; a schema
+    that accepts null lets a child report `null` through the CLI, MCP or
+    HTTP, and you read it back here as `None`. The child answers with `report(text,
     result=...)`, which is refused when the value does not match; you read
     it as `inspect(child).result`, or on each `wait(...)`ed child.
     `required` (default False) refuses a `report` without a result and
