@@ -20,10 +20,14 @@
 //! together, all or none, once none of the others left to land with it
 //! still runs: a whole-suite check passes only with all of them.
 //!
+//! A child given a reviewer ([`crate::review`]) is reviewed first, each
+//! time it is ready with a candidate no reviewer approved.
+//!
 //! A child that cannot land is sent a turn to make it land, at most
 //! [`FIXES`] times: its work conflicts with the parent's branch (merge the
 //! parent's branch and resolve), its own check fails on the merge (fix it),
-//! or it changed paths outside those it owns ([`crate::scope`]; undo them).
+//! it changed paths outside those it owns ([`crate::scope`]; undo them), or
+//! its reviewer asked for changes (make them, or say why not).
 //! After that, or when integrating failed for another reason, it is left
 //! for its parent, and the wake says why. Children sharing a check that
 //! fails on them together are left for the parent at once, since nothing
@@ -41,6 +45,7 @@ use serde::{Deserialize, Serialize};
 use crate::delegation::Delegate;
 use crate::projection::lock;
 use crate::record::Recorder;
+use crate::review::Verdict;
 use crate::state::{Record, Store};
 use crate::{git, Activity, BranchStatus, CandidateInfo, Error, RecordedEvent, TaskOptions, Yard};
 use branchyard_support::time::now_ms;
@@ -51,6 +56,10 @@ pub const FIXES: u32 = 2;
 
 /// Characters of a failed check's output a fix turn quotes.
 const OUTPUT_SHOWN: usize = 2000;
+
+/// Characters of a reviewer's findings a landing note quotes; the fix turn
+/// has them all.
+const NOTE_SHOWN: usize = 600;
 
 /// What became of a child its parent left to the engine to land, as
 /// `inspect` shows it.
@@ -66,6 +75,10 @@ pub struct Landing {
     /// The engine stopped trying: its parent decides what to do with it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub left: bool,
+    /// The candidate its reviewer approved, so it is not reviewed again
+    /// until its work changes ([`crate::review`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed: Option<String>,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -247,6 +260,61 @@ fn land(yard: &Yard, parent: &Record, given: Option<&TaskOptions>) -> Result<boo
             }
             continue;
         }
+        // A reviewer reads each child's work before it lands, unless one
+        // approved this candidate already; the rest of its batch waits, and
+        // an approved batch lands on the next pass, from fresh records.
+        let mut reviewing = false;
+        for child in &batch {
+            let (Some(spec), Some(candidate)) = (crate::review::of(child), &child.info.candidate)
+            else {
+                continue;
+            };
+            let approved = child.landing.as_ref().and_then(|l| l.reviewed.as_deref());
+            if approved == Some(candidate.commit.as_str()) {
+                continue;
+            }
+            reviewing = true;
+            if !can_run {
+                continue;
+            }
+            match crate::review::run(yard, &delegate, parent, child, spec) {
+                Ok((Verdict::Approve, reviewer)) => {
+                    let text = format!("its reviewer on {} approved it", spec.harness);
+                    let commit = candidate.commit.clone();
+                    update_landing(yard, &child.info.name, |l| {
+                        l.reviewed = Some(commit);
+                        l.note = Some(text.clone());
+                    })?;
+                    note(
+                        &store,
+                        &parent.info.name,
+                        &child.info.name,
+                        format!("{text} (its review: by log {reviewer})"),
+                        false,
+                    );
+                    progress = true;
+                }
+                Ok((Verdict::Changes(findings), _)) => {
+                    let why = Fix::Review {
+                        harness: spec.harness.clone(),
+                        findings,
+                    };
+                    progress |= fix(yard, &delegate, can_run, parent, child, why)?;
+                }
+                Err(error) => {
+                    leave(
+                        yard,
+                        parent,
+                        child,
+                        format!("its review could not be done: {error}"),
+                    )?;
+                    progress = true;
+                }
+            }
+        }
+        if reviewing {
+            continue;
+        }
         let names: Vec<String> = batch.iter().map(|r| r.info.name.clone()).collect();
         // Merged directly, not through the parent's own `integrate`: an
         // attempt that fails is the engine's, not a call the parent made.
@@ -256,15 +324,10 @@ fn land(yard: &Yard, parent: &Record, given: Option<&TaskOptions>) -> Result<boo
                     let short = &branch.commit[..branch.commit.len().min(10)];
                     let text = format!("landed in {} at {short}", merged.target);
                     if let Some(child) = batch.iter().find(|r| r.info.name == branch.branch) {
-                        set_landing(
-                            yard,
-                            &child.info.name,
-                            Landing {
-                                note: Some(text.clone()),
-                                left: false,
-                                ..child.landing.clone().unwrap_or_default()
-                            },
-                        )?;
+                        update_landing(yard, &child.info.name, |l| {
+                            l.note = Some(text.clone());
+                            l.left = false;
+                        })?;
                     }
                     note(&store, &parent.info.name, &branch.branch, text, false);
                 }
@@ -428,6 +491,11 @@ enum Fix {
     Check { summary: String, tail: String },
     /// It changed these paths outside the scope `scope` describes.
     Scope { paths: Vec<String>, scope: String },
+    /// Its reviewer, on `harness`, asked for these changes.
+    Review {
+        harness: String,
+        findings: Vec<String>,
+    },
 }
 
 impl Fix {
@@ -445,6 +513,14 @@ impl Fix {
                 "it changes {} outside the paths it owns ({scope})",
                 crate::scope::named(paths)
             ),
+            Fix::Review { harness, findings } => {
+                let all = findings.join("; ");
+                let shown = match all.chars().count() > NOTE_SHOWN {
+                    true => format!("{}…", all.chars().take(NOTE_SHOWN).collect::<String>()),
+                    false => all,
+                };
+                format!("its reviewer on {harness} asked for changes: {shown}")
+            }
         }
     }
 
@@ -481,6 +557,21 @@ impl Fix {
                      what and why in your final message; your parent will make them or give them \
                      to whoever owns them."
                 ),
+            ),
+            Fix::Review { harness, findings } => (
+                format!(
+                    "your reviewer on {harness} asked for changes before it lands:\n\n{}",
+                    findings
+                        .iter()
+                        .enumerate()
+                        .map(|(i, finding)| format!("{}. {finding}", i + 1))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+                "Make each change in your worktree, and run `by check`. If a finding is wrong, \
+                 leave that code as it is and say why in your final message: your next reviewer \
+                 reads it with your work."
+                    .to_owned(),
             ),
         };
         format!(
@@ -559,15 +650,11 @@ fn fix(
         return Ok(false);
     }
     let n = landing.fixes + 1;
-    set_landing(
-        yard,
-        &child.info.name,
-        Landing {
-            fixes: n,
-            note: Some(reason.clone()),
-            left: false,
-        },
-    )?;
+    update_landing(yard, &child.info.name, |l| {
+        l.fixes = n;
+        l.note = Some(reason.clone());
+        l.left = false;
+    })?;
     match delegate.send(&child.info.name, &why.prompt(target, &child.info.base, n)) {
         Ok(_) => {
             note(
@@ -593,15 +680,10 @@ fn fix(
 
 /// Stop landing `child`: its parent decides, and its wake says `why`.
 fn leave(yard: &Yard, parent: &Record, child: &Record, why: String) -> Result<(), Error> {
-    set_landing(
-        yard,
-        &child.info.name,
-        Landing {
-            note: Some(why.clone()),
-            left: true,
-            ..child.landing.clone().unwrap_or_default()
-        },
-    )?;
+    update_landing(yard, &child.info.name, |l| {
+        l.note = Some(why.clone());
+        l.left = true;
+    })?;
     note(
         &yard.store(),
         &parent.info.name,
@@ -612,14 +694,16 @@ fn leave(yard: &Yard, parent: &Record, child: &Record, why: String) -> Result<()
     Ok(())
 }
 
-/// Store `landing` on `name`'s record, under its lease. A child that is
-/// running again is left as it is: its next settle lands it.
-fn set_landing(yard: &Yard, name: &str, landing: Landing) -> Result<(), Error> {
+/// Change the landing on `name`'s record as it is now, under its lease. A
+/// child that is running again is left as it is: its next settle lands it.
+fn update_landing(yard: &Yard, name: &str, change: impl FnOnce(&mut Landing)) -> Result<(), Error> {
     let (mut record, lease) = match crate::ops::hold(yard, name) {
         Ok(held) => held,
         Err(Error::Running(_)) => return Ok(()),
         Err(error) => return Err(error),
     };
+    let mut landing = record.landing.take().unwrap_or_default();
+    change(&mut landing);
     record.landing = Some(landing);
     lease.finish(Some(&record), None)
 }

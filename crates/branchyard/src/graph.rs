@@ -207,6 +207,9 @@ pub struct SpawnSpec {
     /// Leave the child to the engine to land; see `docs/delegation.md#landing`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub land: bool,
+    /// Its reviewer before it lands; see `docs/delegation.md#review`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<crate::ReviewSpec>,
 }
 
 impl SpawnSpec {
@@ -233,6 +236,7 @@ impl SpawnSpec {
             result: self.result.clone(),
             owns: self.owns.clone(),
             land: self.land,
+            review: self.review.clone(),
         })
     }
 
@@ -260,6 +264,7 @@ impl SpawnSpec {
             why: spawn.why.clone(),
             owns: spawn.owns.clone(),
             land: spawn.land,
+            review: spawn.review.clone(),
         }
     }
 }

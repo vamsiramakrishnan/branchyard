@@ -14492,6 +14492,17 @@
         "land": {
           "type": "boolean",
           "description": "Leave the child to the engine to land, like\n[`branchyard::Spawn::land`]. See `docs/delegation.md#landing`."
+        },
+        "review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The child's reviewer before it lands, like\n[`branchyard::Spawn::review`]. See `docs/delegation.md#review`."
         }
       },
       "required": [
@@ -14763,6 +14774,41 @@
             "schema"
           ],
           "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ReviewSpec": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The reviewer's harness or profile ID, such as `codex`."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the reviewer's harness runs; unset, its default."
+            },
+            "rubric": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What to look for, added to the reviewer's prompt after the default\nrubric."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Each review's cost limit, from its parent's budget; required when\nthe parent has a cost limit, as for any child."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A reviewer for a child's work before the engine lands it: a harness its\nparent may delegate to, ideally another vendor's than the child's."
         }
       }
     },
@@ -14949,6 +14995,17 @@
                 "land": {
                   "type": "boolean",
                   "description": "Leave the child to the engine to land; see `docs/delegation.md#landing`."
+                },
+                "review": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ReviewSpec"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Its reviewer before it lands; see `docs/delegation.md#review`."
                 },
                 "kind": {
                   "type": "string",
@@ -15165,6 +15222,41 @@
             "schema"
           ],
           "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ReviewSpec": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The reviewer's harness or profile ID, such as `codex`."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the reviewer's harness runs; unset, its default."
+            },
+            "rubric": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What to look for, added to the reviewer's prompt after the default\nrubric."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Each review's cost limit, from its parent's budget; required when\nthe parent has a cost limit, as for any child."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A reviewer for a child's work before the engine lands it: a harness its\nparent may delegate to, ideally another vendor's than the child's."
         },
         "PolicySpec": {
           "type": "object",
@@ -15673,6 +15765,17 @@
             "land": {
               "type": "boolean",
               "description": "It was left to the engine to land. Omitted when false."
+            },
+            "review": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ReviewSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The reviewer that reads its work before it lands. Omitted when none."
             }
           },
           "required": [
@@ -15896,6 +15999,41 @@
             }
           },
           "description": "A child's limits as the tools show them."
+        },
+        "ReviewSpec": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The reviewer's harness or profile ID, such as `codex`."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the reviewer's harness runs; unset, its default."
+            },
+            "rubric": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What to look for, added to the reviewer's prompt after the default\nrubric."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Each review's cost limit, from its parent's budget; required when\nthe parent has a cost limit, as for any child."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A reviewer for a child's work before the engine lands it: a harness its\nparent may delegate to, ideally another vendor's than the child's."
         },
         "Dependency": {
           "type": "object",
@@ -16611,6 +16749,17 @@
               "type": "boolean",
               "description": "Its parent left it to the engine to land. Omitted when false."
             },
+            "review": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ReviewSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The reviewer that reads its work before it lands. Omitted when none."
+            },
             "landing": {
               "anyOf": [
                 {
@@ -17090,6 +17239,41 @@
           ],
           "description": "How a branch uses a scratch area it is bound to."
         },
+        "ReviewSpec": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The reviewer's harness or profile ID, such as `codex`."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the reviewer's harness runs; unset, its default."
+            },
+            "rubric": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What to look for, added to the reviewer's prompt after the default\nrubric."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Each review's cost limit, from its parent's budget; required when\nthe parent has a cost limit, as for any child."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A reviewer for a child's work before the engine lands it: a harness its\nparent may delegate to, ideally another vendor's than the child's."
+        },
         "Landing": {
           "type": "object",
           "properties": {
@@ -17109,6 +17293,13 @@
             "left": {
               "type": "boolean",
               "description": "The engine stopped trying: its parent decides what to do with it."
+            },
+            "reviewed": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes ([`crate::review`])."
             }
           },
           "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
@@ -18068,6 +18259,17 @@
               "type": "boolean",
               "description": "Its parent left it to the engine to land. Omitted when false."
             },
+            "review": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ReviewSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The reviewer that reads its work before it lands. Omitted when none."
+            },
             "landing": {
               "anyOf": [
                 {
@@ -18337,6 +18539,41 @@
           ],
           "description": "How a branch uses a scratch area it is bound to."
         },
+        "ReviewSpec": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The reviewer's harness or profile ID, such as `codex`."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the reviewer's harness runs; unset, its default."
+            },
+            "rubric": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What to look for, added to the reviewer's prompt after the default\nrubric."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Each review's cost limit, from its parent's budget; required when\nthe parent has a cost limit, as for any child."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A reviewer for a child's work before the engine lands it: a harness its\nparent may delegate to, ideally another vendor's than the child's."
+        },
         "Landing": {
           "type": "object",
           "properties": {
@@ -18356,6 +18593,13 @@
             "left": {
               "type": "boolean",
               "description": "The engine stopped trying: its parent decides what to do with it."
+            },
+            "reviewed": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes ([`crate::review`])."
             }
           },
           "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
@@ -19617,6 +19861,17 @@
               "type": "boolean",
               "description": "Its parent left it to the engine to land. Omitted when false."
             },
+            "review": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ReviewSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The reviewer that reads its work before it lands. Omitted when none."
+            },
             "landing": {
               "anyOf": [
                 {
@@ -19886,6 +20141,41 @@
           ],
           "description": "How a branch uses a scratch area it is bound to."
         },
+        "ReviewSpec": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The reviewer's harness or profile ID, such as `codex`."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the reviewer's harness runs; unset, its default."
+            },
+            "rubric": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What to look for, added to the reviewer's prompt after the default\nrubric."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Each review's cost limit, from its parent's budget; required when\nthe parent has a cost limit, as for any child."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A reviewer for a child's work before the engine lands it: a harness its\nparent may delegate to, ideally another vendor's than the child's."
+        },
         "Landing": {
           "type": "object",
           "properties": {
@@ -19905,6 +20195,13 @@
             "left": {
               "type": "boolean",
               "description": "The engine stopped trying: its parent decides what to do with it."
+            },
+            "reviewed": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes ([`crate::review`])."
             }
           },
           "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
@@ -31819,6 +32116,17 @@
               "type": "boolean",
               "description": "Its parent left it to the engine to land. Omitted when false."
             },
+            "review": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ReviewSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The reviewer that reads its work before it lands. Omitted when none."
+            },
             "landing": {
               "anyOf": [
                 {
@@ -32088,6 +32396,41 @@
           ],
           "description": "How a branch uses a scratch area it is bound to."
         },
+        "ReviewSpec": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The reviewer's harness or profile ID, such as `codex`."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the reviewer's harness runs; unset, its default."
+            },
+            "rubric": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What to look for, added to the reviewer's prompt after the default\nrubric."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Each review's cost limit, from its parent's budget; required when\nthe parent has a cost limit, as for any child."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A reviewer for a child's work before the engine lands it: a harness its\nparent may delegate to, ideally another vendor's than the child's."
+        },
         "Landing": {
           "type": "object",
           "properties": {
@@ -32107,6 +32450,13 @@
             "left": {
               "type": "boolean",
               "description": "The engine stopped trying: its parent decides what to do with it."
+            },
+            "reviewed": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes ([`crate::review`])."
             }
           },
           "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
@@ -33704,6 +34054,17 @@
           "type": "boolean",
           "description": "Its parent left it to the engine to land. Omitted when false."
         },
+        "review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The reviewer that reads its work before it lands. Omitted when none."
+        },
         "landing": {
           "anyOf": [
             {
@@ -34185,6 +34546,41 @@
           ],
           "description": "How a branch uses a scratch area it is bound to."
         },
+        "ReviewSpec": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The reviewer's harness or profile ID, such as `codex`."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the reviewer's harness runs; unset, its default."
+            },
+            "rubric": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What to look for, added to the reviewer's prompt after the default\nrubric."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Each review's cost limit, from its parent's budget; required when\nthe parent has a cost limit, as for any child."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A reviewer for a child's work before the engine lands it: a harness its\nparent may delegate to, ideally another vendor's than the child's."
+        },
         "Landing": {
           "type": "object",
           "properties": {
@@ -34204,6 +34600,13 @@
             "left": {
               "type": "boolean",
               "description": "The engine stopped trying: its parent decides what to do with it."
+            },
+            "reviewed": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes ([`crate::review`])."
             }
           },
           "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."

@@ -879,6 +879,7 @@ pub fn spawn(
         why: args.why.clone(),
         owns: args.owns.clone(),
         land: args.land,
+        review: args.review.as_deref().cloned(),
     };
     let op = remote
         .repo

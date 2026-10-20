@@ -250,6 +250,10 @@ pub(crate) struct Grant {
     /// it. See [`crate::land`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub land: bool,
+    /// The reviewer that reads its work before it lands. See
+    /// [`crate::review`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<crate::ReviewSpec>,
 }
 
 impl Grant {
@@ -261,6 +265,7 @@ impl Grant {
             seats: None,
             owns: Vec::new(),
             land: false,
+            review: None,
         }
     }
 
@@ -350,6 +355,10 @@ pub struct Spawn {
     /// that cannot land is sent a turn to fix its work. See
     /// `docs/delegation.md#landing`.
     pub land: bool,
+    /// A reviewer that reads the child's work each time it is ready to
+    /// land, before it lands; it asks for changes the child is sent as a
+    /// turn to fix its work. Needs `land`. See `docs/delegation.md#review`.
+    pub review: Option<crate::ReviewSpec>,
 }
 
 impl Spawn {
@@ -446,6 +455,9 @@ pub struct Spawned {
     /// It was left to the engine to land. Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub land: bool,
+    /// The reviewer that reads its work before it lands. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<crate::ReviewSpec>,
 }
 
 /// Most bytes one entry of a shared brief may hold.
@@ -478,6 +490,10 @@ pub struct DelegationPlan {
     /// branch waits on its children. See `docs/delegation.md#landing`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub land: bool,
+    /// The reviewer of every task that names none of its own. See
+    /// `docs/delegation.md#review`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<crate::ReviewSpec>,
 }
 
 /// What a plan created.
@@ -839,6 +855,9 @@ pub struct Inspection {
     /// Its parent left it to the engine to land. Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub land: bool,
+    /// The reviewer that reads its work before it lands. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<crate::ReviewSpec>,
     /// What became of its landing: where it landed, or why it has not, and
     /// the turns the engine sent it to fix its work. Omitted until the
     /// engine tried to land it.
@@ -2795,6 +2814,9 @@ impl Local {
                 .map(|task| {
                     let mut spawn = task.to_spawn()?;
                     spawn.land |= plan.land;
+                    if spawn.review.is_none() {
+                        spawn.review = plan.review.clone();
+                    }
                     Ok(Edit::Spawn(Box::new(spawn)))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
@@ -3148,6 +3170,7 @@ impl Local {
                         .map(|g| g.owns.clone())
                         .unwrap_or_default(),
                     land: child.record.grant.as_ref().is_some_and(|g| g.land),
+                    review: child.record.grant.as_ref().and_then(|g| g.review.clone()),
                 }
             })
             .collect();
@@ -3227,6 +3250,20 @@ impl Local {
         // up to the root covers it.
         let owns = crate::scope::normalize_all(&request.owns)?;
         crate::scope::check_overlap(&self.branch, &owns, &crate::scope::chain(&store, caller)?)?;
+        // Its reviewer is a child of this branch too, so this branch must
+        // be able to delegate to its harness.
+        if let Some(review) = &request.review {
+            review.check(request.land, limits.max_usd.is_some())?;
+            let reviewer = harness::select(Some(&review.harness))?;
+            if !grant.envelope.allows(reviewer, own) {
+                return Err(Error::Denied(format!(
+                    "{} may not delegate to {}, so it may not review with it; allowed: {}",
+                    self.branch,
+                    reviewer.label(),
+                    grant.envelope.allowed_text(own)
+                )));
+            }
+        }
         let child_grant = Grant {
             envelope,
             deny,
@@ -3234,6 +3271,7 @@ impl Local {
             seats: seated.as_ref().map(|(_, _, below)| below.clone()),
             owns,
             land: request.land,
+            review: request.review.clone(),
         };
         if child_grant.can_spawn() {
             crate::projection::tools(&self.options)?;
@@ -3753,6 +3791,7 @@ impl Local {
             owns,
             owns_within,
             land: crate::land::wanted(&record),
+            review: crate::review::of(&record).cloned(),
             landing: record.landing.clone(),
             tree_remaining_usd: tightest.as_ref().map(TreeCap::left),
             tree_capped_by: tightest.map(|cap| cap.branch),
@@ -4475,6 +4514,7 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
         why: request.why.clone(),
         owns: request.owns.clone(),
         land: request.land,
+        review: request.review.clone(),
     })
 }
 
@@ -5365,6 +5405,7 @@ Checks on the merged result: \
                 seats: None,
                 owns: Vec::new(),
                 land: false,
+                review: None,
             }),
             bindings: Vec::new(),
             start_base: None,

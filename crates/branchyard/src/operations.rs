@@ -184,6 +184,30 @@ const NO_PLAN_ROUTE: &str = "a server has no route for a plan or a brief yet: sp
                              graph apply --parent";
 /// `result.required` beside `result.schema`: Python gives both in the one
 /// `result` dict.
+/// Python gives a child's reviewer whole.
+const REVIEW_WHOLE: &str = "Python gives the reviewer whole, as review=\"codex\" or \
+     review={\"harness\": ..., \"model\": ..., \"rubric\": ..., \"budget_usd\": ...}";
+const REVIEW_MODEL: Param = Param {
+    cli: Some("--review-model"),
+    tool: Some("review.model"),
+    python: None,
+    why: REVIEW_WHOLE,
+    inside: None,
+};
+const REVIEW_RUBRIC: Param = Param {
+    cli: Some("--review-rubric"),
+    tool: Some("review.rubric"),
+    python: None,
+    why: REVIEW_WHOLE,
+    inside: None,
+};
+const REVIEW_BUDGET: Param = Param {
+    cli: Some("--review-budget-usd"),
+    tool: Some("review.budget_usd"),
+    python: None,
+    why: REVIEW_WHOLE,
+    inside: None,
+};
 const RESULT_REQUIRED: Param = Param {
     cli: Some("--result-required"),
     tool: Some("result.required"),
@@ -344,6 +368,10 @@ pub const OPERATIONS: &[Operation] = &[
             Param::all("--why", "why", "why"),
             Param::all("--owns", "owns", "owns"),
             Param::all("--land", "land", "land"),
+            Param::all("--review", "review.harness", "review"),
+            REVIEW_MODEL,
+            REVIEW_RUBRIC,
+            REVIEW_BUDGET,
             Param::all("--result-schema", "result.schema", "result"),
             RESULT_REQUIRED,
             Param::cli(
@@ -393,6 +421,13 @@ pub const OPERATIONS: &[Operation] = &[
             Param::all("--plan", "tasks", "tasks"),
             Param::all("--brief", "brief", "brief"),
             Param::all("--land", "land", "land"),
+            Param {
+                cli: None,
+                tool: Some("review"),
+                python: Some("review"),
+                why: "by delegate reads the plan's reviewer from its JSON, beside its tasks",
+                inside: None,
+            },
             JSON,
             Param::outside(
                 "--parent",

@@ -147,6 +147,7 @@ mod pull_request;
 mod record;
 mod recover;
 pub mod reported;
+mod review;
 mod run;
 #[cfg(test)]
 mod schema_parity;
@@ -278,6 +279,7 @@ pub use pull_request::{
     PullRequestRef, Pushed, ResolvedThread,
 };
 pub use reported::{Reported, ReportedState, StatusReport};
+pub use review::ReviewSpec;
 pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
 pub use snapshots::{

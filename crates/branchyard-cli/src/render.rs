@@ -1405,6 +1405,9 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     if i.land {
         pairs.push(("landing", landing_text(i.landing.as_ref())));
     }
+    if let Some(review) = &i.review {
+        pairs.push(("review", review_text(review)));
+    }
     if !i.grants.is_empty() {
         let grants: Vec<String> = i.grants.iter().map(|g| g.to_string()).collect();
         pairs.push(("connectors", grants.join(", ")));
@@ -1559,6 +1562,21 @@ fn landing_text(landing: Option<&branchyard::Landing>) -> String {
     }
     if landing.left {
         text.push_str("; left for its parent");
+    }
+    text
+}
+
+/// A branch's reviewer before it lands.
+fn review_text(review: &branchyard::ReviewSpec) -> String {
+    let mut text = format!("by {}", review.harness);
+    if let Some(model) = &review.model {
+        text.push_str(&format!(" with model {model}"));
+    }
+    if let Some(usd) = review.budget_usd {
+        text.push_str(&format!(", ${usd:.2} each"));
+    }
+    if review.rubric.is_some() {
+        text.push_str(", with a rubric");
     }
     text
 }

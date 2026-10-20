@@ -10,7 +10,9 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use branchyard::{Activity, Branch, BranchStatus, Envelope, Policy, Spawn, TaskOptions};
+use branchyard::{
+    Activity, Branch, BranchStatus, Envelope, Policy, ReviewSpec, Spawn, TaskOptions,
+};
 use branchyard_testkit::wait;
 use common::{fake_agent, Fixture};
 
@@ -417,4 +419,182 @@ fn siblings_sharing_their_parents_check_land_together_once_both_are_ready() {
     assert!(merged_into_root(&status(&f, "b")), "{:?}", status(&f, "b"));
     let landed: Vec<String> = landings(&f, "root").into_iter().map(|l| l.0).collect();
     assert_eq!(landed, ["a", "b"]);
+}
+
+/// A reviewer on the parent's own harness, answering from `rubric`: the
+/// fake agent replies with the canned verdicts it names.
+fn reviewed(prompt: String, name: &str, rubric: String) -> Spawn {
+    Spawn {
+        review: Some(ReviewSpec {
+            harness: "gemini-cli".into(),
+            rubric: Some(rubric),
+            ..ReviewSpec::default()
+        }),
+        ..landing(prompt, name)
+    }
+}
+
+/// Canned verdicts, answered in order.
+fn verdicts(f: &Fixture, answers: &[&str]) -> PathBuf {
+    let dir = f.dir.join("verdicts");
+    fs::create_dir_all(&dir).unwrap();
+    for (i, answer) in answers.iter().enumerate() {
+        fs::write(dir.join(format!("{i}.json")), answer).unwrap();
+    }
+    dir
+}
+
+/// The reviewers spawned for `child`, as children of root.
+fn reviewers(f: &Fixture, child: &str) -> Vec<String> {
+    f.yard
+        .branch("root")
+        .unwrap()
+        .info()
+        .children
+        .iter()
+        .filter(|c| c.starts_with(&format!("review-{child}")))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_reviewer_asks_for_changes_the_child_makes_them_and_it_lands() {
+    let f = Fixture::new();
+    let script = f.dir.join("land.txt");
+    fs::write(&script, "SH echo hello > kid.txt\n").unwrap();
+    let dir = verdicts(
+        &f,
+        &[
+            r#"{"approve": false, "findings": ["kid.txt must say hello"]}"#,
+            r#"Fixed. {"approve": true}"#,
+        ],
+    );
+    let p = parent(&f, delegating(&f, Some(&script)));
+    let spawned = p
+        .delegate
+        .spawn(reviewed(
+            held(&p.go, "echo hi > kid.txt"),
+            "kid",
+            format!("REPLY_SEQUENCE {}", dir.display()),
+        ))
+        .unwrap();
+    assert_eq!(spawned.review.unwrap().harness, "gemini-cli");
+    p.end_turn("say hi again");
+    p.release();
+
+    assert_eq!(settled(&f, "root"), BranchStatus::Ready);
+    assert!(
+        merged_into_root(&status(&f, "kid")),
+        "{:?}",
+        status(&f, "kid")
+    );
+    assert_eq!(f.git(&["show", "by/root:kid.txt"]), "hello\n");
+    // The child was sent the findings, numbered.
+    let fix = prompts(&f, "kid").pop().unwrap();
+    assert!(
+        fix.contains(
+            "your reviewer on gemini-cli asked for changes before it lands:\n\n\
+             1. kid.txt must say hello"
+        ),
+        "{fix}"
+    );
+    // Two reviews, each a child of root, set aside after; the first saw the
+    // task and the diff.
+    let names = reviewers(&f, "kid");
+    assert_eq!(names.len(), 2, "{names:?}");
+    for name in &names {
+        let info = f.yard.branch(name).unwrap().info().clone();
+        assert!(
+            matches!(info.status, BranchStatus::Discarded { .. }),
+            "{name}: {:?}",
+            info.status
+        );
+    }
+    let asked = prompts(&f, &names[0]).remove(0);
+    assert!(asked.contains("<branchyard-review>"), "{asked}");
+    assert!(asked.contains("echo hi > kid.txt"), "the task: {asked}");
+    assert!(asked.contains("+hi"), "the diff: {asked}");
+    let outcomes: Vec<String> = landings(&f, "root").into_iter().map(|l| l.1).collect();
+    assert!(
+        outcomes[0].starts_with("its reviewer on gemini-cli asked for changes: kid.txt must"),
+        "{outcomes:?}"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| o.starts_with("its reviewer on gemini-cli approved it")),
+        "{outcomes:?}"
+    );
+    assert!(outcomes.last().unwrap().starts_with("landed in by/root"));
+    let landing = p.delegate.inspect("kid").unwrap().landing.unwrap();
+    assert_eq!(landing.fixes, 1);
+    // What was approved is the candidate that landed, not the merge.
+    let kid = f.yard.branch("kid").unwrap().info().clone();
+    assert_eq!(landing.reviewed, Some(kid.candidate.unwrap().commit));
+}
+
+#[test]
+fn a_review_with_no_verdict_leaves_the_child_for_its_parent() {
+    let f = Fixture::new();
+    let answer = f.dir.join("answer.txt");
+    fs::write(&answer, "It looks fine to me.").unwrap();
+    let p = parent(&f, delegating(&f, None));
+    p.delegate
+        .spawn(reviewed(
+            held(&p.go, "echo hi > kid.txt"),
+            "kid",
+            format!("REPLY_FILE {}", answer.display()),
+        ))
+        .unwrap();
+    p.end_turn("say hi again");
+    p.release();
+
+    assert_eq!(settled(&f, "root"), BranchStatus::NoChanges);
+    assert_eq!(status(&f, "kid"), BranchStatus::Ready, "not landed");
+    let landing = p.delegate.inspect("kid").unwrap().landing.unwrap();
+    assert!(landing.left);
+    let why = landing.note.unwrap();
+    assert!(
+        why.starts_with("its review could not be done: ")
+            && why.contains("gave no verdict: its answer has no JSON object"),
+        "{why}"
+    );
+    let wake = prompts(&f, "root").pop().unwrap();
+    assert!(
+        wake.contains("Left for you, not landed: kid (its review could not be done"),
+        "{wake}"
+    );
+}
+
+#[test]
+fn a_review_is_refused_without_land_or_a_harness_the_parent_may_run() {
+    let f = Fixture::new();
+    let p = parent(&f, delegating(&f, None));
+    let review = ReviewSpec {
+        harness: "gemini-cli".into(),
+        ..ReviewSpec::default()
+    };
+    let unlanded = p.delegate.spawn(Spawn {
+        prompt: "say hi".into(),
+        name: Some("a".into()),
+        review: Some(review.clone()),
+        ..Spawn::default()
+    });
+    assert!(
+        matches!(&unlanded, Err(branchyard::Error::Denied(why)) if why.contains("gates landing")),
+        "{unlanded:?}"
+    );
+    let elsewhere = p.delegate.spawn(Spawn {
+        review: Some(ReviewSpec {
+            harness: "codex".into(),
+            ..review
+        }),
+        ..landing("say hi".into(), "b")
+    });
+    assert!(
+        matches!(&elsewhere, Err(branchyard::Error::Denied(why))
+            if why.contains("may not delegate to") && why.contains("so it may not review with it")),
+        "{elsewhere:?}"
+    );
+    assert!(f.yard.branch("a").is_err() && f.yard.branch("b").is_err());
 }

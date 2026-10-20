@@ -597,6 +597,10 @@ pub struct SpawnRequest {
     /// [`branchyard::Spawn::land`]. See `docs/delegation.md#landing`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub land: bool,
+    /// The child's reviewer before it lands, like
+    /// [`branchyard::Spawn::review`]. See `docs/delegation.md#review`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<branchyard::ReviewSpec>,
 }
 
 fn is_settled(after: &After) -> bool {

@@ -231,6 +231,18 @@ pub fn tools() -> Vec<Tool> {
         "why": {"type": "string", "description": "Why this harness and model for this subtask, in a few words: recorded on the child and learned from by the outcome store beside how it turns out. Ask advise first"},
         "owns": {"type": "array", "items": {"type": "string"}, "description": "The paths the child owns: files, directories (and all below them) or globs such as tests/parser_*.rs, relative to the repository. It is told them every turn, and its changes anywhere else are refused when you integrate it. Give siblings disjoint paths and they cannot conflict"},
         "land": {"type": "boolean", "description": "Leave the child to your engine to land: once its turn ends ready while you wait on your children, it is integrated into your branch, its check on the merge included; one that conflicts, fails its check or strays outside owns is sent a turn to fix that. Your next turn says what landed and what did not, so you integrate nothing yourself"},
+        "review": {
+            "type": "object",
+            "description": "A reviewer that reads the child's work each time it is ready to land, before it lands: a harness you may delegate to, ideally another vendor's than the child's. It approves the work or lists findings, which are sent to the child as a turn to fix its work. Needs land",
+            "properties": {
+                "harness": {"type": "string", "description": "The reviewer's harness or profile ID, such as codex"},
+                "model": {"type": "string", "description": "The model it runs; unset, its harness's default"},
+                "rubric": {"type": "string", "description": "What to look for, added to its prompt"},
+                "budget_usd": {"type": "number", "exclusiveMinimum": 0, "description": "Each review's cost limit, from your budget; required when you have a cost limit"},
+            },
+            "required": ["harness"],
+            "additionalProperties": false,
+        },
         "result": {
             "type": "object",
             "description": "The shape of the answer the child must give: it reports a JSON result with report, checked against this schema (a mismatch is refused, naming the path and the rule), and you read it as inspect's or wait's result. The child sees the contract in its own inspect as result_contract",
@@ -306,6 +318,7 @@ pub fn tools() -> Vec<Tool> {
                         "description": "The subtasks, each as spawn takes a child; give each a name when another depends on it",
                     },
                     "land": {"type": "boolean", "description": "Leave every task to your engine to land, as spawn's land does: each is integrated into your branch when it is ready, and your next turn says what landed"},
+                    "review": spawn_properties["review"].clone(),
                 },
                 "required": ["tasks"],
                 "additionalProperties": false,

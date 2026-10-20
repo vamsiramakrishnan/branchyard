@@ -28,7 +28,7 @@ import dataclasses
 import json
 import os
 import subprocess
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 __all__ = [
     "BranchyardError",
@@ -271,6 +271,9 @@ class Spawned:
     owns: Optional[List[str]] = None
     # It was left to the engine to land; None when it was not.
     land: Optional[bool] = None
+    # Its reviewer before it lands: {"harness", "model", "rubric",
+    # "budget_usd"}; None when it has none.
+    review: Optional[Dict[str, Any]] = None
 
 
 @dataclasses.dataclass
@@ -308,6 +311,7 @@ class Inspection:
     # not, "left": True once its parent decides}. None when not.
     land: Optional[bool] = None
     landing: Optional[Dict[str, Any]] = None
+    review: Optional[Dict[str, Any]] = None
     stalled: Optional[bool] = None
     # What its live children (running, waiting, blocked, awaiting plan
     # approval) hold of its budget, how many they are, and what its settled
@@ -709,6 +713,7 @@ def spawn(
     why: Optional[str] = None,
     owns: Optional[List[str]] = None,
     land: bool = False,
+    review: Union[str, Dict[str, Any], None] = None,
 ) -> Spawned:
     """Create a child branch and start it; returns once it has started.
 
@@ -763,7 +768,15 @@ def spawn(
     conflicts, fails its check or strays outside `owns` is sent a turn to
     fix that. Your next turn says what landed. See docs/delegation.md
     "Landing".
+
+    `review` has a reviewer read the child's work each time it is ready to
+    land, before it lands: a harness ID such as "codex" (ideally another
+    vendor's than the child's), or {"harness": ..., "model": ..., "rubric":
+    ..., "budget_usd": ...}; `budget_usd` is required when you have a cost
+    limit. Its findings are sent to the child as a turn to fix its work.
+    Needs `land=True`. See docs/delegation.md "Review".
     """
+    reviewer = _review(review)
     options = {
         "--seat": seat,
         "--harness": harness,
@@ -796,6 +809,15 @@ def spawn(
         flags.append("--plan")
     if land:
         flags.append("--land")
+    if reviewer is not None:
+        for flag, key in (
+            ("--review", "harness"),
+            ("--review-model", "model"),
+            ("--review-rubric", "rubric"),
+            ("--review-budget-usd", "budget_usd"),
+        ):
+            if reviewer.get(key) is not None:
+                flags += [flag, str(reviewer[key])]
     if result is not None:
         if not isinstance(result, dict) or "schema" not in result or not set(result) <= {"schema", "required"}:
             raise ValueError('result must be {"schema": {...}, "required": bool}')
@@ -808,7 +830,10 @@ def spawn(
 
 
 def delegate(
-    tasks: List[Dict[str, Any]], brief: Optional[str] = None, land: bool = False
+    tasks: List[Dict[str, Any]],
+    brief: Optional[str] = None,
+    land: bool = False,
+    review: Union[str, Dict[str, Any], None] = None,
 ) -> Delegated:
     """Hand your engine a plan: several children at once, with the brief they share.
 
@@ -821,18 +846,36 @@ def delegate(
     brief before any of them starts, so every child you delegate to is given
     it each turn. Then end your turn: you are woken when they have settled.
     With `land=True` the engine integrates each into your branch when it is
-    ready, as `spawn(land=True)` does. See docs/delegation.md "Plans and the
-    shared brief".
+    ready, as `spawn(land=True)` does, and `review` reviews each task that
+    names no reviewer of its own first, as `spawn(review=...)` does. See
+    docs/delegation.md "Plans and the shared brief".
     """
     plan: Dict[str, Any] = {"tasks": tasks}
     if brief is not None:
         plan["brief"] = brief
     if land:
         plan["land"] = True
+    reviewer = _review(review)
+    if reviewer is not None:
+        plan["review"] = reviewer
     value = _run(["delegate", "--plan", "-"], stdin=json.dumps(plan))
     made = _make(Delegated, value)
     made.spawned = [_make(Spawned, s) for s in value.get("spawned", [])]
     return made
+
+
+def _review(review: Union[str, Dict[str, Any], None]) -> Optional[Dict[str, Any]]:
+    """A reviewer as `spawn` and `delegate` take it, as the tools take it."""
+    if review is None:
+        return None
+    if isinstance(review, str):
+        return {"harness": review}
+    keys = {"harness", "model", "rubric", "budget_usd"}
+    if isinstance(review, dict) and "harness" in review and set(review) <= keys:
+        return dict(review)
+    raise ValueError(
+        'review must be a harness ID or {"harness": ..., "model": ..., "rubric": ..., "budget_usd": ...}'
+    )
 
 
 def brief(text: Optional[str] = None) -> Brief:

@@ -589,6 +589,9 @@ pub struct SpawnArgs {
     pub owns: Vec<String>,
     /// `--land`: leave the child to the engine to land.
     pub land: bool,
+    /// `--review` and its `--review-*` flags: the child's reviewer before
+    /// it lands. Boxed, so `Command` stays small.
+    pub review: Option<Box<branchyard::ReviewSpec>>,
     pub json: bool,
 }
 
@@ -4376,6 +4379,20 @@ pub struct SpawnGraph {
     /// that cannot land is sent a turn to fix its work; your next turn says what landed
     #[arg(long)]
     land: bool,
+    /// Have a reviewer on this harness, ideally another vendor's than the child's, read its work
+    /// each time it is ready to land, before it lands; findings are sent to the child as a turn
+    /// to fix its work. Needs --land, and a harness you may delegate to
+    #[arg(long, value_name = "HARNESS", requires = "land", value_parser = non_blank)]
+    review: Option<String>,
+    /// The model the reviewer runs
+    #[arg(long, value_name = "MODEL", requires = "review", value_parser = non_blank)]
+    review_model: Option<String>,
+    /// What the reviewer should look for, added to its prompt
+    #[arg(long, value_name = "TEXT", requires = "review", value_parser = non_blank)]
+    review_rubric: Option<String>,
+    /// Each review's cost limit, from your budget; required when you have a cost limit
+    #[arg(long, value_name = "X", requires = "review", value_parser = usd)]
+    review_budget_usd: Option<f64>,
 }
 
 impl Flags for SpawnFlags {
@@ -4431,6 +4448,14 @@ impl Flags for SpawnFlags {
                 .flat_map(|list| list.0)
                 .collect(),
             land: self.graph.land,
+            review: self.graph.review.map(|harness| {
+                Box::new(branchyard::ReviewSpec {
+                    harness,
+                    model: self.graph.review_model,
+                    rubric: self.graph.review_rubric,
+                    budget_usd: self.graph.review_budget_usd,
+                })
+            }),
             json: self.json,
         })
     }
@@ -5556,6 +5581,25 @@ mod tests {
             panic!("not spawn")
         };
         assert!(lander.land);
+        assert!(lander.review.is_none());
+        let Command::Spawn { spawn: checked, .. } = parse_str(
+            "spawn go --land --review codex --review-model large --review-budget-usd 0.5 \
+             --review-rubric 'No new crates'",
+        )
+        .unwrap() else {
+            panic!("not spawn")
+        };
+        assert_eq!(
+            checked.review.as_deref(),
+            Some(&branchyard::ReviewSpec {
+                harness: "codex".into(),
+                model: Some("large".into()),
+                rubric: Some("No new crates".into()),
+                budget_usd: Some(0.5),
+            })
+        );
+        assert!(err("spawn go --review codex").contains("--land"));
+        assert!(err("spawn go --land --review-model large").contains("--review"));
         let Command::Delegate { land, .. } = parse_str("delegate --plan p.json --land").unwrap()
         else {
             panic!("not delegate")
