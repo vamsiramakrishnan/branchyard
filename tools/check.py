@@ -100,7 +100,7 @@ STEPS = (
     Step(
         "fix_rig_schema",
         "controls",
-        ("cargo", "test", "-p", "branchyard-cli", "--locked", "--offline", "--features", "schema", "--lib", "rig_json"),
+        ("cargo", "test", "-p", "branchyard-cli", "--locked", "--offline", "--features", "schema", "--bin", "by", "rig_json"),
         cargo=True,
         fix=True,
         env=(("BY_UPDATE_SCHEMA", "1"),),
@@ -218,7 +218,7 @@ STEPS = (
     Step(
         "schema_rig",
         "controls",
-        ("cargo", "test", "-p", "branchyard-cli", "--locked", "--offline", "--features", "schema", "--lib", "rig_json"),
+        ("cargo", "test", "-p", "branchyard-cli", "--locked", "--offline", "--features", "schema", "--bin", "by", "rig_json"),
         cargo=True,
     ),
 )
