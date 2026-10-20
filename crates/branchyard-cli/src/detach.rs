@@ -11,7 +11,7 @@
 //! the background command to exit, and then prints the branch and how to
 //! follow it.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -373,7 +373,6 @@ fn text(d: &Detached) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
     use super::*;
     use branchyard_testkit::Scratch;
 
@@ -398,7 +397,7 @@ mod tests {
         assert_eq!(found.command, "run");
         assert!(found.json);
         assert_eq!(found.permissions, Permissions::Yes);
-        let found = requested(&parse("send b go --detach --prompt-file p.md")).unwrap();
+        let found = requested(&parse("send b --detach --prompt-file p.md")).unwrap();
         assert_eq!((found.command, found.json), ("send", false));
         assert_eq!(found.prompt_file.as_deref(), Some("p.md"));
         assert_eq!(

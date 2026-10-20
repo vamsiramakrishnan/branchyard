@@ -1006,7 +1006,7 @@ fn a_detached_turn_outlives_the_command_that_started_it() {
     let agent = fake_agent!().display().to_string();
     let gate = repo.dir.join("gate");
     let prompt = format!(
-        "SH while [ ! -e {} ]; do sleep 0.05; done\nWRITE out.txt=hi",
+        "SH while [ ! -e {} ]; do sleep 0.05; done; echo hi > out.txt",
         gate.display()
     );
     let common = [
@@ -1031,9 +1031,18 @@ fn a_detached_turn_outlives_the_command_that_started_it() {
     // `by run` has exited; the turn waits on the gate, in the background.
     assert_eq!(state(&repo, "bg"), "running");
     fs::write(&gate, "").unwrap();
-    wait::until("the detached turn to end ready", || {
-        state(&repo, "bg") == "ready"
-    });
+    wait::until_with_context(
+        "the detached turn to end ready",
+        wait::DEFAULT_TIMEOUT,
+        || state(&repo, "bg") == "ready",
+        || {
+            format!(
+                "state {}\nlog:\n{}",
+                state(&repo, "bg"),
+                fs::read_to_string(&log).unwrap_or_default()
+            )
+        },
+    );
     assert!(fs::read_to_string(&log).unwrap().contains("bg"));
 
     // A send continues it in the background; its text says how to follow.
@@ -1060,6 +1069,7 @@ fn a_detached_turn_outlives_the_command_that_started_it() {
         "WRITE third.txt=x",
         "--name",
         "bg2",
+        "--fresh-session",
         "--detach",
         "--json",
         "--yes",
