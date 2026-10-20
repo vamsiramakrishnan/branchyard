@@ -76,7 +76,7 @@ pub struct Landing {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub left: bool,
     /// The candidate its reviewer approved, so it is not reviewed again
-    /// until its work changes ([`crate::review`]).
+    /// until its work changes (`crate::review`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewed: Option<String>,
 }
@@ -117,8 +117,13 @@ fn receiving(record: &Record) -> bool {
     crate::wake::is_parked(&record.info.status) || idle(record)
 }
 
-/// The children of `parent` waiting to land, oldest first.
-pub(crate) fn pending_children(store: &Store, parent: &Record) -> Vec<String> {
+/// The children of `parent` waiting to land, oldest first, as the store
+/// has them now: a record read before its turn spawned them does not list
+/// them.
+pub(crate) fn pending_children(store: &Store, parent: &str) -> Vec<String> {
+    let Ok(Some(parent)) = store.backend().read(parent) else {
+        return Vec::new();
+    };
     parent
         .info
         .children
@@ -166,7 +171,7 @@ fn sweep(yard: &Yard, parent: &str, given: Option<&TaskOptions>) -> Result<bool,
     let Some(record) = store.backend().read(parent)? else {
         return Ok(false);
     };
-    if !receiving(&record) || pending_children(&store, &record).is_empty() {
+    if !receiving(&record) || pending_children(&store, parent).is_empty() {
         return Ok(false);
     }
     let (held, lease) = match crate::ops::hold(yard, parent) {

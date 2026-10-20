@@ -143,7 +143,7 @@ pub(crate) fn park(
         .collect();
     // Children it left to the engine to land, ready now: they land while
     // it waits, and its wake says what landed (`crate::land`).
-    let landing: Vec<String> = crate::land::pending_children(&store, record)
+    let landing: Vec<String> = crate::land::pending_children(&store, &record.info.name)
         .into_iter()
         .filter(|name| !running.contains(name) && !unseen.contains(name))
         .collect();
@@ -318,7 +318,7 @@ pub(crate) fn look(yard: &Yard, name: &str, given: Option<&TaskOptions>) -> Resu
     };
     let below = delegation::descendants(&store, name)?;
     if below.iter().any(|info| unsettled(&info.status))
-        || !crate::land::pending_children(&store, &record).is_empty()
+        || !crate::land::pending_children(&store, name).is_empty()
     {
         return Ok(false);
     }

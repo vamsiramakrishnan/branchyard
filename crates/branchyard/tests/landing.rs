@@ -195,6 +195,43 @@ fn a_ready_child_lands_while_its_parent_waits_and_its_wake_says_so() {
     assert!(note.note.unwrap().starts_with("landed in by/root"));
 }
 
+/// A child spawned during its parent's turn and ready before that turn
+/// ends lands before the parent is woken: the parent waits on it, though
+/// its turn began before the child existed.
+#[test]
+fn a_child_ready_before_its_parents_turn_ends_lands_before_it_is_woken() {
+    let f = Fixture::new();
+    let p = parent(&f, delegating(&f, None));
+    let gate = f.dir.join("gate");
+    let turn = held(&gate, "true");
+    std::thread::scope(|s| {
+        let running = s.spawn(|| p.root.send(&turn, p.options.clone()).unwrap());
+        wait::until("root's turn to run", || {
+            status(&f, "root") == BranchStatus::Running
+        });
+        p.delegate
+            .spawn(landing("WRITE kid.txt=k".into(), "kid"))
+            .unwrap();
+        wait::until("kid to be ready", || {
+            status(&f, "kid") == BranchStatus::Ready
+        });
+        assert!(landings(&f, "root").is_empty(), "not while its parent runs");
+        fs::write(&gate, "").unwrap();
+        let after = running.join().unwrap();
+        assert_eq!(after.info().status, BranchStatus::WaitingOnChildren);
+    });
+    assert_eq!(settled(&f, "root"), BranchStatus::Ready);
+    assert!(
+        merged_into_root(&status(&f, "kid")),
+        "{:?}",
+        status(&f, "kid")
+    );
+    let root = f.yard.branch("root").unwrap().info().clone();
+    assert_eq!(root.turns, 3, "its own two, and the wake");
+    let wake = prompts(&f, "root").pop().unwrap();
+    assert!(wake.contains("Landed for you"), "{wake}");
+}
+
 /// Delegated from outside a harness, its parent idle: the child lands as it
 /// ends, and its parent, which had nothing, has its work without a turn.
 #[test]
