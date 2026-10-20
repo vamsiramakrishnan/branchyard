@@ -1541,8 +1541,12 @@ pub(crate) fn advise(
     // The caller's own harness, listed by name alone, carries its model, and
     // its command (a child on it inherits that; `None` for a real harness).
     if let Some(own) = &scope.own {
+        // An envelope lists profile IDs, the caller's own by its profile:
+        // the same profile is its own harness, however it is named.
+        let own_profile = harness::select(Some(&own.harness)).ok().map(|p| p.id);
         for candidate in &mut candidates {
-            if candidate.harness != own.harness {
+            let profile = harness::select(Some(&candidate.harness)).ok().map(|p| p.id);
+            if candidate.harness != own.harness && (profile.is_none() || profile != own_profile) {
                 continue;
             }
             if candidate.model.is_none() && candidate.effort.is_none() {

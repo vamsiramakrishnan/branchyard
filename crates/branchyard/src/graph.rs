@@ -199,6 +199,17 @@ pub struct SpawnSpec {
     /// child. See `docs/fleet.md#advice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// The paths the child owns: files, directories or globs relative to
+    /// the repository; its changes elsewhere are refused when it is
+    /// integrated. See `docs/delegation.md#ownership`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns: Vec<String>,
+    /// Leave the child to the engine to land; see `docs/delegation.md#landing`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub land: bool,
+    /// Its reviewer before it lands; see `docs/delegation.md#review`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<crate::ReviewSpec>,
 }
 
 impl SpawnSpec {
@@ -223,6 +234,9 @@ impl SpawnSpec {
             plan: self.plan,
             model: self.model.clone(),
             result: self.result.clone(),
+            owns: self.owns.clone(),
+            land: self.land,
+            review: self.review.clone(),
         })
     }
 
@@ -248,6 +262,9 @@ impl SpawnSpec {
             model: spawn.model.clone(),
             result: spawn.result.clone(),
             why: spawn.why.clone(),
+            owns: spawn.owns.clone(),
+            land: spawn.land,
+            review: spawn.review.clone(),
         }
     }
 }
@@ -519,9 +536,13 @@ fn verdict(yard: &Yard, record: &Record) -> Result<Verdict, Error> {
             }
         }
     }
-    Ok(match wait {
-        true => Verdict::Wait,
-        false => Verdict::Start,
+    if wait {
+        return Ok(Verdict::Wait);
+    }
+    // Its prerequisites let it start; its harness may have no free slot.
+    Ok(match crate::capacity::full(yard, record)? {
+        Some(_) => Verdict::Wait,
+        None => Verdict::Start,
     })
 }
 
@@ -677,6 +698,30 @@ pub(crate) fn settled(yard: &Yard, name: &str, options: Option<&TaskOptions>) {
             "advance the dependent branches",
             advance(yard, &dependents, options),
         );
+    }
+    // A slot on its harness may have freed. Its siblings start under its
+    // turn's options, as dependents do; another tree's only under those its
+    // own graph was applied with here.
+    let parent = store
+        .backend()
+        .read(name)
+        .ok()
+        .flatten()
+        .and_then(|r| r.info.parent);
+    let (siblings, others): (Vec<_>, Vec<_>) = crate::capacity::queued_behind(yard, name)
+        .into_iter()
+        .partition(|r| r.info.parent.is_some() && r.info.parent == parent);
+    // `advance` starts the last named first: the oldest goes last.
+    let names = |records: Vec<Record>| -> Vec<String> {
+        records.into_iter().rev().map(|r| r.info.name).collect()
+    };
+    for (queued, given) in [(names(siblings), options), (names(others), None)] {
+        if !queued.is_empty() {
+            best_effort(
+                "start the branches waiting for a free slot",
+                advance(yard, &queued, given),
+            );
+        }
     }
     // A parked ancestor wakes once everything below it has settled.
     crate::wake::settled(yard, name, options);

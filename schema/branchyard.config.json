@@ -1012,6 +1012,15 @@
             "$ref": "#/$defs/UsageAccount"
           },
           "description": "More logins to meter, by name: `[usage.accounts.work]` with the\nharness and the configuration directory it logs in from."
+        },
+        "max_running": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "description": "At most this many branches run at once on each harness or profile\nin a repository, as many as a subscription or key takes: `codex = 4`.\nA delegated child past its harness's limit waits for a free slot.\nUnset: no limit. See docs/delegation.md \"Placement\"."
         }
       },
       "description": "`[usage]`."

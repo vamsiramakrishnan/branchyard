@@ -14481,6 +14481,28 @@
             }
           ],
           "description": "The shape of the answer the child must report, like\n[`branchyard::Spawn::result`]: a schema in the contract's subset\nand whether a result is required. A keyword outside the subset is\nrefused. See `docs/delegation.md#result-contract`."
+        },
+        "owns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The paths the child owns, like [`branchyard::Spawn::owns`]: its\nchanges elsewhere are refused when it is integrated. See\n`docs/delegation.md#ownership`."
+        },
+        "land": {
+          "type": "boolean",
+          "description": "Leave the child to the engine to land, like\n[`branchyard::Spawn::land`]. See `docs/delegation.md#landing`."
+        },
+        "review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The child's reviewer before it lands, like\n[`branchyard::Spawn::review`]. See `docs/delegation.md#review`."
         }
       },
       "required": [
@@ -14752,6 +14774,41 @@
             "schema"
           ],
           "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ReviewSpec": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The reviewer's harness or profile ID, such as `codex`."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the reviewer's harness runs; unset, its default."
+            },
+            "rubric": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What to look for, added to the reviewer's prompt after the default\nrubric."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Each review's cost limit, from its parent's budget; required when\nthe parent has a cost limit, as for any child."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A reviewer for a child's work before the engine lands it: a harness its\nparent may delegate to, ideally another vendor's than the child's."
         }
       }
     },
@@ -14927,6 +14984,28 @@
                     "null"
                   ],
                   "description": "Why this harness and model, in the parent's words; recorded on the\nchild. See `docs/fleet.md#advice`."
+                },
+                "owns": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The paths the child owns: files, directories or globs relative to\nthe repository; its changes elsewhere are refused when it is\nintegrated. See `docs/delegation.md#ownership`."
+                },
+                "land": {
+                  "type": "boolean",
+                  "description": "Leave the child to the engine to land; see `docs/delegation.md#landing`."
+                },
+                "review": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ReviewSpec"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Its reviewer before it lands; see `docs/delegation.md#review`."
                 },
                 "kind": {
                   "type": "string",
@@ -15143,6 +15222,41 @@
             "schema"
           ],
           "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ReviewSpec": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The reviewer's harness or profile ID, such as `codex`."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the reviewer's harness runs; unset, its default."
+            },
+            "rubric": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What to look for, added to the reviewer's prompt after the default\nrubric."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Each review's cost limit, from its parent's budget; required when\nthe parent has a cost limit, as for any child."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A reviewer for a child's work before the engine lands it: a harness its\nparent may delegate to, ideally another vendor's than the child's."
         },
         "PolicySpec": {
           "type": "object",
@@ -15640,6 +15754,35 @@
             "check_inherited": {
               "type": "boolean",
               "description": "`check` is its parent's, inherited because the spawn gave none.\nSiblings under a parent's whole-suite check pass it only together:\nintegrate them together ([`Delegate::integrate_all`]). Omitted when\nfalse."
+            },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The paths it owns, as normalized. Omitted when none."
+            },
+            "land": {
+              "type": "boolean",
+              "description": "It was left to the engine to land. Omitted when false."
+            },
+            "review": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ReviewSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The reviewer that reads its work before it lands. Omitted when none."
+            },
+            "waiting_for": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What it waits for when no prerequisite holds it: a free slot on its\nharness (`[usage] max_running`). Omitted otherwise."
             }
           },
           "required": [
@@ -15864,6 +16007,41 @@
           },
           "description": "A child's limits as the tools show them."
         },
+        "ReviewSpec": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The reviewer's harness or profile ID, such as `codex`."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the reviewer's harness runs; unset, its default."
+            },
+            "rubric": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What to look for, added to the reviewer's prompt after the default\nrubric."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Each review's cost limit, from its parent's budget; required when\nthe parent has a cost limit, as for any child."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A reviewer for a child's work before the engine lands it: a harness its\nparent may delegate to, ideally another vendor's than the child's."
+        },
         "Dependency": {
           "type": "object",
           "additionalProperties": false,
@@ -15991,6 +16169,13 @@
             "type": "string"
           },
           "description": "Files where the work conflicts with `target`: integrating it would\nfail before its check."
+        },
+        "outside_scope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Paths the work changes outside the paths the branch owns\n([`crate::scope`]): integrating it would be refused for them,\nwhatever its check says. Empty for a branch without a scope."
         },
         "output_tail": {
           "type": "string",
@@ -16549,6 +16734,49 @@
                 "$ref": "#/$defs/Binding"
               },
               "description": "The scratch areas it is bound to."
+            },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The paths its parent gave it to own; its changes elsewhere are\nrefused when it is integrated. Omitted when none. See\n[`crate::scope`]."
+            },
+            "owns_within": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "description": "The scopes of its ancestors that bound it too, nearest first: a path\nis in its scope only when `owns` (if any) and each of these cover\nit. Omitted when none."
+            },
+            "land": {
+              "type": "boolean",
+              "description": "Its parent left it to the engine to land. Omitted when false."
+            },
+            "review": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ReviewSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The reviewer that reads its work before it lands. Omitted when none."
+            },
+            "landing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Landing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What became of its landing: where it landed, or why it has not, and\nthe turns the engine sent it to fix its work. Omitted until the\nengine tried to land it."
             }
           },
           "required": [
@@ -17017,6 +17245,71 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "ReviewSpec": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The reviewer's harness or profile ID, such as `codex`."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the reviewer's harness runs; unset, its default."
+            },
+            "rubric": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What to look for, added to the reviewer's prompt after the default\nrubric."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Each review's cost limit, from its parent's budget; required when\nthe parent has a cost limit, as for any child."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A reviewer for a child's work before the engine lands it: a harness its\nparent may delegate to, ideally another vendor's than the child's."
+        },
+        "Landing": {
+          "type": "object",
+          "properties": {
+            "fixes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Turns the engine sent it to make its work land."
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Its latest landing: where it landed, or why it has not."
+            },
+            "left": {
+              "type": "boolean",
+              "description": "The engine stopped trying: its parent decides what to do with it."
+            },
+            "reviewed": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes (`crate::review`)."
+            }
+          },
+          "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
         }
       }
     },
@@ -17951,6 +18244,49 @@
                 "$ref": "#/$defs/Binding"
               },
               "description": "The scratch areas it is bound to."
+            },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The paths its parent gave it to own; its changes elsewhere are\nrefused when it is integrated. Omitted when none. See\n[`crate::scope`]."
+            },
+            "owns_within": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "description": "The scopes of its ancestors that bound it too, nearest first: a path\nis in its scope only when `owns` (if any) and each of these cover\nit. Omitted when none."
+            },
+            "land": {
+              "type": "boolean",
+              "description": "Its parent left it to the engine to land. Omitted when false."
+            },
+            "review": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ReviewSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The reviewer that reads its work before it lands. Omitted when none."
+            },
+            "landing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Landing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What became of its landing: where it landed, or why it has not, and\nthe turns the engine sent it to fix its work. Omitted until the\nengine tried to land it."
             }
           },
           "required": [
@@ -18209,6 +18545,71 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "ReviewSpec": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The reviewer's harness or profile ID, such as `codex`."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the reviewer's harness runs; unset, its default."
+            },
+            "rubric": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What to look for, added to the reviewer's prompt after the default\nrubric."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Each review's cost limit, from its parent's budget; required when\nthe parent has a cost limit, as for any child."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A reviewer for a child's work before the engine lands it: a harness its\nparent may delegate to, ideally another vendor's than the child's."
+        },
+        "Landing": {
+          "type": "object",
+          "properties": {
+            "fixes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Turns the engine sent it to make its work land."
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Its latest landing: where it landed, or why it has not."
+            },
+            "left": {
+              "type": "boolean",
+              "description": "The engine stopped trying: its parent decides what to do with it."
+            },
+            "reviewed": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes (`crate::review`)."
+            }
+          },
+          "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
         },
         "MapReport": {
           "type": "object",
@@ -18472,6 +18873,13 @@
                 "type": "string"
               },
               "description": "Files where the work conflicts with `target`: integrating it would\nfail before its check."
+            },
+            "outside_scope": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths the work changes outside the paths the branch owns\n([`crate::scope`]): integrating it would be refused for them,\nwhatever its check says. Empty for a branch without a scope."
             },
             "output_tail": {
               "type": "string",
@@ -19438,6 +19846,49 @@
                 "$ref": "#/$defs/Binding"
               },
               "description": "The scratch areas it is bound to."
+            },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The paths its parent gave it to own; its changes elsewhere are\nrefused when it is integrated. Omitted when none. See\n[`crate::scope`]."
+            },
+            "owns_within": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "description": "The scopes of its ancestors that bound it too, nearest first: a path\nis in its scope only when `owns` (if any) and each of these cover\nit. Omitted when none."
+            },
+            "land": {
+              "type": "boolean",
+              "description": "Its parent left it to the engine to land. Omitted when false."
+            },
+            "review": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ReviewSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The reviewer that reads its work before it lands. Omitted when none."
+            },
+            "landing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Landing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What became of its landing: where it landed, or why it has not, and\nthe turns the engine sent it to fix its work. Omitted until the\nengine tried to land it."
             }
           },
           "required": [
@@ -19696,6 +20147,71 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "ReviewSpec": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The reviewer's harness or profile ID, such as `codex`."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the reviewer's harness runs; unset, its default."
+            },
+            "rubric": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What to look for, added to the reviewer's prompt after the default\nrubric."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Each review's cost limit, from its parent's budget; required when\nthe parent has a cost limit, as for any child."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A reviewer for a child's work before the engine lands it: a harness its\nparent may delegate to, ideally another vendor's than the child's."
+        },
+        "Landing": {
+          "type": "object",
+          "properties": {
+            "fixes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Turns the engine sent it to make its work land."
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Its latest landing: where it landed, or why it has not."
+            },
+            "left": {
+              "type": "boolean",
+              "description": "The engine stopped trying: its parent decides what to do with it."
+            },
+            "reviewed": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes (`crate::review`)."
+            }
+          },
+          "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
         },
         "MapReport": {
           "type": "object",
@@ -19959,6 +20475,13 @@
                 "type": "string"
               },
               "description": "Files where the work conflicts with `target`: integrating it would\nfail before its check."
+            },
+            "outside_scope": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths the work changes outside the paths the branch owns\n([`crate::scope`]): integrating it would be refused for them,\nwhatever its check says. Empty for a branch without a scope."
             },
             "output_tail": {
               "type": "string",
@@ -20756,6 +21279,28 @@
               ],
               "additionalProperties": false,
               "description": "The result the branch reported with `report`, a JSON value that\nmatched its parent's [`contract::ResultContract`] when it had one:\nthe latest is the branch's [`Inspection::result`]. See\n`docs/delegation.md#result-contract`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "brief": {
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "description": "The entry, as the branch wrote it.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ]
+                }
+              },
+              "required": [
+                "brief"
+              ],
+              "additionalProperties": false,
+              "description": "An entry of the branch's shared brief, recorded on the delegating\nbranch: every child it delegates to is given all its entries each\nturn, oldest first. See `docs/delegation.md#plans-and-the-shared-brief`."
             },
             {
               "type": "object",
@@ -25849,6 +26394,28 @@
               ],
               "additionalProperties": false,
               "description": "The result the branch reported with `report`, a JSON value that\nmatched its parent's [`contract::ResultContract`] when it had one:\nthe latest is the branch's [`Inspection::result`]. See\n`docs/delegation.md#result-contract`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "brief": {
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "description": "The entry, as the branch wrote it.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ]
+                }
+              },
+              "required": [
+                "brief"
+              ],
+              "additionalProperties": false,
+              "description": "An entry of the branch's shared brief, recorded on the delegating\nbranch: every child it delegates to is given all its entries each\nturn, oldest first. See `docs/delegation.md#plans-and-the-shared-brief`."
             },
             {
               "type": "object",
@@ -31534,6 +32101,49 @@
                 "$ref": "#/$defs/Binding"
               },
               "description": "The scratch areas it is bound to."
+            },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The paths its parent gave it to own; its changes elsewhere are\nrefused when it is integrated. Omitted when none. See\n[`crate::scope`]."
+            },
+            "owns_within": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "description": "The scopes of its ancestors that bound it too, nearest first: a path\nis in its scope only when `owns` (if any) and each of these cover\nit. Omitted when none."
+            },
+            "land": {
+              "type": "boolean",
+              "description": "Its parent left it to the engine to land. Omitted when false."
+            },
+            "review": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ReviewSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The reviewer that reads its work before it lands. Omitted when none."
+            },
+            "landing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Landing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What became of its landing: where it landed, or why it has not, and\nthe turns the engine sent it to fix its work. Omitted until the\nengine tried to land it."
             }
           },
           "required": [
@@ -31792,6 +32402,71 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "ReviewSpec": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The reviewer's harness or profile ID, such as `codex`."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the reviewer's harness runs; unset, its default."
+            },
+            "rubric": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What to look for, added to the reviewer's prompt after the default\nrubric."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Each review's cost limit, from its parent's budget; required when\nthe parent has a cost limit, as for any child."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A reviewer for a child's work before the engine lands it: a harness its\nparent may delegate to, ideally another vendor's than the child's."
+        },
+        "Landing": {
+          "type": "object",
+          "properties": {
+            "fixes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Turns the engine sent it to make its work land."
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Its latest landing: where it landed, or why it has not."
+            },
+            "left": {
+              "type": "boolean",
+              "description": "The engine stopped trying: its parent decides what to do with it."
+            },
+            "reviewed": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes (`crate::review`)."
+            }
+          },
+          "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
         },
         "MapReport": {
           "type": "object",
@@ -32055,6 +32730,13 @@
                 "type": "string"
               },
               "description": "Files where the work conflicts with `target`: integrating it would\nfail before its check."
+            },
+            "outside_scope": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths the work changes outside the paths the branch owns\n([`crate::scope`]): integrating it would be refused for them,\nwhatever its check says. Empty for a branch without a scope."
             },
             "output_tail": {
               "type": "string",
@@ -33357,6 +34039,49 @@
             "$ref": "#/$defs/Binding"
           },
           "description": "The scratch areas it is bound to."
+        },
+        "owns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The paths its parent gave it to own; its changes elsewhere are\nrefused when it is integrated. Omitted when none. See\n[`crate::scope`]."
+        },
+        "owns_within": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": "The scopes of its ancestors that bound it too, nearest first: a path\nis in its scope only when `owns` (if any) and each of these cover\nit. Omitted when none."
+        },
+        "land": {
+          "type": "boolean",
+          "description": "Its parent left it to the engine to land. Omitted when false."
+        },
+        "review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The reviewer that reads its work before it lands. Omitted when none."
+        },
+        "landing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Landing"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What became of its landing: where it landed, or why it has not, and\nthe turns the engine sent it to fix its work. Omitted until the\nengine tried to land it."
         }
       },
       "required": [
@@ -33827,6 +34552,71 @@
             }
           ],
           "description": "How a branch uses a scratch area it is bound to."
+        },
+        "ReviewSpec": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The reviewer's harness or profile ID, such as `codex`."
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The model the reviewer's harness runs; unset, its default."
+            },
+            "rubric": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What to look for, added to the reviewer's prompt after the default\nrubric."
+            },
+            "budget_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "description": "Each review's cost limit, from its parent's budget; required when\nthe parent has a cost limit, as for any child."
+            }
+          },
+          "required": [
+            "harness"
+          ],
+          "description": "A reviewer for a child's work before the engine lands it: a harness its\nparent may delegate to, ideally another vendor's than the child's."
+        },
+        "Landing": {
+          "type": "object",
+          "properties": {
+            "fixes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Turns the engine sent it to make its work land."
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Its latest landing: where it landed, or why it has not."
+            },
+            "left": {
+              "type": "boolean",
+              "description": "The engine stopped trying: its parent decides what to do with it."
+            },
+            "reviewed": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The candidate its reviewer approved, so it is not reviewed again\nuntil its work changes (`crate::review`)."
+            }
+          },
+          "description": "What became of a child its parent left to the engine to land, as\n`inspect` shows it."
         }
       }
     },
@@ -34921,6 +35711,28 @@
               ],
               "additionalProperties": false,
               "description": "The result the branch reported with `report`, a JSON value that\nmatched its parent's [`contract::ResultContract`] when it had one:\nthe latest is the branch's [`Inspection::result`]. See\n`docs/delegation.md#result-contract`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "brief": {
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "description": "The entry, as the branch wrote it.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ]
+                }
+              },
+              "required": [
+                "brief"
+              ],
+              "additionalProperties": false,
+              "description": "An entry of the branch's shared brief, recorded on the delegating\nbranch: every child it delegates to is given all its entries each\nturn, oldest first. See `docs/delegation.md#plans-and-the-shared-brief`."
             },
             {
               "type": "object",

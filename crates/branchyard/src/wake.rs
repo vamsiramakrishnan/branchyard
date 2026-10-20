@@ -141,16 +141,35 @@ pub(crate) fn park(
         .filter(|info| awaits_parent(&info.status) && held_on.contains(&info.name))
         .map(|info| info.name.clone())
         .collect();
-    if running.is_empty() && unseen.is_empty() {
+    // Children it left to the engine to land, ready now: they land while
+    // it waits, and its wake says what landed (`crate::land`).
+    let landing: Vec<String> = crate::land::pending_children(&store, &record.info.name)
+        .into_iter()
+        .filter(|name| !running.contains(name) && !unseen.contains(name))
+        .collect();
+    if running.is_empty() && unseen.is_empty() && landing.is_empty() {
         return Ok(());
     }
-    let on: Vec<String> = running.iter().chain(&unseen).cloned().collect();
+    let on: Vec<String> = running
+        .iter()
+        .chain(&unseen)
+        .chain(&landing)
+        .cloned()
+        .collect();
     if record.wakes >= max_wakes {
+        let (ended, then) = match running.is_empty() && unseen.is_empty() {
+            true => (
+                format!("with {} ready to land", on.join(", ")),
+                "Integrate them (`by integrate`)",
+            ),
+            false => (
+                format!("while {} still run", on.join(", ")),
+                "Wait for them (`by wait`)",
+            ),
+        };
         recorder.record(Activity::Warning(format!(
-            "its turn ended while {} still run, but it was woken {} times in a row, its \
-             envelope's max_wakes; it is not woken again. Wait for them (`by wait`) or send it a \
-             prompt",
-            on.join(", "),
+            "its turn ended {ended}, but it was woken {} times in a row, its envelope's \
+             max_wakes; it is not woken again. {then} or send it a prompt",
             record.wakes
         )))?;
         return Ok(());
@@ -158,14 +177,21 @@ pub(crate) fn park(
     recorder.record(Activity::Delegation {
         tool: "wait".into(),
         branch: record.info.name.clone(),
-        outcome: match running.is_empty() {
-            false => format!(
+        outcome: match (running.is_empty(), unseen.is_empty()) {
+            (true, true) => format!(
+                "its turn ended with {} ready to land; the engine integrates them into its branch \
+                 and starts its next turn with what landed (automatic wake {} of at most \
+                 {max_wakes})",
+                on.join(", "),
+                record.wakes + 1
+            ),
+            (false, _) => format!(
                 "its turn ended while {} still run; it waits on them, and its next turn starts \
                  when they settle (automatic wake {} of at most {max_wakes})",
                 on.join(", "),
                 record.wakes + 1
             ),
-            true => format!(
+            (true, false) => format!(
                 "its turn's hold was cut after {} settled, which its answer did not see; its \
                  next turn starts with what they did (automatic wake {} of at most {max_wakes})",
                 on.join(", "),
@@ -202,8 +228,10 @@ pub(crate) fn remember(yard: &Yard, record: &Record, options: &TaskOptions) {
 
 /// `name`'s state changed (a turn ended, it was removed, blocked or
 /// recovered): wake each parked ancestor whose descendants have all
-/// settled. `options` are the turn's that changed it, if a turn did.
-/// Errors are logged: they leave the ancestor to the next look.
+/// settled, and land into each ancestor, parked or idle, the children it
+/// left to land that are ready ([`crate::land`]). `options` are the turn's
+/// that changed it, if a turn did. Errors are logged: they leave the
+/// ancestor to the next look.
 pub(crate) fn settled(yard: &Yard, name: &str, options: Option<&TaskOptions>) {
     let store = yard.store();
     let mut seen = BTreeSet::new();
@@ -226,7 +254,7 @@ pub(crate) fn settled(yard: &Yard, name: &str, options: Option<&TaskOptions>) {
         let Ok(Some(record)) = store.backend().read(&parent) else {
             break;
         };
-        if is_parked(&record.info.status) {
+        if is_parked(&record.info.status) || crate::land::idle(&record) {
             best_effort("wake a parked branch", look(yard, &parent, options));
         }
         next = record.info.parent;
@@ -266,14 +294,32 @@ pub(crate) fn resume(yard: &Yard, options: &TaskOptions) -> Result<Vec<String>, 
 /// process parked it, and none was given) is left parked.
 pub(crate) fn look(yard: &Yard, name: &str, given: Option<&TaskOptions>) -> Result<bool, Error> {
     let store = yard.store();
-    let Some(record) = store.backend().read(name)? else {
+    let parked_record = |store: &Store| -> Result<Option<Record>, Error> {
+        Ok(store
+            .backend()
+            .read(name)?
+            .filter(|record| is_parked(&record.info.status)))
+    };
+    let Some(current) = store.backend().read(name)? else {
         return Ok(false);
     };
-    if !is_parked(&record.info.status) {
+    if !is_parked(&current.info.status) {
+        // Not woken, but what it left to land and is ready lands.
+        if crate::land::idle(&current) {
+            crate::land::settle(yard, name, given);
+        }
         return Ok(false);
     }
+    // Children it left to the engine land first: what they bring is in its
+    // branch and its candidate before it wakes or settles.
+    crate::land::settle(yard, name, given);
+    let Some(record) = parked_record(&store)? else {
+        return Ok(false);
+    };
     let below = delegation::descendants(&store, name)?;
-    if below.iter().any(|info| unsettled(&info.status)) {
+    if below.iter().any(|info| unsettled(&info.status))
+        || !crate::land::pending_children(&store, name).is_empty()
+    {
         return Ok(false);
     }
     let parked = record.parked.clone().unwrap_or_else(|| Parked {
@@ -486,6 +532,10 @@ pub(crate) fn summary(
         text.push_str(&format!("\nYour other children: {}.", others.join(", ")));
         text.push('\n');
     }
+    if let Some(lines) = crate::land::wake_lines(store, record, &parked.on) {
+        text.push('\n');
+        text.push_str(&lines);
+    }
     text.push_str(
         "\nWhat you can do now:\n\
          - Integrate the children you want, together when they share a check: `by integrate a b` \
@@ -501,7 +551,7 @@ pub(crate) fn summary(
     Ok(text)
 }
 
-fn status_text(status: &BranchStatus) -> String {
+pub(crate) fn status_text(status: &BranchStatus) -> String {
     match status {
         BranchStatus::Failed { reason } => format!("failed: {reason}"),
         BranchStatus::Blocked { reason } => format!("blocked: {reason}"),

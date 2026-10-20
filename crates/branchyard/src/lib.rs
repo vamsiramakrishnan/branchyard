@@ -96,8 +96,10 @@
 
 mod access;
 mod adopt;
+mod assignment;
 mod broker;
 mod bundle;
+mod capacity;
 mod checkpoint;
 mod compare;
 pub mod configure;
@@ -123,6 +125,7 @@ pub mod inventory;
 mod json_schema;
 mod judge;
 mod knowledge;
+mod land;
 mod lifecycle;
 mod lock;
 mod map;
@@ -145,9 +148,11 @@ mod pull_request;
 mod record;
 mod recover;
 pub mod reported;
+mod review;
 mod run;
 #[cfg(test)]
 mod schema_parity;
+pub mod scope;
 mod seats;
 pub mod services;
 mod snapshots;
@@ -193,6 +198,7 @@ pub use branchyard_provision::{
 };
 use branchyard_workspace::Repository;
 pub use bundle::BundleEntry;
+pub use capacity::AUTO as AUTO_HARNESS;
 pub use checkpoint::{
     entries as checkpoint_entries, recorded as recorded_checkpoints, CheckpointEntry, Checkpoints,
     Rewound,
@@ -200,8 +206,9 @@ pub use checkpoint::{
 pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, AttemptCheck};
 pub use contract::ResultContract;
 pub use delegation::{
-    nest_graph_budgets, Asked, Cancelled, ChildBudget, Children, Delegate, Envelope, EventPage,
-    Inbox, Inspection, Sent, Spawn, Spawned, Waited, DEFAULT_MAX_WAKES,
+    nest_graph_budgets, nest_plan_budgets, Asked, Brief, Cancelled, ChildBudget, Children,
+    Delegate, Delegated, DelegationPlan, Envelope, EventPage, Inbox, Inspection, Sent, Spawn,
+    Spawned, Waited, BRIEF_ENTRY_MAX, BRIEF_MAX, DEFAULT_MAX_WAKES,
 };
 pub use egress::{EgressActivity, Enforcement as EgressEnforcement};
 pub use endpoint::SandboxHost;
@@ -241,6 +248,7 @@ pub use knowledge::{
     KnowledgeStatus, NewKnowledge, DEFAULT_BUDGET_TOKENS as KNOWLEDGE_DEFAULT_BUDGET_TOKENS,
     TEXT_MAX as KNOWLEDGE_TEXT_MAX,
 };
+pub use land::{Landing, FIXES as LAND_FIXES};
 pub use lifecycle::{Parked, Resting};
 pub use map::{
     check_spec as check_map_spec, default_name as map_default_name,
@@ -273,6 +281,7 @@ pub use pull_request::{
     PullRequestRef, Pushed, ResolvedThread,
 };
 pub use reported::{Reported, ReportedState, StatusReport};
+pub use review::ReviewSpec;
 pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
 pub use snapshots::{
@@ -2664,6 +2673,13 @@ pub enum Activity {
         /// The result, as the child gave it.
         value: serde_json::Value,
     },
+    /// An entry of the branch's shared brief, recorded on the delegating
+    /// branch: every child it delegates to is given all its entries each
+    /// turn, oldest first. See `docs/delegation.md#plans-and-the-shared-brief`.
+    Brief {
+        /// The entry, as the branch wrote it.
+        text: String,
+    },
     /// A branch that a trigger keeps alive moved through its lifecycle: it
     /// went idle (its kept sandbox released), dormant (its next run starts
     /// a fresh session), was reincarnated, or was deleted. See
@@ -3483,6 +3499,11 @@ pub struct CheckReport {
     /// fail before its check.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<String>,
+    /// Paths the work changes outside the paths the branch owns
+    /// ([`crate::scope`]): integrating it would be refused for them,
+    /// whatever its check says. Empty for a branch without a scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outside_scope: Vec<String>,
     /// The last [`branchyard_workspace::OUTPUT_TAIL_BYTES`] bytes of its
     /// output, or why it could not start.
     #[serde(default)]
@@ -3491,12 +3512,14 @@ pub struct CheckReport {
 
 impl CheckReport {
     /// Whether integrating the work as it is would get past its check:
-    /// the check passed, or there is none and nothing conflicted.
+    /// nothing is outside its scope, and the check passed, or there is
+    /// none and nothing conflicted.
     pub fn passed(&self) -> bool {
-        match self.check {
-            Some(_) => self.outcome == CheckVerdict::Passed,
-            None => self.conflicts.is_empty(),
-        }
+        self.outside_scope.is_empty()
+            && match self.check {
+                Some(_) => self.outcome == CheckVerdict::Passed,
+                None => self.conflicts.is_empty(),
+            }
     }
 }
 

@@ -584,6 +584,14 @@ pub struct SpawnArgs {
     pub result_schema_file: Option<String>,
     /// `--result-required`: the child must report a result.
     pub result_required: bool,
+    /// `--owns`, repeatable: the paths the child owns. Empty: none of its
+    /// own, bounded only by the scope its parent works under.
+    pub owns: Vec<String>,
+    /// `--land`: leave the child to the engine to land.
+    pub land: bool,
+    /// `--review` and its `--review-*` flags: the child's reviewer before
+    /// it lands. Boxed, so `Command` stays small.
+    pub review: Option<Box<branchyard::ReviewSpec>>,
     pub json: bool,
 }
 
@@ -905,6 +913,20 @@ Examples (inside a harness, the parent is the harness's own branch):
 The child's check (--check) defaults to its parent's, and the spawn says which it
 inherits. It runs on the merge when the child is integrated, so siblings that share
 one test suite are integrated together: by integrate a b (checked once).";
+
+const DELEGATE_EXAMPLES: &str = "\
+Example, inside a harness (outside one, add --parent BRANCH):
+  by delegate --plan plan.json        # then end your turn
+  cat plan.json
+  {\"brief\": \"Parse with the Token type in src/token.rs; add no crates.\",
+   \"tasks\": [
+     {\"name\": \"lexer\", \"prompt\": \"Write the lexer\", \"owns\": [\"src/lexer\"]},
+     {\"name\": \"parser\", \"prompt\": \"Write the parser\", \"owns\": [\"src/parser\"],
+      \"depends_on\": [\"lexer\"]}]}
+
+The children are created all or none. Those that wait for nothing start at once, and
+you are woken with a summary of each when they have all settled. by brief TEXT adds a
+decision every child is given; by steer corrects one that is running.";
 
 const DISCARD_EXAMPLES: &str = "\
 Examples:
@@ -1713,6 +1735,49 @@ pub enum Command {
         prompt_file: Option<String>,
         #[command(flatten)]
         spawn: Checked<SpawnFlags>,
+    },
+    /// Hand the engine a plan: several children at once, with the brief they share; then end
+    /// your turn, and you are woken with a summary when they have settled
+    #[command(display_order = 300, after_help = DELEGATE_EXAMPLES)]
+    Delegate {
+        /// The plan as JSON, `-` for standard input: {"brief": TEXT, "tasks": [TASK, ...]},
+        /// each task as the spawn tool takes a child ({"prompt", "name", "owns", "depends_on",
+        /// "budget_usd", "check", "harness", ...}); depends_on may name another task
+        #[arg(long, value_name = "PATH")]
+        plan: String,
+        /// The brief the children share, in place of the plan's: the goal, the conventions,
+        /// the interfaces between their parts
+        #[arg(long, value_name = "TEXT", value_parser = non_blank)]
+        brief: Option<String>,
+        /// Leave every task to the engine to land, as `spawn --land` does: each is integrated
+        /// into your branch when it is ready, and your next turn says what landed
+        #[arg(long)]
+        land: bool,
+        /// The delegating branch (outside a harness; inside one, it is the harness's own)
+        #[arg(long, value_name = "BRANCH")]
+        parent: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        perms: Perms,
+    },
+    /// Show this branch's shared brief, which every child it delegates to is given each turn;
+    /// with TEXT, add an entry first, sent to the children running now
+    #[command(display_order = 300)]
+    Brief {
+        /// A new entry: a decision every child must follow, such as an interface you settled
+        #[arg(conflicts_with = "file")]
+        text: Option<String>,
+        /// Read the new entry from this file instead, `-` for standard input
+        #[arg(long, value_name = "PATH")]
+        file: Option<String>,
+        /// The delegating branch (outside a harness; inside one, it is the harness's own)
+        #[arg(long, value_name = "BRANCH")]
+        parent: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Show a branch's status, candidate, cost, budget and last message
     #[command(display_order = 301)]
@@ -3113,7 +3178,7 @@ pub struct Perms {
 }
 
 impl Perms {
-    fn apply(self, task: &mut TaskArgs) {
+    pub(crate) fn apply(self, task: &mut TaskArgs) {
         task.permissions = match (self.yes, self.ask, self.permissions) {
             (true, _, _) => Permissions::Yes,
             (false, true, _) => Permissions::Ask,
@@ -4304,6 +4369,30 @@ pub struct SpawnGraph {
     /// ending a turn without one is noted in your log
     #[arg(long)]
     result_required: bool,
+    /// A path the child owns: a file, a directory (and everything below it) or a glob such as
+    /// tests/parser_*.rs, relative to the repository. Its changes anywhere else are refused when
+    /// it is integrated, and it is told them every turn. Repeatable, or comma-separated
+    #[arg(long, value_name = "PATH,PATH,...", value_parser = harness_list)]
+    owns: Vec<List>,
+    /// Leave the child to the engine to land: once its turn ends ready while you wait on your
+    /// children, it is integrated into your branch, its check on the merge included, and a child
+    /// that cannot land is sent a turn to fix its work; your next turn says what landed
+    #[arg(long)]
+    land: bool,
+    /// Have a reviewer on this harness, ideally another vendor's than the child's, read its work
+    /// each time it is ready to land, before it lands; findings are sent to the child as a turn
+    /// to fix its work. Needs --land, and a harness you may delegate to
+    #[arg(long, value_name = "HARNESS", requires = "land", value_parser = non_blank)]
+    review: Option<String>,
+    /// The model the reviewer runs
+    #[arg(long, value_name = "MODEL", requires = "review", value_parser = non_blank)]
+    review_model: Option<String>,
+    /// What the reviewer should look for, added to its prompt
+    #[arg(long, value_name = "TEXT", requires = "review", value_parser = non_blank)]
+    review_rubric: Option<String>,
+    /// Each review's cost limit, from your budget; required when you have a cost limit
+    #[arg(long, value_name = "X", requires = "review", value_parser = usd)]
+    review_budget_usd: Option<f64>,
 }
 
 impl Flags for SpawnFlags {
@@ -4352,6 +4441,21 @@ impl Flags for SpawnFlags {
             result_schema: self.graph.result_schema,
             result_schema_file: self.graph.result_schema_file,
             result_required: self.graph.result_required,
+            owns: self
+                .graph
+                .owns
+                .into_iter()
+                .flat_map(|list| list.0)
+                .collect(),
+            land: self.graph.land,
+            review: self.graph.review.map(|harness| {
+                Box::new(branchyard::ReviewSpec {
+                    harness,
+                    model: self.graph.review_model,
+                    rubric: self.graph.review_rubric,
+                    budget_usd: self.graph.review_budget_usd,
+                })
+            }),
             json: self.json,
         })
     }
@@ -5461,6 +5565,46 @@ mod tests {
         };
         let grants: Vec<String> = granted.connectors.iter().map(|g| g.to_string()).collect();
         assert_eq!(grants, ["github:read", "linear@work:write:issues.*"]);
+        let Command::Spawn { spawn: owner, .. } =
+            parse_str("spawn go --owns src/parser,tests/parser_*.rs --owns docs/parser.md")
+                .unwrap()
+        else {
+            panic!("not spawn")
+        };
+        assert_eq!(
+            owner.owns,
+            ["src/parser", "tests/parser_*.rs", "docs/parser.md"]
+        );
+        assert!(granted.owns.is_empty());
+        assert!(!owner.land);
+        let Command::Spawn { spawn: lander, .. } = parse_str("spawn go --land").unwrap() else {
+            panic!("not spawn")
+        };
+        assert!(lander.land);
+        assert!(lander.review.is_none());
+        let Command::Spawn { spawn: checked, .. } = parse_str(
+            "spawn go --land --review codex --review-model large --review-budget-usd 0.5 \
+             --review-rubric 'No new crates'",
+        )
+        .unwrap() else {
+            panic!("not spawn")
+        };
+        assert_eq!(
+            checked.review.as_deref(),
+            Some(&branchyard::ReviewSpec {
+                harness: "codex".into(),
+                model: Some("large".into()),
+                rubric: Some("No new crates".into()),
+                budget_usd: Some(0.5),
+            })
+        );
+        assert!(err("spawn go --review codex").contains("--land"));
+        assert!(err("spawn go --land --review-model large").contains("--review"));
+        let Command::Delegate { land, .. } = parse_str("delegate --plan p.json --land").unwrap()
+        else {
+            panic!("not delegate")
+        };
+        assert!(land);
         assert_eq!(spawn.seat.as_deref(), Some("worker"));
         assert!(err("spawn go --after soon").contains("[possible values: settled, integrated]"));
         assert!(err("spawn go --bind cache").contains("--bind"));

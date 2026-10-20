@@ -743,12 +743,17 @@ fn run(
             turn.yard.knowledge_settings().budget_tokens
         )))?;
     }
+    // What its parent assigned it: the paths it owns, the shared brief.
+    let assignment = crate::assignment::for_turn(turn.yard, record);
     let provisioned = match crate::provisioning::prepare(
         record,
         turn.profile,
         projection.as_ref(),
         connectors.as_ref(),
-        Some(&briefing),
+        crate::provisioning::Standing {
+            knowledge: Some(&briefing),
+            assignment: assignment.as_deref(),
+        },
         crate::provisioning::Access {
             policy: &bounds.policy,
             model_gateway: provisioned_gateway,

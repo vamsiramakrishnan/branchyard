@@ -588,6 +588,19 @@ pub struct SpawnRequest {
     /// refused. See `docs/delegation.md#result-contract`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<branchyard::ResultContract>,
+    /// The paths the child owns, like [`branchyard::Spawn::owns`]: its
+    /// changes elsewhere are refused when it is integrated. See
+    /// `docs/delegation.md#ownership`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns: Vec<String>,
+    /// Leave the child to the engine to land, like
+    /// [`branchyard::Spawn::land`]. See `docs/delegation.md#landing`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub land: bool,
+    /// The child's reviewer before it lands, like
+    /// [`branchyard::Spawn::review`]. See `docs/delegation.md#review`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<branchyard::ReviewSpec>,
 }
 
 fn is_settled(after: &After) -> bool {

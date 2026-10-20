@@ -614,6 +614,13 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
                 branchyard::contract::one_line(value, RESULT_LINE)
             ),
         ),
+        Activity::Brief { text } => format!(
+            "brief: {}",
+            truncate(
+                &text.split_whitespace().collect::<Vec<_>>().join(" "),
+                RESULT_LINE
+            )
+        ),
         Activity::Message(message) => {
             let reply = match message.in_reply_to {
                 Some(id) => format!(" (re #{id})"),
@@ -1392,6 +1399,15 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     ];
     pairs.extend(budget_lines(i, true));
     pairs.push(("check", check_text(i)));
+    if !i.owns.is_empty() || !i.owns_within.is_empty() {
+        pairs.push(("owns", owns_text(&i.owns, &i.owns_within)));
+    }
+    if i.land {
+        pairs.push(("landing", landing_text(i.landing.as_ref())));
+    }
+    if let Some(review) = &i.review {
+        pairs.push(("review", review_text(review)));
+    }
     if !i.grants.is_empty() {
         let grants: Vec<String> = i.grants.iter().map(|g| g.to_string()).collect();
         pairs.push(("connectors", grants.join(", ")));
@@ -1490,6 +1506,22 @@ pub fn check_report(r: &branchyard::CheckReport, style: Style) -> String {
         (Some(_), CheckVerdict::NotStarted) => ("could not start".to_owned(), Tone::Red),
         (Some(_), CheckVerdict::NotRun) => ("did not run".to_owned(), Tone::Red),
     };
+    // Outside its scope, integrating it is refused whatever the check says.
+    let (outcome, tone) = match r.outside_scope.is_empty() {
+        true => (outcome, tone),
+        false => (
+            format!(
+                "{outcome}; but it changes {} outside the paths it owns, so integrating it is \
+                 refused: {}",
+                match r.outside_scope.len() {
+                    1 => "1 file".to_owned(),
+                    n => format!("{n} files"),
+                },
+                r.outside_scope.join(", ")
+            ),
+            Tone::Red,
+        ),
+    };
     let mut pairs = vec![("branch", r.branch.clone())];
     if let Some(check) = &r.check {
         let source = match &r.inherited_from {
@@ -1508,6 +1540,55 @@ pub fn check_report(r: &branchyard::CheckReport, style: Style) -> String {
     if !r.passed() && !r.output_tail.trim().is_empty() {
         text.push_str(r.output_tail.trim_end());
         text.push('\n');
+    }
+    text
+}
+
+/// What became of a branch left to the engine to land.
+fn landing_text(landing: Option<&branchyard::Landing>) -> String {
+    let Some(landing) = landing else {
+        return "left to the engine; not tried yet".to_owned();
+    };
+    let mut text = landing
+        .note
+        .clone()
+        .unwrap_or_else(|| "left to the engine".to_owned());
+    if landing.fixes > 0 {
+        text.push_str(&format!(
+            "; {} of {} turns to fix it sent",
+            landing.fixes,
+            branchyard::LAND_FIXES
+        ));
+    }
+    if landing.left {
+        text.push_str("; left for its parent");
+    }
+    text
+}
+
+/// A branch's reviewer before it lands.
+fn review_text(review: &branchyard::ReviewSpec) -> String {
+    let mut text = format!("by {}", review.harness);
+    if let Some(model) = &review.model {
+        text.push_str(&format!(" with model {model}"));
+    }
+    if let Some(usd) = review.budget_usd {
+        text.push_str(&format!(", ${usd:.2} each"));
+    }
+    if review.rubric.is_some() {
+        text.push_str(", with a rubric");
+    }
+    text
+}
+
+/// The paths a branch owns, and the scopes above it it works within.
+fn owns_text(owns: &[String], within: &[Vec<String>]) -> String {
+    let mut text = match owns.is_empty() {
+        true => "nothing of its own".to_owned(),
+        false => owns.join(", "),
+    };
+    for scope in within {
+        text.push_str(&format!("; within {}", scope.join(", ")));
     }
     text
 }
@@ -1604,6 +1685,70 @@ pub fn graph(g: &branchyard::Graph, style: Style) -> String {
         }
         out.push_str(&line);
         out.push('\n');
+    }
+    out
+}
+
+/// `by delegate`: what the plan created, and what to do next.
+pub fn delegated(d: &branchyard::Delegated, style: Style) -> String {
+    let mut out = format!(
+        "{} delegated {} at revision {}\n",
+        d.branch,
+        match d.spawned.len() {
+            1 => "1 child".to_owned(),
+            n => format!("{n} children"),
+        },
+        d.revision
+    );
+    for spawned in &d.spawned {
+        let (status, tone) = status_text(&spawned.status);
+        let mut line = format!("  {} {}", spawned.name, style.paint(tone, &status));
+        if !spawned.depends_on.is_empty() {
+            line.push_str(&format!("  after {}", spawned.depends_on.join(", ")));
+        }
+        if !spawned.owns.is_empty() {
+            line.push_str(&format!("  owns {}", spawned.owns.join(", ")));
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    if d.brief_entries > 0 {
+        out.push_str(&format!(
+            "the shared brief has {} {}{}\n",
+            d.brief_entries,
+            match d.brief_entries {
+                1 => "entry",
+                _ => "entries",
+            },
+            match d.steered.is_empty() {
+                true => String::new(),
+                false => format!("; sent to {}", d.steered.join(", ")),
+            }
+        ));
+    }
+    out.push_str(&d.next);
+    out.push('\n');
+    out
+}
+
+/// `by brief`: the shared brief's entries, oldest first.
+pub fn brief(b: &branchyard::Brief, _style: Style) -> String {
+    if b.entries.is_empty() {
+        return format!(
+            "{} has no shared brief; by brief TEXT adds an entry every child it delegates to \
+             is given\n",
+            b.branch
+        );
+    }
+    let mut out = format!("{}'s shared brief:\n", b.branch);
+    for (index, entry) in b.entries.iter().enumerate() {
+        out.push_str(&format!("{}. {}\n", index + 1, entry.trim_end()));
+    }
+    if !b.steered.is_empty() {
+        out.push_str(&format!(
+            "the new entry was sent to {}\n",
+            b.steered.join(", ")
+        ));
     }
     out
 }

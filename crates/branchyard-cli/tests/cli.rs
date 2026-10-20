@@ -636,6 +636,113 @@ fn a_harness_delegates_with_by_in_its_shell() {
     assert_eq!(repo.json(&["show", "kid", "--json"])["depth"], 1);
 }
 
+#[test]
+fn a_harness_delegates_a_plan_and_adds_to_its_brief() {
+    let repo = Repo::new();
+    let plan = r#"{"brief": "Rule one: add no crates.", "tasks": [
+        {"name": "a", "prompt": "WRITE src/a/x.txt=1", "owns": ["src/a"]},
+        {"name": "b", "prompt": "WRITE src/b/y.txt=2", "owns": ["src/b"], "depends_on": ["a"]}]}"#
+        .replace('\n', " ");
+    let prompt = [
+        format!("SH printf '%s' '{plan}' | by delegate --plan - --json"),
+        "SH by brief 'Rule two: keep the old API.' --json".to_owned(),
+        "SH by brief".to_owned(),
+        "SH by delegate --plan - --parent other </dev/null".to_owned(),
+    ]
+    .join("\n");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    let (code, delegated) = sh_json(&said, 0);
+    assert_eq!(code, 0, "{said}");
+    let names: Vec<&str> = delegated["spawned"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["a", "b"]);
+    assert_eq!(
+        delegated["spawned"][1]["owns"],
+        serde_json::json!(["src/b"])
+    );
+    assert_eq!(
+        delegated["spawned"][1]["depends_on"],
+        serde_json::json!(["a"])
+    );
+    assert_eq!(delegated["brief_entries"], 1);
+    assert!(
+        delegated["next"]
+            .as_str()
+            .unwrap()
+            .starts_with("End your turn"),
+        "{delegated}"
+    );
+    let (code, brief) = sh_json(&said, 1);
+    assert_eq!(code, 0);
+    assert_eq!(
+        brief["entries"],
+        serde_json::json!(["Rule one: add no crates.", "Rule two: keep the old API."])
+    );
+    assert!(
+        said.contains("root's shared brief:\n1. Rule one: add no crates.\n2. Rule two"),
+        "{said}"
+    );
+    assert!(
+        said.contains("inside a harness, the plan's children"),
+        "{said}"
+    );
+    // `by run` waited for the plan's children, in dependency order.
+    for name in ["a", "b"] {
+        assert_eq!(
+            repo.json(&["show", name, "--json"])["status"]["state"],
+            "ready",
+            "{name}"
+        );
+    }
+    let log = stdout(&repo.by(&["log", "root"]));
+    assert!(log.contains("brief: Rule two: keep the old API."), "{log}");
+}
+
+/// A plan whose children are left to land: the harness ends its turn, the
+/// engine integrates each child into its branch, and its next turn starts
+/// with what landed, so the harness integrates nothing itself.
+#[test]
+fn a_harness_delegates_a_plan_whose_children_land_in_its_branch() {
+    let repo = Repo::new();
+    let plan = r#"{"land": true, "tasks": [
+        {"name": "a", "prompt": "WRITE src/a/x.txt=1", "owns": ["src/a"]},
+        {"name": "b", "prompt": "WRITE src/b/y.txt=2", "owns": ["src/b"]}]}"#
+        .replace('\n', " ");
+    let prompt = format!("SH printf '%s' '{plan}' | by delegate --plan - --json");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    let (code, delegated) = sh_json(&said, 0);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(delegated["spawned"][0]["land"], true, "{delegated}");
+    assert!(
+        delegated["next"]
+            .as_str()
+            .unwrap()
+            .starts_with("End your turn now: the engine integrates each child"),
+        "{delegated}"
+    );
+    for name in ["a", "b"] {
+        let shown = repo.json(&["show", name, "--json"]);
+        assert_eq!(shown["status"]["state"], "merged", "{shown}");
+        assert_eq!(shown["status"]["target"], "by/root", "{shown}");
+    }
+    assert_eq!(repo.0.git(&["show", "by/root:src/a/x.txt"]), "1\n");
+    assert_eq!(repo.0.git(&["show", "by/root:src/b/y.txt"]), "2\n");
+    let root = repo.json(&["show", "root", "--json"]);
+    assert_eq!(root["status"]["state"], "ready", "{root}");
+    assert_eq!(root["turns"], 2, "its own, and the wake: {root}");
+    let log = stdout(&repo.by(&["log", "root"]));
+    assert!(log.contains("Landed for you"), "{log}");
+    assert!(log.contains("land a: landed in by/root"), "{log}");
+}
+
 /// The battery's harness mismatch: `--harness claude-code` came back as
 /// `claude-code-stream-json` with nothing relating the two. Every surface
 /// names a harness by the ID typed and the profile it resolved to.
@@ -1385,6 +1492,31 @@ fn a_harness_delegates_with_the_python_module() {
     assert_eq!(root["candidate"]["files_changed"], 1);
 }
 
+#[test]
+fn the_python_module_delegates_a_plan_and_reads_its_brief() {
+    let repo = Repo::new();
+    let script = "import branchyard as b; \
+                  d = b.delegate([{'name': 'pa', 'prompt': 'WRITE pa.txt=1', 'owns': ['pa.txt']}, \
+                  {'name': 'pb', 'prompt': 'WRITE pb.txt=2', 'depends_on': ['pa']}], \
+                  brief='Rule one.'); \
+                  print('delegated', [s.name for s in d.spawned], d.spawned[0].owns, \
+                  d.brief_entries, d.next.startswith('End your turn')); \
+                  r = b.brief('Rule two.'); print('brief', r.entries); \
+                  print('read', b.brief().entries == r.entries)";
+    let prompt = format!("SH python3 -c \"{script}\"");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    for expected in [
+        "sh: 0",
+        "delegated ['pa', 'pb'] ['pa.txt'] 1 True",
+        "brief ['Rule one.', 'Rule two.']",
+        "read True",
+    ] {
+        assert!(said.contains(expected), "{expected:?} missing from\n{said}");
+    }
+}
+
 /// `branchyard.check` returns the report, a failing check included, rather
 /// than raising.
 #[test]
@@ -1754,8 +1886,8 @@ fn a_delegating_harness_gets_tools_and_skill_outside_its_worktree() {
     assert!(tools.status.success(), "{}", stderr(&tools));
     assert!(
         reply(&repo, "mcp").contains(
-            "mcp tools: spawn,inspect,events,send,steer,propose_integration,check,cancel,discard,\
-             children"
+            "mcp tools: spawn,delegate,brief,inspect,events,send,steer,propose_integration,check,\
+             cancel,discard,children"
         ),
         "{}",
         reply(&repo, "mcp")

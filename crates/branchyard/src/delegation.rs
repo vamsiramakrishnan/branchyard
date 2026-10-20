@@ -239,6 +239,21 @@ pub(crate) struct Grant {
     /// branch spawns only by seat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seats: Option<Seats>,
+    /// The paths its parent gave it to own, normalized
+    /// ([`crate::scope::normalize`]); empty for none. Its changes outside
+    /// them, and outside every ancestor's, are refused when it is
+    /// integrated. See [`crate::scope`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns: Vec<String>,
+    /// Its parent left it to the engine to land: integrated into the
+    /// parent's branch when its turn ends ready while the parent waits on
+    /// it. See [`crate::land`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub land: bool,
+    /// The reviewer that reads its work before it lands. See
+    /// [`crate::review`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<crate::ReviewSpec>,
 }
 
 impl Grant {
@@ -248,6 +263,9 @@ impl Grant {
             deny: Vec::new(),
             limits: None,
             seats: None,
+            owns: Vec::new(),
+            land: false,
+            review: None,
         }
     }
 
@@ -325,6 +343,22 @@ pub struct Spawn {
     /// classifier gives its prompt, so `by log` shows the choice and the
     /// outcome store learns from it ([`crate::ParentChoice`]).
     pub why: Option<String>,
+    /// The paths the child owns: files, directories or globs relative to
+    /// the repository. Its changes anywhere else are refused when it is
+    /// integrated, and it is told them every turn. Empty: it is bounded
+    /// only by the scope its parent works under, if any. See
+    /// [`crate::scope`].
+    pub owns: Vec<String>,
+    /// Leave the child to the engine to land: once its turn ends ready
+    /// while this branch waits on its children, it is integrated into this
+    /// branch's git branch, its check on the merge included, and a child
+    /// that cannot land is sent a turn to fix its work. See
+    /// `docs/delegation.md#landing`.
+    pub land: bool,
+    /// A reviewer that reads the child's work each time it is ready to
+    /// land, before it lands; it asks for changes the child is sent as a
+    /// turn to fix its work. Needs `land`. See `docs/delegation.md#review`.
+    pub review: Option<crate::ReviewSpec>,
 }
 
 impl Spawn {
@@ -415,6 +449,153 @@ pub struct Spawned {
     /// false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub check_inherited: bool,
+    /// The paths it owns, as normalized. Omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns: Vec<String>,
+    /// It was left to the engine to land. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub land: bool,
+    /// The reviewer that reads its work before it lands. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<crate::ReviewSpec>,
+    /// What it waits for when no prerequisite holds it: a free slot on its
+    /// harness (`[usage] max_running`). Omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for: Option<String>,
+}
+
+/// Most bytes one entry of a shared brief may hold.
+pub const BRIEF_ENTRY_MAX: usize = 16 * 1024;
+/// Most bytes a branch's whole shared brief may hold.
+pub const BRIEF_MAX: usize = 64 * 1024;
+
+/// A plan: the subtasks a delegating branch hands its engine in one call
+/// ([`Delegate::delegate`], `by delegate`, the `delegate` tool), with the
+/// brief they share. Its children are created as one graph proposal, all
+/// or none, and those that wait for nothing start at once; the branch then
+/// ends its turn and is woken when they have settled. See
+/// `docs/delegation.md#plans-and-the-shared-brief`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationPlan {
+    /// What every child shares: the goal, the conventions, the interfaces
+    /// between their parts. Added to the branch's shared brief before any
+    /// child starts, so every child of the branch, these and later ones,
+    /// is given it each turn. Later decisions are added with
+    /// [`Delegate::brief`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<String>,
+    /// The subtasks, each as `spawn` takes it. `depends_on` may name
+    /// another subtask by its `name`, or an existing child.
+    pub tasks: Vec<SpawnSpec>,
+    /// Leave every task to the engine to land, as each task's own `land`
+    /// does: integrated into this branch when it is ready, while this
+    /// branch waits on its children. See `docs/delegation.md#landing`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub land: bool,
+    /// The reviewer of every task that names none of its own. See
+    /// `docs/delegation.md#review`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<crate::ReviewSpec>,
+}
+
+/// What a plan created.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Delegated {
+    /// The branch that delegated.
+    pub branch: String,
+    /// Its graph revision after the plan.
+    pub revision: u64,
+    /// The children the plan created, in plan order, as they were when it
+    /// returned: `running`, or `waiting` for their prerequisites.
+    pub spawned: Vec<Spawned>,
+    /// Every dependency among the branch's children after the plan.
+    pub dependencies: Vec<Dependency>,
+    /// How many entries the branch's shared brief has now.
+    pub brief_entries: usize,
+    /// Children that were already running and were sent the plan's brief.
+    /// Omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steered: Vec<String>,
+    /// What the branch does now, in a sentence or two.
+    pub next: String,
+}
+
+/// A branch's shared brief: the entries every child it delegates to is
+/// given each turn.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Brief {
+    /// The branch whose brief it is.
+    pub branch: String,
+    /// Its entries, oldest first.
+    pub entries: Vec<String>,
+    /// Children whose running turn was sent the entry just added; the rest
+    /// read it at their next turn. Omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steered: Vec<String>,
+}
+
+/// The entries of `branch`'s shared brief, oldest first.
+pub(crate) fn brief_entries(store: &Store, branch: &str) -> Result<Vec<String>, Error> {
+    Ok(record::read(store, branch)?
+        .into_iter()
+        .filter_map(|event| match event.activity {
+            Activity::Brief { text } => Some(text),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Refuse a brief entry that is empty, too long, or would make `branch`'s
+/// brief too long; the entry, trimmed.
+fn brief_entry(store: &Store, branch: &str, text: &str) -> Result<String, Error> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(Error::Denied("a brief entry needs text".into()));
+    }
+    if text.len() > BRIEF_ENTRY_MAX {
+        return Err(Error::Denied(format!(
+            "a brief entry may hold at most {} KiB, not {} bytes; put the detail in a file the \
+             children can read and name it in the brief",
+            BRIEF_ENTRY_MAX / 1024,
+            text.len()
+        )));
+    }
+    let held: usize = brief_entries(store, branch)?.iter().map(String::len).sum();
+    if held + text.len() > BRIEF_MAX {
+        return Err(Error::Denied(format!(
+            "{branch}'s shared brief would hold {} bytes, over its {} KiB; put the detail in a \
+             file the children can read and name it in the brief",
+            held + text.len(),
+            BRIEF_MAX / 1024
+        )));
+    }
+    Ok(text.to_owned())
+}
+
+/// What a branch that just delegated does now.
+fn next_after_delegating(spawned: &[Spawned]) -> String {
+    let live = spawned
+        .iter()
+        .any(|s| matches!(s.status, BranchStatus::Running | BranchStatus::Waiting));
+    let landing = spawned.iter().any(|s| s.land);
+    match (live, landing) {
+        (true, true) => "End your turn now: the engine integrates each child into your branch \
+                 when it is ready (its check on the merge included), sends one that cannot land a \
+                 turn to fix it, and starts you again with what landed and what did not. Until \
+                 then, `by steer <child> \"<text>\"` corrects a running child, and `by brief \
+                 \"<text>\"` tells all of them a new decision."
+            .into(),
+        (true, false) => "End your turn now: when every child has settled you are started again \
+                 with a summary of each (status, diff, cost, check, last message, result). Until \
+                 then, `by steer <child> \"<text>\"` corrects a running child, and `by brief \
+                 \"<text>\"` tells all of them a new decision."
+            .into(),
+        (false, _) => "No child is running; `by inspect <child>` says why each stopped.".into(),
+    }
 }
 
 /// A descendant whose next turn was started.
@@ -665,6 +846,27 @@ pub struct Inspection {
     /// The scratch areas it is bound to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<Binding>,
+    /// The paths its parent gave it to own; its changes elsewhere are
+    /// refused when it is integrated. Omitted when none. See
+    /// [`crate::scope`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns: Vec<String>,
+    /// The scopes of its ancestors that bound it too, nearest first: a path
+    /// is in its scope only when `owns` (if any) and each of these cover
+    /// it. Omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns_within: Vec<Vec<String>>,
+    /// Its parent left it to the engine to land. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub land: bool,
+    /// The reviewer that reads its work before it lands. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<crate::ReviewSpec>,
+    /// What became of its landing: where it landed, or why it has not, and
+    /// the turns the engine sent it to fix its work. Omitted until the
+    /// engine tried to land it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<crate::land::Landing>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -787,6 +989,32 @@ impl Delegate {
         match &self.via {
             Via::Local(local) => local.spawn(&spawn),
             Via::Remote(_) => self.typed("spawn", spawn.arguments()),
+        }
+    }
+
+    /// Create the children of `plan` as one graph proposal, all or none,
+    /// with its brief added to this branch's shared brief before any of
+    /// them starts. Those that wait for nothing start at once; returns once
+    /// they have, with what to do next (end the turn: this branch is woken
+    /// when they have settled). See [`DelegationPlan`].
+    pub fn delegate(&self, plan: DelegationPlan) -> Result<Delegated, Error> {
+        match &self.via {
+            Via::Local(local) => local.delegate(&plan),
+            Via::Remote(_) => self.typed(
+                "delegate",
+                serde_json::to_value(&plan)
+                    .map_err(|e| Error::State(format!("unwritable plan: {e}")))?,
+            ),
+        }
+    }
+
+    /// This branch's shared brief, after adding `text` to it when given:
+    /// every child it delegates to is given the brief each turn, and those
+    /// running now are sent the new entry.
+    pub fn brief(&self, text: Option<&str>) -> Result<Brief, Error> {
+        match &self.via {
+            Via::Local(local) => local.brief(text),
+            Via::Remote(_) => self.typed("brief", json!({ "text": text })),
         }
     }
 
@@ -1917,7 +2145,7 @@ pub(crate) fn wait_subtree(yard: &Yard, name: &str) -> Result<Vec<BranchInfo>, E
             watched.push(own.info.clone());
         }
         let names: BTreeSet<String> = watched.iter().map(|info| info.name.clone()).collect();
-        let handles: Vec<JoinHandle<()>> = {
+        let mut handles: Vec<JoinHandle<()>> = {
             let mut running = lock(&yard.hub.running);
             let waiting: Vec<String> = running
                 .keys()
@@ -1929,6 +2157,14 @@ pub(crate) fn wait_subtree(yard: &Yard, name: &str) -> Result<Vec<BranchInfo>, E
                 .filter_map(|key| running.remove(key))
                 .collect()
         };
+        // And the ended turns still running their hooks, such as one
+        // landing its branch that started the branch's next turn.
+        {
+            let mut ending = lock(&yard.hub.ending);
+            for name in &names {
+                handles.extend(ending.remove(name).unwrap_or_default());
+            }
+        }
         if !handles.is_empty() {
             for handle in handles {
                 // A panic in a child's thread has already been reported by
@@ -2044,9 +2280,22 @@ pub(crate) fn start_turn(
     );
     match started {
         Ok(handle) => {
-            let previous = lock(&yard.hub.running).insert(name, handle);
-            if let Some(previous) = previous {
-                branchyard_support::join_reporting("previous turn", previous);
+            let previous = lock(&yard.hub.running).insert(name.clone(), handle);
+            match previous {
+                // The previous turn's own thread is starting this turn, from
+                // its hooks after its turn ended (the engine landing the
+                // branch sends it a turn to fix its work): it cannot wait for
+                // itself, and a wait joins it once its hooks return.
+                Some(previous) if previous.thread().id() == std::thread::current().id() => {
+                    lock(&yard.hub.ending)
+                        .entry(name)
+                        .or_default()
+                        .push(previous);
+                }
+                Some(previous) => {
+                    branchyard_support::join_reporting("previous turn", previous);
+                }
+                None => {}
             }
             Ok(())
         }
@@ -2302,7 +2551,10 @@ fn merged_outcome(merged: &Merged) -> String {
 /// What became of a spawned child, for its parent's event log.
 fn spawn_outcome(spawned: &Spawned) -> String {
     match &spawned.status {
-        BranchStatus::Waiting => format!("waiting for {}", spawned.depends_on.join(", ")),
+        BranchStatus::Waiting => match (&spawned.waiting_for, spawned.depends_on.is_empty()) {
+            (Some(slot), true) => format!("waiting for {slot}"),
+            _ => format!("waiting for {}", spawned.depends_on.join(", ")),
+        },
         BranchStatus::Blocked { reason } => format!("blocked: {reason}"),
         _ => {
             let on = profiles::label(&spawned.harness, &spawned.profile);
@@ -2512,7 +2764,7 @@ impl Local {
 
     fn spawn(&self, request: &Spawn) -> Result<Spawned, Error> {
         let result = self
-            .try_apply_graph(&[Edit::Spawn(Box::new(request.clone()))], None)
+            .try_apply_graph(&[Edit::Spawn(Box::new(request.clone()))], None, None)
             .and_then(|applied| {
                 applied
                     .spawned
@@ -2533,7 +2785,7 @@ impl Local {
             .iter()
             .map(Edit::from_graph)
             .collect::<Result<Vec<_>, _>>()
-            .and_then(|edits| self.try_apply_graph(&edits, Some(expected)));
+            .and_then(|edits| self.try_apply_graph(&edits, Some(expected), None));
         self.note("apply_graph", &self.branch, &result, |applied| {
             let spawned: Vec<String> = applied
                 .spawned
@@ -2548,14 +2800,134 @@ impl Local {
         result
     }
 
+    fn delegate(&self, plan: &DelegationPlan) -> Result<Delegated, Error> {
+        let result = (|| {
+            if plan.tasks.is_empty() {
+                return Err(Error::Denied(
+                    "a plan needs at least one task: give tasks, each as spawn takes it".into(),
+                ));
+            }
+            let store = self.store();
+            let brief = plan
+                .brief
+                .as_deref()
+                .map(|text| brief_entry(&store, &self.branch, text))
+                .transpose()?;
+            // Running before the plan: they are sent its brief.
+            let running = self.running_children()?;
+            let edits = plan
+                .tasks
+                .iter()
+                .map(|task| {
+                    let mut spawn = task.to_spawn()?;
+                    spawn.land |= plan.land;
+                    if spawn.review.is_none() {
+                        spawn.review = plan.review.clone();
+                    }
+                    Ok(Edit::Spawn(Box::new(spawn)))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            let applied = self.try_apply_graph(&edits, None, brief.as_deref())?;
+            let steered = match &brief {
+                Some(text) => self.steer_brief(&running, text),
+                None => Vec::new(),
+            };
+            Ok(Delegated {
+                branch: applied.branch,
+                revision: applied.revision,
+                next: next_after_delegating(&applied.spawned),
+                spawned: applied.spawned,
+                dependencies: applied.dependencies,
+                brief_entries: brief_entries(&store, &self.branch)?.len(),
+                steered,
+            })
+        })();
+        self.note("delegate", &self.branch, &result, |d| {
+            let names: Vec<String> = d
+                .spawned
+                .iter()
+                .map(|s| format!("{} ({})", s.name, spawn_outcome(s)))
+                .collect();
+            format!("revision {}: {}", d.revision, names.join(", "))
+        });
+        result
+    }
+
+    fn brief(&self, text: Option<&str>) -> Result<Brief, Error> {
+        let result = (|| {
+            let store = self.store();
+            let mut steered = Vec::new();
+            if let Some(text) = text {
+                let text = brief_entry(&store, &self.branch, text)?;
+                let running = self.running_children()?;
+                Recorder::open(&store, &self.branch, self.options.observer.clone())?
+                    .record(Activity::Brief { text: text.clone() })?;
+                steered = self.steer_brief(&running, &text);
+            }
+            Ok(Brief {
+                branch: self.branch.clone(),
+                entries: brief_entries(&store, &self.branch)?,
+                steered,
+            })
+        })();
+        self.note("brief", &self.branch, &result, |b| match text {
+            Some(_) => format!(
+                "added entry {} of the shared brief{}",
+                b.entries.len(),
+                match b.steered.is_empty() {
+                    true => String::new(),
+                    false => format!("; sent to {}", b.steered.join(", ")),
+                }
+            ),
+            None => format!("the shared brief has {} entries", b.entries.len()),
+        });
+        result
+    }
+
+    /// This branch's children running a turn now.
+    fn running_children(&self) -> Result<Vec<String>, Error> {
+        let store = self.store();
+        Ok(store
+            .read(&self.branch)?
+            .info
+            .children
+            .iter()
+            .filter(|child| {
+                store
+                    .read(child)
+                    .is_ok_and(|r| r.info.status == BranchStatus::Running)
+            })
+            .cloned()
+            .collect())
+    }
+
+    /// Send `text`, a new entry of this branch's brief, into each of
+    /// `children`'s running turn; those whose harness takes it. A child
+    /// that cannot is given it at its next turn, in its instructions.
+    fn steer_brief(&self, children: &[String], text: &str) -> Vec<String> {
+        let message =
+            format!("Your parent added to the brief it shares with all its children:\n\n{text}");
+        children
+            .iter()
+            .filter(|child| {
+                crate::steer::request(&self.yard, child, &message, &self.branch).is_ok()
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Validate a whole proposal, then commit it in one store transaction
     /// and start the children whose prerequisites have settled. Nothing is
     /// written unless every edit is valid. `expected` is checked here and
-    /// again in the transaction; `None` (a plain spawn) skips it.
+    /// again in the transaction; `None` (a plain spawn) skips it. `brief`,
+    /// a checked entry of this branch's shared brief, is recorded once the
+    /// proposal commits and before any child starts, so every child's first
+    /// turn has it.
     fn try_apply_graph(
         &self,
         edits: &[Edit],
         expected: Option<u64>,
+        brief: Option<&str>,
     ) -> Result<GraphApplied, Error> {
         let store = self.store();
         let _spawning = lock(&self.yard.hub.spawning);
@@ -2729,6 +3101,13 @@ impl Local {
             add,
             remove,
         })?;
+        if let Some(text) = brief {
+            Recorder::open(&store, &self.branch, self.options.observer.clone())?.record(
+                Activity::Brief {
+                    text: text.to_owned(),
+                },
+            )?;
+        }
         // The parent's choice of each child's harness and model, with the
         // kind its prompt classifies as: shown by `by log`, learned from by
         // the outcome store.
@@ -2767,12 +3146,18 @@ impl Local {
             .into_iter()
             .map(|child| {
                 let name = child.record.info.name.clone();
-                let info = started
+                let current = started
                     .iter()
                     .find(|r| r.info.name == name)
-                    .map(|r| r.info.clone())
-                    .or_else(|| store.read(&name).ok().map(|r| r.info))
-                    .unwrap_or(child.record.info);
+                    .cloned()
+                    .or_else(|| store.read(&name).ok());
+                let waiting_for = current
+                    .as_ref()
+                    .filter(|r| {
+                        r.info.status == BranchStatus::Waiting && child.depends_on.is_empty()
+                    })
+                    .and_then(|r| crate::capacity::full(&self.yard, r).ok().flatten());
+                let info = current.map(|r| r.info).unwrap_or(child.record.info);
                 Spawned {
                     name: info.name,
                     git_branch: info.git_branch,
@@ -2791,6 +3176,15 @@ impl Local {
                     depends_on: child.depends_on,
                     check: child.record.check.clone(),
                     check_inherited: child.check_inherited,
+                    owns: child
+                        .record
+                        .grant
+                        .as_ref()
+                        .map(|g| g.owns.clone())
+                        .unwrap_or_default(),
+                    land: child.record.grant.as_ref().is_some_and(|g| g.land),
+                    review: child.record.grant.as_ref().and_then(|g| g.review.clone()),
+                    waiting_for,
                 }
             })
             .collect();
@@ -2837,6 +3231,15 @@ impl Local {
         if let Some(result) = &request.result {
             result.check()?;
         }
+        // `auto`: the router places it.
+        let placed;
+        let request = match request.harness.as_deref() {
+            Some(crate::capacity::AUTO) => {
+                placed = self.place(request)?;
+                &placed
+            }
+            _ => request,
+        };
         let seated = self.seat(caller, grant, request, planned)?;
         let filled;
         let request = match &seated {
@@ -2865,11 +3268,33 @@ impl Local {
         let limits = self.child_limits(caller, &request.budget, planned_usd)?;
         // The parent's own denials, those it was given, then the request's.
         let deny = run::with_denials(&run::with_denials(&grant.deny, &caller.deny), &request.deny);
+        // The paths it owns, which must be able to overlap the scope this
+        // branch works under; a path is in its scope only when every scope
+        // up to the root covers it.
+        let owns = crate::scope::normalize_all(&request.owns)?;
+        crate::scope::check_overlap(&self.branch, &owns, &crate::scope::chain(&store, caller)?)?;
+        // Its reviewer is a child of this branch too, so this branch must
+        // be able to delegate to its harness.
+        if let Some(review) = &request.review {
+            review.check(request.land, limits.max_usd.is_some())?;
+            let reviewer = harness::select(Some(&review.harness))?;
+            if !grant.envelope.allows(reviewer, own) {
+                return Err(Error::Denied(format!(
+                    "{} may not delegate to {}, so it may not review with it; allowed: {}",
+                    self.branch,
+                    reviewer.label(),
+                    grant.envelope.allowed_text(own)
+                )));
+            }
+        }
         let child_grant = Grant {
             envelope,
             deny,
             limits: Some(limits.clone()),
             seats: seated.as_ref().map(|(_, _, below)| below.clone()),
+            owns,
+            land: request.land,
+            review: request.review.clone(),
         };
         if child_grant.can_spawn() {
             crate::projection::tools(&self.options)?;
@@ -3292,6 +3717,77 @@ impl Local {
     /// The advice for a subtask, as this branch: the candidates are its
     /// task's fleet entry for the kind, or the harnesses its envelope
     /// allows, with what it may still spend.
+    /// `request` with its harness chosen for `auto`: the router's pick among
+    /// the harnesses this branch may delegate to that can run here, by their
+    /// recorded outcomes for the task's kind, unless its harness is full and
+    /// another available one has a free slot; with no free slot anywhere, the
+    /// pick, which waits for one. Its model is the pick's unless it names
+    /// one, and its `why` says what decided unless it gives one.
+    fn place(&self, request: &Spawn) -> Result<Spawn, Error> {
+        if request.seat.is_some() {
+            return Err(Error::Denied(
+                "a seat sets the child's harness; drop harness auto, or the seat".into(),
+            ));
+        }
+        let advice = self.advise(&request.prompt, None)?;
+        let full =
+            |harness: &str| crate::capacity::full_for_child(&self.yard, harness, &self.branch);
+        let picked = advice
+            .pick
+            .as_ref()
+            .map(|p| (p.candidate.clone(), p.reason.clone()));
+        let chosen = match picked {
+            Some((candidate, reason)) => match full(&candidate.harness) {
+                None => (candidate, format!("placed by the router: {reason}")),
+                Some(slot) => {
+                    let room = advice
+                        .candidates
+                        .iter()
+                        .filter(|a| a.available && full(&a.candidate.harness).is_none())
+                        .max_by(|a, b| a.expected.total_cmp(&b.expected));
+                    match room {
+                        Some(other) => (
+                            other.candidate.clone(),
+                            format!(
+                                "placed on {} with a free slot: the router's pick, {}, waits for \
+                                 {slot}",
+                                other.candidate.label(),
+                                candidate.label()
+                            ),
+                        ),
+                        None => (
+                            candidate,
+                            format!("placed by the router ({reason}); it waits for {slot}"),
+                        ),
+                    }
+                }
+            },
+            None => {
+                let why: Vec<String> = advice
+                    .candidates
+                    .iter()
+                    .filter_map(|a| {
+                        a.reason
+                            .as_ref()
+                            .map(|r| format!("{}: {r}", a.candidate.label()))
+                    })
+                    .collect();
+                return Err(Error::Denied(format!(
+                    "no harness {} may delegate to can run here now ({}); name one with harness",
+                    self.branch,
+                    why.join("; ")
+                )));
+            }
+        };
+        let (candidate, why) = chosen;
+        Ok(Spawn {
+            harness: Some(candidate.harness.clone()),
+            model: request.model.clone().or(candidate.model.clone()),
+            why: request.why.clone().or(Some(why)),
+            ..request.clone()
+        })
+    }
+
     fn advise(&self, prompt: &str, kind: Option<crate::TaskKind>) -> Result<crate::Advice, Error> {
         let store = self.store();
         let record = store.read(&self.branch)?;
@@ -3376,7 +3872,21 @@ impl Local {
         let tightest = caps_above(&store, branch, own.then(|| self.own_spent(&record)))
             .into_iter()
             .min_by(|a, b| a.left().total_cmp(&b.left()));
+        let owns = record
+            .grant
+            .as_ref()
+            .map(|g| g.owns.clone())
+            .unwrap_or_default();
+        let mut owns_within = crate::scope::chain(&store, &record)?;
+        if !owns.is_empty() {
+            owns_within.remove(0);
+        }
         Ok(Inspection {
+            owns,
+            owns_within,
+            land: crate::land::wanted(&record),
+            review: crate::review::of(&record).cloned(),
+            landing: record.landing.clone(),
             tree_remaining_usd: tightest.as_ref().map(TreeCap::left),
             tree_capped_by: tightest.map(|cap| cap.branch),
             subtree_cost_usd: subtree_spent(&store, &record).max(if own {
@@ -4096,6 +4606,9 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
         model: request.model.clone(),
         result: request.result.clone(),
         why: request.why.clone(),
+        owns: request.owns.clone(),
+        land: request.land,
+        review: request.review.clone(),
     })
 }
 
@@ -4189,6 +4702,13 @@ struct ApplyGraphArgs {
 #[serde(deny_unknown_fields)]
 struct TargetArgs {
     branch: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BriefArgs {
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -4428,6 +4948,18 @@ pub fn nest_graph_budgets(edits: &mut Value) -> Result<(), Error> {
     Ok(())
 }
 
+/// Nest each task's flat limits (`budget_usd`, `max_turns`,
+/// `max_minutes`) into its `budget`, as the `spawn` tool reads a child: the
+/// `delegate` tool takes each task of a plan the same way.
+pub fn nest_plan_budgets(tasks: &mut Value) -> Result<(), Error> {
+    if let Some(tasks) = tasks.as_array_mut() {
+        for task in tasks {
+            *task = nest_budget(task.take())?;
+        }
+    }
+    Ok(())
+}
+
 fn required(tool: &str, branch: Option<String>) -> Result<String, Error> {
     branch.ok_or_else(|| Error::Denied(format!("{tool} needs a branch")))
 }
@@ -4446,6 +4978,18 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
         "spawn" => {
             let spec: SpawnSpec = parse(tool, nest_budget(arguments)?)?;
             to_json(&local.spawn(&spec.to_spawn()?)?)
+        }
+        "delegate" => {
+            let mut arguments = arguments;
+            if let Some(tasks) = arguments.get_mut("tasks") {
+                nest_plan_budgets(tasks)?;
+            }
+            let plan: DelegationPlan = parse(tool, arguments)?;
+            to_json(&local.delegate(&plan)?)
+        }
+        "brief" => {
+            let args: BriefArgs = parse(tool, arguments)?;
+            to_json(&local.brief(args.text.as_deref())?)
         }
         "apply_graph" => {
             let mut arguments = arguments;
@@ -4953,6 +5497,9 @@ Checks on the merged result: \
                     ..Limits::default()
                 }),
                 seats: None,
+                owns: Vec::new(),
+                land: false,
+                review: None,
             }),
             bindings: Vec::new(),
             start_base: None,
@@ -4962,6 +5509,7 @@ Checks on the merged result: \
             parked: None,
             wakes: 0,
             lost: None,
+            landing: None,
             sandbox_seed: None,
             merged: None,
             actor: None,

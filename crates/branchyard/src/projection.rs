@@ -100,6 +100,14 @@ pub(crate) struct Context {
 pub(crate) struct Hub {
     pub contexts: Mutex<HashMap<String, Context>>,
     pub running: Mutex<HashMap<String, JoinHandle<()>>>,
+    /// Threads of turns that ended and started their branch's next turn
+    /// from their own hooks (the engine landing the branch sends it a turn
+    /// to fix its work), by branch: each ends once its hooks return, and a
+    /// wait joins them as it joins the running turns.
+    pub ending: Mutex<HashMap<String, Vec<JoinHandle<()>>>>,
+    /// The most branches that run at once on each harness or profile; see
+    /// `crate::capacity`.
+    pub capacity: Mutex<std::collections::BTreeMap<String, u32>>,
     broker: Mutex<Option<Broker>>,
     /// Checks and reservations for one spawn or send happen together.
     pub spawning: Mutex<()>,
@@ -147,6 +155,8 @@ impl Default for Hub {
         Hub {
             contexts: Default::default(),
             running: Default::default(),
+            ending: Default::default(),
+            capacity: Default::default(),
             broker: Default::default(),
             spawning: Default::default(),
             delivery_hook: Mutex::new(Some(Arc::new(crate::inbox::SteerDelivery::default()))),

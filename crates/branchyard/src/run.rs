@@ -191,6 +191,7 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
         parked: None,
         wakes: 0,
         lost: None,
+        landing: None,
     })
 }
 

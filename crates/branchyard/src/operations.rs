@@ -178,8 +178,36 @@ const FLAT_BUDGET: &str = "the tool also takes the flat limits the CLI and Pytho
                            it is refused";
 const PERMISSIONS: &str = "a child runs under its parent's policy, and only a person answers \
                            permission requests";
+/// Why a plan and its brief do not go through a server.
+const NO_PLAN_ROUTE: &str = "a server has no route for a plan or a brief yet: spawn each child \
+                             with by spawn --parent, or the plan's tasks as a proposal with by \
+                             graph apply --parent";
 /// `result.required` beside `result.schema`: Python gives both in the one
 /// `result` dict.
+/// Python gives a child's reviewer whole.
+const REVIEW_WHOLE: &str = "Python gives the reviewer whole, as review=\"codex\" or \
+     review={\"harness\": ..., \"model\": ..., \"rubric\": ..., \"budget_usd\": ...}";
+const REVIEW_MODEL: Param = Param {
+    cli: Some("--review-model"),
+    tool: Some("review.model"),
+    python: None,
+    why: REVIEW_WHOLE,
+    inside: None,
+};
+const REVIEW_RUBRIC: Param = Param {
+    cli: Some("--review-rubric"),
+    tool: Some("review.rubric"),
+    python: None,
+    why: REVIEW_WHOLE,
+    inside: None,
+};
+const REVIEW_BUDGET: Param = Param {
+    cli: Some("--review-budget-usd"),
+    tool: Some("review.budget_usd"),
+    python: None,
+    why: REVIEW_WHOLE,
+    inside: None,
+};
 const RESULT_REQUIRED: Param = Param {
     cli: Some("--result-required"),
     tool: Some("result.required"),
@@ -338,6 +366,12 @@ pub const OPERATIONS: &[Operation] = &[
             Param::all("--plan", "plan", "plan"),
             Param::all("--model", "model", "model"),
             Param::all("--why", "why", "why"),
+            Param::all("--owns", "owns", "owns"),
+            Param::all("--land", "land", "land"),
+            Param::all("--review", "review.harness", "review"),
+            REVIEW_MODEL,
+            REVIEW_RUBRIC,
+            REVIEW_BUDGET,
             Param::all("--result-schema", "result.schema", "result"),
             RESULT_REQUIRED,
             Param::cli(
@@ -376,6 +410,61 @@ pub const OPERATIONS: &[Operation] = &[
             ),
         ],
     ),
+    op(
+        "delegate",
+        &["delegate"],
+        "delegate",
+        "delegate",
+        "delegate",
+        Capability::Delegate,
+        &[
+            Param::all("--plan", "tasks", "tasks"),
+            Param::all("--brief", "brief", "brief"),
+            Param::all("--land", "land", "land"),
+            Param {
+                cli: None,
+                tool: Some("review"),
+                python: Some("review"),
+                why: "by delegate reads the plan's reviewer from its JSON, beside its tasks",
+                inside: None,
+            },
+            JSON,
+            Param::outside(
+                "--parent",
+                "inside a harness the parent is always the harness's own branch",
+            ),
+            Param::outside("--yes", PERMISSIONS),
+            Param::outside("--ask", PERMISSIONS),
+            Param::outside("--permissions", PERMISSIONS),
+            Param::outside(
+                "--allow-unapproved-tools",
+                "a child keeps its parent's approval routing",
+            ),
+        ],
+    )
+    .no_remote(NO_PLAN_ROUTE),
+    op(
+        "brief",
+        &["brief"],
+        "brief",
+        "brief",
+        "brief",
+        Capability::Delegate,
+        &[
+            Param::all("<TEXT>", "text", "text"),
+            Param::cli(
+                "--file",
+                "a tool call and a Python string carry text of any length; only a shell command \
+                 line needs a file",
+            ),
+            JSON,
+            Param::outside(
+                "--parent",
+                "inside a harness the brief is always the harness's own branch's",
+            ),
+        ],
+    )
+    .no_remote(NO_PLAN_ROUTE),
     op(
         "inspect",
         &["inspect"],

@@ -138,6 +138,13 @@ pub(crate) fn merge_many(yard: &Yard, names: &[String], target: &str) -> Result<
             timeout: CHECK_TIMEOUT,
         })
         .collect();
+    // A branch's changes outside the paths it owns are refused before
+    // anything merges: each candidate is compared with the target and with
+    // the candidates merged before it here ([`crate::scope::outside`]).
+    if let Err(error) = scoped(yard, &held, &settled, &expected) {
+        abandon(&store, &held, &begun);
+        return Err(error);
+    }
     let integrated = match candidates.is_empty() {
         true => None,
         false => {
@@ -278,6 +285,37 @@ pub(crate) fn merge_many(yard: &Yard, names: &[String], target: &str) -> Result<
     })
 }
 
+/// Refuse the batch when a branch still to merge changed paths outside its
+/// scope: the first such branch, with its paths.
+fn scoped(
+    yard: &Yard,
+    held: &[(Record, Lease)],
+    settled: &[Option<Merged>],
+    target_head: &str,
+) -> Result<(), Error> {
+    let store = yard.store();
+    let mut earlier: Vec<String> = Vec::new();
+    for ((record, _), done) in held.iter().zip(settled) {
+        let (None, Some(candidate)) = (done, record.info.candidate.as_ref()) else {
+            continue;
+        };
+        let chain = crate::scope::chain(&store, record)?;
+        let outside = crate::scope::outside(
+            yard,
+            &chain,
+            &record.info.base,
+            &candidate.commit,
+            target_head,
+            &earlier,
+        )?;
+        if !outside.is_empty() {
+            return Err(crate::scope::refusal(&record.info.name, &chain, &outside));
+        }
+        earlier.push(candidate.commit.clone());
+    }
+    Ok(())
+}
+
 /// Run `record`'s check (its own or inherited) on its current work as
 /// [`merge_many`] would run it, integrating nothing: the worktree's files
 /// as they are, committed nowhere, merged in a temporary worktree into its
@@ -318,6 +356,19 @@ pub(crate) fn check_work(
         }
         None => (None, work.clone()),
     };
+    // The paths its work changes outside the scope it owns: integrating it
+    // would be refused for them, whatever its check says.
+    let outside_scope = match &parent {
+        Some(_) => crate::scope::outside(
+            yard,
+            &crate::scope::chain(&yard.store(), record)?,
+            &info.base,
+            &work,
+            &onto,
+            &[],
+        )?,
+        None => Vec::new(),
+    };
     let mut report = CheckReport {
         branch: info.name.clone(),
         check: record.check.clone(),
@@ -327,6 +378,7 @@ pub(crate) fn check_work(
         checked: None,
         outcome: CheckVerdict::NotRun,
         conflicts: Vec::new(),
+        outside_scope,
         output_tail: String::new(),
     };
     let merged = {

@@ -28,7 +28,7 @@ import dataclasses
 import json
 import os
 import subprocess
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 __all__ = [
     "BranchyardError",
@@ -63,8 +63,12 @@ __all__ = [
     "Inbox",
     "Graph",
     "GraphApplied",
+    "Delegated",
+    "Brief",
     "Advice",
     "spawn",
+    "delegate",
+    "brief",
     "inspect",
     "events",
     "send",
@@ -263,6 +267,16 @@ class Spawned:
     check_inherited: Optional[bool] = None
     # The model its harness runs; None for the harness's default.
     model: Optional[str] = None
+    # The paths it owns, as normalized; None when it was given none.
+    owns: Optional[List[str]] = None
+    # It was left to the engine to land; None when it was not.
+    land: Optional[bool] = None
+    # Its reviewer before it lands: {"harness", "model", "rubric",
+    # "budget_usd"}; None when it has none.
+    review: Optional[Dict[str, Any]] = None
+    # What it waits for when no prerequisite holds it: a free slot on its
+    # harness ([usage] max_running).
+    waiting_for: Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -290,6 +304,17 @@ class Inspection:
     graph_revision: Optional[int] = None
     depends_on: Optional[List[Dict[str, Any]]] = None
     bindings: Optional[List[Dict[str, Any]]] = None
+    # The paths its parent gave it to own, and the scopes of its ancestors
+    # that bound it too, nearest first: a path is in its scope only when all
+    # of them cover it. None when there are none.
+    owns: Optional[List[str]] = None
+    owns_within: Optional[List[List[str]]] = None
+    # Its parent left it to the engine to land, and what became of that:
+    # {"fixes": turns sent to fix its work, "note": where it landed or why
+    # not, "left": True once its parent decides}. None when not.
+    land: Optional[bool] = None
+    landing: Optional[Dict[str, Any]] = None
+    review: Optional[Dict[str, Any]] = None
     stalled: Optional[bool] = None
     # What its live children (running, waiting, blocked, awaiting plan
     # approval) hold of its budget, how many they are, and what its settled
@@ -424,10 +449,15 @@ class CheckReport:
     checked: Optional[str] = None
     conflicts: Optional[List[str]] = None
     output_tail: str = ""
+    # Paths the work changes outside the paths the branch owns: integrating
+    # it would be refused for them, whatever its check says.
+    outside_scope: Optional[List[str]] = None
 
     @property
     def passed(self) -> bool:
         """Whether integrating the work as it is would get past its check."""
+        if self.outside_scope:
+            return False
         if self.check is None:
             return not self.conflicts
         return self.outcome == "passed"
@@ -493,6 +523,32 @@ class GraphApplied:
     revision: int
     spawned: List[Spawned]
     dependencies: List[Dict[str, Any]]
+
+
+@dataclasses.dataclass
+class Delegated:
+    """What `delegate` created: the children, in plan order, and what to do next."""
+
+    branch: str
+    revision: int
+    spawned: List[Spawned]
+    dependencies: List[Dict[str, Any]]
+    # How many entries your shared brief has now.
+    brief_entries: int
+    # What to do now: usually, end your turn; you are woken when they settle.
+    next: str
+    # Children already running that were sent the plan's brief.
+    steered: Optional[List[str]] = None
+
+
+@dataclasses.dataclass
+class Brief:
+    """Your shared brief: what every child you delegate to is given each turn."""
+
+    branch: str
+    entries: List[str]
+    # Children whose running turn was sent the entry just added.
+    steered: Optional[List[str]] = None
 
 
 @dataclasses.dataclass
@@ -658,8 +714,17 @@ def spawn(
     model: Optional[str] = None,
     result: Optional[Dict[str, Any]] = None,
     why: Optional[str] = None,
+    owns: Optional[List[str]] = None,
+    land: bool = False,
+    review: Union[str, Dict[str, Any], None] = None,
 ) -> Spawned:
     """Create a child branch and start it; returns once it has started.
+
+    `harness="auto"` has the router place the child among the harnesses
+    you may delegate to that can run here, by their recorded outcomes for
+    the task's kind, preferring one with a free slot (`[usage]
+    max_running`); `why` says what decided. A child whose harness is full
+    is created waiting and starts when a slot frees (`waiting_for`).
 
     In a rig, `seat` names the seat to fill: it sets the child's harness,
     limits, check and instructions, and the other arguments may only narrow
@@ -698,7 +763,29 @@ def spawn(
     `why` is why this harness and model for this subtask, in a few words:
     it is recorded on the child and learned from by the outcome store, so
     ask `advise()` first and say what decided you.
+
+    `owns` are the paths the child owns: files, directories (and all below
+    them) or globs such as "tests/parser_*.rs", relative to the repository.
+    It is told them every turn, and its changes anywhere else are refused
+    when you integrate it; `check(child).outside_scope` lists them first.
+    Give siblings disjoint paths and they cannot conflict. See
+    docs/delegation.md "Ownership".
+
+    `land=True` leaves the child to the engine to land: once its turn ends
+    ready while you wait on your children (end your turn), it is integrated
+    into your branch, its check on the merge included, and a child that
+    conflicts, fails its check or strays outside `owns` is sent a turn to
+    fix that. Your next turn says what landed. See docs/delegation.md
+    "Landing".
+
+    `review` has a reviewer read the child's work each time it is ready to
+    land, before it lands: a harness ID such as "codex" (ideally another
+    vendor's than the child's), or {"harness": ..., "model": ..., "rubric":
+    ..., "budget_usd": ...}; `budget_usd` is required when you have a cost
+    limit. Its findings are sent to the child as a turn to fix its work.
+    Needs `land=True`. See docs/delegation.md "Review".
     """
+    reviewer = _review(review)
     options = {
         "--seat": seat,
         "--harness": harness,
@@ -723,10 +810,23 @@ def spawn(
             flags += [flag, str(value)]
     for grant in connectors or []:
         flags += ["--connector", grant]
+    for path in owns or []:
+        flags += ["--owns", path]
     for scratch, access in (bindings or {}).items():
         flags += ["--bind", f"{scratch}:{access}"]
     if plan:
         flags.append("--plan")
+    if land:
+        flags.append("--land")
+    if reviewer is not None:
+        for flag, key in (
+            ("--review", "harness"),
+            ("--review-model", "model"),
+            ("--review-rubric", "rubric"),
+            ("--review-budget-usd", "budget_usd"),
+        ):
+            if reviewer.get(key) is not None:
+                flags += [flag, str(reviewer[key])]
     if result is not None:
         if not isinstance(result, dict) or "schema" not in result or not set(result) <= {"schema", "required"}:
             raise ValueError('result must be {"schema": {...}, "required": bool}')
@@ -736,6 +836,67 @@ def spawn(
     # On stdin, so a prompt of any length fits: a command-line argument is
     # limited to 128 KiB on Linux.
     return _make(Spawned, _run(["spawn", *flags, "--prompt-file", "-"], stdin=prompt))
+
+
+def delegate(
+    tasks: List[Dict[str, Any]],
+    brief: Optional[str] = None,
+    land: bool = False,
+    review: Union[str, Dict[str, Any], None] = None,
+) -> Delegated:
+    """Hand your engine a plan: several children at once, with the brief they share.
+
+    Each task is a dict as `spawn` takes its arguments over the MCP tool:
+    {"prompt": ..., "name": ..., "harness": ..., "owns": [...],
+    "depends_on": [...], "budget_usd": ..., "check": [...], ...}, where
+    `depends_on` may name another task. They are created all or none, and
+    those that wait for nothing start at once. `brief` (the goal, the
+    conventions, the interfaces between their parts) is added to your shared
+    brief before any of them starts, so every child you delegate to is given
+    it each turn. Then end your turn: you are woken when they have settled.
+    With `land=True` the engine integrates each into your branch when it is
+    ready, as `spawn(land=True)` does, and `review` reviews each task that
+    names no reviewer of its own first, as `spawn(review=...)` does. See
+    docs/delegation.md "Plans and the shared brief".
+    """
+    plan: Dict[str, Any] = {"tasks": tasks}
+    if brief is not None:
+        plan["brief"] = brief
+    if land:
+        plan["land"] = True
+    reviewer = _review(review)
+    if reviewer is not None:
+        plan["review"] = reviewer
+    value = _run(["delegate", "--plan", "-"], stdin=json.dumps(plan))
+    made = _make(Delegated, value)
+    made.spawned = [_make(Spawned, s) for s in value.get("spawned", [])]
+    return made
+
+
+def _review(review: Union[str, Dict[str, Any], None]) -> Optional[Dict[str, Any]]:
+    """A reviewer as `spawn` and `delegate` take it, as the tools take it."""
+    if review is None:
+        return None
+    if isinstance(review, str):
+        return {"harness": review}
+    keys = {"harness", "model", "rubric", "budget_usd"}
+    if isinstance(review, dict) and "harness" in review and set(review) <= keys:
+        return dict(review)
+    raise ValueError(
+        'review must be a harness ID or {"harness": ..., "model": ..., "rubric": ..., "budget_usd": ...}'
+    )
+
+
+def brief(text: Optional[str] = None) -> Brief:
+    """Your shared brief; with `text`, add it as a new entry first.
+
+    Every child you delegate to is given the whole brief each turn; those
+    running now are sent the new entry. Use it for a decision all of them
+    must follow, such as an interface you settled.
+    """
+    if text is None:
+        return _make(Brief, _run(["brief"]))
+    return _make(Brief, _run(["brief", "--file", "-"], stdin=text))
 
 
 def graph(branch: Optional[str] = None) -> Graph:

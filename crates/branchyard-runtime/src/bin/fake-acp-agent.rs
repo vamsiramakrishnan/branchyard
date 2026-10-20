@@ -71,7 +71,10 @@
 //! Branchyard's automatic wake of a parent waiting on its children
 //! (it contains `<branchyard-wake>`) is acted on as if it were the file's
 //! contents instead, so a test scripts what a woken parent does; without
-//! it, a wake is echoed like any prompt.
+//! it, a wake is echoed like any prompt. `FAKE_ACP_LAND=<file>` does the
+//! same for a turn the engine sends a child to make its work land (it
+//! contains `<branchyard-land>`): a test scripts how the child reconciles
+//! or fixes its work.
 //!
 //! With `FAKE_ACP_SILENT=1` in its environment it never answers
 //! `initialize`, so no prompt is ever submitted to it.
@@ -259,13 +262,21 @@ fn main() {
                     }
                 }
                 let woken;
-                if text.contains("<branchyard-wake>") {
-                    if let Some(script) = std::env::var_os("FAKE_ACP_WAKE") {
-                        woken = std::fs::read_to_string(&script).unwrap_or_else(|e| {
-                            format!("wake script {}: {e}", script.to_string_lossy())
-                        });
-                        text = &woken;
-                    }
+                let scripted = [
+                    ("<branchyard-wake>", "FAKE_ACP_WAKE", "wake"),
+                    ("<branchyard-land>", "FAKE_ACP_LAND", "land"),
+                ]
+                .into_iter()
+                .find_map(|(tag, var, what)| {
+                    text.contains(tag)
+                        .then(|| std::env::var_os(var).map(|script| (script, what)))
+                        .flatten()
+                });
+                if let Some((script, what)) = scripted {
+                    woken = std::fs::read_to_string(&script).unwrap_or_else(|e| {
+                        format!("{what} script {}: {e}", script.to_string_lossy())
+                    });
+                    text = &woken;
                 }
                 if let Some(path) = text
                     .lines()

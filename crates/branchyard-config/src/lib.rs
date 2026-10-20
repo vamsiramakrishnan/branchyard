@@ -437,6 +437,12 @@ pub struct UsageConfig {
     /// harness and the configuration directory it logs in from.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub accounts: BTreeMap<String, UsageAccount>,
+    /// At most this many branches run at once on each harness or profile
+    /// in a repository, as many as a subscription or key takes: `codex = 4`.
+    /// A delegated child past its harness's limit waits for a free slot.
+    /// Unset: no limit. See docs/delegation.md "Placement".
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub max_running: BTreeMap<String, u32>,
 }
 
 impl UsageConfig {
@@ -2073,6 +2079,14 @@ impl ProjectConfig {
                 return fail(key, "must be a percent, from 0 to 100".into());
             }
         }
+        for (harness, max) in &self.usage.max_running {
+            if *max == 0 {
+                return fail(
+                    &format!("usage.max_running.{harness}"),
+                    "must be at least 1; leave it out for no limit".into(),
+                );
+            }
+        }
         for (name, account) in &self.usage.accounts {
             if !matches!(account.harness.as_str(), "claude-code" | "codex") {
                 return fail(
@@ -3236,6 +3250,10 @@ classes = { compensable = "allow" }
             (
                 "[sync]\nremote = \"gs://b\"\nconcurrency = 0",
                 "sync.concurrency",
+            ),
+            (
+                "[usage]\nmax_running = { codex = 0 }",
+                "usage.max_running.codex: must be at least 1",
             ),
             (
                 "[sync]\nremote = \"gs://b\"\nspeed = 1",
