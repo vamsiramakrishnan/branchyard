@@ -467,14 +467,19 @@ pub fn promote_before_merge(target: &Target, branch: &str) -> Outcome {
 /// What a rewind to `to` leaves upstream, for `by rewind` to say before it
 /// acts: the plan, or `None` when nothing happened upstream after `to`.
 pub fn rewind_note(yard: &Yard, branch: &str, to: u32) -> Option<String> {
-    let plan = yard.undo_plan(branch, to).ok()?;
+    rewind_note_for(&yard.undo_plan(branch, to).ok()?, branch, to)
+}
+
+/// [`rewind_note`] from an undo plan, as remote mode reads it from the
+/// server.
+pub fn rewind_note_for(plan: &UndoPlan, branch: &str, to: u32) -> Option<String> {
     if plan.is_empty() {
         return None;
     }
     Some(format!(
         "{}A rewind restores files and the conversation only; undo upstream effects with: by \
          undo {branch} --to {to}\n",
-        plan_text::render(&plan, branch, true)
+        plan_text::render(plan, branch, true)
     ))
 }
 
@@ -512,4 +517,24 @@ pub fn summary(events: &[RecordedEvent]) -> Option<(Value, String)> {
         json!({"total": states.len(), "states": counts, "approvals_waiting": asked}),
         line,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rewind_says_nothing_when_nothing_happened_upstream() {
+        let plan = UndoPlan {
+            branch: "b".into(),
+            to: 1,
+            reversible: Vec::new(),
+            compensable: Vec::new(),
+            irreversible: Vec::new(),
+            unknown: Vec::new(),
+            staged: Vec::new(),
+            at_ms: 0,
+        };
+        assert_eq!(rewind_note_for(&plan, "b", 1), None);
+    }
 }

@@ -65,7 +65,7 @@
     }
   },
   "tests": {
-    "total": 2334,
+    "total": 2339,
     "ignored": 29,
     "by_crate": {
       "branchyard": {
@@ -77,7 +77,7 @@
         "ignored": 0
       },
       "branchyard-cli": {
-        "tests": 461,
+        "tests": 464,
         "ignored": 3
       },
       "branchyard-client": {
@@ -129,7 +129,7 @@
         "ignored": 0
       },
       "branchyard-server": {
-        "tests": 265,
+        "tests": 267,
         "ignored": 0
       },
       "branchyard-setup": {
@@ -163,7 +163,7 @@
     }
   },
   "http": {
-    "route_count": 89,
+    "route_count": 90,
     "routes": [
       "/.well-known/branchyard",
       "/.well-known/jwks.json",
@@ -214,6 +214,7 @@
       "/v1/repos/{repo}/branches/{branch}/reincarnate",
       "/v1/repos/{repo}/branches/{branch}/report",
       "/v1/repos/{repo}/branches/{branch}/report-status",
+      "/v1/repos/{repo}/branches/{branch}/rewind",
       "/v1/repos/{repo}/branches/{branch}/scratch",
       "/v1/repos/{repo}/branches/{branch}/scratch/{name}/lock",
       "/v1/repos/{repo}/branches/{branch}/scratch/{name}/share",

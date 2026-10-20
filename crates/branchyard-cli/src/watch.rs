@@ -442,22 +442,26 @@ impl Source {
     }
 
     /// `by show`'s checkpoint list for a branch, without color: what `r`
-    /// chooses from. Local only, as `by rewind` is.
+    /// chooses from: the SDK's locally, from the branch's events remotely.
     fn checkpoints(&self, branch: &str) -> Result<String, String> {
-        match self {
+        let list = match self {
             Source::Local { yard, .. } => yard
                 .branch(branch)
                 .and_then(|branch| branch.checkpoints())
-                .map(|list| {
-                    crate::attempts::checkpoint_lines(&list, Style { color: false })
-                        .lines()
-                        .skip_while(|l| l.trim().is_empty() || l.trim() == "checkpoints")
-                        .map(|l| format!("{l}\n"))
-                        .collect()
-                })
-                .map_err(|e| e.to_string()),
-            Source::Remote { .. } => Err("by rewind is local only".into()),
-        }
+                .map_err(|e| e.to_string())?,
+            Source::Remote { repo, .. } => repo
+                .branch(branch)
+                .map_err(crate::commands::Failure::from)
+                .and_then(|info| crate::attempts::remote_checkpoints(repo, &info))
+                .map_err(|e| e.to_string())?,
+        };
+        Ok(
+            crate::attempts::checkpoint_lines(&list, Style { color: false })
+                .lines()
+                .skip_while(|l| l.trim().is_empty() || l.trim() == "checkpoints")
+                .map(|l| format!("{l}\n"))
+                .collect(),
+        )
     }
 
     /// `by compare`'s table for a branch and its siblings, without color.

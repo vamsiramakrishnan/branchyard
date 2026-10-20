@@ -802,10 +802,8 @@ pub fn fork_at(
     prompt: &str,
     task: &TaskArgs,
 ) -> Outcome {
-    if let Target::Remote(_) = target {
-        return Err(Failure::Message(
-            "fork --at is not available in remote mode yet; run it on the server's host".into(),
-        ));
+    if let Target::Remote(remote) = target {
+        return remote::fork_at(env, remote, branch, turn, prompt, task);
     }
     let branch = open()?.branch(branch)?;
     let live = Live::start(env, task, task.delegate.is_some(), branch.provider()?);

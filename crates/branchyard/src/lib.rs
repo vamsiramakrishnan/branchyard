@@ -1952,6 +1952,14 @@ impl Branch {
         checkpoint::list(&self.yard, &self.info.name)
     }
 
+    /// The commit of this branch's checkpoint `turn` (0 is its base), or the
+    /// error [`Branch::rewind`] and [`Branch::fork_at`] give for it: no such
+    /// checkpoint, or its ref no longer names its commit. Lets a caller
+    /// refuse a checkpoint before it queues work at it.
+    pub fn checkpoint_commit(&self, turn: u32) -> Result<String, Error> {
+        checkpoint::commit_at(&self.yard, &self.info.name, turn)
+    }
+
     /// A new branch from this branch's latest candidate, always with a
     /// fresh session, whose first prompt is a generated handoff brief: the
     /// original task, turns so far, its last message, the candidate's

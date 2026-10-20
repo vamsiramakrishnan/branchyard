@@ -790,6 +790,8 @@ pub fn router(app: Shared) -> Router {
         .merge(crate::knowledge_routes::router())
         // Approvals, the effect ledger and undo: `effects_routes`.
         .merge(crate::effects_routes::router())
+        // Rewinding to a checkpoint: `checkpoint_routes`.
+        .merge(crate::checkpoint_routes::router())
         // Wide maps: `map_routes`.
         .merge(crate::map_routes::router())
         // Tasks and their attempts: `task_routes`.
@@ -1638,7 +1640,17 @@ async fn post_fork(
     }
     app.check_admission_quotas(&caller, &policy).await?;
     let options = work::fork_options(&app, &repo, &request)?;
-    existing(&repo.yard, &branch).await?;
+    let source = existing(&repo.yard, &branch).await?;
+    // At a checkpoint: one the branch has, checked before anything is
+    // queued, as the local command refuses it.
+    if let Some(turn) = request.at {
+        blocking(move || {
+            source
+                .checkpoint_commit(turn)
+                .map_err(|e| crate::checkpoint_routes::checkpoint_refusal(&source, turn, &e))
+        })
+        .await??;
+    }
     let planned = {
         let (yard, prompt) = (repo.yard.clone(), request.prompt.clone());
         match blocking(move || yard.task(prompt).options(options).planned_names(&[])).await? {

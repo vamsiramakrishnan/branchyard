@@ -65,6 +65,7 @@
 
 pub mod api;
 pub mod auth;
+mod checkpoint_routes;
 pub mod cli;
 pub mod companion;
 pub mod config;

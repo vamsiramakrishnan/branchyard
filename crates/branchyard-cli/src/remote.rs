@@ -351,7 +351,10 @@ fn follow_prefixed(
                         }
                     }
                     let prefixed = prefix.is_some_and(|p| entry.branch.starts_with(p));
-                    if prefixed || branches.contains(&entry.branch) {
+                    // A fork at a checkpoint is recorded, not observed, by
+                    // a local run, which shows its warning instead: so here.
+                    let recorded_only = matches!(entry.activity, Activity::ForkedAt { .. });
+                    if !recorded_only && (prefixed || branches.contains(&entry.branch)) {
                         console.event(&BranchEvent {
                             branch: entry.branch,
                             activity: entry.activity,
@@ -510,7 +513,12 @@ fn finish_one(env: &Env, remote: &Remote, op: &Operation, prefixed: bool) -> Out
     let console = live_console(env, prefixed, false);
     let done = follow(remote, op, &console);
     console.finish();
-    let result = result(done?)?;
+    finish_result(env, result(done?)?)
+}
+
+/// Print a finished operation's branch summary, and the branches it
+/// delegated to, as local mode does after a turn.
+fn finish_result(env: &Env, result: OperationResult) -> Outcome {
     let info = result
         .branches
         .into_iter()
@@ -791,12 +799,52 @@ pub fn fork(
     fresh_session: bool,
     task: &TaskArgs,
 ) -> Outcome {
+    let (request, notice) = fork_request(prompt, fresh_session, None, task)?;
+    let op = remote.repo.fork(branch, &request, &new_key())?;
+    announce(remote, notice, request.provider.as_ref());
+    finish_one(env, remote, &op, task.delegate.is_some())
+}
+
+/// `by --remote fork BRANCH --at N`: the server forks at the checkpoint,
+/// and this says how the new branch's session continues, as the local
+/// command does, before its summary.
+pub fn fork_at(
+    env: &Env,
+    remote: &Remote,
+    branch: &str,
+    turn: u32,
+    prompt: &str,
+    task: &TaskArgs,
+) -> Outcome {
+    let (request, notice) = fork_request(prompt, false, Some(turn), task)?;
+    let op = remote.repo.fork(branch, &request, &new_key())?;
+    announce(remote, notice, request.provider.as_ref());
+    let console = live_console(env, task.delegate.is_some(), false);
+    let done = follow(remote, &op, &console);
+    console.finish();
+    let result = result(done?)?;
+    if let Some(info) = result.branches.first() {
+        if let Ok(events) = remote.repo.events(&info.name, 0) {
+            crate::attempts::announce_forked_at(&info.name, &events.events);
+        }
+    }
+    finish_result(env, result)
+}
+
+/// A fork's request, from `by fork`'s flags.
+fn fork_request(
+    prompt: &str,
+    fresh_session: bool,
+    at: Option<u32>,
+    task: &TaskArgs,
+) -> Result<(ForkRequest, Option<&'static str>), Failure> {
     let (policy, notice) = permissions(task)?;
     let provider = provider(task)?;
     let request = ForkRequest {
         prompt: prompt.to_owned(),
         name: task.name.clone(),
         fresh_session,
+        at,
         harness: task.harness.clone(),
         budget: budget(task),
         policy,
@@ -806,14 +854,12 @@ pub fn fork(
         delegation: task.delegate.map(Envelope::depth),
         allow_delegation: task.allow_delegation,
         unapproved_tools: task.unapproved_tools,
-        provider: provider.clone(),
+        provider,
         provision: provision(task)?,
         require_labels: task.require_labels.clone(),
         priority: task.priority,
     };
-    let op = remote.repo.fork(branch, &request, &new_key())?;
-    announce(remote, notice, provider.as_ref());
-    finish_one(env, remote, &op, task.delegate.is_some())
+    Ok((request, notice))
 }
 
 pub fn reincarnate(env: &Env, remote: &Remote, branch: &str, task: &TaskArgs) -> Outcome {

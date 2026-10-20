@@ -54,21 +54,24 @@ fn local_only(target: &Target, what: &str) -> Result<(), Failure> {
 pub fn checkpoints(target: &Target, info: &BranchInfo) -> Result<Checkpoints, Failure> {
     match target {
         Target::Local => Ok(open()?.branch(&info.name)?.checkpoints()?),
-        Target::Remote(remote) => {
-            let events = remote.repo.events(&info.name, 0)?.events;
-            let current = events.iter().rev().find_map(|e| match &e.activity {
-                Activity::Checkpoint(c) => Some(c.turn),
-                Activity::Rewound { to, .. } => Some(*to),
-                _ => None,
-            });
-            Ok(Checkpoints {
-                branch: info.name.clone(),
-                base: info.base.clone(),
-                current: current.or(Some(0)),
-                checkpoints: branchyard::checkpoint_entries(&events),
-            })
-        }
+        Target::Remote(remote) => remote_checkpoints(&remote.repo, info),
     }
+}
+
+/// [`checkpoints`] from the server's records of the branch.
+pub fn remote_checkpoints(repo: &Repo, info: &BranchInfo) -> Result<Checkpoints, Failure> {
+    let events = repo.events(&info.name, 0)?.events;
+    let current = events.iter().rev().find_map(|e| match &e.activity {
+        Activity::Checkpoint(c) => Some(c.turn),
+        Activity::Rewound { to, .. } => Some(*to),
+        _ => None,
+    });
+    Ok(Checkpoints {
+        branch: info.name.clone(),
+        base: info.base.clone(),
+        current: current.or(Some(0)),
+        checkpoints: branchyard::checkpoint_entries(&events),
+    })
 }
 
 /// The `checkpoints` section of `by show`.
@@ -124,24 +127,34 @@ fn entry_text(entry: &CheckpointEntry, style: Style) -> String {
 
 /// After `by fork --at`: how the new branch's session continues.
 pub fn announce_fork(forked: &Branch) {
-    let Ok(events) = forked.events() else {
-        return;
-    };
-    for event in events {
-        if let Activity::ForkedAt {
+    if let Ok(events) = forked.events() {
+        announce_forked_at(&forked.info().name, &events);
+    }
+}
+
+/// [`announce_fork`] from the new branch `name`'s recorded events, as
+/// remote mode reads them from the server.
+pub fn announce_forked_at(name: &str, events: &[branchyard::RecordedEvent]) {
+    if let Some(line) = forked_at_line(name, events) {
+        eprintln!("{line}");
+    }
+}
+
+/// The line [`announce_forked_at`] prints, if the events hold a fork at a
+/// checkpoint.
+fn forked_at_line(name: &str, events: &[branchyard::RecordedEvent]) -> Option<String> {
+    events.iter().find_map(|event| match &event.activity {
+        Activity::ForkedAt {
             branch,
             turn,
             session,
             ..
-        } = event.activity
-        {
-            eprintln!(
-                "by: forked from {branch} at checkpoint {turn}; {} {}",
-                forked.info().name,
-                session.describe()
-            );
-        }
-    }
+        } => Some(format!(
+            "by: forked from {branch} at checkpoint {turn}; {name} {}",
+            session.describe()
+        )),
+        _ => None,
+    })
 }
 
 pub fn rewind(
@@ -152,8 +165,28 @@ pub fn rewind(
     yes: bool,
     as_json: bool,
 ) -> Outcome {
-    local_only(target, "by rewind")?;
-    rewind_in(env, &open()?, branch, to, yes, as_json)
+    let Target::Remote(remote) = target else {
+        return rewind_in(env, &open()?, branch, to, yes, as_json);
+    };
+    // The server's rewind: the same note, question and output.
+    let info = remote.repo.branch(branch)?;
+    let note = remote
+        .repo
+        .undo_plan(branch, to)
+        .ok()
+        .and_then(|plan| crate::effects_cmd::rewind_note_for(&plan, branch, to));
+    let asked = Rewind {
+        branch,
+        to,
+        yes,
+        as_json,
+    };
+    asked.run(
+        env,
+        note,
+        || checkpoints(target, &info),
+        || Ok(remote.repo.rewind(branch, to)?),
+    )
 }
 
 /// `by rewind` in `yard`, as `by task rewind` runs it in a task's own
@@ -169,48 +202,92 @@ pub(crate) fn rewind_in(
     let handle = yard.branch(branch)?;
     // Rewinding past effectful turns leaves the world as it is: say so,
     // with what `by undo` could do (docs/effects.md).
-    if let Some(note) = crate::effects_cmd::rewind_note(yard, branch, to) {
-        eprint!("{note}");
-    }
-    if !yes {
-        let list = handle.checkpoints()?;
-        let later: Vec<String> = list
-            .checkpoints
-            .iter()
-            .filter(|e| e.checkpoint.turn > to)
-            .map(|e| e.checkpoint.turn.to_string())
-            .collect();
-        let question = format!(
-            "Reset {branch} and its worktree to checkpoint {to}?{}",
-            match later.is_empty() {
-                true => String::new(),
-                false => format!(
-                    " Checkpoints {} stay, so you can rewind forward again.",
-                    later.join(", ")
-                ),
-            }
-        );
-        if !confirm(env, &question) {
-            return Err(Failure::Message(format!(
-                "rewinding {branch} resets its worktree; pass --yes to confirm (or run on a terminal)"
-            )));
+    let note = crate::effects_cmd::rewind_note(yard, branch, to);
+    let asked = Rewind {
+        branch,
+        to,
+        yes,
+        as_json,
+    };
+    asked.run(
+        env,
+        note,
+        || Ok(handle.checkpoints()?),
+        || Ok(handle.rewind(to)?),
+    )
+}
+
+/// A `by rewind` as it was asked for, locally or remotely.
+struct Rewind<'a> {
+    branch: &'a str,
+    to: u32,
+    yes: bool,
+    as_json: bool,
+}
+
+impl Rewind<'_> {
+    /// Say `note`, ask unless `--yes` (listing the checkpoints `list`
+    /// gives), rewind with `act` and print what it did.
+    fn run(
+        &self,
+        env: &Env,
+        note: Option<String>,
+        list: impl FnOnce() -> Result<Checkpoints, Failure>,
+        act: impl FnOnce() -> Result<branchyard::Rewound, Failure>,
+    ) -> Outcome {
+        let Rewind {
+            branch,
+            to,
+            yes,
+            as_json,
+        } = *self;
+        if let Some(note) = note {
+            eprint!("{note}");
         }
+        if !yes {
+            let list = list()?;
+            if !confirm(env, &rewind_question(&list, branch, to)) {
+                return Err(Failure::Message(format!(
+                    "rewinding {branch} resets its worktree; pass --yes to confirm (or run on a terminal)"
+                )));
+            }
+        }
+        let rewound = act()?;
+        if as_json {
+            return print(&json::text(
+                &serde_json::to_value(&rewound).unwrap_or_default(),
+            ));
+        }
+        let from = rewound
+            .from
+            .map(|n| format!(" from {n}"))
+            .unwrap_or_default();
+        print(&format!(
+            "rewound {branch}{from} to checkpoint {to} ({})\nthe next turn {}\n",
+            short(&rewound.commit),
+            rewound.session.describe()
+        ))
     }
-    let rewound = handle.rewind(to)?;
-    if as_json {
-        return print(&json::text(
-            &serde_json::to_value(&rewound).unwrap_or_default(),
-        ));
-    }
-    let from = rewound
-        .from
-        .map(|n| format!(" from {n}"))
-        .unwrap_or_default();
-    print(&format!(
-        "rewound {branch}{from} to checkpoint {to} ({})\nthe next turn {}\n",
-        short(&rewound.commit),
-        rewound.session.describe()
-    ))
+}
+
+/// What `by rewind` asks before it resets `branch` to `to`.
+fn rewind_question(list: &Checkpoints, branch: &str, to: u32) -> String {
+    let later: Vec<String> = list
+        .checkpoints
+        .iter()
+        .filter(|e| e.checkpoint.turn > to)
+        .map(|e| e.checkpoint.turn.to_string())
+        .collect();
+    format!(
+        "Reset {branch} and its worktree to checkpoint {to}?{}",
+        match later.is_empty() {
+            true => String::new(),
+            false => format!(
+                " Checkpoints {} stay, so you can rewind forward again.",
+                later.join(", ")
+            ),
+        }
+    )
 }
 
 /// `by try`, `by try --off` and `by try --status`.
@@ -543,7 +620,37 @@ pub fn compare_table(attempts: &[Attempt], style: Style) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use branchyard::{AttemptCheck, SessionContinuity};
+    use branchyard::{AttemptCheck, RecordedEvent, SessionContinuity};
+
+    #[test]
+    fn a_fork_at_a_checkpoint_is_announced_from_its_events() {
+        let session = SessionContinuity::Fresh {
+            reason: "nothing ran before the base".into(),
+        };
+        let events = vec![
+            RecordedEvent {
+                at_ms: 1,
+                activity: Activity::Prompt("x".into()),
+            },
+            RecordedEvent {
+                at_ms: 2,
+                activity: Activity::ForkedAt {
+                    branch: "hello".into(),
+                    turn: 0,
+                    commit: "abc".into(),
+                    session: session.clone(),
+                },
+            },
+        ];
+        assert_eq!(
+            forked_at_line("hello-2", &events),
+            Some(format!(
+                "by: forked from hello at checkpoint 0; hello-2 {}",
+                session.describe()
+            ))
+        );
+        assert_eq!(forked_at_line("hello-2", &events[..1]), None);
+    }
 
     fn attempt(name: &str, unique: &[&str]) -> Attempt {
         Attempt {

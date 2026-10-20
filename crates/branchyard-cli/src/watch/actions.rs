@@ -449,7 +449,7 @@ pub const ACTIONS: &[Action] = &[
         },
         run: Run::Wait(&["rewind", "--yes", "--to", "{text}", "--", "{branch}"]),
         when: rewindable,
-        remote: Remote::No(ON_THIS_MACHINE),
+        remote: Remote::Yes,
     },
     Action {
         key: 'c',
@@ -993,11 +993,13 @@ mod tests {
         assert!(refused('r', BranchStatus::Running, true, false).is_some());
         assert_eq!(refused('r', BranchStatus::Interrupted, false, false), None);
         assert_eq!(refused('c', BranchStatus::Waiting, false, true), None);
-        for key in ['p', 'P', 'o', 'r', 't'] {
+        for key in ['p', 'P', 'o', 't'] {
             assert!(refused(key, BranchStatus::Ready, true, true)
                 .unwrap()
                 .contains("local only"));
         }
+        // A rewind goes through the server's route.
+        assert_eq!(refused('r', BranchStatus::Ready, true, true), None);
         assert_eq!(refused('v', BranchStatus::Ready, true, true), None);
         assert!(refused('v', BranchStatus::Running, true, false).is_some());
         assert!(refused('v', BranchStatus::Ready, false, false)

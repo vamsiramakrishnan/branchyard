@@ -11,7 +11,7 @@ Surfaces:
 - **client**: `branchyard-client`, the typed Rust client of that API.
 - **delegation**: a harness acting as its branch through `by` in its shell, the Python module, `Delegate` in Rust, or the MCP tools (`by mcp`). The four reach one set of operations and give the same answers ([delegation](delegation.md)); they work in local mode and on a server that allows delegation.
 
-The server registers <!-- fact:http.route_count -->89<!-- /fact --> routes; each is documented in [the server reference](server.md) or on this page, and `tools/docs_facts.py --check` fails when one is not.
+The server registers <!-- fact:http.route_count -->90<!-- /fact --> routes; each is documented in [the server reference](server.md) or on this page, and `tools/docs_facts.py --check` fails when one is not.
 
 **yes** means supported; **no** gives the reason; a server opt-in is named where the server's operator must allow something first.
 
@@ -38,8 +38,8 @@ The server registers <!-- fact:http.route_count -->89<!-- /fact --> routes; each
 | Harness profiles | `Yard::harnesses` | `harnesses` | yes, the server's `PATH` | `GET /v1/harnesses` | `harnesses` | no |
 | Recover stopped turns | `Yard::recover`, `Yard::open` | on every open | the server, at start and every 30 s | n/a | n/a | n/a |
 | List checkpoints ([checkpoints](checkpoints.md)) | `Branch::checkpoints`; `recorded_checkpoints` from events | `show`, `log` | yes, from the event log | the `checkpoint` events | `events` | no: `events` shows them |
-| Fork at a checkpoint | `Branch::fork_at` | `fork --at N` | no: needs an API operation; refused with a message | no | no | no: children start from a revision |
-| Rewind to a checkpoint | `Branch::rewind` | `rewind --to N` | no: needs an API operation; refused with a message | no | no | no: not a delegation operation |
+| Fork at a checkpoint | `Branch::fork_at` | `fork --at N` | yes, a fork operation; the session line from the new branch's `forked_at` event | `POST …/fork` with `at` (`404 unknown_checkpoint` before anything is queued) | `fork` (`ForkRequest::at`) | no: children start from a revision |
+| Rewind to a checkpoint | `Branch::rewind` | `rewind --to N` | yes, the same note, question and output | `POST …/rewind` (`RewindRequest`, `Rewound`), not an operation: it holds the branch while it runs | `rewind` | no: not a delegation operation |
 | Try a branch in this checkout | `Yard::try_on`, `try_off`, `try_status`, `try_recover` | `try`, `try --off`, `try --status` | no: the server's checkout is not yours; refused | no | no | no |
 | Compare attempts | `Yard::compare`, `fan_branches`, `diff_between`; `compare_attempt`, `mark_unique`, `diff_files` | `compare` | yes, but not `--check` or `--diff` | from branches, events and diffs | the same | no |
 | Watch and act from a phone ([companion](companion.md)) | n/a | `serve --app`, `serve token new --link` | n/a | `/app/`, the same API under the caller's scopes | `Client::me` | no |
@@ -261,7 +261,7 @@ The cockpit branch made `by watch` act on the selected branch; integrating it wi
 | `Y` | copy the worktree's path | no: the worktree is on the server |
 | `p`, `P` | `pr` (waited for, output in a pane), `pr --watch` (in the background), each after a yes | no: pushes from this machine with your `gh` login |
 | `o` | `open`, in-process through `open::plan`/`launch`; a terminal editor gets the screen until it exits | no: the worktree is on the server |
-| `r` | `rewind --to N --yes`, N typed under the checkpoint list, then a yes | no: needs an API operation |
+| `r` | `rewind --to N --yes`, N typed under the checkpoint list, then a yes | yes, the list from the server's events |
 | `c` | `compare` of the branch and its siblings, in a pane | yes, from records, events and diffs |
 | `t` | `try` after a yes; on the tried branch, `try --off` | no: changes this machine's checkout |
 

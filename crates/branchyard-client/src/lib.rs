@@ -76,8 +76,8 @@ use api::{
     Diff, DiscardRequest, ErrorBody, ErrorResponse, FeedEntry, ForkRequest, GraphRequest,
     HarnessList, IntegrateRequest, InventoryReport, MapList, MapRequest, MapResumeRequest,
     MergeRequest, Operation, ReincarnateRequest, Removed, RepoEntry, RepoList, ReportRequest,
-    ReportStatusRequest, SendRequest, SpawnRequest, SteerRequest, TaskList, TaskRequest,
-    TextRequest, WaitRequest,
+    ReportStatusRequest, RewindRequest, SendRequest, SpawnRequest, SteerRequest, TaskList,
+    TaskRequest, TextRequest, WaitRequest,
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
@@ -830,6 +830,19 @@ impl Repo {
             &DiscardRequest {
                 reason: reason.map(str::to_owned),
             },
+            &new_key(),
+        )
+    }
+
+    /// Reset a settled branch, its worktree and its candidate to its
+    /// checkpoint `to` (0 is its base), like `by rewind --to N`. Refused
+    /// while a turn runs, for a merged branch, over worktree changes no
+    /// checkpoint has, and for a checkpoint it does not have. Later
+    /// checkpoints stay, so rewinding to one of them undoes this.
+    pub fn rewind(&self, branch: &str, to: u32) -> Result<branchyard::Rewound, Error> {
+        self.client.post(
+            &self.branch_path(branch, "/rewind"),
+            &RewindRequest { to },
             &new_key(),
         )
     }

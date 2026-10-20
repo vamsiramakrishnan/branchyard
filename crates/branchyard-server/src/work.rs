@@ -182,7 +182,10 @@ impl Work {
                     ..fork_options(app, repo, &request).map_err(api)?
                 };
                 yard.branch(&branch)
-                    .and_then(|source| source.fork(&request.prompt, request.fresh_session, options))
+                    .and_then(|source| match request.at {
+                        Some(turn) => source.fork_at(turn, &request.prompt, options),
+                        None => source.fork(&request.prompt, request.fresh_session, options),
+                    })
                     .and_then(|b| finished(vec![b]))
                     .map_err(sdk)
             }
@@ -934,6 +937,12 @@ pub(crate) fn fork_options(
 ) -> Result<TaskOptions, ApiError> {
     if request.prompt.trim().is_empty() {
         return Err(ApiError::bad_request("prompt is empty"));
+    }
+    if request.at.is_some() && request.fresh_session {
+        return Err(ApiError::bad_request(
+            "at and fresh_session cannot be combined: a fork at a checkpoint starts a fresh \
+             session itself when the harness's cannot be forked there",
+        ));
     }
     let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
     let provider = app.provider(request.provider.clone())?;

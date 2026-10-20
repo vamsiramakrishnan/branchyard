@@ -397,6 +397,13 @@ pub struct ForkRequest {
     pub name: Option<String>,
     #[serde(default)]
     pub fresh_session: bool,
+    /// Fork from the branch's checkpoint N (0 is its base) instead of its
+    /// candidate, like `by fork --at N` and [`branchyard::Branch::fork_at`]:
+    /// the session forks natively only if it ended there, else a fresh one
+    /// starts with a summary. Not with `fresh_session`. A checkpoint the
+    /// branch does not have is refused when the request is admitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
     #[serde(default)]
@@ -703,6 +710,17 @@ pub struct DiscardRequest {
     /// when it is omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// `POST /v1/repos/{repo}/branches/{branch}/rewind`: reset a settled
+/// branch, its worktree and its candidate to a checkpoint, like
+/// `by rewind --to N`. The answer is a [`branchyard::Rewound`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RewindRequest {
+    /// The checkpoint: a turn number, or 0 for the branch's base.
+    pub to: u32,
 }
 
 /// `POST /v1/repos/{repo}/wait`: block until branches settle, like

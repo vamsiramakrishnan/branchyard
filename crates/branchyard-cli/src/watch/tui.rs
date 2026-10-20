@@ -3070,7 +3070,7 @@ mod tests {
         }
         select(&mut m, "done");
         m.remote = true;
-        for key in ['p', 'P', 'o', 'r', 't'] {
+        for key in ['p', 'P', 'o', 't'] {
             assert!(press(&mut m, &[Key::Char(key)]).is_empty(), "{key}");
             assert!(m.toast.as_ref().unwrap().text.contains("is local only"));
         }

@@ -12131,6 +12131,15 @@
           "type": "boolean",
           "default": false
         },
+        "at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Fork from the branch's checkpoint N (0 is its base) instead of its\ncandidate, like `by fork --at N` and [`branchyard::Branch::fork_at`]:\nthe session forks natively only if it ended there, else a fresh one\nstarts with a summary. Not with `fresh_session`. A checkpoint the\nbranch does not have is refused when the request is admitted."
+        },
         "harness": {
           "type": [
             "string",
@@ -16443,6 +16452,127 @@
       "description": "`POST /v1/repos/{repo}/branches/{branch}/discard`: set a settled\nbranch aside, like `by discard`. The answer is the branch's\n[`branchyard::Inspection`].",
       "title": "DiscardRequest",
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "RewindRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "to": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "The checkpoint: a turn number, or 0 for the branch's base."
+        }
+      },
+      "required": [
+        "to"
+      ],
+      "description": "`POST /v1/repos/{repo}/branches/{branch}/rewind`: reset a settled\nbranch, its worktree and its candidate to a checkpoint, like\n`by rewind --to N`. The answer is a [`branchyard::Rewound`].",
+      "title": "RewindRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "Rewound": {
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "from": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "to": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "commit": {
+          "type": "string"
+        },
+        "session": {
+          "$ref": "#/$defs/SessionContinuity"
+        }
+      },
+      "required": [
+        "branch",
+        "to",
+        "commit",
+        "session"
+      ],
+      "description": "What [`crate::Branch::rewind`] did.",
+      "title": "Rewound",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "SessionContinuity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "session": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "native"
+                }
+              },
+              "required": [
+                "mode",
+                "session"
+              ],
+              "description": "The harness's own session is resumed (a rewind) or forked (a fork):\nit ended exactly at that checkpoint."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "turns": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "summary"
+                }
+              },
+              "required": [
+                "mode",
+                "turns",
+                "reason"
+              ],
+              "description": "A fresh session, whose first prompt carries a generated summary of\nthese turns, because the native session could not continue from the\ncheckpoint, for `reason`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "fresh"
+                }
+              },
+              "required": [
+                "mode",
+                "reason"
+              ],
+              "description": "A fresh session with no summary: nothing ran before the checkpoint\n(turn 0, the base)."
+            }
+          ],
+          "description": "How a rewound or forked-at branch's conversation continues. Serialized as\nan object tagged by `mode`, such as `{\"mode\": \"native\", \"session\": \"...\"}`."
+        }
+      }
     },
     "WaitRequest": {
       "type": "object",

@@ -1682,7 +1682,6 @@ fn compare_works_remotely_and_local_only_commands_say_so() {
     );
     for args in [
         &["try", "one"][..],
-        &["rewind", "one", "--to", "0", "--yes"],
         &["compare", "one", "two", "--diff", "one", "two"],
     ] {
         let refused = server.by(&dir.0, args);
@@ -1693,6 +1692,93 @@ fn compare_works_remotely_and_local_only_commands_say_so() {
             text(&refused.stderr)
         );
     }
+}
+
+#[test]
+fn rewind_and_fork_at_print_what_local_ones_do() {
+    let dir = Dir::new();
+    let here = dir.repo("here");
+    let there = dir.repo("there");
+    let server = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
+    let both = |args: &[&str]| -> (Output, Output) {
+        let l = local(&here, args);
+        let r = server.by(
+            &dir.0,
+            &with_agent(args)
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        );
+        (l, r)
+    };
+    let same = |args: &[&str]| {
+        let (l, r) = both(args);
+        assert_eq!(
+            l.status.code(),
+            r.status.code(),
+            "{args:?}\nlocal: {}\nremote: {}",
+            text(&l.stderr),
+            text(&r.stderr)
+        );
+        assert_eq!(
+            normalize(&text(&l.stdout), &here),
+            normalize(&text(&r.stdout), &there),
+            "{args:?}\nremote stderr: {}",
+            text(&r.stderr)
+        );
+        (l, r)
+    };
+    same(&["run", "WRITE one.txt=1", "--name", "cp", "--yes"]);
+    same(&["send", "cp", "WRITE two.txt=2", "--yes"]);
+
+    // Back, forward and back again, as text and as JSON.
+    let (_, r) = same(&["rewind", "cp", "--to", "1", "--yes"]);
+    assert!(
+        text(&r.stdout).starts_with("rewound cp from 2 to checkpoint 1"),
+        "{}",
+        text(&r.stdout)
+    );
+    same(&["show", "cp"]);
+    same(&["diff", "cp"]);
+    let (l, r) = both(&["rewind", "cp", "--to", "2", "--yes", "--json"]);
+    assert!(
+        l.status.success() && r.status.success(),
+        "{}",
+        text(&r.stderr)
+    );
+    assert_eq!(json(&l.stdout, &here), json(&r.stdout, &there));
+    same(&["rewind", "cp", "--to", "1", "--yes"]);
+    // Refused as locally: a checkpoint it does not have, and no --yes off a
+    // terminal.
+    let (l, r) = same(&["rewind", "cp", "--to", "9", "--yes"]);
+    assert!(
+        text(&r.stderr).contains("cp has no checkpoint 9"),
+        "{}",
+        text(&r.stderr)
+    );
+    assert!(text(&l.stderr).contains("cp has no checkpoint 9"));
+    let (_, r) = same(&["rewind", "cp", "--to", "0"]);
+    assert!(
+        text(&r.stderr).contains("pass --yes"),
+        "{}",
+        text(&r.stderr)
+    );
+
+    // A fork at turn 1 says how its session goes on, and has turn 1's files.
+    let (l, r) = same(&[
+        "fork", "cp", "WHOAMI", "--at", "1", "--name", "cp-at", "--yes",
+    ]);
+    let line = |out: &Output| {
+        text(&out.stderr)
+            .lines()
+            .find(|l| l.starts_with("by: forked from cp at checkpoint 1;"))
+            .map(str::to_owned)
+    };
+    assert!(line(&r).is_some(), "{}", text(&r.stderr));
+    assert_eq!(line(&l), line(&r));
+    same(&["diff", "cp-at"]);
+    let (_, r) = same(&["fork", "cp", "WHOAMI", "--at", "7", "--yes"]);
+    assert!(!r.status.success());
 }
 
 #[test]
