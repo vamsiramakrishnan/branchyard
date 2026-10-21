@@ -874,3 +874,14 @@ See [harness integration](harness-integration.md#claude-code) and [distribution]
 | `plugins/branchyard/commands/status.md`, `wait.md` | `/branchyard:setup` only | also `/branchyard:status` (branches and what needs attention) and `/branchyard:wait` (`by wait`, then a summary) |
 | `.claude-plugin/marketplace.json` | none: `claude --plugin-dir plugins/branchyard` | the repository is a marketplace: `/plugin marketplace add vamsiramakrishnan/branchyard`, `/plugin install branchyard@branchyard`; `tools/package.py` refuses a marketplace entry not at the workspace version |
 
+## Changed with long-polled operations
+
+See [server](server.md#operations).
+
+| Gap | Before | Now |
+|---|---|---|
+| `GET /v1/operations/{id}` | answered at once, so every waiter polled it: the Rust client and `by --remote` every 200 to 250 ms, Python every 0.5 s | `?wait=SECONDS` long-polls: the answer comes as the operation finishes, or with it unfinished once that long passes (capped at 30s); a `wait` that is not a number of seconds is `400 invalid_request` with `detail.field` `wait` |
+| `Client::wait` | `wait(id, poll)`: slept `poll` between reads, with no timeout | `wait(id)` and `wait_timeout(id, timeout)` over the long poll, asking again past the cap |
+| Python `Client.wait`, `Reply.wait` | slept `poll` (0.5 s) between reads | no `poll`; long polls, asked again until `timeout` |
+| `by --remote` following an operation | read it every 250 ms, sleeping between reads when the event stream was lost | long polls of 5 s on a thread of their own; the stream and the operation are heard on one channel |
+| `Delegate::wait` through the broker (`Delegate::connect`) | inspected the branch every 100 ms | the engine's blocking `wait`, as `Delegate::wait_for` |

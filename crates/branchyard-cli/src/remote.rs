@@ -9,18 +9,18 @@
 
 use std::collections::HashSet;
 use std::io;
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use branchyard::{
     Activity, BranchEvent, BranchInfo, Children, Envelope, EventPage, Inspection, Merged, Provider,
     Sent,
 };
 use branchyard_client::api::{
-    BudgetSpec, ErrorBody, ForkRequest, GraphRequest, MapRequest, MergeRequest, Operation,
-    OperationResult, OperationState, PolicyMode, PolicySpec, ReincarnateRequest, RuleSpec,
-    SendRequest, SpawnRequest, TaskRequest,
+    BudgetSpec, ErrorBody, FeedEntry, ForkRequest, GraphRequest, MapRequest, MergeRequest,
+    Operation, OperationResult, OperationState, PolicyMode, PolicySpec, ReincarnateRequest,
+    RuleSpec, SendRequest, SpawnRequest, TaskRequest,
 };
 use branchyard_client::{new_key, Client, Repo};
 
@@ -302,6 +302,19 @@ fn follow(remote: &Remote, op: &Operation, console: &Console) -> Result<Operatio
     follow_prefixed(remote, op, console, None)
 }
 
+/// What [`follow_prefixed`] hears: the stream's entries and its end, and
+/// the operation as each long poll of it answers.
+enum Heard {
+    Entry(Box<Result<FeedEntry, branchyard_client::Error>>),
+    StreamEnded,
+    Operation(Box<Result<Operation, branchyard_client::Error>>),
+}
+
+/// How long one long poll of a followed operation lasts: the operation
+/// finishing answers it at once; a queued one's reason for waiting
+/// (`waiting`) is shown within this.
+const FOLLOW_POLL: Duration = Duration::from_secs(5);
+
 /// [`follow`], also showing every branch whose name starts with `prefix`:
 /// a map's, which its operation cannot name when it is accepted.
 fn follow_prefixed(
@@ -313,18 +326,30 @@ fn follow_prefixed(
     let mut branches: HashSet<String> = op.branches.iter().cloned().collect();
     let (tx, rx) = mpsc::channel();
     let stream = remote.repo.stream(Some(op.cursor));
+    let entries = tx.clone();
     std::thread::spawn(move || {
         for item in stream {
-            if tx.send(item).is_err() {
+            if entries.send(Heard::Entry(Box::new(item))).is_err() {
                 return;
             }
+        }
+        branchyard_support::best_effort(
+            "say the event stream ended",
+            entries.send(Heard::StreamEnded),
+        );
+    });
+    // The operation's state by long polls, not by sleeping between reads.
+    let (client, id) = (remote.client.clone(), op.id.clone());
+    std::thread::spawn(move || loop {
+        let op = client.wait_timeout(&id, FOLLOW_POLL);
+        let last = op.as_ref().map_or(true, |op| op.state.is_terminal());
+        if tx.send(Heard::Operation(Box::new(op))).is_err() || last {
+            return;
         }
     });
     let mut seen = op.cursor;
     let mut finished: Option<Operation> = None;
     let mut streaming = true;
-    let mut polled = Instant::now();
-    let poll = Duration::from_millis(250);
     let mut said_waiting = false;
     loop {
         if let Some(done) = &finished {
@@ -333,9 +358,15 @@ fn follow_prefixed(
                 return Ok(done.clone());
             }
         }
-        if streaming {
-            match rx.recv_timeout(poll) {
-                Ok(Ok(entry)) => {
+        let Ok(heard) = rx.recv() else {
+            return Err(Failure::Message(format!(
+                "lost track of operation {}",
+                op.id
+            )));
+        };
+        match heard {
+            Heard::Entry(item) if streaming => match *item {
+                Ok(entry) => {
                     seen = entry.seq;
                     // A child a followed branch spawned is followed too, as
                     // a local run shows its children.
@@ -361,26 +392,23 @@ fn follow_prefixed(
                         });
                     }
                 }
-                Ok(Err(error)) => {
+                Err(error) => {
                     console.finish();
                     eprintln!("by: lost the event stream ({error}); waiting for the result");
                     streaming = false;
                 }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => streaming = false,
-            }
-        } else {
-            std::thread::sleep(poll);
-        }
-        if finished.is_none() && polled.elapsed() >= poll {
-            polled = Instant::now();
-            let op = remote.client.operation(&op.id)?;
-            if let (Some(waiting), false) = (&op.waiting, said_waiting) {
-                eprintln!("by: {} is still queued: {waiting}", op.id);
-                said_waiting = true;
-            }
-            if op.state.is_terminal() {
-                finished = Some(op);
+            },
+            Heard::Entry(_) => {}
+            Heard::StreamEnded => streaming = false,
+            Heard::Operation(op) => {
+                let op = (*op)?;
+                if let (Some(waiting), false) = (&op.waiting, said_waiting) {
+                    eprintln!("by: {} is still queued: {waiting}", op.id);
+                    said_waiting = true;
+                }
+                if op.state.is_terminal() {
+                    finished = Some(op);
+                }
             }
         }
     }
@@ -969,10 +997,7 @@ pub fn integrate(remote: &Remote, branch: &str) -> Result<Merged, branchyard::Er
         .repo
         .integrate(branch, &new_key())
         .map_err(sdk_error)?;
-    let done = remote
-        .client
-        .wait(&op.id, Duration::from_millis(200))
-        .map_err(sdk_error)?;
+    let done = remote.client.wait(&op.id).map_err(sdk_error)?;
     result(done)?
         .merged
         .ok_or_else(|| branchyard::Error::State("the server returned no merge".into()))
@@ -988,10 +1013,7 @@ pub fn integrate_all(
         .repo
         .integrate_all(branches, &new_key())
         .map_err(sdk_error)?;
-    let done = remote
-        .client
-        .wait(&op.id, Duration::from_millis(200))
-        .map_err(sdk_error)?;
+    let done = remote.client.wait(&op.id).map_err(sdk_error)?;
     result(done)?
         .merged_all
         .ok_or_else(|| branchyard::Error::State("the server returned no merge".into()))
@@ -1003,10 +1025,7 @@ pub fn integrate_all(
 /// stops waiting, not the check.
 pub fn check(remote: &Remote, branch: &str) -> Result<branchyard::CheckReport, branchyard::Error> {
     let op = remote.repo.check(branch, &new_key()).map_err(sdk_error)?;
-    let done = remote
-        .client
-        .wait(&op.id, Duration::from_millis(200))
-        .map_err(sdk_error)?;
+    let done = remote.client.wait(&op.id).map_err(sdk_error)?;
     result(done)?
         .check_report
         .ok_or_else(|| branchyard::Error::State("the server returned no check report".into()))
@@ -1044,7 +1063,7 @@ pub fn merge(remote: &Remote, branch: &str, into: Option<&str>) -> Outcome {
         }
         other => other?,
     };
-    let done = remote.client.wait(&op.id, Duration::from_millis(200))?;
+    let done = remote.client.wait(&op.id)?;
     let merged = result(done)?
         .merged
         .ok_or_else(|| Failure::Message("the server returned no merge".into()))?;

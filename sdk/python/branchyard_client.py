@@ -115,6 +115,11 @@ __all__ = [
 JSON = dict[str, Any]
 Grants = Sequence[Union["Grant", str, JSON]]
 
+# The longest one wait request asks the server for, in seconds: its own cap
+# on `POST .../wait` and `GET /v1/operations/{id}?wait=`, past which a wait
+# asks again.
+_WAIT_CAP = 30.0
+
 # ---------------------------------------------------------------------------
 # Errors
 
@@ -995,20 +1000,26 @@ class Client:
         operation: Union[Operation, str],
         *,
         timeout: Optional[float] = None,
-        poll: float = 0.5,
         check: bool = False,
     ) -> Operation:
-        """Poll until the operation finishes, or `timeout` seconds pass
-        (`TimeoutError`). With `check`, a failed or interrupted operation
-        raises `OperationFailedError`."""
+        """Block until the operation finishes, or `timeout` seconds pass
+        (`TimeoutError`), with `GET /v1/operations/{id}?wait=` long polls:
+        the server answers as it finishes, or at its 30 s cap, and this asks
+        again. With `check`, a failed or interrupted operation raises
+        `OperationFailedError`."""
         id = operation.id if isinstance(operation, Operation) else operation
         deadline = None if timeout is None else time.monotonic() + timeout
-        op = operation if isinstance(operation, Operation) and operation.done else self.operation(id)
-        while not op.done:
-            if deadline is not None and time.monotonic() >= deadline:
+        op = operation if isinstance(operation, Operation) and operation.done else None
+        while op is None or not op.done:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if op is not None and remaining is not None and remaining <= 0:
                 raise TimeoutError(f"operation {id} still {op.state} after {timeout}s")
-            time.sleep(poll)
-            op = self.operation(id)
+            ask = _WAIT_CAP if remaining is None else min(_WAIT_CAP, remaining)
+            op = Operation(
+                self.request(
+                    "GET", f"/v1/operations/{_q(id)}", query={"wait": f"{ask:.3f}"}, timeout=ask + self.timeout
+                )
+            )
         if check and op.failed:
             raise OperationFailedError(op)
         return op
@@ -1581,7 +1592,7 @@ class Repo:
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            ask = 30.0 if remaining is None else min(30.0, remaining)
+            ask = _WAIT_CAP if remaining is None else min(_WAIT_CAP, remaining)
             waited = Record(
                 self.client.request(
                     "POST",
@@ -2058,12 +2069,13 @@ class Reply:
     def steered(self) -> bool:
         return self.steer is not None
 
-    def wait(self, timeout: Optional[float] = None, poll: float = 0.5) -> "Reply":
-        """Block until the operation finishes; `OperationFailedError` when
-        it failed, `TimeoutError` past `timeout`. Then `text` is ready."""
+    def wait(self, timeout: Optional[float] = None) -> "Reply":
+        """Block until the operation finishes (`Client.wait`'s long poll);
+        `OperationFailedError` when it failed, `TimeoutError` past
+        `timeout`. Then `text` is ready."""
         if self.operation is None:
             raise ValueError("no operation to wait for: the message was steered into a turn without one")
-        self.operation = self.repo.client.wait(self.operation, timeout=timeout, poll=poll, check=True)
+        self.operation = self.repo.client.wait(self.operation, timeout=timeout, check=True)
         return self
 
     @property

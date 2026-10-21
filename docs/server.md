@@ -264,7 +264,7 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `POST /v1/repos/{repo}/branches/{b}/report-status` | State `b`'s own status beside the protocol's, as `by report-status --as b`; `{state, summary, link?, ttl_seconds?}`; `run` scope; `400 invalid_request` with `detail.field` for a field that breaks a rule | `Reported`: `{report, escalation?}` |
 | `POST /v1/repos/{repo}/branches/{b}/answer` | Answer one of `b`'s own descendants' messages, as `by answer --as b`; `{message_id, text}` | `Message` |
 | `GET /v1/repos/{repo}/events/stream?cursor=N` | SSE of activity across branches after feed position `N`; without a cursor, from now | `text/event-stream` |
-| `GET /v1/operations/{id}` | An operation's status and result, on any server sharing the operation store | operation |
+| `GET /v1/operations/{id}[?wait=SECONDS]` | An operation's status and result, on any server sharing the operation store. With `wait`, a long poll: the answer comes as the operation finishes, or once that many seconds pass (capped at 30s, like `POST …/wait`), with the operation as it then is; a `wait` that is not a number of seconds is `400 invalid_request` with `detail.field` `wait` | operation |
 | `GET /v1/operations?idempotency_key=K` | The operation the caller's request with key `K` created, for a client that lost the response | operation, or `404 unknown_operation` |
 | `POST /v1/repos/{repo}/branches/{b}/artifacts` | Publish the body's bytes as a new artifact of `b`, acting with the server's authority as a person, like `by artifact publish --branch`. `name`, `media_type`, repeated `label` are query parameters; refused over `--max-artifact-bytes` | `201` `ArtifactRef` |
 | `GET /v1/repos/{repo}/branches/{b}/artifacts` | Every artifact `b` may read | `{"artifacts": [ArtifactRef]}` |
@@ -359,6 +359,8 @@ Task, send, fork, reincarnate, merge, spawn, integrate and check are long operat
 ```
 
 `kind` is `task`, `send`, `fork`, `reincarnate`, `merge`, `spawn`, `integrate`, `approve_plan`, `reject_plan`, `map` or `check`. `priority` is the priority it was admitted at, left out when 0. An operation whose request named `require_labels` carries them as `requires` (sorted, once each), and, once it has waited queued longer than `unclaimable_after` and no live worker serving its repository carries them all, `waiting` says why ([worker labels](#worker-labels)). `state` moves through `queued`, `running`, then `succeeded`, `failed` or `interrupted`. A finished operation adds `finished_at_ms`, `end_cursor`, and either `result` or `error` (`{"code", "message", "detail"}`). `result` has `branches` (`[BranchInfo]`); `merged` (`{"branch", "target", "previous", "commit"}`) for a merge or integration; `descendants` (`[BranchInfo]`), every branch the operation's branches delegated to, once they finished, since a task, send or fork waits for its subtree as `by run` does; `inspection` for a spawn; and `check_report` for a check. A branch that ends `failed` or over budget is a *succeeded* operation whose branch status says so, exactly as the SDK returns `Ok(branch)`; an operation fails when the SDK call returns an error, such as an unknown harness or a refused merge.
+
+To wait for one, ask `GET /v1/operations/{id}?wait=30` and ask again while it is not finished: the server answers as the operation reaches `succeeded`, `failed` or `interrupted`, woken at once when a worker in its own process records the outcome, and within its `poll_interval` when another worker on the store ran it. The Rust client's `Client::wait` and `wait_timeout`, Python's `client.wait`, and `by --remote` wait this way rather than polling.
 
 `branches` are the names planned at acceptance. `cursor` is the feed position at acceptance and `end_cursor` the position once the operation's activity was ingested: to watch one operation, stream from `cursor` until the operation finishes and the stream reaches `end_cursor`, keeping entries for its branches. That is what `by --remote … run` does.
 
@@ -612,7 +614,7 @@ What it is not yet:
 
 - **Shared with local `by`.** A local `by` on a served repository opens its SQLite `state.db` and sees none of the server's branches; use `by --remote`. Nothing is imported from an existing `state.db` when a repository moves to the database.
 - **TLS to the database.** Connections are plain; keep the database on a trusted network or a Unix socket.
-- **Waits** poll every 100 ms, as SQLite's do across processes; nothing listens for `NOTIFY`.
+- **Waits** poll every 100 ms, as SQLite's do across processes; nothing listens for `NOTIFY`. A long poll of an operation another server's worker runs sees it finish within `poll_interval`.
 
 ### Service registry
 

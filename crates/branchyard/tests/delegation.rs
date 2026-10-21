@@ -685,6 +685,14 @@ fn tokens_are_issued_per_turn_and_forged_ones_are_refused() {
     // ...and from anywhere else, through the broker, with the same answers.
     let remote = Delegate::connect(&f.root, &token).unwrap();
     assert_eq!(remote.branch(), "root");
+    // A wait through the broker is the engine's blocking wait: settled,
+    // or refused as still running once its timeout passes.
+    let settled = remote.wait("kid", Duration::MAX).unwrap();
+    assert_ne!(settled.status, BranchStatus::Running, "{settled:?}");
+    match remote.wait("root", Duration::from_millis(200)) {
+        Err(Error::Running(branch)) => assert_eq!(branch, "root"),
+        other => panic!("{other:?}"),
+    }
     root_waits_for(&f, "kid");
     assert_eq!(
         remote.inspect("kid").unwrap(),

@@ -437,7 +437,7 @@ class Requests(ServerCase):
         self.assertIsNone(op.check_report, "nothing until the check has ended")
         ((_, _, headers, body),) = self.requests("POST", f"{REPO}/branches/b/check")
         self.assertEqual((headers["idempotency-key"], body), ("k-9", {}))
-        done = self.client.wait(op, poll=0.01, check=True)
+        done = self.client.wait(op, check=True)
         report = done.check_report
         assert report is not None
         self.assertIsInstance(report, bc.CheckReport)
@@ -479,7 +479,7 @@ class Requests(ServerCase):
             (200, self.op("op5", "failed", kind="check", error={"code": "git_error", "message": "no worktree"})),
         )
         with self.assertRaises(bc.OperationFailedError) as failed:
-            self.client.wait(self.app.check("b"), poll=0.01, check=True)
+            self.client.wait(self.app.check("b"), check=True)
         self.assertEqual(failed.exception.code, "git_error")
         self.assertIsNone(failed.exception.operation.check_report)
 
@@ -639,7 +639,7 @@ class Errors(ServerCase):
 
 
 class Waiting(ServerCase):
-    def test_wait_polls_until_done_and_checks_the_outcome(self):
+    def test_wait_long_polls_until_done_and_checks_the_outcome(self):
         self.fake.answer(
             "GET",
             "/v1/operations/op1",
@@ -650,11 +650,18 @@ class Waiting(ServerCase):
                 self.op("op1", "succeeded", end=4, result={"branches": [{"name": "b", "status": {"state": "ready"}}]}),
             ),
         )
-        op = self.client.wait("op1", poll=0.01)
+        started = time.monotonic()
+        op = self.client.wait("op1")
         self.assertTrue(op.done)
         self.assertEqual(op.result_branches[0].state, "ready")
         self.assertTrue(op.result_branches[0].settled)
-        self.assertEqual(len(self.requests("GET", "/v1/operations/op1")), 3)
+        # Each ask is a long poll the server holds, at most its 30 s cap;
+        # nothing sleeps between them.
+        asks = self.requests("GET", "/v1/operations/op1")
+        self.assertEqual(len(asks), 3)
+        waits = [float(parse_qs(urlsplit(r[1]).query)["wait"][0]) for r in asks]
+        self.assertEqual(waits, [30.0, 30.0, 30.0])
+        self.assertLess(time.monotonic() - started, 5)
         self.fake.answer(
             "GET",
             "/v1/operations/op2",
@@ -672,7 +679,10 @@ class Waiting(ServerCase):
     def test_wait_times_out(self):
         self.fake.always("GET", "/v1/operations/op1", 200, self.op("op1", "running"))
         with self.assertRaises(TimeoutError):
-            self.client.wait("op1", timeout=0.05, poll=0.01)
+            self.client.wait("op1", timeout=0.05)
+        # Each ask is for no longer than what is left of the timeout.
+        waits = [float(parse_qs(urlsplit(r[1]).query)["wait"][0]) for r in self.requests("GET", "/v1/operations/op1")]
+        self.assertTrue(waits and all(0 <= w <= 0.05 for w in waits), waits)
 
     def test_wait_for_asks_again_past_the_servers_cap_until_settled(self):
         self.fake.answer(

@@ -33,12 +33,12 @@ client = Client("http://127.0.0.1:8421", token_file=".branchyard/server/token")
 app = client.repo("app")
 
 op = app.task("Make the flaky parser test deterministic", harness="claude-code", budget_usd=2)
-op = client.wait(op, check=True)              # polls GET /v1/operations/{id}
+op = client.wait(op, check=True)              # long-polls GET /v1/operations/{id}?wait=
 branch = op.result_branches[0]
 print(branch.name, branch.state)              # "flaky-parser", "ready"
 ```
 
-`Client(url, token=..., token_file=..., ca_file=..., timeout=30)` is one server; `client.repo(name)` is one served repository, and every `Repo` method is one route of the [API reference](server.md#api-reference). Methods that start work (`task`, `send`, `fork`, `reincarnate`, `merge`, `spawn`, `integrate`, `approve_plan`, `reject_plan`) return an `Operation` and `client.wait` polls it; everything else returns at once. Results are `Record`s: dicts whose keys also read as attributes (`op.state`, `branch.status.state`), a missing key reading as `None`, so a newer server's fields never break an older client. `op.raw` is the plain dict.
+`Client(url, token=..., token_file=..., ca_file=..., timeout=30)` is one server; `client.repo(name)` is one served repository, and every `Repo` method is one route of the [API reference](server.md#api-reference). Methods that start work (`task`, `send`, `fork`, `reincarnate`, `merge`, `spawn`, `integrate`, `approve_plan`, `reject_plan`) return an `Operation` and `client.wait(op, timeout=None, check=False)` waits for it, with long polls the server answers as the operation finishes (each at most 30 s, asked again until `timeout`, then `TimeoutError`); everything else returns at once. Results are `Record`s: dicts whose keys also read as attributes (`op.state`, `branch.status.state`), a missing key reading as `None`, so a newer server's fields never break an older client. `op.raw` is the plain dict.
 
 Every `POST` that creates an operation carries an `Idempotency-Key`, generated unless you pass `key=`: keep the key and a retry after a lost response returns the original operation (`op.replayed` is true) instead of starting another; the same key with a different body is `IdempotencyKeyReusedError` ([idempotency](server.md#idempotency)). `client.operation_by_key(key)` finds the operation a key created.
 
