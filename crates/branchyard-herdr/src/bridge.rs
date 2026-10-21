@@ -127,18 +127,13 @@ pub fn run(config: &Config) -> Result<(), String> {
     let debounce = config.debounce();
     let mut due: Option<Instant> = None;
     loop {
-        // A claim whose time-to-live passed no longer marks its pane.
-        let now = branchyard_support::time::now_ms();
-        bridge.dirty.extend(bridge.branches.expire(now));
-        let expiry = bridge
-            .branches
-            .next_expiry()
-            .map(|at| Duration::from_millis(at.saturating_sub(now)));
-        let wait = match due {
-            Some(at) => at.saturating_duration_since(Instant::now()),
-            None => Duration::from_secs(3600),
-        };
-        let wait = expiry.map_or(wait, |expiry| wait.min(expiry));
+        let wait = tick(
+            &mut bridge.branches,
+            &mut bridge.dirty,
+            &mut due,
+            branchyard_support::time::now_ms(),
+            debounce,
+        );
         match rx.recv_timeout(wait) {
             Ok(Feed::Snapshot(listed)) => {
                 let names = bridge.branches.snapshot(&listed);
@@ -168,6 +163,32 @@ pub fn run(config: &Config) -> Result<(), String> {
             bridge.flush();
             due = None;
         }
+    }
+}
+
+/// Expire claims whose time-to-live has passed, and say how long to wait
+/// for the feed: until the pending flush, or the next expiry, whichever is
+/// first. An expiry schedules a flush of its own, since the feed may stay
+/// quiet and nothing else would.
+fn tick(
+    branches: &mut Branches,
+    dirty: &mut BTreeSet<String>,
+    due: &mut Option<Instant>,
+    now_ms: u64,
+    debounce: Duration,
+) -> Duration {
+    let expired = branches.expire(now_ms);
+    if !expired.is_empty() {
+        dirty.extend(expired);
+        due.get_or_insert_with(|| Instant::now() + debounce);
+    }
+    let wait = match due {
+        Some(at) => at.saturating_duration_since(Instant::now()),
+        None => Duration::from_secs(3600),
+    };
+    match branches.next_expiry() {
+        Some(at) => wait.min(Duration::from_millis(at.saturating_sub(now_ms))),
+        None => wait,
     }
 }
 
@@ -416,5 +437,39 @@ impl<'a> Bridge<'a> {
                     .call(&["tab".into(), "rename".into(), tab.clone(), label]),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use branchyard::{Activity, ReportedState};
+
+    /// An expired claim is flushed after the debounce even when the feed
+    /// says nothing more: the wait never falls back to the idle hour.
+    #[test]
+    fn an_expiry_schedules_a_flush_of_its_own() {
+        let mut branches = Branches::default();
+        let (mut dirty, mut due) = (BTreeSet::new(), None);
+        let debounce = Duration::from_millis(250);
+        branches.apply("b", 0, &Activity::Prompt("go".into()));
+        let timed = Activity::StatusReport {
+            state: ReportedState::Blocked,
+            summary: "waiting on CI".into(),
+            link: None,
+            ttl_seconds: Some(60),
+        };
+        branches.apply("b", 10_000, &timed);
+
+        // Before it expires: wait until it does, nothing to flush.
+        let wait = tick(&mut branches, &mut dirty, &mut due, 40_000, debounce);
+        assert_eq!(wait, Duration::from_secs(30));
+        assert!(dirty.is_empty() && due.is_none());
+
+        // As it expires: the branch is dirty and a flush is due.
+        let wait = tick(&mut branches, &mut dirty, &mut due, 70_000, debounce);
+        assert_eq!(dirty, BTreeSet::from(["b".to_owned()]));
+        assert!(due.is_some());
+        assert!(wait <= debounce, "{wait:?}");
     }
 }
