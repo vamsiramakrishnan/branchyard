@@ -296,6 +296,142 @@ fn result(op: Operation) -> Result<OperationResult, Failure> {
     }
 }
 
+/// `by log --follow` against a server: the branch's recorded events, then
+/// each new one from the repository's event stream, until interrupted.
+/// When the server goes away it says so once, reconnects after the last
+/// entry it read, and says when it is back.
+pub fn follow_log(remote: &Remote, branch: &str, out: &mut commands::Following<'_>) -> Outcome {
+    let (stream, history) = log_and_stream(&remote.repo, branch)?;
+    out.take(history)?;
+    let (tx, rx) = mpsc::channel();
+    let repo = remote.repo.clone();
+    let name = branch.to_owned();
+    std::thread::spawn(move || follow_branch(&repo, &name, stream, &tx));
+    loop {
+        match rx.recv_timeout(commands::FOLLOW_POLL) {
+            Ok(Followed::Event(event)) => out.take(vec![*event])?,
+            Ok(Followed::Lost(error)) => eprintln!("by: {error}; retrying"),
+            Ok(Followed::Back) => eprintln!("by: reconnected to {}", remote.client.endpoint()),
+            Ok(Followed::Refused(error)) => return Err(error.into()),
+            // The events paused: held message text is complete.
+            Err(RecvTimeoutError::Timeout) => out.take(Vec::new())?,
+            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+        }
+    }
+}
+
+/// The branch's events so far, and the repository's event stream opened
+/// where they end. Anything the branch records between reading its events
+/// and opening the stream would be missed, and anything after opening it
+/// read twice, so its events are read again once the stream is open: none
+/// new means the two meet exactly; otherwise those are kept and the stream
+/// opened again.
+fn log_and_stream(
+    repo: &Repo,
+    branch: &str,
+) -> Result<
+    (
+        branchyard_client::EventStream,
+        Vec<branchyard::RecordedEvent>,
+    ),
+    Failure,
+> {
+    let page = repo.events(branch, 0)?;
+    let mut cursor = page.cursor;
+    let mut events = page.events;
+    loop {
+        let mut stream = repo.stream(None).max_failures(0);
+        stream.open()?;
+        let more = repo.events(branch, cursor)?;
+        if more.events.is_empty() {
+            return Ok((stream, events));
+        }
+        cursor = more.cursor;
+        events.extend(more.events);
+    }
+}
+
+/// What the thread reading the stream for `by log --follow` passes on.
+enum Followed {
+    /// One of the branch's events.
+    Event(Box<branchyard::RecordedEvent>),
+    /// The server cannot be reached; retrying.
+    Lost(branchyard_client::Error),
+    /// Reconnected after [`Followed::Lost`].
+    Back,
+    /// The server refused the stream; retrying cannot help.
+    Refused(branchyard_client::Error),
+}
+
+/// Pass `branch`'s entries from `stream` to `tx`, reconnecting after the
+/// last entry read when the stream drops, until `tx`'s reader is gone.
+fn follow_branch(
+    repo: &Repo,
+    branch: &str,
+    mut stream: branchyard_client::EventStream,
+    tx: &mpsc::Sender<Followed>,
+) {
+    let mut cursor = stream.cursor();
+    loop {
+        for item in stream.by_ref() {
+            match item {
+                Ok(entry) => {
+                    cursor = Some(entry.seq);
+                    if entry.branch != branch {
+                        continue;
+                    }
+                    let event = branchyard::RecordedEvent {
+                        at_ms: entry.at_ms,
+                        activity: entry.activity,
+                    };
+                    if tx.send(Followed::Event(Box::new(event))).is_err() {
+                        return;
+                    }
+                }
+                // Dropped: reconnect below.
+                Err(branchyard_client::Error::Transport { .. }) => break,
+                Err(error) => {
+                    branchyard_support::best_effort(
+                        "report the refused stream",
+                        tx.send(Followed::Refused(error)),
+                    );
+                    return;
+                }
+            }
+        }
+        let mut delays = branchyard_client::reconnect_backoff();
+        let mut lost = false;
+        stream = loop {
+            let mut next = repo.stream(cursor).max_failures(0);
+            match next.open() {
+                Ok(_) => {
+                    if lost && tx.send(Followed::Back).is_err() {
+                        return;
+                    }
+                    break next;
+                }
+                // A restarting server: keep following and try again.
+                Err(error @ branchyard_client::Error::Transport { .. }) => {
+                    if !lost {
+                        lost = true;
+                        if tx.send(Followed::Lost(error)).is_err() {
+                            return;
+                        }
+                    }
+                    std::thread::sleep(delays.next().unwrap_or(Duration::from_secs(5)));
+                }
+                Err(error) => {
+                    branchyard_support::best_effort(
+                        "report the refused stream",
+                        tx.send(Followed::Refused(error)),
+                    );
+                    return;
+                }
+            }
+        };
+    }
+}
+
 /// Render the operation's activity as it streams, until the operation has
 /// finished and every entry up to its end cursor has been shown.
 fn follow(remote: &Remote, op: &Operation, console: &Console) -> Result<Operation, Failure> {
@@ -775,6 +911,8 @@ pub fn send(
 ) -> Outcome {
     let (request, notice) = send_request(task, prompt)?;
     let op = remote.repo.send(branch, &request, &new_key())?;
+    // A `by review --detach` launcher waits for the server to accept it.
+    crate::detach::accepted(branch);
     announce(remote, notice, None);
     let delegating = task.delegate.is_some() || !remote.repo.branch(branch)?.children.is_empty();
     finish_one(env, remote, &op, delegating)
@@ -794,6 +932,7 @@ pub fn send_json(
         .repo
         .send(branch, &request, &new_key())
         .map_err(sdk_error)?;
+    crate::detach::accepted(branch);
     announce(remote, notice, None);
     let info = follow_result(env, remote, &op)?
         .branches

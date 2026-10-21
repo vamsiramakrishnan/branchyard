@@ -950,6 +950,7 @@ impl Repo {
             backoff: None,
             max_failures: 8,
             done: false,
+            head: None,
         }
     }
 }
@@ -966,12 +967,21 @@ pub struct EventStream {
     backoff: Option<ExponentialBackoff>,
     max_failures: u32,
     done: bool,
+    /// The feed's last position when [`EventStream::open`] connected.
+    head: Option<u64>,
 }
 
 impl EventStream {
     /// The last sequence number delivered, or the server's starting point.
     pub fn cursor(&self) -> Option<u64> {
         self.cursor
+    }
+
+    /// The feed's last position when [`EventStream::open`] connected: the
+    /// entries up to it are history, those after it new. `None` before
+    /// `open`, or from a server that does not say.
+    pub fn head(&self) -> Option<u64> {
+        self.head
     }
 
     /// Consecutive reconnect failures tolerated before giving up.
@@ -999,6 +1009,9 @@ impl EventStream {
                     .and_then(|id| id.parse().ok())
                     .ok_or_else(|| Error::Protocol("open event without a cursor".into()))?;
                 self.cursor = Some(id);
+                self.head = serde_json::from_str::<serde_json::Value>(&event.data)
+                    .ok()
+                    .and_then(|data| data.get("head")?.as_u64());
                 Ok(id)
             }
             Ok(Some(event)) => Err(Error::Protocol(format!(

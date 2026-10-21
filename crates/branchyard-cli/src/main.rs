@@ -69,6 +69,9 @@ use commands::{Env, Failure, Target};
 
 fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().collect();
+    // A background command started by `--detach` takes its report pipe
+    // before it starts anything that could inherit it.
+    detach::become_child();
     args::unset_blank_env();
     if let Some(call) = args::server_call(&argv[1..]) {
         return serve(&argv[..=call.prefix], call);
@@ -112,7 +115,9 @@ fn main() -> ExitCode {
     }
     let mut env_now = Env::detect();
     env_now.notify = notify::Settings::resolve(globals.no_notify, &globals.notify, &env);
-    match run(&env_now, &globals, command) {
+    let outcome = run(&env_now, &globals, command);
+    detach::finish(&outcome);
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         // A closed pipe, as in `by ls | head`, is the reader's choice.
         Err(Failure::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,

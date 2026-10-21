@@ -427,40 +427,20 @@ fn detach(target: &Target, branch: &str, text: &str, task: &TaskArgs, draft: &Pa
     }
     command.args(["--", branch, text]);
     let log = draft.with_extension(format!("{}.log", branchyard_support::time::now_ms()));
-    let before = last_turn(target, branch)?;
-    let mut child = crate::detach::spawn(&mut command, &log)?;
+    let (mut child, handshake) = crate::detach::spawn_reporting(&mut command, &log)?;
     eprintln!(
         "by: sending in the background; its output goes to {}",
         log.display()
     );
-    // Return once the send started its turn, or the server queued it, so
-    // a `by wait` after this waits for that turn, not the one before.
-    let deadline = std::time::Instant::now() + SEND_STARTS;
-    while child.try_wait()?.is_none() && std::time::Instant::now() < deadline {
-        let queued = match target {
-            Target::Remote(remote) => !remote.repo.operations(Some(branch))?.is_empty(),
-            Target::Local => false,
-        };
-        if queued || last_turn(target, branch)? != before {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    // Return once the send started its turn, or the server accepted it,
+    // so a `by wait` after this waits for that turn, not the one before.
+    // The send reports that on a pipe, as a `--detach` turn does.
+    handshake.wait(&mut child, SEND_STARTS)?;
     Ok(())
 }
 
 /// How long `--detach` waits for the background send to start its turn.
 const SEND_STARTS: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// `branch`'s status and turn count: a send changes one when its turn
-/// starts, the status to running and the count when the turn ends.
-fn last_turn(target: &Target, branch: &str) -> Result<(branchyard::BranchStatus, u32), Failure> {
-    let info = match target {
-        Target::Local => commands::open()?.branch(branch)?.info().clone(),
-        Target::Remote(remote) => remote.repo.branch(branch)?,
-    };
-    Ok((info.status, info.turns))
-}
 
 #[cfg(test)]
 mod tests {

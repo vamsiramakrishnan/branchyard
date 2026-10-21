@@ -69,6 +69,10 @@ branchyard-sandbox = { path = "../branchyard-sandbox" }
 # `by sync`: tasks replicated to durable storage (docs/sync.md).
 branchyard-sync = { path = "../branchyard-sync" }
 
+# `--detach`: the inherited report pipe's descriptor flags.
+[target."cfg(unix)".dependencies]
+rustix = { workspace = true }
+
 [dev-dependencies]
 branchyard-testkit = { path = "../branchyard-testkit" }
 branchyard-bridge = { path = "../branchyard-bridge" }
