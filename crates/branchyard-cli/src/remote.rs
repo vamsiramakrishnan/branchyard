@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 use std::io;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::Duration;
 

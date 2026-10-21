@@ -6241,7 +6241,8 @@
           "type": "object",
           "properties": {
             "source": {
-              "$ref": "#/$defs/FeedbackSource"
+              "$ref": "#/$defs/FeedbackSource",
+              "description": "Where it came from: a pull request or a review."
             },
             "reference": {
               "type": [
@@ -6254,7 +6255,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/FeedbackItem"
-              }
+              },
+              "description": "The comments and checks, in the order they were sent."
             },
             "prompt": {
               "type": [
@@ -6290,6 +6292,7 @@
           "properties": {
             "kind": {
               "$ref": "#/$defs/FeedbackKind",
+              "description": "A comment to address, or a failed check.",
               "default": "comment"
             },
             "path": {
@@ -7113,7 +7116,8 @@
           "type": "object",
           "properties": {
             "source": {
-              "$ref": "#/$defs/FeedbackSource"
+              "$ref": "#/$defs/FeedbackSource",
+              "description": "Where it came from: a pull request or a review."
             },
             "reference": {
               "type": [
@@ -7126,7 +7130,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/FeedbackItem"
-              }
+              },
+              "description": "The comments and checks, in the order they were sent."
             },
             "prompt": {
               "type": [
@@ -7162,6 +7167,7 @@
           "properties": {
             "kind": {
               "$ref": "#/$defs/FeedbackKind",
+              "description": "A comment to address, or a failed check.",
               "default": "comment"
             },
             "path": {
@@ -12373,7 +12379,8 @@
           "type": "object",
           "properties": {
             "source": {
-              "$ref": "#/$defs/FeedbackSource"
+              "$ref": "#/$defs/FeedbackSource",
+              "description": "Where it came from: a pull request or a review."
             },
             "reference": {
               "type": [
@@ -12386,7 +12393,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/FeedbackItem"
-              }
+              },
+              "description": "The comments and checks, in the order they were sent."
             },
             "prompt": {
               "type": [
@@ -12422,6 +12430,7 @@
           "properties": {
             "kind": {
               "$ref": "#/$defs/FeedbackKind",
+              "description": "A comment to address, or a failed check.",
               "default": "comment"
             },
             "path": {
@@ -24386,7 +24395,8 @@
           "type": "object",
           "properties": {
             "source": {
-              "$ref": "#/$defs/FeedbackSource"
+              "$ref": "#/$defs/FeedbackSource",
+              "description": "Where it came from: a pull request or a review."
             },
             "reference": {
               "type": [
@@ -24399,7 +24409,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/FeedbackItem"
-              }
+              },
+              "description": "The comments and checks, in the order they were sent."
             },
             "prompt": {
               "type": [
@@ -24435,6 +24446,7 @@
           "properties": {
             "kind": {
               "$ref": "#/$defs/FeedbackKind",
+              "description": "A comment to address, or a failed check.",
               "default": "comment"
             },
             "path": {
@@ -29635,7 +29647,8 @@
           "type": "object",
           "properties": {
             "source": {
-              "$ref": "#/$defs/FeedbackSource"
+              "$ref": "#/$defs/FeedbackSource",
+              "description": "Where it came from: a pull request or a review."
             },
             "reference": {
               "type": [
@@ -29648,7 +29661,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/FeedbackItem"
-              }
+              },
+              "description": "The comments and checks, in the order they were sent."
             },
             "prompt": {
               "type": [
@@ -29684,6 +29698,7 @@
           "properties": {
             "kind": {
               "$ref": "#/$defs/FeedbackKind",
+              "description": "A comment to address, or a failed check.",
               "default": "comment"
             },
             "path": {
@@ -39192,7 +39207,8 @@
           "type": "object",
           "properties": {
             "source": {
-              "$ref": "#/$defs/FeedbackSource"
+              "$ref": "#/$defs/FeedbackSource",
+              "description": "Where it came from: a pull request or a review."
             },
             "reference": {
               "type": [
@@ -39205,7 +39221,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/FeedbackItem"
-              }
+              },
+              "description": "The comments and checks, in the order they were sent."
             },
             "prompt": {
               "type": [
@@ -39241,6 +39258,7 @@
           "properties": {
             "kind": {
               "$ref": "#/$defs/FeedbackKind",
+              "description": "A comment to address, or a failed check.",
               "default": "comment"
             },
             "path": {

@@ -40,6 +40,7 @@ pub enum FeedbackKind {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeedbackItem {
+    /// A comment to address, or a failed check.
     #[serde(default)]
     pub kind: FeedbackKind,
     /// The file it is about, relative to the repository's root.
@@ -62,10 +63,12 @@ pub struct FeedbackItem {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Feedback {
+    /// Where it came from: a pull request or a review.
     pub source: FeedbackSource,
     /// What it is about, such as the pull request's URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
+    /// The comments and checks, in the order they were sent.
     pub items: Vec<FeedbackItem>,
     /// The BLAKE3 digest (hex) of the prompt's text, trimmed, that carried
     /// it to the harness, as a turn's prompt or a steer. Set when recorded
