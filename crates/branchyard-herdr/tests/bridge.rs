@@ -605,6 +605,16 @@ fn branches_get_one_pane_each_and_their_states_follow_the_feed() {
         || fake.opened().iter().filter(|(b, _)| b == "after").count() == 2,
         || format!("{:?}\n{}", fake.calls(), log()),
     );
+    // The fake records an open as it is asked, before the bridge has the
+    // answer; a report on the new pane means the bridge has it, and has
+    // saved it, before the restart below.
+    let reopened = fake.opened().last().map(|(_, pane)| pane.clone()).unwrap();
+    wait::until_with_context(
+        "a report on the second pane",
+        long,
+        || !fake.reports(&reopened).is_empty(),
+        || format!("{:?}\n{}", fake.calls(), log()),
+    );
 
     // Reports change something each time: debounced, and never repeated.
     for (branch, pane) in fake.opened() {
