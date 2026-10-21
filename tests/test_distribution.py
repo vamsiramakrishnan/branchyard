@@ -100,7 +100,6 @@ class ArchiveTests(unittest.TestCase):
         finally:
             package.MARKETPLACE.write_text(original)
 
-
     def test_the_sdk_version_must_match_the_workspace_version(self):
         with mock.patch.object(package, "sdk_version", return_value="9.9.9"), self.assertRaises(ValueError) as raised:
             package.build(self.root / "broken")
