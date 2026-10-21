@@ -23,3 +23,7 @@ target
 # Python validation tools
 __pycache__/
 *.pyc
+
+# What `pip install ./sdk/python` leaves in the source tree
+sdk/python/build/
+sdk/python/*.egg-info/

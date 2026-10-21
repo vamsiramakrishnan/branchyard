@@ -11,10 +11,13 @@ import re
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
+import tomllib
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -83,6 +86,78 @@ class ArchiveTests(unittest.TestCase):
                 package.build(self.root / "broken")
         finally:
             (package.PLUGIN / ".codex-plugin/plugin.json").write_text(original)
+
+    def test_the_sdk_version_must_match_the_workspace_version(self):
+        with mock.patch.object(package, "sdk_version", return_value="9.9.9"), self.assertRaises(ValueError) as raised:
+            package.build(self.root / "broken")
+        self.assertIn("pyproject.toml", str(raised.exception))
+
+    def test_build_leftovers_are_not_packaged(self):
+        tree = self.root / "tree"
+        for name in ["mod.py", "build/lib/mod.py", "mod.egg-info/PKG-INFO", "__pycache__/mod.cpython-312.pyc"]:
+            (tree / name).parent.mkdir(parents=True, exist_ok=True)
+            (tree / name).write_text("x")
+        self.assertEqual(list(package.inputs(tree)), ["mod.py"])
+
+
+class SdkProjectTests(unittest.TestCase):
+    """`sdk/python/pyproject.toml`: what `pip install ./sdk/python` builds."""
+
+    def setUp(self):
+        self.project = tomllib.loads((package.SDK / "pyproject.toml").read_text())
+
+    def test_it_names_every_module_at_the_workspace_version_with_no_dependencies(self):
+        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]
+        project = self.project["project"]
+        self.assertEqual(project["name"], "branchyard")
+        self.assertEqual(project["version"], workspace["version"])
+        self.assertEqual(project["license"], {"text": workspace["license"]})
+        self.assertEqual(project["dependencies"], [])
+        # ruff.toml holds the modules to 3.9's syntax; the floor says the same.
+        self.assertEqual(project["requires-python"], ">=3.9")
+        self.assertEqual(self.project["build-system"]["build-backend"], "setuptools.build_meta")
+        modules = sorted(path.stem for path in package.SDK.glob("*.py"))
+        self.assertEqual(sorted(self.project["tool"]["setuptools"]["py-modules"]), modules)
+
+    def test_setuptools_builds_it_from_the_extracted_archive(self):
+        if importlib.util.find_spec("setuptools") is None:
+            self.skipTest("setuptools is not installed; pip install ./sdk/python needs it, or network to fetch it")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            *_archives, sdk = package.build(root / "dist")
+            with zipfile.ZipFile(sdk) as archive:
+                archive.extractall(root / "extracted")
+            # The source distribution, as pip builds it before the wheel:
+            # setuptools reads the project and collects both modules. The
+            # wheel step is left out: some distributions' patched setuptools
+            # cannot build one on every Python they ship.
+            built = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys, setuptools.build_meta as b; print(b.build_sdist(sys.argv[1]))",
+                    str(root / "sdist"),
+                ],
+                cwd=root / "extracted/branchyard-sdk",
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(built.returncode, 0, built.stderr[-2000:])
+            version = self.project["project"]["version"]
+            name = built.stdout.strip().splitlines()[-1]
+            self.assertEqual(name, f"branchyard-{version}.tar.gz")
+            with tarfile.open(root / "sdist" / name) as sdist:
+                sdist.extractall(root / "unpacked", filter="data")
+            unpacked = root / "unpacked" / f"branchyard-{version}"
+            for module in ["branchyard.py", "branchyard_client.py"]:
+                self.assertEqual((unpacked / module).read_bytes(), (package.SDK / module).read_bytes())
+            info = (unpacked / "PKG-INFO").read_text()
+            self.assertIn(f"Version: {version}", info)
+            self.assertIn("Requires-Python: >=3.9", info)
+            # Both modules import from what was built, nothing from the checkout.
+            code = f"import sys; sys.path.insert(0, {str(unpacked)!r}); import branchyard, branchyard_client"
+            imported = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True)
+            self.assertEqual(imported.returncode, 0, imported.stderr)
 
 
 class InstallerTests(unittest.TestCase):

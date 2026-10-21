@@ -45,9 +45,9 @@ Produces four ZIP archives in `dist/`, each named `branchyard-<kind>-<version>.z
 | `branchyard-plugin-<version>.zip` | `plugins/branchyard/`, including both skills, the `/branchyard:setup` command, both manifests, `LICENSE`, and a `MANIFEST.sha256.json` of every file's digest |
 | `branchyard-skill-<version>.zip` | The standalone delegate skill alone, `plugins/branchyard/skills/delegate/`, for a host with no plugin loader |
 | `branchyard-setup-skill-<version>.zip` | The standalone setup skill alone, `plugins/branchyard/skills/setup/` |
-| `branchyard-sdk-<version>.zip` | `sdk/python/`: the Python modules, `branchyard.py` wrapping `by --json` for code inside a harness and `branchyard_client.py` speaking to `by serve` for a service outside ([SDKs](sdk.md)) |
+| `branchyard-sdk-<version>.zip` | `sdk/python/`: the Python modules, `branchyard.py` wrapping `by --json` for code inside a harness and `branchyard_client.py` speaking to `by serve` for a service outside, and `pyproject.toml`, so `pip install ./branchyard-sdk` installs both from the extracted archive ([SDKs](sdk.md#install)) |
 
-Building refuses to proceed if either plugin manifest's `name` or `version` does not match the workspace's own `Cargo.toml` version, so a stale manifest cannot ship silently.
+Building refuses to proceed if either plugin manifest's `name` or `version`, or `sdk/python/pyproject.toml`'s `version`, does not match the workspace's own `Cargo.toml` version, so a stale manifest cannot ship silently. Build leftovers in a source root (`__pycache__`, `*.pyc`, and the `build/` and `*.egg-info` that `pip install ./sdk/python` writes there) are never packaged.
 
 **Reproducible.** Every archive is deterministic: inputs are read in sorted path order, every entry gets a fixed timestamp (`1980-01-01T00:00:00`, ZIP's minimum) and mode (`0644`), and compression is deflate at a fixed level. Two builds from the same source tree are byte-for-byte identical; `tests/test_distribution.py` checks this, along with every manifest entry's digest.
 
@@ -55,6 +55,7 @@ Building refuses to proceed if either plugin manifest's `name` or `version` does
 
 - Runs the shipped `install_skill.py` from the extracted plugin, checking the preview/apply/no-op/refuse/`--force` behavior above and that the installed skill's bytes match the canonical source.
 - Imports the extracted SDK module and calls it against a stub `by`, checking it runs standalone (no `sys.path` trick back into the checkout) and its bytes match the canonical source.
+- Builds the extracted SDK's source distribution with setuptools, as `pip install` does first, and imports both modules from it; checks `pyproject.toml` names every module at the workspace version with no dependencies. The build is skipped where setuptools is not installed.
 - Compares the plugin archive's bundled skills against the standalone skill archives: each holds the same canonical bytes, `plugins/branchyard/skills/<name>/` inside one and the top level of the other; and checks the plugin ships `commands/setup.md`.
 - Installs the setup skill with `--skill setup`.
 

@@ -35,15 +35,36 @@ ARCHIVES = [
 ]
 
 
+def _generated(relative: Path) -> bool:
+    """Whether `relative` is a build's leftover rather than a source: bytecode,
+    or what `pip install ./sdk/python` writes into the tree it builds from."""
+    parts = relative.parts
+    return (
+        "__pycache__" in parts
+        or relative.suffix == ".pyc"
+        or parts[0] == "build"
+        or any(part.endswith(".egg-info") for part in parts)
+    )
+
+
 def inputs(root: Path) -> dict:
-    """Every regular file under `root`, by its path relative to it, sorted."""
+    """Every regular file under `root`, by its path relative to it, sorted,
+    less build leftovers."""
     result = {}
     for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if _generated(relative):
+            continue
         if path.is_symlink():
             raise ValueError(f"package inputs must not be symlinks: {path}")
-        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc":
-            result[path.relative_to(root).as_posix()] = path.read_bytes()
+        if path.is_file():
+            result[relative.as_posix()] = path.read_bytes()
     return result
+
+
+def sdk_version() -> str:
+    """`sdk/python/pyproject.toml`'s `project.version`."""
+    return tomllib.loads((SDK / "pyproject.toml").read_text())["project"]["version"]
 
 
 def archive(path: Path, files: dict, root_name: str) -> None:
@@ -71,6 +92,8 @@ def build(destination: Path) -> list[Path]:
             raise ValueError(
                 f"{host}/plugin.json's name and version must be 'branchyard' and {version!r}, the workspace version"
             )
+    if sdk_version() != version:
+        raise ValueError(f"sdk/python/pyproject.toml's version must be {version!r}, the workspace version")
     destination.mkdir(parents=True, exist_ok=True)
     license_bytes = (ROOT / "LICENSE").read_bytes()
     paths = []

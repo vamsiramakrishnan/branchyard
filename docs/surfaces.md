@@ -768,6 +768,10 @@ A third-party surface (a Slack or Discord bot, a web app, a scheduler) drives `b
 | `Inspection::grants` (`by inspect --json`, `by inspect`'s `connectors` line, the HTTP inspection, Python `Inspection.grants`) | none: what a child was given had to be inferred from the narrowing rules | the branch's grant as stored, what its turns' tokens carry and the most a child of its can be given; left out when it has none |
 | `sdk/python/branchyard_client.py`: `Client`, `Repo`, `Operation`, `EventStream`, `Grant`, `Surface`, `Conversation`, `Reply`, errors by code | the Rust `branchyard-client` crate and raw HTTP | a standard-library Python client over the whole API: idempotent operations, typed errors, the event stream with resumption, one branch per conversation with `queue`, `steer` and `skip` while busy, a reply's text by the operation's cursors, grants given and inspected |
 | `ruff.toml`, the `python` CI job | `tools/` and `tests/` | the client module too, at a Python 3.9 target (`per-file-target-version`); `tests/test_sdk_client.py` in the controls job |
+| `sdk/python/pyproject.toml` | loose modules, copied or put on `sys.path` | `pip install ./sdk/python` (or from the extracted SDK archive) installs `branchyard` and `branchyard_client`, no dependencies, at the workspace version, which `tools/package.py` enforces ([install](sdk.md#install)) |
+| `Repo.rewind(branch, to)` → `Rewound`, `Repo.fork(..., at=N)`, `with repo.stream() as stream` | none; raw `client.request` | the client's `rewind` and `ForkRequest::at`, with `unknown_checkpoint` a `NotFoundError` and `checkpoint_unavailable` a `ConflictError`; the stream closes when the block ends |
+| `branchyard.wait(branch, timeout)` (the in-harness module) | took `poll`, ignored since the wait became `by wait` | no `poll`: a call that passes it is a `TypeError` |
+| Which routes the Python client lacks | unchecked | `RouteParity` in `tests/test_sdk_client.py`: every server route (`docs/facts.json`) is reached by a method, checked against a recorder, or excused with its reason ([SDKs](sdk.md#the-rest-of-the-api)) |
 
 ## Added with the borrowed designs
 
