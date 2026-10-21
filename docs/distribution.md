@@ -1,10 +1,19 @@
 # Distribution
 
-Two canonical skills: [`plugins/branchyard/skills/setup`](../plugins/branchyard/skills/setup/SKILL.md) teaches a harness to set Branchyard up by interviewing the user through `by init --json` ([setup](setup.md)), and [`plugins/branchyard/skills/delegate`](../plugins/branchyard/skills/delegate/SKILL.md) teaches it to use `by`'s delegation commands (`docs/delegation.md`). The Claude plugin also has a `/branchyard:setup` command ([`commands/setup.md`](../plugins/branchyard/commands/setup.md)) that starts the setup skill. Two plugin manifests, [`.claude-plugin/plugin.json`](../plugins/branchyard/.claude-plugin/plugin.json) and [`.codex-plugin/plugin.json`](../plugins/branchyard/.codex-plugin/plugin.json), point at the same `./skills/` directory, so Claude Code and Codex load an identical skill; a host with neither plugin loader installs an exact standalone copy with the shipped installer. The skills call the `by` CLI by name; install it from a [prebuilt release](#prebuilt-binaries) or with `cargo install --locked --path crates/branchyard-cli`.
+Two canonical skills: [`plugins/branchyard/skills/setup`](../plugins/branchyard/skills/setup/SKILL.md) teaches a harness to set Branchyard up by interviewing the user through `by init --json` ([setup](setup.md)), and [`plugins/branchyard/skills/delegate`](../plugins/branchyard/skills/delegate/SKILL.md) teaches it to use `by`'s delegation commands (`docs/delegation.md`). The Claude plugin also has three slash commands, `/branchyard:setup` ([`commands/setup.md`](../plugins/branchyard/commands/setup.md)), which starts the setup skill, `/branchyard:status` and `/branchyard:wait`, and two hooks ([`hooks/hooks.json`](../plugins/branchyard/hooks/hooks.json)) that tell a session when its branches finish ([harness integration](harness-integration.md#claude-code)). Two plugin manifests, [`.claude-plugin/plugin.json`](../plugins/branchyard/.claude-plugin/plugin.json) and [`.codex-plugin/plugin.json`](../plugins/branchyard/.codex-plugin/plugin.json), point at the same `./skills/` directory, so Claude Code and Codex load an identical skill; a host with neither plugin loader installs an exact standalone copy with the shipped installer. The skills call the `by` CLI by name; install it from a [prebuilt release](#prebuilt-binaries) or with `cargo install --locked --path crates/branchyard-cli`.
 
 ## Install for Claude Code
 
-Point Claude Code's plugin loader at the checkout or an extracted archive:
+The repository is a Claude Code plugin marketplace: [`.claude-plugin/marketplace.json`](../.claude-plugin/marketplace.json) at its root lists the one plugin, `branchyard`, at `./plugins/branchyard`. In Claude Code:
+
+```text
+/plugin marketplace add vamsiramakrishnan/branchyard
+/plugin install branchyard@branchyard
+```
+
+That gives the two skills, the `/branchyard:setup`, `/branchyard:status` and `/branchyard:wait` commands, and the `SessionStart` and `UserPromptSubmit` hooks, which run `by hook` when `by` is on `PATH` and do nothing otherwise. The status line is not part of a plugin; to show one, add `"statusLine": {"type": "command", "command": "by statusline"}` to your Claude Code settings yourself (nothing edits them for you).
+
+Or point Claude Code's plugin loader at a checkout or an extracted archive for one session:
 
 ```sh
 claude --plugin-dir plugins/branchyard
@@ -42,12 +51,12 @@ Produces four ZIP archives in `dist/`, each named `branchyard-<kind>-<version>.z
 
 | Archive | Contents |
 |---|---|
-| `branchyard-plugin-<version>.zip` | `plugins/branchyard/`, including both skills, the `/branchyard:setup` command, both manifests, `LICENSE`, and a `MANIFEST.sha256.json` of every file's digest |
+| `branchyard-plugin-<version>.zip` | `plugins/branchyard/`, including both skills, the three slash commands, the hooks, both manifests, `LICENSE`, and a `MANIFEST.sha256.json` of every file's digest |
 | `branchyard-skill-<version>.zip` | The standalone delegate skill alone, `plugins/branchyard/skills/delegate/`, for a host with no plugin loader |
 | `branchyard-setup-skill-<version>.zip` | The standalone setup skill alone, `plugins/branchyard/skills/setup/` |
 | `branchyard-sdk-<version>.zip` | `sdk/python/`: the Python modules, `branchyard.py` wrapping `by --json` for code inside a harness and `branchyard_client.py` speaking to `by serve` for a service outside, and `pyproject.toml`, so `pip install ./branchyard-sdk` installs both from the extracted archive ([SDKs](sdk.md#install)) |
 
-Building refuses to proceed if either plugin manifest's `name` or `version`, or `sdk/python/pyproject.toml`'s `version`, does not match the workspace's own `Cargo.toml` version, so a stale manifest cannot ship silently. Build leftovers in a source root (`__pycache__`, `*.pyc`, and the `build/` and `*.egg-info` that `pip install ./sdk/python` writes there) are never packaged.
+Building refuses to proceed if either plugin manifest's `name` or `version`, or `sdk/python/pyproject.toml`'s `version`, does not match the workspace's own `Cargo.toml` version, or if `.claude-plugin/marketplace.json` does not list the plugin once, at `./plugins/branchyard`, at that version, so a stale manifest cannot ship silently. Build leftovers in a source root (`__pycache__`, `*.pyc`, and the `build/` and `*.egg-info` that `pip install ./sdk/python` writes there) are never packaged.
 
 **Reproducible.** Every archive is deterministic: inputs are read in sorted path order, every entry gets a fixed timestamp (`1980-01-01T00:00:00`, ZIP's minimum) and mode (`0644`), and compression is deflate at a fixed level. Two builds from the same source tree are byte-for-byte identical; `tests/test_distribution.py` checks this, along with every manifest entry's digest.
 
@@ -56,7 +65,8 @@ Building refuses to proceed if either plugin manifest's `name` or `version`, or 
 - Runs the shipped `install_skill.py` from the extracted plugin, checking the preview/apply/no-op/refuse/`--force` behavior above and that the installed skill's bytes match the canonical source.
 - Imports the extracted SDK module and calls it against a stub `by`, checking it runs standalone (no `sys.path` trick back into the checkout) and its bytes match the canonical source.
 - Builds the extracted SDK's source distribution with setuptools, as `pip install` does first, and imports both modules from it; checks `pyproject.toml` names every module at the workspace version with no dependencies. The build is skipped where setuptools is not installed.
-- Compares the plugin archive's bundled skills against the standalone skill archives: each holds the same canonical bytes, `plugins/branchyard/skills/<name>/` inside one and the top level of the other; and checks the plugin ships `commands/setup.md`.
+- Compares the plugin archive's bundled skills against the standalone skill archives: each holds the same canonical bytes, `plugins/branchyard/skills/<name>/` inside one and the top level of the other; and checks the plugin ships its three commands and `hooks/hooks.json`.
+- Checks the marketplace lists the plugin directory, every command has a `description`, the manifest names no hooks file, and each hook runs `by hook` only when `by` is installed (run with an empty `PATH`, it prints nothing and exits 0).
 - Installs the setup skill with `--skill setup`.
 
 Run it directly, or as part of `.github/workflows/check.yml`:
@@ -97,4 +107,4 @@ POSIX `sh`. It picks the archive for this machine (`--target` overrides), downlo
 
 ### Verified here
 
-On 1 October 2026, on x86_64 Linux: `cargo build --release -p branchyard-cli --locked --offline` built `by` for this host (glibc, not musl) in 5 minutes 40 seconds: 45,930,280 bytes, 36,830,896 stripped (the workflow strips), and `by --version` printed `by 0.0.1`; the same archive layout installed with `install.sh` from a `file://` directory ran. A musl build (`--target x86_64-unknown-linux-musl --features postgres`, the target added with rustup) compiled every Rust crate and `ring`, then failed only to link SQLite's C, which, with no musl C compiler here (`CC=gcc`, glibc headers), referenced glibc's `__memcpy_chk` and `stat64`: the reason the workflow installs `musl-tools` and sets `CC_<target>=musl-gcc`; `tests/test_distribution.py` runs `install.sh` against a `file://` release directory in a temporary prefix (installed, modes 0755, licenses copied, a reinstall replacing, a tampered `SHA256SUMS` installing nothing, plain `http` refused, `--dry-run`), checks `sh -n`, fills the Homebrew template, and checks the workflow's trigger (only a `v*` tag push), its commit-pinned actions, targets, checksums and attestations, parsing it as YAML where PyYAML is installed. **Not verified:** the workflow itself (it never ran), a complete musl build (no musl-gcc here) and macOS builds (no macOS), the attestations, and the formula under `brew`.
+On 1 October 2026, on x86_64 Linux: `cargo build --release -p branchyard-cli --locked --offline` built `by` for this host (glibc, not musl) in 5 minutes 40 seconds: 45,930,280 bytes, 36,830,896 stripped (the workflow strips), and `by --version` printed `by 0.0.1`; the same archive layout installed with `install.sh` from a `file://` directory ran. A musl build (`--target x86_64-unknown-linux-musl --features postgres`, the target added with rustup) compiled every Rust crate and `ring`, then failed only to link SQLite's C, which, with no musl C compiler here (`CC=gcc`, glibc headers), referenced glibc's `__memcpy_chk` and `stat64`: the reason the workflow installs `musl-tools` and sets `CC_<target>=musl-gcc`; `tests/test_distribution.py` runs `install.sh` against a `file://` release directory in a temporary prefix (installed, modes 0755, licenses copied, a reinstall replacing, a tampered `SHA256SUMS` installing nothing, plain `http` refused, `--dry-run`), checks `sh -n`, fills the Homebrew template, and checks the workflow's trigger (only a `v*` tag push), its commit-pinned actions, targets, checksums and attestations, parsing it as YAML where PyYAML is installed. **Not verified:** `/plugin marketplace add` and `/plugin install` against a live Claude Code (no Claude Code here; the marketplace and hooks files follow its documented shapes and are checked as JSON), the workflow itself (it never ran), a complete musl build (no musl-gcc here) and macOS builds (no macOS), the attestations, and the formula under `brew`.

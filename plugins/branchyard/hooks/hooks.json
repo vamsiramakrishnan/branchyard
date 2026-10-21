@@ -1,0 +1,27 @@
+{
+  "description": "Tell this session what changed in the repository's Branchyard branches: a branch that finished, failed, is blocked or asks, or this branch's unread messages. Silent without by on PATH or outside a repository Branchyard uses.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v by >/dev/null 2>&1 && by hook session-start || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v by >/dev/null 2>&1 && by hook user-prompt-submit || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

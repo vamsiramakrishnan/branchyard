@@ -21,6 +21,7 @@ PLUGIN = ROOT / "plugins" / "branchyard"
 SKILL = PLUGIN / "skills" / "delegate"
 SETUP_SKILL = PLUGIN / "skills" / "setup"
 SDK = ROOT / "sdk" / "python"
+MARKETPLACE = ROOT / ".claude-plugin" / "marketplace.json"
 
 # A fixed timestamp for every archive entry (ZIP's minimum representable
 # date-time), so archives from different builds never differ only by mtime.
@@ -82,6 +83,25 @@ def archive(path: Path, files: dict, root_name: str) -> None:
             output.writestr(info, data)
 
 
+def check_marketplace(version: str) -> None:
+    """`.claude-plugin/marketplace.json` at the repository root, which
+    `/plugin marketplace add` reads from a clone: it must list this plugin
+    by name, at its directory, at the workspace version."""
+    marketplace = json.loads(MARKETPLACE.read_text())
+    entries = [p for p in marketplace.get("plugins", []) if p.get("name") == "branchyard"]
+    if (
+        len(entries) != 1
+        or not marketplace.get("owner", {}).get("name")
+        or entries[0].get("source") != "./" + PLUGIN.relative_to(ROOT).as_posix()
+        or entries[0].get("version") != version
+        or marketplace.get("metadata", {}).get("version") != version
+    ):
+        raise ValueError(
+            f"{MARKETPLACE.relative_to(ROOT)} must name an owner and list the branchyard plugin once, "
+            f"at ./plugins/branchyard, with version {version!r}, the workspace version"
+        )
+
+
 def build(destination: Path) -> list[Path]:
     """Build every archive into `destination`; returns their paths, in the
     order of `ARCHIVES`."""
@@ -94,6 +114,7 @@ def build(destination: Path) -> list[Path]:
             )
     if sdk_version() != version:
         raise ValueError(f"sdk/python/pyproject.toml's version must be {version!r}, the workspace version")
+    check_marketplace(version)
     destination.mkdir(parents=True, exist_ok=True)
     license_bytes = (ROOT / "LICENSE").read_bytes()
     paths = []

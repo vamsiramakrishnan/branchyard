@@ -116,6 +116,7 @@ mod engine;
 mod environments;
 mod fleet;
 mod git;
+pub mod glance;
 mod goal;
 mod graph;
 mod harness;

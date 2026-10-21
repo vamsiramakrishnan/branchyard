@@ -67,8 +67,9 @@ class ArchiveTests(unittest.TestCase):
                     for path, data in inputs.items():
                         self.assertEqual(plugin_zip.read(f"branchyard/skills/{name}/{path}"), data)
                         self.assertEqual(skill_zip.read(f"{name}/{path}"), data)
-            # The /branchyard:setup command ships in the plugin.
-            self.assertIn("branchyard/commands/setup.md", plugin_zip.namelist())
+            # The slash commands and the hooks ship in the plugin.
+            for name in ("commands/setup.md", "commands/status.md", "commands/wait.md", "hooks/hooks.json"):
+                self.assertIn(f"branchyard/{name}", plugin_zip.namelist())
 
     def test_sdk_archive_matches_its_source(self):
         *_archives, sdk = package.build(self.root / "dist")
@@ -86,6 +87,19 @@ class ArchiveTests(unittest.TestCase):
                 package.build(self.root / "broken")
         finally:
             (package.PLUGIN / ".codex-plugin/plugin.json").write_text(original)
+
+    def test_the_marketplace_must_list_the_plugin_at_the_workspace_version(self):
+        original = package.MARKETPLACE.read_text()
+        try:
+            for field, value in (("version", "9.9.9"), ("source", "./plugins/elsewhere")):
+                broken = json.loads(original)
+                broken["plugins"][0][field] = value
+                package.MARKETPLACE.write_text(json.dumps(broken))
+                with self.assertRaises(ValueError):
+                    package.build(self.root / "broken")
+        finally:
+            package.MARKETPLACE.write_text(original)
+
 
     def test_the_sdk_version_must_match_the_workspace_version(self):
         with mock.patch.object(package, "sdk_version", return_value="9.9.9"), self.assertRaises(ValueError) as raised:
@@ -158,6 +172,61 @@ class SdkProjectTests(unittest.TestCase):
             code = f"import sys; sys.path.insert(0, {str(unpacked)!r}); import branchyard, branchyard_client"
             imported = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True)
             self.assertEqual(imported.returncode, 0, imported.stderr)
+
+
+class ClaudeCodePluginTests(unittest.TestCase):
+    """The Claude Code marketplace, hooks and commands, as files: no
+    Claude Code here, so a live `/plugin install` is the final check."""
+
+    def test_the_marketplace_lists_the_plugin_directory(self):
+        marketplace = json.loads(package.MARKETPLACE.read_text())
+        self.assertEqual(marketplace["name"], "branchyard")
+        self.assertTrue(marketplace["owner"]["name"])
+        (entry,) = marketplace["plugins"]
+        manifest = json.loads((ROOT / entry["source"] / ".claude-plugin/plugin.json").read_text())
+        self.assertEqual(entry["name"], manifest["name"])
+        self.assertEqual(entry["version"], manifest["version"])
+        self.assertTrue(entry["description"])
+
+    def test_hooks_run_by_hook_only_when_by_is_installed(self):
+        hooks = json.loads((package.PLUGIN / "hooks/hooks.json").read_text())["hooks"]
+        events = {"SessionStart": "session-start", "UserPromptSubmit": "user-prompt-submit"}
+        self.assertEqual(set(hooks), set(events))
+        empty = tempfile.TemporaryDirectory()
+        self.addCleanup(empty.cleanup)
+        for event, groups in hooks.items():
+            (group,) = groups
+            (hook,) = group["hooks"]
+            self.assertEqual(hook["type"], "command")
+            self.assertLessEqual(hook["timeout"], 10)
+            self.assertEqual(
+                hook["command"],
+                f"command -v by >/dev/null 2>&1 && by hook {events[event]} || true",
+            )
+            # Without by on PATH: silent, and exit 0.
+            out = subprocess.run(
+                ["/bin/sh", "-c", hook["command"]],
+                input='{"session_id": "s", "cwd": "/"}',
+                capture_output=True,
+                text=True,
+                env={"PATH": empty.name},
+            )
+            self.assertEqual((out.returncode, out.stdout, out.stderr), (0, "", ""))
+
+    def test_the_manifest_names_no_hooks_file(self):
+        # Claude Code finds hooks/hooks.json itself; the copy Branchyard
+        # projects for its own turns has no hooks, so its manifest must not
+        # name one (crates/branchyard/src/projection.rs).
+        manifest = json.loads((package.PLUGIN / ".claude-plugin/plugin.json").read_text())
+        self.assertNotIn("hooks", manifest)
+
+    def test_every_command_has_a_description(self):
+        commands = sorted((package.PLUGIN / "commands").glob("*.md"))
+        self.assertEqual([c.name for c in commands], ["setup.md", "status.md", "wait.md"])
+        for command in commands:
+            text = command.read_text()
+            self.assertTrue(text.startswith("---\ndescription: "), command.name)
+            self.assertIn("\nargument-hint: ", text.split("\n---\n", 1)[0], command.name)
 
 
 class InstallerTests(unittest.TestCase):

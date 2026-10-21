@@ -70,7 +70,12 @@ pub(crate) const SERVER_NAME: &str = branchyard_provision::permissions::DELEGATI
 /// The Python module, written to `.branchyard/sdk/python/branchyard.py`.
 const PYTHON_MODULE: &str = include_str!("../../../sdk/python/branchyard.py");
 /// The Claude Code plugin carrying the delegation skill, written to
-/// `.branchyard/plugin/`.
+/// `.branchyard/plugin/`. Only the manifest and the skill: not the plugin's
+/// `hooks/hooks.json` (`by hook`, which Claude Code finds by that path, so
+/// the manifest names no hooks) nor its slash commands. Those are for a
+/// session a person started; a turn Branchyard runs already reports its
+/// status through its own stream and gets its messages from the engine, so
+/// the hooks would only repeat both.
 const PLUGIN_MANIFEST: &str =
     include_str!("../../../plugins/branchyard/.claude-plugin/plugin.json");
 const SKILL: &str = include_str!("../../../plugins/branchyard/skills/delegate/SKILL.md");

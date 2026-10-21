@@ -24,6 +24,7 @@ mod fleet_cmd;
 mod gateway_cmd;
 mod gh;
 mod harness_cmd;
+mod hook_cmd;
 mod inherited;
 mod init;
 mod json;
@@ -85,6 +86,14 @@ fn main() -> ExitCode {
         branchyard_support::best_effort("print the help", args::command().print_help());
         return ExitCode::SUCCESS;
     };
+    // Run by a Claude Code session on every prompt and redraw: no
+    // configuration, no logging, and never a failure, whatever the
+    // repository holds (docs/harness-integration.md).
+    match &command {
+        Command::Hook { event } => return hook_cmd::hook(event),
+        Command::Statusline => return hook_cmd::statusline(),
+        _ => {}
+    }
     // branchyard.toml and the user configuration, under flags and variables.
     let cwd = std::env::current_dir().unwrap_or_default();
     let env = |name: &str| std::env::var(name).ok();
@@ -697,7 +706,9 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Remote { .. }
         | Command::Catalog { .. }
         | Command::Sync(_)
-        | Command::Connectors { .. } => unreachable!("handled before choosing a target"),
+        | Command::Connectors { .. }
+        | Command::Hook { .. }
+        | Command::Statusline => unreachable!("handled before choosing a target"),
     }
 }
 

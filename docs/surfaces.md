@@ -861,3 +861,16 @@ See [up](up.md) and [configuration](setup.md#configuration).
 | Bring the configured backends up | `Yard::up_plan`, `Yard::up_apply`, `Yard::up` over `branchyard::up::Machine` (`LocalMachine` is this machine) | `up [--plan] [--yes] [--json]` | refused: a server brings up its own machine | none | Python `Local(root).up()`, `doctor()`, `harnesses()`, `run()` | refused inside a harness |
 | A server of the process's own | n/a | `serve` | n/a | n/a | Python `Client.local(root)`: `by serve` on a free loopback port with a fresh token, stopped on `close()` | n/a |
 
+## Added with the Claude Code plugin's hooks, status line and marketplace
+
+See [harness integration](harness-integration.md#claude-code) and [distribution](distribution.md#install-for-claude-code). Both commands are the CLI's alone: they serve a Claude Code session on this machine, read its local store, and have no SDK operation, route, client call or delegation tool beyond `branchyard::glance`.
+
+| Surface | Before | Now |
+|---|---|---|
+| `by hook session-start\|user-prompt-submit` | none: a Claude Code session a person started learned a branch finished by polling `by ls` or blocking in `by wait` | reads the hook's JSON on stdin and prints `hookSpecificOutput.additionalContext`: with `BRANCHYARD_BRANCH`, that branch's unread messages; otherwise branches that finished, failed, are blocked or ask since the session's last call (`.branchyard/hooks/<session_id>.json`); at most twelve lines; read-only, two seconds at most, always exit 0 |
+| `by statusline` | none | one line for Claude Code's `statusLine` command, `by: feat-x · 2 running · 1 asking · 3 ready`; nothing outside a repository Branchyard uses |
+| `branchyard::glance` (`read`, `find_root`, `state_dir`, `Glance`, `Counts`, `READ_WAIT`) | none; `Yard::open` creates, upgrades and recovers | a read-only look at `.branchyard/state.db`: branches, unanswered questions from running branches, a branch's unread messages |
+| `plugins/branchyard/hooks/hooks.json` | none | `SessionStart` and `UserPromptSubmit` running `by hook` when `by` is on `PATH`; not in the plugin projected into Branchyard's own Claude Code turns |
+| `plugins/branchyard/commands/status.md`, `wait.md` | `/branchyard:setup` only | also `/branchyard:status` (branches and what needs attention) and `/branchyard:wait` (`by wait`, then a summary) |
+| `.claude-plugin/marketplace.json` | none: `claude --plugin-dir plugins/branchyard` | the repository is a marketplace: `/plugin marketplace add vamsiramakrishnan/branchyard`, `/plugin install branchyard@branchyard`; `tools/package.py` refuses a marketplace entry not at the workspace version |
+

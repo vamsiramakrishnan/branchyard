@@ -1120,6 +1120,29 @@ Examples:
 See docs/up.md.
 ";
 
+const HOOK_EXAMPLES: &str = "\
+Reads Claude Code's hook JSON (session_id, cwd) on stdin and prints its hookSpecificOutput
+with additionalContext, or nothing. With BRANCHYARD_BRANCH set: that branch's unread messages.
+Otherwise: branches that finished, failed, became blocked or started asking since this
+session's last hook call (remembered in .branchyard/hooks/<session_id>.json). Reads local
+state only, gives up after two seconds, and always exits 0.
+
+The plugin's hooks/hooks.json runs it; to run it from settings.json instead:
+  \"hooks\": {\"UserPromptSubmit\": [{\"hooks\": [{\"type\": \"command\",
+    \"command\": \"by hook user-prompt-submit\"}]}]}
+
+See docs/harness-integration.md.
+";
+
+const STATUSLINE_EXAMPLES: &str = "\
+Prints, for example:  by: feat-x · 2 running · 1 asking · 3 ready
+(the branch whose worktree Claude Code runs in, then the counts that are not zero).
+Set it in ~/.claude/settings.json or .claude/settings.json; by never edits them:
+  \"statusLine\": {\"type\": \"command\", \"command\": \"by statusline\"}
+
+See docs/harness-integration.md.
+";
+
 const DOCTOR_EXAMPLES: &str = "\
 Checks, each ok, warn or fail with a line on what to do:
   repository       a repository; .branchyard/ and its store; the store's schema
@@ -2141,6 +2164,17 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Tell a Claude Code session what changed in this repository's branches (run by the plugin's
+    /// hooks with the hook's JSON on stdin; prints nothing and exits 0 on any problem)
+    #[command(display_order = 606, after_help = HOOK_EXAMPLES)]
+    Hook {
+        /// session-start or user-prompt-submit
+        event: String,
+    },
+    /// Print one line about this repository's branches for Claude Code's status line (reads its
+    /// JSON on stdin; prints nothing outside a repository Branchyard uses)
+    #[command(display_order = 607, after_help = STATUSLINE_EXAMPLES)]
+    Statusline,
     /// Run, stop or inspect this repository's connector gateway (Anvil), and its keys
     #[command(display_order = 403, subcommand_required = true, after_help = GATEWAY_EXAMPLES)]
     Gateway {
