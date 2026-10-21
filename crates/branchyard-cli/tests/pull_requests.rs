@@ -31,6 +31,8 @@ next() {
 case "$1 $2" in
 "auth status")
   if [ -f "$d/unauthenticated" ]; then
+    # A localized gh, unless run in the C locale.
+    if [ "$LC_ALL" != C ]; then echo "Nicht angemeldet. Bitte anmelden." >&2; exit 1; fi
     echo "You are not logged into any GitHub hosts. To log in, run: gh auth login" >&2
     exit 1
   fi
@@ -885,9 +887,16 @@ fn missing_or_logged_out_gh_is_explained_before_anything_is_pushed() {
         .unwrap();
     assert!(stderr(&out).contains("not on PATH"), "{}", stderr(&out));
 
-    // Logged out.
+    // Logged out, said in English whatever the user's locale.
     fs::write(repo.gh.join("unauthenticated"), "").unwrap();
-    let out = repo.by(&["pr", "feat"]);
+    let out = repo
+        .command(env!("CARGO_BIN_EXE_by"))
+        .args(["pr", "feat"])
+        .env("LC_ALL", "de_DE.UTF-8")
+        .env("LANG", "de_DE.UTF-8")
+        .env("LANGUAGE", "de")
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     assert!(
         stderr(&out).contains("gh is not logged in to GitHub; run `gh auth login` first"),

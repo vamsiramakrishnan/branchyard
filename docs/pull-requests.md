@@ -194,4 +194,5 @@ The CLI folds these (`pr::state`) into the branch's issue, last check, last push
 - `--draft` applies when the pull request is created; turning a draft ready is `gh pr ready`.
 - Comments from bots are fed back like anyone's; there is no filter by author yet.
 - Remote mode: a server would need its own git remote and `gh` login per repository, and an operator's decision to let clients push through it. Not built.
+- `gh` runs with `LC_ALL=C` and no `LANGUAGE`, because two of its messages are matched (`gh auth login` for a logged-out `gh`, `no checks` for a pull request without checks); a structured answer for either is not used yet.
 - Tested only against a fake `gh` and a bare local remote ([validation](validation.md)), never against GitHub itself.
