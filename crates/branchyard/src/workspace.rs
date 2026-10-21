@@ -455,6 +455,9 @@ pub(crate) fn script_env(
 /// How long `shell_setup` may run before it is killed and what needed it
 /// fails.
 pub const SHELL_SETUP_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long, once the snippet's shell has exited, its output may take to
+/// reach its end before what was read is used.
+const SHELL_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// The most of `shell_setup`'s standard error a failure quotes: the last
 /// bytes.
@@ -522,14 +525,36 @@ pub(crate) fn shell_env(
         .map_err(|e| fail(format!("could not start /bin/sh: {e}"), b""))?;
     let pid = child.id();
     let started = proc::start_time(pid).unwrap_or_default();
+    // Each pipe is read into a buffer on a thread of its own, which says
+    // when it reaches the end. A process the snippet left running outside
+    // what `kill_group` can reach (off Linux, once the shell is reaped) may
+    // hold a pipe open; the output is complete by then, so the wait for its
+    // end is bounded by `SHELL_DRAIN_GRACE` rather than by that process.
     let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (done, ended) = std::sync::mpsc::channel::<()>();
+        let into = bytes.clone();
         std::thread::spawn(move || {
-            let mut bytes = Vec::new();
             if let Some(mut pipe) = pipe {
-                branchyard_support::best_effort("read shell_setup", pipe.read_to_end(&mut bytes));
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match pipe.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => into
+                            .lock_recovering("shell_setup output")
+                            .extend_from_slice(&chunk[..n]),
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(e) => {
+                            branchyard_support::best_effort("read shell_setup", Err::<(), _>(e));
+                            break;
+                        }
+                    }
+                }
             }
-            bytes
-        })
+            // The receiver is gone only once the result was taken.
+            done.send(()).ok();
+        });
+        (bytes, ended)
     };
     let stdout = drain(
         child
@@ -566,8 +591,19 @@ pub(crate) fn shell_env(
     if status.is_err() {
         branchyard_support::best_effort("reap shell_setup", child.wait());
     }
-    let out = stdout.join().unwrap_or_default();
-    let err = stderr.join().unwrap_or_default();
+    let drained = Instant::now() + SHELL_DRAIN_GRACE;
+    let take = |(bytes, ended): (
+        std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        std::sync::mpsc::Receiver<()>,
+    )| {
+        // Ended or not, what was read is the output.
+        ended
+            .recv_timeout(drained.saturating_duration_since(Instant::now()))
+            .ok();
+        std::mem::take(&mut *bytes.lock_recovering("shell_setup output"))
+    };
+    let out = take(stdout);
+    let err = take(stderr);
     match status {
         Ok(status) if status.success() => {}
         Ok(status) => {
@@ -2004,6 +2040,32 @@ mod tests {
             error.contains("exited with status 4: first\nboom"),
             "{error}"
         );
+        // A process left running outside the shell's group holds standard
+        // error open; the result still comes once the shell exits.
+        let pid_file = dir.join("leftover.pid");
+        let began = Instant::now();
+        let changed = shell_env(
+            &format!(
+                "setsid sh -c 'echo $$ > {}; exec sleep 30' & export BY_UNIT_LEFT=1",
+                pid_file.display()
+            ),
+            dir,
+            &[],
+            &|| None,
+        )
+        .unwrap();
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            began.elapsed()
+        );
+        assert!(changed.contains(&("BY_UNIT_LEFT".to_owned(), "1".to_owned())));
+        if let Some(pid) = fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|pid| pid.trim().parse::<u32>().ok())
+        {
+            branchyard_support::kill_process(pid);
+        }
         let stopped = shell_env("sleep 5", dir, &[], &|| Some("cancelled".into())).unwrap_err();
         assert!(stopped.contains("was stopped: cancelled"), "{stopped}");
         // `script_env`: the spec's variables, then the snippet's, then the

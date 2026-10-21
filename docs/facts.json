@@ -65,7 +65,7 @@
     }
   },
   "tests": {
-    "total": 2344,
+    "total": 2345,
     "ignored": 29,
     "by_crate": {
       "branchyard": {
@@ -97,7 +97,7 @@
         "ignored": 0
       },
       "branchyard-herdr": {
-        "tests": 14,
+        "tests": 15,
         "ignored": 0
       },
       "branchyard-mcp": {
