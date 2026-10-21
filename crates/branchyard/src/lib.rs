@@ -114,6 +114,7 @@ mod egress;
 mod endpoint;
 mod engine;
 mod environments;
+mod feedback;
 mod fleet;
 mod git;
 pub mod glance;
@@ -219,6 +220,7 @@ pub use environments::{
     DEFAULT_INPUTS as ENVIRONMENT_DEFAULT_INPUTS, DEFAULT_KEEP as ENVIRONMENT_DEFAULT_KEEP,
     DEFAULT_MAX_AGE as ENVIRONMENT_DEFAULT_MAX_AGE,
 };
+pub use feedback::{prompt_digest, Feedback, FeedbackItem, FeedbackKind, FeedbackSource};
 pub use fleet::{
     classify, credit, entry_label as fleet_entry_label, fresh_seed as fleet_seed, harness_fault,
     inventory_default, pooled as fleet_pooled, recorded_choice, recorded_route, risk_words,
@@ -2627,6 +2629,10 @@ pub enum Activity {
     /// a pull request opened or observed, feedback delivered. See
     /// [`PullRequestActivity`] and `docs/pull-requests.md`.
     PullRequest(Box<PullRequestActivity>),
+    /// Feedback sent as the prompt (or steer) whose digest it names, as
+    /// data: `by pr --watch`'s pull request feedback or `by review`'s
+    /// comments. Recorded just before that prompt. See [`Feedback`].
+    Feedback(Box<Feedback>),
     /// Where a turn's sandbox came from (fresh, resumed, branched from a
     /// provider snapshot) and what became of it: kept, destroyed, evicted,
     /// a snapshot released. See `docs/sandbox-snapshots.md`.

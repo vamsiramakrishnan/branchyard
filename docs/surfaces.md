@@ -885,3 +885,13 @@ See [server](server.md#operations).
 | Python `Client.wait`, `Reply.wait` | slept `poll` (0.5 s) between reads | no `poll`; long polls, asked again until `timeout` |
 | `by --remote` following an operation | read it every 250 ms, sleeping between reads when the event stream was lost | long polls of 5 s on a thread of their own; the stream and the operation are heard on one channel |
 | `Delegate::wait` through the broker (`Delegate::connect`) | inspected the branch every 100 ms | the engine's blocking `wait`, as `Delegate::wait_for` |
+
+## Added with feedback as data
+
+See [knowledge](knowledge.md) and [pull requests](pull-requests.md#the-events).
+
+| Surface | Before | Now |
+|---|---|---|
+| `Activity::Feedback` (`Feedback`, `FeedbackItem`, `FeedbackKind`, `FeedbackSource`); `Branch::record_feedback`, `prompt_digest` | none | `by review` and `by pr --watch` record their feedback as data beside the prompt, naming it by digest; in `schema/contract.json` |
+| `feedback` on send requests | none | the server records it just before the turn; refused with `retry` |
+| The knowledge extractor | parsed feedback out of the prompt's prose | reads the `feedback` record; the prose only for older logs |

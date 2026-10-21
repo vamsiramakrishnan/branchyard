@@ -615,6 +615,28 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
                 branchyard::contract::one_line(value, RESULT_LINE)
             ),
         ),
+        Activity::Feedback(feedback) => {
+            let comments = feedback
+                .items
+                .iter()
+                .filter(|i| i.kind == branchyard::FeedbackKind::Comment)
+                .count();
+            let source = match feedback.source {
+                branchyard::FeedbackSource::PullRequest => "pull request",
+                branchyard::FeedbackSource::Review => "review",
+            };
+            format!(
+                "{source} feedback: {} piece{} ({comments} comment{}){}",
+                feedback.items.len(),
+                if feedback.items.len() == 1 { "" } else { "s" },
+                if comments == 1 { "" } else { "s" },
+                feedback
+                    .reference
+                    .as_deref()
+                    .map(|r| format!(" on {r}"))
+                    .unwrap_or_default()
+            )
+        }
         Activity::Brief { text } => format!(
             "brief: {}",
             truncate(

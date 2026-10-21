@@ -895,6 +895,7 @@ fn send_request(
             provision: provision(task)?,
             require_labels: task.require_labels.clone(),
             priority: task.priority,
+            feedback: None,
         },
         notice,
     ))
@@ -913,6 +914,24 @@ pub fn send(
     let op = remote.repo.send(branch, &request, &new_key())?;
     // A `by review --detach` launcher waits for the server to accept it.
     crate::detach::accepted(branch);
+    announce(remote, notice, None);
+    let delegating = task.delegate.is_some() || !remote.repo.branch(branch)?.children.is_empty();
+    finish_one(env, remote, &op, delegating)
+}
+
+/// `by --remote review`: send `prompt` with `feedback`, which the server
+/// records as data beside it.
+pub fn send_feedback(
+    env: &Env,
+    remote: &Remote,
+    branch: &str,
+    prompt: &str,
+    task: &TaskArgs,
+    feedback: branchyard::Feedback,
+) -> Outcome {
+    let (mut request, notice) = send_request(task, Prompt::Text(prompt))?;
+    request.feedback = Some(feedback);
+    let op = remote.repo.send(branch, &request, &new_key())?;
     announce(remote, notice, None);
     let delegating = task.delegate.is_some() || !remote.repo.branch(branch)?.children.is_empty();
     finish_one(env, remote, &op, delegating)

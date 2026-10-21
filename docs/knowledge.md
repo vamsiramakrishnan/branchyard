@@ -26,6 +26,8 @@ When a top-level branch ends (it merges, a judge proposes it as the pick, or, if
 Two distillers exist:
 
 - **The extractor**, deterministic, the default. It reads the branch's event log for what a person told it after its task: every prompt sent with `by send` (or `Branch::send`) after the first, every `by send --steer`, each comment of a `by review` (scoped to the comment's file), and each review comment `by pr --watch` delivered (scoped to its file; failed CI checks are not corrections). Branchyard's own prompts (plan mode, plan approval, goal follow-ups), inbox blocks, a rewind's summary, and replies that only keep a turn going (`continue`, `yes`, `lgtm`, …) are skipped. Each correction is proposed as written, with the repository as its scope unless it came with a file.
+
+  Feedback is read as data, not out of the prompt. `by review` and `by pr --watch` record a `feedback` event just before their prompt (or steer): its `source` (`review` or `pull_request`), a `reference` (the pull request's URL), and `items`, each with a `kind` (`comment`, or `check` for a failed check, which is not a correction), `path`, `line`, `start_line`, `author` and `body` as written. The event names its prompt by `prompt`, the BLAKE3 digest of the prompt's trimmed text, so the extractor pairs the two by identity and the prompt's wording can change without breaking it. A server records the event for a send whose request carries `feedback` (`by --remote review` sends it; refused with `retry`). Not done: `by --remote review --detach` starts a plain `by send` in the background, which carries no record, so its comments are read from the prose. Logs written before the event existed are still read: a prompt with no matching record falls back to parsing the prose (`File:` / `User comment:` lines, and the numbered `Feedback on pull request #` list), which depends on that wording.
 - **A harness distiller**: any `Judge` (normally a `HarnessJudge`, the [judge's](fleet.md#judging) machinery) run read-only on a scratch branch that is removed afterwards. Its prompt has the task, the extractor's corrections, what changed, the agent's last reply and the entries already adopted, and asks for at most five general rules. It must answer one JSON object and nothing else (one fenced block is allowed):
 
   ```json
@@ -91,7 +93,7 @@ Checked strictly like the rest of `branchyard.toml` (an unknown trigger or harne
 | Deterministic (tested hermetically) | Needs a real harness and model to evaluate |
 |---|---|
 | The store on SQLite and PostgreSQL; ids, compare-and-swap decisions, entries outliving branches | Whether agents follow adopted entries, and whether the order and the budget are right |
-| The extractor over sends, steers, `by review` and `by pr --watch` prompts; duplicates and rejections never re-proposed | Whether a person's corrections, as written, make good rules (the extractor does not generalize) |
+| The extractor over sends, steers, and the `feedback` records of `by review` and `by pr --watch` (old logs' prose too); duplicates and rejections never re-proposed | Whether a person's corrections, as written, make good rules (the extractor does not generalize) |
 | Matching, ordering, the budget, the `provisioned` trace; `by knowledge` locally and remotely | Whether a model distiller proposes general, correct rules, and answers the format reliably |
 | A harness distiller's protocol: scratch branch, deny-all policy, strict parsing, fallback | |
 

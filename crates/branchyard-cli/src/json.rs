@@ -337,6 +337,11 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "activity": "result",
             "value": value,
         }),
+        Activity::Feedback(feedback) => {
+            let mut value = serde(feedback);
+            value["activity"] = json!("feedback");
+            value
+        }
         Activity::Brief { text } => json!({
             "activity": "brief",
             "text": text,

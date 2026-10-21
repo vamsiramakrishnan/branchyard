@@ -451,6 +451,26 @@ fn watch_sends_ci_failures_and_review_comments_back_once_and_pushes_each_fix() {
     assert_eq!(delivered[0]["keys"], json!([format!("ci:test:{head1}")]));
     assert_eq!(delivered[0]["via"], "send");
     assert_eq!(delivered[1]["keys"], json!(["thread:C1"]));
+    // Each delivery is also recorded as data, naming its prompt by digest.
+    let records: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["activity"] == "feedback")
+        .collect();
+    assert_eq!(records.len(), 2);
+    for (record, prompt) in records.iter().zip(&prompts[1..]) {
+        assert_eq!(record["source"], "pull_request");
+        assert_eq!(
+            record["reference"],
+            "https://github.com/acme/widgets/pull/7"
+        );
+        assert_eq!(record["prompt"], branchyard::prompt_digest(prompt).as_str());
+    }
+    assert_eq!(records[0]["items"][0]["kind"], "check");
+    assert_eq!(
+        records[1]["items"],
+        json!([{"kind": "comment", "path": "a.txt", "line": 1, "author": "alice",
+                "body": "Please WRITE review.txt=done"}])
+    );
     assert_eq!(repo_events_of(events, "watch_stopped").len(), 1);
     let log = stdout(&repo.by(&["log", "feat"]));
     assert!(

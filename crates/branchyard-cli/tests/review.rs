@@ -143,6 +143,46 @@ fn comments_written_on_the_diff_go_to_the_branch_as_one_prompt() {
     let prompts = repo.prompts("feat");
     assert_eq!(prompts.len(), 2);
     assert_eq!(prompts[1], printed);
+    // The comments are recorded as data beside the prompt, which the
+    // record names by digest.
+    let out = repo.ok(repo.by(None, &["log", "feat", "--json"]));
+    let events: Value = serde_json::from_str(&out).unwrap();
+    let records: Vec<&Value> = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["activity"] == "feedback")
+        .collect();
+    assert_eq!(records.len(), 1, "{out}");
+    assert_eq!(records[0]["source"], "review");
+    assert_eq!(
+        records[0]["prompt"],
+        branchyard::prompt_digest(&prompts[1]).as_str()
+    );
+    let items: Vec<(&str, Option<u64>, &str)> = records[0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| {
+            (
+                i["path"].as_str().unwrap(),
+                i["line"].as_u64(),
+                i["body"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [
+            ("a.txt", None, "Rename the file"),
+            (
+                "a.txt",
+                Some(1),
+                "Is this hunk tested?\nIt changes behaviour."
+            ),
+            ("a.txt", Some(1), "please WRITE review.txt=done now"),
+        ]
+    );
     assert!(
         !repo.draft("feat").exists(),
         "a sent review leaves no draft"

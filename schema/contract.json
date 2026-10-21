@@ -5593,6 +5593,17 @@
               ],
               "format": "int32",
               "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
+            },
+            "feedback": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Feedback"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The prompt is feedback (`by review`'s comments, a pull request's):\nthe server records it as data on the branch's log just before the\nturn, as `Branch::record_feedback` does, so readers need not parse\nthe prompt. Refused with `retry`."
             }
           },
           "description": "`POST /v1/repos/{repo}/branches/{branch}/send`."
@@ -6225,6 +6236,118 @@
             }
           ],
           "description": "What a tool or an operation resolves to."
+        },
+        "Feedback": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/FeedbackSource"
+            },
+            "reference": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What it is about, such as the pull request's URL."
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FeedbackItem"
+              }
+            },
+            "prompt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The BLAKE3 digest (hex) of the prompt's text, trimmed, that carried\nit to the harness, as a turn's prompt or a steer. Set when recorded\nby [`Branch::record_feedback`]; a value given is replaced."
+            }
+          },
+          "required": [
+            "source",
+            "items"
+          ],
+          "description": "Feedback sent into a branch, as data."
+        },
+        "FeedbackSource": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "pull_request",
+              "description": "`by pr --watch`: a pull request's reviews, comments and checks."
+            },
+            {
+              "type": "string",
+              "const": "review",
+              "description": "`by review`: comments written on the branch's diff."
+            }
+          ],
+          "description": "Where a [`Feedback`] came from. Serialized in snake case."
+        },
+        "FeedbackItem": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/FeedbackKind",
+              "default": "comment"
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The file it is about, relative to the repository's root."
+            },
+            "line": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The (last) line it is about."
+            },
+            "start_line": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The first line of a range, when it covers more than one."
+            },
+            "author": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Who wrote it, such as a GitHub login."
+            },
+            "body": {
+              "type": "string",
+              "description": "Its text, as written: not quoted, escaped or numbered."
+            }
+          },
+          "required": [
+            "body"
+          ],
+          "description": "One piece of feedback."
+        },
+        "FeedbackKind": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "comment",
+              "description": "A person's comment or review: a correction."
+            },
+            {
+              "type": "string",
+              "const": "check",
+              "description": "A failed check, CI's or the branch's own: not a correction."
+            }
+          ],
+          "description": "What one [`FeedbackItem`] is. Serialized in snake case."
         }
       }
     },
@@ -6342,6 +6465,17 @@
               ],
               "format": "int32",
               "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
+            },
+            "feedback": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Feedback"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The prompt is feedback (`by review`'s comments, a pull request's):\nthe server records it as data on the branch's log just before the\nturn, as `Branch::record_feedback` does, so readers need not parse\nthe prompt. Refused with `retry`."
             }
           },
           "description": "`POST /v1/repos/{repo}/branches/{branch}/send`."
@@ -6974,6 +7108,118 @@
             }
           ],
           "description": "What a tool or an operation resolves to."
+        },
+        "Feedback": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/FeedbackSource"
+            },
+            "reference": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What it is about, such as the pull request's URL."
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FeedbackItem"
+              }
+            },
+            "prompt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The BLAKE3 digest (hex) of the prompt's text, trimmed, that carried\nit to the harness, as a turn's prompt or a steer. Set when recorded\nby [`Branch::record_feedback`]; a value given is replaced."
+            }
+          },
+          "required": [
+            "source",
+            "items"
+          ],
+          "description": "Feedback sent into a branch, as data."
+        },
+        "FeedbackSource": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "pull_request",
+              "description": "`by pr --watch`: a pull request's reviews, comments and checks."
+            },
+            {
+              "type": "string",
+              "const": "review",
+              "description": "`by review`: comments written on the branch's diff."
+            }
+          ],
+          "description": "Where a [`Feedback`] came from. Serialized in snake case."
+        },
+        "FeedbackItem": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/FeedbackKind",
+              "default": "comment"
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The file it is about, relative to the repository's root."
+            },
+            "line": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The (last) line it is about."
+            },
+            "start_line": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The first line of a range, when it covers more than one."
+            },
+            "author": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Who wrote it, such as a GitHub login."
+            },
+            "body": {
+              "type": "string",
+              "description": "Its text, as written: not quoted, escaped or numbered."
+            }
+          },
+          "required": [
+            "body"
+          ],
+          "description": "One piece of feedback."
+        },
+        "FeedbackKind": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "comment",
+              "description": "A person's comment or review: a correction."
+            },
+            {
+              "type": "string",
+              "const": "check",
+              "description": "A failed check, CI's or the branch's own: not a correction."
+            }
+          ],
+          "description": "What one [`FeedbackItem`] is. Serialized in snake case."
         }
       }
     },
@@ -11477,6 +11723,17 @@
           ],
           "format": "int32",
           "description": "The operation's priority, -10 to 10 (default 0): higher runs first,\nand the server caps it at the tenant's `max_priority`. See\n`docs/server.md#scheduling`."
+        },
+        "feedback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Feedback"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The prompt is feedback (`by review`'s comments, a pull request's):\nthe server records it as data on the branch's log just before the\nturn, as `Branch::record_feedback` does, so readers need not parse\nthe prompt. Refused with `retry`."
         }
       },
       "description": "`POST /v1/repos/{repo}/branches/{branch}/send`.",
@@ -12111,6 +12368,118 @@
             }
           ],
           "description": "What a tool or an operation resolves to."
+        },
+        "Feedback": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/FeedbackSource"
+            },
+            "reference": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What it is about, such as the pull request's URL."
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FeedbackItem"
+              }
+            },
+            "prompt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The BLAKE3 digest (hex) of the prompt's text, trimmed, that carried\nit to the harness, as a turn's prompt or a steer. Set when recorded\nby [`Branch::record_feedback`]; a value given is replaced."
+            }
+          },
+          "required": [
+            "source",
+            "items"
+          ],
+          "description": "Feedback sent into a branch, as data."
+        },
+        "FeedbackSource": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "pull_request",
+              "description": "`by pr --watch`: a pull request's reviews, comments and checks."
+            },
+            {
+              "type": "string",
+              "const": "review",
+              "description": "`by review`: comments written on the branch's diff."
+            }
+          ],
+          "description": "Where a [`Feedback`] came from. Serialized in snake case."
+        },
+        "FeedbackItem": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/FeedbackKind",
+              "default": "comment"
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The file it is about, relative to the repository's root."
+            },
+            "line": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The (last) line it is about."
+            },
+            "start_line": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The first line of a range, when it covers more than one."
+            },
+            "author": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Who wrote it, such as a GitHub login."
+            },
+            "body": {
+              "type": "string",
+              "description": "Its text, as written: not quoted, escaped or numbered."
+            }
+          },
+          "required": [
+            "body"
+          ],
+          "description": "One piece of feedback."
+        },
+        "FeedbackKind": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "comment",
+              "description": "A person's comment or review: a correction."
+            },
+            {
+              "type": "string",
+              "const": "check",
+              "description": "A failed check, CI's or the branch's own: not a correction."
+            }
+          ],
+          "description": "What one [`FeedbackItem`] is. Serialized in snake case."
         }
       }
     },
@@ -21435,6 +21804,19 @@
             {
               "type": "object",
               "properties": {
+                "feedback": {
+                  "$ref": "#/$defs/Feedback"
+                }
+              },
+              "required": [
+                "feedback"
+              ],
+              "additionalProperties": false,
+              "description": "Feedback sent as the prompt (or steer) whose digest it names, as\ndata: `by pr --watch`'s pull request feedback or `by review`'s\ncomments. Recorded just before that prompt. See [`Feedback`]."
+            },
+            {
+              "type": "object",
+              "properties": {
                 "sandbox": {
                   "$ref": "#/$defs/SandboxEvent"
                 }
@@ -23999,6 +24381,118 @@
             "resolved"
           ],
           "description": "One review thread `by pr --watch` answered and resolved, or tried to."
+        },
+        "Feedback": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/FeedbackSource"
+            },
+            "reference": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What it is about, such as the pull request's URL."
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FeedbackItem"
+              }
+            },
+            "prompt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The BLAKE3 digest (hex) of the prompt's text, trimmed, that carried\nit to the harness, as a turn's prompt or a steer. Set when recorded\nby [`Branch::record_feedback`]; a value given is replaced."
+            }
+          },
+          "required": [
+            "source",
+            "items"
+          ],
+          "description": "Feedback sent into a branch, as data."
+        },
+        "FeedbackSource": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "pull_request",
+              "description": "`by pr --watch`: a pull request's reviews, comments and checks."
+            },
+            {
+              "type": "string",
+              "const": "review",
+              "description": "`by review`: comments written on the branch's diff."
+            }
+          ],
+          "description": "Where a [`Feedback`] came from. Serialized in snake case."
+        },
+        "FeedbackItem": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/FeedbackKind",
+              "default": "comment"
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The file it is about, relative to the repository's root."
+            },
+            "line": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The (last) line it is about."
+            },
+            "start_line": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The first line of a range, when it covers more than one."
+            },
+            "author": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Who wrote it, such as a GitHub login."
+            },
+            "body": {
+              "type": "string",
+              "description": "Its text, as written: not quoted, escaped or numbered."
+            }
+          },
+          "required": [
+            "body"
+          ],
+          "description": "One piece of feedback."
+        },
+        "FeedbackKind": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "comment",
+              "description": "A person's comment or review: a correction."
+            },
+            {
+              "type": "string",
+              "const": "check",
+              "description": "A failed check, CI's or the branch's own: not a correction."
+            }
+          ],
+          "description": "What one [`FeedbackItem`] is. Serialized in snake case."
         },
         "SandboxEvent": {
           "oneOf": [
@@ -26559,6 +27053,19 @@
             {
               "type": "object",
               "properties": {
+                "feedback": {
+                  "$ref": "#/$defs/Feedback"
+                }
+              },
+              "required": [
+                "feedback"
+              ],
+              "additionalProperties": false,
+              "description": "Feedback sent as the prompt (or steer) whose digest it names, as\ndata: `by pr --watch`'s pull request feedback or `by review`'s\ncomments. Recorded just before that prompt. See [`Feedback`]."
+            },
+            {
+              "type": "object",
+              "properties": {
                 "sandbox": {
                   "$ref": "#/$defs/SandboxEvent"
                 }
@@ -29123,6 +29630,118 @@
             "resolved"
           ],
           "description": "One review thread `by pr --watch` answered and resolved, or tried to."
+        },
+        "Feedback": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/FeedbackSource"
+            },
+            "reference": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What it is about, such as the pull request's URL."
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FeedbackItem"
+              }
+            },
+            "prompt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The BLAKE3 digest (hex) of the prompt's text, trimmed, that carried\nit to the harness, as a turn's prompt or a steer. Set when recorded\nby [`Branch::record_feedback`]; a value given is replaced."
+            }
+          },
+          "required": [
+            "source",
+            "items"
+          ],
+          "description": "Feedback sent into a branch, as data."
+        },
+        "FeedbackSource": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "pull_request",
+              "description": "`by pr --watch`: a pull request's reviews, comments and checks."
+            },
+            {
+              "type": "string",
+              "const": "review",
+              "description": "`by review`: comments written on the branch's diff."
+            }
+          ],
+          "description": "Where a [`Feedback`] came from. Serialized in snake case."
+        },
+        "FeedbackItem": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/FeedbackKind",
+              "default": "comment"
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The file it is about, relative to the repository's root."
+            },
+            "line": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The (last) line it is about."
+            },
+            "start_line": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The first line of a range, when it covers more than one."
+            },
+            "author": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Who wrote it, such as a GitHub login."
+            },
+            "body": {
+              "type": "string",
+              "description": "Its text, as written: not quoted, escaped or numbered."
+            }
+          },
+          "required": [
+            "body"
+          ],
+          "description": "One piece of feedback."
+        },
+        "FeedbackKind": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "comment",
+              "description": "A person's comment or review: a correction."
+            },
+            {
+              "type": "string",
+              "const": "check",
+              "description": "A failed check, CI's or the branch's own: not a correction."
+            }
+          ],
+          "description": "What one [`FeedbackItem`] is. Serialized in snake case."
         },
         "SandboxEvent": {
           "oneOf": [
@@ -35991,6 +36610,19 @@
             {
               "type": "object",
               "properties": {
+                "feedback": {
+                  "$ref": "#/$defs/Feedback"
+                }
+              },
+              "required": [
+                "feedback"
+              ],
+              "additionalProperties": false,
+              "description": "Feedback sent as the prompt (or steer) whose digest it names, as\ndata: `by pr --watch`'s pull request feedback or `by review`'s\ncomments. Recorded just before that prompt. See [`Feedback`]."
+            },
+            {
+              "type": "object",
+              "properties": {
                 "sandbox": {
                   "$ref": "#/$defs/SandboxEvent"
                 }
@@ -38555,6 +39187,118 @@
             "resolved"
           ],
           "description": "One review thread `by pr --watch` answered and resolved, or tried to."
+        },
+        "Feedback": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/FeedbackSource"
+            },
+            "reference": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What it is about, such as the pull request's URL."
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FeedbackItem"
+              }
+            },
+            "prompt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The BLAKE3 digest (hex) of the prompt's text, trimmed, that carried\nit to the harness, as a turn's prompt or a steer. Set when recorded\nby [`Branch::record_feedback`]; a value given is replaced."
+            }
+          },
+          "required": [
+            "source",
+            "items"
+          ],
+          "description": "Feedback sent into a branch, as data."
+        },
+        "FeedbackSource": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "pull_request",
+              "description": "`by pr --watch`: a pull request's reviews, comments and checks."
+            },
+            {
+              "type": "string",
+              "const": "review",
+              "description": "`by review`: comments written on the branch's diff."
+            }
+          ],
+          "description": "Where a [`Feedback`] came from. Serialized in snake case."
+        },
+        "FeedbackItem": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/FeedbackKind",
+              "default": "comment"
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The file it is about, relative to the repository's root."
+            },
+            "line": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The (last) line it is about."
+            },
+            "start_line": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The first line of a range, when it covers more than one."
+            },
+            "author": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Who wrote it, such as a GitHub login."
+            },
+            "body": {
+              "type": "string",
+              "description": "Its text, as written: not quoted, escaped or numbered."
+            }
+          },
+          "required": [
+            "body"
+          ],
+          "description": "One piece of feedback."
+        },
+        "FeedbackKind": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "comment",
+              "description": "A person's comment or review: a correction."
+            },
+            {
+              "type": "string",
+              "const": "check",
+              "description": "A failed check, CI's or the branch's own: not a correction."
+            }
+          ],
+          "description": "What one [`FeedbackItem`] is. Serialized in snake case."
         },
         "SandboxEvent": {
           "oneOf": [
