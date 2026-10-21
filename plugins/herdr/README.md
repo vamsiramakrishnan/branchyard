@@ -25,7 +25,7 @@ Branchyard runs harnesses on protocol pipes, not terminals, so a branch cannot b
 
   Changes are debounced (250 ms by default) and only a changed report is sent, so a permission request answered at once by the policy never shows. `--seq` is milliseconds since the epoch, strictly increasing, so Herdr ignores a stale report.
 - **Reconnects**: when the stream drops, as when the server restarts, the bridge reconnects after the last cursor it applied, with backoff up to 5 seconds: nothing is missed or applied twice. If the server's feed was reset (`cursor_out_of_range`), it lists the branches again.
-- **Panes are reused**: the branch-to-pane map is kept in `panes.json` in the plugin's Herdr state directory. A restarted bridge checks each saved pane with `herdr pane get` before using it, and reports every branch's current state once. A pane you close is opened again at the branch's next change.
+- **Panes are reused**: the branch-to-pane map is kept in `panes.json` in the plugin's Herdr state directory, saved as soon as a pane opens and before it is named or reported on, so a bridge stopped in between does not open a second pane when it restarts. A restarted bridge checks each saved pane with `herdr pane get` before using it, and reports every branch's current state once. A pane you close is opened again at the branch's next change.
 
 ## Install
 
