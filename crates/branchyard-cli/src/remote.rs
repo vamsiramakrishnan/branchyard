@@ -301,7 +301,7 @@ fn result(op: Operation) -> Result<OperationResult, Failure> {
 /// When the server goes away it says so once, reconnects after the last
 /// entry it read, and says when it is back.
 pub fn follow_log(remote: &Remote, branch: &str, out: &mut commands::Following<'_>) -> Outcome {
-    let (stream, history) = log_and_stream(&remote.repo, branch)?;
+    let (stream, history, mut overlap) = log_and_stream(&remote.repo, branch)?;
     out.take(history)?;
     let (tx, rx) = mpsc::channel();
     let repo = remote.repo.clone();
@@ -309,6 +309,7 @@ pub fn follow_log(remote: &Remote, branch: &str, out: &mut commands::Following<'
     std::thread::spawn(move || follow_branch(&repo, &name, stream, &tx));
     loop {
         match rx.recv_timeout(commands::FOLLOW_POLL) {
+            Ok(Followed::Event(event)) if overlap.seen(&event) => {}
             Ok(Followed::Event(event)) => out.take(vec![*event])?,
             Ok(Followed::Lost(error)) => eprintln!("by: {error}; retrying"),
             Ok(Followed::Back) => eprintln!("by: reconnected to {}", remote.client.endpoint()),
@@ -320,12 +321,16 @@ pub fn follow_log(remote: &Remote, branch: &str, out: &mut commands::Following<'
     }
 }
 
-/// The branch's events so far, and the repository's event stream opened
-/// where they end. Anything the branch records between reading its events
-/// and opening the stream would be missed, and anything after opening it
-/// read twice, so its events are read again once the stream is open: none
-/// new means the two meet exactly; otherwise those are kept and the stream
-/// opened again.
+/// The branch's events so far, the repository's event stream opened where
+/// they end, and the overlap: the branch's events read once the stream was
+/// open, which are in the history and may also arrive on the stream.
+///
+/// The branch's events are read, the stream opened, and the branch's events
+/// read again from where they ended, once: an event recorded between the
+/// first read and the opening is caught by the second, and one recorded
+/// after the opening comes on the stream as well, so the second read is the
+/// overlap [`Overlap::seen`] drops. Reading again until nothing new came
+/// would never end on a branch busier than one round trip.
 fn log_and_stream(
     repo: &Repo,
     branch: &str,
@@ -333,21 +338,38 @@ fn log_and_stream(
     (
         branchyard_client::EventStream,
         Vec<branchyard::RecordedEvent>,
+        Overlap,
     ),
     Failure,
 > {
     let page = repo.events(branch, 0)?;
-    let mut cursor = page.cursor;
     let mut events = page.events;
-    loop {
-        let mut stream = repo.stream(None).max_failures(0);
-        stream.open()?;
-        let more = repo.events(branch, cursor)?;
-        if more.events.is_empty() {
-            return Ok((stream, events));
+    let mut stream = repo.stream(None).max_failures(0);
+    stream.open()?;
+    let more = repo.events(branch, page.cursor)?.events;
+    events.extend(more.iter().cloned());
+    Ok((stream, events, Overlap(more.into())))
+}
+
+/// The branch's events read after the stream opened, not yet matched on it.
+/// Those the stream also carries come first on it and in the same order, so
+/// each stream event is looked for among them; one not found means the
+/// stream has passed them all.
+struct Overlap(std::collections::VecDeque<branchyard::RecordedEvent>);
+
+impl Overlap {
+    /// Whether `event`, from the stream, is one already shown.
+    fn seen(&mut self, event: &branchyard::RecordedEvent) -> bool {
+        match self.0.iter().position(|e| e == event) {
+            Some(at) => {
+                self.0.drain(..=at);
+                true
+            }
+            None => {
+                self.0.clear();
+                false
+            }
         }
-        cursor = more.cursor;
-        events.extend(more.events);
     }
 }
 
@@ -1329,6 +1351,25 @@ fn rig_failed(json: bool, error: branchyard::Error) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stream events already read after the stream opened are dropped,
+    /// in order; the first one not among them ends the matching, so a later
+    /// repeat of the same event is shown.
+    #[test]
+    fn the_overlap_is_dropped_once() {
+        let event = |at_ms: u64, text: &str| branchyard::RecordedEvent {
+            at_ms,
+            activity: Activity::Prompt(text.into()),
+        };
+        let mut overlap = Overlap([event(1, "before"), event(2, "after")].into());
+        // `before` was recorded before the stream opened: it never comes,
+        // and `after` is the first stream event.
+        assert!(overlap.seen(&event(2, "after")));
+        assert!(!overlap.seen(&event(3, "new")));
+        assert!(!overlap.seen(&event(2, "after")), "matching has ended");
+        let mut none = Overlap(Default::default());
+        assert!(!none.seen(&event(1, "x")));
+    }
 
     /// A server's failed integration check reads as a local one: the
     /// shared check's fields and every check of the integration, at the
