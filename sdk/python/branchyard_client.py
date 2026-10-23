@@ -98,6 +98,7 @@ __all__ = [
     "Repo",
     "Report",
     "Reported",
+    "Rewound",
     "RunningError",
     "ServerError",
     "Status",
@@ -113,6 +114,11 @@ __all__ = [
 
 JSON = dict[str, Any]
 Grants = Sequence[Union["Grant", str, JSON]]
+
+# The longest one wait request asks the server for, in seconds: its own cap
+# on `POST .../wait` and `GET /v1/operations/{id}?wait=`, past which a wait
+# asks again.
+_WAIT_CAP = 30.0
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -254,6 +260,7 @@ _BY_CODE: dict[str, Callable[..., BranchyardError]] = {
     "unknown_branch": NotFoundError,
     "unknown_operation": NotFoundError,
     "unknown_trigger": NotFoundError,
+    "unknown_checkpoint": NotFoundError,
     "denied": DeniedError,
     "scope_required": DeniedError,
     "repo_not_allowed": DeniedError,
@@ -285,6 +292,7 @@ _BY_CODE: dict[str, Callable[..., BranchyardError]] = {
     "trigger_exists": ConflictError,
     "no_plan": ConflictError,
     "stale_revision": ConflictError,
+    "checkpoint_unavailable": ConflictError,
     "check_failed": CheckFailedError,
     "check_timed_out": CheckFailedError,
     "check_not_started": CheckFailedError,
@@ -523,6 +531,21 @@ class Reported(Record):
     def escalation(self) -> Optional["Message"]:
         value = self.get("escalation")
         return Message(value) if isinstance(value, dict) else None
+
+
+class Rewound(Record):
+    """What `Repo.rewind` returns, as `by rewind --json` prints it:
+    `branch`, `from` (the checkpoint it was at, None when it had none),
+    `to`, `commit` (the checkpoint's, now the branch's candidate) and
+    `session`, how its next turn continues: `{"mode": "native", "session"}`,
+    `{"mode": "summary", "turns", "reason"}` or `{"mode": "fresh",
+    "reason"}` (`docs/checkpoints.md`). `from` is a keyword, so read it as
+    `rewound["from"]`."""
+
+    @property
+    def session_mode(self) -> Optional[str]:
+        session = self.get("session")
+        return session.get("mode") if isinstance(session, dict) else None
 
 
 class CheckReport(Record):
@@ -977,20 +1000,26 @@ class Client:
         operation: Union[Operation, str],
         *,
         timeout: Optional[float] = None,
-        poll: float = 0.5,
         check: bool = False,
     ) -> Operation:
-        """Poll until the operation finishes, or `timeout` seconds pass
-        (`TimeoutError`). With `check`, a failed or interrupted operation
-        raises `OperationFailedError`."""
+        """Block until the operation finishes, or `timeout` seconds pass
+        (`TimeoutError`), with `GET /v1/operations/{id}?wait=` long polls:
+        the server answers as it finishes, or at its 30 s cap, and this asks
+        again. With `check`, a failed or interrupted operation raises
+        `OperationFailedError`."""
         id = operation.id if isinstance(operation, Operation) else operation
         deadline = None if timeout is None else time.monotonic() + timeout
-        op = operation if isinstance(operation, Operation) and operation.done else self.operation(id)
-        while not op.done:
-            if deadline is not None and time.monotonic() >= deadline:
+        op = operation if isinstance(operation, Operation) and operation.done else None
+        while op is None or not op.done:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if op is not None and remaining is not None and remaining <= 0:
                 raise TimeoutError(f"operation {id} still {op.state} after {timeout}s")
-            time.sleep(poll)
-            op = self.operation(id)
+            ask = _WAIT_CAP if remaining is None else min(_WAIT_CAP, remaining)
+            op = Operation(
+                self.request(
+                    "GET", f"/v1/operations/{_q(id)}", query={"wait": f"{ask:.3f}"}, timeout=ask + self.timeout
+                )
+            )
         if check and op.failed:
             raise OperationFailedError(op)
         return op
@@ -1374,16 +1403,37 @@ class Repo:
         *,
         name: Optional[str] = None,
         fresh_session: bool = False,
+        at: Optional[int] = None,
         key: Optional[str] = None,
         **options: Any,
     ) -> Operation:
         """A new branch from `branch`'s candidate, continuing its session
         unless `fresh_session`; `options` as `task` takes them (`harness`,
         `budget`, `isolated`, `provision`, ...). The fork keeps its parent's
-        grant unless `options["provision"]` gives another."""
-        body: JSON = {"prompt": prompt, "name": name, "fresh_session": fresh_session}
+        grant unless `options["provision"]` gives another.
+
+        With `at`, the new branch starts from `branch`'s checkpoint `at`
+        instead (0 is its base), like `by fork --at N`: its session forks
+        natively only if it ended there, else a fresh one starts with a
+        summary (`docs/checkpoints.md`). Not with `fresh_session`
+        (`InvalidRequestError`); a checkpoint the branch does not have is
+        refused before anything is queued (`NotFoundError`,
+        `unknown_checkpoint`)."""
+        body: JSON = {"prompt": prompt, "name": name, "fresh_session": fresh_session, "at": at}
         body.update(options)
         return self.client._operation(self._branch(branch, "/fork"), body, key)
+
+    def rewind(self, branch: str, to: int) -> Rewound:
+        """Reset settled `branch`, its worktree and its candidate to its
+        checkpoint `to` (0 is its base), like `by rewind --to N`; not an
+        operation, so it returns when done. Refused while a turn runs
+        (`RunningError`), while an operation holds the branch
+        (`BranchBusyError`), for a merged branch or over worktree changes no
+        checkpoint has (`DeniedError`), for a checkpoint it does not have
+        (`NotFoundError`, `unknown_checkpoint`) and for one whose ref no
+        longer names its commit (`ConflictError`, `checkpoint_unavailable`).
+        Later checkpoints stay, so rewinding to one of them undoes this."""
+        return Rewound(self.client.post(self._branch(branch, "/rewind"), {"to": to}, key=new_key()))
 
     def reincarnate(
         self, branch: str, *, name: Optional[str] = None, key: Optional[str] = None, **options: Any
@@ -1542,7 +1592,7 @@ class Repo:
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            ask = 30.0 if remaining is None else min(30.0, remaining)
+            ask = _WAIT_CAP if remaining is None else min(_WAIT_CAP, remaining)
             waited = Record(
                 self.client.request(
                     "POST",
@@ -1745,7 +1795,8 @@ class EventStream:
     the last `TransportError`. The server comments every 15 s, so a read
     quiet for `read_timeout` seconds is a dead connection: the stream
     reconnects at once (not a failure) after calling `on_idle`, if set,
-    which may `close()` it. `for entry in stream` is the loop."""
+    which may `close()` it. `for entry in stream` is the loop; `with
+    repo.stream() as stream:` closes it however the block ends."""
 
     def __init__(
         self,
@@ -1765,6 +1816,12 @@ class EventStream:
         self.on_idle: Optional[Callable[[], None]] = None
         self._response: Any = None
         self._closed = False
+
+    def __enter__(self) -> "EventStream":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     def __iter__(self) -> Iterator[FeedEntry]:
         failures = 0
@@ -2012,12 +2069,13 @@ class Reply:
     def steered(self) -> bool:
         return self.steer is not None
 
-    def wait(self, timeout: Optional[float] = None, poll: float = 0.5) -> "Reply":
-        """Block until the operation finishes; `OperationFailedError` when
-        it failed, `TimeoutError` past `timeout`. Then `text` is ready."""
+    def wait(self, timeout: Optional[float] = None) -> "Reply":
+        """Block until the operation finishes (`Client.wait`'s long poll);
+        `OperationFailedError` when it failed, `TimeoutError` past
+        `timeout`. Then `text` is ready."""
         if self.operation is None:
             raise ValueError("no operation to wait for: the message was steered into a turn without one")
-        self.operation = self.repo.client.wait(self.operation, timeout=timeout, poll=poll, check=True)
+        self.operation = self.repo.client.wait(self.operation, timeout=timeout, check=True)
         return self
 
     @property

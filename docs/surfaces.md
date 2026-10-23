@@ -768,6 +768,10 @@ A third-party surface (a Slack or Discord bot, a web app, a scheduler) drives `b
 | `Inspection::grants` (`by inspect --json`, `by inspect`'s `connectors` line, the HTTP inspection, Python `Inspection.grants`) | none: what a child was given had to be inferred from the narrowing rules | the branch's grant as stored, what its turns' tokens carry and the most a child of its can be given; left out when it has none |
 | `sdk/python/branchyard_client.py`: `Client`, `Repo`, `Operation`, `EventStream`, `Grant`, `Surface`, `Conversation`, `Reply`, errors by code | the Rust `branchyard-client` crate and raw HTTP | a standard-library Python client over the whole API: idempotent operations, typed errors, the event stream with resumption, one branch per conversation with `queue`, `steer` and `skip` while busy, a reply's text by the operation's cursors, grants given and inspected |
 | `ruff.toml`, the `python` CI job | `tools/` and `tests/` | the client module too, at a Python 3.9 target (`per-file-target-version`); `tests/test_sdk_client.py` in the controls job |
+| `sdk/python/pyproject.toml` | loose modules, copied or put on `sys.path` | `pip install ./sdk/python` (or from the extracted SDK archive) installs `branchyard` and `branchyard_client`, no dependencies, at the workspace version, which `tools/package.py` enforces ([install](sdk.md#install)) |
+| `Repo.rewind(branch, to)` → `Rewound`, `Repo.fork(..., at=N)`, `with repo.stream() as stream` | none; raw `client.request` | the client's `rewind` and `ForkRequest::at`, with `unknown_checkpoint` a `NotFoundError` and `checkpoint_unavailable` a `ConflictError`; the stream closes when the block ends |
+| `branchyard.wait(branch, timeout)` (the in-harness module) | took `poll`, ignored since the wait became `by wait` | no `poll`: a call that passes it is a `TypeError` |
+| Which routes the Python client lacks | unchecked | `RouteParity` in `tests/test_sdk_client.py`: every server route (`docs/facts.json`) is reached by a method, checked against a recorder, or excused with its reason ([SDKs](sdk.md#the-rest-of-the-api)) |
 
 ## Added with the borrowed designs
 
@@ -857,3 +861,37 @@ See [up](up.md) and [configuration](setup.md#configuration).
 | Bring the configured backends up | `Yard::up_plan`, `Yard::up_apply`, `Yard::up` over `branchyard::up::Machine` (`LocalMachine` is this machine) | `up [--plan] [--yes] [--json]` | refused: a server brings up its own machine | none | Python `Local(root).up()`, `doctor()`, `harnesses()`, `run()` | refused inside a harness |
 | A server of the process's own | n/a | `serve` | n/a | n/a | Python `Client.local(root)`: `by serve` on a free loopback port with a fresh token, stopped on `close()` | n/a |
 
+## Added with the Claude Code plugin's hooks, status line and marketplace
+
+See [harness integration](harness-integration.md#claude-code) and [distribution](distribution.md#install-for-claude-code). Both commands are the CLI's alone: they serve a Claude Code session on this machine, read its local store, and have no SDK operation, route, client call or delegation tool beyond `branchyard::glance`.
+
+| Surface | Before | Now |
+|---|---|---|
+| `by hook session-start\|user-prompt-submit` | none: a Claude Code session a person started learned a branch finished by polling `by ls` or blocking in `by wait` | reads the hook's JSON on stdin and prints `hookSpecificOutput.additionalContext`: with `BRANCHYARD_BRANCH`, that branch's unread messages; otherwise branches that finished, failed, are blocked or ask since the session's last call (`.branchyard/hooks/<session_id>.json`); at most twelve lines; read-only, two seconds at most, always exit 0 |
+| `by statusline` | none | one line for Claude Code's `statusLine` command, `by: feat-x · 2 running · 1 asking · 3 ready`; nothing outside a repository Branchyard uses |
+| `branchyard::glance` (`read`, `find_root`, `state_dir`, `Glance`, `Counts`, `READ_WAIT`) | none; `Yard::open` creates, upgrades and recovers | a read-only look at `.branchyard/state.db`: branches, unanswered questions from running branches, a branch's unread messages |
+| `plugins/branchyard/hooks/hooks.json` | none | `SessionStart` and `UserPromptSubmit` running `by hook` when `by` is on `PATH`; not in the plugin projected into Branchyard's own Claude Code turns |
+| `plugins/branchyard/commands/status.md`, `wait.md` | `/branchyard:setup` only | also `/branchyard:status` (branches and what needs attention) and `/branchyard:wait` (`by wait`, then a summary) |
+| `.claude-plugin/marketplace.json` | none: `claude --plugin-dir plugins/branchyard` | the repository is a marketplace: `/plugin marketplace add vamsiramakrishnan/branchyard`, `/plugin install branchyard@branchyard`; `tools/package.py` refuses a marketplace entry not at the workspace version |
+
+## Changed with long-polled operations
+
+See [server](server.md#operations).
+
+| Gap | Before | Now |
+|---|---|---|
+| `GET /v1/operations/{id}` | answered at once, so every waiter polled it: the Rust client and `by --remote` every 200 to 250 ms, Python every 0.5 s | `?wait=SECONDS` long-polls: the answer comes as the operation finishes, or with it unfinished once that long passes (capped at 30s); a `wait` that is not a number of seconds is `400 invalid_request` with `detail.field` `wait` |
+| `Client::wait` | `wait(id, poll)`: slept `poll` between reads, with no timeout | `wait(id)` and `wait_timeout(id, timeout)` over the long poll, asking again past the cap |
+| Python `Client.wait`, `Reply.wait` | slept `poll` (0.5 s) between reads | no `poll`; long polls, asked again until `timeout` |
+| `by --remote` following an operation | read it every 250 ms, sleeping between reads when the event stream was lost | long polls of 5 s on a thread of their own; the stream and the operation are heard on one channel |
+| `Delegate::wait` through the broker (`Delegate::connect`) | inspected the branch every 100 ms | the engine's blocking `wait`, as `Delegate::wait_for` |
+
+## Added with feedback as data
+
+See [knowledge](knowledge.md) and [pull requests](pull-requests.md#the-events).
+
+| Surface | Before | Now |
+|---|---|---|
+| `Activity::Feedback` (`Feedback`, `FeedbackItem`, `FeedbackKind`, `FeedbackSource`); `Branch::record_feedback`, `prompt_digest` | none | `by review` and `by pr --watch` record their feedback as data beside the prompt, naming it by digest; in `schema/contract.json` |
+| `feedback` on send requests | none | the server records it just before the turn; refused with `retry` |
+| The knowledge extractor | parsed feedback out of the prompt's prose | reads the `feedback` record; the prose only for older logs |

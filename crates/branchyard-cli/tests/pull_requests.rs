@@ -31,6 +31,8 @@ next() {
 case "$1 $2" in
 "auth status")
   if [ -f "$d/unauthenticated" ]; then
+    # A localized gh, unless run in the C locale.
+    if [ "$LC_ALL" != C ]; then echo "Nicht angemeldet. Bitte anmelden." >&2; exit 1; fi
     echo "You are not logged into any GitHub hosts. To log in, run: gh auth login" >&2
     exit 1
   fi
@@ -451,6 +453,26 @@ fn watch_sends_ci_failures_and_review_comments_back_once_and_pushes_each_fix() {
     assert_eq!(delivered[0]["keys"], json!([format!("ci:test:{head1}")]));
     assert_eq!(delivered[0]["via"], "send");
     assert_eq!(delivered[1]["keys"], json!(["thread:C1"]));
+    // Each delivery is also recorded as data, naming its prompt by digest.
+    let records: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["activity"] == "feedback")
+        .collect();
+    assert_eq!(records.len(), 2);
+    for (record, prompt) in records.iter().zip(&prompts[1..]) {
+        assert_eq!(record["source"], "pull_request");
+        assert_eq!(
+            record["reference"],
+            "https://github.com/acme/widgets/pull/7"
+        );
+        assert_eq!(record["prompt"], branchyard::prompt_digest(prompt).as_str());
+    }
+    assert_eq!(records[0]["items"][0]["kind"], "check");
+    assert_eq!(
+        records[1]["items"],
+        json!([{"kind": "comment", "path": "a.txt", "line": 1, "author": "alice",
+                "body": "Please WRITE review.txt=done"}])
+    );
     assert_eq!(repo_events_of(events, "watch_stopped").len(), 1);
     let log = stdout(&repo.by(&["log", "feat"]));
     assert!(
@@ -865,9 +887,16 @@ fn missing_or_logged_out_gh_is_explained_before_anything_is_pushed() {
         .unwrap();
     assert!(stderr(&out).contains("not on PATH"), "{}", stderr(&out));
 
-    // Logged out.
+    // Logged out, said in English whatever the user's locale.
     fs::write(repo.gh.join("unauthenticated"), "").unwrap();
-    let out = repo.by(&["pr", "feat"]);
+    let out = repo
+        .command(env!("CARGO_BIN_EXE_by"))
+        .args(["pr", "feat"])
+        .env("LC_ALL", "de_DE.UTF-8")
+        .env("LANG", "de_DE.UTF-8")
+        .env("LANGUAGE", "de")
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     assert!(
         stderr(&out).contains("gh is not logged in to GitHub; run `gh auth login` first"),

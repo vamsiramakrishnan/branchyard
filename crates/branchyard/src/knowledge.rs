@@ -21,7 +21,7 @@
 //! token budget; the `provisioned` event lists their ids.
 
 use branchyard_support::best_effort;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
@@ -31,7 +31,9 @@ use crate::fleet::{classify, recorded_route, FleetActivity, TaskKind};
 use crate::judge::{Judge, JudgedBy};
 use crate::record::Recorder;
 use crate::state::Record;
-use crate::{Activity, Error, RecordedEvent, Yard};
+use crate::{
+    prompt_digest, Activity, Error, Feedback, FeedbackKind, FeedbackSource, RecordedEvent, Yard,
+};
 use branchyard_support::time::now_ms;
 
 /// Where an entry applies: the whole repository, files matching a path
@@ -783,6 +785,37 @@ fn bounded(text: &str) -> String {
     format!("{}...", cut.trim_end())
 }
 
+/// The corrections in a structured [`Feedback`] record: (path, comment)
+/// for each person's comment, failed checks left out. A pull request's
+/// quoted lines are joined with spaces, as [`pull_request_feedback`]
+/// joins them, so old and new logs propose the same text.
+fn structured_feedback(feedback: &Feedback) -> Vec<(Option<String>, String)> {
+    feedback
+        .items
+        .iter()
+        .filter(|item| item.kind == FeedbackKind::Comment)
+        .map(|item| {
+            let body = match feedback.source {
+                FeedbackSource::PullRequest => item
+                    .body
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                FeedbackSource::Review => item.body.trim().to_owned(),
+            };
+            (item.path.clone(), body)
+        })
+        .filter(|(_, body)| !body.is_empty())
+        .collect()
+}
+
+// The two parsers below read feedback back out of the prompt's prose. They
+// are the fallback for logs written before feedback was recorded as data
+// (`Activity::Feedback`), and break if the prompt's wording changes; a log
+// with the record never reaches them for that prompt.
+
 /// `by review`'s comments in `text`: (file, comment).
 fn review_comments(text: &str) -> Vec<(String, String)> {
     let mut found = Vec::new();
@@ -858,7 +891,19 @@ fn pull_request_feedback(text: &str) -> Vec<(Option<String>, String)> {
 
 /// The deterministic extractor: the person's corrections in `events`
 /// after the task, review comments and pull request review feedback.
+/// Feedback is read from its [`Activity::Feedback`] record, paired with
+/// its prompt by the prompt's digest; a prompt without one (an older log)
+/// is parsed as prose.
 pub(crate) fn extract(events: &[RecordedEvent]) -> Vec<Proposal> {
+    let recorded: HashMap<&str, &Feedback> = events
+        .iter()
+        .filter_map(|event| match &event.activity {
+            Activity::Feedback(feedback) => {
+                feedback.prompt.as_deref().map(|d| (d, feedback.as_ref()))
+            }
+            _ => None,
+        })
+        .collect();
     let mut proposals = Vec::new();
     let mut turn = 0u32;
     let mut push = |text: &str, scope: KnowledgeScope, turn: u32, via: &str| {
@@ -891,6 +936,16 @@ pub(crate) fn extract(events: &[RecordedEvent]) -> Vec<Proposal> {
             continue;
         }
         let at = turn.max(1);
+        if let Some(feedback) = recorded.get(prompt_digest(text).as_str()) {
+            let via = match feedback.source {
+                FeedbackSource::PullRequest => "pull_request",
+                FeedbackSource::Review => "review",
+            };
+            for (path, body) in structured_feedback(feedback) {
+                push(&body, KnowledgeScope { path, kind: None }, at, via);
+            }
+            continue;
+        }
         if text.starts_with("Feedback on pull request #") {
             for (path, body) in pull_request_feedback(text) {
                 let scope = KnowledgeScope { path, kind: None };
@@ -1203,6 +1258,7 @@ pub(crate) fn on_end(yard: &Yard, name: &str, trigger: DistillTrigger) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::FeedbackItem;
 
     fn entry(
         id: u64,
@@ -1360,6 +1416,98 @@ mod tests {
                     None,
                     "steer",
                     Some(7)
+                ),
+            ]
+        );
+    }
+
+    /// Feedback recorded as data is read from the record, whatever its
+    /// prompt says: prose the old parsers would misread (or not see at
+    /// all) gives the recorded comments, a failed check gives none, and a
+    /// record pairs only with its own prompt.
+    #[test]
+    fn the_extractor_reads_recorded_feedback_not_the_prompt() {
+        let reworded = "PR #9 has news. Item one. Please handle:\n\
+                        1. Something unrelated. File: nowhere\n";
+        let comments = "Two notes from your reviewer, in a new wording.";
+        let record = |source, prompt: &str, items: Vec<FeedbackItem>| RecordedEvent {
+            at_ms: 0,
+            activity: Activity::Feedback(Box::new(Feedback {
+                source,
+                reference: Some("https://x/9".into()),
+                items,
+                prompt: Some(prompt_digest(prompt)),
+            })),
+        };
+        let item = |kind, path: Option<&str>, body: &str| FeedbackItem {
+            kind,
+            path: path.map(str::to_owned),
+            line: Some(3),
+            body: body.into(),
+            ..FeedbackItem::default()
+        };
+        let events = vec![
+            prompt("Fix the parser"),
+            record(
+                FeedbackSource::PullRequest,
+                reworded,
+                vec![
+                    item(FeedbackKind::Check, None, "CI check \"test\" failed"),
+                    item(
+                        FeedbackKind::Comment,
+                        Some("src/lib.rs"),
+                        "Never unwrap\nin library code",
+                    ),
+                ],
+            ),
+            prompt(reworded),
+            record(
+                FeedbackSource::Review,
+                comments,
+                vec![item(
+                    FeedbackKind::Comment,
+                    Some("a.rs"),
+                    "Name the constant after its unit",
+                )],
+            ),
+            RecordedEvent {
+                at_ms: 0,
+                activity: Activity::Steered {
+                    id: 1,
+                    by: "by review".into(),
+                    text: comments.into(),
+                },
+            },
+            // Not the recorded prompt: read as the person's own words.
+            prompt("Keep the changelog in step with every change"),
+        ];
+        let found: Vec<(String, Option<String>, String, Option<u32>)> = extract(&events)
+            .into_iter()
+            .map(|p| (p.text, p.scope.path, p.via, p.turn))
+            .collect();
+        let row = |t: &str, p: Option<&str>, v: &str, turn| {
+            (t.to_owned(), p.map(str::to_owned), v.to_owned(), Some(turn))
+        };
+        assert_eq!(
+            found,
+            [
+                row(
+                    "Never unwrap in library code",
+                    Some("src/lib.rs"),
+                    "pull_request",
+                    2
+                ),
+                row(
+                    "Name the constant after its unit",
+                    Some("a.rs"),
+                    "review",
+                    2
+                ),
+                row(
+                    "Keep the changelog in step with every change",
+                    None,
+                    "send",
+                    3
                 ),
             ]
         );

@@ -385,6 +385,12 @@ pub struct SendRequest {
     /// `docs/server.md#scheduling`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
+    /// The prompt is feedback (`by review`'s comments, a pull request's):
+    /// the server records it as data on the branch's log just before the
+    /// turn, as `Branch::record_feedback` does, so readers need not parse
+    /// the prompt. Refused with `retry`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<branchyard::Feedback>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/fork`.

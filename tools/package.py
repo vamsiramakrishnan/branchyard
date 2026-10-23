@@ -21,6 +21,7 @@ PLUGIN = ROOT / "plugins" / "branchyard"
 SKILL = PLUGIN / "skills" / "delegate"
 SETUP_SKILL = PLUGIN / "skills" / "setup"
 SDK = ROOT / "sdk" / "python"
+MARKETPLACE = ROOT / ".claude-plugin" / "marketplace.json"
 
 # A fixed timestamp for every archive entry (ZIP's minimum representable
 # date-time), so archives from different builds never differ only by mtime.
@@ -35,15 +36,36 @@ ARCHIVES = [
 ]
 
 
+def _generated(relative: Path) -> bool:
+    """Whether `relative` is a build's leftover rather than a source: bytecode,
+    or what `pip install ./sdk/python` writes into the tree it builds from."""
+    parts = relative.parts
+    return (
+        "__pycache__" in parts
+        or relative.suffix == ".pyc"
+        or parts[0] == "build"
+        or any(part.endswith(".egg-info") for part in parts)
+    )
+
+
 def inputs(root: Path) -> dict:
-    """Every regular file under `root`, by its path relative to it, sorted."""
+    """Every regular file under `root`, by its path relative to it, sorted,
+    less build leftovers."""
     result = {}
     for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if _generated(relative):
+            continue
         if path.is_symlink():
             raise ValueError(f"package inputs must not be symlinks: {path}")
-        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc":
-            result[path.relative_to(root).as_posix()] = path.read_bytes()
+        if path.is_file():
+            result[relative.as_posix()] = path.read_bytes()
     return result
+
+
+def sdk_version() -> str:
+    """`sdk/python/pyproject.toml`'s `project.version`."""
+    return tomllib.loads((SDK / "pyproject.toml").read_text())["project"]["version"]
 
 
 def archive(path: Path, files: dict, root_name: str) -> None:
@@ -61,6 +83,25 @@ def archive(path: Path, files: dict, root_name: str) -> None:
             output.writestr(info, data)
 
 
+def check_marketplace(version: str) -> None:
+    """`.claude-plugin/marketplace.json` at the repository root, which
+    `/plugin marketplace add` reads from a clone: it must list this plugin
+    by name, at its directory, at the workspace version."""
+    marketplace = json.loads(MARKETPLACE.read_text())
+    entries = [p for p in marketplace.get("plugins", []) if p.get("name") == "branchyard"]
+    if (
+        len(entries) != 1
+        or not marketplace.get("owner", {}).get("name")
+        or entries[0].get("source") != "./" + PLUGIN.relative_to(ROOT).as_posix()
+        or entries[0].get("version") != version
+        or marketplace.get("metadata", {}).get("version") != version
+    ):
+        raise ValueError(
+            f"{MARKETPLACE.relative_to(ROOT)} must name an owner and list the branchyard plugin once, "
+            f"at ./plugins/branchyard, with version {version!r}, the workspace version"
+        )
+
+
 def build(destination: Path) -> list[Path]:
     """Build every archive into `destination`; returns their paths, in the
     order of `ARCHIVES`."""
@@ -71,6 +112,9 @@ def build(destination: Path) -> list[Path]:
             raise ValueError(
                 f"{host}/plugin.json's name and version must be 'branchyard' and {version!r}, the workspace version"
             )
+    if sdk_version() != version:
+        raise ValueError(f"sdk/python/pyproject.toml's version must be {version!r}, the workspace version")
+    check_marketplace(version)
     destination.mkdir(parents=True, exist_ok=True)
     license_bytes = (ROOT / "LICENSE").read_bytes()
     paths = []

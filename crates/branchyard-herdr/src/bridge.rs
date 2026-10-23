@@ -373,10 +373,15 @@ impl<'a> Bridge<'a> {
                         branch.to_owned(),
                         PaneEntry {
                             pane_id: opened.pane_id.clone(),
-                            tab_id: opened.tab_id,
+                            tab_id: opened.tab_id.clone(),
                         },
                     );
-                    *changed = true;
+                    // Saved before anything else is asked of herdr: a
+                    // bridge stopped between opening a pane and the end of
+                    // the batch would otherwise forget it, and open another
+                    // when it restarts.
+                    self.panes.save(self.config);
+                    self.name(branch, &opened);
                     opened.pane_id
                 }
             };
@@ -410,6 +415,11 @@ impl<'a> Bridge<'a> {
                 &env,
             )
             .map_err(|e| e.to_string())?;
+        Ok(opened)
+    }
+
+    /// Name a newly opened pane and its tab after the branch.
+    fn name(&self, branch: &str, opened: &Opened) {
         let label = format!("by: {branch}");
         best_effort(
             "name the herdr pane and tab",
@@ -427,7 +437,6 @@ impl<'a> Bridge<'a> {
                     .call(&["tab".into(), "rename".into(), tab.clone(), label]),
             );
         }
-        Ok(opened)
     }
 }
 

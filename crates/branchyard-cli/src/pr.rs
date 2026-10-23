@@ -19,8 +19,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use branchyard::{
-    Activity, Branch, BranchInfo, BranchStatus, CheckRun, CiSummary, IssueLink,
-    PullRequestActivity, PullRequestObservation, PullRequestRef, Pushed, RecordedEvent, Yard,
+    Activity, Branch, BranchInfo, BranchStatus, CheckRun, CiSummary, FeedbackItem, FeedbackKind,
+    FeedbackSource, IssueLink, PullRequestActivity, PullRequestObservation, PullRequestRef, Pushed,
+    RecordedEvent, Yard,
 };
 use branchyard_workspace::Git;
 use serde_json::{json, Value};
@@ -1294,6 +1295,28 @@ pub struct Feedback {
     /// For a failed CI check, its link, whose run's failed log
     /// [`failed_log`] adds to `text` before delivery.
     pub log: Option<String>,
+    /// The same piece as data, recorded beside the prompt
+    /// ([`branchyard::Feedback`]) so readers of the log need not parse
+    /// `text`.
+    pub item: FeedbackItem,
+}
+
+/// A failed check, as a [`FeedbackItem`].
+fn check_item(body: String) -> FeedbackItem {
+    FeedbackItem {
+        kind: FeedbackKind::Check,
+        body,
+        ..FeedbackItem::default()
+    }
+}
+
+/// A person's comment, as a [`FeedbackItem`].
+fn comment_item(author: &str, body: &str) -> FeedbackItem {
+    FeedbackItem {
+        author: Some(author.to_owned()).filter(|a| !a.is_empty()),
+        body: body.trim().to_owned(),
+        ..FeedbackItem::default()
+    }
 }
 
 const THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { \
@@ -1403,10 +1426,12 @@ pub fn observe(gh: &Gh, pr: &PullRequestRef) -> Result<Observed, Failure> {
                         true => String::new(),
                         false => format!(" (workflow {workflow})"),
                     };
+                    let text = format!("CI check \"{name}\"{about} failed on {on}: {link}");
                     feedback.push(Feedback {
                         key,
                         summary: format!("CI check {name} failed on {on}"),
-                        text: format!("CI check \"{name}\"{about} failed on {on}: {link}"),
+                        item: check_item(text.clone()),
+                        text,
                         log: Some(link),
                     });
                 }
@@ -1432,6 +1457,7 @@ pub fn observe(gh: &Gh, pr: &PullRequestRef) -> Result<Observed, Failure> {
             summary: format!("review by @{author}"),
             text: format!("@{author} {what}:\n{}", quote(&body)),
             log: None,
+            item: comment_item(&author, &body),
         });
     }
     for comment in view["comments"].as_array().into_iter().flatten() {
@@ -1445,6 +1471,7 @@ pub fn observe(gh: &Gh, pr: &PullRequestRef) -> Result<Observed, Failure> {
             summary: format!("comment by @{author}"),
             text: format!("@{author} commented:\n{}", quote(&body)),
             log: None,
+            item: comment_item(&author, &body),
         });
     }
     let mut unresolved = 0;
@@ -1484,6 +1511,11 @@ pub fn observe(gh: &Gh, pr: &PullRequestRef) -> Result<Observed, Failure> {
                 summary: format!("review comment by @{author}{place}"),
                 text: format!("Review comment by @{author}{place}:\n{}", quote(&body)),
                 log: None,
+                item: FeedbackItem {
+                    path: comment["path"].as_str().map(str::to_owned),
+                    line: comment["line"].as_u64().and_then(|l| u32::try_from(l).ok()),
+                    ..comment_item(&author, &body)
+                },
             });
         }
     }
@@ -1552,6 +1584,16 @@ pub fn feedback_prompt(pr: &PullRequestRef, feedback: &[Feedback]) -> String {
          request again.\n",
     );
     text
+}
+
+/// `feedback` on `pr` as data, recorded beside its prompt.
+pub fn feedback_record(pr: &PullRequestRef, feedback: &[Feedback]) -> branchyard::Feedback {
+    branchyard::Feedback {
+        source: FeedbackSource::PullRequest,
+        reference: Some(pr.url.clone()),
+        items: feedback.iter().map(|f| f.item.clone()).collect(),
+        prompt: None,
+    }
 }
 
 // Commands.
@@ -1808,16 +1850,18 @@ fn push_if_new(
                 run.argv.join(" "),
                 short(&run.commit)
             ))?;
+            let text = format!(
+                "The branch's check `{}` failed on its candidate {}, so it was not \
+                 pushed. Its output ended:\n```\n{}\n```",
+                run.argv.join(" "),
+                short(&run.commit),
+                tail_lines(&run.output_tail, 40)
+            );
             Ok(PushOutcome::CheckFailed(Feedback {
                 key: format!("check:{}", run.commit),
                 summary: format!("local check failed on {}", short(&run.commit)),
-                text: format!(
-                    "The branch's check `{}` failed on its candidate {}, so it was not \
-                     pushed. Its output ended:\n```\n{}\n```",
-                    run.argv.join(" "),
-                    short(&run.commit),
-                    tail_lines(&run.output_tail, 40)
-                ),
+                item: check_item(text.clone()),
+                text,
                 log: None,
             }))
         }
@@ -1928,6 +1972,9 @@ fn deliver(
         summary.join("; ")
     ))?;
     let branch = yard.branch(name)?;
+    // Whether it is steered or sent, the prompt is `text`; the record names
+    // it by digest.
+    branch.record_feedback(&text, feedback_record(pr, feedback))?;
     if branch.info().status == BranchStatus::Running {
         let steer = yard
             .steer_as(name, &text, "by pr --watch")
@@ -2328,14 +2375,36 @@ mod tests {
             base: None,
             draft: false,
         };
-        let feedback = vec![Feedback {
-            key: "k".into(),
-            summary: "s".into(),
-            text: "CI check \"t\" failed.".into(),
-            log: None,
-        }];
+        let feedback = vec![
+            Feedback {
+                key: "k".into(),
+                summary: "s".into(),
+                text: "CI check \"t\" failed.".into(),
+                log: None,
+                item: check_item("CI check \"t\" failed.".into()),
+            },
+            Feedback {
+                key: "c".into(),
+                summary: "s".into(),
+                text: "Review comment by @ana on a.rs:3:\n> Name it\n> well".into(),
+                log: None,
+                item: FeedbackItem {
+                    path: Some("a.rs".into()),
+                    line: Some(3),
+                    ..comment_item("ana", " Name it\nwell\n")
+                },
+            },
+        ];
+        let record = feedback_record(&pr, &feedback);
+        assert_eq!(record.source, FeedbackSource::PullRequest);
+        assert_eq!(record.reference.as_deref(), Some("https://x/pull/7"));
+        assert_eq!(record.items[0].kind, FeedbackKind::Check);
+        assert_eq!(record.items[1].kind, FeedbackKind::Comment);
+        assert_eq!(record.items[1].body, "Name it\nwell");
+        assert_eq!(record.items[1].author.as_deref(), Some("ana"));
+        let feedback = &feedback[..1];
         assert_eq!(
-            feedback_prompt(&pr, &feedback),
+            feedback_prompt(&pr, feedback),
             "Feedback on pull request #7 (https://x/pull/7) for this branch:\n\n\
              1. CI check \"t\" failed.\n\nAddress it on this branch. When this turn ends, the \
              branch is pushed to the pull request again.\n"

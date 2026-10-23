@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use crate::args::{Permissions, TaskArgs};
 use crate::commands::{self, print, Env, Failure, Outcome, Target};
 use crate::open;
+use crate::remote;
 use crate::review_format::{format_diff_comments, DiffComment};
 
 /// What starts a comment line.
@@ -258,6 +259,26 @@ pub fn message(comments: &[DiffComment]) -> String {
     )
 }
 
+/// `comments` as data, recorded beside their prompt.
+pub fn feedback_record(comments: &[DiffComment]) -> branchyard::Feedback {
+    let items = comments
+        .iter()
+        .map(|c| branchyard::FeedbackItem {
+            path: Some(c.file_path.clone()),
+            line: Some(c.line_number).filter(|&l| l > 0),
+            start_line: c.start_line.filter(|&s| s > 0 && s != c.line_number),
+            body: c.body.clone(),
+            ..branchyard::FeedbackItem::default()
+        })
+        .collect();
+    branchyard::Feedback {
+        source: branchyard::FeedbackSource::Review,
+        reference: None,
+        items,
+        prompt: None,
+    }
+}
+
 /// What `by review` was asked to do.
 pub struct ReviewArgs<'a> {
     pub branch: &'a str,
@@ -381,6 +402,22 @@ pub fn main(env: &Env, target: &Target, args: &ReviewArgs) -> Outcome {
         comments.len(),
         if comments.len() == 1 { "" } else { "s" }
     );
+    let record = feedback_record(&comments);
+    match target {
+        Target::Local => commands::open()?
+            .branch(branch)?
+            .record_feedback(&text, record)?,
+        // A server records it with the send; a detached send carries the
+        // prose only.
+        Target::Remote(remote) if !args.detach => {
+            remote::send_feedback(env, remote, branch, &text, args.task, record)?;
+            if args.file.is_none() {
+                branchyard_support::cleanup_file(&path);
+            }
+            return Ok(());
+        }
+        Target::Remote(_) => {}
+    }
     if args.detach {
         detach(target, branch, &text, args.task, &path)?;
     } else {
@@ -427,40 +464,20 @@ fn detach(target: &Target, branch: &str, text: &str, task: &TaskArgs, draft: &Pa
     }
     command.args(["--", branch, text]);
     let log = draft.with_extension(format!("{}.log", branchyard_support::time::now_ms()));
-    let before = last_turn(target, branch)?;
-    let mut child = crate::detach::spawn(&mut command, &log)?;
+    let (mut child, handshake) = crate::detach::spawn_reporting(&mut command, &log)?;
     eprintln!(
         "by: sending in the background; its output goes to {}",
         log.display()
     );
-    // Return once the send started its turn, or the server queued it, so
-    // a `by wait` after this waits for that turn, not the one before.
-    let deadline = std::time::Instant::now() + SEND_STARTS;
-    while child.try_wait()?.is_none() && std::time::Instant::now() < deadline {
-        let queued = match target {
-            Target::Remote(remote) => !remote.repo.operations(Some(branch))?.is_empty(),
-            Target::Local => false,
-        };
-        if queued || last_turn(target, branch)? != before {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    // Return once the send started its turn, or the server accepted it,
+    // so a `by wait` after this waits for that turn, not the one before.
+    // The send reports that on a pipe, as a `--detach` turn does.
+    handshake.wait(&mut child, SEND_STARTS)?;
     Ok(())
 }
 
 /// How long `--detach` waits for the background send to start its turn.
 const SEND_STARTS: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// `branch`'s status and turn count: a send changes one when its turn
-/// starts, the status to running and the count when the turn ends.
-fn last_turn(target: &Target, branch: &str) -> Result<(branchyard::BranchStatus, u32), Failure> {
-    let info = match target {
-        Target::Local => commands::open()?.branch(branch)?.info().clone(),
-        Target::Remote(remote) => remote.repo.branch(branch)?,
-    };
-    Ok((info.status, info.turns))
-}
 
 #[cfg(test)]
 mod tests {
@@ -588,5 +605,37 @@ index 3333333..0000000
             .contains("ends early"));
         let empty_comment = edit(&[(" fn a() {}", ">>   ")]);
         assert_eq!(parse(DIFF, &empty_comment).unwrap(), []);
+    }
+
+    /// The record keeps each comment's file, line or range, and body as
+    /// written; a whole-file comment has no line.
+    #[test]
+    fn the_feedback_record_keeps_each_comment_as_data() {
+        let record = feedback_record(&[
+            comment("a.rs", Some(3), 7, "Say \"why\"\nhere"),
+            comment("a.rs", Some(2), 2, "x"),
+            comment("b.rs", None, 0, "Rename"),
+        ]);
+        assert_eq!(record.source, branchyard::FeedbackSource::Review);
+        let items: Vec<(&str, Option<u32>, Option<u32>, &str)> = record
+            .items
+            .iter()
+            .map(|i| {
+                (
+                    i.path.as_deref().unwrap(),
+                    i.start_line,
+                    i.line,
+                    i.body.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            items,
+            [
+                ("a.rs", Some(3), Some(7), "Say \"why\"\nhere"),
+                ("a.rs", None, Some(2), "x"),
+                ("b.rs", None, None, "Rename"),
+            ]
+        );
     }
 }

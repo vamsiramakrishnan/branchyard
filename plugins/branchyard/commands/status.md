@@ -1,0 +1,22 @@
+---
+description: Show this repository's Branchyard branches and what needs your attention (questions, blocked or failed branches, results ready to integrate)
+argument-hint: "[branch]"
+---
+
+Show the state of this repository's Branchyard branches, for "$ARGUMENTS"
+(if empty, all of them).
+
+1. Run `by ls --json` (on a Branchyard branch, where BRANCHYARD_BRANCH is
+   set, run `by children --json` instead). With a branch named, run
+   `by show <branch> --json` too.
+2. For each parent with children, run `by inbox --as <parent> --unread --json`
+   (on a Branchyard branch: `by inbox --unread --json`, your own).
+3. Summarise in a short table: name, state, harness, cost. Then list what
+   needs attention, most urgent first: unanswered questions (with their
+   message id, so the user can `by answer --as <parent> ID TEXT`), blocked or failed
+   branches with their reason, branches waiting for plan approval, and
+   branches `ready` to integrate (`by merge <branch>`, or `by integrate` on
+   a branch).
+
+Only read: do not answer, merge, cancel or discard anything unless the user
+asks you to.

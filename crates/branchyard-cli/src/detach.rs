@@ -4,36 +4,37 @@
 //! in a log file), so the turn outlives the terminal and this process.
 //!
 //! The background command learns it is one from [`REPORT_ENV`], which
-//! names a file it reports to ([`Reporter`]): the branch its first event is
-//! about, then that the branch's prompt was recorded, which the engine does
-//! once the harness is up and the turn holds its lease, just before the
-//! prompt is submitted. The launching command waits for that report, or for
-//! the background command to exit, and then prints the branch and how to
-//! follow it.
+//! names the write end of a pipe it inherited ([`spawn_reporting`]). It
+//! reports there ([`Reporter`]), one JSON line each: the branch its first
+//! event is about, then that the branch's prompt was recorded, which the
+//! engine does once the harness is up and the turn holds its lease, just
+//! before the prompt is submitted; or that it failed first, with why. Then
+//! it closes the pipe. The launching command blocks reading the pipe until
+//! the turn started, the command failed or ended (the pipe closes), or
+//! [`STARTS`] passed, and then prints the branch and how to follow it.
+//! `by review --detach` waits on its background `by send` the same way.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use branchyard::{Activity, BranchEvent};
 use branchyard_support::LockExt as _;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::args::{Command as Parsed, Permissions};
 use crate::commands::{self, Failure, Outcome, Target};
 
-/// In the background command's environment: the file it reports to.
-pub const REPORT_ENV: &str = "BRANCHYARD_DETACH_REPORT";
+/// In the background command's environment: the number of the inherited
+/// file descriptor, the write end of a pipe, it reports to.
+pub const REPORT_ENV: &str = "BRANCHYARD_DETACH_FD";
 
 /// How long the launching command waits for the turn to start before it
 /// returns anyway, saying the turn has not started yet.
 const STARTS: Duration = Duration::from_secs(120);
-
-/// How often the launching command looks at the report.
-const POLL: Duration = Duration::from_millis(25);
 
 /// Lines of the log shown when the background command fails.
 const TAIL: usize = 40;
@@ -55,6 +56,98 @@ pub fn spawn(command: &mut Command, log: &Path) -> io::Result<Child> {
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(command, 0);
     command.spawn()
+}
+
+/// [`spawn`], with a pipe the command reports to ([`REPORT_ENV`]); read
+/// what it reports with [`Handshake::wait`].
+#[cfg(unix)]
+pub fn spawn_reporting(command: &mut Command, log: &Path) -> io::Result<(Child, Handshake)> {
+    use std::os::fd::{AsRawFd as _, BorrowedFd};
+    use std::os::unix::process::CommandExt as _;
+    let (reader, writer) = io::pipe()?;
+    let fd = writer.as_raw_fd();
+    command.env(REPORT_ENV, fd.to_string());
+    // SAFETY: runs in the forked child before exec, and only clears the
+    // close-on-exec flag of a descriptor the child inherited, so the
+    // command keeps the write end (and nothing else this process starts
+    // does). fcntl is async-signal-safe.
+    unsafe {
+        command.pre_exec(move || {
+            rustix::io::fcntl_setfd(BorrowedFd::borrow_raw(fd), rustix::io::FdFlags::empty())
+                .map_err(io::Error::from)
+        });
+    }
+    let child = spawn(command, log)?;
+    // Only the command holds the write end now: its closing it, or
+    // exiting, ends the launcher's read.
+    drop(writer);
+    Ok((child, Handshake { reader }))
+}
+
+/// [`spawn`] where there are no inherited pipes: nothing is reported, and
+/// [`Handshake::wait`] returns at once.
+#[cfg(not(unix))]
+pub fn spawn_reporting(command: &mut Command, log: &Path) -> io::Result<(Child, Handshake)> {
+    Ok((spawn(command, log)?, Handshake {}))
+}
+
+/// The read end of a background command's report pipe.
+pub struct Handshake {
+    #[cfg(unix)]
+    reader: io::PipeReader,
+}
+
+impl Handshake {
+    /// Block until `child` reports that its turn started or that it
+    /// failed, closes the pipe (it ended), or `within` passed. Says what it
+    /// reported and, if it has exited, how.
+    #[cfg(unix)]
+    pub fn wait(
+        self,
+        child: &mut Child,
+        within: Duration,
+    ) -> io::Result<(Report, Option<ExitStatus>)> {
+        use std::io::BufRead as _;
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        let (tx, rx) = mpsc::channel();
+        let reader = self.reader;
+        // A thread, so the read can time out; it ends with the pipe.
+        std::thread::spawn(move || {
+            for line in io::BufReader::new(reader).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+        let deadline = std::time::Instant::now() + within;
+        let mut report = Report::default();
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(line) => {
+                    report.apply(&line);
+                    if report.started {
+                        return Ok((report, child.try_wait()?));
+                    }
+                    if report.failed.is_some() {
+                        return Ok((report, Some(child.wait()?)));
+                    }
+                }
+                // Closed without a start: the command ended.
+                Err(RecvTimeoutError::Disconnected) => return Ok((report, Some(child.wait()?))),
+                Err(RecvTimeoutError::Timeout) => return Ok((report, child.try_wait()?)),
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub fn wait(
+        self,
+        child: &mut Child,
+        _within: Duration,
+    ) -> io::Result<(Report, Option<ExitStatus>)> {
+        Ok((Report::default(), child.try_wait()?))
+    }
 }
 
 /// A `--detach` the command line asked for.
@@ -133,11 +226,17 @@ pub fn refusal(launch: &Launch, remote: bool, in_harness: bool) -> Option<String
     None
 }
 
-/// Reports the background command's branch and the start of its turn to
-/// a file, once each; see the module's documentation.
+/// Reports the background command's branch and the start of its turn, or
+/// its failure, to the launcher's pipe, once each; see the module's
+/// documentation.
 pub struct Reporter {
-    path: PathBuf,
-    seen: Mutex<Report>,
+    seen: Mutex<Reporting>,
+}
+
+struct Reporting {
+    /// The pipe, until the turn started or the command failed.
+    sink: Option<Box<dyn Write + Send>>,
+    report: Report,
 }
 
 /// What a [`Reporter`] wrote, read back by the launcher.
@@ -145,34 +244,60 @@ pub struct Reporter {
 pub struct Report {
     /// The branch the first event was about.
     pub branch: Option<String>,
-    /// Its prompt was recorded: the turn started.
+    /// Its prompt was recorded, or the server accepted it: the turn
+    /// started.
     pub started: bool,
+    /// The command failed before that, and why.
+    pub failed: Option<String>,
+}
+
+/// One line a [`Reporter`] writes.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum Line {
+    Branch {
+        branch: String,
+    },
+    Started {
+        branch: String,
+    },
+    Failed {
+        branch: Option<String>,
+        detail: String,
+    },
 }
 
 impl Report {
-    /// Parse a report file's lines (`branch NAME`, `started NAME`).
-    pub fn parse(text: &str) -> Report {
-        let mut report = Report::default();
-        for line in text.lines() {
-            match line.split_once(' ') {
-                Some(("branch", name)) if report.branch.is_none() => {
-                    report.branch = Some(name.to_owned())
+    /// Take in one line of a report; one that does not parse is ignored.
+    pub fn apply(&mut self, line: &str) {
+        let Ok(line) = serde_json::from_str::<Line>(line) else {
+            return;
+        };
+        match line {
+            Line::Branch { branch } => {
+                self.branch.get_or_insert(branch);
+            }
+            Line::Started { branch } => {
+                self.branch.get_or_insert(branch);
+                self.started = true;
+            }
+            Line::Failed { branch, detail } => {
+                if let Some(branch) = branch {
+                    self.branch.get_or_insert(branch);
                 }
-                Some(("started", name)) if report.branch.as_deref() == Some(name) => {
-                    report.started = true
-                }
-                _ => {}
+                self.failed = Some(detail);
             }
         }
-        report
     }
 }
 
 impl Reporter {
-    pub fn new(path: PathBuf) -> Reporter {
+    pub fn new(sink: Option<Box<dyn Write + Send>>) -> Reporter {
         Reporter {
-            path,
-            seen: Mutex::new(Report::default()),
+            seen: Mutex::new(Reporting {
+                sink,
+                report: Report::default(),
+            }),
         }
     }
 
@@ -180,51 +305,128 @@ impl Reporter {
     /// starts its turn. Nothing is written after that.
     pub fn observe(&self, event: &BranchEvent) {
         let mut seen = self.seen.lock_recovering("detached report");
-        if seen.started {
+        if seen.sink.is_none() {
             return;
         }
-        if seen.branch.is_none() {
-            seen.branch = Some(event.branch.clone());
-            self.write(&format!("branch {}\n", event.branch));
+        if seen.report.branch.is_none() {
+            seen.report.branch = Some(event.branch.clone());
+            seen.write(&Line::Branch {
+                branch: event.branch.clone(),
+            });
         }
-        if seen.branch.as_deref() == Some(event.branch.as_str())
+        if seen.report.branch.as_deref() == Some(event.branch.as_str())
             && matches!(event.activity, Activity::Prompt(_))
         {
-            seen.started = true;
-            self.write(&format!("started {}\n", event.branch));
+            seen.started(&event.branch);
         }
     }
 
-    fn write(&self, line: &str) {
-        let written = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .and_then(|mut file| file.write_all(line.as_bytes()));
+    /// The server accepted a turn for `branch` (a remote `by send`): it is
+    /// queued or running there, as started as it gets from here.
+    pub fn accepted(&self, branch: &str) {
+        let mut seen = self.seen.lock_recovering("detached report");
+        if seen.sink.is_some() {
+            seen.started(branch);
+        }
+    }
+
+    /// The command failed, with `detail`, before its turn started.
+    pub fn failed(&self, detail: &str) {
+        let mut seen = self.seen.lock_recovering("detached report");
+        let line = Line::Failed {
+            branch: seen.report.branch.clone(),
+            detail: detail.to_owned(),
+        };
+        seen.write(&line);
+        seen.sink = None;
+    }
+}
+
+impl Reporting {
+    fn started(&mut self, branch: &str) {
+        self.report.started = true;
+        self.write(&Line::Started {
+            branch: branch.to_owned(),
+        });
+        // Closing it is what the launcher waits for.
+        self.sink = None;
+    }
+
+    fn write(&mut self, line: &Line) {
+        let Some(sink) = self.sink.as_mut() else {
+            return;
+        };
+        let written = serde_json::to_string(line)
+            .map_err(io::Error::from)
+            .and_then(|text| sink.write_all(format!("{text}\n").as_bytes()))
+            .and_then(|()| sink.flush());
         branchyard_support::best_effort("report to the launching by", written);
     }
 }
 
 static REPORTER: OnceLock<Reporter> = OnceLock::new();
 
-/// Whether this process is a background command `--detach` started; if so,
-/// its branch events are reported from now on ([`observe`]). The variable
-/// is removed so the harness and what it runs do not inherit it.
+/// Whether this process is a background command `--detach` (or `by review
+/// --detach`) started; if so, its branch events are reported from now on
+/// ([`observe`]). The variable is removed, and the pipe closed on exec, so
+/// the harness and what it runs inherit neither. `main` calls this first,
+/// before it starts anything that could hold the pipe open.
 pub fn become_child() -> bool {
-    match std::env::var_os(REPORT_ENV).filter(|v| !v.is_empty()) {
-        Some(path) => {
+    match std::env::var(REPORT_ENV).ok().filter(|v| !v.is_empty()) {
+        Some(fd) => {
             std::env::remove_var(REPORT_ENV);
-            REPORTER.get_or_init(|| Reporter::new(PathBuf::from(path)));
+            REPORTER.get_or_init(|| Reporter::new(inherited(&fd)));
             true
         }
         None => REPORTER.get().is_some(),
     }
 }
 
+/// The pipe the launcher passed as descriptor `fd`, owned from now on and
+/// closed on exec.
+#[cfg(unix)]
+fn inherited(fd: &str) -> Option<Box<dyn Write + Send>> {
+    use std::os::fd::{BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
+    // Never standard input, output or error.
+    let fd: RawFd = fd.parse().ok().filter(|fd| *fd > 2)?;
+    // SAFETY: borrowed only for fcntl, which fails harmlessly on a
+    // descriptor that is not open.
+    rustix::io::fcntl_getfd(unsafe { BorrowedFd::borrow_raw(fd) }).ok()?;
+    // SAFETY: it is open, and the launching `by` passed it to this process
+    // alone to report on: nothing else here uses or closes it.
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    branchyard_support::best_effort(
+        "keep the report pipe from the harness",
+        rustix::io::fcntl_setfd(&owned, rustix::io::FdFlags::CLOEXEC),
+    );
+    Some(Box::new(fs::File::from(owned)))
+}
+
+#[cfg(not(unix))]
+fn inherited(_fd: &str) -> Option<Box<dyn Write + Send>> {
+    None
+}
+
 /// Report `event` when this is a background command; see [`become_child`].
 pub fn observe(event: &BranchEvent) {
     if let Some(reporter) = REPORTER.get() {
         reporter.observe(event);
+    }
+}
+
+/// Report that the server accepted a turn for `branch`, when this is a
+/// background command.
+pub fn accepted(branch: &str) {
+    if let Some(reporter) = REPORTER.get() {
+        reporter.accepted(branch);
+    }
+}
+
+/// Report a background command's failure, if its turn had not started:
+/// the launcher shows the end of its log.
+pub fn finish(outcome: &Outcome) {
+    if let (Some(reporter), Err(failure)) = (REPORTER.get(), outcome) {
+        reporter.failed(&failure.to_string());
     }
 }
 
@@ -256,15 +458,11 @@ pub fn launch(target: &Target, launch: &Launch) -> Outcome {
     let dir = yard.root().join(".branchyard").join("detached");
     let stamp = branchyard_support::time::now_ms();
     let log = dir.join(format!("{}-{stamp}.log", launch.command));
-    let report = dir.join(format!("{}-{stamp}.report", launch.command));
     let mut command = Command::new(std::env::current_exe()?);
-    command
-        .args(std::env::args_os().skip(1))
-        .env(REPORT_ENV, &report);
-    let mut child = spawn(&mut command, &log)?;
+    command.args(std::env::args_os().skip(1));
+    let (mut child, handshake) = spawn_reporting(&mut command, &log)?;
     let pid = child.id();
-    let (seen, exited) = wait_for_start(&mut child, &report)?;
-    branchyard_support::cleanup_file(&report);
+    let (seen, exited) = handshake.wait(&mut child, STARTS)?;
     // One log per branch, once the branch is known.
     let log = match &seen.branch {
         Some(branch) => {
@@ -309,21 +507,6 @@ pub fn launch(target: &Target, launch: &Launch) -> Outcome {
 /// denial.
 const DENY_NOTICE: &str = "the detached turn has no terminal, so tool permission requests are \
      denied; pass --yes or --permissions PRESET with --detach to allow them";
-
-/// Poll `report` until the turn started, `child` exited, or [`STARTS`]
-/// passed. Whether it exited is read first, so a report written just
-/// before it exited is seen.
-fn wait_for_start(child: &mut Child, report: &Path) -> io::Result<(Report, Option<ExitStatus>)> {
-    let deadline = Instant::now() + STARTS;
-    loop {
-        let exited = child.try_wait()?;
-        let seen = Report::parse(&fs::read_to_string(report).unwrap_or_default());
-        if seen.started || exited.is_some() || Instant::now() >= deadline {
-            return Ok((seen, exited));
-        }
-        std::thread::sleep(POLL);
-    }
-}
 
 /// `<branch>-<command>-<stamp>.log`, the branch's name made safe for a
 /// file name.
@@ -435,36 +618,136 @@ mod tests {
         }
     }
 
+    /// A sink whose bytes the test reads back.
+    #[derive(Clone, Default)]
+    struct Shared(std::sync::Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Shared {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock_recovering("test sink").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Shared {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock_recovering("test sink")).into_owned()
+        }
+    }
+
+    fn parse(text: &str) -> Report {
+        let mut report = Report::default();
+        for line in text.lines() {
+            report.apply(line);
+        }
+        report
+    }
+
     #[test]
     fn the_reporter_names_the_first_branch_and_the_start_of_its_turn() {
-        let scratch = Scratch::new("detach-report");
-        let path = scratch.path().join("r");
-        let reporter = Reporter::new(path.clone());
+        let sink = Shared::default();
+        let reporter = Reporter::new(Some(Box::new(sink.clone())));
         reporter.observe(&event(
             "a",
             Activity::Status(branchyard::BranchStatus::Running),
         ));
         assert_eq!(
-            Report::parse(&fs::read_to_string(&path).unwrap()),
+            parse(&sink.text()),
             Report {
                 branch: Some("a".into()),
-                started: false
+                ..Report::default()
             }
         );
         // Another branch's prompt (a delegated child) is not this turn's.
         reporter.observe(&event("a-child", Activity::Prompt("x".into())));
         reporter.observe(&event("a", Activity::Prompt("go".into())));
         reporter.observe(&event("a", Activity::Prompt("again".into())));
-        let text = fs::read_to_string(&path).unwrap();
-        assert_eq!(text, "branch a\nstarted a\n");
+        // Nothing after the start, a failure included.
+        reporter.failed("late");
+        let text = sink.text();
         assert_eq!(
-            Report::parse(&text),
+            text,
+            "{\"state\":\"branch\",\"branch\":\"a\"}\n{\"state\":\"started\",\"branch\":\"a\"}\n"
+        );
+        assert_eq!(
+            parse(&text),
             Report {
                 branch: Some("a".into()),
-                started: true
+                started: true,
+                failed: None
             }
         );
-        assert_eq!(Report::parse("started b\n"), Report::default());
+        assert_eq!(parse("started b\n"), Report::default());
+
+        // A failure before the start carries the branch, if known, and why.
+        let sink = Shared::default();
+        let reporter = Reporter::new(Some(Box::new(sink.clone())));
+        reporter.observe(&event(
+            "c",
+            Activity::Status(branchyard::BranchStatus::Running),
+        ));
+        reporter.failed("no harness");
+        reporter.accepted("c");
+        assert_eq!(
+            parse(&sink.text()),
+            Report {
+                branch: Some("c".into()),
+                started: false,
+                failed: Some("no harness".into())
+            }
+        );
+        // A remote send is started once the server accepts it.
+        let sink = Shared::default();
+        Reporter::new(Some(Box::new(sink.clone()))).accepted("d");
+        assert!(parse(&sink.text()).started);
+    }
+
+    /// The launcher reads the pipe: a start returns at once with the
+    /// command still running, a close without one is the command's exit,
+    /// and nothing within the time returns with neither.
+    #[test]
+    fn the_handshake_returns_on_a_start_an_exit_or_the_time_limit() {
+        let scratch = Scratch::new("detach-handshake");
+        let log = scratch.path().join("h.log");
+        let sh = |script: &str| {
+            let mut command = Command::new("sh");
+            command.args(["-c", script]);
+            spawn_reporting(&mut command, &log).unwrap()
+        };
+        // The command still holds the pipe (the sleep inherits it), so
+        // only the line can end the wait.
+        let (mut child, handshake) = sh(
+            "printf '%s\\n' '{\"state\":\"started\",\"branch\":\"b\"}' >&$BRANCHYARD_DETACH_FD; \
+             exec sleep 30",
+        );
+        let started = std::time::Instant::now();
+        let (report, exited) = handshake.wait(&mut child, STARTS).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert_eq!(report.branch.as_deref(), Some("b"));
+        assert!(report.started && exited.is_none());
+        branchyard_support::best_effort("kill", child.kill());
+        branchyard_support::best_effort("reap", child.wait());
+
+        let (mut child, handshake) = sh(
+            "printf '%s\\n' '{\"state\":\"branch\",\"branch\":\"c\"}' >&$BRANCHYARD_DETACH_FD; \
+             echo bye; exit 3",
+        );
+        let (report, exited) = handshake.wait(&mut child, STARTS).unwrap();
+        assert_eq!(report.branch.as_deref(), Some("c"));
+        assert!(!report.started);
+        assert_eq!(exited.and_then(|status| status.code()), Some(3));
+        assert!(fs::read_to_string(&log).unwrap().contains("bye"));
+
+        let (mut child, handshake) = sh("exec sleep 30");
+        let (report, exited) = handshake
+            .wait(&mut child, Duration::from_millis(200))
+            .unwrap();
+        assert_eq!((report, exited), (Report::default(), None));
+        branchyard_support::best_effort("kill", child.kill());
+        branchyard_support::best_effort("reap", child.wait());
     }
 
     #[test]

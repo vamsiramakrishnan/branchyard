@@ -2253,7 +2253,7 @@ impl GraphBackend for Sqlite {
     }
 }
 
-fn message_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
+pub(crate) fn message_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     let kind: String = r.get(3)?;
     let kind = kind.parse::<crate::MessageKind>().map_err(|_| {
         rusqlite::Error::InvalidColumnType(3, "kind".into(), rusqlite::types::Type::Text)

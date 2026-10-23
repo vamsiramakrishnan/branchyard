@@ -648,14 +648,31 @@ pub fn run(env: &Env, target: &Target, interval: Duration, once: bool) -> Outcom
         },
         Target::Remote(remote) => {
             let (tx, rx) = mpsc::channel();
-            let stream = remote.repo.stream(Some(0));
-            std::thread::spawn(move || {
-                for item in stream {
-                    if tx.send(item).is_err() {
-                        return;
+            let mut stream = remote.repo.stream(Some(0));
+            if once {
+                // The history is the feed up to its head when the stream
+                // opened: read exactly that, then the branches, so the
+                // frame is complete without waiting on the stream.
+                stream.open()?;
+                let head = stream.head().unwrap_or(0);
+                if head > 0 {
+                    for item in stream.by_ref() {
+                        let entry = item?;
+                        let seq = entry.seq;
+                        if tx.send(Ok(entry)).is_err() || seq >= head {
+                            break;
+                        }
                     }
                 }
-            });
+            } else {
+                std::thread::spawn(move || {
+                    for item in stream {
+                        if tx.send(item).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
             Source::Remote {
                 label: remote.label(),
                 repo: remote.repo.clone(),
@@ -667,10 +684,6 @@ pub fn run(env: &Env, target: &Target, interval: Duration, once: bool) -> Outcom
     let style = Style { color: env.color };
     let mut doing: HashMap<String, Doing> = HashMap::new();
     if once {
-        // Remote history arrives on the stream; give it a moment.
-        if matches!(source, Source::Remote { .. }) {
-            std::thread::sleep(Duration::from_millis(300));
-        }
         let infos = update(&mut source, &mut doing, |_, _| {})?;
         let title = format!("by watch · {}", source.label());
         let lines = frame(&title, &infos, &doing, now_ms() / 1000, once_width(), style);

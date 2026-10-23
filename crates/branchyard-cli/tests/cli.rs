@@ -1322,7 +1322,7 @@ fn a_harness_steers_its_running_children_with_by_and_python() {
     let repo = Repo::new();
     let script = "import branchyard as b; b.spawn('AWAIT_STEER', name='py'); \
                   s = b.steer('py', 'from python'); print('steered', s.by, s.state['state']); \
-                  d = b.wait('py', timeout=60, poll=0.05); print('finished', d.status['state']); \
+                  d = b.wait('py', timeout=60); print('finished', d.status['state']); \
                   exec('try:\\n b.steer(\\'py\\', \\'late\\')\\nexcept b.NotRunningError as e:\\n print(\\'refused\\', e.kind)')";
     let prompt = [
         "SH by spawn AWAIT_STEER --name kid --json".to_owned(),
@@ -1465,7 +1465,7 @@ fn steering_takes_a_prompt_file_and_names_its_command() {
 fn a_harness_delegates_with_the_python_module() {
     let repo = Repo::new();
     let script = "import branchyard as b; c = b.spawn('WRITE py.txt=p', name='py'); \
-                  print('spawned', c.name, c.status['state']); d = b.wait(c.name, timeout=60, poll=0.05); \
+                  print('spawned', c.name, c.status['state']); d = b.wait(c.name, timeout=60); \
                   print('finished', d.status['state'], d.candidate['files_changed']); \
                   w = b.wait_all(c.name); s = w.settled[0]; \
                   print('typed', s.status.state, s.state, s.status == 'ready', s.status.reason); \
@@ -1523,7 +1523,7 @@ fn the_python_module_delegates_a_plan_and_reads_its_brief() {
 fn the_python_module_checks_a_branchs_current_work() {
     let repo = Repo::new();
     let script = "import branchyard as b; c = b.spawn('WRITE py.part=p', name='py'); \
-                  b.wait(c.name, timeout=60, poll=0.05); r = b.check(c.name); \
+                  b.wait(c.name, timeout=60); r = b.check(c.name); \
                   print('child', r.outcome, r.passed, r.inherited_from, r.target); \
                   m = b.check(); print('mine', m.outcome, m.passed, m.target)";
     let prompt = format!("SH python3 -c \"{script}\"");
@@ -2036,7 +2036,7 @@ fn a_rig_runs_its_root_which_fills_seats_with_by_and_python() {
     let spec = repo.dir.join("team.toml");
     fs::write(&spec, TEAM).unwrap();
     let script = "import branchyard as b; c = b.spawn('INSTRUC' + 'TED', seat='reviewer'); \
-                  print('seat', c.seat, c.name); d = b.wait(c.name, timeout=60, poll=0.05); \
+                  print('seat', c.seat, c.name); d = b.wait(c.name, timeout=60); \
                   print('reviewed', d.status['state'], d.last_message, d.seat)";
     let prompt = [
         "SH by inspect --json".to_owned(),
@@ -2221,11 +2221,11 @@ fn a_harness_applies_a_graph_with_by_and_python() {
     let repo = Repo::new();
     let edits = r#"[{"kind":"spawn","prompt":"WRITE a.txt=1","name":"a"},{"kind":"spawn","prompt":"WRITE b.txt=1","name":"b","depends_on":["a"]}]"#;
     let script = "import branchyard as b; g = b.graph(); print('python rev', g.revision); \
-                  b.wait('b', timeout=60, poll=0.05); \
+                  b.wait('b', timeout=60); \
                   a = b.apply_graph([{'kind': 'spawn', 'prompt': 'WRITE c.txt=1', 'name': 'c', \
                   'depends_on': ['b']}], g.revision); \
                   print('python applied', a.revision, a.spawned[0].status['state'], a.spawned[0].depends_on); \
-                  d = b.wait('c', timeout=60, poll=0.05); \
+                  d = b.wait('c', timeout=60); \
                   print('python waited', d.status['state'], d.depends_on[0]['prerequisite']); \
                   exec('try:\\n b.apply_graph([{\\'kind\\': \\'add_dependency\\', \\'dependent\\': \\'c\\', \\'prerequisite\\': \\'a\\'}], 0)\\nexcept b.StaleRevisionError as e:\\n print(\\'python stale\\', e.kind)')";
     let prompt = [

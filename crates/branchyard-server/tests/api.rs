@@ -551,6 +551,70 @@ fn branches_are_waited_for_over_http() {
     }
 }
 
+/// `GET /v1/operations/{id}?wait=SECONDS` answers as the operation
+/// finishes, or with it unfinished once that long has passed; the client's
+/// `wait` and `wait_timeout` ride on it.
+#[test]
+fn an_operation_is_long_polled_until_it_finishes() {
+    let f = Fixture::new();
+    let server = Server::start(f.config());
+    let client = server.client();
+    let repo = client.repo("app");
+    let op = repo.submit_task(&task("HANG", "held"), &new_key()).unwrap();
+    wait::until("the prompt to be submitted", || {
+        common::started(&client, "app", "held")
+    });
+    let path = format!("/v1/operations/{}", op.id);
+
+    // At its wait: the operation as it is, unfinished.
+    let asked = std::time::Instant::now();
+    let (status, _, body) = raw(server.addr, &get(&format!("{path}?wait=0.3"), Some(TOKEN)));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(json(&body)["state"], "running", "{body}");
+    assert!(asked.elapsed() >= Duration::from_millis(300));
+    let pending = client
+        .wait_timeout(&op.id, Duration::from_millis(200))
+        .unwrap();
+    assert_eq!(pending.state, OperationState::Running, "{pending:?}");
+
+    // Finishing answers a long wait at once, well before it ends.
+    let (addr, long) = (server.addr, format!("{path}?wait=25"));
+    let waiting = std::thread::spawn(move || {
+        let asked = std::time::Instant::now();
+        (raw(addr, &get(&long, Some(TOKEN))), asked.elapsed())
+    });
+    let client_waiting = {
+        let (client, id) = (client.clone(), op.id.clone());
+        std::thread::spawn(move || client.wait(&id))
+    };
+    repo.cancel("held").unwrap();
+    let ((status, _, body), took) = waiting.join().unwrap();
+    assert_eq!(status, 200, "{body}");
+    let done: branchyard_client::api::Operation = serde_json::from_str(&body).unwrap();
+    assert!(done.state.is_terminal(), "{done:?}");
+    assert!(took < Duration::from_secs(20), "answered after {took:?}");
+    let waited = client_waiting.join().unwrap().unwrap();
+    assert_eq!(waited.state, done.state);
+    let again = client.wait_timeout(&op.id, Duration::ZERO).unwrap();
+    assert_eq!(again.state, done.state);
+
+    for wait in ["-1", "soon", "", "NaN", "inf"] {
+        let (status, _, body) = raw(
+            server.addr,
+            &get(&format!("{path}?wait={wait}"), Some(TOKEN)),
+        );
+        assert_eq!(status, 400, "{wait}: {body}");
+        let body = json(&body);
+        assert_eq!(body["error"]["code"], "invalid_request", "{wait}");
+        assert_eq!(body["error"]["detail"]["field"], "wait", "{wait}");
+    }
+    let (status, _, _) = raw(
+        server.addr,
+        &get("/v1/operations/op_nope?wait=1", Some(TOKEN)),
+    );
+    assert_eq!(status, 404);
+}
+
 /// The battery's wait-since scenario: a wait called after a send, before a
 /// worker started its turn, returned at once with the previous turn's
 /// `ready`. It waits for the sent turn.

@@ -24,6 +24,7 @@ mod fleet_cmd;
 mod gateway_cmd;
 mod gh;
 mod harness_cmd;
+mod hook_cmd;
 mod inherited;
 mod init;
 mod json;
@@ -68,6 +69,9 @@ use commands::{Env, Failure, Target};
 
 fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().collect();
+    // A background command started by `--detach` takes its report pipe
+    // before it starts anything that could inherit it.
+    detach::become_child();
     args::unset_blank_env();
     if let Some(call) = args::server_call(&argv[1..]) {
         return serve(&argv[..=call.prefix], call);
@@ -85,6 +89,14 @@ fn main() -> ExitCode {
         branchyard_support::best_effort("print the help", args::command().print_help());
         return ExitCode::SUCCESS;
     };
+    // Run by a Claude Code session on every prompt and redraw: no
+    // configuration, no logging, and never a failure, whatever the
+    // repository holds (docs/harness-integration.md).
+    match &command {
+        Command::Hook { event } => return hook_cmd::hook(event),
+        Command::Statusline => return hook_cmd::statusline(),
+        _ => {}
+    }
     // branchyard.toml and the user configuration, under flags and variables.
     let cwd = std::env::current_dir().unwrap_or_default();
     let env = |name: &str| std::env::var(name).ok();
@@ -103,7 +115,9 @@ fn main() -> ExitCode {
     }
     let mut env_now = Env::detect();
     env_now.notify = notify::Settings::resolve(globals.no_notify, &globals.notify, &env);
-    match run(&env_now, &globals, command) {
+    let outcome = run(&env_now, &globals, command);
+    detach::finish(&outcome);
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         // A closed pipe, as in `by ls | head`, is the reader's choice.
         Err(Failure::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
@@ -697,7 +711,9 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Remote { .. }
         | Command::Catalog { .. }
         | Command::Sync(_)
-        | Command::Connectors { .. } => unreachable!("handled before choosing a target"),
+        | Command::Connectors { .. }
+        | Command::Hook { .. }
+        | Command::Statusline => unreachable!("handled before choosing a target"),
     }
 }
 

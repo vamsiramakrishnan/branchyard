@@ -170,6 +170,7 @@ impl Work {
                 let target = yard.branch(&branch).map_err(sdk)?;
                 send_allowed(app, &target, &branch, &request).map_err(api)?;
                 let prompt = sent_prompt(&target, &request).map_err(api)?;
+                record_feedback(&target, &prompt, &request).map_err(sdk)?;
                 target
                     .send(&prompt, options)
                     .and_then(|b| finished(vec![b]))
@@ -213,6 +214,7 @@ impl Work {
                 send_allowed(app, &target, &branch, &request).map_err(api)?;
                 let prompt = sent_prompt(&target, &request).map_err(api)?;
                 target.reincarnate_in_place(&reason).map_err(sdk)?;
+                record_feedback(&target, &prompt, &request).map_err(sdk)?;
                 target
                     .send(&prompt, options)
                     .and_then(|b| finished(vec![b]))
@@ -853,6 +855,11 @@ pub(crate) fn send_options(
         (false, true) => return Err(ApiError::bad_request("prompt is empty")),
         _ => {}
     }
+    if request.retry && request.feedback.is_some() {
+        return Err(ApiError::bad_request(
+            "feedback describes the prompt given with it, and retry gives none",
+        ));
+    }
     let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
     // A send keeps the branch's recorded command unless the request
     // replaces it.
@@ -886,6 +893,19 @@ pub(crate) fn sent_prompt(target: &Branch, request: &SendRequest) -> Result<Stri
     match request.retry {
         true => target.retry_prompt().map_err(|e| error::sdk(&e)),
         false => Ok(request.prompt.clone()),
+    }
+}
+
+/// Record a send's feedback, when it has some, on `target`'s log as
+/// carried by `prompt`, just before the turn. Blocks.
+fn record_feedback(
+    target: &Branch,
+    prompt: &str,
+    request: &SendRequest,
+) -> Result<(), branchyard::Error> {
+    match &request.feedback {
+        Some(feedback) => target.record_feedback(prompt, feedback.clone()),
+        None => Ok(()),
     }
 }
 

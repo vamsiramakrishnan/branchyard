@@ -75,8 +75,6 @@ const EVENTS_MAX: usize = 200;
 const LAST_MESSAGE_MAX: usize = 4000;
 /// Cost comparisons tolerate float rounding of this much.
 pub(crate) const EPSILON_USD: f64 = 1e-9;
-/// How often [`Delegate::wait`] looks.
-const WAIT_POLL: Duration = Duration::from_millis(100);
 /// How often a wait for a turn in another process looks again for a
 /// stopped engine to recover, and for children on this process's threads.
 const SETTLE_EVERY: Duration = Duration::from_secs(1);
@@ -1478,8 +1476,19 @@ impl Delegate {
     /// The branch's turn may run in any process using the repository: the
     /// wait reads its durable status, and a turn whose engine stopped is
     /// recovered, so it ends `interrupted` rather than being waited for.
+    /// Through the broker it is the engine's `wait`, which blocks in the
+    /// engine's process until the status changes, not a loop of
+    /// inspections.
     pub fn wait(&self, branch: &str, timeout: Duration) -> Result<Inspection, Error> {
         let deadline = Instant::now().checked_add(timeout);
+        let Via::Local(local) = &self.via else {
+            // A timeout too long to count from now is no timeout.
+            let waited = self.wait_for(&[branch], false, deadline.map(|_| timeout))?;
+            return match waited.settled.into_iter().next() {
+                Some(inspection) if !waited.timed_out => Ok(inspection),
+                _ => Err(Error::Running(branch.to_owned())),
+            };
+        };
         loop {
             let inspection = self.inspect(branch)?;
             if !crate::wake::unsettled(&inspection.status) {
@@ -1490,23 +1499,18 @@ impl Delegate {
                 return Err(Error::Running(branch.to_owned()));
             }
             let left = deadline.map_or(SETTLE_EVERY, |d| (d - now).min(SETTLE_EVERY));
-            match &self.via {
-                Via::Local(local) => {
-                    recover::settle(&local.yard, branch)?;
-                    if inspection.status == BranchStatus::Waiting {
-                        graph::advance(&local.yard, &[branch.to_owned()], None)?;
-                    }
-                    if inspection.status == BranchStatus::WaitingOnChildren {
-                        crate::wake::look(&local.yard, branch, None)?;
-                    }
-                    let store = local.store();
-                    let before = inspection.status.clone();
-                    store.wait(left, || {
-                        Ok((store.read(branch)?.info.status != before).then_some(()))
-                    })?;
-                }
-                Via::Remote(_) => std::thread::sleep(WAIT_POLL.min(left)),
+            recover::settle(&local.yard, branch)?;
+            if inspection.status == BranchStatus::Waiting {
+                graph::advance(&local.yard, &[branch.to_owned()], None)?;
             }
+            if inspection.status == BranchStatus::WaitingOnChildren {
+                crate::wake::look(&local.yard, branch, None)?;
+            }
+            let store = local.store();
+            let before = inspection.status.clone();
+            store.wait(left, || {
+                Ok((store.read(branch)?.info.status != before).then_some(()))
+            })?;
         }
     }
 
