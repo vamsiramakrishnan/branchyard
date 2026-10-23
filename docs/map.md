@@ -72,9 +72,13 @@ Without `--schema`, an item's result is its last reply's text, and only the bran
 
 There is no JSON Schema crate in the workspace's offline vendor set, so Branchyard checks a documented subset with its own code (`branchyard::JsonSchema`):
 
-- Checked: `type` (a name or a list), `properties`, `required`, `additionalProperties` (a boolean or a schema), `items` (one schema), `enum`, `const`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `minLength`, `maxLength`, `minItems`, `maxItems`, `uniqueItems`, `anyOf`. A schema may be `true` or `false`.
-- Allowed and not checked: `$schema`, `$id`, `$comment`, `title`, `description`, `default`, `examples`, `format` (an annotation in JSON Schema 2020-12 too).
-- Refused when the map starts: anything else, such as `pattern`, `$ref`, `oneOf`, `allOf`, `not`, `if`. Nothing a schema says is silently left unchecked.
+- Checked: `type` (a name or a list), `properties`, `required`, `additionalProperties` (a boolean or a schema), `items` (one schema), `enum`, `const`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `minLength`, `maxLength`, `pattern` (a regular expression in the Rust `regex` syntax, searched anywhere in the string unless anchored with `^`/`$`, as in JSON Schema; no look-around or backreferences), `minItems`, `maxItems`, `uniqueItems`, `anyOf`, `oneOf`. A schema may be `true` or `false`.
+- Allowed and not checked: `$schema`, `$id`, `$comment`, `title`, `description`, `default`, `examples`, `deprecated`, `readOnly`, `writeOnly`, `format` (an annotation in JSON Schema 2020-12 too).
+- Refused when the map starts: anything else, such as `$ref`, `allOf`, `not`, `if`, `patternProperties`, `prefixItems`. Nothing a schema says is silently left unchecked. So is a keyword in the wrong form (`items` as a list, an empty `anyOf`), a `pattern` that does not compile (`$.properties.id.pattern is not a valid regular expression: unclosed group`) and bounds no value could meet (`minItems` above `maxItems`).
+
+When no alternative of `anyOf` or `oneOf` matches, the error names the closest one (of the value's type, then with the fewest errors) and its first two errors: `$.kind: matches none of the 2 alternatives in oneOf (closest, oneOf[0]: $.kind: must be "lib")`. A value matching more than one alternative of `oneOf` is refused naming them. `uniqueItems` names the repeat: `$.tags[1]: repeats the item at [0]`.
+
+The same checker, with the same keywords, checks a [result contract](delegation.md#result-contract), except that a contract refuses `format`.
 
 Numbers compare by value (`1` equals `1.0`); `integer` accepts `3.0`. At most 20 errors are reported for one answer.
 

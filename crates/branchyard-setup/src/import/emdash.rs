@@ -96,23 +96,21 @@ pub fn import(text: &str, _: Reader) -> Result<Imported, String> {
     let mut setup = commands(&config.prepare);
     setup.extend(commands(&config.setup));
     let run = commands(&config.run);
-    let mut notes = Vec::new();
-    if config.shell_setup.is_some() {
-        notes.push(
-            "shellSetup is not imported: Branchyard has no per-shell setup for the harness yet"
-                .to_owned(),
-        );
-    }
+    let shell_setup = config
+        .shell_setup
+        .map(|s| rename_variables(s.trim(), VARIABLES))
+        .filter(|s| !s.is_empty());
     Ok(Imported {
         file: FILE,
         copy: config.preserve_patterns.unwrap_or_default(),
         setup,
         run: (!run.is_empty()).then(|| run.join(" && ")),
         teardown: commands(&config.teardown),
+        shell_setup,
         env: Default::default(),
         prepare: false,
         inputs: Vec::new(),
-        notes,
+        notes: Vec::new(),
     })
 }
 
@@ -155,7 +153,12 @@ mod tests {
             imported.teardown,
             ["docker compose -p \"$EMDASH_TASK_ID\" down"]
         );
-        assert_eq!(imported.notes.len(), 1);
+        // shellSetup becomes shell_setup, nothing left out.
+        assert_eq!(imported.shell_setup.as_deref(), Some("nvm use"));
+        assert!(imported.notes.is_empty(), "{:?}", imported.notes);
+        let only = import(r#"{"shellSetup": "source .venv/bin/activate"}"#, &none).unwrap();
+        assert!(!only.is_empty());
+        assert!(import(r#"{"shellSetup": "  "}"#, &none).unwrap().is_empty());
         assert!(import("{}", &none).unwrap().is_empty());
         assert!(import(r#"{"scripts": {"setup": 1}}"#, &none)
             .unwrap_err()

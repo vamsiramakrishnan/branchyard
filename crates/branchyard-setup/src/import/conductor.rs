@@ -114,6 +114,7 @@ pub fn import(text: &str, _: Reader) -> Result<Imported, String> {
         setup: commands(string(scripts, "setup", "scripts.")?),
         run: run.map(|c| rename_variables(&c, VARIABLES)),
         teardown: commands(string(scripts, "archive", "scripts.")?),
+        shell_setup: None,
         env: Default::default(),
         prepare: false,
         inputs: Vec::new(),

@@ -247,7 +247,7 @@ pub fn tools() -> Vec<Tool> {
             "type": "object",
             "description": "The shape of the answer the child must give: it reports a JSON result with report, checked against this schema (a mismatch is refused, naming the path and the rule), and you read it as inspect's or wait's result. The child sees the contract in its own inspect as result_contract",
             "properties": {
-                "schema": {"type": "object", "description": "A JSON Schema using only type (object, array, string, number, integer, boolean, null), properties, required, additionalProperties (false), items, enum, minimum, maximum, minLength, maxLength and description; any other keyword, such as pattern, is refused"},
+                "schema": {"type": "object", "description": "A JSON Schema using only type (object, array, string, number, integer, boolean, null, or a list), properties, required, additionalProperties, items, enum, const, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength, maxLength, pattern, minItems, maxItems, uniqueItems, anyOf, oneOf, and annotations such as title and description; any other keyword, such as $ref, allOf or format, is refused"},
                 "required": {"type": "boolean", "description": "true: a report without a result is refused, and you get a warning in your log when the child ends its turn without one. Default false"},
             },
             "required": ["schema"],
@@ -613,7 +613,7 @@ pub fn tools() -> Vec<Tool> {
                 "type": "object",
                 "properties": {
                     "text": {"type": "string"},
-                    "result": {"description": "Your answer as a JSON value (an object, array, string, number or boolean), matching result_contract when you have one. null counts as none"},
+                    "result": {"description": "Your answer as a JSON value (an object, array, string, number or boolean), matching result_contract when you have one. null counts as none, unless your result_contract's schema accepts null"},
                 },
                 "required": ["text"],
                 "additionalProperties": false,
@@ -638,7 +638,10 @@ pub fn tools() -> Vec<Tool> {
              you gave up (failure). Your parent and the person watching see it next to your \
              status. Blocked and failure are also escalated to your parent's inbox. It is a \
              claim, not a result: it changes nothing about your branch, and report is still \
-             how you send your parent a message.",
+             how you send your parent a message. Give ttl_seconds when the claim holds only \
+             for a while: once it passes, the report is shown as stale. A report also goes \
+             stale when a later turn of yours finishes without a new one, or your branch \
+             ends.",
             schema(json!({
                 "type": "object",
                 "properties": {
@@ -649,6 +652,12 @@ pub fn tools() -> Vec<Tool> {
                     },
                     "summary": {"type": "string", "maxLength": branchyard::reported::SUMMARY_MAX, "description": "One line, at most 280 characters"},
                     "link": {"type": "string", "description": "Optional http(s) URL with more, such as a pull request or an issue"},
+                    "ttl_seconds": {
+                        "type": "integer",
+                        "minimum": branchyard::reported::TTL_MIN_SECONDS,
+                        "maximum": branchyard::reported::TTL_MAX_SECONDS,
+                        "description": "Optional: how long the claim holds, in whole seconds (1 to 604800, 7 days); after that it is shown as stale",
+                    },
                 },
                 "required": ["state", "summary"],
                 "additionalProperties": false,

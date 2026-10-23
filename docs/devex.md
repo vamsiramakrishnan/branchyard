@@ -43,13 +43,13 @@ All three solve the same pain, which reviewers of Conductor call its main fricti
 
 **Branchyard: done** ([workspace](workspace.md)). `[workspace]` in `branchyard.toml` has:
 - `copy`: globs of untracked files carried from the repository root into each new worktree, never outside it, never a symbolic link, never tracked files, and never committed from the branch;
-- `setup` (one command or a list), named `[workspace.run.NAME]` scripts for `by workspace run` (a `default`), and `teardown` on `by rm` and `by merge --rm`.
+- `setup` (one command or a list), named `[workspace.run.NAME]` scripts for `by workspace run` (a `default`), and `teardown` on `by rm` and `by merge --rm`;
+- `shell_setup`: emdash's `shellSetup` (for example `nvm use`), run before every turn's harness and every script, which get the variables it sets.
 
 Scripts and the harness get `BRANCHYARD_BRANCH`, `BRANCHYARD_WORKTREE`, `BRANCHYARD_ROOT` and `BRANCHYARD_PORT`, a port reserved per branch in the store (SQLite or PostgreSQL), stable across turns and restarts, and released with the branch. The user file's `[projects."<root>".workspace]` replaces a repository's section, as Superset's mirrored path does. Setup is a journaled step: a crash mid-install kills what it started, ends the branch `interrupted`, and its next turn runs setup again from the start. A repository's scripts never run until you trust them: a per-user record keyed by repository root and the section's digest, asked once on a terminal or given with `by workspace trust`, and asked again when the scripts change; a server runs them only for repositories its operator lists in `allow_workspace_scripts`, never because a request asks. `by init project` suggests the section from lockfiles, `Cargo.toml`, `pyproject.toml`, `go.mod`, a Compose file and `.env` files, or imports it from a committed `.emdash.json`, `orca.yaml`, `.superset/config.json` or `.conductor/settings.toml` ([setup](setup.md#importing-another-tools-workspace-configuration)).
 
 **Still open:**
 - Conductor's `available_in`. **Done since** (Wave 2, [workspace](workspace.md#listening-ports)): its concurrent run mode, `by workspace run BRANCH A B --detach` starting several scripts at once, each with its own port; and the ports each branch's processes listen on, attributed by Branchyard's variables, working directory, process tree or command line (ported from Orca), in `by workspace ports`, `by show` and `by watch`'s detail pane, where `b` opens one in a browser and `K` stops them.
-- An emdash-style `shellSetup` (for example `nvm use`) applied to the harness's own shell.
 - Setup inside a sandbox: scripts run on the host, as you, even for isolated or sandboxed branches, and the Substrate provider's bundle does not carry files setup creates that git ignores.
 - Tested hermetically only: no real package manager, Docker stack or harness, and not on macOS.
 
@@ -79,7 +79,13 @@ emdash autosaves terminal state and resumes agents where they left off ([tasks](
 - `by watch` should show interrupted branches prominently, with a one-key resume (a `by send` to the branch, which resumes its native session).
 - With a server running (`by serve` or `by worker`), local turns should outlive the terminal that started them. This is the daemon behaviour Superset has.
 
-**Status:** the first is done. `by watch` draws an interrupted branch in black on yellow, counts them in its header, and `R` resumes the selected one with one key (`by send` with a "continue where you left off" prompt, which resumes the harness's native session). A turn started from `by watch` runs in its own process group, detached from the dashboard, so it outlives `by watch` and the terminal. What remains is the second: `by run` in a terminal still ties its turn to that terminal unless it goes through a server.
+**Status:** both are done for local mode. `by watch` draws an interrupted branch in black on yellow, counts them in its header, and `R` resumes the selected one with one key (`by send` with a "continue where you left off" prompt, which resumes the harness's native session). A turn started from `by watch` runs in its own process group, detached from the dashboard, so it outlives `by watch` and the terminal.
+
+`by run`, `by send` and `by fork` take `--detach`, which needs no server. The command starts itself again the way `by watch` starts a turn: in its own process group, with standard input from `/dev/null`, and its output in a log under `.branchyard/detached/`, named after the branch once the branch is known. It waits only until the turn has started (the branch exists, holds its lease and its prompt is recorded, which happens once the harness is up). Then it prints the branch, the log and how to follow it: `by log -f BRANCH` or `by watch`, `by wait BRANCH`, `by cancel BRANCH`. With `--json` it prints `branch`, `command`, `pid`, `log`, `started` and `exited` instead. If the background command exits with an error first (a harness that cannot start, for example), the launcher prints the end of its log and exits 1. If the turn has not started after two minutes, the launcher returns and says so. Closing the terminal or pressing Ctrl-C in it then leaves the turn running.
+
+A detached turn has no terminal. Its tool permission requests are answered by `--yes`, `--permissions PRESET` or the `permissions` default in `branchyard.toml`. With none of them, every request is denied, as for any `by` without a terminal, and the launcher says so. `--ask` with `--detach` is a usage error (exit 2). A configured `permissions = "ask"` is refused (pass `--yes` or `--permissions`), and so is `--prompt-file -`, since there is no standard input to read. With `--remote`, `--detach` is refused: the turn already runs on the server and outlives the command, so Ctrl-C stops only the following. Inside a harness it is refused too, because `by spawn` and `by send` already return there.
+
+Not done: `by fan --detach` and `by map --detach`. A detached turn is still a child of no supervisor: if the machine reboots, the turn ends `interrupted`, and you resume it with `R` in `by watch` or `by send`.
 
 ### 5. Review, PR and CI without leaving the tool
 
@@ -194,12 +200,12 @@ In order of what a user would feel first:
    - `by init` and the `setup` skill (under way), which detect first and show files and commands before acting (§1).
    - `branchyard.toml` holding defaults, MCP servers (§8) and the workspace lifecycle below.
 2. **Workspace lifecycle** (§2), **done** ([workspace](workspace.md)):
-   - `copy`, `setup`, named `run` and `teardown`;
+   - `copy`, `setup`, named `run`, `teardown` and `shell_setup`;
    - Branchyard-given variables with an allocated port;
    - a per-repository trust decision;
    - setup journaled and recovered.
 
-   Left: a `shellSetup` for the harness, setup inside a sandbox. Concurrent run scripts and listening ports in `by watch` are done (Wave 2).
+   Left: setup inside a sandbox. Concurrent run scripts and listening ports in `by watch` are done (Wave 2).
 3. **From branch to merged PR** (§5, §9), done ([pull requests](pull-requests.md)):
    - `by run --issue`;
    - `by pr` and `by pr --watch`, which routes CI failures and review comments back into the branch;
@@ -210,8 +216,8 @@ In order of what a user would feel first:
    - `by open` (done, the `o` key);
    - a keyboard sheet and actions (done), with `p`/`P` for pull requests, `r` rewind, `c` compare and `t` try bound after the three branches were integrated, and checkpoint and merge readiness in the detail pane.
 5. **Compare and choose** after a fan-out (§3). Done: `by compare` ([checkpoints](checkpoints.md#compare-attempts)), and `c` in `by watch` compares the selected branch with its siblings.
-6. **Per-turn checkpoints** with `by rewind` / `by fork --at` (§6), and **`by try`** (§7). Done in local mode ([checkpoints](checkpoints.md)), with `r` and `t` in `by watch`; remote rewind and `fork --at` remain.
+6. **Per-turn checkpoints** with `by rewind` / `by fork --at` (§6), and **`by try`** (§7). Done ([checkpoints](checkpoints.md)), with `r` and `t` in `by watch`; rewind and `fork --at` also work remotely.
 
 **Status, 18 October 2026 (an SDK first).** The configuration became the engine's: `branchyard-config` holds `branchyard.toml`'s types, strict parser, layering and loader, and `Yard::open_configured` gives a yard what the files describe (the gateways, the approvals, the knowledge settings, the task defaults), one path for `by`, the server's model gateway and a Rust program ([configuration](setup.md#configuration)). `by up` is the one command that brings a repository's configured backends up (harnesses installed where the user file allows, the connector gateway started, and what only a person can do listed, with `--plan`, `--yes` and `--json`), the engine's `Yard::up` behind it over a `Machine` boundary with a fake for the tests ([up](up.md)); `by doctor` stays the read-only report. The Python client gained local mode: `Client.local(root)` embeds a `by serve` of the process's own, and `Local(root).up()`, `doctor()` and `harnesses()` run `by --json` ([SDKs](sdk.md#local-mode)). Deferred: the rig planner, pull-request and tracker code still live in `by` rather than the engine, and there is no TypeScript client from the contract schema.
 
-**Where the plan stands** after the checkpoints, pull-request and cockpit branches were integrated: items 3 to 6 are done in local mode, and `by watch` binds every command they added. Item 1 has `by init`, the `setup` skill and `branchyard.toml` with `[mcp]` servers ([setup](setup.md)). Item 2, the workspace lifecycle, is the one left, in its own branch, to be integrated after these. What remains inside the done items is listed under each section above: remote rewind and `fork --at`, picking from the compare pane, and replying to review threads. Wave 2 added Linear, Jira and GitLab issues and `--pr` (§9), concurrent run scripts and listening ports (§2), and, from Orca, quota meters per login that the router and guard act on, and adopting a Claude Code or Codex session already on the machine as a branch ([usage](usage.md)).
+**Where the plan stands** after the checkpoints, pull-request and cockpit branches were integrated: items 3 to 6 are done in local mode, and `by watch` binds every command they added. Item 1 has `by init`, the `setup` skill and `branchyard.toml` with `[mcp]` servers ([setup](setup.md)). Item 2, the workspace lifecycle, is the one left, in its own branch, to be integrated after these. What remains inside the done items is listed under each section above: picking from the compare pane, and replying to review threads. Wave 2 added Linear, Jira and GitLab issues and `--pr` (§9), concurrent run scripts and listening ports (§2), and, from Orca, quota meters per login that the router and guard act on, and adopting a Claude Code or Codex session already on the machine as a branch ([usage](usage.md)).

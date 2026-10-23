@@ -17,14 +17,13 @@ mod tui;
 
 use branchyard_support::time::now_ms;
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
-use branchyard::{Activity, BranchInfo, Event, RecordedEvent, Yard};
+use branchyard::{Activity, BranchInfo, BranchStatus, Event, RecordedEvent, Yard};
 use branchyard_client::api::FeedEntry;
 use branchyard_client::Repo;
 
@@ -41,8 +40,9 @@ pub struct Doing {
     pub asking: Option<String>,
     /// The latest status the harness reported about itself this turn
     /// (`report_status`): a claim beside the protocol's status. While its
-    /// state is working or blocked, its summary is shown in place of the
-    /// last tool.
+    /// state is working or blocked and it is not stale (see
+    /// [`Doing::reported_at`]), its summary is shown in place of the last
+    /// tool.
     pub reported: Option<branchyard::StatusReport>,
     /// Text of the current message, tail only.
     text: String,
@@ -86,17 +86,18 @@ impl Doing {
                 self.asking = None;
             }
             // What the harness says it is doing, in its own words.
-            Activity::StatusReport {
-                state,
-                summary,
-                link,
-            } => {
-                self.reported = Some(branchyard::StatusReport {
-                    state: *state,
-                    summary: summary.clone(),
-                    link: link.clone(),
-                    at_ms: event.at_ms,
-                });
+            Activity::StatusReport { .. } => {
+                self.reported = branchyard::StatusReport::of(event);
+            }
+            // The branch ended: what it said before no longer holds.
+            Activity::Status(
+                BranchStatus::Failed { .. }
+                | BranchStatus::Merged { .. }
+                | BranchStatus::Discarded { .. },
+            ) => {
+                if let Some(report) = &mut self.reported {
+                    report.mark_stale(branchyard::reported::StaleBecause::Ended);
+                }
             }
             // A gateway call is what the harness is doing, as a tool is.
             Activity::ConnectorCall(call) => {
@@ -138,15 +139,24 @@ impl Doing {
             .unwrap_or_default()
     }
 
-    /// One line: a pending permission request, the tool, the snippet.
-    pub fn summary(&self) -> String {
+    /// The latest report this turn as it stands at `now_ms`: stale once
+    /// the branch ended after it or its time-to-live passed. A new turn
+    /// clears it here, so a later turn never makes it stale.
+    pub fn reported_at(&self, now_ms: u64) -> Option<branchyard::StatusReport> {
+        self.reported.clone().map(|report| report.at(now_ms))
+    }
+
+    /// One line at `now_ms`: a pending permission request, the tool (or
+    /// the harness's own current words), the snippet.
+    pub fn summary(&self, now_ms: u64) -> String {
         let mut parts = Vec::new();
         if let Some(tool) = &self.asking {
             parts.push(format!("asks {tool}"));
         }
-        match (&self.reported, &self.tool) {
-            // Its own words win over the last tool while it works or waits.
-            (Some(report), _) if report.state.is_doing() => {
+        match (self.reported_at(now_ms), &self.tool) {
+            // Its own words win over the last tool while it works or waits,
+            // until they go stale.
+            (Some(report), _) if report.is_doing() => {
                 let said = report
                     .summary
                     .split_whitespace()
@@ -238,7 +248,7 @@ pub fn rows(
             let (status, tone) = render::status_text(&info.status);
             let activity = doing
                 .get(&info.name)
-                .map(Doing::summary)
+                .map(|d| d.summary(now_s.saturating_mul(1000)))
                 .unwrap_or_default();
             let fixed = vec![
                 name,
@@ -363,7 +373,7 @@ pub fn changes(
         let (status, _) = render::status_text(&info.status);
         let activity = doing
             .get(&info.name)
-            .map(Doing::summary)
+            .map(|d| d.summary(now_ms))
             .unwrap_or_default();
         let mut text = format!(
             "{status}  turns {}  cost {}",
@@ -443,22 +453,26 @@ impl Source {
     }
 
     /// `by show`'s checkpoint list for a branch, without color: what `r`
-    /// chooses from. Local only, as `by rewind` is.
+    /// chooses from: the SDK's locally, from the branch's events remotely.
     fn checkpoints(&self, branch: &str) -> Result<String, String> {
-        match self {
+        let list = match self {
             Source::Local { yard, .. } => yard
                 .branch(branch)
                 .and_then(|branch| branch.checkpoints())
-                .map(|list| {
-                    crate::attempts::checkpoint_lines(&list, Style { color: false })
-                        .lines()
-                        .skip_while(|l| l.trim().is_empty() || l.trim() == "checkpoints")
-                        .map(|l| format!("{l}\n"))
-                        .collect()
-                })
-                .map_err(|e| e.to_string()),
-            Source::Remote { .. } => Err("by rewind is local only".into()),
-        }
+                .map_err(|e| e.to_string())?,
+            Source::Remote { repo, .. } => repo
+                .branch(branch)
+                .map_err(crate::commands::Failure::from)
+                .and_then(|info| crate::attempts::remote_checkpoints(repo, &info))
+                .map_err(|e| e.to_string())?,
+        };
+        Ok(
+            crate::attempts::checkpoint_lines(&list, Style { color: false })
+                .lines()
+                .skip_while(|l| l.trim().is_empty() || l.trim() == "checkpoints")
+                .map(|l| format!("{l}\n"))
+                .collect(),
+        )
     }
 
     /// `by compare`'s table for a branch and its siblings, without color.
@@ -926,17 +940,9 @@ impl Runner {
             actions::by_id(invocation.action).name.replace(' ', "-"),
             now_ms()
         ));
-        let started = std::fs::create_dir_all(&self.logs)
-            .and_then(|()| File::create(&log))
-            .and_then(|file| Ok((file.try_clone()?, file)))
-            .and_then(|(out, err)| {
-                command.stdout(out).stderr(err);
-                // Its own process group: the terminal's signals, and the
-                // dashboard quitting, leave it running.
-                #[cfg(unix)]
-                std::os::unix::process::CommandExt::process_group(&mut command, 0);
-                command.spawn()
-            });
+        // Its own process group: the terminal's signals, and the dashboard
+        // quitting, leave it running.
+        let started = crate::detach::spawn(&mut command, &log);
         let mut child = match started {
             Ok(child) => child,
             Err(error) => {
@@ -1120,7 +1126,7 @@ mod tests {
         doing.apply(&at(1, Activity::Prompt("go".into())));
         doing.apply(&at(2, delta("Reading the parser\nnow   running")));
         doing.apply(&at(3, delta(" tests\n\n")));
-        assert_eq!(doing.summary(), "now running tests");
+        assert_eq!(doing.summary(NOW), "now running tests");
         doing.apply(&at(
             4,
             Activity::Harness(Event::ToolStarted {
@@ -1140,7 +1146,7 @@ mod tests {
                 },
             }),
         ));
-        assert_eq!(doing.summary(), "asks Bash · ▸ Bash");
+        assert_eq!(doing.summary(NOW), "asks Bash · ▸ Bash");
         doing.apply(&at(
             6,
             Activity::Decision {
@@ -1150,7 +1156,7 @@ mod tests {
                 source: branchyard::DecisionSource::Default,
             },
         ));
-        assert_eq!(doing.summary(), "▸ Bash");
+        assert_eq!(doing.summary(NOW), "▸ Bash");
         assert_eq!(doing.last_at_ms, 6);
         doing.apply(&at(7, delta(&"é".repeat(2_000))));
         assert!(doing.text.len() <= TEXT_TAIL * 2 + 2);
@@ -1161,8 +1167,12 @@ mod tests {
             state,
             summary: summary.into(),
             link: None,
+            ttl_seconds: None,
         }
     }
+
+    /// A time for tests in which nothing has expired.
+    const NOW: u64 = 1_000_000;
 
     /// What the harness says it is doing is shown in place of the last tool
     /// while it works or is blocked, until it says something else or the
@@ -1180,17 +1190,17 @@ mod tests {
         let mut doing = Doing::default();
         doing.apply(&at(1, Activity::Prompt("go".into())));
         doing.apply(&at(2, tool("Bash")));
-        assert_eq!(doing.summary(), "▸ Bash");
+        assert_eq!(doing.summary(NOW), "▸ Bash");
         doing.apply(&at(
             3,
             said(ReportedState::Working, "reading\nthe failing test"),
         ));
-        assert_eq!(doing.summary(), "▸ reading the failing test");
+        assert_eq!(doing.summary(NOW), "▸ reading the failing test");
         // A later tool does not displace the harness's own words.
         doing.apply(&at(4, tool("Edit")));
-        assert_eq!(doing.summary(), "▸ reading the failing test");
+        assert_eq!(doing.summary(NOW), "▸ reading the failing test");
         doing.apply(&at(5, said(ReportedState::Blocked, "needs the API key")));
-        assert_eq!(doing.summary(), "▸ blocked: needs the API key");
+        assert_eq!(doing.summary(NOW), "▸ blocked: needs the API key");
         // Idle, complete and failure say nothing about what it is doing now.
         for state in [
             ReportedState::Idle,
@@ -1198,14 +1208,59 @@ mod tests {
             ReportedState::Failure,
         ] {
             doing.apply(&at(6, said(state, "x")));
-            assert_eq!(doing.summary(), "▸ Edit", "{state}");
+            assert_eq!(doing.summary(NOW), "▸ Edit", "{state}");
             assert_eq!(doing.reported.as_ref().map(|r| r.state), Some(state));
         }
         doing.apply(&at(7, said(ReportedState::Working, "again")));
         assert_eq!(doing.reported.as_ref().unwrap().at_ms, 7);
         doing.apply(&at(8, Activity::Prompt("next".into())));
         assert_eq!(doing.reported, None);
-        assert_eq!(doing.summary(), "");
+        assert_eq!(doing.summary(NOW), "");
+    }
+
+    /// A stale report is not shown as what the branch is doing: once its
+    /// time-to-live has passed, or once the branch ended after it.
+    #[test]
+    fn a_stale_report_gives_way_to_the_last_tool() {
+        use branchyard::reported::StaleBecause;
+        use branchyard::ReportedState;
+        let mut doing = Doing::default();
+        doing.apply(&at(1, Activity::Prompt("go".into())));
+        doing.apply(&at(
+            2,
+            Activity::Harness(Event::ToolStarted {
+                turn: 1,
+                call_id: "c".into(),
+                name: "Bash".into(),
+            }),
+        ));
+        doing.apply(&at(
+            1_000,
+            Activity::StatusReport {
+                state: ReportedState::Blocked,
+                summary: "waiting on CI".into(),
+                link: None,
+                ttl_seconds: Some(60),
+            },
+        ));
+        assert_eq!(doing.summary(60_999), "▸ blocked: waiting on CI");
+        assert_eq!(doing.summary(61_000), "▸ Bash", "its ttl has passed");
+        let stale = doing.reported_at(61_000).unwrap();
+        assert_eq!(stale.stale_because, Some(StaleBecause::Expired));
+        // Without a ttl, the branch ending makes it stale.
+        doing.apply(&at(2_000, said(ReportedState::Working, "parsing")));
+        assert_eq!(doing.summary(u64::MAX), "▸ parsing");
+        doing.apply(&at(
+            3_000,
+            Activity::Status(BranchStatus::Failed {
+                reason: "exit 1".into(),
+            }),
+        ));
+        assert_eq!(doing.summary(3_000), "▸ Bash");
+        assert_eq!(
+            doing.reported_at(3_000).unwrap().stale_because,
+            Some(StaleBecause::Ended)
+        );
     }
 
     #[test]

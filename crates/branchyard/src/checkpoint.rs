@@ -139,6 +139,7 @@ pub struct CheckpointEntry {
 }
 
 /// What [`crate::Branch::rewind`] did.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Rewound {
     pub branch: String,
@@ -146,6 +147,15 @@ pub struct Rewound {
     pub to: u32,
     pub commit: String,
     pub session: SessionContinuity,
+}
+
+/// The commit of `name`'s checkpoint `turn` (0 is its base), or the error a
+/// rewind or a fork at it gives.
+pub(crate) fn commit_at(yard: &Yard, name: &str, turn: u32) -> Result<String, Error> {
+    let store = yard.store();
+    let record = store.read(name)?;
+    let events = record::read(&store, name)?;
+    target_commit(yard, &record, &recorded(&events), turn)
 }
 
 pub(crate) fn list(yard: &Yard, name: &str) -> Result<Checkpoints, Error> {

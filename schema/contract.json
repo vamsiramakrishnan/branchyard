@@ -12131,6 +12131,15 @@
           "type": "boolean",
           "default": false
         },
+        "at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Fork from the branch's checkpoint N (0 is its base) instead of its\ncandidate, like `by fork --at N` and [`branchyard::Branch::fork_at`]:\nthe session forks natively only if it ended there, else a fresh one\nstarts with a summary. Not with `fresh_session`. A checkpoint the\nbranch does not have is refused when the request is admitted."
+        },
         "harness": {
           "type": [
             "string",
@@ -14762,7 +14771,7 @@
           "additionalProperties": false,
           "properties": {
             "schema": {
-              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
             },
             "required": {
               "type": "boolean",
@@ -15210,7 +15219,7 @@
           "additionalProperties": false,
           "properties": {
             "schema": {
-              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
             },
             "required": {
               "type": "boolean",
@@ -16242,6 +16251,14 @@
             "null"
           ],
           "description": "Where to read more: an `http` or `https` URL of at most 2048 bytes.\nA blank one counts as none."
+        },
+        "ttl_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "How long the report holds, a whole number of seconds from 1 to\n604800 (7 days); after that it reads as stale. Omitted for none."
         }
       },
       "required": [
@@ -16301,6 +16318,39 @@
               "format": "uint64",
               "minimum": 0,
               "description": "Milliseconds since the Unix epoch when the report was recorded."
+            },
+            "ttl_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "How long the report holds, in seconds, as the harness gave it.\nOmitted when none was given: the report then holds until a later\nturn finishes or the branch ends."
+            },
+            "expires_at_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When the report expires, `at_ms` plus `ttl_seconds`. Omitted without\na `ttl_seconds`."
+            },
+            "stale": {
+              "type": "boolean",
+              "description": "Whether the report no longer says what the branch is doing, judged\nwhen it was read. Omitted while it is current."
+            },
+            "stale_because": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StaleBecause"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Why it is stale. Omitted while it is current."
             }
           },
           "required": [
@@ -16339,6 +16389,26 @@
             }
           ],
           "description": "What a harness says it is doing."
+        },
+        "StaleBecause": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "ended",
+              "description": "The branch ended since: a `failed`, `merged` or `discarded` status\nwas recorded after the report."
+            },
+            {
+              "type": "string",
+              "const": "later_turn",
+              "description": "A later turn of the branch started and finished without a new\nreport."
+            },
+            {
+              "type": "string",
+              "const": "expired",
+              "description": "Its `ttl_seconds` have passed."
+            }
+          ],
+          "description": "Why a report no longer says what the branch is doing. Judged when the\nreport is read, from the branch's events and the time; see\n[`judge`]."
         },
         "Message": {
           "type": "object",
@@ -16443,6 +16513,127 @@
       "description": "`POST /v1/repos/{repo}/branches/{branch}/discard`: set a settled\nbranch aside, like `by discard`. The answer is the branch's\n[`branchyard::Inspection`].",
       "title": "DiscardRequest",
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "RewindRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "to": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "The checkpoint: a turn number, or 0 for the branch's base."
+        }
+      },
+      "required": [
+        "to"
+      ],
+      "description": "`POST /v1/repos/{repo}/branches/{branch}/rewind`: reset a settled\nbranch, its worktree and its candidate to a checkpoint, like\n`by rewind --to N`. The answer is a [`branchyard::Rewound`].",
+      "title": "RewindRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "Rewound": {
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "from": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "to": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "commit": {
+          "type": "string"
+        },
+        "session": {
+          "$ref": "#/$defs/SessionContinuity"
+        }
+      },
+      "required": [
+        "branch",
+        "to",
+        "commit",
+        "session"
+      ],
+      "description": "What [`crate::Branch::rewind`] did.",
+      "title": "Rewound",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "SessionContinuity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "session": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "native"
+                }
+              },
+              "required": [
+                "mode",
+                "session"
+              ],
+              "description": "The harness's own session is resumed (a rewind) or forked (a fork):\nit ended exactly at that checkpoint."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "turns": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "summary"
+                }
+              },
+              "required": [
+                "mode",
+                "turns",
+                "reason"
+              ],
+              "description": "A fresh session, whose first prompt carries a generated summary of\nthese turns, because the native session could not continue from the\ncheckpoint, for `reason`."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "const": "fresh"
+                }
+              },
+              "required": [
+                "mode",
+                "reason"
+              ],
+              "description": "A fresh session with no summary: nothing ran before the checkpoint\n(turn 0, the base)."
+            }
+          ],
+          "description": "How a rewound or forked-at branch's conversation continues. Serialized as\nan object tagged by `mode`, such as `{\"mode\": \"native\", \"session\": \"...\"}`."
+        }
+      }
     },
     "WaitRequest": {
       "type": "object",
@@ -16694,7 +16885,7 @@
               "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
             },
             "result": {
-              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
+              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one. It is JSON `null` only when the contract's schema\naccepts `null` and the branch reported it (written `\"result\": null`,\nwhich reads back as `Some(Null)`); otherwise a `null` counts as none."
             },
             "seat": {
               "type": [
@@ -17122,6 +17313,39 @@
               "format": "uint64",
               "minimum": 0,
               "description": "Milliseconds since the Unix epoch when the report was recorded."
+            },
+            "ttl_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "How long the report holds, in seconds, as the harness gave it.\nOmitted when none was given: the report then holds until a later\nturn finishes or the branch ends."
+            },
+            "expires_at_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When the report expires, `at_ms` plus `ttl_seconds`. Omitted without\na `ttl_seconds`."
+            },
+            "stale": {
+              "type": "boolean",
+              "description": "Whether the report no longer says what the branch is doing, judged\nwhen it was read. Omitted while it is current."
+            },
+            "stale_because": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StaleBecause"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Why it is stale. Omitted while it is current."
             }
           },
           "required": [
@@ -17161,12 +17385,32 @@
           ],
           "description": "What a harness says it is doing."
         },
+        "StaleBecause": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "ended",
+              "description": "The branch ended since: a `failed`, `merged` or `discarded` status\nwas recorded after the report."
+            },
+            {
+              "type": "string",
+              "const": "later_turn",
+              "description": "A later turn of the branch started and finished without a new\nreport."
+            },
+            {
+              "type": "string",
+              "const": "expired",
+              "description": "Its `ttl_seconds` have passed."
+            }
+          ],
+          "description": "Why a report no longer says what the branch is doing. Judged when the\nreport is read, from the branch's events and the time; see\n[`judge`]."
+        },
         "ResultContract": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "schema": {
-              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
             },
             "required": {
               "type": "boolean",
@@ -17360,7 +17604,7 @@
           "description": "What to tell the parent."
         },
         "result": {
-          "description": "The branch's result, a JSON value checked against its result\ncontract and recorded when it matches; see\n`docs/delegation.md#result-contract`. A `null` counts as none."
+          "description": "The branch's result, a JSON value checked against its result\ncontract and recorded when it matches; see\n`docs/delegation.md#result-contract`. A `null` is a result only\nunder a contract whose schema accepts `null`, and none otherwise."
         }
       },
       "required": [
@@ -18204,7 +18448,7 @@
               "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
             },
             "result": {
-              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
+              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one. It is JSON `null` only when the contract's schema\naccepts `null` and the branch reported it (written `\"result\": null`,\nwhich reads back as `Some(Null)`); otherwise a `null` counts as none."
             },
             "seat": {
               "type": [
@@ -18422,6 +18666,39 @@
               "format": "uint64",
               "minimum": 0,
               "description": "Milliseconds since the Unix epoch when the report was recorded."
+            },
+            "ttl_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "How long the report holds, in seconds, as the harness gave it.\nOmitted when none was given: the report then holds until a later\nturn finishes or the branch ends."
+            },
+            "expires_at_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When the report expires, `at_ms` plus `ttl_seconds`. Omitted without\na `ttl_seconds`."
+            },
+            "stale": {
+              "type": "boolean",
+              "description": "Whether the report no longer says what the branch is doing, judged\nwhen it was read. Omitted while it is current."
+            },
+            "stale_because": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StaleBecause"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Why it is stale. Omitted while it is current."
             }
           },
           "required": [
@@ -18461,12 +18738,32 @@
           ],
           "description": "What a harness says it is doing."
         },
+        "StaleBecause": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "ended",
+              "description": "The branch ended since: a `failed`, `merged` or `discarded` status\nwas recorded after the report."
+            },
+            {
+              "type": "string",
+              "const": "later_turn",
+              "description": "A later turn of the branch started and finished without a new\nreport."
+            },
+            {
+              "type": "string",
+              "const": "expired",
+              "description": "Its `ttl_seconds` have passed."
+            }
+          ],
+          "description": "Why a report no longer says what the branch is doing. Judged when the\nreport is read, from the branch's events and the time; see\n[`judge`]."
+        },
         "ResultContract": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "schema": {
-              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
             },
             "required": {
               "type": "boolean",
@@ -19806,7 +20103,7 @@
               "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
             },
             "result": {
-              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
+              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one. It is JSON `null` only when the contract's schema\naccepts `null` and the branch reported it (written `\"result\": null`,\nwhich reads back as `Some(Null)`); otherwise a `null` counts as none."
             },
             "seat": {
               "type": [
@@ -20024,6 +20321,39 @@
               "format": "uint64",
               "minimum": 0,
               "description": "Milliseconds since the Unix epoch when the report was recorded."
+            },
+            "ttl_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "How long the report holds, in seconds, as the harness gave it.\nOmitted when none was given: the report then holds until a later\nturn finishes or the branch ends."
+            },
+            "expires_at_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When the report expires, `at_ms` plus `ttl_seconds`. Omitted without\na `ttl_seconds`."
+            },
+            "stale": {
+              "type": "boolean",
+              "description": "Whether the report no longer says what the branch is doing, judged\nwhen it was read. Omitted while it is current."
+            },
+            "stale_because": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StaleBecause"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Why it is stale. Omitted while it is current."
             }
           },
           "required": [
@@ -20063,12 +20393,32 @@
           ],
           "description": "What a harness says it is doing."
         },
+        "StaleBecause": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "ended",
+              "description": "The branch ended since: a `failed`, `merged` or `discarded` status\nwas recorded after the report."
+            },
+            {
+              "type": "string",
+              "const": "later_turn",
+              "description": "A later turn of the branch started and finished without a new\nreport."
+            },
+            {
+              "type": "string",
+              "const": "expired",
+              "description": "Its `ttl_seconds` have passed."
+            }
+          ],
+          "description": "Why a report no longer says what the branch is doing. Judged when the\nreport is read, from the branch's events and the time; see\n[`judge`]."
+        },
         "ResultContract": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "schema": {
-              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
             },
             "required": {
               "type": "boolean",
@@ -21245,6 +21595,15 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "ttl_seconds": {
+                      "description": "How long the report holds, in whole seconds (1 to 7 days),\nwhen the harness gave a time-to-live. See\n[`reported::judge`].",
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "format": "uint64",
+                      "minimum": 0
                     }
                   },
                   "required": [
@@ -26360,6 +26719,15 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "ttl_seconds": {
+                      "description": "How long the report holds, in whole seconds (1 to 7 days),\nwhen the harness gave a time-to-live. See\n[`reported::judge`].",
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "format": "uint64",
+                      "minimum": 0
                     }
                   },
                   "required": [
@@ -32061,7 +32429,7 @@
               "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
             },
             "result": {
-              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
+              "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one. It is JSON `null` only when the contract's schema\naccepts `null` and the branch reported it (written `\"result\": null`,\nwhich reads back as `Some(Null)`); otherwise a `null` counts as none."
             },
             "seat": {
               "type": [
@@ -32279,6 +32647,39 @@
               "format": "uint64",
               "minimum": 0,
               "description": "Milliseconds since the Unix epoch when the report was recorded."
+            },
+            "ttl_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "How long the report holds, in seconds, as the harness gave it.\nOmitted when none was given: the report then holds until a later\nturn finishes or the branch ends."
+            },
+            "expires_at_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When the report expires, `at_ms` plus `ttl_seconds`. Omitted without\na `ttl_seconds`."
+            },
+            "stale": {
+              "type": "boolean",
+              "description": "Whether the report no longer says what the branch is doing, judged\nwhen it was read. Omitted while it is current."
+            },
+            "stale_because": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StaleBecause"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Why it is stale. Omitted while it is current."
             }
           },
           "required": [
@@ -32318,12 +32719,32 @@
           ],
           "description": "What a harness says it is doing."
         },
+        "StaleBecause": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "ended",
+              "description": "The branch ended since: a `failed`, `merged` or `discarded` status\nwas recorded after the report."
+            },
+            {
+              "type": "string",
+              "const": "later_turn",
+              "description": "A later turn of the branch started and finished without a new\nreport."
+            },
+            {
+              "type": "string",
+              "const": "expired",
+              "description": "Its `ttl_seconds` have passed."
+            }
+          ],
+          "description": "Why a report no longer says what the branch is doing. Judged when the\nreport is read, from the branch's events and the time; see\n[`judge`]."
+        },
         "ResultContract": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "schema": {
-              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
             },
             "required": {
               "type": "boolean",
@@ -33999,7 +34420,7 @@
           "description": "What its parent asked of the answer it reports: the schema and\nwhether a result is required, as the spawn gave them. Omitted when\nthe spawn gave none."
         },
         "result": {
-          "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one; a result of JSON `null` counts as none."
+          "description": "The latest result the branch reported with `report`, a JSON value\nthat matched `result_contract` when it has one. Omitted until it\nreports one. It is JSON `null` only when the contract's schema\naccepts `null` and the branch reported it (written `\"result\": null`,\nwhich reads back as `Some(Null)`); otherwise a `null` counts as none."
         },
         "seat": {
           "type": [
@@ -34429,6 +34850,39 @@
               "format": "uint64",
               "minimum": 0,
               "description": "Milliseconds since the Unix epoch when the report was recorded."
+            },
+            "ttl_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "How long the report holds, in seconds, as the harness gave it.\nOmitted when none was given: the report then holds until a later\nturn finishes or the branch ends."
+            },
+            "expires_at_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When the report expires, `at_ms` plus `ttl_seconds`. Omitted without\na `ttl_seconds`."
+            },
+            "stale": {
+              "type": "boolean",
+              "description": "Whether the report no longer says what the branch is doing, judged\nwhen it was read. Omitted while it is current."
+            },
+            "stale_because": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StaleBecause"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Why it is stale. Omitted while it is current."
             }
           },
           "required": [
@@ -34468,12 +34922,32 @@
           ],
           "description": "What a harness says it is doing."
         },
+        "StaleBecause": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "ended",
+              "description": "The branch ended since: a `failed`, `merged` or `discarded` status\nwas recorded after the report."
+            },
+            {
+              "type": "string",
+              "const": "later_turn",
+              "description": "A later turn of the branch started and finished without a new\nreport."
+            },
+            {
+              "type": "string",
+              "const": "expired",
+              "description": "Its `ttl_seconds` have passed."
+            }
+          ],
+          "description": "Why a report no longer says what the branch is doing. Judged when the\nreport is read, from the branch's events and the time; see\n[`judge`]."
+        },
         "ResultContract": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "schema": {
-              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties` (`false`),\n`items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and\n`description`. A result reported with `report` must match it."
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
             },
             "required": {
               "type": "boolean",
@@ -35677,6 +36151,15 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "ttl_seconds": {
+                      "description": "How long the report holds, in whole seconds (1 to 7 days),\nwhen the harness gave a time-to-live. See\n[`reported::judge`].",
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "format": "uint64",
+                      "minimum": 0
                     }
                   },
                   "required": [

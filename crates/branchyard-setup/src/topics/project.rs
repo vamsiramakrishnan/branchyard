@@ -790,6 +790,8 @@ fn workspace_questions(facts: &Facts, current: &ProjectConfig, qs: &mut Vec<Ques
         Some(w) => w.run_script(None).ok().and_then(|(_, c)| joined(c)),
         None => detected.run.clone(),
     };
+    let shell_setup =
+        existing.map_or_else(|| detected.shell_setup.clone(), |w| w.shell_setup.clone());
     let copy: Vec<String> = existing.map_or_else(|| detected.copy.clone(), |w| w.copy.clone());
     qs.push(
         Question::new(
@@ -877,6 +879,14 @@ fn workspace_questions(facts: &Facts, current: &ProjectConfig, qs: &mut Vec<Ques
         "Runs in the worktree on by rm and by merge --rm, best-effort, such as stopping the branch's containers.",
         teardown,
         "No teardown",
+    ));
+    qs.push(command(
+        "workspace.shell_setup",
+        "Shell",
+        "What shell setup should run before each turn and script, such as `nvm use`?",
+        "Runs with /bin/sh in the worktree before every turn's harness and every setup, run and teardown script; the variables it sets are theirs. A failure fails the turn.",
+        shell_setup,
+        "No shell setup",
     ));
 }
 
@@ -996,6 +1006,7 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
             }
             set!("workspace.setup", get("workspace.setup"));
             set!("workspace.teardown", get("workspace.teardown"));
+            set!("workspace.shell_setup", get("workspace.shell_setup"));
             // What a devcontainer says beyond its scripts, applied as
             // detected for the plan to show: the variables its processes
             // get, and the file keying the environment it is built as.
@@ -1273,9 +1284,9 @@ mod tests {
         assert!(w
             .found
             .ends_with(&[".emdash.json".into(), ".superset/config.json".into()]));
-        assert_eq!(w.notes.len(), 2, "{:?}", w.notes);
-        assert!(w.notes[0].starts_with(".emdash.json: shellSetup is not imported"));
-        assert!(w.notes[1].starts_with(".conductor/settings.toml was not imported:"));
+        assert_eq!(w.shell_setup.as_deref(), Some("nvm use"));
+        assert_eq!(w.notes.len(), 1, "{:?}", w.notes);
+        assert!(w.notes[0].starts_with(".conductor/settings.toml was not imported:"));
         let lines = facts.lines();
         assert!(lines.iter().any(|l| l.label == "Not imported"), "{lines:?}");
         let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
@@ -1289,6 +1300,7 @@ mod tests {
             ["PORT=$BRANCHYARD_PORT pnpm dev"]
         );
         assert_eq!(workspace.teardown.commands(), ["docker compose down"]);
+        assert_eq!(workspace.shell_setup.as_deref(), Some("nvm use"));
         assert!(plan.valid);
     }
 

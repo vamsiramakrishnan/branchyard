@@ -112,6 +112,10 @@ pub struct WorkspaceFacts {
     pub run: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub teardown: Vec<String>,
+    /// A shell snippet run before each turn and script, from emdash's
+    /// `shellSetup`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_setup: Option<String>,
     /// Variables the scripts and the harness get, from a devcontainer's
     /// `containerEnv` and `remoteEnv`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -243,6 +247,9 @@ impl WorkspaceFacts {
             }
             if teardown.is_none() && !found.teardown.is_empty() {
                 teardown = Some(found.teardown.clone());
+            }
+            if self.shell_setup.is_none() {
+                self.shell_setup = found.shell_setup.clone();
             }
         }
         if let Some(setup) = setup {

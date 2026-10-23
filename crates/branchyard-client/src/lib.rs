@@ -76,8 +76,8 @@ use api::{
     Diff, DiscardRequest, ErrorBody, ErrorResponse, FeedEntry, ForkRequest, GraphRequest,
     HarnessList, IntegrateRequest, InventoryReport, MapList, MapRequest, MapResumeRequest,
     MergeRequest, Operation, ReincarnateRequest, Removed, RepoEntry, RepoList, ReportRequest,
-    ReportStatusRequest, SendRequest, SpawnRequest, SteerRequest, TaskList, TaskRequest,
-    TextRequest, WaitRequest,
+    ReportStatusRequest, RewindRequest, SendRequest, SpawnRequest, SteerRequest, TaskList,
+    TaskRequest, TextRequest, WaitRequest,
 };
 use http::{encode, Endpoint, Response};
 use sse::SseReader;
@@ -755,9 +755,11 @@ impl Repo {
     /// State `branch`'s own status beside the protocol's, as the person or
     /// surface acting for it; like `by report-status --as`. The answer is
     /// the report as recorded and, for `blocked` and `failure`, the
-    /// escalation sent to the parent. A summary that is blank or over 280
-    /// characters, or a link that is not an `http(s)` URL, is refused
-    /// `400 invalid_request` with `detail.field` naming it. A branch's own
+    /// escalation sent to the parent. `ttl`, when given, is how long the
+    /// report holds before it reads as stale. A summary that is blank or
+    /// over 280 characters, a link that is not an `http(s)` URL, or a ttl
+    /// that is not whole seconds from 1 second to 7 days, is refused `400
+    /// invalid_request` with `detail.field` naming it. A branch's own
     /// harness reports through its broker, not this route.
     pub fn report_status(
         &self,
@@ -765,6 +767,7 @@ impl Repo {
         state: ReportedState,
         summary: &str,
         link: Option<&str>,
+        ttl: Option<std::time::Duration>,
     ) -> Result<Reported, Error> {
         self.client.post(
             &self.branch_path(branch, "/report-status"),
@@ -772,6 +775,7 @@ impl Repo {
                 state: state.to_string(),
                 summary: summary.to_owned(),
                 link: link.map(str::to_owned),
+                ttl_seconds: ttl.map(|t| t.as_secs_f64()),
             },
             &new_key(),
         )
@@ -830,6 +834,19 @@ impl Repo {
             &DiscardRequest {
                 reason: reason.map(str::to_owned),
             },
+            &new_key(),
+        )
+    }
+
+    /// Reset a settled branch, its worktree and its candidate to its
+    /// checkpoint `to` (0 is its base), like `by rewind --to N`. Refused
+    /// while a turn runs, for a merged branch, over worktree changes no
+    /// checkpoint has, and for a checkpoint it does not have. Later
+    /// checkpoints stay, so rewinding to one of them undoes this.
+    pub fn rewind(&self, branch: &str, to: u32) -> Result<branchyard::Rewound, Error> {
+        self.client.post(
+            &self.branch_path(branch, "/rewind"),
+            &RewindRequest { to },
             &new_key(),
         )
     }

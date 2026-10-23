@@ -325,11 +325,13 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             state,
             summary,
             link,
+            ttl_seconds,
         } => json!({
             "activity": "status_report",
             "state": state,
             "summary": summary,
             "link": link,
+            "ttl_seconds": ttl_seconds,
         }),
         Activity::Result { value } => json!({
             "activity": "result",
@@ -542,6 +544,7 @@ mod tests {
                     state: branchyard::ReportedState::Blocked,
                     summary: "needs a key".into(),
                     link: link.map(Into::into),
+                    ttl_seconds: None,
                 },
             })
         };
@@ -553,6 +556,7 @@ mod tests {
                 "state": "blocked",
                 "summary": "needs a key",
                 "link": "https://example.com/i/1",
+                "ttl_seconds": null,
             })
         );
         assert_eq!(status_report(None)["link"], Value::Null);

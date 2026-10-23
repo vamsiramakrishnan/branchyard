@@ -260,7 +260,11 @@ impl Live {
             },
             policy,
             check: task.check.clone(),
-            observer: Some(Arc::new(move |event| console.event(event))),
+            observer: Some(Arc::new(move |event| {
+                // A `--detach` launcher waits for this turn to start.
+                crate::detach::observe(event);
+                console.event(event)
+            })),
             isolated: task.isolated,
             command: task.command.clone(),
             provider: provider(task)?,
@@ -798,10 +802,8 @@ pub fn fork_at(
     prompt: &str,
     task: &TaskArgs,
 ) -> Outcome {
-    if let Target::Remote(_) = target {
-        return Err(Failure::Message(
-            "fork --at is not available in remote mode yet; run it on the server's host".into(),
-        ));
+    if let Target::Remote(remote) = target {
+        return remote::fork_at(env, remote, branch, turn, prompt, task);
     }
     let branch = open()?.branch(branch)?;
     let live = Live::start(env, task, task.delegate.is_some(), branch.provider()?);
@@ -1035,19 +1037,23 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
 }
 
 /// The branch's latest self-reported status, as JSON and as one line for
-/// `by show`: `blocked: waiting on the API key (https://...), 3m ago`.
-/// `None` when it never reported one. A claim of the harness's, shown
-/// beside the status the protocol gives.
+/// `by show`: `blocked: waiting on the API key (https://...), 3m ago`, or
+/// `blocked: waiting on the API key (stale, 14m old)` once it is stale
+/// (`docs/delegation.md#self-reported-status`). `None` when it never
+/// reported one. A claim of the harness's, shown beside the status the
+/// protocol gives.
 pub(crate) fn reported_summary(
     events: &[branchyard::RecordedEvent],
     now_ms: u64,
 ) -> Option<(serde_json::Value, String)> {
-    let report = branchyard::reported::latest(events)?;
+    let report = branchyard::reported::latest(events, now_ms)?;
     let age = render::age_text(now_ms.saturating_sub(report.at_ms) / 1000);
     let mut text = render::reported_text(&report);
-    text.push_str(&match age.as_str() {
-        "now" => ", just now".to_owned(),
-        age => format!(", {age} ago"),
+    text.push_str(&match (report.stale, age.as_str()) {
+        (true, "now") => " (stale, just now)".to_owned(),
+        (true, age) => format!(" (stale, {age} old)"),
+        (false, "now") => ", just now".to_owned(),
+        (false, age) => format!(", {age} ago"),
     });
     Some((serde_json::to_value(&report).ok()?, text))
 }
@@ -2119,30 +2125,31 @@ pub fn escalate(target: &Target, as_branch: Option<String>, text: &str, json: bo
 pub fn report_status(
     target: &Target,
     as_branch: Option<String>,
-    state: &str,
-    summary: &str,
-    link: Option<&str>,
+    report: (&str, &str, Option<&str>),
+    ttl: Option<std::time::Duration>,
     json: bool,
 ) -> Outcome {
+    let (state, summary, link) = report;
     let delegate = harness_delegate(json)?;
     let state = branchyard::ReportedState::parse(state);
     let result = match (delegate, target) {
         (Some(delegate), _) => as_itself(&delegate, as_branch.as_deref(), "--as")
-            .and_then(|()| delegate.report_status(state?, summary, link)),
+            .and_then(|()| delegate.report_status(state?, summary, link, ttl)),
         // The rules are the engine's, checked here as well so a refusal
         // reads as a local one does; the server checks them again.
         (None, Target::Remote(remote)) => {
             as_branch_required(as_branch, "report-status").and_then(|b| {
                 let state = state?;
                 branchyard::reported::check(summary, link)?;
+                branchyard::reported::check_ttl(ttl.map(|t| t.as_secs_f64()))?;
                 remote
                     .repo
-                    .report_status(&b, state, summary, link)
+                    .report_status(&b, state, summary, link, ttl)
                     .map_err(remote::sdk_error)
             })
         }
         (None, Target::Local) => as_branch_required(as_branch, "report-status").and_then(|b| {
-            as_user(&b, TaskOptions::default())?.report_status(state?, summary, link)
+            as_user(&b, TaskOptions::default())?.report_status(state?, summary, link, ttl)
         }),
     };
     emit(json, result, |reported| {

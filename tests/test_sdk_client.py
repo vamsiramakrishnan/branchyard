@@ -495,6 +495,18 @@ class Requests(ServerCase):
             f"{REPO}/branches/kid/report-status",
             (200, {"report": report, "escalation": escalation}),
             (200, {"report": {"state": "working", "summary": "reading", "at_ms": 8}}),
+            (
+                200,
+                {
+                    "report": {
+                        "state": "idle",
+                        "summary": "waiting on CI",
+                        "at_ms": 9,
+                        "ttl_seconds": 600,
+                        "expires_at_ms": 600_009,
+                    }
+                },
+            ),
         )
         reported = self.app.report_status("kid", "blocked", "needs the API key", link="https://example.com/i/1")
         self.assertIsInstance(reported, bc.Reported)
@@ -507,12 +519,18 @@ class Requests(ServerCase):
         self.assertEqual(working.report.state, "working")
         self.assertIsNone(working.report.link)
         self.assertIsNone(working.escalation, "only blocked and failure reach the parent")
+        self.assertFalse(working.report.stale)
+        timed = self.app.report_status("kid", "idle", "waiting on CI", ttl_seconds=600)
+        self.assertEqual(timed.report.expires_at_ms, 600_009)
+        self.assertFalse(timed.report.stale)
+        self.assertTrue(bc.StatusReport({"stale": True, "stale_because": "expired"}).stale)
         sent = [r[3] for r in self.requests("POST", f"{REPO}/branches/kid/report-status")]
         self.assertEqual(
             sent,
             [
                 {"state": "blocked", "summary": "needs the API key", "link": "https://example.com/i/1"},
                 {"state": "working", "summary": "reading"},
+                {"state": "idle", "summary": "waiting on CI", "ttl_seconds": 600},
             ],
         )
 
@@ -522,6 +540,7 @@ class Requests(ServerCase):
             ("state", 'state must be one of working, idle, blocked, complete, failure, not "done"'),
             ("summary", "the summary is 281 characters; keep it to one line of at most 280"),
             ("link", 'the link must be an http or https URL, not "ftp://x/"'),
+            ("ttl_seconds", "ttl_seconds must be a whole number of seconds from 1 to 604800 (7 days), not 0"),
         ]:
             self.fake.answer("POST", path, (400, _error("invalid_request", message, {"field": field})))
             with self.assertRaises(bc.InvalidRequestError) as raised:

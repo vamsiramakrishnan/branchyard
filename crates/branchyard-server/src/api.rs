@@ -665,6 +665,7 @@ impl App {
             copy: w.copy.clone(),
             setup: w.setup.commands(),
             teardown: w.teardown.commands(),
+            shell_setup: w.shell_setup.clone(),
             env: w.env.clone(),
             digest: Some(w.digest()),
             prepare: w.prepare,
@@ -789,6 +790,8 @@ pub fn router(app: Shared) -> Router {
         .merge(crate::knowledge_routes::router())
         // Approvals, the effect ledger and undo: `effects_routes`.
         .merge(crate::effects_routes::router())
+        // Rewinding to a checkpoint: `checkpoint_routes`.
+        .merge(crate::checkpoint_routes::router())
         // Wide maps: `map_routes`.
         .merge(crate::map_routes::router())
         // Tasks and their attempts: `task_routes`.
@@ -1637,7 +1640,17 @@ async fn post_fork(
     }
     app.check_admission_quotas(&caller, &policy).await?;
     let options = work::fork_options(&app, &repo, &request)?;
-    existing(&repo.yard, &branch).await?;
+    let source = existing(&repo.yard, &branch).await?;
+    // At a checkpoint: one the branch has, checked before anything is
+    // queued, as the local command refuses it.
+    if let Some(turn) = request.at {
+        blocking(move || {
+            source
+                .checkpoint_commit(turn)
+                .map_err(|e| crate::checkpoint_routes::checkpoint_refusal(&source, turn, &e))
+        })
+        .await??;
+    }
     let planned = {
         let (yard, prompt) = (repo.yard.clone(), request.prompt.clone());
         match blocking(move || yard.task(prompt).options(options).planned_names(&[])).await? {
@@ -2306,14 +2319,22 @@ async fn post_report_status(
     JsonBody(request, _): JsonBody<ReportStatusRequest>,
 ) -> Result<Json<branchyard::Reported>, ApiError> {
     app.authorized_repo(&caller, &repo, "run")?;
-    let (state, summary, link) =
-        branchyard::reported::validate(&request.state, &request.summary, request.link.as_deref())
-            .map_err(|refusal| {
-            ApiError::bad_request(refusal.message)
-                .detail(serde_json::json!({ "field": refusal.field }))
-        })?;
+    let checked = branchyard::reported::validate(
+        &request.state,
+        &request.summary,
+        request.link.as_deref(),
+        request.ttl_seconds,
+    )
+    .map_err(|refusal| {
+        ApiError::bad_request(refusal.message).detail(serde_json::json!({ "field": refusal.field }))
+    })?;
     as_person(&app, &caller, &repo, branch, "run", move |d, _| {
-        d.report_status(state, &summary, link.as_deref())
+        d.report_status(
+            checked.state,
+            &checked.summary,
+            checked.link.as_deref(),
+            checked.ttl_seconds.map(std::time::Duration::from_secs),
+        )
     })
     .await
     .map(Json)

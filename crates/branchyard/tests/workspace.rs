@@ -695,3 +695,131 @@ fn the_workspaces_variables_reach_setup_and_the_harness_expanded() {
     assert_eq!(get("APP_MODE"), Some("dev".into()));
     assert_eq!(get("BRANCHYARD_BRANCH"), Some("vars".into()));
 }
+
+/// A `shell_setup` exporting a variable, trying to replace Branchyard's
+/// port, the harness's home and a credential, and counting its runs.
+fn shell_spec(setup: Vec<String>) -> WorkspaceSpec {
+    WorkspaceSpec {
+        setup,
+        shell_setup: Some(
+            "echo ran >> shell.count; echo 'shell says hi'; export BY_TEST_FROM_SHELL=yes \
+             BRANCHYARD_PORT=1 HOME=/nowhere ANTHROPIC_API_KEY=leaked"
+                .into(),
+        ),
+        ..WorkspaceSpec::default()
+    }
+}
+
+#[test]
+fn shell_setup_reaches_setup_and_every_turns_harness_but_never_branchyards_own() {
+    let f = Fixture::new();
+    let spec = shell_spec(vec![
+        "printf '%s\\n' \"$BY_TEST_FROM_SHELL\" \"$BRANCHYARD_PORT\" > setup.env".into(),
+    ]);
+    let branch = f
+        .yard
+        .task("ENV BY_TEST_FROM_SHELL BRANCHYARD_PORT HOME")
+        .options(with(&f, spec))
+        .name("shelled")
+        .run()
+        .unwrap();
+    assert_eq!(branch.info().status, BranchStatus::Ready);
+    let worktree = branch.info().worktree.clone();
+    let lines: Vec<String> = fs::read_to_string(worktree.join("setup.env"))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(lines[0], "yes", "setup runs with what shell_setup set");
+    let port = f.yard.workspace("shelled").unwrap().port.unwrap();
+    assert_eq!(lines[1], port.to_string(), "the branch's port wins");
+    let said = text(&branch.events().unwrap());
+    assert_eq!(reported(&said, "BY_TEST_FROM_SHELL"), Some("yes".into()));
+    assert_eq!(reported(&said, "BRANCHYARD_PORT"), Some(port.to_string()));
+    assert_ne!(reported(&said, "HOME"), Some("/nowhere".into()));
+    // Once for setup and once for the turn's harness, then again for the
+    // next turn: never cached across turns.
+    let count = || {
+        fs::read_to_string(worktree.join("shell.count"))
+            .unwrap()
+            .lines()
+            .count()
+    };
+    assert_eq!(count(), 2);
+    branch.send("ENV BY_TEST_FROM_SHELL", f.options()).unwrap();
+    assert_eq!(count(), 3);
+    // `by workspace run` gets the same, the branch's port still winning.
+    let env = f.yard.workspace_env("shelled").unwrap();
+    let last = |name: &str| {
+        env.iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(last("BY_TEST_FROM_SHELL"), Some("yes".into()));
+    assert_eq!(last("BRANCHYARD_PORT"), Some(port.to_string()));
+}
+
+#[test]
+fn shell_setup_never_gives_an_isolated_harness_a_credential() {
+    let f = Fixture::new();
+    let options = TaskOptions {
+        isolated: true,
+        ..with(&f, shell_spec(Vec::new()))
+    };
+    let branch = f
+        .yard
+        .task("ENV BY_TEST_FROM_SHELL ANTHROPIC_API_KEY")
+        .options(options)
+        .name("isolated")
+        .run()
+        .unwrap();
+    assert_eq!(branch.info().status, BranchStatus::Ready);
+    let said = text(&branch.events().unwrap());
+    assert_eq!(reported(&said, "BY_TEST_FROM_SHELL"), Some("yes".into()));
+    assert!(said.contains("ANTHROPIC_API_KEY unset"), "{said}");
+}
+
+#[test]
+fn a_failing_shell_setup_fails_the_turn_naming_it_and_its_error() {
+    let f = Fixture::new();
+    // Before the harness: no setup, the turn fails and no prompt is sent.
+    let spec = WorkspaceSpec {
+        shell_setup: Some("echo 'nvm: version \"99\" is not installed' >&2; exit 3".into()),
+        ..WorkspaceSpec::default()
+    };
+    let branch = f
+        .yard
+        .task("WRITE x.txt=1")
+        .options(with(&f, spec.clone()))
+        .name("noshell")
+        .run()
+        .unwrap();
+    let BranchStatus::Failed { reason } = &branch.info().status else {
+        panic!("{:?}", branch.info().status);
+    };
+    assert!(reason.contains("shell_setup"), "{reason}");
+    assert!(reason.contains("exited with status 3"), "{reason}");
+    assert!(reason.contains("is not installed"), "{reason}");
+    assert_eq!(prompts(&branch.events().unwrap()), 0);
+    // Before setup: setup fails, saying why, and never ran.
+    let spec = WorkspaceSpec {
+        setup: vec!["touch ran".into()],
+        ..spec
+    };
+    let branch = f
+        .yard
+        .task("WRITE x.txt=1")
+        .options(with(&f, spec))
+        .name("nosetup")
+        .run()
+        .unwrap();
+    let BranchStatus::Failed { reason } = &branch.info().status else {
+        panic!("{:?}", branch.info().status);
+    };
+    assert!(
+        reason.starts_with("workspace setup failed: shell_setup"),
+        "{reason}"
+    );
+    assert!(!branch.info().worktree.join("ran").exists());
+}

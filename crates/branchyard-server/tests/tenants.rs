@@ -106,7 +106,7 @@ fn scopes_are_enforced_per_endpoint() {
     assert_eq!(denied.code(), Some("scope_required"));
     let denied = reader
         .repo("app")
-        .report_status("r2", branchyard::ReportedState::Working, "x", None)
+        .report_status("r2", branchyard::ReportedState::Working, "x", None, None)
         .unwrap_err();
     assert_eq!(denied.code(), Some("scope_required"));
     let checked = runner.repo("app").check("r2", &new_key()).unwrap();

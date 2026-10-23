@@ -496,8 +496,16 @@ class StatusReport(Record):
     """A branch's own account of what it is doing, from its `report_status`
     tool (`docs/delegation.md#self-reported-status`): `state` (`working`,
     `idle`, `blocked`, `complete` or `failure`), `summary`, `link` (None
-    when none was given) and `at_ms`. A claim beside the protocol's
-    `status`, which may disagree with it."""
+    when none was given) and `at_ms`; `ttl_seconds` and `expires_at_ms`
+    when it was given a time-to-live; and `stale_because` (`ended`,
+    `later_turn` or `expired`) once it no longer says what the branch is
+    doing. A claim beside the protocol's `status`, which may disagree with
+    it."""
+
+    @property
+    def stale(self) -> bool:
+        """Whether the report had gone stale when it was read."""
+        return bool(self.get("stale"))
 
 
 class Reported(Record):
@@ -1582,20 +1590,25 @@ class Repo:
     def escalate(self, branch: str, text: str) -> Message:
         return Message(self.client.post(self._branch(branch, "/escalate"), {"text": text}))
 
-    def report_status(self, branch: str, state: str, summary: str, link: Optional[str] = None) -> Reported:
+    def report_status(
+        self,
+        branch: str,
+        state: str,
+        summary: str,
+        link: Optional[str] = None,
+        ttl_seconds: Optional[float] = None,
+    ) -> Reported:
         """State `branch`'s own status beside the protocol's, as the person
         or surface acting for it (`by report-status --as`): `state` is
         `working`, `idle`, `blocked`, `complete` or `failure`, `summary`
-        one line of at most 280 characters, `link` an optional http(s) URL.
-        A `blocked` or `failure` report is also escalated to its parent. A
-        field that breaks a rule raises `InvalidRequestError` whose `field`
-        names it. A branch's own harness reports through its broker, not
-        this route."""
-        return Reported(
-            self.client.post(
-                self._branch(branch, "/report-status"), _drop_none({"state": state, "summary": summary, "link": link})
-            )
-        )
+        one line of at most 280 characters, `link` an optional http(s) URL,
+        `ttl_seconds` an optional time-to-live (whole seconds, 1 to 604800)
+        after which the report reads as stale. A `blocked` or `failure`
+        report is also escalated to its parent. A field that breaks a rule
+        raises `InvalidRequestError` whose `field` names it. A branch's own
+        harness reports through its broker, not this route."""
+        body = _drop_none({"state": state, "summary": summary, "link": link, "ttl_seconds": ttl_seconds})
+        return Reported(self.client.post(self._branch(branch, "/report-status"), body))
 
     def answer(self, branch: str, message_id: int, text: str) -> Message:
         """Answer one of `branch`'s descendants' messages, as `branch`."""

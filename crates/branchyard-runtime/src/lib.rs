@@ -173,6 +173,15 @@ impl Environment {
         &self.home
     }
 
+    /// Whether an inherited variable named `name` would be passed through:
+    /// not stripped by a prefix (unless kept) and not removed. For a
+    /// variable from elsewhere that must obey the same scrubbing.
+    pub fn admits(&self, name: &str) -> bool {
+        let upper = name.to_ascii_uppercase();
+        let stripped = self.strip.iter().any(|p| upper.starts_with(p.as_str()));
+        !((stripped && !self.keep.contains(name)) || self.remove.contains(name))
+    }
+
     /// The complete environment this describes, read from this process's
     /// environment now. Variables whose names are not UTF-8 are kept as
     /// inherited; no rule can name them.
@@ -182,9 +191,7 @@ impl Environment {
                 let Some(name) = name.to_str() else {
                     return true;
                 };
-                let upper = name.to_ascii_uppercase();
-                let stripped = self.strip.iter().any(|p| upper.starts_with(p.as_str()));
-                !((stripped && !self.keep.contains(name)) || self.remove.contains(name))
+                self.admits(name)
             })
             .collect();
         if !self.inherit_home {

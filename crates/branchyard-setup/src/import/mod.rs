@@ -9,7 +9,8 @@
 //! with Coder's envbuilder as the reference).
 //!
 //! Each importer turns its file into the parts `[workspace]` has: files to
-//! copy, setup commands, a run script and teardown commands, with the
+//! copy, setup commands, a run script, teardown commands and a shell
+//! snippet run before each turn and script (emdash's `shellSetup`), with the
 //! tool's own variables (`$EMDASH_PORT`, `$CONDUCTOR_ROOT_PATH`, ...)
 //! renamed to Branchyard's (`$BRANCHYARD_PORT`, `$BRANCHYARD_ROOT`, ...),
 //! and a note for each thing it left out. A devcontainer also gives the
@@ -40,6 +41,9 @@ pub struct Imported {
     /// The command that starts a development server.
     pub run: Option<String>,
     pub teardown: Vec<String>,
+    /// A shell snippet run before each turn and script (emdash's
+    /// `shellSetup`).
+    pub shell_setup: Option<String>,
     /// Variables the scripts and the harness get (a devcontainer's
     /// `containerEnv` and `remoteEnv`).
     pub env: BTreeMap<String, String>,
@@ -57,6 +61,7 @@ impl Imported {
             && self.setup.is_empty()
             && self.run.is_none()
             && self.teardown.is_empty()
+            && self.shell_setup.is_none()
             && self.env.is_empty()
     }
 }

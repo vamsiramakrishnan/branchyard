@@ -820,17 +820,22 @@ impl Yard {
     /// The variables `branch`'s scripts and harness get:
     /// `BRANCHYARD_BRANCH`, `BRANCHYARD_WORKTREE`, `BRANCHYARD_ROOT` and
     /// `BRANCHYARD_PORT`, reserving the branch's port now if it has none
-    /// yet. For running a command in its worktree, as `by workspace run`
-    /// does.
+    /// yet, with its `[workspace.env]` and what its `shell_setup` adds or
+    /// changes (run now, in the worktree). For running a command in its
+    /// worktree, as `by workspace run` does. [`Error::Config`] when
+    /// `shell_setup` fails, saying why.
     pub fn workspace_env(&self, branch: &str) -> Result<Vec<(String, String)>, Error> {
         let store = self.store();
         let record = store.read(branch)?;
         let port = workspace::reserve_port(&store, &self.root, branch)?;
         let vars = workspace::variables(self, branch, &record.info.worktree, Some(port));
-        Ok(match record.workspace.as_ref() {
-            Some(state) => workspace::with_spec_env(&state.spec, vars),
-            None => vars,
-        })
+        match record.workspace.as_ref() {
+            Some(state) => {
+                workspace::script_env(&state.spec, &record.info.worktree, vars, &|| None)
+                    .map_err(Error::Config)
+            }
+            None => Ok(vars),
+        }
     }
 
     /// Append a workspace lifecycle report to `branch`'s event log, for a
@@ -1947,6 +1952,14 @@ impl Branch {
         checkpoint::list(&self.yard, &self.info.name)
     }
 
+    /// The commit of this branch's checkpoint `turn` (0 is its base), or the
+    /// error [`Branch::rewind`] and [`Branch::fork_at`] give for it: no such
+    /// checkpoint, or its ref no longer names its commit. Lets a caller
+    /// refuse a checkpoint before it queues work at it.
+    pub fn checkpoint_commit(&self, turn: u32) -> Result<String, Error> {
+        checkpoint::commit_at(&self.yard, &self.info.name, turn)
+    }
+
     /// A new branch from this branch's latest candidate, always with a
     /// fresh session, whose first prompt is a generated handoff brief: the
     /// original task, turns so far, its last message, the candidate's
@@ -2664,6 +2677,11 @@ pub enum Activity {
         /// Where to read more, an `http` or `https` URL.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         link: Option<String>,
+        /// How long the report holds, in whole seconds (1 to 7 days),
+        /// when the harness gave a time-to-live. See
+        /// [`reported::judge`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl_seconds: Option<u64>,
     },
     /// The result the branch reported with `report`, a JSON value that
     /// matched its parent's [`contract::ResultContract`] when it had one:

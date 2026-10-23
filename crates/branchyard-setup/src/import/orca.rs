@@ -172,6 +172,7 @@ pub fn import(text: &str, _: Reader) -> Result<Imported, String> {
         setup: commands(&hooks.setup),
         run: run.map(|c| rename_variables(&c, VARIABLES)),
         teardown: commands(&hooks.archive),
+        shell_setup: None,
         env: Default::default(),
         prepare: false,
         inputs: Vec::new(),

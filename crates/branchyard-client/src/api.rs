@@ -397,6 +397,13 @@ pub struct ForkRequest {
     pub name: Option<String>,
     #[serde(default)]
     pub fresh_session: bool,
+    /// Fork from the branch's checkpoint N (0 is its base) instead of its
+    /// candidate, like `by fork --at N` and [`branchyard::Branch::fork_at`]:
+    /// the session forks natively only if it ended there, else a fresh one
+    /// starts with a summary. Not with `fresh_session`. A checkpoint the
+    /// branch does not have is refused when the request is admitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
     #[serde(default)]
@@ -663,7 +670,7 @@ pub struct CheckRequest {}
 /// own status beside the protocol's, like `by report-status --as`. The
 /// answer is a [`branchyard::Reported`].
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReportStatusRequest {
     /// One of `working`, `idle`, `blocked`, `complete` or `failure`. A
@@ -676,6 +683,10 @@ pub struct ReportStatusRequest {
     /// A blank one counts as none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+    /// How long the report holds, a whole number of seconds from 1 to
+    /// 604800 (7 days); after that it reads as stale. Omitted for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<f64>,
 }
 
 /// `POST /v1/repos/{repo}/branches/{branch}/cancel`: no fields yet.
@@ -703,6 +714,17 @@ pub struct DiscardRequest {
     /// when it is omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// `POST /v1/repos/{repo}/branches/{branch}/rewind`: reset a settled
+/// branch, its worktree and its candidate to a checkpoint, like
+/// `by rewind --to N`. The answer is a [`branchyard::Rewound`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RewindRequest {
+    /// The checkpoint: a turn number, or 0 for the branch's base.
+    pub to: u32,
 }
 
 /// `POST /v1/repos/{repo}/wait`: block until branches settle, like
@@ -756,8 +778,13 @@ pub struct ReportRequest {
     pub text: String,
     /// The branch's result, a JSON value checked against its result
     /// contract and recorded when it matches; see
-    /// `docs/delegation.md#result-contract`. A `null` counts as none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `docs/delegation.md#result-contract`. A `null` is a result only
+    /// under a contract whose schema accepts `null`, and none otherwise.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "branchyard::contract::present"
+    )]
     pub result: Option<serde_json::Value>,
 }
 

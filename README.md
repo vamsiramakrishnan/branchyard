@@ -55,6 +55,7 @@ by up                                                 # bring the configured bac
 by harnesses                                          # installed harnesses and their qualification
 by harnesses --all                                    # every harness CLI Branchyard knows of: install, login, API keys
 by run "Make the flaky parser test deterministic" --check "cargo test" --max-minutes 20 --ask
+by run "Document the parser's error codes" --detach --yes   # in the background; outlives this terminal (by log -f, by wait)
 by fan "Make the flaky parser test deterministic" --harness claude-code,codex --check "cargo test" --yes
 by ls
 by diff make-the-flaky-parser-test-deterministic-codex

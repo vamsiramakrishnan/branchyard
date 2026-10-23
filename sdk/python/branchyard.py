@@ -616,6 +616,14 @@ class StatusReport:
     # Milliseconds since the Unix epoch.
     at_ms: int
     link: Optional[str] = None
+    # The time-to-live it was given, in seconds, and when it expires; None
+    # without one.
+    ttl_seconds: Optional[int] = None
+    expires_at_ms: Optional[int] = None
+    # True once it no longer says what the branch is doing (None while it
+    # is current), and why: "ended", "later_turn" or "expired".
+    stale: Optional[bool] = None
+    stale_because: Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -751,9 +759,13 @@ def spawn(
 
     `result` says what shape the child's answer must take:
     `{"schema": {...}, "required": True}`, the schema a JSON Schema using
-    only type, properties, required, additionalProperties (False), items,
-    enum, minimum, maximum, minLength, maxLength and description (anything
-    else is refused, naming it). The child answers with `report(text,
+    only type, properties, required, additionalProperties, items, enum,
+    const, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength,
+    maxLength, pattern, minItems, maxItems, uniqueItems, anyOf, oneOf and
+    annotations such as title and description (anything else is refused,
+    naming it). `report(text, result=None)` reports no result; a schema
+    that accepts null lets a child report `null` through the CLI, MCP or
+    HTTP, and you read it back here as `None`. The child answers with `report(text,
     result=...)`, which is refused when the value does not match; you read
     it as `inspect(child).result`, or on each `wait(...)`ed child.
     `required` (default False) refuses a `report` without a result and
@@ -1084,19 +1096,25 @@ def escalate(text: str) -> Message:
     return _message(_run(["escalate", "--", text]))
 
 
-def report_status(state: str, summary: str, link: Optional[str] = None) -> Reported:
+def report_status(
+    state: str, summary: str, link: Optional[str] = None, ttl_seconds: Optional[int] = None
+) -> Reported:
     """State your own status in one line, beside the one Branchyard derives.
 
     `state` is "working", "idle", "blocked", "complete" or "failure";
-    `summary` is at most 280 characters; `link` is an optional http(s) URL.
-    It is a claim and changes nothing about your branch, and it is not a
-    message: use `report` for that. "blocked" and "failure" are also
-    escalated to your parent's inbox, and the result's `escalation` is that
-    message. Your parent sees the latest report as `inspect(...).reported`.
+    `summary` is at most 280 characters; `link` is an optional http(s) URL;
+    `ttl_seconds` an optional time-to-live (whole seconds, 1 to 604800)
+    after which the report is shown as stale. It is a claim and changes
+    nothing about your branch, and it is not a message: use `report` for
+    that. "blocked" and "failure" are also escalated to your parent's
+    inbox, and the result's `escalation` is that message. Your parent sees
+    the latest report as `inspect(...).reported`.
     """
     args = ["report-status"]
     if link is not None:
         args += ["--link", link]
+    if ttl_seconds is not None:
+        args += ["--ttl", f"{ttl_seconds}s"]
     args += ["--", state, summary]
     value = _run(args)
     escalation = value.get("escalation")

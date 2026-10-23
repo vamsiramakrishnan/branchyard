@@ -989,3 +989,139 @@ fn adopt_lists_this_repositorys_sessions_and_resumes_one_natively() {
         stderr(&out)
     );
 }
+
+// Detached local turns (`--detach` on run, send and fork).
+
+/// The state of `branch`, as `by show --json` says it.
+fn state(repo: &branchyard_testkit::Repo, branch: &str) -> Value {
+    repo.json(&["show", branch, "--json"])["status"]["state"].clone()
+}
+
+/// `by run --detach` returns once the turn has started, and the turn,
+/// held open by a gate file, outlives it and ends `ready`; `by send` and
+/// `by fork --detach` then run turns of their own the same way.
+#[test]
+fn a_detached_turn_outlives_the_command_that_started_it() {
+    let repo = branchyard_testkit::repo!();
+    let agent = fake_agent!().display().to_string();
+    let gate = repo.dir.join("gate");
+    let prompt = format!(
+        "SH while [ ! -e {} ]; do sleep 0.05; done; echo hi > out.txt",
+        gate.display()
+    );
+    let common = [
+        "--yes",
+        "--harness",
+        "gemini-cli",
+        "--command",
+        agent.as_str(),
+    ];
+    let mut args = vec!["run", prompt.as_str(), "--name", "bg", "--detach", "--json"];
+    args.extend(common);
+    let launched = repo.json(&args);
+    assert_eq!(launched["branch"], "bg");
+    assert_eq!(launched["command"], "run");
+    assert_eq!(launched["started"], true);
+    let log = PathBuf::from(launched["log"].as_str().unwrap());
+    assert!(
+        log.starts_with(repo.root.join(".branchyard/detached")),
+        "{}",
+        log.display()
+    );
+    // `by run` has exited; the turn waits on the gate, in the background.
+    assert_eq!(state(&repo, "bg"), "running");
+    fs::write(&gate, "").unwrap();
+    wait::until_with_context(
+        "the detached turn to end ready",
+        wait::DEFAULT_TIMEOUT,
+        || state(&repo, "bg") == "ready",
+        || {
+            format!(
+                "state {}\nlog:\n{}",
+                state(&repo, "bg"),
+                fs::read_to_string(&log).unwrap_or_default()
+            )
+        },
+    );
+    assert!(fs::read_to_string(&log).unwrap().contains("bg"));
+
+    // A send continues it in the background; its text says how to follow.
+    let out = repo.ok(&[
+        "send",
+        "bg",
+        "WRITE more.txt=x",
+        "--detach",
+        "--yes",
+        "--command",
+        &agent,
+    ]);
+    let text = stdout(&out);
+    for follow in ["bg ", "by log -f bg", "by wait bg", "by cancel bg"] {
+        assert!(text.contains(follow), "{text}");
+    }
+    wait::until("the detached send to end ready", || {
+        let shown = repo.json(&["show", "bg", "--json"]);
+        shown["turns"] == 2 && shown["status"]["state"] == "ready"
+    });
+    let args = [
+        "fork",
+        "bg",
+        "WRITE third.txt=x",
+        "--name",
+        "bg2",
+        "--fresh-session",
+        "--detach",
+        "--json",
+        "--yes",
+        "--command",
+        agent.as_str(),
+    ];
+    assert_eq!(repo.json(&args)["branch"], "bg2");
+    wait::until("the detached fork to end ready", || {
+        state(&repo, "bg2") == "ready"
+    });
+}
+
+/// A background command that fails before its turn starts makes the
+/// launcher fail too, with the end of its log.
+#[test]
+fn a_detached_turn_that_cannot_start_is_reported_with_its_log() {
+    let repo = branchyard_testkit::repo!();
+    let out = repo.by(&[
+        "run",
+        "go",
+        "--name",
+        "broken",
+        "--detach",
+        "--yes",
+        "--harness",
+        "gemini-cli",
+        "--command",
+        "/nonexistent/harness",
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("the background by run failed"), "{err}");
+    assert!(err.contains(".branchyard/detached/"), "{err}");
+    assert!(err.contains("/nonexistent/harness"), "{err}");
+}
+
+/// What a detached turn cannot do is refused before anything starts:
+/// `--ask` as a usage error, an `ask` from the configuration as an error.
+#[test]
+fn detach_refuses_to_ask() {
+    let repo = branchyard_testkit::repo!(&[
+        ("a.txt", "one\n"),
+        ("branchyard.toml", "[defaults]\npermissions = \"ask\"\n"),
+    ]);
+    let out = repo.by(&["run", "go", "--detach", "--ask"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    let out = repo.by(&["run", "go", "--detach"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("a detached turn has none"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!repo.root.join(".branchyard/detached").exists());
+}

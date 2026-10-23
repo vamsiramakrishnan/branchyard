@@ -115,6 +115,14 @@ fn each_turn_records_a_checkpoint_ref_that_survives_a_restart_and_goes_with_the_
         list.checkpoints[1].checkpoint.commit,
         list.checkpoints[2].checkpoint.commit
     );
+    // Each checkpoint's commit, the base as 0, and the refusal for none.
+    assert_eq!(branch.checkpoint_commit(1).unwrap(), *one);
+    assert_eq!(branch.checkpoint_commit(0).unwrap(), branch.info().base);
+    let missing = branch.checkpoint_commit(9).unwrap_err().to_string();
+    assert!(
+        missing.contains("cp has no checkpoint 9; its checkpoints are 0 (its base) and"),
+        "{missing}"
+    );
     let events = branch.events().unwrap();
     let recorded = events
         .iter()

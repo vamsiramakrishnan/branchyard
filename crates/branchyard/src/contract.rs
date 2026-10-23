@@ -13,50 +13,50 @@
 //! [`Inspection::result`](crate::Inspection::result), which `inspect` and
 //! `wait` carry.
 //!
-//! The subset is [`KEYWORDS`]: `type`, `properties`, `required`,
-//! `additionalProperties`, `items`, `enum`, `minimum`, `maximum`,
-//! `minLength`, `maxLength` and `description`. Anything else (`pattern`,
-//! `$ref`, `oneOf`, `title`, `const`, ...) is refused when the contract is
-//! given, by name, so no rule a schema states is left unchecked. Keywords
-//! apply as in JSON Schema: `properties` constrains an object and says
-//! nothing about a string, so declare `type` for the shape you want. The
-//! values are checked by the same checker `by map` uses for its schemas
-//! ([`crate::JsonSchema`]), behind this stricter keyword list.
+//! The subset is the one `by map` checks ([`crate::JsonSchema`], one
+//! checker): the keywords [`KEYWORDS`] (`type`, `properties`, `required`,
+//! `additionalProperties`, `items`, `enum`, `const`, `minimum`, `maximum`,
+//! `exclusiveMinimum`, `exclusiveMaximum`, `minLength`, `maxLength`,
+//! `pattern`, `minItems`, `maxItems`, `uniqueItems`, `anyOf`, `oneOf`) and
+//! the unchecked annotations [`ANNOTATIONS`]. Anything else (`$ref`,
+//! `allOf`, `not`, `if`, `format`, ...) is refused when the contract is
+//! given, by name, so no rule a schema states is left unchecked; so is a
+//! keyword in the wrong form, an invalid `pattern`, bounds no value could
+//! meet, and a schema of `false`. Keywords apply as in JSON Schema:
+//! `properties` constrains an object and says nothing about a string, so
+//! declare `type` for the shape you want.
+//!
+//! A JSON `null` reported as a result is the same as none (on the wire,
+//! `"result": null` and no `result` read alike to most clients), except
+//! under a contract whose schema accepts `null` (`type: "null"`, a list of
+//! types with `null`, an `anyOf` with it, ...): there it is a result,
+//! recorded and read back as `null`.
 //!
 //! Not done: a result is not checked against anything but the schema (that
-//! it is true is the child's claim, like a self-reported status); a result
-//! of JSON `null` is the same as none, so a contract whose root is `type:
-//! "null"` is refused; and nothing here stops a child from ending its turn
-//! without a result: a `required` contract only records a warning on the
-//! parent when it does (the `settled` check at the end of a turn).
+//! it is true is the child's claim, like a self-reported status); and
+//! nothing here stops a child from ending its turn without a result: a
+//! `required` contract only records a warning on the parent when it does
+//! (the `settled` check at the end of a turn).
 
 use branchyard_support::best_effort;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
-use crate::json_schema::JsonSchema;
+use crate::json_schema::{Dialect, JsonSchema};
 use crate::record::{self, Recorder};
 use crate::{Activity, BranchStatus, Error, Observer, RecordedEvent, Yard};
 
-/// The keywords a contract's schema may use.
-pub const KEYWORDS: [&str; 11] = [
-    "type",
-    "properties",
-    "required",
-    "additionalProperties",
-    "items",
-    "enum",
-    "minimum",
-    "maximum",
-    "minLength",
-    "maxLength",
-    "description",
-];
+/// The keywords a contract's schema checks: the same as a map's schema
+/// (`docs/map.md#schemas`).
+pub const KEYWORDS: &[&str] = crate::json_schema::KEYWORDS;
+
+/// The annotations a contract's schema may carry, unchecked. Unlike a
+/// map's schema, a contract's refuses `format`: it would read as a rule
+/// nobody checks.
+pub const ANNOTATIONS: &[&str] = crate::json_schema::ANNOTATIONS;
 
 /// The names `type` may take.
-pub const TYPES: [&str; 7] = [
-    "object", "array", "string", "number", "integer", "boolean", "null",
-];
+pub const TYPES: &[&str] = crate::json_schema::TYPES;
 
 /// The longest contract schema, as compact JSON, in bytes.
 pub const SCHEMA_MAX: usize = 16 * 1024;
@@ -73,9 +73,13 @@ const VIOLATIONS_SHOWN: usize = 8;
 #[serde(deny_unknown_fields)]
 pub struct ResultContract {
     /// A JSON Schema in the subset the contract supports: `type`,
-    /// `properties`, `required`, `additionalProperties` (`false`),
-    /// `items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength` and
-    /// `description`. A result reported with `report` must match it.
+    /// `properties`, `required`, `additionalProperties`, `items`, `enum`,
+    /// `const`, `minimum`, `maximum`, `exclusiveMinimum`,
+    /// `exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,
+    /// `minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the
+    /// annotations `title`, `description`, `$comment`, `default`,
+    /// `examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and
+    /// `$id`. A result reported with `report` must match it.
     pub schema: Value,
     /// Whether the child must report a result: a `report` without one is
     /// refused, and a child whose turn ends with none leaves a warning in
@@ -103,9 +107,19 @@ impl ResultContract {
     /// `result.files[2]: expected string, got number`. Empty when it
     /// matches.
     pub fn violations(&self, result: &Value) -> Result<Vec<String>, Error> {
-        let schema = JsonSchema::new(self.schema.clone())
-            .map_err(|why| Error::State(format!("the stored result contract is invalid: {why}")))?;
-        Ok(schema.validate_at(result, "result"))
+        Ok(self.compiled()?.validate_at(result, "result"))
+    }
+
+    /// Whether a JSON `null` matches the schema, so that `null` is a
+    /// result under this contract rather than none.
+    pub fn accepts_null(&self) -> bool {
+        self.compiled()
+            .is_ok_and(|schema| schema.accepts(&Value::Null))
+    }
+
+    fn compiled(&self) -> Result<JsonSchema, Error> {
+        JsonSchema::declared(self.schema.clone(), Dialect::Contract)
+            .map_err(|why| Error::State(format!("the stored result contract is invalid: {why}")))
     }
 
     /// `result` if it matches the schema, else a refusal naming each place
@@ -137,117 +151,9 @@ pub fn check_schema(schema: &Value) -> Result<(), String> {
             "result.schema is {size} bytes; keep it to at most {SCHEMA_MAX}"
         ));
     }
-    check_node(schema, "result.schema")?;
-    // Null is no result (see the module docs), so it can never be reported.
-    if schema.get("type") == Some(&Value::String("null".into())) {
-        return Err(
-            "result.schema.type cannot be null at the root: a result of null is the \
-                    same as none, so the contract could never be met"
-                .into(),
-        );
-    }
-    Ok(())
-}
-
-fn describe(value: &Value) -> String {
-    let text = value.to_string();
-    match text.chars().count() > 40 {
-        true => format!("{}...", text.chars().take(40).collect::<String>()),
-        false => text,
-    }
-}
-
-fn check_node(node: &Value, at: &str) -> Result<(), String> {
-    let Some(object) = node.as_object() else {
-        return Err(format!(
-            "{at} must be a schema object, not {}",
-            describe(node)
-        ));
-    };
-    if let Some(key) = object.keys().find(|k| !KEYWORDS.contains(&k.as_str())) {
-        return Err(format!(
-            "{at} uses `{key}`, which the contract does not support"
-        ));
-    }
-    if let Some(kind) = object.get("type") {
-        if !kind.as_str().is_some_and(|k| TYPES.contains(&k)) {
-            return Err(format!(
-                "{at}.type must be one of {}, not {}",
-                TYPES.join(", "),
-                describe(kind)
-            ));
-        }
-    }
-    check_properties(object, at)?;
-    check_required(object, at)?;
-    if let Some(extra) = object.get("additionalProperties") {
-        if !extra.is_boolean() {
-            return Err(format!(
-                "{at}.additionalProperties must be false (or true), not {}: a schema there is \
-                 not supported",
-                describe(extra)
-            ));
-        }
-    }
-    if let Some(items) = object.get("items") {
-        check_node(items, &format!("{at}.items"))?;
-    }
-    if object
-        .get("enum")
-        .is_some_and(|e| e.as_array().is_none_or(|list| list.is_empty()))
-    {
-        return Err(format!("{at}.enum must be a non-empty array of values"));
-    }
-    for key in ["minimum", "maximum"] {
-        if object.get(key).is_some_and(|v| !v.is_number()) {
-            return Err(format!("{at}.{key} must be a number"));
-        }
-    }
-    for key in ["minLength", "maxLength"] {
-        if object.get(key).is_some_and(|v| v.as_u64().is_none()) {
-            return Err(format!("{at}.{key} must be a whole number of at least 0"));
-        }
-    }
-    if object.get("description").is_some_and(|v| !v.is_string()) {
-        return Err(format!("{at}.description must be a string"));
-    }
-    Ok(())
-}
-
-fn check_properties(object: &Map<String, Value>, at: &str) -> Result<(), String> {
-    let Some(properties) = object.get("properties") else {
-        return Ok(());
-    };
-    let Some(properties) = properties.as_object() else {
-        return Err(format!("{at}.properties must be an object of schemas"));
-    };
-    for (name, sub) in properties {
-        check_node(sub, &format!("{at}.properties.{name}"))?;
-    }
-    Ok(())
-}
-
-fn check_required(object: &Map<String, Value>, at: &str) -> Result<(), String> {
-    let Some(required) = object.get("required") else {
-        return Ok(());
-    };
-    let names: Option<Vec<&str>> = required
-        .as_array()
-        .and_then(|list| list.iter().map(Value::as_str).collect());
-    let Some(names) = names else {
-        return Err(format!("{at}.required must be an array of property names"));
-    };
-    if object.get("additionalProperties") == Some(&Value::Bool(false)) {
-        let declared = object.get("properties").and_then(Value::as_object);
-        if let Some(name) = names
-            .iter()
-            .find(|n| !declared.is_some_and(|p| p.contains_key(**n)))
-        {
-            return Err(format!(
-                "{at}.required names `{name}`, which is not in properties while \
-                 additionalProperties is false, so no result could match"
-            ));
-        }
+    JsonSchema::declared(schema.clone(), Dialect::Contract)?;
+    if schema == &Value::Bool(false) {
+        return Err("result.schema is false, so the contract could never be met".into());
     }
     Ok(())
 }
@@ -256,12 +162,14 @@ fn check_required(object: &Map<String, Value>, at: &str) -> Result<(), String> {
 /// `contract` (or it has none), `None` when none was given, or the
 /// refusal. A branch whose contract is `required` may not report without
 /// one, and no result may be larger than [`RESULT_MAX`] bytes. A JSON
-/// `null` is the same as none.
+/// `null` is the same as none, unless the contract's schema accepts
+/// `null` ([`ResultContract::accepts_null`]): then it is the result.
 pub fn accept(
     contract: Option<&ResultContract>,
     result: Option<Value>,
 ) -> Result<Option<Value>, Error> {
-    let result = result.filter(|value| !value.is_null());
+    let null_is_a_result = contract.is_some_and(ResultContract::accepts_null);
+    let result = result.filter(|value| !value.is_null() || null_is_a_result);
     let Some(value) = result else {
         return match contract {
             Some(contract) if contract.required => Err(Error::Denied(
@@ -282,6 +190,14 @@ pub fn accept(
         contract.validate(&value)?;
     }
     Ok(Some(value))
+}
+
+/// For `#[serde(default, deserialize_with = "present")]` on an
+/// `Option<Value>` result: a field that is present is `Some`, even when it
+/// is JSON `null`, so a `null` result is not lost on the wire (serde reads
+/// a present `null` as `None` otherwise). An absent field is still `None`.
+pub fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
 }
 
 /// The latest result in `events`, oldest first, if the branch ever
@@ -571,37 +487,123 @@ mod tests {
     #[test]
     fn a_keyword_outside_the_subset_is_refused_by_name_wherever_it_is() {
         assert_eq!(
-            refused(json!({"type": "string", "pattern": "^a"})),
-            "result.schema uses `pattern`, which the contract does not support"
+            refused(json!({"type": "string", "$ref": "#/a"})),
+            "result.schema uses `$ref`, which the contract does not support"
         );
         assert_eq!(
-            refused(json!({"properties": {"name": {"$ref": "#/x"}}})),
-            "result.schema.properties.name uses `$ref`, which the contract does not support"
+            refused(json!({"properties": {"name": {"allOf": []}}})),
+            "result.schema.properties.name uses `allOf`, which the contract does not support"
         );
         assert_eq!(
-            refused(json!({"type": "array", "items": {"type": "array", "items": {"oneOf": []}}})),
-            "result.schema.items.items uses `oneOf`, which the contract does not support"
+            refused(json!({"type": "array", "items": {"type": "array", "items": {"not": {}}}})),
+            "result.schema.items.items uses `not`, which the contract does not support"
         );
-        // These are allowed by `by map`'s checker, and not by a contract.
+        assert_eq!(
+            refused(json!({"anyOf": [{"if": {}}]})),
+            "result.schema.anyOf[0] uses `if`, which the contract does not support"
+        );
+        // `format` is an annotation to `by map`, and refused here: nothing
+        // would check it.
         for keyword in [
-            "const",
-            "anyOf",
-            "minItems",
-            "maxItems",
-            "uniqueItems",
-            "exclusiveMinimum",
-            "exclusiveMaximum",
-            "title",
-            "default",
-            "examples",
             "format",
-            "$schema",
+            "patternProperties",
+            "prefixItems",
+            "dependentRequired",
         ] {
-            let message = refused(json!({"type": "object", keyword: 1}));
+            let message = refused(json!({"type": "object", keyword: "x"}));
             assert_eq!(
                 message,
                 format!("result.schema uses `{keyword}`, which the contract does not support")
             );
+        }
+    }
+
+    #[test]
+    fn the_richer_keywords_are_checked_with_readable_errors() {
+        let rich = contract(json!({
+            "title": "Review",
+            "$comment": "checked by the parent",
+            "type": "object",
+            "required": ["kind", "id", "files", "score"],
+            "properties": {
+                "kind": {"const": "review"},
+                "id": {"type": "string", "pattern": "^[A-Z]+-[0-9]+$", "examples": ["BY-12"]},
+                "files": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                          "maxItems": 3, "uniqueItems": true},
+                "score": {"exclusiveMinimum": 0, "exclusiveMaximum": 1, "default": 0.5},
+                "verdict": {"anyOf": [{"enum": ["pass", "fail"]}, {"type": "null"}]},
+                "owner": {"oneOf": [{"type": "string"}, {"type": "object", "required": ["team"]}]}
+            }
+        }));
+        let good = json!({"kind": "review", "id": "BY-12", "files": ["a.rs"], "score": 0.5,
+                          "verdict": null, "owner": {"team": "x"}});
+        rich.validate(&good).unwrap();
+        let with = |field: &str, value: Value| {
+            let mut result = good.clone();
+            result[field] = value;
+            mismatch(&rich, result)
+        };
+        assert_eq!(
+            with("kind", json!("audit")),
+            "result.kind: must be \"review\""
+        );
+        assert_eq!(
+            with("id", json!("by-12")),
+            "result.id: \"by-12\" does not match the pattern \"^[A-Z]+-[0-9]+$\""
+        );
+        assert_eq!(
+            with("files", json!([])),
+            "result.files: 0 item(s), fewer than the minimum 1"
+        );
+        assert_eq!(
+            with("files", json!(["a", "b", "c", "d"])),
+            "result.files: 4 item(s), more than the maximum 3"
+        );
+        assert_eq!(
+            with("files", json!(["a", "a"])),
+            "result.files[1]: repeats the item at [0]"
+        );
+        assert_eq!(
+            with("score", json!(1)),
+            "result.score: 1 must be less than 1"
+        );
+        assert_eq!(
+            with("score", json!(0)),
+            "result.score: 0 must be more than 0"
+        );
+        assert_eq!(
+            with("verdict", json!("maybe")),
+            "result.verdict: matches none of the 2 alternatives in anyOf (closest, anyOf[0]: \
+             result.verdict: \"maybe\" is not one of \"pass\", \"fail\")"
+        );
+        assert_eq!(
+            with("owner", json!(3)),
+            "result.owner: matches none of the 2 alternatives in oneOf (closest, oneOf[0]: \
+             result.owner: expected string, got number)"
+        );
+        // Declared wrong, each is refused naming its place.
+        for (schema, expected) in [
+            (
+                json!({"properties": {"id": {"pattern": "[a-"}}}),
+                "result.schema.properties.id.pattern is not a valid regular expression: \
+                 unclosed character class",
+            ),
+            (
+                json!({"minItems": 2, "maxItems": 1}),
+                "result.schema.minItems (2) is not below result.schema.maxItems (1), so no \
+                 value could match",
+            ),
+            (
+                json!({"oneOf": []}),
+                "result.schema.oneOf must be a non-empty array of schemas",
+            ),
+            (
+                json!({"uniqueItems": "yes"}),
+                "result.schema.uniqueItems must be true or false",
+            ),
+            (json!({"title": 1}), "result.schema.title must be a string"),
+        ] {
+            assert_eq!(refused(schema.clone()), expected, "{schema}");
         }
     }
 
@@ -611,20 +613,20 @@ mod tests {
             (
                 json!({"type": "text"}),
                 "result.schema.type must be one of object, array, string, number, integer, \
-                 boolean, null, not \"text\"",
+                 boolean, null, or a non-empty list of them, not \"text\"",
             ),
             (
-                json!({"type": ["string", "null"]}),
+                json!({"type": ["string", "nil"]}),
                 "result.schema.type must be one of object, array, string, number, integer, \
-                 boolean, null, not [\"string\",\"null\"]",
+                 boolean, null, or a non-empty list of them, not [\"string\",\"nil\"]",
             ),
             (
                 json!({"properties": []}),
                 "result.schema.properties must be an object of schemas",
             ),
             (
-                json!({"properties": {"a": true}}),
-                "result.schema.properties.a must be a schema object, not true",
+                json!({"properties": {"a": 1}}),
+                "result.schema.properties.a must be a schema (an object, or true or false), not 1",
             ),
             (
                 json!({"required": "a"}),
@@ -635,13 +637,14 @@ mod tests {
                 "result.schema.required must be an array of property names",
             ),
             (
-                json!({"additionalProperties": {"type": "string"}}),
-                "result.schema.additionalProperties must be false (or true), not \
-                 {\"type\":\"string\"}: a schema there is not supported",
+                json!({"additionalProperties": 1}),
+                "result.schema.additionalProperties must be a schema (an object, or true or \
+                 false), not 1",
             ),
             (
                 json!({"items": [{"type": "string"}]}),
-                "result.schema.items must be a schema object, not [{\"type\":\"string\"}]",
+                "result.schema.items must be one schema; a list of schemas (prefixItems) is not \
+                 supported",
             ),
             (
                 json!({"enum": []}),
@@ -672,16 +675,29 @@ mod tests {
                 "result.schema.description must be a string",
             ),
             (
-                json!(true),
-                "result.schema must be a schema object, not true",
+                json!("string"),
+                "result.schema must be a schema (an object, or true or false), not \"string\"",
             ),
             (
-                json!("string"),
-                "result.schema must be a schema object, not \"string\"",
+                json!(false),
+                "result.schema is false, so the contract could never be met",
             ),
         ] {
             assert_eq!(refused(schema.clone()), expected, "{schema}");
         }
+        // A list of types, a schema for extra properties and boolean
+        // schemas are in the subset.
+        let open = contract(json!({
+            "type": ["object", "null"],
+            "properties": {"a": true, "b": false},
+            "additionalProperties": {"type": "string"}
+        }));
+        open.validate(&json!({"a": [1], "c": "x"})).unwrap();
+        assert_eq!(
+            mismatch(&open, json!({"b": 1, "c": 2})),
+            "result.b: no value is allowed here; result.c: expected string, got number"
+        );
+        contract(json!(true)).validate(&json!(1)).unwrap();
     }
 
     #[test]
@@ -693,7 +709,7 @@ mod tests {
                 "properties": {"a": {"type": "string"}}
             })),
             "result.schema.required names `b`, which is not in properties while \
-             additionalProperties is false, so no result could match"
+             additionalProperties is false, so no value could match"
         );
         // With extra properties allowed, a required one need not be listed.
         contract(json!({"required": ["b"], "properties": {"a": {}}}));
@@ -701,10 +717,44 @@ mod tests {
     }
 
     #[test]
-    fn a_root_that_could_only_be_null_is_refused() {
-        assert!(refused(json!({"type": "null"})).contains("could never be met"));
-        // Nested, null is an ordinary type.
-        contract(json!({"properties": {"a": {"type": "null"}}}));
+    fn null_is_a_result_only_under_a_contract_whose_schema_accepts_it() {
+        for schema in [
+            json!({"type": "null"}),
+            json!({"type": ["object", "null"]}),
+            json!({"anyOf": [{"type": "object"}, {"const": null}]}),
+            json!({"enum": [null, 1]}),
+            json!({}),
+        ] {
+            for required in [false, true] {
+                let wanted = ResultContract::new(schema.clone(), required).unwrap();
+                assert!(wanted.accepts_null(), "{schema}");
+                assert_eq!(
+                    accept(Some(&wanted), Some(Value::Null)).unwrap(),
+                    Some(Value::Null),
+                    "{schema}"
+                );
+                // No result at all is still none.
+                assert_eq!(accept(Some(&wanted), None).is_err(), required);
+            }
+        }
+        // A schema that refuses null: null is none, as without a contract.
+        let object = ResultContract::new(json!({"type": "object"}), false).unwrap();
+        assert!(!object.accepts_null());
+        assert_eq!(accept(Some(&object), Some(Value::Null)).unwrap(), None);
+        assert_eq!(accept(None, Some(Value::Null)).unwrap(), None);
+    }
+
+    #[test]
+    fn a_present_null_reads_as_a_result_and_an_absent_field_as_none() {
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(default, deserialize_with = "present")]
+            result: Option<Value>,
+        }
+        let read = |text: &str| serde_json::from_str::<Wire>(text).unwrap().result;
+        assert_eq!(read(r#"{"result": null}"#), Some(Value::Null));
+        assert_eq!(read(r#"{"result": [1]}"#), Some(json!([1])));
+        assert_eq!(read("{}"), None);
     }
 
     #[test]

@@ -2,8 +2,9 @@
 //! the fake ACP agent: the trust decision (refused without a terminal,
 //! granted by `by workspace trust` or on a terminal, asked again after a
 //! change, never needed for copy-only or your own user file, never taken
-//! by a harness), `by workspace show` and `run`, and teardown on `by rm`
-//! and `by merge --rm`. Hermetic; requires `git` and `sh`.
+//! by a harness), `by workspace show` and `run`, `shell_setup`'s variables,
+//! and teardown on `by rm` and `by merge --rm`. Hermetic; requires `git`
+//! and `sh`.
 
 #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
@@ -626,4 +627,81 @@ fn by_env_pool_fills_and_by_run_starts_from_a_ready_slot() {
     assert!(status["slots"].as_array().unwrap().is_empty());
     let out = repo.by(&["--remote", "http://127.0.0.1:9", "env", "pool", "status"]);
     assert_eq!(out.status.code(), Some(1));
+}
+
+/// `shell_setup` through `by`: it is a script that needs trust, `by
+/// workspace show` lists it, and the variable it exports reaches setup,
+/// the harness and `by workspace run`, never replacing the branch's port.
+/// A failing one fails `by workspace run` without running the script.
+#[test]
+fn shell_setup_needs_trust_and_reaches_setup_the_harness_and_run_scripts() {
+    let repo = Repo::new(
+        r#"
+[workspace]
+shell_setup = "[ ! -e broken ] || { echo nope >&2; exit 3; }; export BY_CLI_SHELL=from-shell BRANCHYARD_PORT=1"
+setup = "echo $BY_CLI_SHELL > setup-shell.txt"
+
+[workspace.run.dev]
+command = "echo shell=$BY_CLI_SHELL port=$BRANCHYARD_PORT"
+default = true
+"#,
+    );
+    let out = repo.by_agent(&["run", "ENV BY_CLI_SHELL", "--name", "shelled"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("has scripts you have not trusted"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(repo.branches(), 0);
+    let shown = repo.json(&["workspace", "show", "--json"]);
+    assert!(
+        shown["workspace"]["shell_setup"]
+            .as_str()
+            .unwrap()
+            .ends_with("export BY_CLI_SHELL=from-shell BRANCHYARD_PORT=1"),
+        "{shown}"
+    );
+    let trusted = repo.by(&["workspace", "trust"]);
+    assert!(trusted.status.success(), "{}", stderr(&trusted));
+    assert!(
+        stdout(&trusted).contains("shell     [ ! -e broken ]"),
+        "{}",
+        stdout(&trusted)
+    );
+
+    let out = repo.by_agent(&["run", "ENV BY_CLI_SHELL", "--name", "shelled"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let info = repo.json(&["workspace", "show", "shelled", "--json"]);
+    let port = info["port"].as_u64().unwrap();
+    let worktree = PathBuf::from(info["worktree"].as_str().unwrap());
+    assert_eq!(
+        fs::read_to_string(worktree.join("setup-shell.txt"))
+            .unwrap()
+            .trim(),
+        "from-shell"
+    );
+    let said: String = repo
+        .json(&["log", "shelled", "--json"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["event"]["type"] == "message_delta")
+        .map(|e| e["event"]["text"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(said.contains("BY_CLI_SHELL=from-shell"), "{said}");
+
+    let out = repo.by(&["workspace", "run", "shelled"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), format!("shell=from-shell port={port}"));
+
+    // A failing snippet fails the run script before it starts, quoting
+    // its error.
+    fs::write(worktree.join("broken"), "").unwrap();
+    let out = repo.by(&["workspace", "run", "shelled"]);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(!stdout(&out).contains("shell="), "{}", stdout(&out));
+    let said = stderr(&out);
+    assert!(said.contains("exited with status 3"), "{said}");
+    assert!(said.contains("nope"), "{said}");
 }
