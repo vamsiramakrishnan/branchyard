@@ -1,0 +1,8 @@
+{
+  "session_id": "cc-1",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "cwd": "@CWD@",
+  "permission_mode": "default",
+  "hook_event_name": "SessionStart",
+  "source": "startup"
+}

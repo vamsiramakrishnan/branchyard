@@ -1,0 +1,6 @@
+{
+  "hook_event_name": "userPromptSubmit",
+  "cwd": "@CWD@",
+  "session_id": "kr-1",
+  "prompt": "carry on"
+}

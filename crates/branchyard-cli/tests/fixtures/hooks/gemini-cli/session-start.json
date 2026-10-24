@@ -1,0 +1,8 @@
+{
+  "session_id": "gm-1",
+  "transcript_path": "/tmp/t.json",
+  "cwd": "@CWD@",
+  "hook_event_name": "SessionStart",
+  "timestamp": "2026-10-24T10:00:00Z",
+  "source": "startup"
+}

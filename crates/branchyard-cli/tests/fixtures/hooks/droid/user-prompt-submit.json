@@ -1,0 +1,8 @@
+{
+  "session_id": "dr-1",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "cwd": "@CWD@",
+  "permission_mode": "auto-low",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "carry on"
+}

@@ -1,0 +1,9 @@
+{
+  "session_id": "cx-1",
+  "turn_id": "t1",
+  "transcript_path": null,
+  "cwd": "@CWD@",
+  "hook_event_name": "UserPromptSubmit",
+  "model": "gpt-5.5",
+  "prompt": "carry on"
+}

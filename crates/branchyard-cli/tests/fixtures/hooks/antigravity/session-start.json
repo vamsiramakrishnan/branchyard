@@ -1,0 +1,9 @@
+{
+  "conversationId": "ag-1",
+  "workspacePaths": [
+    "@CWD@"
+  ],
+  "transcriptPath": "/tmp/t.jsonl",
+  "artifactDirectoryPath": "/tmp/a",
+  "modelName": "m"
+}

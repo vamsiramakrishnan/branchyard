@@ -11,6 +11,7 @@
 | [Connectors](connectors.md) | How does a branch use GitHub, Slack or an internal API through a skill, an SDK and one gateway, without holding a credential? |
 | [Architecture](design.md) | What does the SDK own, where do harnesses run, and how do topology, budgets, storage, recovery, and merging work? |
 | [Harness integration](harness-integration.md) | How do we control sixteen harnesses through ACP and native interfaces? |
+| [Harness hooks](harness-hooks.md) | How does a session a person started in any harness hear what Branchyard's branches did, through its hooks and status line? |
 | [Implementation plan](implementation-plan.md) | What do we build next, in what order, and what proves each milestone works? |
 | [Delegation](delegation.md) | How does a harness create and coordinate child branches with `by`, Python, Rust or MCP, within what envelope and authority? |
 | [Rigs](rigs.md) | How do I declare a team of harnesses in a file, check it, and run it with `by rig`, and what is refused? |

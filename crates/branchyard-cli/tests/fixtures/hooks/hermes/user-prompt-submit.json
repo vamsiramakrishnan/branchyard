@@ -1,0 +1,9 @@
+{
+  "hook_event_name": "pre_llm_call",
+  "session_id": "hm-1",
+  "cwd": "@CWD@",
+  "tool_name": null,
+  "tool_input": null,
+  "profile": "default",
+  "extra": {}
+}

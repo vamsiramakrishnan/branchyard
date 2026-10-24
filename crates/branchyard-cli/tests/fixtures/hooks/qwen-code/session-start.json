@@ -1,0 +1,7 @@
+{
+  "session_id": "qw-1",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "cwd": "@CWD@",
+  "hook_event_name": "SessionStart",
+  "source": "startup"
+}

@@ -1,0 +1,5 @@
+{
+  "hook_event_name": "agentSpawn",
+  "cwd": "@CWD@",
+  "session_id": "kr-1"
+}

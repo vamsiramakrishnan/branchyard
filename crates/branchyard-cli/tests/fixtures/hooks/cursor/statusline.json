@@ -1,0 +1,8 @@
+{
+  "cwd": "@CWD@",
+  "workspace": {
+    "current_dir": "@CWD@",
+    "project_dir": "@CWD@",
+    "added_dirs": []
+  }
+}

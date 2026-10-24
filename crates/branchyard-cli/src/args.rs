@@ -1131,7 +1131,12 @@ The plugin's hooks/hooks.json runs it; to run it from settings.json instead:
   \"hooks\": {\"UserPromptSubmit\": [{\"hooks\": [{\"type\": \"command\",
     \"command\": \"by hook user-prompt-submit\"}]}]}
 
-See docs/harness-integration.md.
+Other harnesses: --harness ID reads that harness's hook JSON and answers in its shape, for
+example `by hook --harness gemini-cli user-prompt-submit` (a BeforeAgent hook). An unknown
+ID prints nothing and exits 0. --harness generic reads {\"cwd\", \"session_id\"} and prints
+{\"context\": \"...\"}, for plugins written in code.
+
+See docs/harness-integration.md and docs/harness-hooks.md.
 ";
 
 const STATUSLINE_EXAMPLES: &str = "\
@@ -2164,17 +2169,28 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Tell a Claude Code session what changed in this repository's branches (run by the plugin's
-    /// hooks with the hook's JSON on stdin; prints nothing and exits 0 on any problem)
+    /// Tell a Claude Code session (or, with --harness, another harness's) what changed in this
+    /// repository's branches (run by the plugin's hooks with the hook's JSON on stdin; prints
+    /// nothing and exits 0 on any problem)
     #[command(display_order = 606, after_help = HOOK_EXAMPLES)]
     Hook {
+        /// Read and answer in this harness's hook dialect: claude-code (the default), codex,
+        /// gemini-cli, qwen-code, github-copilot, droid, deepseek-harness, cursor, antigravity,
+        /// kiro, hermes, or generic
+        #[arg(long, value_name = "ID")]
+        harness: Option<String>,
         /// session-start or user-prompt-submit
         event: String,
     },
-    /// Print one line about this repository's branches for Claude Code's status line (reads its
-    /// JSON on stdin; prints nothing outside a repository Branchyard uses)
+    /// Print one line about this repository's branches for Claude Code's (or, with --harness,
+    /// another harness's) status line (reads its JSON on stdin; prints nothing outside a
+    /// repository Branchyard uses)
     #[command(display_order = 607, after_help = STATUSLINE_EXAMPLES)]
-    Statusline,
+    Statusline {
+        /// Read the directory from this harness's status-line JSON (as for `by hook --harness`)
+        #[arg(long, value_name = "ID")]
+        harness: Option<String>,
+    },
     /// Run, stop or inspect this repository's connector gateway (Anvil), and its keys
     #[command(display_order = 403, subcommand_required = true, after_help = GATEWAY_EXAMPLES)]
     Gateway {

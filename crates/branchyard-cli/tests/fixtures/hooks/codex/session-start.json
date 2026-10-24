@@ -1,0 +1,8 @@
+{
+  "session_id": "cx-1",
+  "transcript_path": null,
+  "cwd": "@CWD@",
+  "hook_event_name": "SessionStart",
+  "model": "gpt-5.5",
+  "source": "startup"
+}
