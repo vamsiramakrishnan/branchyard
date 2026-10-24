@@ -774,9 +774,9 @@ fn the_gateway_refuses_what_the_token_does_not_allow() {
 #[test]
 fn backends_fail_over_on_refusal_5xx_and_429_in_order() {
     let f = Fixture::new();
-    let refused = TcpListener::bind("127.0.0.1:0").unwrap();
-    let refused_url = format!("http://127.0.0.1:{}", refused.local_addr().unwrap().port());
-    drop(refused);
+    // Port 1 is privileged, so no mock in this process can be given it, as
+    // a freed ephemeral port can be: connecting to it is always refused.
+    let refused_url = "http://127.0.0.1:1".to_owned();
     let (five, many, good) = (
         mock(Behavior::Status(503)),
         mock(Behavior::Status(429)),
