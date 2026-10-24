@@ -1286,18 +1286,52 @@ fn unknown_operation(what: String) -> ApiError {
 
 /// An operation only its own tenant may read: another tenant's, like an
 /// unknown ID, is `404`, so a principal cannot tell the two apart.
+///
+/// With `?wait=SECONDS`, a long poll: the answer comes once the operation
+/// is terminal or that long has passed, at most [`MAX_WAIT`], and is the
+/// operation as it then is, so a caller that wants longer asks again. The
+/// operation finishing wakes it ([`crate::ops::Registry::wait_for_tenant`]).
 async fn operation(
     State(app): State<Shared>,
     Path(id): Path<String>,
     Extension(caller): Extension<Caller>,
+    RawQuery(query): RawQuery,
 ) -> Result<Json<Operation>, ApiError> {
+    let wait = operation_wait(query.as_deref())?;
     let registry = app.registry.clone();
     let found = {
         let id = id.clone();
         let tenant = caller.tenant().to_owned();
-        blocking(move || registry.get_for_tenant(&id, &tenant)).await??
+        blocking(move || match wait {
+            Some(timeout) => registry.wait_for_tenant(&id, &tenant, timeout),
+            None => registry.get_for_tenant(&id, &tenant),
+        })
+        .await??
     };
     found.map(Json).ok_or_else(|| unknown_operation(id))
+}
+
+/// The `wait` of `GET /v1/operations/{id}?wait=SECONDS`, capped at
+/// [`MAX_WAIT`]: a number of seconds, not negative, else `400` with
+/// `detail.field` `wait`.
+fn operation_wait(query: Option<&str>) -> Result<Option<Duration>, ApiError> {
+    let Some(raw) = query
+        .unwrap_or("")
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("wait="))
+        .map(branchyard_client::http::decode_form)
+    else {
+        return Ok(None);
+    };
+    match raw.parse::<f64>() {
+        Ok(s) if s.is_finite() && s >= 0.0 => {
+            Ok(Some(Duration::from_secs_f64(s.min(1e9)).min(MAX_WAIT)))
+        }
+        _ => Err(
+            ApiError::bad_request(format!("wait takes a number of seconds, not {raw:?}"))
+                .detail(serde_json::json!({ "field": "wait" })),
+        ),
+    }
 }
 
 /// `GET /v1/operations?idempotency_key=KEY`: the operation the caller's

@@ -11,16 +11,16 @@ use std::collections::HashSet;
 use std::io;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use branchyard::{
     Activity, BranchEvent, BranchInfo, Children, Envelope, EventPage, Inspection, Merged, Provider,
     Sent,
 };
 use branchyard_client::api::{
-    BudgetSpec, ErrorBody, ForkRequest, GraphRequest, MapRequest, MergeRequest, Operation,
-    OperationResult, OperationState, PolicyMode, PolicySpec, ReincarnateRequest, RuleSpec,
-    SendRequest, SpawnRequest, TaskRequest,
+    BudgetSpec, ErrorBody, FeedEntry, ForkRequest, GraphRequest, MapRequest, MergeRequest,
+    Operation, OperationResult, OperationState, PolicyMode, PolicySpec, ReincarnateRequest,
+    RuleSpec, SendRequest, SpawnRequest, TaskRequest,
 };
 use branchyard_client::{new_key, Client, Repo};
 
@@ -296,11 +296,182 @@ fn result(op: Operation) -> Result<OperationResult, Failure> {
     }
 }
 
+/// `by log --follow` against a server: the branch's recorded events, then
+/// each new one from the repository's event stream, until interrupted.
+/// When the server goes away it says so once, reconnects after the last
+/// entry it read, and says when it is back.
+pub fn follow_log(remote: &Remote, branch: &str, out: &mut commands::Following<'_>) -> Outcome {
+    let (stream, history, mut overlap) = log_and_stream(&remote.repo, branch)?;
+    out.take(history)?;
+    let (tx, rx) = mpsc::channel();
+    let repo = remote.repo.clone();
+    let name = branch.to_owned();
+    std::thread::spawn(move || follow_branch(&repo, &name, stream, &tx));
+    loop {
+        match rx.recv_timeout(commands::FOLLOW_POLL) {
+            Ok(Followed::Event(event)) if overlap.seen(&event) => {}
+            Ok(Followed::Event(event)) => out.take(vec![*event])?,
+            Ok(Followed::Lost(error)) => eprintln!("by: {error}; retrying"),
+            Ok(Followed::Back) => eprintln!("by: reconnected to {}", remote.client.endpoint()),
+            Ok(Followed::Refused(error)) => return Err(error.into()),
+            // The events paused: held message text is complete.
+            Err(RecvTimeoutError::Timeout) => out.take(Vec::new())?,
+            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+        }
+    }
+}
+
+/// The branch's events so far, the repository's event stream opened where
+/// they end, and the overlap: the branch's events read once the stream was
+/// open, which are in the history and may also arrive on the stream.
+///
+/// The branch's events are read, the stream opened, and the branch's events
+/// read again from where they ended, once: an event recorded between the
+/// first read and the opening is caught by the second, and one recorded
+/// after the opening comes on the stream as well, so the second read is the
+/// overlap [`Overlap::seen`] drops. Reading again until nothing new came
+/// would never end on a branch busier than one round trip.
+fn log_and_stream(
+    repo: &Repo,
+    branch: &str,
+) -> Result<
+    (
+        branchyard_client::EventStream,
+        Vec<branchyard::RecordedEvent>,
+        Overlap,
+    ),
+    Failure,
+> {
+    let page = repo.events(branch, 0)?;
+    let mut events = page.events;
+    let mut stream = repo.stream(None).max_failures(0);
+    stream.open()?;
+    let more = repo.events(branch, page.cursor)?.events;
+    events.extend(more.iter().cloned());
+    Ok((stream, events, Overlap(more.into())))
+}
+
+/// The branch's events read after the stream opened, not yet matched on it.
+/// Those the stream also carries come first on it and in the same order, so
+/// each stream event is looked for among them; one not found means the
+/// stream has passed them all.
+struct Overlap(std::collections::VecDeque<branchyard::RecordedEvent>);
+
+impl Overlap {
+    /// Whether `event`, from the stream, is one already shown.
+    fn seen(&mut self, event: &branchyard::RecordedEvent) -> bool {
+        match self.0.iter().position(|e| e == event) {
+            Some(at) => {
+                self.0.drain(..=at);
+                true
+            }
+            None => {
+                self.0.clear();
+                false
+            }
+        }
+    }
+}
+
+/// What the thread reading the stream for `by log --follow` passes on.
+enum Followed {
+    /// One of the branch's events.
+    Event(Box<branchyard::RecordedEvent>),
+    /// The server cannot be reached; retrying.
+    Lost(branchyard_client::Error),
+    /// Reconnected after [`Followed::Lost`].
+    Back,
+    /// The server refused the stream; retrying cannot help.
+    Refused(branchyard_client::Error),
+}
+
+/// Pass `branch`'s entries from `stream` to `tx`, reconnecting after the
+/// last entry read when the stream drops, until `tx`'s reader is gone.
+fn follow_branch(
+    repo: &Repo,
+    branch: &str,
+    mut stream: branchyard_client::EventStream,
+    tx: &mpsc::Sender<Followed>,
+) {
+    let mut cursor = stream.cursor();
+    loop {
+        for item in stream.by_ref() {
+            match item {
+                Ok(entry) => {
+                    cursor = Some(entry.seq);
+                    if entry.branch != branch {
+                        continue;
+                    }
+                    let event = branchyard::RecordedEvent {
+                        at_ms: entry.at_ms,
+                        activity: entry.activity,
+                    };
+                    if tx.send(Followed::Event(Box::new(event))).is_err() {
+                        return;
+                    }
+                }
+                // Dropped: reconnect below.
+                Err(branchyard_client::Error::Transport { .. }) => break,
+                Err(error) => {
+                    branchyard_support::best_effort(
+                        "report the refused stream",
+                        tx.send(Followed::Refused(error)),
+                    );
+                    return;
+                }
+            }
+        }
+        let mut delays = branchyard_client::reconnect_backoff();
+        let mut lost = false;
+        stream = loop {
+            let mut next = repo.stream(cursor).max_failures(0);
+            match next.open() {
+                Ok(_) => {
+                    if lost && tx.send(Followed::Back).is_err() {
+                        return;
+                    }
+                    break next;
+                }
+                // A restarting server: keep following and try again.
+                Err(error @ branchyard_client::Error::Transport { .. }) => {
+                    if !lost {
+                        lost = true;
+                        if tx.send(Followed::Lost(error)).is_err() {
+                            return;
+                        }
+                    }
+                    std::thread::sleep(delays.next().unwrap_or(Duration::from_secs(5)));
+                }
+                Err(error) => {
+                    branchyard_support::best_effort(
+                        "report the refused stream",
+                        tx.send(Followed::Refused(error)),
+                    );
+                    return;
+                }
+            }
+        };
+    }
+}
+
 /// Render the operation's activity as it streams, until the operation has
 /// finished and every entry up to its end cursor has been shown.
 fn follow(remote: &Remote, op: &Operation, console: &Console) -> Result<Operation, Failure> {
     follow_prefixed(remote, op, console, None)
 }
+
+/// What [`follow_prefixed`] hears: the stream's entries and its end, and
+/// the operation as each long poll of it answers.
+enum Heard {
+    Entry(Box<Result<FeedEntry, branchyard_client::Error>>),
+    StreamEnded,
+    Operation(Box<Result<Operation, branchyard_client::Error>>),
+}
+
+/// How long one long poll of a followed operation lasts: the operation
+/// finishing answers it at once; a queued one's reason for waiting
+/// (`waiting`) is shown within this.
+const FOLLOW_POLL: Duration = Duration::from_secs(5);
 
 /// [`follow`], also showing every branch whose name starts with `prefix`:
 /// a map's, which its operation cannot name when it is accepted.
@@ -313,18 +484,30 @@ fn follow_prefixed(
     let mut branches: HashSet<String> = op.branches.iter().cloned().collect();
     let (tx, rx) = mpsc::channel();
     let stream = remote.repo.stream(Some(op.cursor));
+    let entries = tx.clone();
     std::thread::spawn(move || {
         for item in stream {
-            if tx.send(item).is_err() {
+            if entries.send(Heard::Entry(Box::new(item))).is_err() {
                 return;
             }
+        }
+        branchyard_support::best_effort(
+            "say the event stream ended",
+            entries.send(Heard::StreamEnded),
+        );
+    });
+    // The operation's state by long polls, not by sleeping between reads.
+    let (client, id) = (remote.client.clone(), op.id.clone());
+    std::thread::spawn(move || loop {
+        let op = client.wait_timeout(&id, FOLLOW_POLL);
+        let last = op.as_ref().map_or(true, |op| op.state.is_terminal());
+        if tx.send(Heard::Operation(Box::new(op))).is_err() || last {
+            return;
         }
     });
     let mut seen = op.cursor;
     let mut finished: Option<Operation> = None;
     let mut streaming = true;
-    let mut polled = Instant::now();
-    let poll = Duration::from_millis(250);
     let mut said_waiting = false;
     loop {
         if let Some(done) = &finished {
@@ -333,9 +516,15 @@ fn follow_prefixed(
                 return Ok(done.clone());
             }
         }
-        if streaming {
-            match rx.recv_timeout(poll) {
-                Ok(Ok(entry)) => {
+        let Ok(heard) = rx.recv() else {
+            return Err(Failure::Message(format!(
+                "lost track of operation {}",
+                op.id
+            )));
+        };
+        match heard {
+            Heard::Entry(item) if streaming => match *item {
+                Ok(entry) => {
                     seen = entry.seq;
                     // A child a followed branch spawned is followed too, as
                     // a local run shows its children.
@@ -361,26 +550,23 @@ fn follow_prefixed(
                         });
                     }
                 }
-                Ok(Err(error)) => {
+                Err(error) => {
                     console.finish();
                     eprintln!("by: lost the event stream ({error}); waiting for the result");
                     streaming = false;
                 }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => streaming = false,
-            }
-        } else {
-            std::thread::sleep(poll);
-        }
-        if finished.is_none() && polled.elapsed() >= poll {
-            polled = Instant::now();
-            let op = remote.client.operation(&op.id)?;
-            if let (Some(waiting), false) = (&op.waiting, said_waiting) {
-                eprintln!("by: {} is still queued: {waiting}", op.id);
-                said_waiting = true;
-            }
-            if op.state.is_terminal() {
-                finished = Some(op);
+            },
+            Heard::Entry(_) => {}
+            Heard::StreamEnded => streaming = false,
+            Heard::Operation(op) => {
+                let op = (*op)?;
+                if let (Some(waiting), false) = (&op.waiting, said_waiting) {
+                    eprintln!("by: {} is still queued: {waiting}", op.id);
+                    said_waiting = true;
+                }
+                if op.state.is_terminal() {
+                    finished = Some(op);
+                }
             }
         }
     }
@@ -731,6 +917,7 @@ fn send_request(
             provision: provision(task)?,
             require_labels: task.require_labels.clone(),
             priority: task.priority,
+            feedback: None,
         },
         notice,
     ))
@@ -746,6 +933,26 @@ pub fn send(
     task: &TaskArgs,
 ) -> Outcome {
     let (request, notice) = send_request(task, prompt)?;
+    let op = remote.repo.send(branch, &request, &new_key())?;
+    // A `by review --detach` launcher waits for the server to accept it.
+    crate::detach::accepted(branch);
+    announce(remote, notice, None);
+    let delegating = task.delegate.is_some() || !remote.repo.branch(branch)?.children.is_empty();
+    finish_one(env, remote, &op, delegating)
+}
+
+/// `by --remote review`: send `prompt` with `feedback`, which the server
+/// records as data beside it.
+pub fn send_feedback(
+    env: &Env,
+    remote: &Remote,
+    branch: &str,
+    prompt: &str,
+    task: &TaskArgs,
+    feedback: branchyard::Feedback,
+) -> Outcome {
+    let (mut request, notice) = send_request(task, Prompt::Text(prompt))?;
+    request.feedback = Some(feedback);
     let op = remote.repo.send(branch, &request, &new_key())?;
     announce(remote, notice, None);
     let delegating = task.delegate.is_some() || !remote.repo.branch(branch)?.children.is_empty();
@@ -766,6 +973,7 @@ pub fn send_json(
         .repo
         .send(branch, &request, &new_key())
         .map_err(sdk_error)?;
+    crate::detach::accepted(branch);
     announce(remote, notice, None);
     let info = follow_result(env, remote, &op)?
         .branches
@@ -969,10 +1177,7 @@ pub fn integrate(remote: &Remote, branch: &str) -> Result<Merged, branchyard::Er
         .repo
         .integrate(branch, &new_key())
         .map_err(sdk_error)?;
-    let done = remote
-        .client
-        .wait(&op.id, Duration::from_millis(200))
-        .map_err(sdk_error)?;
+    let done = remote.client.wait(&op.id).map_err(sdk_error)?;
     result(done)?
         .merged
         .ok_or_else(|| branchyard::Error::State("the server returned no merge".into()))
@@ -988,10 +1193,7 @@ pub fn integrate_all(
         .repo
         .integrate_all(branches, &new_key())
         .map_err(sdk_error)?;
-    let done = remote
-        .client
-        .wait(&op.id, Duration::from_millis(200))
-        .map_err(sdk_error)?;
+    let done = remote.client.wait(&op.id).map_err(sdk_error)?;
     result(done)?
         .merged_all
         .ok_or_else(|| branchyard::Error::State("the server returned no merge".into()))
@@ -1003,10 +1205,7 @@ pub fn integrate_all(
 /// stops waiting, not the check.
 pub fn check(remote: &Remote, branch: &str) -> Result<branchyard::CheckReport, branchyard::Error> {
     let op = remote.repo.check(branch, &new_key()).map_err(sdk_error)?;
-    let done = remote
-        .client
-        .wait(&op.id, Duration::from_millis(200))
-        .map_err(sdk_error)?;
+    let done = remote.client.wait(&op.id).map_err(sdk_error)?;
     result(done)?
         .check_report
         .ok_or_else(|| branchyard::Error::State("the server returned no check report".into()))
@@ -1044,7 +1243,7 @@ pub fn merge(remote: &Remote, branch: &str, into: Option<&str>) -> Outcome {
         }
         other => other?,
     };
-    let done = remote.client.wait(&op.id, Duration::from_millis(200))?;
+    let done = remote.client.wait(&op.id)?;
     let merged = result(done)?
         .merged
         .ok_or_else(|| Failure::Message("the server returned no merge".into()))?;
@@ -1152,6 +1351,25 @@ fn rig_failed(json: bool, error: branchyard::Error) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stream events already read after the stream opened are dropped,
+    /// in order; the first one not among them ends the matching, so a later
+    /// repeat of the same event is shown.
+    #[test]
+    fn the_overlap_is_dropped_once() {
+        let event = |at_ms: u64, text: &str| branchyard::RecordedEvent {
+            at_ms,
+            activity: Activity::Prompt(text.into()),
+        };
+        let mut overlap = Overlap([event(1, "before"), event(2, "after")].into());
+        // `before` was recorded before the stream opened: it never comes,
+        // and `after` is the first stream event.
+        assert!(overlap.seen(&event(2, "after")));
+        assert!(!overlap.seen(&event(3, "new")));
+        assert!(!overlap.seen(&event(2, "after")), "matching has ended");
+        let mut none = Overlap(Default::default());
+        assert!(!none.seen(&event(1, "x")));
+    }
 
     /// A server's failed integration check reads as a local one: the
     /// shared check's fields and every check of the integration, at the

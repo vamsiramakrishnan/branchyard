@@ -6,7 +6,10 @@
 
 mod common;
 
-use branchyard::{Activity, BranchStatus, GoalActivity, JudgedBy, KnowledgeScope, KnowledgeStatus};
+use branchyard::{
+    prompt_digest, Activity, BranchStatus, Feedback, FeedbackItem, FeedbackSource, GoalActivity,
+    JudgedBy, KnowledgeScope, KnowledgeSource, KnowledgeStatus,
+};
 use branchyard_client::api::{
     GoalRequest, OperationKind, OperationState, PolicySpec, SendRequest, TaskRequest,
 };
@@ -110,6 +113,80 @@ fn knowledge_is_a_persons_decision_over_http_and_reaches_harnesses() {
         .unwrap();
     assert_eq!(rejected.status, KnowledgeStatus::Rejected);
     assert_eq!(rejected.note.as_deref(), Some("too narrow"));
+
+    // Feedback sent with its prompt is recorded as data, and distilled
+    // from the record, not from the prompt's wording.
+    let op = run(&client, &task("WRITE notes.txt=1", "fed"));
+    assert_eq!(op.state, OperationState::Succeeded);
+    let feedback = Feedback {
+        source: FeedbackSource::Review,
+        reference: None,
+        items: vec![FeedbackItem {
+            path: Some("notes.txt".into()),
+            line: Some(1),
+            body: "Write each date in ISO form".into(),
+            ..FeedbackItem::default()
+        }],
+        prompt: Some("not trusted: the server sets it".into()),
+    };
+    let prompt = "A reworded note from review. WRITE notes.txt=2";
+    let retried = repo
+        .send(
+            "fed",
+            &SendRequest {
+                retry: true,
+                feedback: Some(feedback.clone()),
+                ..SendRequest::default()
+            },
+            &new_key(),
+        )
+        .unwrap_err();
+    assert_eq!(retried.code(), Some("invalid_request"), "{retried}");
+    let sent = repo
+        .send(
+            "fed",
+            &SendRequest {
+                prompt: prompt.into(),
+                policy: PolicySpec::allow_all(),
+                feedback: Some(feedback),
+                ..SendRequest::default()
+            },
+            &new_key(),
+        )
+        .unwrap();
+    assert_eq!(
+        await_operation(&client, &sent.id).state,
+        OperationState::Succeeded
+    );
+    let recorded: Vec<Option<String>> = repo
+        .events("fed", 0)
+        .unwrap()
+        .events
+        .iter()
+        .filter_map(|e| match &e.activity {
+            Activity::Feedback(f) => Some(f.prompt.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recorded, [Some(prompt_digest(prompt))]);
+    let distilled = repo.distill("fed").unwrap();
+    let proposed: Vec<(&str, Option<&str>, &KnowledgeSource)> = distilled
+        .proposed
+        .iter()
+        .map(|e| (e.text.as_str(), e.scope.path.as_deref(), &e.source))
+        .collect();
+    assert_eq!(
+        proposed,
+        [(
+            "Write each date in ISO form",
+            Some("notes.txt"),
+            &KnowledgeSource::Branch {
+                branch: "fed".into(),
+                turn: Some(2),
+                via: "review".into(),
+            }
+        )]
+    );
 
     // Removed, and then unknown.
     repo.remove_knowledge(adopted.id).unwrap();

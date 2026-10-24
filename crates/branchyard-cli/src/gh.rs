@@ -175,7 +175,12 @@ impl Gh {
             .env("GH_PROMPT_DISABLED", "1")
             .env("GH_PAGER", "cat")
             .env("NO_COLOR", "1")
-            .env("GH_NO_UPDATE_NOTIFIER", "1");
+            .env("GH_NO_UPDATE_NOTIFIER", "1")
+            // Its messages (and those of the git it runs) in English, since
+            // a few are matched (`gh auth login`, `no checks`), whatever
+            // the user's locale.
+            .env("LC_ALL", "C")
+            .env_remove("LANGUAGE");
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(GhError::Missing),

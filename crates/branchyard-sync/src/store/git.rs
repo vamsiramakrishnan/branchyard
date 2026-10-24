@@ -10,6 +10,13 @@
 //! read as 0 here (quotas do not apply to this backend). Uploads are one
 //! push each; there are no partial pushes to resume. Key characters git
 //! refuses in ref names (none of the sync layout's) are escaped as `=XX`.
+//!
+//! Every git process runs with `LC_ALL=C` and no `LANGUAGE`, so its
+//! messages are git's own English whatever the user's locale. A push's
+//! outcome is read from its `--porcelain` status lines, which git never
+//! translates; matching stderr text is only the fallback for failures
+//! that report no ref (a remote that cannot be reached, a ref to delete
+//! that is not there) and for fetches.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -19,6 +26,76 @@ use crate::error::{Error, Result};
 use crate::store::{check_key, check_prefix, Entry, Generation, Object, ObjectStore};
 
 const NAMESPACE: &str = "refs/by-sync/";
+
+/// `git`, in the C locale, never prompting for credentials.
+fn git() -> Command {
+    let mut command = Command::new("git");
+    command
+        .env("LC_ALL", "C")
+        .env_remove("LANGUAGE")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    command
+}
+
+/// What `git push --porcelain` reported for one ref.
+#[derive(Debug, PartialEq, Eq)]
+enum RefStatus {
+    /// Pushed, deleted, or already as asked (`' '`, `+`, `-`, `*`, `=`).
+    Ok,
+    /// The remote ref was not what the lease or a fast-forward expected:
+    /// `[rejected]` (`stale info`, `fetch first`, `non-fast-forward`,
+    /// `already exists`, …), or `[remote rejected]` because the remote's
+    /// own compare-and-swap lost a race (`failed to update ref`,
+    /// `failed to lock`, `cannot lock ref …`). The reason.
+    Moved(String),
+    /// The remote refused it for another reason (`[remote rejected]` by a
+    /// hook or permissions). The summary as git gave it.
+    Refused(String),
+    /// Any other `!`: `[remote failure]`, `[no match]`. The summary.
+    Failed(String),
+}
+
+/// `[remote rejected]` reasons that mean another writer moved the ref
+/// between the lease check and the update.
+const LOST_RACE: [&str; 3] = ["failed to update ref", "failed to lock", "cannot lock ref"];
+
+/// The ref status lines of `git push --porcelain` output: `<flag>\t<from>:<to>\t<summary>`,
+/// with `(<reason>)` after the summary for a rejection. Other lines (`To <url>`,
+/// `Done`) are skipped.
+fn porcelain_status(stdout: &str) -> Vec<RefStatus> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let flag = fields.next()?;
+            let _refs = fields.next()?;
+            let summary = fields.next()?.trim();
+            match flag {
+                " " | "+" | "-" | "*" | "=" => Some(RefStatus::Ok),
+                "!" => {
+                    let reason = |rest: &str| {
+                        rest.trim()
+                            .trim_start_matches('(')
+                            .trim_end_matches(')')
+                            .to_owned()
+                    };
+                    Some(if let Some(rest) = summary.strip_prefix("[rejected]") {
+                        RefStatus::Moved(reason(rest))
+                    } else if let Some(rest) = summary.strip_prefix("[remote rejected]") {
+                        let why = reason(rest);
+                        match LOST_RACE.iter().any(|r| why.contains(r)) {
+                            true => RefStatus::Moved(why),
+                            false => RefStatus::Refused(summary.to_owned()),
+                        }
+                    } else {
+                        RefStatus::Failed(summary.to_owned())
+                    })
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
 
 pub struct GitStore {
     remote: String,
@@ -105,42 +182,68 @@ impl GitStore {
                 "{expected:?} is not a commit ID"
             )));
         }
-        let output = Command::new("git")
+        let output = git()
             .arg("-C")
             .arg(&self.cache)
             .args(["push", "--quiet", "--porcelain"])
             .arg(format!("--force-with-lease={lease}"))
             .arg(&self.remote)
             .arg(refspec)
-            .env("GIT_TERMINAL_PROMPT", "0")
             .stdin(Stdio::null())
             .output()?;
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
         if output.status.success() {
             return Ok(());
         }
-        if text.contains("stale info") || text.contains("rejected") || text.contains("fetch first")
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let statuses = porcelain_status(&stdout);
+        if let Some(RefStatus::Moved(reason)) =
+            statuses.iter().find(|s| matches!(s, RefStatus::Moved(_)))
+        {
+            return Err(Error::precondition(format!(
+                "{refspec}: the remote ref moved ({reason})"
+            )));
+        }
+        for status in &statuses {
+            match status {
+                RefStatus::Refused(summary) => {
+                    return Err(Error::refused(format!("git push {refspec}: {summary}")))
+                }
+                RefStatus::Failed(summary) => {
+                    return Err(Error::transient(format!(
+                        "git push {refspec}: {summary}: {}",
+                        stderr.trim()
+                    )))
+                }
+                RefStatus::Ok | RefStatus::Moved(_) => {}
+            }
+        }
+        // No ref was reported: the push failed before it reached one. The
+        // C locale keeps these messages git's English.
+        if statuses.is_empty()
+            && (stderr.contains("stale info")
+                || stderr.contains("[rejected]")
+                || stderr.contains("fetch first"))
         {
             return Err(Error::precondition(format!(
                 "{refspec}: the remote ref moved"
             )));
         }
-        Err(Error::transient(format!("git push: {}", text.trim())))
+        Err(Error::transient(format!(
+            "git push: {}{}",
+            stdout.trim(),
+            stderr.trim()
+        )))
     }
 
     fn fetch(&self, key: &str) -> Result<String> {
         let refname = format!("{NAMESPACE}{}", encode(key));
-        let output = Command::new("git")
+        let output = git()
             .arg("-C")
             .arg(&self.cache)
             .args(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head"])
             .arg(&self.remote)
             .arg(format!("+{refname}:refs/cache/{}", encode(key)))
-            .env("GIT_TERMINAL_PROMPT", "0")
             .stdin(Stdio::null())
             .output()?;
         if !output.status.success() {
@@ -160,11 +263,10 @@ impl GitStore {
     }
 
     fn remote_refs(&self) -> Result<Vec<(String, String)>> {
-        let output = Command::new("git")
+        let output = git()
             .args(["ls-remote", "--refs"])
             .arg(&self.remote)
             .arg(format!("{NAMESPACE}*"))
-            .env("GIT_TERMINAL_PROMPT", "0")
             .stdin(Stdio::null())
             .output()?;
         if !output.status.success() {
@@ -185,7 +287,7 @@ impl GitStore {
 }
 
 fn run(dir: &Path, args: &[&str], input: Option<&[u8]>) -> Result<String> {
-    let mut child = Command::new("git")
+    let mut child = git()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -224,7 +326,7 @@ impl ObjectStore for GitStore {
     fn get(&self, key: &str) -> Result<Object> {
         check_key(key)?;
         let commit = self.fetch(key)?;
-        let output = Command::new("git")
+        let output = git()
             .arg("-C")
             .arg(&self.cache)
             .args(["cat-file", "blob", &format!("{commit}:data")])
@@ -301,7 +403,8 @@ impl ObjectStore for GitStore {
         let refname = format!("{NAMESPACE}{}", encode(key));
         match self.push(&format!(":{refname}"), &format!("{refname}:{generation}")) {
             // Deleting a ref that is not there is refused as a failed
-            // lease too.
+            // lease too. git reports no ref status for it, only this
+            // message, which the C locale keeps in English.
             Err(e) if e.is(crate::Kind::Transient) && e.message.contains("unable to delete") => {
                 Err(Error::precondition(format!("{key} does not exist")))
             }
@@ -313,6 +416,65 @@ impl ObjectStore for GitStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Porcelain status lines, as git prints them, classified: lease and
+    /// fast-forward rejections (and a remote's lost compare-and-swap) are
+    /// a moved ref, a hook's refusal is not, and successes and other lines
+    /// are told apart.
+    #[test]
+    fn porcelain_push_status_is_classified() {
+        let ref_ = "refs/by-sync/k";
+        let line = |flag: &str, summary: &str| {
+            format!("To file:///r.git\n{flag}\tabc:{ref_}\t{summary}\nDone\n")
+        };
+        for (flag, summary, expected) in [
+            (
+                "!",
+                "[rejected] (stale info)",
+                RefStatus::Moved("stale info".into()),
+            ),
+            (
+                "!",
+                "[rejected] (non-fast-forward)",
+                RefStatus::Moved("non-fast-forward".into()),
+            ),
+            (
+                "!",
+                "[rejected] (fetch first)",
+                RefStatus::Moved("fetch first".into()),
+            ),
+            (
+                "!",
+                "[remote rejected] (pre-receive hook declined)",
+                RefStatus::Refused("[remote rejected] (pre-receive hook declined)".into()),
+            ),
+            (
+                "!",
+                "[remote rejected] (failed to update ref)",
+                RefStatus::Moved("failed to update ref".into()),
+            ),
+            (
+                "!",
+                "[remote failure] (remote failed to report status)",
+                RefStatus::Failed("[remote failure] (remote failed to report status)".into()),
+            ),
+            ("*", "[new reference]", RefStatus::Ok),
+            ("+", "1a2b...3c4d (forced update)", RefStatus::Ok),
+            ("-", "[deleted]", RefStatus::Ok),
+            ("=", "[up to date]", RefStatus::Ok),
+            (" ", "1a2b..3c4d", RefStatus::Ok),
+        ] {
+            assert_eq!(
+                porcelain_status(&line(flag, summary)),
+                [expected],
+                "{summary}"
+            );
+        }
+        // A ref to delete that the remote does not have, or a remote that
+        // cannot be reached, reports no ref at all.
+        assert_eq!(porcelain_status("error: failed to push some refs\n"), []);
+        assert_eq!(porcelain_status(""), []);
+    }
 
     #[test]
     fn keys_round_trip_through_ref_names() {

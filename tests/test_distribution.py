@@ -11,10 +11,13 @@ import re
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
+import tomllib
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -64,8 +67,9 @@ class ArchiveTests(unittest.TestCase):
                     for path, data in inputs.items():
                         self.assertEqual(plugin_zip.read(f"branchyard/skills/{name}/{path}"), data)
                         self.assertEqual(skill_zip.read(f"{name}/{path}"), data)
-            # The /branchyard:setup command ships in the plugin.
-            self.assertIn("branchyard/commands/setup.md", plugin_zip.namelist())
+            # The slash commands and the hooks ship in the plugin.
+            for name in ("commands/setup.md", "commands/status.md", "commands/wait.md", "hooks/hooks.json"):
+                self.assertIn(f"branchyard/{name}", plugin_zip.namelist())
 
     def test_sdk_archive_matches_its_source(self):
         *_archives, sdk = package.build(self.root / "dist")
@@ -83,6 +87,145 @@ class ArchiveTests(unittest.TestCase):
                 package.build(self.root / "broken")
         finally:
             (package.PLUGIN / ".codex-plugin/plugin.json").write_text(original)
+
+    def test_the_marketplace_must_list_the_plugin_at_the_workspace_version(self):
+        original = package.MARKETPLACE.read_text()
+        try:
+            for field, value in (("version", "9.9.9"), ("source", "./plugins/elsewhere")):
+                broken = json.loads(original)
+                broken["plugins"][0][field] = value
+                package.MARKETPLACE.write_text(json.dumps(broken))
+                with self.assertRaises(ValueError):
+                    package.build(self.root / "broken")
+        finally:
+            package.MARKETPLACE.write_text(original)
+
+    def test_the_sdk_version_must_match_the_workspace_version(self):
+        with mock.patch.object(package, "sdk_version", return_value="9.9.9"), self.assertRaises(ValueError) as raised:
+            package.build(self.root / "broken")
+        self.assertIn("pyproject.toml", str(raised.exception))
+
+    def test_build_leftovers_are_not_packaged(self):
+        tree = self.root / "tree"
+        for name in ["mod.py", "build/lib/mod.py", "mod.egg-info/PKG-INFO", "__pycache__/mod.cpython-312.pyc"]:
+            (tree / name).parent.mkdir(parents=True, exist_ok=True)
+            (tree / name).write_text("x")
+        self.assertEqual(list(package.inputs(tree)), ["mod.py"])
+
+
+class SdkProjectTests(unittest.TestCase):
+    """`sdk/python/pyproject.toml`: what `pip install ./sdk/python` builds."""
+
+    def setUp(self):
+        self.project = tomllib.loads((package.SDK / "pyproject.toml").read_text())
+
+    def test_it_names_every_module_at_the_workspace_version_with_no_dependencies(self):
+        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]
+        project = self.project["project"]
+        self.assertEqual(project["name"], "branchyard")
+        self.assertEqual(project["version"], workspace["version"])
+        self.assertEqual(project["license"], {"text": workspace["license"]})
+        self.assertEqual(project["dependencies"], [])
+        # ruff.toml holds the modules to 3.9's syntax; the floor says the same.
+        self.assertEqual(project["requires-python"], ">=3.9")
+        self.assertEqual(self.project["build-system"]["build-backend"], "setuptools.build_meta")
+        modules = sorted(path.stem for path in package.SDK.glob("*.py"))
+        self.assertEqual(sorted(self.project["tool"]["setuptools"]["py-modules"]), modules)
+
+    def test_setuptools_builds_it_from_the_extracted_archive(self):
+        if importlib.util.find_spec("setuptools") is None:
+            self.skipTest("setuptools is not installed; pip install ./sdk/python needs it, or network to fetch it")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            *_archives, sdk = package.build(root / "dist")
+            with zipfile.ZipFile(sdk) as archive:
+                archive.extractall(root / "extracted")
+            # The source distribution, as pip builds it before the wheel:
+            # setuptools reads the project and collects both modules. The
+            # wheel step is left out: some distributions' patched setuptools
+            # cannot build one on every Python they ship.
+            built = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys, setuptools.build_meta as b; print(b.build_sdist(sys.argv[1]))",
+                    str(root / "sdist"),
+                ],
+                cwd=root / "extracted/branchyard-sdk",
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(built.returncode, 0, built.stderr[-2000:])
+            version = self.project["project"]["version"]
+            name = built.stdout.strip().splitlines()[-1]
+            self.assertEqual(name, f"branchyard-{version}.tar.gz")
+            with tarfile.open(root / "sdist" / name) as sdist:
+                sdist.extractall(root / "unpacked", filter="data")
+            unpacked = root / "unpacked" / f"branchyard-{version}"
+            for module in ["branchyard.py", "branchyard_client.py"]:
+                self.assertEqual((unpacked / module).read_bytes(), (package.SDK / module).read_bytes())
+            info = (unpacked / "PKG-INFO").read_text()
+            self.assertIn(f"Version: {version}", info)
+            self.assertIn("Requires-Python: >=3.9", info)
+            # Both modules import from what was built, nothing from the checkout.
+            code = f"import sys; sys.path.insert(0, {str(unpacked)!r}); import branchyard, branchyard_client"
+            imported = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True)
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+
+
+class ClaudeCodePluginTests(unittest.TestCase):
+    """The Claude Code marketplace, hooks and commands, as files: no
+    Claude Code here, so a live `/plugin install` is the final check."""
+
+    def test_the_marketplace_lists_the_plugin_directory(self):
+        marketplace = json.loads(package.MARKETPLACE.read_text())
+        self.assertEqual(marketplace["name"], "branchyard")
+        self.assertTrue(marketplace["owner"]["name"])
+        (entry,) = marketplace["plugins"]
+        manifest = json.loads((ROOT / entry["source"] / ".claude-plugin/plugin.json").read_text())
+        self.assertEqual(entry["name"], manifest["name"])
+        self.assertEqual(entry["version"], manifest["version"])
+        self.assertTrue(entry["description"])
+
+    def test_hooks_run_by_hook_only_when_by_is_installed(self):
+        hooks = json.loads((package.PLUGIN / "hooks/hooks.json").read_text())["hooks"]
+        events = {"SessionStart": "session-start", "UserPromptSubmit": "user-prompt-submit"}
+        self.assertEqual(set(hooks), set(events))
+        empty = tempfile.TemporaryDirectory()
+        self.addCleanup(empty.cleanup)
+        for event, groups in hooks.items():
+            (group,) = groups
+            (hook,) = group["hooks"]
+            self.assertEqual(hook["type"], "command")
+            self.assertLessEqual(hook["timeout"], 10)
+            self.assertEqual(
+                hook["command"],
+                f"command -v by >/dev/null 2>&1 && by hook {events[event]} || true",
+            )
+            # Without by on PATH: silent, and exit 0.
+            out = subprocess.run(
+                ["/bin/sh", "-c", hook["command"]],
+                input='{"session_id": "s", "cwd": "/"}',
+                capture_output=True,
+                text=True,
+                env={"PATH": empty.name},
+            )
+            self.assertEqual((out.returncode, out.stdout, out.stderr), (0, "", ""))
+
+    def test_the_manifest_names_no_hooks_file(self):
+        # Claude Code finds hooks/hooks.json itself; the copy Branchyard
+        # projects for its own turns has no hooks, so its manifest must not
+        # name one (crates/branchyard/src/projection.rs).
+        manifest = json.loads((package.PLUGIN / ".claude-plugin/plugin.json").read_text())
+        self.assertNotIn("hooks", manifest)
+
+    def test_every_command_has_a_description(self):
+        commands = sorted((package.PLUGIN / "commands").glob("*.md"))
+        self.assertEqual([c.name for c in commands], ["setup.md", "status.md", "wait.md"])
+        for command in commands:
+            text = command.read_text()
+            self.assertTrue(text.startswith("---\ndescription: "), command.name)
+            self.assertIn("\nargument-hint: ", text.split("\n---\n", 1)[0], command.name)
 
 
 class InstallerTests(unittest.TestCase):

@@ -183,6 +183,8 @@ Every step is an `Activity::PullRequest` event on the branch's log, shown by `by
 | `watch_stopped` | `reason` | `stopped watching the pull request: the pull request was merged` |
 | `threads_resolved` | `commit`, `threads` (`id`, `path`, `replied`, `resolved`, `error`) | `1 review thread addressed in 1a2b3c4d5e resolved (a.txt)` |
 
+Each delivery of feedback is also recorded, just before its prompt or steer, as an `Activity::Feedback` event (`{"activity": "feedback", "source": "pull_request", "reference": url, "items": [...], "prompt": digest}`; `by log`: `pull request feedback: 2 pieces (1 comment) on url`): every piece as data, a failed check as `kind: "check"` and a review, comment or review-thread comment as `kind: "comment"` with its `path`, `line`, `author` and unquoted `body`. `by review` records the same with `source: "review"`. Readers of the log, such as [knowledge](knowledge.md) distillation, use it rather than parsing the prompt, so the prompt's wording is free to change.
+
 The CLI folds these (`pr::state`) into the branch's issue, last check, last push, pull request, last observation and delivered keys. In the SDK, `Branch::record_pull_request` appends one, `Branch::verify_candidate` runs the check on the candidate in a temporary worktree, and `Branch::push_candidate` pushes it (`Repository::verify` and `Repository::push` in `branchyard-workspace`). In `by watch`, `p` runs `by pr` after a yes (waited for, its output in a pane), `P` runs `by pr --watch` in the background, `o` opens the worktree through `open::plan` and `open::launch` (leaving the dashboard's screen for a terminal editor, whose `Plan::terminal` says so, and redrawing it after), and the detail pane shows the merge-readiness line folded from the branch's `pull_request` events with `pr::state` and `pr::readiness`; all three keys are refused remotely.
 
 ## Not done
@@ -192,4 +194,5 @@ The CLI folds these (`pr::state`) into the branch's issue, last check, last push
 - `--draft` applies when the pull request is created; turning a draft ready is `gh pr ready`.
 - Comments from bots are fed back like anyone's; there is no filter by author yet.
 - Remote mode: a server would need its own git remote and `gh` login per repository, and an operator's decision to let clients push through it. Not built.
+- `gh` runs with `LC_ALL=C` and no `LANGUAGE`, because two of its messages are matched (`gh auth login` for a logged-out `gh`, `no checks` for a pull request without checks); a structured answer for either is not used yet.
 - Tested only against a fake `gh` and a bare local remote ([validation](validation.md)), never against GitHub itself.

@@ -1200,12 +1200,11 @@ def wait_all(*branches: str, timeout: Optional[float] = None) -> Waited:
     return _wait(list(branches), False, timeout)
 
 
-def wait(branch: str, timeout: Optional[float] = None, poll: float = 1.0) -> Inspection:
+def wait(branch: str, timeout: Optional[float] = None) -> Inspection:
     """Wait until `branch` is neither running nor waiting (for its
     prerequisites or on its children) and return its inspection;
-    RunningError after `timeout` seconds. `poll` is ignored: the wait is
-    the engine's (`by wait`)."""
-    del poll
+    RunningError after `timeout` seconds. The wait is the engine's
+    (`by wait`): it wakes on the branch's notifications, not by polling."""
     return _wait([branch], False, timeout).settled[0]
 
 

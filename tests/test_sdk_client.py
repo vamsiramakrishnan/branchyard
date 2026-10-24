@@ -7,14 +7,17 @@ wire is checked without a real server. The real server is covered by
 Run: `python tests/test_sdk_client.py`.
 """
 
+import contextlib
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
 import time
 import unittest
 from collections import deque
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
@@ -434,7 +437,7 @@ class Requests(ServerCase):
         self.assertIsNone(op.check_report, "nothing until the check has ended")
         ((_, _, headers, body),) = self.requests("POST", f"{REPO}/branches/b/check")
         self.assertEqual((headers["idempotency-key"], body), ("k-9", {}))
-        done = self.client.wait(op, poll=0.01, check=True)
+        done = self.client.wait(op, check=True)
         report = done.check_report
         assert report is not None
         self.assertIsInstance(report, bc.CheckReport)
@@ -476,7 +479,7 @@ class Requests(ServerCase):
             (200, self.op("op5", "failed", kind="check", error={"code": "git_error", "message": "no worktree"})),
         )
         with self.assertRaises(bc.OperationFailedError) as failed:
-            self.client.wait(self.app.check("b"), poll=0.01, check=True)
+            self.client.wait(self.app.check("b"), check=True)
         self.assertEqual(failed.exception.code, "git_error")
         self.assertIsNone(failed.exception.operation.check_report)
 
@@ -636,7 +639,7 @@ class Errors(ServerCase):
 
 
 class Waiting(ServerCase):
-    def test_wait_polls_until_done_and_checks_the_outcome(self):
+    def test_wait_long_polls_until_done_and_checks_the_outcome(self):
         self.fake.answer(
             "GET",
             "/v1/operations/op1",
@@ -647,11 +650,18 @@ class Waiting(ServerCase):
                 self.op("op1", "succeeded", end=4, result={"branches": [{"name": "b", "status": {"state": "ready"}}]}),
             ),
         )
-        op = self.client.wait("op1", poll=0.01)
+        started = time.monotonic()
+        op = self.client.wait("op1")
         self.assertTrue(op.done)
         self.assertEqual(op.result_branches[0].state, "ready")
         self.assertTrue(op.result_branches[0].settled)
-        self.assertEqual(len(self.requests("GET", "/v1/operations/op1")), 3)
+        # Each ask is a long poll the server holds, at most its 30 s cap;
+        # nothing sleeps between them.
+        asks = self.requests("GET", "/v1/operations/op1")
+        self.assertEqual(len(asks), 3)
+        waits = [float(parse_qs(urlsplit(r[1]).query)["wait"][0]) for r in asks]
+        self.assertEqual(waits, [30.0, 30.0, 30.0])
+        self.assertLess(time.monotonic() - started, 5)
         self.fake.answer(
             "GET",
             "/v1/operations/op2",
@@ -669,7 +679,10 @@ class Waiting(ServerCase):
     def test_wait_times_out(self):
         self.fake.always("GET", "/v1/operations/op1", 200, self.op("op1", "running"))
         with self.assertRaises(TimeoutError):
-            self.client.wait("op1", timeout=0.05, poll=0.01)
+            self.client.wait("op1", timeout=0.05)
+        # Each ask is for no longer than what is left of the timeout.
+        waits = [float(parse_qs(urlsplit(r[1]).query)["wait"][0]) for r in self.requests("GET", "/v1/operations/op1")]
+        self.assertTrue(waits and all(0 <= w <= 0.05 for w in waits), waits)
 
     def test_wait_for_asks_again_past_the_servers_cap_until_settled(self):
         self.fake.answer(
@@ -738,6 +751,21 @@ class Streaming(ServerCase):
         self.assertEqual(len(idles), 2)
         self.assertLess(time.monotonic() - started, 1.5)
         self.assertEqual(self.fake.stream_opens, [1, 1])
+
+    def test_the_stream_is_a_context_manager_that_closes_however_the_block_ends(self):
+        self.fake.feed = [_prompt(1, "a", "go"), _delta(2, "a", "x")]
+        with self.app.stream(0) as stream:
+            entries = iter(stream)  # held, as a `for` loop holds it, so the connection stays open
+            first = next(entries)
+            self.assertIsNotNone(stream._response)
+        self.assertEqual(first.seq, 1)
+        self.assertIsNone(stream._response)
+        self.assertEqual(list(stream), [])
+        with self.assertRaises(KeyError), self.app.stream(0) as failing:
+            for _entry in failing:
+                raise KeyError("the surface's own failure")
+        self.assertIsNone(failing._response)
+        self.assertEqual(list(failing), [])
 
     def test_a_cursor_past_the_end_is_an_invalid_request(self):
         # The fake has no feed; the real server answers 400 cursor_out_of_range.
@@ -978,6 +1006,61 @@ class Approvals(ServerCase):
         effects = self.app.effects(branch="b")
         self.assertEqual(effects[0].operation, "github.issues.create")
         self.assertEqual(self.requests("GET", f"{REPO}/effects")[0][1], f"{REPO}/effects?branch=b")
+
+
+class Checkpoints(ServerCase):
+    REWOUND: ClassVar[dict] = {
+        "branch": "b",
+        "from": 3,
+        "to": 1,
+        "commit": "c0ffee",
+        "session": {"mode": "summary", "turns": [1], "reason": "its session went on to turn 3"},
+    }
+
+    def test_rewind_posts_the_checkpoint_with_a_key_and_reads_the_answer(self):
+        self.fake.answer("POST", f"{REPO}/branches/b/rewind", (200, self.REWOUND))
+        rewound = self.app.rewind("b", 1)
+        self.assertIsInstance(rewound, bc.Rewound)
+        ((_method, _path, headers, body),) = self.requests("POST", f"{REPO}/branches/b/rewind")
+        self.assertEqual(body, {"to": 1})
+        self.assertEqual(len(headers["idempotency-key"]), 32)
+        self.assertEqual((rewound.branch, rewound["from"], rewound.to, rewound.commit), ("b", 3, 1, "c0ffee"))
+        self.assertEqual(rewound.session_mode, "summary")
+        self.assertEqual(rewound.session["turns"], [1])
+
+    def test_rewind_refusals_are_typed(self):
+        cases = [
+            (404, _error("unknown_checkpoint", "no checkpoint 9", {"branch": "b", "turn": 9}), bc.NotFoundError),
+            (409, _error("checkpoint_unavailable", "ref moved"), bc.ConflictError),
+            (409, _error("branch_busy", "busy", {"holder": "op7"}), bc.BranchBusyError),
+            (409, _error("running"), bc.RunningError),
+            (403, _error("denied", "merged"), bc.DeniedError),
+        ]
+        for status, body, expected in cases:
+            self.fake.answer("POST", f"{REPO}/branches/b/rewind", (status, body))
+            with self.assertRaises(expected) as raised:
+                self.app.rewind("b", 9)
+            self.assertIs(type(raised.exception), expected, body)
+            self.assertEqual(raised.exception.code, body["error"]["code"])
+        self.assertEqual(raised.exception.status, 403)
+
+    def test_fork_at_a_checkpoint_sends_at_and_without_it_sends_none(self):
+        self.fake.always("POST", f"{REPO}/branches/b/fork", 202, self.op("op1", "queued", "b-2", kind="fork"))
+        op = self.app.fork("b", "try again", name="b-2", at=0, harness="codex")
+        self.assertEqual(op.id, "op1")
+        self.app.fork("b", "plain")
+        at, plain = (r[3] for r in self.requests("POST", f"{REPO}/branches/b/fork"))
+        # `at=0` (the base) is sent; a false `fresh_session` is left out.
+        self.assertEqual(at, {"prompt": "try again", "name": "b-2", "at": 0, "harness": "codex"})
+        self.assertEqual(plain, {"prompt": "plain"})
+
+    def test_fork_at_a_checkpoint_the_branch_lacks_is_refused_before_queueing(self):
+        self.fake.answer(
+            "POST", f"{REPO}/branches/b/fork", (404, _error("unknown_checkpoint", "b has no checkpoint 5"))
+        )
+        with self.assertRaises(bc.NotFoundError) as raised:
+            self.app.fork("b", "x", at=5)
+        self.assertEqual(raised.exception.code, "unknown_checkpoint")
 
 
 class GrantsAndNames(unittest.TestCase):
@@ -1302,6 +1385,161 @@ class LocalMode(ServerCase):
                 local.doctor()
             self.assertIn("no such command", str(failed.exception))
             self.assertIn("exited 2", str(failed.exception))
+
+
+# Every route the server registers (`docs/facts.json`, generated from the
+# server's sources by `tools/docs_facts.py`) is either reached by a method of
+# the HTTP client, called here, or excused with the reason it is not.
+COVERED: dict[str, list[Callable[[bc.Client, bc.Repo], Any]]] = {
+    "/healthz": [lambda c, _r: c.healthy()],
+    "/v1/app/me": [lambda c, _r: c.me()],
+    "/v1/harnesses": [lambda c, _r: c.harnesses()],
+    "/v1/operations": [lambda c, _r: c.operation_by_key("k")],
+    "/v1/operations/{id}": [lambda c, _r: c.operation("op1")],
+    "/v1/repos": [lambda c, _r: c.repos()],
+    "/v1/repos/{repo}/approvals": [lambda _c, r: r.approvals()],
+    "/v1/repos/{repo}/approvals/{id}/allow": [lambda _c, r: r.allow("ap1")],
+    "/v1/repos/{repo}/approvals/{id}/deny": [lambda _c, r: r.deny("ap1")],
+    "/v1/repos/{repo}/branches": [lambda _c, r: r.branches()],
+    "/v1/repos/{repo}/branches/{branch}": [lambda _c, r: r.branch("b"), lambda _c, r: r.remove("b")],
+    "/v1/repos/{repo}/branches/{branch}/answer": [lambda _c, r: r.answer("b", 1, "yes")],
+    "/v1/repos/{repo}/branches/{branch}/artifacts": [
+        lambda _c, r: r.publish_artifact("b", b"x", "x.txt"),
+        lambda _c, r: r.artifacts("b"),
+    ],
+    "/v1/repos/{repo}/branches/{branch}/artifacts/{id}": [lambda _c, r: r.read_artifact("b", "a1")],
+    "/v1/repos/{repo}/branches/{branch}/artifacts/{id}/content": [lambda _c, r: r.read_artifact("b", "a1")],
+    "/v1/repos/{repo}/branches/{branch}/artifacts/{id}/share": [lambda _c, r: r.share_artifact("b", "a1", "c")],
+    "/v1/repos/{repo}/branches/{branch}/ask": [lambda _c, r: r.ask("b", "?")],
+    "/v1/repos/{repo}/branches/{branch}/cancel": [lambda _c, r: r.cancel("b")],
+    "/v1/repos/{repo}/branches/{branch}/check": [lambda _c, r: r.check("b")],
+    "/v1/repos/{repo}/branches/{branch}/children": [lambda _c, r: r.children("b")],
+    "/v1/repos/{repo}/branches/{branch}/diff": [lambda _c, r: r.diff("b")],
+    "/v1/repos/{repo}/branches/{branch}/discard": [lambda _c, r: r.discard("b")],
+    "/v1/repos/{repo}/branches/{branch}/escalate": [lambda _c, r: r.escalate("b", "help")],
+    "/v1/repos/{repo}/branches/{branch}/event-page": [lambda _c, r: r.event_page("b")],
+    "/v1/repos/{repo}/branches/{branch}/events": [lambda _c, r: r.events("b"), lambda _c, r: r.said("b")],
+    "/v1/repos/{repo}/branches/{branch}/fork": [lambda _c, r: r.fork("b", "go", at=1)],
+    "/v1/repos/{repo}/branches/{branch}/graph": [
+        lambda _c, r: r.graph("b"),
+        lambda _c, r: r.apply_graph("b", 1, []),
+    ],
+    "/v1/repos/{repo}/branches/{branch}/inbox": [lambda _c, r: r.inbox("b")],
+    "/v1/repos/{repo}/branches/{branch}/inspection": [lambda _c, r: r.inspect("b")],
+    "/v1/repos/{repo}/branches/{branch}/integrate": [lambda _c, r: r.integrate("b", with_=["c"])],
+    "/v1/repos/{repo}/branches/{branch}/merge": [lambda _c, r: r.merge("b")],
+    "/v1/repos/{repo}/branches/{branch}/plan": [lambda _c, r: r.plan("b")],
+    "/v1/repos/{repo}/branches/{branch}/plan/approve": [lambda _c, r: r.approve_plan("b")],
+    "/v1/repos/{repo}/branches/{branch}/plan/reject": [lambda _c, r: r.reject_plan("b", "no")],
+    "/v1/repos/{repo}/branches/{branch}/reincarnate": [lambda _c, r: r.reincarnate("b")],
+    "/v1/repos/{repo}/branches/{branch}/report": [lambda _c, r: r.report("b", "done")],
+    "/v1/repos/{repo}/branches/{branch}/report-status": [lambda _c, r: r.report_status("b", "working", "on it")],
+    "/v1/repos/{repo}/branches/{branch}/rewind": [lambda _c, r: r.rewind("b", 1)],
+    "/v1/repos/{repo}/branches/{branch}/scratch": [
+        lambda _c, r: r.create_scratch("b", "s"),
+        lambda _c, r: r.scratch_areas("b"),
+    ],
+    "/v1/repos/{repo}/branches/{branch}/scratch/{name}/share": [lambda _c, r: r.share_scratch("b", "s", "c")],
+    "/v1/repos/{repo}/branches/{branch}/send": [lambda _c, r: r.send("b", "more")],
+    "/v1/repos/{repo}/branches/{branch}/spawn": [lambda _c, r: r.spawn("b", "work")],
+    "/v1/repos/{repo}/branches/{branch}/steer": [lambda _c, r: r.steer("b", "also")],
+    "/v1/repos/{repo}/effects": [lambda _c, r: r.effects()],
+    "/v1/repos/{repo}/effects/{id}": [lambda _c, r: r.effect("e1")],
+    "/v1/repos/{repo}/effects/{id}/promote": [lambda _c, r: r.promote_effect("e1")],
+    "/v1/repos/{repo}/events/stream": [lambda _c, r: list(r.stream(0, max_failures=0))],
+    "/v1/repos/{repo}/operations": [lambda _c, r: r.operations()],
+    "/v1/repos/{repo}/tasks": [lambda _c, r: r.task("go")],
+    "/v1/repos/{repo}/wait": [lambda _c, r: r.wait_for(["b"])],
+    "/v1/triggers": [lambda c, _r: c.triggers(), lambda c, _r: c.create_trigger({"name": "t"})],
+    "/v1/triggers/{t}": [lambda c, _r: c.trigger("t"), lambda c, _r: c.delete_trigger("t")],
+    "/v1/triggers/{t}/disable": [lambda c, _r: c.enable_trigger("t", False)],
+    "/v1/triggers/{t}/enable": [lambda c, _r: c.enable_trigger("t")],
+    "/v1/triggers/{t}/runs": [lambda c, _r: c.trigger_runs("t")],
+    "/v1/triggers/{t}/test": [lambda c, _r: c.test_trigger("t")],
+}
+
+NOT_A_CLIENT_ROUTE = "not a client route: neither SDK calls it"
+RUST_ONLY = "branchyard-client has it; the Python client does not yet (client.request reaches it)"
+
+# The routes the Python client has no method for, and why.
+EXCUSED: dict[str, str] = {
+    "/.well-known/branchyard": f"{RUST_ONLY}: Client::discovery, which by pair and the companion use",
+    "/.well-known/jwks.json": f"{NOT_A_CLIENT_ROUTE}: the gateway's keys, read by Anvil",
+    "/app": f"{NOT_A_CLIENT_ROUTE}: the companion web app's pages",
+    "/app/": f"{NOT_A_CLIENT_ROUTE}: the companion web app's pages",
+    "/app/pair": f"{NOT_A_CLIENT_ROUTE}: the companion web app's pairing page",
+    "/app/{file}": f"{NOT_A_CLIENT_ROUTE}: the companion web app's files",
+    "/metrics": f"{NOT_A_CLIENT_ROUTE}: Prometheus scrapes it",
+    "/v1/app/push": f"{RUST_ONLY}: Web Push, a browser's concern",
+    "/v1/app/push/subscriptions": f"{RUST_ONLY}: Web Push, a browser's concern",
+    "/v1/app/push/test": f"{RUST_ONLY}: Web Push, a browser's concern",
+    "/v1/inventory": f"{RUST_ONLY}: Client::inventory",
+    "/v1/services": f"{RUST_ONLY}: the fleet's services (admin)",
+    "/v1/services/gc": f"{RUST_ONLY}: the fleet's services (admin)",
+    "/v1/services/{id}": f"{RUST_ONLY}: the fleet's services (admin)",
+    "/v1/triggers/{t}/fire": f"{NOT_A_CLIENT_ROUTE}: a webhook sender's, signed rather than bearer-authenticated",
+    "/v1/triggers/{t}/fire/{token}": f"{NOT_A_CLIENT_ROUTE}: a webhook sender's, its token in the path",
+    "/v1/triggers/{t}/secret": f"{RUST_ONLY}: Client::set_trigger_secret",
+    "/v1/repos/{repo}/branches/{branch}/distill": f"{RUST_ONLY}: knowledge (Repo::distill)",
+    "/v1/repos/{repo}/knowledge": f"{RUST_ONLY}: knowledge",
+    "/v1/repos/{repo}/knowledge/export": f"{RUST_ONLY}: knowledge",
+    "/v1/repos/{repo}/knowledge/{id}": f"{RUST_ONLY}: knowledge",
+    "/v1/repos/{repo}/knowledge/{id}/adopt": f"{RUST_ONLY}: knowledge",
+    "/v1/repos/{repo}/knowledge/{id}/edit": f"{RUST_ONLY}: knowledge",
+    "/v1/repos/{repo}/knowledge/{id}/reject": f"{RUST_ONLY}: knowledge",
+    "/v1/repos/{repo}/maps": f"{RUST_ONLY}: maps (Repo::map, maps)",
+    "/v1/repos/{repo}/maps/{name}": f"{RUST_ONLY}: maps",
+    "/v1/repos/{repo}/maps/{name}/resume": f"{RUST_ONLY}: maps",
+    "/v1/repos/{repo}/task-records": f"{RUST_ONLY}: Repo::tasks",
+    "/v1/repos/{repo}/task-records/{task}": f"{RUST_ONLY}: Repo::task_record",
+    "/v1/repos/{repo}/effects/reconcile": f"{RUST_ONLY}: Repo::reconcile_effects",
+    "/v1/repos/{repo}/branches/{branch}/undo": f"{RUST_ONLY}: Repo::undo_plan, undo",
+    "/v1/repos/{repo}/branches/{branch}/scratch/{name}/lock": f"{RUST_ONLY}: scratch locks",
+    "/v1/repos/{repo}/branches/{branch}/scratch/{name}/unlock": f"{RUST_ONLY}: scratch locks",
+    "/v1/repos/{repo}/scratch/{name}/lock": f"{RUST_ONLY}: scratch locks (the holder)",
+}
+
+
+def _route_pattern(route: str) -> str:
+    return "".join("[^/]+" if part.startswith("{") else re.escape(part) for part in re.split(r"(\{[^}]+\})", route))
+
+
+class RouteParity(unittest.TestCase):
+    """The Python HTTP client against the server's route list: each route
+    is reached by a method, called here against a recorder, or excused."""
+
+    def setUp(self) -> None:
+        facts = json.loads((ROOT / "docs/facts.json").read_text())
+        self.routes = set(facts["http"]["routes"])
+
+    def test_every_route_is_covered_or_excused_and_nothing_else(self) -> None:
+        self.assertFalse(set(COVERED) & set(EXCUSED), "a route both covered and excused")
+        self.assertEqual(sorted(self.routes - set(COVERED) - set(EXCUSED)), [], "routes neither covered nor excused")
+        self.assertEqual(sorted((set(COVERED) | set(EXCUSED)) - self.routes), [], "routes the server no longer has")
+        for route, reason in EXCUSED.items():
+            self.assertTrue(reason.startswith((NOT_A_CLIENT_ROUTE, RUST_ONLY)), route)
+
+    def test_each_covered_route_is_what_its_method_requests(self) -> None:
+        client = bc.Client("http://127.0.0.1:9", TOKEN)
+        repo = client.repo("app")
+        seen: list[str] = []
+
+        def record(method: str, path: str, body: Any = None, **options: Any) -> Any:
+            seen.append(path)
+            return (200, {}, b"") if options.get("raw") else {}
+
+        def opened(request: Any, **_options: Any) -> Any:
+            seen.append(urlsplit(request.full_url).path)
+            raise OSError("recorded")
+
+        with mock.patch.object(client, "request", record), mock.patch.object(bc.urllib.request, "urlopen", opened):
+            for route, calls in COVERED.items():
+                pattern = re.compile(_route_pattern(route) + "$")
+                for call in calls:
+                    seen.clear()
+                    with contextlib.suppress(bc.TransportError):
+                        call(client, repo)
+                    self.assertTrue(any(pattern.match(path) for path in seen), f"{route}: requested {seen}")
 
 
 if __name__ == "__main__":

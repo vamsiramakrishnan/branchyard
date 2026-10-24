@@ -18,7 +18,7 @@
 //!     println!("{} {:?}", entry.branch, entry.activity);
 //! #   break;
 //! }
-//! let done = client.wait(&op.id, std::time::Duration::from_millis(500))?;
+//! let done = client.wait(&op.id)?;
 //! println!("{:?}", done.state);
 //! # Ok::<(), branchyard_client::Error>(())
 //! ```
@@ -87,7 +87,7 @@ use storage_api::{
 };
 
 /// The longest one wait request asks the server for: its own cap, which
-/// [`Repo::wait_for`] asks again past.
+/// [`Repo::wait_for`] and [`Client::wait`] ask again past.
 const WAIT_CAP: Duration = Duration::from_secs(30);
 /// Largest response body read into memory.
 const MAX_BODY: usize = 256 * 1024 * 1024;
@@ -310,14 +310,32 @@ impl Client {
         self.get(&format!("/v1/operations?idempotency_key={}", encode(key)))
     }
 
-    /// Poll an operation until it finishes.
-    pub fn wait(&self, id: &str, poll: Duration) -> Result<Operation, Error> {
+    /// Block until an operation finishes, with `GET /v1/operations/{id}?wait=`
+    /// long polls: the server answers as it finishes, or at its cap, and
+    /// this asks again.
+    pub fn wait(&self, id: &str) -> Result<Operation, Error> {
+        self.wait_up_to(id, None)
+    }
+
+    /// Like [`Client::wait`], for at most `timeout`: the operation as it
+    /// then is, finished or not (see `state.is_terminal()`).
+    pub fn wait_timeout(&self, id: &str, timeout: Duration) -> Result<Operation, Error> {
+        self.wait_up_to(id, Some(timeout))
+    }
+
+    fn wait_up_to(&self, id: &str, timeout: Option<Duration>) -> Result<Operation, Error> {
+        let deadline = timeout.and_then(|t| std::time::Instant::now().checked_add(t));
         loop {
-            let op = self.operation(id)?;
-            if op.state.is_terminal() {
+            let left = deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()));
+            let ask = left.map_or(WAIT_CAP, |l| l.min(WAIT_CAP));
+            let path = format!("/v1/operations/{}?wait={}", encode(id), ask.as_secs_f64());
+            // The server holds the answer for up to `ask`; the usual
+            // timeout counts from then.
+            let response = self.call("GET", &path, None, &[], self.timeout + ask)?;
+            let op: Operation = self.decode(response)?;
+            if op.state.is_terminal() || left.is_some_and(|l| l <= WAIT_CAP) {
                 return Ok(op);
             }
-            std::thread::sleep(poll);
         }
     }
 
@@ -932,6 +950,7 @@ impl Repo {
             backoff: None,
             max_failures: 8,
             done: false,
+            head: None,
         }
     }
 }
@@ -948,12 +967,21 @@ pub struct EventStream {
     backoff: Option<ExponentialBackoff>,
     max_failures: u32,
     done: bool,
+    /// The feed's last position when [`EventStream::open`] connected.
+    head: Option<u64>,
 }
 
 impl EventStream {
     /// The last sequence number delivered, or the server's starting point.
     pub fn cursor(&self) -> Option<u64> {
         self.cursor
+    }
+
+    /// The feed's last position when [`EventStream::open`] connected: the
+    /// entries up to it are history, those after it new. `None` before
+    /// `open`, or from a server that does not say.
+    pub fn head(&self) -> Option<u64> {
+        self.head
     }
 
     /// Consecutive reconnect failures tolerated before giving up.
@@ -981,6 +1009,9 @@ impl EventStream {
                     .and_then(|id| id.parse().ok())
                     .ok_or_else(|| Error::Protocol("open event without a cursor".into()))?;
                 self.cursor = Some(id);
+                self.head = serde_json::from_str::<serde_json::Value>(&event.data)
+                    .ok()
+                    .and_then(|data| data.get("head")?.as_u64());
                 Ok(id)
             }
             Ok(Some(event)) => Err(Error::Protocol(format!(

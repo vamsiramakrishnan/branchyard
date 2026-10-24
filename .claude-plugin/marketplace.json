@@ -1,0 +1,20 @@
+{
+  "name": "branchyard",
+  "owner": {
+    "name": "Branchyard contributors"
+  },
+  "metadata": {
+    "description": "Branchyard's Claude Code plugin, from this repository.",
+    "version": "0.0.1"
+  },
+  "plugins": [
+    {
+      "name": "branchyard",
+      "source": "./plugins/branchyard",
+      "description": "Set up Branchyard by interview and delegate work to child branches; slash commands for status and waiting, and hooks that tell a session when its branches finish. Requires the by CLI.",
+      "version": "0.0.1",
+      "license": "Apache-2.0",
+      "category": "development"
+    }
+  ]
+}

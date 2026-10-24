@@ -230,6 +230,10 @@ struct State {
     closed: bool,
     /// Something was admitted here since the dispatcher last looked.
     admitted: bool,
+    /// How many operations this process has finished running: what a
+    /// [`Registry::wait_for_tenant`] that read the store before one
+    /// finished sees moved.
+    finished: u64,
 }
 
 fn interrupted(message: &str) -> ErrorBody {
@@ -279,6 +283,7 @@ impl Registry {
                 accepting: true,
                 closed: false,
                 admitted: false,
+                finished: 0,
             }),
             changed: Condvar::new(),
             inventory: Mutex::new(None),
@@ -434,6 +439,38 @@ impl Registry {
         Ok(found
             .filter(|stored| stored.tenant() == tenant)
             .map(|stored| self.describe(stored.operation)))
+    }
+
+    /// `id`'s operation for `tenant`, as [`Registry::get_for_tenant`]
+    /// reads it, once it is terminal or `timeout` has passed, whichever is
+    /// first; at shutdown, as it is then. An operation this process runs
+    /// wakes the wait as it finishes; one another worker on the store runs
+    /// is seen within [`Options::poll`], as the dispatcher sees their work.
+    pub fn wait_for_tenant(
+        &self,
+        id: &str,
+        tenant: &str,
+        timeout: Duration,
+    ) -> Result<Option<Operation>, ApiError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let seen = self.lock().finished;
+            let Some(operation) = self.get_for_tenant(id, tenant)? else {
+                return Ok(None);
+            };
+            let now = Instant::now();
+            if operation.state.is_terminal() || now >= deadline {
+                return Ok(Some(operation));
+            }
+            let state = self.lock();
+            if state.closed || !state.accepting {
+                return Ok(Some(operation));
+            }
+            if state.finished == seen {
+                let left = (deadline - now).min(self.options.poll);
+                drop(self.changed.wait_timeout_recovering(state, left, "changed"));
+            }
+        }
     }
 
     /// `tenant`'s queued and running operations, as the store holds them.
@@ -877,7 +914,10 @@ impl Registry {
     }
 
     fn done(&self, id: &str) {
-        self.lock().running.remove(id);
+        let mut state = self.lock();
+        state.running.remove(id);
+        state.finished += 1;
+        drop(state);
         self.changed.notify_all();
     }
 
@@ -1190,6 +1230,51 @@ mod tests {
         assert!(error.body.message.contains("busy with delete"), "{error:?}");
         drop(hold);
         assert!(registry.submit(new(None, &["b"]), Value::Null).is_ok());
+        registry.close();
+    }
+
+    #[test]
+    fn a_wait_for_an_operation_wakes_as_it_finishes_or_gives_up_at_its_timeout() {
+        // A poll far longer than the test: only the finish can wake it.
+        let registry = Registry::open(
+            Box::new(MemoryStore::default()),
+            Options {
+                poll: Duration::from_secs(60),
+                ..options(2)
+            },
+        )
+        .unwrap();
+        let recorder = Arc::new(Recorder::default());
+        registry.start(recorder.clone()).unwrap();
+        let (release, gate) = mpsc::channel::<()>();
+        *recorder.gate.lock().unwrap() = Some(gate);
+        let (op, _) = registry
+            .submit(new(None, &["b"]), serde_json::json!({ "wait": true }))
+            .unwrap();
+        let tenant = crate::config::DEFAULT_TENANT;
+
+        let pending = registry
+            .wait_for_tenant(&op.id, tenant, Duration::from_millis(50))
+            .unwrap()
+            .unwrap();
+        assert!(!pending.state.is_terminal(), "{pending:?}");
+        assert!(registry
+            .wait_for_tenant(&op.id, "other", Duration::from_secs(5))
+            .unwrap()
+            .is_none());
+
+        let waiting = {
+            let (registry, id) = (registry.clone(), op.id.clone());
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                let op = registry.wait_for_tenant(&id, tenant, Duration::from_secs(30));
+                (op, started.elapsed())
+            })
+        };
+        release.send(()).unwrap();
+        let (finished, took) = waiting.join().unwrap();
+        assert_eq!(finished.unwrap().unwrap().state, OperationState::Succeeded);
+        assert!(took < Duration::from_secs(20), "woke after {took:?}");
         registry.close();
     }
 

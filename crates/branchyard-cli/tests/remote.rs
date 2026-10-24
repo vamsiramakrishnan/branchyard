@@ -487,6 +487,101 @@ fn remote_commands_print_what_local_ones_do() {
     );
 }
 
+/// `by log --follow` against a server prints the branch's history as `by
+/// log` does, then what is recorded after it started, from the event
+/// stream; `by watch --once` shows the history at once.
+#[test]
+fn log_follow_and_watch_once_read_the_servers_event_stream() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let server = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
+    let first = server.by(
+        &dir.0,
+        &with_agent(&["run", "WRITE a.txt=1", "--name", "f"])
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
+    assert!(first.status.success(), "{}", text(&first.stderr));
+
+    // Every time, with no wait: the history is read up to the feed's head.
+    for _ in 0..3 {
+        let watched = server.by(&dir.0, &["watch", "--once"]);
+        assert!(watched.status.success(), "{}", text(&watched.stderr));
+        let frame = text(&watched.stdout);
+        assert!(
+            frame.contains("f  ") && frame.contains("wrote a.txt"),
+            "{frame}"
+        );
+    }
+
+    let logged = server.by(&dir.0, &["log", "f", "--json"]);
+    let history: Vec<Value> = serde_json::from_slice(&logged.stdout).unwrap();
+    assert!(!history.is_empty());
+    let mut follow = command(BY, &dir.0)
+        .arg("--remote")
+        .arg(&server.url)
+        .arg("--token-file")
+        .arg(&server.token_file)
+        .args(["log", "f", "--follow", "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = follow.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if tx.send(line.unwrap()).is_err() {
+                return;
+            }
+        }
+    });
+    let mut lines: Vec<Value> = Vec::new();
+    fn read_until(
+        rx: &std::sync::mpsc::Receiver<String>,
+        lines: &mut Vec<Value>,
+        what: &str,
+        done: &dyn Fn(&[Value]) -> bool,
+    ) {
+        while !done(lines) {
+            match rx.recv_timeout(wait::DEFAULT_TIMEOUT) {
+                Ok(line) => lines.push(serde_json::from_str(&line).unwrap()),
+                Err(_) => panic!("{what}: {lines:#?}"),
+            }
+        }
+    }
+    let count = history.len();
+    read_until(&rx, &mut lines, "the history", &|lines| {
+        lines.len() >= count
+    });
+    // The same events, one per line.
+    assert_eq!(&lines[..count], &history[..]);
+
+    // A turn sent after it started arrives on the stream.
+    let sent = server.by(
+        &dir.0,
+        &with_agent(&["send", "f", "WRITE b.txt=2"])
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
+    assert!(sent.status.success(), "{}", text(&sent.stderr));
+    read_until(&rx, &mut lines, "the new turn", &|lines| {
+        lines
+            .iter()
+            .any(|l| l["activity"] == "prompt" && l["text"] == "WRITE b.txt=2")
+    });
+    // Each event once: the new turn's prompt is not repeated.
+    let prompts = lines
+        .iter()
+        .filter(|l| l["activity"] == "prompt" && l["text"] == "WRITE b.txt=2")
+        .count();
+    assert_eq!(prompts, 1);
+    branchyard_support::best_effort("stop by log --follow", follow.kill());
+    branchyard_support::best_effort("reap by log --follow", follow.wait());
+}
+
 #[test]
 fn by_cancel_stops_a_turn_on_the_server() {
     let dir = Dir::new();
