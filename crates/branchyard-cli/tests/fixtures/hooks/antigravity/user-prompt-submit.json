@@ -1,11 +1,12 @@
 {
-  "conversationId": "ag-1",
+  "artifactDirectoryPath": "/home/u/.gemini/antigravity-cli/brain/72e26003-c814-4561-8b7d-62f184a542e5",
+  "conversationId": "72e26003-c814-4561-8b7d-62f184a542e5",
+  "initialNumSteps": 1,
+  "invocationNum": 0,
+  "lastUserInput": "If your context contains a note starting with 'Branchyard:', repeat that note verbatim; otherwise reply NONE. Do not use any tools.",
+  "modelName": "gemini-3.1-pro-low",
+  "transcriptPath": "/home/u/.gemini/antigravity-cli/brain/72e26003-c814-4561-8b7d-62f184a542e5/.system_generated/logs/transcript_full.jsonl",
   "workspacePaths": [
     "@CWD@"
-  ],
-  "transcriptPath": "/tmp/t.jsonl",
-  "artifactDirectoryPath": "/tmp/a",
-  "modelName": "m",
-  "invocationNum": 0,
-  "initialNumSteps": 1
+  ]
 }
