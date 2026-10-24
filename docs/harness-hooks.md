@@ -114,15 +114,15 @@ Tested against recorded payloads written from the bridge's source and README (it
 
 ## Pi
 
-What you get: an extension, `plugins/branchyard/harnesses/pi/branchyard.ts`, that tells a Pi session a person started which of the repository's Branchyard branches finished, failed, are blocked or ask. On a session's first prompt its `before_agent_start` handler runs `by hook --harness generic session-start` (stdin `{"cwd", "session_id"}`, the session id from `ctx.sessionManager`) and returns the reply's `context` as a custom message (`customType: "branchyard"`, shown in the transcript); on later prompts it runs `user-prompt-submit`, which says something only when there is news. On `session_start` and `agent_end` it runs `by statusline --harness generic` and puts the line in the footer with `ctx.ui.setStatus("branchyard", ...)`. It spawns `by` with node's `child_process` and nothing else; a missing `by`, a non-zero exit, output that is not JSON, or no answer within 3 seconds adds nothing and never throws. The file is plain JavaScript with a `.ts` name, so Pi loads it as it loads any extension.
+What you get: an extension, `plugins/branchyard/harnesses/pi/branchyard.ts`, that tells a Pi session a person started which of the repository's Branchyard branches finished, failed, are blocked or ask. On a session's first prompt its `before_agent_start` handler runs `by hook --harness generic session-start` (stdin `{"cwd", "session_id"}`, the session id from `ctx.sessionManager`) and returns the reply's `context` as a custom message (`customType: "branchyard"`, shown in the transcript); on later prompts it runs `user-prompt-submit`, which says something only when there is news. On `session_start` and `agent_end` it runs `by statusline --harness generic` and puts the line in the footer with `ctx.ui.setStatus("branchyard", ...)`; in print mode (`pi -p`), where `ctx.hasUI` is false and there is no footer, it skips that. It spawns `by` with node's `child_process` and nothing else; a missing `by`, a non-zero exit, output that is not JSON, or no answer within 3 seconds adds nothing and never throws. The file is plain JavaScript with a `.ts` name, so Pi loads it as it loads any extension.
 
 Install: `by init plugin` copies it to `~/.pi/agent/extensions/branchyard.ts` (`plugins/branchyard/install/pi.toml`). Or, from a clone, `pi install ./plugins/branchyard/harnesses/pi` (its `package.json` names the extension under `pi.extensions`). Run `/reload` or start a new session afterwards.
 
-Caveats: `pi install git:...` of the whole repository does not find the extension, because the repository root has no `package.json`; use the local path. Whether a session has had its session-start context is remembered in the extension's memory, so a resumed session after a restart is told the counts again (the cursor in `.branchyard/hooks/<session>.json` keeps that to counts, not old news).
+Caveats: `pi install git:...` of the whole repository does not find the extension, because the repository root has no `package.json`; use the local path. Whether a session has had its session-start context is remembered in the extension's memory, so a session resumed by a new process (`pi -c`) asks for `session-start` again; the cursor in `.branchyard/hooks/<session>.json` already exists then, so nothing is repeated.
 
 Try it: in a repository Branchyard uses, with a branch that has finished, start `pi` and send any prompt; the transcript shows a `branchyard` message naming the branch, and the footer shows `by: ...`. With `by` off PATH nothing appears.
 
-Tested against a fake host API under node 22 with a stub `by` (`tests/test_plugin_ts.py`); not run against the real CLI. Not done: no Pi command (`/by-status`) or skill registration; the extension does not use `pi.sendMessage` for news that arrives while the agent is idle.
+Run against the real CLI, Pi 0.73.1 (`@mariozechner/pi-coding-agent`), Z.ai `glm-4.5-air`, 24 October 2026: installed both by `by init plugin pi --apply` and by `pi install <clone>/plugins/branchyard/harnesses/pi`; `pi -p` sent `{"cwd", "session_id": <session uuid>}` and the model repeated "Branchyard: 2 ready to integrate (by ls)." (stored in the session as a `custom_message` with `customType: "branchyard"`); `pi -p -c` was quiet; in `--mode rpc` a second prompt after another branch finished got only that branch, and `setStatus` requests carried `by: N ready`. The interactive TUI footer was not looked at. Also tested against a fake host API shaped from the recorded `ctx` and events (`tests/test_plugin_ts.py`). Not done: no Pi command (`/by-status`) or skill registration; the extension does not use `pi.sendMessage` for news that arrives while the agent is idle.
 
 ## Oh My Pi
 
@@ -134,7 +134,7 @@ Caveats: as for Pi. Oh My Pi may call `before_agent_start` again for the same su
 
 Try it: as for Pi, with `omp`.
 
-Tested against a fake host API under node 22 with a stub `by`, the same run as Pi; not run against the real CLI. Not done: no `omp plugin install name@marketplace` entry, since the repository has no Oh My Pi marketplace file.
+Run against the real CLI, Oh My Pi 18.12.6 (`@oh-my-pi/pi-coding-agent`, under Bun), Z.ai `glm-4.5-air`, 24 October 2026: installed both by `by init plugin oh-my-pi --apply` and by `omp plugin link <clone>/plugins/branchyard/harnesses/pi`; `omp -p` got "Branchyard: 3 ready to integrate (by ls)." back from the model, `omp -p -c` was quiet, and in `--mode rpc` the second prompt got only the newly finished branch and `setStatus` carried `by: N ready`. Its `ctx` exposes `cwd`, `hasUI` and `sessionManager` as getters and its `systemPrompt` is an array; the extension reads neither shape-sensitive field. The interactive TUI footer was not looked at. Not done: no `omp plugin install name@marketplace` entry, since the repository has no Oh My Pi marketplace file.
 
 ## Amp
 
@@ -154,11 +154,11 @@ What you get: a plugin, `plugins/branchyard/harnesses/opencode/branchyard.js`, f
 
 Install: `by init plugin` copies it to `~/.config/opencode/plugins/branchyard.js` (`plugins/branchyard/install/opencode.toml`); a project can instead keep it in `.opencode/plugins/`. Or list the directory in `opencode.json`: `{"plugin": ["/path/to/branchyard/plugins/branchyard/harnesses/opencode"]}` (its `package.json` names the entry under `main` and `exports["./server"]`). Restart OpenCode afterwards.
 
-Caveats: OpenCode offers plugins no status line (TUI slots only), so there is none. The 2.x plugin API on OpenCode's development branch differs and is not targeted. Sessions that have had their session-start context are remembered in the plugin's memory, as for Pi.
+Caveats: OpenCode offers plugins no status line (TUI slots only), so there is none. The 2.x plugin API on OpenCode's development branch differs and is not targeted. Sessions that have had their session-start context are remembered in the plugin's memory, so each `opencode run -c` process asks for `session-start` again; the session's cursor keeps that quiet. `chat.message`'s input has no `messageID`; the plugin takes the id from `output.message.id`.
 
 Try it: in a repository Branchyard uses, with a finished branch, run `opencode` and send a message; the model's first reply can name the branch, and the session's stored message holds a synthetic part with the Branchyard lines.
 
-Tested against a fake host API under node 22 with a stub `by` (`tests/test_plugin_ts.py`); not run against the real CLI. Not done: no npm package is published, so `"plugin": ["branchyard-opencode"]` does not resolve.
+Run against the real CLI, OpenCode 1.19.4, `zai-coding-plan/glm-5.3-flash`, 24 October 2026: loaded from `~/.config/opencode/plugins/` (`by init plugin opencode --apply`) and as a directory path in `opencode.json` `"plugin"`; `opencode run` replied "Branchyard: 1 ready to integrate (by ls).", `opencode export` showed the synthetic user part, `opencode run -c` was quiet, and after another branch finished the next `-c` prompt got only that branch. With `by` off PATH the model replied NONE. Also tested against a fake host API shaped from the recorded hook input (`tests/test_plugin_ts.py`). Not done: no npm package is published, so `"plugin": ["branchyard-opencode"]` does not resolve.
 
 ## Hermes
 

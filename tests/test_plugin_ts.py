@@ -79,22 +79,40 @@ if (kind === "pi") {
   const pi = { on: (name, fn) => { handlers[name] = fn; } };
   mod.default(pi);
   out.events = Object.keys(handlers).sort();
-  const ctx = (id) => ({
-    cwd,
-    hasUI: true,
-    sessionManager: { getSessionId: () => id },
-    ui: { setStatus: (key, text) => out.status.push([key, text === undefined ? null : text]) },
-  });
-  const prompt = (text, id) => handlers.before_agent_start({ type: "before_agent_start", prompt: text }, ctx(id));
-  if (scenario === "full") {
-    await timed("session_start", () => handlers.session_start({ type: "session_start" }, ctx("sess-1")));
+  // Shaped like what Pi 0.73.1 and Oh My Pi 18.12.6 handed a real extension (recorded
+  // 24 October 2026): Pi's ctx has own fields, Oh My Pi's has only `ui` as an own key and
+  // the rest as getters; Pi's systemPrompt is a string, Oh My Pi's an array. `hasUI` is
+  // false in print mode (-p), where setStatus is a no-op.
+  const omp = scenario === "omp";
+  const hasUI = scenario !== "print";
+  const ctx = (id) => {
+    const ui = { setStatus: (key, text) => out.status.push([key, text === undefined ? null : text]) };
+    const sessionManager = { getSessionId: () => id, getSessionFile: () => `/sessions/${id}.jsonl` };
+    if (!omp) {
+      return { cwd, hasUI, sessionManager, ui, model: {}, isIdle: () => true, getSystemPrompt: () => "sys" };
+    }
+    const host = { ui };
+    for (const [key, value] of Object.entries({ cwd, hasUI, sessionManager })) {
+      Object.defineProperty(host, key, { get: () => value, enumerable: false });
+    }
+    return host;
+  };
+  const systemPrompt = omp ? ["policy", "<project-context>"] : "You are an expert coding assistant";
+  const prompt = (text, id) =>
+    handlers.before_agent_start(
+      { type: "before_agent_start", prompt: text, images: undefined, systemPrompt },
+      ctx(id),
+    );
+  const start = omp ? { type: "session_start" } : { type: "session_start", reason: "startup" };
+  if (scenario === "one") {
+    await timed("first", () => prompt("hi", "sess-1"));
+  } else {
+    await timed("session_start", () => handlers.session_start(start, ctx("sess-1")));
     await timed("first", () => prompt("hi", "sess-1"));
     await timed("second", () => prompt("again", "sess-1"));
     await timed("other", () => prompt("new", "sess-2"));
-    await timed("agent_end", () => handlers.agent_end({ type: "agent_end" }, ctx("sess-1")));
+    await timed("agent_end", () => handlers.agent_end({ type: "agent_end", messages: [] }, ctx("sess-1")));
     await timed("bare ctx", () => handlers.before_agent_start({ type: "before_agent_start" }, {}));
-  } else {
-    await timed("first", () => prompt("hi", "sess-1"));
   }
 } else if (kind === "amp") {
   out.factory = typeof mod.default;
@@ -128,14 +146,27 @@ if (kind === "pi") {
   out.factory = typeof mod.default;
   out.id = mod.default && mod.default.id;
   out.exports = Object.keys(mod).sort();
-  const hooks = await mod.default.server({ directory: cwd, worktree: cwd, project: {}, client: {} }, {});
+  // Shaped like what OpenCode 1.19.4 handed a real plugin (recorded 24 October 2026):
+  // chat.message's input names no messageID or agent; the id is on output.message.
+  const input = {
+    $: () => {},
+    client: {},
+    directory: cwd,
+    experimental_workspace: { register() {} },
+    project: {},
+    serverUrl: new URL("http://localhost:4096"),
+    worktree: cwd,
+  };
+  const hooks = await mod.default.server(input, {});
   out.events = Object.keys(hooks).sort();
+  const model = { providerID: "zai-coding-plan", modelID: "glm-5.3-flash" };
   const send = async (sessionID, messageID) => {
     const output = {
-      message: { id: messageID, sessionID, role: "user" },
-      parts: [{ id: "prt_user", type: "text", text: "hello" }],
+      message: { id: messageID, sessionID, role: "user", agent: "build", model, time: { created: 1 } },
+      parts: [{ id: "prt_user", sessionID, messageID, type: "text", text: "hello" }],
     };
-    await hooks["chat.message"]({ sessionID, messageID, agent: "build" }, output);
+    const hookInput = { sessionID, model, agent: undefined, messageID: undefined, variant: undefined };
+    await hooks["chat.message"](hookInput, output);
     return output.parts;
   };
   if (scenario === "full") {
@@ -283,6 +314,21 @@ class Plugins(unittest.TestCase):
         self.assertTrue(status)
         self.assertTrue(all(s == {"cwd": str(self.cwd)} for s in status))
         self.assertIn(["branchyard", "STATUS line"], out["status"])
+
+    def test_oh_my_pi_host_shape_gets_the_same_message_and_status(self):
+        out = self.run_plugin("pi", scenario="omp")
+        _start, first, second, other, _end, _bare = out["results"]
+        self.assertEqual(first["message"]["content"], "CTX session-start")
+        self.assertEqual(second["message"]["content"], "CTX user-prompt-submit")
+        self.assertEqual(other["message"]["content"], "CTX session-start")
+        self.assert_generic_calls("sess-1", "sess-2")
+        self.assertIn(["branchyard", "STATUS line"], out["status"])
+
+    def test_pi_print_mode_injects_but_runs_no_status_line(self):
+        out = self.run_plugin("pi", scenario="print")
+        self.assertEqual(out["results"][1]["message"]["content"], "CTX session-start")
+        self.assertEqual(out["status"], [])
+        self.assertEqual([a for a, _ in self.calls() if a.startswith("statusline")], [])
 
     def test_amp_returns_a_message_and_updates_a_status_item(self):
         out = self.run_plugin("amp")

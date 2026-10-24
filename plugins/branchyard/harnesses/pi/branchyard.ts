@@ -1,6 +1,6 @@
 // Branchyard for Pi and Oh My Pi: tells a session a person started which of the
 // repository's Branchyard branches finished, failed, are blocked or ask, and keeps a
-// status-line entry. It runs `by hook --harness generic <event>` and
+// status-line entry where there is a footer (interactive and RPC modes). It runs `by hook --harness generic <event>` and
 // `by statusline --harness generic`; without `by` on PATH, or when `by` is slow
 // (3 s) or fails, it adds nothing and never throws. Plain JavaScript in a .ts file
 // so Pi (jiti), Oh My Pi (Bun) and node all load it without a build step.
@@ -87,7 +87,9 @@ function cwdOf(ctx) {
 
 async function refreshStatus(ctx) {
   try {
-    if (!ctx || !ctx.ui || typeof ctx.ui.setStatus !== "function") return;
+    // Print (-p) and JSON modes have no footer (`hasUI` false) yet still offer a no-op
+    // setStatus: skip the `by statusline` run there.
+    if (!ctx || ctx.hasUI === false || !ctx.ui || typeof ctx.ui.setStatus !== "function") return;
     const text = await statusText(cwdOf(ctx));
     ctx.ui.setStatus(STATUS_KEY, text || undefined);
   } catch {
