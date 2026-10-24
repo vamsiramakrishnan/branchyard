@@ -27,6 +27,9 @@ for model in sys.argv[1:]:
                  "content-type": "application/json"}, method="POST")
     try:
         with opener.open(request, timeout=60) as response:
+            # Read the answer as a harness does: closing before the gateway
+            # has written it is a harness that went away.
+            response.read()
             print(f"call {model}: {response.status}")
     except urllib.error.HTTPError as error:
         print(f"call {model}: {error.code}")
