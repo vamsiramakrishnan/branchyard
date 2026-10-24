@@ -245,10 +245,21 @@ class ManifestTests(unittest.TestCase):
         manifest = json.loads((PLUGIN / ".codex-plugin/plugin.json").read_text())
         self.assertEqual((manifest["name"], manifest["version"]), ("branchyard", WORKSPACE_VERSION))
         # An explicit `hooks` replaces Codex's default hooks/hooks.json, which is Claude Code's.
+        # Codex 0.164 honours it: its trust key names harnesses/codex/hooks.json.
         self.assertEqual(manifest["hooks"], "./harnesses/codex/hooks.json")
         target = (PLUGIN / manifest["hooks"]).resolve()
         self.assertTrue(target.is_file())
         self.assertTrue(target.is_relative_to(PLUGIN.resolve()))
+
+    def test_the_codex_install_says_how_hooks_get_trusted(self):
+        # `codex exec` skips an untrusted hook without a word (Codex 0.164), so the
+        # note must name both the interactive trust and the unattended flag.
+        import tomllib
+
+        notes = [n["text"] for n in tomllib.loads((PLUGIN / "install/codex.toml").read_text())["note"]]
+        text = " ".join(notes)
+        self.assertIn("Trust all and continue", text)
+        self.assertIn("codex exec --dangerously-bypass-hook-trust", text)
 
     def test_the_codex_marketplace_lists_the_plugin(self):
         marketplace = json.loads((ROOT / ".agents/plugins/marketplace.json").read_text())
