@@ -442,8 +442,10 @@ fn assert_cut_kept_the_outcome(events: &[RecordedEvent], warning: &str) {
 /// interrupted and never woken.
 #[test]
 fn a_cut_hold_parks_a_branch_whose_children_still_run() {
+    // Long enough for the turn to reach its hold on a slow (instrumented)
+    // run; the child never settles, so the limit always cuts the hold.
     let (status, events) =
-        cut_while_a_child_runs(Budget::default().duration(Duration::from_secs(1)));
+        cut_while_a_child_runs(Budget::default().duration(Duration::from_secs(5)));
     assert_eq!(status, BranchStatus::WaitingOnChildren, "{events:?}");
     assert_cut_kept_the_outcome(&events, "duration limit while held open");
 }
