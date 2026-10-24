@@ -1,0 +1,7 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "command -v by >/dev/null 2>&1 && by statusline --harness cursor || true",
+    "timeoutMs": 2000
+  }
+}

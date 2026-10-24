@@ -1,0 +1,24 @@
+harness = "cursor"
+binaries = ["cursor-agent", "cursor", "agent"]
+provides = ["hooks", "statusline"]
+
+[[file]]
+from = "harnesses/cursor/hooks.json"
+to = "~/.cursor/hooks.json"
+how = "merge-json"
+at = ""
+
+[[file]]
+from = "harnesses/cursor/cli-config.json"
+to = "~/.cursor/cli-config.json"
+how = "merge-json"
+at = ""
+
+[[note]]
+text = "The skills and the /status, /wait and /setup commands come with the Cursor plugin: in Cursor open Customize, add this repository's marketplace (.cursor-plugin/marketplace.json) and install branchyard. Install the plugin or keep these user hooks, not both, or each session hears the news twice."
+
+[[note]]
+text = "Cursor's beforeSubmitPrompt hook cannot add context, so Cursor hears from Branchyard when a session starts, not before each prompt."
+
+[[note]]
+text = "The Cursor CLI's statusLine replaces its built-in footer. Remove statusLine from ~/.cursor/cli-config.json if you would rather keep the footer."

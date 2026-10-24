@@ -1,0 +1,15 @@
+harness = "hermes"
+binaries = ["hermes"]
+provides = ["hooks"]
+
+[[file]]
+from = "harnesses/hermes/hooks.yaml"
+to = "~/.hermes/config.yaml"
+how = "merge-yaml"
+at = ""
+
+[[note]]
+text = "Hermes asks once before it runs a new shell hook. Start `hermes chat` in a terminal and approve the pre_llm_call hook, or run `hermes hooks list` to see its consent status. The gateway, cron and `hermes acp` never ask: approve it from a terminal first, or start them with HERMES_ACCEPT_HOOKS=1."
+
+[[note]]
+text = "A non-default Hermes profile reads its own config.yaml (~/.hermes/profiles/<name>/config.yaml); copy the hooks: block there for that profile."

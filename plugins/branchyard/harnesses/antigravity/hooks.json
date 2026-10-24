@@ -1,0 +1,18 @@
+{
+  "branchyard": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "command -v by >/dev/null 2>&1 && by hook --harness antigravity session-start || true",
+        "timeout": 5
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "command -v by >/dev/null 2>&1 && by hook --harness antigravity user-prompt-submit || true",
+        "timeout": 5
+      }
+    ]
+  }
+}
