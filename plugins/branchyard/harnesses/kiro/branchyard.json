@@ -1,0 +1,25 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "branchyard-session-start",
+      "description": "Tell the session which Branchyard branches need an answer, and how many run or are ready. Silent without by on PATH or outside a repository Branchyard uses.",
+      "trigger": "SessionStart",
+      "action": {
+        "type": "command",
+        "command": "command -v by >/dev/null 2>&1 && by hook --harness kiro session-start || true"
+      },
+      "timeout": 5
+    },
+    {
+      "name": "branchyard-prompt-submit",
+      "description": "Before each prompt, tell the session which Branchyard branches changed since it last heard. Silent when nothing changed.",
+      "trigger": "UserPromptSubmit",
+      "action": {
+        "type": "command",
+        "command": "command -v by >/dev/null 2>&1 && by hook --harness kiro user-prompt-submit || true"
+      },
+      "timeout": 5
+    }
+  ]
+}
