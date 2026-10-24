@@ -45,6 +45,6 @@
     "crates/branchyard-server/tests/companion.rs": 1,
     "crates/branchyard/tests/egress_common/mod.rs": 1,
     "crates/branchyard/tests/mock_gateway/mod.rs": 1,
-    "crates/branchyard/tests/models.rs": 2
+    "crates/branchyard/tests/models.rs": 1
   }
 }
