@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "command -v by >/dev/null 2>&1 && by hook --harness github-copilot session-start || true",
+        "timeoutSec": 5
+      }
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+# What `by init plugin` installs for Factory Droid: the hooks in the user
+# hooks file and the status line in the user settings. Droid also installs
+# the Claude Code plugin as it is (`droid plugin marketplace add`); see
+# docs/harness-hooks.md. Install the hooks one way, not both.
+harness = "droid"
+binaries = ["droid"]
+provides = ["hooks", "statusline"]
+
+[[file]]
+from = "harnesses/droid/hooks.json"
+to = "~/.factory/hooks.json"
+how = "merge-json"
+at = ""
+
+[[file]]
+from = "harnesses/droid/settings.json"
+to = "~/.factory/settings.json"
+how = "merge-json"
+at = ""
+
+[[note]]
+text = "Droid reads the hooks key in ~/.factory/settings.json only while ~/.factory/hooks.json does not exist: move any hooks you keep there into ~/.factory/hooks.json. Review them with /hooks."

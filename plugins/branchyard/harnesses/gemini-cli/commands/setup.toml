@@ -1,0 +1,11 @@
+# Mirrors commands/setup.md for Gemini CLI ({{args}} for $ARGUMENTS).
+description = "Set up Branchyard by interview (project defaults, a server, a rig, a deployment, or these skills)"
+prompt = """
+Set up Branchyard for the topic "{{args}}" (if empty, run
+`by init --json` and ask the user which topic). Branchyard's `setup`
+skill, when it is installed, has the details.
+
+Drive `by init <topic> --json --next`, ask the user every batch of
+questions yourself, show the dry-run diff and validation, and apply only
+after the user confirms. Never ask for or write a secret's value.
+"""

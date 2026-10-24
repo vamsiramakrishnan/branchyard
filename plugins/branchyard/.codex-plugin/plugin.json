@@ -4,6 +4,7 @@
   "version": "0.0.1",
   "license": "Apache-2.0",
   "skills": "./skills/",
+  "hooks": "./harnesses/codex/hooks.json",
   "interface": {
     "displayName": "Branchyard",
     "shortDescription": "Set up Branchyard; delegate work to child branches",

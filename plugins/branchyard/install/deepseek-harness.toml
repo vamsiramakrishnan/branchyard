@@ -1,0 +1,20 @@
+# What `by init plugin` installs for DeepSeek Harness: a Claude Code
+# hooks.json and the patch row that mounts the Claude Code hook bridge on it,
+# for every profile. See docs/harness-hooks.md.
+harness = "deepseek-harness"
+binaries = ["dsh"]
+provides = ["hooks"]
+
+[[file]]
+from = "harnesses/deepseek-harness/hooks.json"
+to = "~/.dsh/branchyard-hooks.json"
+how = "write"
+
+[[file]]
+from = "harnesses/deepseek-harness/cordis.patch.yml"
+to = "~/.dsh/cordis.patch.yml"
+how = "merge-yaml"
+at = ""
+
+[[note]]
+text = "The patch goes to ~/.dsh, the default DSH_HOME; with DSH_HOME set elsewhere, move its insert into $DSH_HOME/cordis.patch.yml. The bridge, @deepseek-ai/dsh-hooks-claude-code, must resolve in the profile: dsh --profile <name> --dump-config shows the branchyard-hooks row."

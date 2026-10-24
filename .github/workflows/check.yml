@@ -177,3 +177,4 @@ jobs:
       - run: mypy --python-version 3.12 --ignore-missing-imports --explicit-package-bases tools tests sdk/python/branchyard_client.py
       - run: python tests/test_install_ci_tool.py
       - run: python tests/test_check_coverage.py
+      - run: python tests/test_plugin_claude_compat.py
