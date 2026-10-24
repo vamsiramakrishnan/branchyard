@@ -170,6 +170,8 @@ STEPS = (
     Step("test_sdk_client", "controls", (PY, "tests/test_sdk_client.py")),
     Step("test_check", "controls", (PY, "tests/test_check.py")),
     Step("test_install_hooks", "controls", (PY, "tests/test_install_hooks.py")),
+    # The packaging for Codex, Gemini CLI, Qwen Code, Copilot CLI, Droid and DeepSeek Harness.
+    Step("test_plugin_claude_compat", "controls", (PY, "tests/test_plugin_claude_compat.py")),
     # Cargo: rustdoc (the docs job), formatting, the undocumented-items ratchet, Clippy, and the
     # schema freshness tests. The Clippy passes CI runs for the feature builds stay in the workflow.
     Step(

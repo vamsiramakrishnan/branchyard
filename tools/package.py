@@ -22,6 +22,14 @@ SKILL = PLUGIN / "skills" / "delegate"
 SETUP_SKILL = PLUGIN / "skills" / "setup"
 SDK = ROOT / "sdk" / "python"
 MARKETPLACE = ROOT / ".claude-plugin" / "marketplace.json"
+# Each host's manifest for the plugin, relative to it: each names it
+# `branchyard` at the workspace version.
+HOST_MANIFESTS = [
+    ".codex-plugin/plugin.json",
+    ".claude-plugin/plugin.json",
+    ".github/plugin/plugin.json",
+    "harnesses/gemini-cli/gemini-extension.json",
+]
 
 # A fixed timestamp for every archive entry (ZIP's minimum representable
 # date-time), so archives from different builds never differ only by mtime.
@@ -106,12 +114,10 @@ def build(destination: Path) -> list[Path]:
     """Build every archive into `destination`; returns their paths, in the
     order of `ARCHIVES`."""
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
-    for host in [".codex-plugin", ".claude-plugin"]:
-        manifest = json.loads((PLUGIN / host / "plugin.json").read_text())
+    for host in HOST_MANIFESTS:
+        manifest = json.loads((PLUGIN / host).read_text())
         if manifest["name"] != "branchyard" or manifest["version"] != version:
-            raise ValueError(
-                f"{host}/plugin.json's name and version must be 'branchyard' and {version!r}, the workspace version"
-            )
+            raise ValueError(f"{host}'s name and version must be 'branchyard' and {version!r}, the workspace version")
     if sdk_version() != version:
         raise ValueError(f"sdk/python/pyproject.toml's version must be {version!r}, the workspace version")
     check_marketplace(version)

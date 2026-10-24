@@ -1,0 +1,21 @@
+# What `by init plugin` installs for GitHub Copilot CLI: the sessionStart hook
+# as a user hooks file and the status line in the user settings. The plugin
+# (skills, commands and the same hook) installs with `copilot plugin install`;
+# see docs/harness-hooks.md. Install the hook one way, not both.
+harness = "github-copilot"
+binaries = ["copilot"]
+provides = ["hooks", "statusline"]
+
+[[file]]
+from = "harnesses/github-copilot/hooks.json"
+to = "~/.copilot/hooks/branchyard.json"
+how = "write"
+
+[[file]]
+from = "harnesses/github-copilot/settings.json"
+to = "~/.copilot/settings.json"
+how = "merge-json"
+at = ""
+
+[[note]]
+text = "Copilot CLI drops what a userPromptSubmitted hook from a file prints, so Branchyard tells a Copilot session only at its start; run /status (plugin) or by ls for news mid-session."
