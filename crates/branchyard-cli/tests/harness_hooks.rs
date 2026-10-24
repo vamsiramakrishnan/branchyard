@@ -3,8 +3,8 @@
 //! `tests/fixtures/hooks/<id>/`: `<name>.json` is the harness's stdin
 //! (`@CWD@` stands for the repository), `<name>.out` the exact stdout (empty
 //! where the harness drops what that event prints). Most payloads are
-//! recorded from the real CLI; Copilot CLI's, Droid's, Cursor's,
-//! Antigravity's and Kiro's are written from their documentation.
+//! recorded from the real CLI; Copilot CLI's, Droid's, Cursor's and Kiro's
+//! are written from their documentation.
 //! Hermetic: no real harness, no network. Requires `git` and `sh`.
 
 #![allow(clippy::panic, clippy::unwrap_used, clippy::unwrap_in_result)] // tests: a panic is the failure report

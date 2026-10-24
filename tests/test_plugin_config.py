@@ -160,8 +160,12 @@ class Files(unittest.TestCase):
         self.assertRegex(manifest["name"], r"^[a-zA-Z0-9-_]+$")
         hooks = load_json("harnesses/antigravity/hooks.json")
         self.assertEqual(set(hooks), {"branchyard"})
+        # Both events take a flat list of handlers (agy 1.4.7): no matcher group.
+        self.assertEqual(set(hooks["branchyard"]), {"SessionStart", "PreInvocation"})
         for entries in hooks["branchyard"].values():
             for entry in entries:
+                self.assertNotIn("hooks", entry)
+                self.assertNotIn("matcher", entry)
                 self.assertEqual(entry["type"], "command")
                 self.assertIsInstance(entry["timeout"], int)
         status = load_json("harnesses/antigravity/settings.json")["statusLine"]
