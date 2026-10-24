@@ -1077,6 +1077,10 @@ Examples:
   by init project --answers answers.json --dry-run
   by init project --answers - --apply --json < answers.json
   by init server --defaults --apply --force
+  by init plugin                                     # each harness Branchyard installs for, detected first
+  by init plugin codex hermes                        # their hooks: every diff shown, then asks
+  by init plugin --all-detected --dry-run            # the plan for every harness on PATH
+  by init plugin cursor --apply                      # write without asking (--force replaces)
 
 Answers name where a secret is (a variable, or @file), never its value.
 Generated tokens are written 0600 and printed nowhere. See docs/setup.md.";
@@ -2596,6 +2600,10 @@ pub struct InitArgs {
     pub answers: Option<String>,
     pub defaults: bool,
     pub force: bool,
+    /// `by init plugin ID...`: the harnesses to install for.
+    pub harnesses: Vec<String>,
+    /// `by init plugin --all-detected`.
+    pub all_detected: bool,
 }
 
 /// `by init`'s options. At most one step; a step needs a topic; `--answers`
@@ -2606,6 +2614,13 @@ pub struct InitFlags {
     /// What to set up (default: the wizard asks)
     #[arg(value_name = "TOPIC", value_parser = TopicParser)]
     topic: Option<branchyard_setup::Topic>,
+    /// With plugin: the harnesses to install hooks, commands and skills for (by init plugin lists
+    /// them)
+    #[arg(value_name = "HARNESS", requires = "topic")]
+    harnesses: Vec<String>,
+    /// With plugin: every harness found on PATH
+    #[arg(long, conflicts_with = "harnesses")]
+    all_detected: bool,
     /// Print JSON (schema/setup.protocol.json): the topics, or the step's result
     #[arg(long)]
     json: bool,
@@ -2652,7 +2667,11 @@ impl Flags for InitFlags {
             (_, _, true) => Some(InitStep::Apply),
             _ => None,
         };
-        if self.json && self.topic.is_some() && step.is_none() {
+        let plugin = self.topic == Some(branchyard_setup::Topic::Plugin);
+        if (!self.harnesses.is_empty() || self.all_detected) && !plugin {
+            return Err("harnesses and --all-detected go with by init plugin".into());
+        }
+        if self.json && self.topic.is_some() && step.is_none() && !plugin {
             return Err("with --json and a topic, give --next, --dry-run or --apply".into());
         }
         Ok(InitArgs {
@@ -2662,6 +2681,8 @@ impl Flags for InitFlags {
             answers: self.answers,
             defaults: self.defaults,
             force: self.force,
+            harnesses: self.harnesses,
+            all_detected: self.all_detected,
         })
     }
 }
@@ -6837,8 +6858,15 @@ mod tests {
                 answers: None,
                 defaults: false,
                 force: false,
+                harnesses: Vec::new(),
+                all_detected: false,
             }
         );
+        let plugin = init("init plugin codex hermes --dry-run");
+        assert_eq!(plugin.harnesses, ["codex", "hermes"]);
+        assert_eq!(plugin.step, Some(InitStep::DryRun));
+        assert!(init("init plugin --all-detected").all_detected);
+        assert!(init("init plugin --json").json);
         assert_eq!(init("init --json").step, None);
         assert_eq!(init("init server --defaults").topic, Some(Topic::Server));
         let next = init("init project --json --next --answers=a.json");
@@ -6907,8 +6935,18 @@ mod tests {
             ),
             (
                 "init project extra",
-                ErrorKind::UnknownArgument,
-                "unexpected argument",
+                ErrorKind::ArgumentConflict,
+                "harnesses and --all-detected go with by init plugin",
+            ),
+            (
+                "init rig --all-detected",
+                ErrorKind::ArgumentConflict,
+                "go with by init plugin",
+            ),
+            (
+                "init plugin codex --all-detected",
+                ErrorKind::ArgumentConflict,
+                "cannot be used with",
             ),
             (
                 "init project --bogus",

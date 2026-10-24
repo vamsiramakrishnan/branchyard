@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v by >/dev/null 2>&1 && by hook session-start || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v by >/dev/null 2>&1 && by hook user-prompt-submit || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -941,6 +941,7 @@ dependencies = [
  "shlex",
  "similar",
  "toml",
+ "toml_edit",
 ]
 
 [[package]]

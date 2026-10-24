@@ -1,0 +1,38 @@
+# A made-up harness touching every `how`: a file, a directory, and a merge
+# into JSON, TOML and YAML (tests/install.rs).
+harness = "fixture"
+binaries = ["fixture-cli", "fx"]
+provides = ["hooks", "commands", "statusline"]
+
+[[file]]
+from = "harnesses/fixture/hook.sh"
+to = "~/.fixture/hooks/branchyard.sh"
+how = "write"
+
+[[file]]
+from = "harnesses/fixture/ext"
+to = "{project}/.fixture/extensions/branchyard"
+
+[[file]]
+from = "harnesses/fixture/settings.json"
+to = "~/.fixture/settings.json"
+how = "merge-json"
+
+[[file]]
+from = "harnesses/fixture/statusline.json"
+to = "~/.fixture/settings.json"
+how = "merge-json"
+at = "ui"
+
+[[file]]
+from = "harnesses/fixture/config.toml"
+to = "~/.fixture/config.toml"
+how = "merge-toml"
+
+[[file]]
+from = "harnesses/fixture/config.yaml"
+to = "~/.fixture/config.yaml"
+how = "merge-yaml"
+
+[[note]]
+text = "Run /hooks in Fixture to trust the hooks."

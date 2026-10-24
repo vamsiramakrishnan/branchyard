@@ -207,6 +207,10 @@ impl Probe for HostProbe {
         std::env::var_os(name).is_some_and(|v| !v.is_empty())
     }
 
+    fn on_path(&self, program: &str) -> bool {
+        which(program).is_some()
+    }
+
     fn tool(&self, program: &str) -> Option<String> {
         let path = which(program)?;
         Some(
@@ -443,7 +447,20 @@ pub fn apply(plan: &Plan, root: &Path, force: bool) -> Result<Applied, Refusal> 
             applied.unchanged.push(file.path.clone());
             continue;
         }
-        write_file(&path, file.body(), file.mode_bits()).map_err(io)?;
+        // A merge into the person's own file keeps its mode, and writes
+        // through a symbolic link (a dotfiles checkout) rather than over it.
+        let merged = file.how.as_deref().is_some_and(|h| h.starts_with("merge"));
+        let (path, mode) = match (merged, fs::canonicalize(&path)) {
+            (true, Ok(real)) => {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(&real)
+                    .map(|m| m.permissions().mode() & 0o7777)
+                    .unwrap_or(file.mode_bits());
+                (real, mode)
+            }
+            _ => (path.clone(), file.mode_bits()),
+        };
+        write_file(&path, file.body(), mode).map_err(io)?;
         applied.written.push(file.path.clone());
     }
     Ok(applied)
@@ -495,6 +512,9 @@ impl<P: Probe> Probe for CachedProbe<P> {
             .entry(program.to_owned())
             .or_insert_with(|| self.inner.tool(program))
             .clone()
+    }
+    fn on_path(&self, program: &str) -> bool {
+        self.inner.on_path(program)
     }
     fn platform(&self) -> Platform {
         self.platform.get_or_init(|| self.inner.platform()).clone()

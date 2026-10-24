@@ -797,3 +797,78 @@ fn project_setup_imports_a_devcontainer_as_a_prepared_workspace() {
     let check = repo.by(&["config", "validate"]);
     assert!(check.status.success(), "{}", text(&check));
 }
+
+#[test]
+fn by_init_plugin_lists_previews_and_installs_a_harness_once() {
+    let repo = Repo::new();
+    let base = repo.root.parent().unwrap().to_path_buf();
+    let bin = base.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(bin.join("claude"), "#!/bin/sh\necho 2.1.0\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let home = base.join("home");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    let settings = home.join(".claude/settings.json");
+    fs::write(&settings, "{\n    \"model\": \"opus\"\n}\n").unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let by = |args: &[&str]| {
+        let out = repo
+            .command()
+            .env("PATH", &path)
+            .args(args)
+            .output()
+            .unwrap();
+        repo.record(&out);
+        out
+    };
+    // The listing: detected first, as text and JSON.
+    let listed = by(&["init", "plugin"]);
+    assert!(listed.status.success(), "{}", text(&listed));
+    assert!(text(&listed).contains("Claude Code (claude-code)  detected (claude)"));
+    let list: Value = serde_json::from_slice(&by(&["init", "plugin", "--json"]).stdout).unwrap();
+    assert_eq!(list["harnesses"][0]["harness"], "claude-code");
+    assert_eq!(list["harnesses"][0]["detected"], true);
+    // Without a terminal: the diffs, then nothing written.
+    let preview = by(&["init", "plugin", "--all-detected"]);
+    assert!(preview.status.success(), "{}", text(&preview));
+    assert!(text(&preview).contains("merge-json"), "{}", text(&preview));
+    assert!(text(&preview).contains("Nothing was written"));
+    assert_eq!(
+        fs::read_to_string(&settings).unwrap(),
+        "{\n    \"model\": \"opus\"\n}\n"
+    );
+    // --apply writes, keeps the person's settings and prints the notes.
+    let applied = by(&["init", "plugin", "claude-code", "--apply"]);
+    assert!(applied.status.success(), "{}", text(&applied));
+    assert!(
+        text(&applied).contains("note: Claude Code:"),
+        "{}",
+        text(&applied)
+    );
+    let merged: Value = serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(merged["model"], "opus");
+    assert_eq!(merged["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+    assert!(home.join(".claude/skills/setup/SKILL.md").exists());
+    // A second run has nothing to do.
+    let again = by(&["init", "plugin", "claude-code"]);
+    assert!(
+        text(&again).contains("nothing to write"),
+        "{}",
+        text(&again)
+    );
+    // A clash is refused and writes nothing; an unknown harness is named.
+    fs::write(&settings, "{\"hooks\": []}\n").unwrap();
+    let refused = by(&["init", "plugin", "claude-code", "--apply"]);
+    assert!(!refused.status.success());
+    assert!(
+        text(&refused).contains("failed validation"),
+        "{}",
+        text(&refused)
+    );
+    assert_eq!(fs::read_to_string(&settings).unwrap(), "{\"hooks\": []}\n");
+    let unknown = by(&["init", "plugin", "nope"]);
+    assert!(text(&unknown).contains("no install for harness \"nope\""));
+}
