@@ -158,7 +158,10 @@ pub(crate) const DIALECTS: &[Dialect] = &[
             session_start: "SessionStart",
             user_prompt_submit: "BeforeAgent",
         },
-        deaf: &[],
+        // Headless, Gemini CLI puts a SessionStart context in front of the
+        // prompt, so `gemini -p "/cmd"` is no longer a command; BeforeAgent
+        // appends after the command is expanded, and hears everything.
+        deaf: &[Event::SessionStart],
     },
     Dialect {
         id: "qwen-code",
@@ -997,6 +1000,7 @@ mod tests {
             ("github-copilot", "user-prompt-submit"),
             ("cursor", "user-prompt-submit"),
             ("hermes", "session-start"),
+            ("gemini-cli", "session-start"),
         ] {
             let d = dialect(Some(id)).unwrap();
             assert_eq!(

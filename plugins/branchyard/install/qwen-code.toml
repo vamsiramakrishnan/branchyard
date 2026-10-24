@@ -13,4 +13,4 @@ how = "merge-json"
 at = ""
 
 [[note]]
-text = "For /setup, /status and /wait in Qwen Code, install the Gemini CLI extension from a clone: qwen extensions install <clone>/plugins/branchyard/harnesses/gemini-cli"
+text = "For /setup, /wait and /branchyard.status (Qwen Code's own /status wins) in Qwen Code, install the Gemini CLI extension from a clone: qwen extensions install <clone>/plugins/branchyard/harnesses/gemini-cli"

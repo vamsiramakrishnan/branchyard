@@ -42,7 +42,9 @@ HOOK_FILES = {
     "gemini-cli/hooks/hooks.json": (
         "gemini-cli",
         ("hooks",),
-        {"SessionStart": "session-start", "BeforeAgent": "user-prompt-submit"},
+        # No SessionStart: headless Gemini CLI puts its context in front of the
+        # prompt, which turns `gemini -p "/branchyard:status"` into plain text.
+        {"BeforeAgent": "user-prompt-submit"},
         "timeout",
         10_000,
     ),
@@ -236,8 +238,8 @@ class HookFileTests(unittest.TestCase):
                     self.assertRegex(command, GUARD)
                     result = run_without_by(command, self.empty)
                     self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
-        # Two hooks each for five harnesses, one for Copilot, three status lines.
-        self.assertEqual(found, 14)
+        # Two hooks each for four harnesses, one each for Gemini CLI and Copilot, three status lines.
+        self.assertEqual(found, 13)
 
 
 class ManifestTests(unittest.TestCase):

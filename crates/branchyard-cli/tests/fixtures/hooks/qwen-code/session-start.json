@@ -1,7 +1,10 @@
 {
-  "session_id": "qw-1",
-  "transcript_path": "/tmp/transcript.jsonl",
+  "session_id": "0b23329c-6c01-4412-9d3b-7277661b2d4e",
+  "transcript_path": "/home/u/.qwen/projects/-home-u-yard/chats/0b23329c-6c01-4412-9d3b-7277661b2d4e.jsonl",
   "cwd": "@CWD@",
   "hook_event_name": "SessionStart",
-  "source": "startup"
+  "timestamp": "2026-10-24T11:44:47.921Z",
+  "permission_mode": "auto",
+  "source": "startup",
+  "model": "glm-4.5-air"
 }

@@ -1,8 +1,8 @@
 {
-  "session_id": "gm-1",
-  "transcript_path": "/tmp/t.json",
+  "session_id": "7628edd1-ca79-45ac-81ef-2bc25420f6f6",
+  "transcript_path": "/home/u/.gemini/tmp/yard/chats/session-2026-10-24T11-38-7628edd1.jsonl",
   "cwd": "@CWD@",
   "hook_event_name": "SessionStart",
-  "timestamp": "2026-10-24T10:00:00Z",
+  "timestamp": "2026-10-24T11:38:59.512Z",
   "source": "startup"
 }
