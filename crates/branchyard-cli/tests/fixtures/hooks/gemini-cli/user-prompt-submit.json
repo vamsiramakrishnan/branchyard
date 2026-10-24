@@ -1,8 +1,8 @@
 {
-  "session_id": "gm-1",
-  "transcript_path": "/tmp/t.json",
+  "session_id": "74f3cb34-5c96-407b-9eb4-68d41fa2103e",
+  "transcript_path": "/home/u/.gemini/tmp/yard/chats/session-2026-10-24T11-39-74f3cb34.jsonl",
   "cwd": "@CWD@",
   "hook_event_name": "BeforeAgent",
-  "timestamp": "2026-10-24T10:00:05Z",
-  "prompt": "carry on"
+  "timestamp": "2026-10-24T11:39:40.225Z",
+  "prompt": "If your context contains a note starting with 'Branchyard:', repeat that note verbatim; otherwise reply NONE."
 }

@@ -29,4 +29,4 @@ to = "~/.gemini/commands/branchyard/wait.toml"
 how = "write"
 
 [[note]]
-text = "In Gemini CLI, /hooks panel lists the Branchyard hooks (branchyard-session-start, branchyard-before-agent); /hooks enable <name> turns one back on if it is off."
+text = "Gemini CLI runs hooks only in a trusted folder (gemini -p needs --skip-trust or GEMINI_CLI_TRUST_WORKSPACE=true there); /hooks panel lists branchyard-before-agent, and /hooks enable branchyard-before-agent turns it back on if it is off."
