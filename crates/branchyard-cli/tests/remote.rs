@@ -2362,12 +2362,14 @@ fn a_session_hook_reads_a_servers_postgres_store() {
             "repos": repos,
             "data_dir": dir.0.join("pg-data"),
             "database": url,
-            "tokens": [{"name": "t", "token": "hook-test-token"}],
+            "tokens": [{"name": "t", "token": "hook-test-token-0123"}],
             "allow_client_commands": true,
         })
         .to_string(),
     )
     .unwrap();
+    // A file holding a token must be the owner's alone, or the server warns.
+    fs::set_permissions(&config, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
     fs::write(
         there.join("branchyard.toml"),
         format!("[serve]\nconfig = \"{}\"\n", config.display()),
@@ -2375,7 +2377,7 @@ fn a_session_hook_reads_a_servers_postgres_store() {
     .unwrap();
     let mut server = Served::start(&dir.0, &[], &["--config", &config.display().to_string()]);
     server.token_file = dir.0.join("client.token");
-    fs::write(&server.token_file, "hook-test-token\n").unwrap();
+    fs::write(&server.token_file, "hook-test-token-0123\n").unwrap();
     let input = serde_json::json!({"session_id": "s1", "cwd": there});
     let hook = |event: &str| context(&session(&there, &["hook", event], &input, &[]).0);
     assert_eq!(hook("session-start"), None);
