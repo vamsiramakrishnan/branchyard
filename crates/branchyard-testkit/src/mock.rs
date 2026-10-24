@@ -18,7 +18,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use branchyard_support::LockExt;
 
@@ -30,6 +30,9 @@ use crate::wait;
 const MAX_HEAD: usize = 64 * 1024;
 /// Largest request body the mock accepts.
 const MAX_BODY: usize = 64 * 1024 * 1024;
+/// How long a stopped server's accept queue must stay empty before it
+/// stops accepting: long enough for a handshake already under way to land.
+const DRAIN: Duration = Duration::from_millis(50);
 
 /// One request the server received.
 #[derive(Clone, Debug)]
@@ -181,12 +184,24 @@ impl MockHttp {
                 listener
                     .set_nonblocking(true)
                     .expect("make the listener non-blocking");
+                // A client's `connect` can return before its connection is
+                // in the accept queue: the handshake ends asynchronously,
+                // even on loopback. So once stopped, the queue must stay
+                // empty for `DRAIN` before the loop ends, or a client that
+                // connected just before `finish` would never be read.
+                let mut empty_since: Option<Instant> = None;
                 loop {
                     let stream = match listener.accept() {
-                        Ok((stream, _)) => stream.set_nonblocking(false).map(|()| stream),
+                        Ok((stream, _)) => {
+                            empty_since = None;
+                            stream.set_nonblocking(false).map(|()| stream)
+                        }
                         Err(e) if e.kind() == ErrorKind::WouldBlock => {
                             if stop.load(Ordering::SeqCst) {
-                                break;
+                                let since = *empty_since.get_or_insert_with(Instant::now);
+                                if since.elapsed() >= DRAIN {
+                                    break;
+                                }
                             }
                             std::thread::sleep(Duration::from_millis(2));
                             continue;
