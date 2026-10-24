@@ -1507,7 +1507,11 @@ if args and args[0] == "serve":
     while True:
         time.sleep(1)
 answers = json.loads(os.environ.get("FAKE_BY_ANSWERS", "{{}}"))
-answer = answers.get(args[0]) if args else None
+# By the command and its first argument after `--json` ("send ghost"),
+# else by the command alone.
+answer = answers.get(" ".join(args[0:1] + args[2:3])) if len(args) > 2 else None
+if answer is None and args:
+    answer = answers.get(args[0])
 if answer is None:
     print("by: no such command", file=sys.stderr)
     sys.exit(2)
@@ -1648,6 +1652,228 @@ class LocalMode(ServerCase):
                 local.doctor()
             self.assertIn("no such command", str(failed.exception))
             self.assertIn("exited 2", str(failed.exception))
+
+
+# ---------------------------------------------------------------------------
+# One API inside and outside a harness: `connect()` over the fake `by` and
+# over the fake server, running the same script.
+
+KID_INFO = {
+    "name": "kid",
+    "git_branch": "by/kid",
+    "harness": "codex",
+    "profile": "codex",
+    "base": "main",
+    "depth": 1,
+    "status": {"state": "ready"},
+    "budget": {"max_usd": 0.5},
+}
+KID_INSPECTION = {
+    "name": "kid",
+    "status": {"state": "ready"},
+    "harness": "codex",
+    "parent": "lead",
+    "children": [],
+    "result_contract": {"schema": {"type": "object"}, "required": False},
+    "result": {"files": ["parser.rs"]},
+}
+MERGED = {"branch": "kid", "target": "by/lead", "previous": "c0", "commit": "c1"}
+REPORTED_MESSAGE = {"id": 7, "from": "lead", "to": "root", "kind": "report", "text": "done", "at_ms": 5}
+REPORTED_STATUS = {"report": {"state": "complete", "summary": "parser fixed", "at_ms": 6}}
+CHECKS = {"checks": [{"check": ["cargo", "test"], "branches": ["flaky"], "outcome": "failed"}]}
+REFUSALS = {
+    "ghost": ("unknown_branch", "no branch named ghost", None),
+    "main": ("denied", "main is not a descendant of lead", None),
+    "flaky": ("check_failed", "flaky's check failed", CHECKS),
+}
+
+
+def one_script(by: bc.Delegator) -> list[Any]:
+    """What a meta-harness does, written once: spawn, wait, integrate,
+    report, and three refusals, with what each call returned."""
+    kid = by.spawn("Fix the parser test", harness="codex", name="kid", budget_usd=0.5, check=["cargo", "test"])
+    done = by.wait(kid.name)
+    merged = by.integrate(kid.name)
+    sent = by.report("done", result={"files": done.result["files"]})
+    status = by.report_status("complete", "parser fixed")
+    seen: list[Any] = [
+        [type(r).__name__ for r in (kid, done, merged, sent, status)],
+        [kid.name, kid.state, done.state, done.result, merged.commit, sent.text, sent["from"], status.report.state],
+    ]
+    for call in (lambda: by.send("ghost", "hello"), lambda: by.inspect("main"), lambda: by.integrate("flaky")):
+        try:
+            call()
+        except bc.BranchyardError as error:
+            checks = error.checks if isinstance(error, bc.CheckFailedError) else None
+            seen.append((type(error).__name__, error.code, error.kind, error.message, checks))
+    return seen
+
+
+class OneApi(ServerCase):
+    """`connect()` runs `one_script` inside a harness, through the fake `by`
+    as `branchyard.py` runs it, and outside, over HTTP on the fake server:
+    the same results, the same exceptions."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.by = root / "by"
+        self.by.write_text(FAKE_BY)
+        self.by.chmod(0o755)
+        self.log = root / "calls.log"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+        super().tearDown()
+
+    def inside(self) -> list[Any]:
+        answers: dict[str, Any] = {
+            "spawn": {"body": KID_INFO},
+            "wait": {"body": {"settled": [KID_INSPECTION], "pending": []}},
+            "integrate kid": {"body": MERGED},
+            "report": {"body": REPORTED_MESSAGE},
+            "report-status": {"body": REPORTED_STATUS},
+        }
+        for branch, (kind, message, detail) in REFUSALS.items():
+            command = {"ghost": "send", "main": "inspect", "flaky": "integrate"}[branch]
+            error = {"kind": kind, "message": message, **({"detail": detail} if detail else {})}
+            answers[f"{command} {branch}"] = {"body": {"error": error}, "code": 1}
+        env = {
+            "BRANCHYARD_BY": str(self.by),
+            "BRANCHYARD_DELEGATION": "token",
+            "FAKE_BY_LOG": str(self.log),
+            "FAKE_BY_ANSWERS": json.dumps(answers),
+        }
+        with mock.patch.dict(os.environ, env):
+            os.environ.pop("BRANCHYARD_REMOTE", None)
+            by = bc.connect()
+            self.assertTrue(by.inside)
+            return one_script(by)
+
+    def outside(self) -> list[Any]:
+        spawned = self.op("op1", "queued", "kid", kind="spawn")
+        self.fake.answer("POST", f"{REPO}/branches/lead/spawn", (202, spawned))
+        result = {"branches": [KID_INFO], "inspection": KID_INSPECTION}
+        self.fake.answer("GET", "/v1/operations/op1", (200, {**spawned, "state": "succeeded", "result": result}))
+        self.fake.answer("POST", f"{REPO}/wait", (200, {"settled": [KID_INSPECTION], "pending": []}))
+        merging = self.op("op2", "queued", "kid", kind="integrate")
+        self.fake.answer("POST", f"{REPO}/branches/kid/integrate", (202, merging))
+        merged = {**merging, "state": "succeeded", "result": {"branches": [KID_INFO], "merged": MERGED}}
+        self.fake.answer("GET", "/v1/operations/op2", (200, merged))
+        self.fake.answer("POST", f"{REPO}/branches/lead/report", (200, REPORTED_MESSAGE))
+        self.fake.answer("POST", f"{REPO}/branches/lead/report-status", (200, REPORTED_STATUS))
+        code, message, _ = REFUSALS["ghost"]
+        self.fake.answer("POST", f"{REPO}/branches/ghost/send", (404, _error(code, message)))
+        code, message, _ = REFUSALS["main"]
+        self.fake.answer("GET", f"{REPO}/branches/main/inspection", (403, _error(code, message)))
+        # A failed check is the integrate operation's failure over HTTP.
+        failing = self.op("op3", "queued", "flaky", kind="integrate")
+        self.fake.answer("POST", f"{REPO}/branches/flaky/integrate", (202, failing))
+        code, message, detail = REFUSALS["flaky"]
+        failed = {**failing, "state": "failed", "error": {"code": code, "message": message, "detail": detail}}
+        self.fake.answer("GET", "/v1/operations/op3", (200, failed))
+        by = bc.connect(self.app, branch="lead")
+        self.assertFalse(by.inside)
+        return one_script(by)
+
+    def test_the_same_script_gives_the_same_results_and_errors_inside_and_outside(self):
+        inside = self.inside()
+        outside = self.outside()
+        self.assertEqual(inside, outside)
+        self.assertEqual(
+            inside[0], ["BranchInfo", "Inspection", "Record", "Message", "Reported"], "the same Record types"
+        )
+        self.assertEqual(
+            inside[1], ["kid", "ready", "ready", {"files": ["parser.rs"]}, "c1", "done", "lead", "complete"]
+        )
+        self.assertEqual(
+            inside[2:],
+            [
+                ("NotFoundError", "unknown_branch", "unknown_branch", "no branch named ghost", None),
+                ("DeniedError", "denied", "denied", "main is not a descendant of lead", None),
+                ("CheckFailedError", "check_failed", "check_failed", "flaky's check failed", CHECKS["checks"]),
+            ],
+        )
+        # Each backend was asked the same thing in its own terms.
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        spawn = next(c for c in calls if c[0] == "spawn")
+        self.assertEqual(spawn[spawn.index("--check") + 1], "cargo test")
+        self.assertEqual(spawn[spawn.index("--name") + 1], "kid")
+        ((_, _, _, body),) = self.requests("POST", f"{REPO}/branches/lead/spawn")
+        self.assertEqual((body["check"], body["name"], body["budget"]), (["cargo", "test"], "kid", {"max_usd": 0.5}))
+        ((_, _, _, report),) = [r for r in self.fake.requests if r[1] == f"{REPO}/branches/lead/report"]
+        self.assertEqual(report, {"text": "done", "result": {"files": ["parser.rs"]}})
+
+    def test_a_failed_operation_keeps_the_operation_on_its_error(self):
+        failing = self.op("op3", "queued", "flaky", kind="integrate")
+        self.fake.answer("POST", f"{REPO}/branches/flaky/integrate", (202, failing))
+        failed = {**failing, "state": "failed", "error": {"code": "check_timed_out", "message": "slow"}}
+        self.fake.answer("GET", "/v1/operations/op3", (200, failed))
+        with self.assertRaises(bc.CheckTimedOutError) as raised:
+            bc.connect(self.app, branch="lead").integrate("flaky")
+        self.assertIsInstance(raised.exception, bc.CheckFailedError)
+        self.assertEqual(raised.exception.operation.id, "op3")
+
+    def test_outside_a_call_that_acts_as_a_branch_needs_one(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("BRANCHYARD_BRANCH", None)
+            by = bc.connect(self.app)
+            with self.assertRaises(bc.InvalidRequestError):
+                by.report("done")
+        self.assertEqual(self.fake.requests, [])
+
+    def test_connect_finds_the_server_and_its_only_repo_from_the_environment(self):
+        token = Path(self.tmp.name) / "token"
+        token.write_text(TOKEN + "\n")
+        self.fake.answer("GET", "/v1/repos", (200, {"repos": [{"name": "app", "root": "/r"}]}))
+        env = {"BRANCHYARD_REMOTE": self.url, "BRANCHYARD_TOKEN_FILE": str(token), "BRANCHYARD_BRANCH": "lead"}
+        with mock.patch.dict(os.environ, env):
+            for name in ("BRANCHYARD_DELEGATION", "BRANCHYARD_REPO", "BRANCHYARD_CA_FILE"):
+                os.environ.pop(name, None)
+            by = bc.connect()
+        self.assertFalse(by.inside)
+        self.assertEqual((by.repo.name if by.repo else None, by.branch), ("app", "lead"))
+
+
+class OneErrorHierarchy(unittest.TestCase):
+    """Both modules raise one set of classes, each with `code` and `kind`."""
+
+    def test_the_modules_share_their_error_classes(self):
+        for name in (
+            "BranchyardError",
+            "DeniedError",
+            "NotFoundError",
+            "RunningError",
+            "NotRunningError",
+            "SteerRefusedError",
+            "CheckFailedError",
+            "CheckTimedOutError",
+            "CheckNotStartedError",
+            "StaleRevisionError",
+            "ConflictError",
+            "InvalidRequestError",
+            "UnsupportedError",
+        ):
+            self.assertIs(getattr(bm, name), getattr(bc, name), name)
+        error = bc.error_for_code("stale_revision", "moved", {"expected": 1, "actual": 2})
+        self.assertIsInstance(error, bc.StaleRevisionError)
+        self.assertIsInstance(error, bc.ConflictError)
+        self.assertEqual((error.code, error.kind, error.detail["actual"]), ("stale_revision", "stale_revision", 2))
+        for code, cls in (
+            ("unsupported", bc.UnsupportedError),
+            ("not_running", bc.NotRunningError),
+            ("check_not_started", bc.CheckNotStartedError),
+            ("git", bc.ServerError),
+            ("whatever", bc.BranchyardError),
+        ):
+            self.assertIs(type(bc.error_for_code(code, "m")), cls, code)
+
+    def test_branchyard_py_argument_checks_raise_them_too(self):
+        with self.assertRaises(bc.DeniedError) as refused:
+            bm.send("kid")
+        self.assertEqual((refused.exception.kind, refused.exception.code), ("denied", "denied"))
+        self.assertEqual(refused.exception.detail, {})
 
 
 # Every route the server registers (`docs/facts.json`, generated from the

@@ -5,9 +5,11 @@ that harness's branch and only on its descendants: `by` finds the branch
 from the BRANCHYARD_DELEGATION token the engine set, and the engine checks
 it. Outside a harness, `by` acts with your authority on the repository.
 
-Standard library only. `by` is BRANCHYARD_BY when set, else `by` on PATH.
-Every failure raises a BranchyardError subclass carrying the error's kind,
-as `by --json` reported it:
+Standard library only, with `branchyard_client` beside it (installed
+with it, and by Branchyard for a delegating turn). `by` is BRANCHYARD_BY
+when set, else `by` on PATH. Every failure raises a BranchyardError
+subclass carrying the error's kind, as `by --json` reported it; the classes
+are `branchyard_client`'s, the same ones its HTTP client raises:
 
     import branchyard
 
@@ -20,6 +22,9 @@ as `by --json` reported it:
 A harness may also end its turn while its children run: Branchyard starts
 its next turn once they have all settled, with a summary of what each did.
 
+`branchyard_client.connect()` is these calls as one API that runs the same
+script outside a harness too, over HTTP (docs/sdk.md).
+
 Not guaranteed: anything `by` does not. This module adds no authority,
 retries nothing, and waits only when asked.
 """
@@ -28,6 +33,7 @@ import dataclasses
 import json
 import os
 import subprocess
+import threading
 from typing import Any, Dict, List, Optional, Union
 
 __all__ = [
@@ -41,6 +47,9 @@ __all__ = [
     "CheckNotStartedError",
     "NotFoundError",
     "StaleRevisionError",
+    "ConflictError",
+    "InvalidRequestError",
+    "UnsupportedError",
     "Status",
     "Spawned",
     "Inspection",
@@ -104,100 +113,26 @@ __all__ = [
 ]
 
 
-class BranchyardError(Exception):
-    """`by` failed. `kind` is the stable error kind, such as "denied", and
-    `detail` what the error carries beyond its message (None when nothing),
-    as `by --json` reported them."""
-
-    def __init__(self, kind: str, message: str, detail: Optional[Dict[str, Any]] = None):
-        super().__init__(message)
-        self.kind = kind
-        self.message = message
-        self.detail = detail
-
-
-class DeniedError(BranchyardError):
-    """Refused by the envelope, the budget or the authority check."""
-
-
-class RunningError(BranchyardError):
-    """The branch is running a turn and must be idle for this."""
-
-
-class NotRunningError(BranchyardError):
-    """The branch is not running a turn, and steering needs one."""
-
-
-class SteerRefusedError(BranchyardError):
-    """The running turn did not take steered input; the message says why."""
-
-
-class CheckFailedError(BranchyardError):
-    """A branch's check failed on its merge; nothing was integrated.
-
-    When siblings left out of the integration share the check and could
-    change the result (a parent's whole-suite check may pass only with all
-    of them, and a branch integrated failed its `by check` alone too),
-    `integrate_together` names the branches to integrate at once,
-    `integrate(*e.integrate_together)`, and `unsettled` those of them still
-    to wait for. Both are empty otherwise: the check failed on its own, and
-    when siblings share it, `own_work` names the branches integrated, on
-    whose own work it failed.
-
-    `checks` names every check of the branches integrated, in the order
-    they ran, as dicts `{check, branches, outcome}`: `outcome` is "passed",
-    "failed", "timed_out", "not_started" or "not_run" (a check before it
-    failed).
-    """
-
-    @property
-    def checks(self) -> List[Dict[str, Any]]:
-        return _checks(self.detail)
-
-    @property
-    def integrate_together(self) -> List[str]:
-        return list((self.detail or {}).get("integrate_together", []))
-
-    @property
-    def unsettled(self) -> List[str]:
-        return list((self.detail or {}).get("unsettled", []))
-
-    @property
-    def own_work(self) -> List[str]:
-        return list((self.detail or {}).get("own_work", []))
-
-
-class CheckTimedOutError(BranchyardError):
-    """A branch's check ran past its timeout on the merge; nothing was
-    integrated. `checks` is as CheckFailedError's, the timed-out one's
-    outcome "timed_out" (empty for a single branch's merge)."""
-
-    @property
-    def checks(self) -> List[Dict[str, Any]]:
-        return _checks(self.detail)
-
-
-class CheckNotStartedError(BranchyardError):
-    """A branch's check could not be started on the merge; nothing was
-    integrated. `checks` is as CheckFailedError's, the one that could not
-    start "not_started" (empty for a single branch's merge)."""
-
-    @property
-    def checks(self) -> List[Dict[str, Any]]:
-        return _checks(self.detail)
-
-
-def _checks(detail: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    # An integration's checks, as a check error's `detail` carries them.
-    return list((detail or {}).get("checks", []))
-
-
-class NotFoundError(BranchyardError):
-    """No such branch."""
-
-
-class StaleRevisionError(BranchyardError):
-    """A graph proposal was made against a revision that moved on; read `graph()` again."""
+# The error classes are `branchyard_client`'s, so code that catches them
+# runs the same inside a harness and over HTTP; each carries `kind` and
+# `code` (the same value), `message` and `detail`. Branchyard installs both
+# modules for a delegating turn.
+from branchyard_client import (  # noqa: E402
+    BranchyardError,
+    CheckFailedError,
+    CheckNotStartedError,
+    CheckTimedOutError,
+    ConflictError,
+    DeniedError,
+    InvalidRequestError,
+    NotFoundError,
+    NotRunningError,
+    RunningError,
+    StaleRevisionError,
+    SteerRefusedError,
+    UnsupportedError,
+    error_for_code,
+)
 
 
 class Status(dict):
@@ -231,19 +166,6 @@ class Status(dict):
 
     def __str__(self) -> str:
         return str(self.get("state", ""))
-
-
-_KINDS = {
-    "denied": DeniedError,
-    "running": RunningError,
-    "not_running": NotRunningError,
-    "steer_refused": SteerRefusedError,
-    "unknown_branch": NotFoundError,
-    "check_failed": CheckFailedError,
-    "check_timed_out": CheckTimedOutError,
-    "check_not_started": CheckNotStartedError,
-    "stale_revision": StaleRevisionError,
-}
 
 
 @dataclasses.dataclass
@@ -656,6 +578,12 @@ def _by() -> str:
     return os.environ.get("BRANCHYARD_BY") or "by"
 
 
+# The JSON `by` printed for this thread's last call, whole:
+# `branchyard_client.Delegator` returns it as a Record, which keeps the
+# fields the dataclasses here do not name.
+_answer = threading.local()
+
+
 def _run(args: List[str], result_on_failure: bool = False, stdin: Optional[str] = None) -> Any:
     # `stdin`, when given, is what `by` reads on its standard input, such as
     # a prompt too long for a command line (`--prompt-file -`).
@@ -675,17 +603,17 @@ def _run(args: List[str], result_on_failure: bool = False, stdin: Optional[str] 
     except json.JSONDecodeError:
         value = None
     if result_on_failure and isinstance(value, dict) and "error" not in value:
+        _answer.value = value
         return value
     if done.returncode != 0 or value is None:
         error = value.get("error") if isinstance(value, dict) else None
         if isinstance(error, dict):
             kind = str(error.get("kind", "error"))
             detail = error.get("detail")
-            raise _KINDS.get(kind, BranchyardError)(
-                kind, str(error.get("message", "")), detail if isinstance(detail, dict) else None
-            )
+            raise error_for_code(kind, str(error.get("message", "")), detail)
         detail = done.stderr.strip() or f"exit status {done.returncode}"
         raise BranchyardError("error", f"by {args[0]}: {detail}")
+    _answer.value = value
     return value
 
 

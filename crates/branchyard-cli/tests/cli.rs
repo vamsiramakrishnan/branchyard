@@ -1492,6 +1492,32 @@ fn a_harness_delegates_with_the_python_module() {
     assert_eq!(root["candidate"]["files_changed"], 1);
 }
 
+/// `branchyard_client.connect()` inside a real delegating turn: the
+/// engine installs the client beside the module, and the calls return the
+/// whole answer as Records and raise the shared classes.
+#[test]
+fn a_harness_delegates_through_the_one_api() {
+    let repo = Repo::new();
+    let script = "import branchyard_client as bc; by = bc.connect(); \
+                  c = by.spawn('WRITE one.txt=1', name='one'); print('inside', by.inside, type(c).__name__, c.name); \
+                  d = by.wait(c.name, timeout=60); print('settled', d.state, d.candidate['files_changed']); \
+                  print('merged into', by.integrate(c.name).target); \
+                  exec('try:\\n by.inspect(\\'main\\')\\nexcept bc.DeniedError as e:\\n print(\\'denied\\', e.kind, e.code)')";
+    let prompt = format!("SH python3 -c \"{script}\"");
+    let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
+    assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
+    let said = reply(&repo, "root");
+    for expected in [
+        "sh: 0",
+        "inside True BranchInfo one",
+        "settled ready 1",
+        "merged into by/root",
+        "denied denied denied",
+    ] {
+        assert!(said.contains(expected), "{expected:?} missing from\n{said}");
+    }
+}
+
 #[test]
 fn the_python_module_delegates_a_plan_and_reads_its_brief() {
     let repo = Repo::new();
@@ -1873,6 +1899,7 @@ fn a_delegating_harness_gets_tools_and_skill_outside_its_worktree() {
     assert!(dir.join("plugin/skills/delegate/SKILL.md").is_file());
     assert!(dir.join("plugin/.claude-plugin/plugin.json").is_file());
     assert!(dir.join("sdk/python/branchyard.py").is_file());
+    assert!(dir.join("sdk/python/branchyard_client.py").is_file());
     assert_eq!(
         repo.git(&["status", "--porcelain", "--untracked-files=all"]),
         ""

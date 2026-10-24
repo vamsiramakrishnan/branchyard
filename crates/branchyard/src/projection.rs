@@ -13,7 +13,8 @@
 //!   itself, its storage and its parent's inbox; only a branch whose
 //!   envelope allows children (`max_depth` above 0) may spawn and act on
 //!   descendants.
-//! - The Python module's directory first on `PYTHONPATH`.
+//! - The Python modules' directory first on `PYTHONPATH`: `branchyard.py`
+//!   and the `branchyard_client.py` whose errors and `connect()` it shares.
 //! - Branchyard's MCP server (`by mcp`, or `branchyard-mcp`). A sandboxed
 //!   harness gets it over HTTP from this host instead
 //!   ([`crate::endpoint`]), and none of the variables above, which name
@@ -69,6 +70,9 @@ pub(crate) const SERVER_NAME: &str = branchyard_provision::permissions::DELEGATI
 
 /// The Python module, written to `.branchyard/sdk/python/branchyard.py`.
 const PYTHON_MODULE: &str = include_str!("../../../sdk/python/branchyard.py");
+/// The Python HTTP client beside it: the module raises its error classes,
+/// and its `connect()` runs one script inside a turn and outside it.
+const PYTHON_CLIENT: &str = include_str!("../../../sdk/python/branchyard_client.py");
 /// The Claude Code plugin carrying the delegation skill, written to
 /// `.branchyard/plugin/`. Only the manifest and the skill: not the plugin's
 /// `hooks/hooks.json` (`by hook`, which Claude Code finds by that path, so
@@ -438,6 +442,7 @@ pub(crate) fn project(
     let python = dir.join("sdk").join("python");
     let plugin = dir.join("plugin");
     install(&python.join("branchyard.py"), PYTHON_MODULE)?;
+    install(&python.join("branchyard_client.py"), PYTHON_CLIENT)?;
     if spawns {
         install(
             &plugin.join(".claude-plugin").join("plugin.json"),

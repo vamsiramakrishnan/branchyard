@@ -72,10 +72,13 @@ __all__ = [
     "BranchInfo",
     "BranchyardError",
     "CheckFailedError",
+    "CheckNotStartedError",
     "CheckReport",
+    "CheckTimedOutError",
     "Client",
     "ConflictError",
     "Conversation",
+    "Delegator",
     "DeniedError",
     "Effect",
     "EventStream",
@@ -89,6 +92,7 @@ __all__ = [
     "Message",
     "NotAllowedError",
     "NotFoundError",
+    "NotRunningError",
     "Operation",
     "OperationFailedError",
     "Plan",
@@ -101,14 +105,20 @@ __all__ = [
     "Rewound",
     "RunningError",
     "ServerError",
+    "StaleRevisionError",
     "Status",
     "StatusReport",
     "Steer",
+    "SteerRefusedError",
     "Step",
     "Surface",
     "TransportError",
     "UnauthorizedError",
+    "UnsupportedError",
+    "Waited",
     "branch_name",
+    "connect",
+    "error_for_code",
     "new_key",
 ]
 
@@ -125,9 +135,16 @@ _WAIT_CAP = 30.0
 
 
 class BranchyardError(Exception):
-    """A refusal or failure, as the server reported it: `code` is stable
-    (`docs/server.md#errors`), `message` is for people, `detail` is the
-    code's extra data when it has any, `status` the HTTP status."""
+    """A refusal or failure, as the server or `by --json` reported it:
+    `code` is stable (`docs/server.md#errors`), and `kind` is the same
+    value under the name `by --json` gives it, so one `except` and one
+    attribute read serve both. `message` is for people, `detail` the
+    code's extra data (`{}` when it has none), `status` the HTTP status (0
+    from `by`). `sdk/python/branchyard.py` raises these same classes."""
+
+    # The failed operation, when the error is one's: `OperationFailedError`,
+    # and a `Delegator`'s errors over HTTP.
+    operation: Optional["Operation"] = None
 
     def __init__(self, code: str, message: str, detail: Optional[JSON] = None, status: int = 0):
         super().__init__(message)
@@ -135,6 +152,15 @@ class BranchyardError(Exception):
         self.message = message
         self.detail = detail or {}
         self.status = status
+
+    @property
+    def kind(self) -> str:
+        """`code`, by the name `by --json` gives it."""
+        return self.code
+
+    @kind.setter
+    def kind(self, value: str) -> None:
+        self.code = value
 
     def __str__(self) -> str:
         return f"{self.code}: {self.message}"
@@ -196,19 +222,75 @@ class BranchBusyError(BranchyardError):
 
 class RunningError(BranchyardError):
     """`running`: a turn runs on the branch in another engine (a local
-    `by`), or a scratch lock is held."""
+    `by`), or a scratch lock is held; also a wait that timed out with the
+    branches still running (`branchyard.wait`, `Delegator.wait`)."""
+
+
+class NotRunningError(BranchyardError):
+    """`not_running`: the branch runs no turn, and steering needs one."""
+
+
+class SteerRefusedError(BranchyardError):
+    """`steer_refused`: the running turn did not take steered input; the
+    message says why."""
+
+
+class UnsupportedError(BranchyardError):
+    """`unsupported` or `harness_unavailable`: the harness cannot do this
+    (take input mid-turn, choose a model), or cannot run here."""
 
 
 class ConflictError(BranchyardError):
     """An engine refusal: `branch_exists`, `no_candidate`, `target_moved`,
     `conflict`, `dirty_target`, `already_merged`, `fenced`,
     `detached_head`, `trigger_exists`, `no_plan`, `stale_revision`,
-    `checkpoint_unavailable`, `service_held`."""
+    `checkpoint_unavailable`, `service_held`, `invalid_candidate`."""
+
+
+class StaleRevisionError(ConflictError):
+    """`stale_revision`: a graph proposal was made against a revision that
+    moved on; read the graph again."""
 
 
 class CheckFailedError(BranchyardError):
-    """`check_failed`, `check_timed_out` or `check_not_started`: a merge or
-    integration's check; `detail.output_tail` or `detail.checks`."""
+    """`check_failed`, and the base of `CheckTimedOutError` and
+    `CheckNotStartedError`: a merge or integration's check, so nothing was
+    integrated; `detail.output_tail` or `detail.checks`.
+
+    When siblings left out of the integration share the check and could
+    change the result, `integrate_together` names the branches to
+    integrate at once and `unsettled` those of them still to wait for;
+    both are empty otherwise, and `own_work` names the branches integrated,
+    on whose own work it failed. `checks` names every check of the
+    branches integrated, in the order they ran, as dicts `{check,
+    branches, outcome}`: `outcome` is `passed`, `failed`, `timed_out`,
+    `not_started` or `not_run` (a check before it failed)."""
+
+    @property
+    def checks(self) -> list[JSON]:
+        return list(self.detail.get("checks", []))
+
+    @property
+    def integrate_together(self) -> list[str]:
+        return list(self.detail.get("integrate_together", []))
+
+    @property
+    def unsettled(self) -> list[str]:
+        return list(self.detail.get("unsettled", []))
+
+    @property
+    def own_work(self) -> list[str]:
+        return list(self.detail.get("own_work", []))
+
+
+class CheckTimedOutError(CheckFailedError):
+    """`check_timed_out`: the check ran past its timeout on the merge; its
+    outcome in `checks` is `timed_out`."""
+
+
+class CheckNotStartedError(CheckFailedError):
+    """`check_not_started`: the check could not be started on the merge;
+    its outcome in `checks` is `not_started`."""
 
 
 class QuotaExceededError(BranchyardError):
@@ -285,6 +367,10 @@ _BY_CODE: dict[str, Callable[..., BranchyardError]] = {
     "invalid_pairing_code": InvalidRequestError,
     "branch_busy": BranchBusyError,
     "running": RunningError,
+    "not_running": NotRunningError,
+    "steer_refused": SteerRefusedError,
+    "unsupported": UnsupportedError,
+    "harness_unavailable": UnsupportedError,
     "branch_exists": ConflictError,
     "no_candidate": ConflictError,
     "target_moved": ConflictError,
@@ -295,16 +381,21 @@ _BY_CODE: dict[str, Callable[..., BranchyardError]] = {
     "detached_head": ConflictError,
     "trigger_exists": ConflictError,
     "no_plan": ConflictError,
-    "stale_revision": ConflictError,
+    "stale_revision": StaleRevisionError,
     "checkpoint_unavailable": ConflictError,
     "service_held": ConflictError,
+    "invalid_candidate": ConflictError,
     "check_failed": CheckFailedError,
-    "check_timed_out": CheckFailedError,
-    "check_not_started": CheckFailedError,
+    "check_timed_out": CheckTimedOutError,
+    "check_not_started": CheckNotStartedError,
     "quota_exceeded": QuotaExceededError,
     "rate_limited": QuotaExceededError,
     "idempotency_key_reused": IdempotencyKeyReusedError,
 }
+
+# Server-side failures by the kinds `by --json` gives them; the server's
+# codes for them (`git_error`, `io_error`, ...) are 5xx.
+_BY_FAILURES = frozenset({"git", "io", "state", "harness"})
 
 
 def error_for(status: int, body: Any, headers: Optional[dict[str, str]] = None) -> BranchyardError:
@@ -314,17 +405,25 @@ def error_for(status: int, body: Any, headers: Optional[dict[str, str]] = None) 
     if not isinstance(error, dict) or "code" not in error:
         return TransportError(f"HTTP {status} without an API error body: {str(body)[:200]}")
     code = str(error["code"])
-    message = str(error.get("message", code))
-    detail = error.get("detail") if isinstance(error.get("detail"), dict) else None
+    retry_after = None
+    value = (headers or {}).get("retry-after")
+    if value and value.strip().isdigit():
+        retry_after = float(value)
+    return error_for_code(code, str(error.get("message", code)), error.get("detail"), status, retry_after)
+
+
+def error_for_code(
+    code: str, message: str, detail: Any = None, status: int = 0, retry_after: Optional[float] = None
+) -> BranchyardError:
+    """The exception for an error `code`, the server's or the `kind` `by
+    --json` prints, else by `status` (5xx `ServerError`, the rest
+    `BranchyardError`). Both Python modules raise through it."""
+    detail = detail if isinstance(detail, dict) else None
     cls = _BY_CODE.get(code)
     if cls is QuotaExceededError:
-        retry_after = None
-        value = (headers or {}).get("retry-after")
-        if value and value.strip().isdigit():
-            retry_after = float(value)
         return QuotaExceededError(code, message, detail, status, retry_after)
     if cls is None:
-        cls = ServerError if status >= 500 else BranchyardError
+        cls = ServerError if status >= 500 or code in _BY_FAILURES else BranchyardError
     return cls(code, message, detail, status)
 
 
@@ -1352,7 +1451,7 @@ class Local:
             raise LocalError(f"`{' '.join(command)}` exited {done.returncode} without JSON; it said: {said}") from None
         if isinstance(value, dict) and set(value) == {"error"} and isinstance(value["error"], dict):
             refusal = value["error"]
-            raise BranchyardError(
+            raise error_for_code(
                 str(refusal.get("kind") or "error"), str(refusal.get("message") or ""), refusal.get("detail")
             )
         return done.returncode, value
@@ -2528,3 +2627,269 @@ class Reply:
             stream.close()
         if op.done:
             self.operation = op
+
+
+# ---------------------------------------------------------------------------
+# One API inside and outside a harness
+
+
+class Waited(Record):
+    """What `Delegator.wait_any` and `wait_all` return, as `by wait --json`
+    and `POST .../wait` give it: `settled` (`Inspection`s), `pending` (the
+    names still running) and `timed_out`."""
+
+    @property
+    def settled(self) -> list[Inspection]:
+        return [Inspection(i) for i in self.get("settled") or ()]
+
+    @property
+    def pending(self) -> list[str]:
+        return list(self.get("pending") or ())
+
+
+def connect(
+    target: Union[Client, Repo, None] = None, *, repo: Optional[str] = None, branch: Optional[str] = None
+) -> "Delegator":
+    """The delegation calls (`spawn`, `send`, `steer`, `integrate`, `check`,
+    `wait`, `wait_any`, `wait_all`, `inspect`, `events`, `report`,
+    `report_status`) as one object, so the same code runs inside a harness
+    turn and outside it (`docs/sdk.md#one-api-inside-and-outside-a-harness`).
+
+    Given a `Client` or a `Repo`, it speaks HTTP to that server, acting as
+    `branch` (the branch it spawns under and reports as). Given neither:
+    inside a delegating turn (`BRANCHYARD_DELEGATION` set) it runs
+    `sdk/python/branchyard.py`'s functions, acting as the turn's branch;
+    else, with `BRANCHYARD_REMOTE` set, it makes a `Client` from it,
+    `BRANCHYARD_TOKEN_FILE` and `BRANCHYARD_CA_FILE`, as `by --remote`
+    does; else it runs `branchyard.py` with your authority on the
+    repository here. `repo` (default `BRANCHYARD_REPO`, else the server's
+    only one) picks a `Client`'s repository; `branch` defaults to
+    `BRANCHYARD_BRANCH`."""
+    branch = branch or os.environ.get("BRANCHYARD_BRANCH") or None
+    if target is None and not os.environ.get("BRANCHYARD_DELEGATION"):
+        remote = os.environ.get("BRANCHYARD_REMOTE")
+        if remote:
+            target = Client(
+                remote,
+                token_file=os.environ.get("BRANCHYARD_TOKEN_FILE") or None,
+                ca_file=os.environ.get("BRANCHYARD_CA_FILE") or None,
+            )
+    if isinstance(target, Client):
+        name = repo or os.environ.get("BRANCHYARD_REPO")
+        if not name:
+            served = [str(r.name) for r in target.repos()]
+            if len(served) != 1:
+                raise InvalidRequestError(
+                    "invalid_request", f"the server serves {', '.join(served) or 'nothing'}; pass repo=NAME"
+                )
+            name = served[0]
+        target = target.repo(name)
+    return Delegator(target, branch)
+
+
+class Delegator:
+    """`connect()`'s object: `branchyard.py`'s delegation calls, with its
+    argument names and order, run through `by --json` inside a harness
+    (`repo` is None) or over HTTP on `repo`, acting as `branch`.
+
+    Both return the same types: `Record`s holding the whole JSON answer
+    (`BranchInfo`, `Inspection`, `Steer`, `Message`, `Reported`,
+    `CheckReport`, `Waited`), which lose no field where `branchyard.py`'s
+    dataclasses keep only those they name; and both raise the same
+    exceptions, by code. Over HTTP each call that is an operation is
+    waited for, and one that fails raises the error for its code (with
+    `operation` set), as the same call inside would. The server's spawn and
+    send operations last until the turn they start settles, so outside,
+    `spawn` and `send` return a settled branch where inside they return as
+    its turn starts."""
+
+    def __init__(self, repo: Optional[Repo] = None, branch: Optional[str] = None):
+        self.repo = repo
+        self.branch = branch
+
+    @property
+    def inside(self) -> bool:
+        """Whether the calls run through `by --json` (`branchyard.py`)."""
+        return self.repo is None
+
+    # -- the two backends --------------------------------------------------
+
+    def _by(self, function: str, *args: Any, **options: Any) -> Any:
+        import branchyard
+
+        getattr(branchyard, function)(*args, **options)
+        return branchyard._answer.value
+
+    def _http(self) -> Repo:
+        assert self.repo is not None
+        return self.repo
+
+    def _acting(self, call: str) -> str:
+        if not self.branch:
+            raise InvalidRequestError(
+                "invalid_request", f"{call} over HTTP acts as a branch: connect(..., branch=NAME)"
+            )
+        return self.branch
+
+    def _done(self, op: Operation) -> Operation:
+        op = self._http().client.wait(op)
+        if op.failed:
+            error = op.error or {}
+            raised = error_for_code(
+                str(error.get("code", op.state)),
+                str(error.get("message", f"operation {op.id} {op.state}")),
+                error.get("detail"),
+            )
+            raised.operation = op
+            raise raised
+        return op
+
+    # -- delegating --------------------------------------------------------
+
+    def spawn(
+        self,
+        prompt: str,
+        harness: Optional[str] = None,
+        name: Optional[str] = None,
+        base: Optional[str] = None,
+        budget_usd: Optional[float] = None,
+        max_turns: Optional[int] = None,
+        check: Union[str, Sequence[str], None] = None,
+        seat: Optional[str] = None,
+        depends_on: Optional[Sequence[str]] = None,
+        after: Optional[str] = None,
+        model: Optional[str] = None,
+        result: Optional[JSON] = None,
+        why: Optional[str] = None,
+        **options: Any,
+    ) -> BranchInfo:
+        """A child of this branch running `prompt`; its `BranchInfo`.
+        `check` is a command line or its argv. `options` go to the
+        backend's own spawn as they are (`branchyard.spawn`'s or
+        `Repo.spawn`'s), so they are not portable."""
+        common: JSON = {
+            "harness": harness,
+            "name": name,
+            "base": base,
+            "budget_usd": budget_usd,
+            "seat": seat,
+            "after": after,
+            "model": model,
+            "result": result,
+            "why": why,
+        }
+        if self.inside:
+            line = check if check is None or isinstance(check, str) else _shell_line(check)
+            needs = list(depends_on) if depends_on else None
+            return BranchInfo(
+                self._by("spawn", prompt, max_turns=max_turns, check=line, depends_on=needs, **common, **options)
+            )
+        words = _shell_words(check) if isinstance(check, str) else check
+        budget = {"max_turns": max_turns} if max_turns is not None else None
+        op = self._http().spawn(
+            self._acting("spawn"), prompt, budget=budget, check=words, depends_on=depends_on, **common, **options
+        )
+        return self._done(op).result_branches[0]
+
+    def send(self, branch: str, prompt: Optional[str] = None, retry: bool = False) -> BranchInfo:
+        """`branch`'s next turn with `prompt`, or with `retry` its cut-off
+        one again; its `BranchInfo` (inside, `name` and `status` only)."""
+        if self.inside:
+            return BranchInfo(self._by("send", branch, prompt, retry=retry))
+        if retry and prompt is not None:
+            raise DeniedError("denied", "retry submits the cut-off turn's own prompt; give no prompt")
+        if not retry and prompt is None:
+            raise DeniedError("denied", "send needs a prompt, or retry=True")
+        return self._done(self._http().send(branch, prompt, retry=retry)).result_branches[0]
+
+    def steer(self, branch: str, text: str) -> Steer:
+        """`text` into `branch`'s running turn, without interrupting it."""
+        if self.inside:
+            return Steer(self._by("steer", branch, text))
+        return self._http().steer(branch, text)
+
+    def integrate(self, *branches: str) -> Record:
+        """Merge finished descendants into their parent after their check:
+        a `Merged` for one, a `MergedAll` (`branches`, `checks`,
+        `check_results`) for several. A failed check raises
+        `CheckFailedError` (`CheckTimedOutError`, `CheckNotStartedError`)."""
+        if not branches:
+            raise DeniedError("denied", "name at least one branch to integrate")
+        if self.inside:
+            return Record(self._by("integrate", *branches))
+        op = self._done(self._http().integrate(branches[0], with_=branches[1:]))
+        result = op.get("result") or {}
+        return Record(result.get("merged" if len(branches) == 1 else "merged_all") or {})
+
+    def check(self, branch: Optional[str] = None) -> CheckReport:
+        """Run a branch's check on its current work and integrate nothing:
+        this branch's when `branch` is None."""
+        if self.inside:
+            return CheckReport(self._by("check", branch))
+        op = self._done(self._http().check(branch or self._acting("check")))
+        return op.check_report or CheckReport({})
+
+    # -- waiting and looking -----------------------------------------------
+
+    def _wait(self, branches: Sequence[str], any: bool, timeout: Optional[float]) -> Waited:
+        if self.inside:
+            # `branchyard.py` raises the RunningError of a timeout itself.
+            return Waited(self._by("wait_any" if any else "wait_all", *branches, timeout=timeout))
+        waited = Waited(self._http().wait_for(branches, any=any, timeout=timeout))
+        if waited.get("timed_out"):
+            raise RunningError("running", f"still running after {timeout}s: {', '.join(waited.pending)}")
+        return waited
+
+    def wait(self, branch: str, timeout: Optional[float] = None) -> Inspection:
+        """Block until `branch` settles; its `Inspection`. `RunningError`
+        after `timeout` seconds."""
+        return self._wait([branch], False, timeout).settled[0]
+
+    def wait_any(self, *branches: str, timeout: Optional[float] = None) -> Waited:
+        """Block until the first of `branches` settles."""
+        return self._wait(branches, True, timeout)
+
+    def wait_all(self, *branches: str, timeout: Optional[float] = None) -> Waited:
+        """Block until all of `branches` have settled."""
+        return self._wait(branches, False, timeout)
+
+    def inspect(self, branch: Optional[str] = None) -> Inspection:
+        """A branch's state: this branch's when `branch` is None."""
+        if self.inside:
+            return Inspection(self._by("inspect", branch))
+        return self._http().inspect(branch or self._acting("inspect"))
+
+    def events(self, branch: Optional[str] = None, cursor: Optional[int] = None, limit: Optional[int] = None) -> Record:
+        """An `EventPage` of a branch's recorded events (`branch`, `events`,
+        `next_cursor`, `total`); pass `next_cursor` back as `cursor`."""
+        if self.inside:
+            return Record(self._by("events", branch, cursor, limit))
+        return self._http().event_page(branch or self._acting("events"), cursor, limit)
+
+    # -- reporting, as this branch -----------------------------------------
+
+    def report(self, text: str, result: Optional[Any] = None) -> Message:
+        """Report to this branch's parent, with `result` as its answer."""
+        if self.inside:
+            return Message(self._by("report", text, result))
+        return self._http().report(self._acting("report"), text, result)
+
+    def report_status(
+        self, state: str, summary: str, link: Optional[str] = None, ttl_seconds: Optional[int] = None
+    ) -> Reported:
+        """State this branch's own status beside the protocol's."""
+        if self.inside:
+            return Reported(self._by("report_status", state, summary, link, ttl_seconds))
+        return self._http().report_status(self._acting("report_status"), state, summary, link, ttl_seconds)
+
+
+def _shell_line(argv: Sequence[str]) -> str:
+    import shlex
+
+    return shlex.join(argv)
+
+
+def _shell_words(line: str) -> list[str]:
+    import shlex
+
+    return shlex.split(line)
