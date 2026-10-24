@@ -7,7 +7,7 @@
 //! upgrades an older store and recovers branches whose engine stopped,
 //! killing their processes. [`read`] opens `.branchyard/state.db` through a
 //! read-only connection, waits at most [`READ_WAIT`] for a writer, and reads
-//! three things. [`read_postgres`] (the `postgres` feature) reads the same
+//! three things. `read_postgres` (the `postgres` feature) reads the same
 //! three from a server's PostgreSQL store in a read-only transaction, and a
 //! caller that asked a server instead puts its answers together with
 //! [`Glance::from_parts`] and [`unanswered`], so every source gives the
@@ -180,7 +180,7 @@ pub fn read(root: &Path, inbox_of: Option<&str>) -> Result<Option<Glance>, Error
     )))
 }
 
-/// How long [`read_postgres`] waits to connect.
+/// How long `read_postgres` waits to connect.
 pub const CONNECT_WAIT: Duration = Duration::from_millis(800);
 
 /// [`read`] for a repository whose state a server keeps in PostgreSQL at
