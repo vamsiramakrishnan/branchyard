@@ -202,6 +202,8 @@ class InstallManifests(unittest.TestCase):
         (entry,) = manifest["file"]
         self.assertEqual((entry["to"], entry["how"]), ("~/.hermes/config.yaml", "merge-yaml"))
         self.assertTrue(any("HERMES_ACCEPT_HOOKS" in n["text"] for n in manifest["note"]))
+        # Hermes 0.19.0 skips an unapproved hook in `hermes chat -q` without a terminal too.
+        self.assertTrue(any("hermes chat -q" in n["text"] for n in manifest["note"]))
 
 
 class Commands(unittest.TestCase):

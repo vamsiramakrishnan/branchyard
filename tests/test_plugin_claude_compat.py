@@ -298,7 +298,9 @@ class ManifestTests(unittest.TestCase):
     def test_the_deepseek_patch_mounts_the_bridge_on_the_installed_hooks(self):
         text = (HARNESSES / "deepseek-harness/cordis.patch.yml").read_text()
         self.assertIn("name: '@deepseek-ai/dsh-hooks-claude-code'", text)
-        self.assertIn("'.dsh', 'branchyard-hooks.json'", text)
+        # dshHomePath follows DSH_HOME and is not relative to where dsh started
+        # (checked against dsh 0.2.1-rc.2 with DSH_HOME set elsewhere).
+        self.assertIn("configPath: !!js dshHomePath('branchyard-hooks.json')", text)
         install = tomllib.loads((INSTALL / "deepseek-harness.toml").read_text())
         hooks = next(f for f in install["file"] if f["from"] == "harnesses/deepseek-harness/hooks.json")
         self.assertEqual(hooks["to"], "~/.dsh/branchyard-hooks.json")
@@ -309,7 +311,11 @@ class ManifestTests(unittest.TestCase):
         [row] = operation["insert"]
         self.assertEqual(row["id"], "branchyard-hooks")
         self.assertEqual(row["name"], "@deepseek-ai/dsh-hooks-claude-code")
-        self.assertIn("homedir()", row["config"]["configPath"]["__js"])
+        self.assertEqual(row["config"]["configPath"]["__js"], "dshHomePath('branchyard-hooks.json')")
+        # The bridge has to be added to a profile before the row loads.
+        notes = " ".join(n["text"] for n in install["note"])
+        self.assertIn("@deepseek-ai/dsh-hooks-claude-code@<version>", notes)
+        self.assertIn("@deepseek-ai/dsh-hook-protocol@<version>", notes)
 
     def test_the_package_checks_every_host_manifest_version(self):
         sys.path.insert(0, str(ROOT / "tools"))
