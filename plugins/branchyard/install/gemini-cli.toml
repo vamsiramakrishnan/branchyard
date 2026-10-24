@@ -1,0 +1,32 @@
+# What `by init plugin` installs for Gemini CLI: the extension's hooks merged
+# into the user settings and its commands as /branchyard:setup,
+# /branchyard:status and /branchyard:wait. The extension itself installs with
+# `gemini extensions install`; see docs/harness-hooks.md. Install one or the
+# other, not both.
+harness = "gemini-cli"
+binaries = ["gemini"]
+provides = ["hooks", "commands"]
+
+[[file]]
+from = "harnesses/gemini-cli/hooks/hooks.json"
+to = "~/.gemini/settings.json"
+how = "merge-json"
+at = ""
+
+[[file]]
+from = "harnesses/gemini-cli/commands/setup.toml"
+to = "~/.gemini/commands/branchyard/setup.toml"
+how = "write"
+
+[[file]]
+from = "harnesses/gemini-cli/commands/status.toml"
+to = "~/.gemini/commands/branchyard/status.toml"
+how = "write"
+
+[[file]]
+from = "harnesses/gemini-cli/commands/wait.toml"
+to = "~/.gemini/commands/branchyard/wait.toml"
+how = "write"
+
+[[note]]
+text = "Gemini CLI runs hooks only in a trusted folder (gemini -p needs --skip-trust or GEMINI_CLI_TRUST_WORKSPACE=true there); /hooks panel lists branchyard-before-agent, and /hooks enable branchyard-before-agent turns it back on if it is off."

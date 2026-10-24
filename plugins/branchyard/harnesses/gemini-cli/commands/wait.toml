@@ -1,0 +1,22 @@
+# Mirrors commands/wait.md for Gemini CLI ({{args}} for $ARGUMENTS).
+description = "Wait for Branchyard branches to settle and summarise what each did"
+prompt = """
+Wait for Branchyard branches with `by wait`, then summarise the results,
+for "{{args}}".
+
+1. Pick the branches: those named in the arguments; else, on a Branchyard
+   branch (BRANCHYARD_BRANCH set), your running children (`by wait` with no
+   names waits for them); else the `running` and `waiting` branches in
+   `by ls --json`. If none are running, say so and stop.
+2. Run `by wait <branches> --json --timeout 500` (add `--any` if the
+   arguments say so). Keep the timeout under your shell tool's own time
+   limit; when the result says `timed_out`, say which are still running
+   and wait again.
+3. For each settled branch, summarise its state, its result or last
+   message, files changed and cost. Then say what needs the user: failures
+   with their reason, unanswered questions (`by inbox --as <parent>
+   --unread`), and branches ready to integrate (`by merge <branch>`, or
+   `by integrate` on a branch).
+
+Do not merge, integrate, discard or send anything unless the user asks.
+"""

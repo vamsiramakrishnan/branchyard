@@ -22,6 +22,10 @@ pub enum ArtifactKind {
     Secret,
     /// A skill's `SKILL.md` or reference file.
     Skill,
+    /// A harness's own settings, hooks or extension file, installed by
+    /// `by init plugin`: parsed as JSON or TOML by its extension (YAML is
+    /// not parsed here).
+    HarnessConfig,
     /// Anything else (`.gitignore`).
     Text,
 }
@@ -104,6 +108,15 @@ pub struct PlannedFile {
     /// (`by serve --config FILE FLAGS`), which its validation uses too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub serve_flags: Vec<String>,
+    /// For a harness install (`by init plugin`): how the packaged file is
+    /// installed, such as `write` or `merge-json at hooks`. A merge only
+    /// adds, so it never counts as replacing the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub how: Option<String>,
+    /// Why this file cannot be installed (a merge that would have to
+    /// replace something): the plan is then invalid and writes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
     /// A sensitive file's text, never serialized.
     #[serde(skip)]
     #[schemars(skip)]
@@ -135,8 +148,41 @@ impl PlannedFile {
             diff,
             validation: Validation::default(),
             serve_flags: Vec::new(),
+            how: None,
+            refusal: None,
             body,
         }
+    }
+
+    /// A harness install's file (`by init plugin`), `how` it is installed:
+    /// written as packaged, or the existing file with a fragment merged
+    /// in. Executable when it starts with `#!`.
+    pub fn installed(
+        path: &str,
+        kind: ArtifactKind,
+        body: String,
+        existing: Option<String>,
+        how: &str,
+    ) -> PlannedFile {
+        let mode = match body.starts_with("#!") {
+            true => 0o755,
+            false => 0o644,
+        };
+        let mut file = PlannedFile::new(path, kind, mode, body, existing);
+        if how.starts_with("merge") {
+            file.overwrites = false;
+        }
+        file.how = Some(how.into());
+        file
+    }
+
+    /// A harness install's file that cannot be installed, and why.
+    pub fn refused(path: &str, kind: ArtifactKind, how: &str, why: String) -> PlannedFile {
+        let mut file = PlannedFile::new(path, kind, 0o644, String::new(), Some(String::new()));
+        file.content = None;
+        file.how = Some(how.into());
+        file.refusal = Some(why);
+        file
     }
 
     /// A generated secret, written 0600 when missing and kept when it
@@ -156,6 +202,8 @@ impl PlannedFile {
             diff: None,
             validation: Validation::ok("generated secret"),
             serve_flags: Vec::new(),
+            how: None,
+            refusal: None,
             body: match exists {
                 true => String::new(),
                 false => body,
@@ -224,9 +272,12 @@ impl Plan {
     pub fn validate(&mut self, validator: &dyn Validator) {
         let snapshot = self.files.clone();
         for file in &mut self.files {
-            file.validation = match file.kind {
-                ArtifactKind::Secret => Validation::ok("generated secret"),
-                _ => validator.validate(file, &snapshot),
+            file.validation = match (&file.refusal, file.kind) {
+                (Some(why), _) => {
+                    Validation::failed(file.how.as_deref().unwrap_or("install"), why.clone())
+                }
+                (None, ArtifactKind::Secret) => Validation::ok("generated secret"),
+                (None, _) => validator.validate(file, &snapshot),
             };
         }
         self.valid = self.files.iter().all(|f| f.validation.ok);
@@ -263,6 +314,20 @@ impl Validator for BuiltinValidator {
                 Err(e) => Validation::failed("skill frontmatter", e),
             },
             ArtifactKind::Text => Validation::ok("text"),
+            ArtifactKind::HarnessConfig => {
+                let name = file.path.rsplit('/').next().unwrap_or(&file.path);
+                match name.rsplit_once('.').map(|(_, ext)| ext) {
+                    Some("json") => match serde_json::from_str::<serde_json::Value>(file.body()) {
+                        Ok(_) => Validation::ok("json"),
+                        Err(e) => Validation::failed("json", e.to_string()),
+                    },
+                    Some("toml") => match file.body().parse::<toml_edit::DocumentMut>() {
+                        Ok(_) => Validation::ok("toml"),
+                        Err(e) => Validation::failed("toml", e.to_string()),
+                    },
+                    _ => Validation::skipped("yaml", "not parsed: by has no YAML parser"),
+                }
+            }
             ArtifactKind::Secret => Validation::ok("generated secret"),
             ArtifactKind::ServerConfig => {
                 match serde_json::from_str::<serde_json::Value>(file.body()) {

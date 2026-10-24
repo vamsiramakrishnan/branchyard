@@ -38,6 +38,7 @@ pub fn protocol_json() -> String {
     entry::<Applied>("Applied", &mut types);
     entry::<TopicList>("TopicList", &mut types);
     entry::<ErrorResponse>("ErrorResponse", &mut types);
+    entry::<crate::install::HarnessList>("HarnessList", &mut types);
     let mut doc = Map::new();
     doc.insert(
         "schema".into(),

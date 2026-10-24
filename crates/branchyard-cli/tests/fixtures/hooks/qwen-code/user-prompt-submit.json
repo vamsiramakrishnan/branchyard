@@ -1,0 +1,10 @@
+{
+  "session_id": "0b23329c-6c01-4412-9d3b-7277661b2d4e",
+  "transcript_path": "/home/u/.qwen/projects/-home-u-yard/chats/0b23329c-6c01-4412-9d3b-7277661b2d4e.jsonl",
+  "cwd": "@CWD@",
+  "hook_event_name": "UserPromptSubmit",
+  "timestamp": "2026-10-24T11:46:23.336Z",
+  "permission_mode": "auto",
+  "prompt_id": "0b23329c-6c01-4412-9d3b-7277661b2d4e########3",
+  "prompt": "Quote verbatim any note starting with Branchyard: that is attached to THIS latest message, or reply NONE."
+}

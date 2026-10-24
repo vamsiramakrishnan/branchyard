@@ -25,12 +25,25 @@ pub use branchyard_config::{
 /// This machine and repository.
 pub struct HostProbe {
     root: PathBuf,
+    /// Whether to run each installed harness's `--version`; some of them
+    /// write their own directories into the home when they start.
+    versions: bool,
 }
 
 impl HostProbe {
     pub fn new(cwd: &Path) -> HostProbe {
         HostProbe {
             root: project_root(cwd),
+            versions: true,
+        }
+    }
+
+    /// A probe that finds harnesses on `PATH` without running them, for
+    /// installing hooks, which needs no versions.
+    pub fn without_versions(cwd: &Path) -> HostProbe {
+        HostProbe {
+            versions: false,
+            ..HostProbe::new(cwd)
         }
     }
 
@@ -147,7 +160,11 @@ impl Probe for HostProbe {
             .collect();
         // Logins as `by harnesses` reads them: its cached inventory, by
         // names and files only.
-        let inventory = crate::harness_cmd::detected_here().ok();
+        // Refreshing the inventory runs the harnesses too.
+        let inventory = match self.versions {
+            true => crate::harness_cmd::detected_here().ok(),
+            false => None,
+        };
         fn word<T: serde::Serialize>(value: &T) -> String {
             serde_json::to_value(value)
                 .ok()
@@ -163,6 +180,7 @@ impl Probe for HostProbe {
             })
         };
         // Ask each installed harness for its version at once, bounded.
+        let versions = self.versions;
         let handles: Vec<_> = defaults
             .into_iter()
             .map(|info| {
@@ -171,7 +189,7 @@ impl Probe for HostProbe {
                         .and_then(|p| p.command.first())
                         .and_then(|program| which(program));
                     let version = match (info.available, program) {
-                        (true, Some(program)) => {
+                        (true, Some(program)) if versions => {
                             first_line(&program, &["--version"], None, VERSION_TIMEOUT)
                         }
                         _ => None,
@@ -205,6 +223,10 @@ impl Probe for HostProbe {
 
     fn env_is_set(&self, name: &str) -> bool {
         std::env::var_os(name).is_some_and(|v| !v.is_empty())
+    }
+
+    fn on_path(&self, program: &str) -> bool {
+        which(program).is_some()
     }
 
     fn tool(&self, program: &str) -> Option<String> {
@@ -443,7 +465,20 @@ pub fn apply(plan: &Plan, root: &Path, force: bool) -> Result<Applied, Refusal> 
             applied.unchanged.push(file.path.clone());
             continue;
         }
-        write_file(&path, file.body(), file.mode_bits()).map_err(io)?;
+        // A merge into the person's own file keeps its mode, and writes
+        // through a symbolic link (a dotfiles checkout) rather than over it.
+        let merged = file.how.as_deref().is_some_and(|h| h.starts_with("merge"));
+        let (path, mode) = match (merged, fs::canonicalize(&path)) {
+            (true, Ok(real)) => {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(&real)
+                    .map(|m| m.permissions().mode() & 0o7777)
+                    .unwrap_or(file.mode_bits());
+                (real, mode)
+            }
+            _ => (path.clone(), file.mode_bits()),
+        };
+        write_file(&path, file.body(), mode).map_err(io)?;
         applied.written.push(file.path.clone());
     }
     Ok(applied)
@@ -495,6 +530,9 @@ impl<P: Probe> Probe for CachedProbe<P> {
             .entry(program.to_owned())
             .or_insert_with(|| self.inner.tool(program))
             .clone()
+    }
+    fn on_path(&self, program: &str) -> bool {
+        self.inner.on_path(program)
     }
     fn platform(&self) -> Platform {
         self.platform.get_or_init(|| self.inner.platform()).clone()

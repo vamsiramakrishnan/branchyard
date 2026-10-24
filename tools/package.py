@@ -2,6 +2,9 @@
 """Build reproducible plugin, standalone-skill and Python SDK archives from
 one canonical source: `plugins/branchyard`, `plugins/branchyard/skills/delegate`,
 `plugins/branchyard/skills/setup` and `sdk/python`. See `docs/distribution.md`.
+The plugin archive is the whole of `plugins/branchyard`, so it carries each
+harness's files (`harnesses/`) and the install manifests `by init plugin`
+reads (`install/`); executable files keep their executable bit.
 
 Determinism: inputs are read in sorted path order, every archive entry gets
 a fixed timestamp and mode, and compression is deflate at a fixed level, so
@@ -22,6 +25,14 @@ SKILL = PLUGIN / "skills" / "delegate"
 SETUP_SKILL = PLUGIN / "skills" / "setup"
 SDK = ROOT / "sdk" / "python"
 MARKETPLACE = ROOT / ".claude-plugin" / "marketplace.json"
+# Each host's manifest for the plugin, relative to it: each names it
+# `branchyard` at the workspace version.
+HOST_MANIFESTS = [
+    ".codex-plugin/plugin.json",
+    ".claude-plugin/plugin.json",
+    ".github/plugin/plugin.json",
+    "harnesses/gemini-cli/gemini-extension.json",
+]
 
 # A fixed timestamp for every archive entry (ZIP's minimum representable
 # date-time), so archives from different builds never differ only by mtime.
@@ -63,14 +74,26 @@ def inputs(root: Path) -> dict:
     return result
 
 
+def executables(root: Path) -> set:
+    """The files under `root` with an executable bit, by relative path: they
+    are archived 0755 (a harness's hook script must stay runnable), every
+    other file 0644."""
+    return {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and not path.is_symlink() and path.stat().st_mode & 0o111
+    }
+
+
 def sdk_version() -> str:
     """`sdk/python/pyproject.toml`'s `project.version`."""
     return tomllib.loads((SDK / "pyproject.toml").read_text())["project"]["version"]
 
 
-def archive(path: Path, files: dict, root_name: str) -> None:
+def archive(path: Path, files: dict, root_name: str, executable: frozenset = frozenset()) -> None:
     """Write `files` (name -> bytes) under `root_name/` in a new zip at
-    `path`, plus a `root_name/MANIFEST.sha256.json` of their digests."""
+    `path`, plus a `root_name/MANIFEST.sha256.json` of their digests; the
+    names in `executable` get mode 0755."""
     manifest = {name: hashlib.sha256(data).hexdigest() for name, data in sorted(files.items())}
     files = dict(files)
     files["MANIFEST.sha256.json"] = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
@@ -78,7 +101,7 @@ def archive(path: Path, files: dict, root_name: str) -> None:
         for name, data in sorted(files.items()):
             info = zipfile.ZipInfo(f"{root_name}/{name}", date_time=FIXED_TIME)
             info.create_system = 3  # Unix, so external_attr below is meaningful.
-            info.external_attr = 0o100644 << 16
+            info.external_attr = (0o100755 if name in executable else 0o100644) << 16
             info.compress_type = zipfile.ZIP_DEFLATED
             output.writestr(info, data)
 
@@ -106,12 +129,10 @@ def build(destination: Path) -> list[Path]:
     """Build every archive into `destination`; returns their paths, in the
     order of `ARCHIVES`."""
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
-    for host in [".codex-plugin", ".claude-plugin"]:
-        manifest = json.loads((PLUGIN / host / "plugin.json").read_text())
+    for host in HOST_MANIFESTS:
+        manifest = json.loads((PLUGIN / host).read_text())
         if manifest["name"] != "branchyard" or manifest["version"] != version:
-            raise ValueError(
-                f"{host}/plugin.json's name and version must be 'branchyard' and {version!r}, the workspace version"
-            )
+            raise ValueError(f"{host}'s name and version must be 'branchyard' and {version!r}, the workspace version")
     if sdk_version() != version:
         raise ValueError(f"sdk/python/pyproject.toml's version must be {version!r}, the workspace version")
     check_marketplace(version)
@@ -122,7 +143,7 @@ def build(destination: Path) -> list[Path]:
         files = inputs(root)
         files["LICENSE"] = license_bytes
         path = destination / f"branchyard-{kind}-{version}.zip"
-        archive(path, files, root_name)
+        archive(path, files, root_name, frozenset(executables(root)))
         paths.append(path)
     return paths
 

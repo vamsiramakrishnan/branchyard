@@ -1,0 +1,9 @@
+# Branchyard for Hermes: merged into ~/.hermes/config.yaml by `by init plugin`, or paste it there.
+# Hermes splits a hook command with shlex and runs it without a shell, so the guard is inside
+# sh -c. Only pre_llm_call: on_session_start is an observer whose output Hermes ignores, and
+# running `by` there would mark the session's first summary as shown before any turn could see it.
+# The first pre_llm_call of a session gets that summary instead.
+hooks:
+  pre_llm_call:
+    - command: "sh -c 'command -v by >/dev/null 2>&1 && by hook --harness hermes user-prompt-submit || true'"
+      timeout: 5

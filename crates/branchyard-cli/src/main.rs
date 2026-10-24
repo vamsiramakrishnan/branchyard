@@ -93,8 +93,8 @@ fn main() -> ExitCode {
     // configuration only to find the yard, no logging, and never a failure, whatever the
     // repository holds (docs/harness-integration.md).
     match &command {
-        Command::Hook { event } => return hook_cmd::hook(event),
-        Command::Statusline => return hook_cmd::statusline(),
+        Command::Hook { harness, event } => return hook_cmd::hook(harness.as_deref(), event),
+        Command::Statusline { harness } => return hook_cmd::statusline(harness.as_deref()),
         _ => {}
     }
     // branchyard.toml and the user configuration, under flags and variables.
@@ -713,7 +713,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Sync(_)
         | Command::Connectors { .. }
         | Command::Hook { .. }
-        | Command::Statusline => unreachable!("handled before choosing a target"),
+        | Command::Statusline { .. } => unreachable!("handled before choosing a target"),
     }
 }
 

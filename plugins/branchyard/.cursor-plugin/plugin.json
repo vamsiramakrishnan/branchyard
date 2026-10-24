@@ -1,0 +1,14 @@
+{
+  "name": "branchyard",
+  "displayName": "Branchyard",
+  "version": "0.0.1",
+  "description": "Set up Branchyard by interview and delegate work to child branches; commands for status and waiting, and a session-start hook that tells a session which of the repository's branches finished, failed, are blocked or ask. Requires the by CLI.",
+  "author": {
+    "name": "Branchyard contributors"
+  },
+  "license": "Apache-2.0",
+  "keywords": ["branchyard", "delegation", "branches", "hooks"],
+  "skills": "./skills/",
+  "commands": "./commands/",
+  "hooks": "./harnesses/cursor/hooks.json"
+}

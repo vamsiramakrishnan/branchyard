@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "BeforeAgent": [
+      {
+        "hooks": [
+          {
+            "name": "branchyard-before-agent",
+            "type": "command",
+            "command": "command -v by >/dev/null 2>&1 && by hook --harness gemini-cli user-prompt-submit || true",
+            "description": "Branchyard branches that finished, failed, are blocked or ask since the last prompt",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
+}

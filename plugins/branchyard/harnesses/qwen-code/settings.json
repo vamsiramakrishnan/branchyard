@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "branchyard-session-start",
+            "command": "command -v by >/dev/null 2>&1 && by hook --harness qwen-code session-start || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "branchyard-user-prompt-submit",
+            "command": "command -v by >/dev/null 2>&1 && by hook --harness qwen-code user-prompt-submit || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "ui": {
+    "statusLine": {
+      "type": "command",
+      "command": "command -v by >/dev/null 2>&1 && by statusline --harness qwen-code || true"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "hook_event_name": "Status",
+  "session_id": "dr-1",
+  "cwd": "@CWD@",
+  "model": {
+    "id": "m",
+    "display_name": "M"
+  },
+  "workspace": {
+    "current_dir": "@CWD@",
+    "project_dir": "@CWD@"
+  }
+}

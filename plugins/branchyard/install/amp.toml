@@ -1,0 +1,11 @@
+harness = "amp"
+binaries = ["amp"]
+provides = ["hooks", "statusline"]
+
+[[file]]
+from = "harnesses/amp/branchyard.ts"
+to = "~/.config/amp/plugins/branchyard.ts"
+how = "write"
+
+[[note]]
+text = "Run \"plugins: reload\" from Amp's command palette, or restart Amp, to load the Branchyard plugin."

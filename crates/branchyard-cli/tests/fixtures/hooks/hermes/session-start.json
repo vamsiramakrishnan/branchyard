@@ -1,0 +1,12 @@
+{
+  "hook_event_name": "on_session_start",
+  "tool_name": null,
+  "tool_input": null,
+  "session_id": "20261024_115306_8306bb",
+  "cwd": "@CWD@",
+  "extra": {
+    "model": "glm-4.6",
+    "platform": "cli",
+    "telemetry_schema_version": "hermes.observer.v1"
+  }
+}

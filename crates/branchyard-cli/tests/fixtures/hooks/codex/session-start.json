@@ -1,0 +1,9 @@
+{
+  "session_id": "01a16dba-7f5b-7dd0-b2e5-3b8f06247d92",
+  "transcript_path": "/home/me/.codex/sessions/2026/10/24/rollout-2026-10-24T11-45-01-01a16dba-7f5b-7dd0-b2e5-3b8f06247d92.jsonl",
+  "cwd": "@CWD@",
+  "hook_event_name": "SessionStart",
+  "model": "glm-4.6",
+  "permission_mode": "bypassPermissions",
+  "source": "startup"
+}

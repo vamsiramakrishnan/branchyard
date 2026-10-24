@@ -1077,6 +1077,10 @@ Examples:
   by init project --answers answers.json --dry-run
   by init project --answers - --apply --json < answers.json
   by init server --defaults --apply --force
+  by init plugin                                     # each harness Branchyard installs for, detected first
+  by init plugin codex hermes                        # their hooks: every diff shown, then asks
+  by init plugin --all-detected --dry-run            # the plan for every harness on PATH
+  by init plugin cursor --apply                      # write without asking (--force replaces)
 
 Answers name where a secret is (a variable, or @file), never its value.
 Generated tokens are written 0600 and printed nowhere. See docs/setup.md.";
@@ -1131,7 +1135,12 @@ The plugin's hooks/hooks.json runs it; to run it from settings.json instead:
   \"hooks\": {\"UserPromptSubmit\": [{\"hooks\": [{\"type\": \"command\",
     \"command\": \"by hook user-prompt-submit\"}]}]}
 
-See docs/harness-integration.md.
+Other harnesses: --harness ID reads that harness's hook JSON and answers in its shape, for
+example `by hook --harness gemini-cli user-prompt-submit` (a BeforeAgent hook). An unknown
+ID prints nothing and exits 0. --harness generic reads {\"cwd\", \"session_id\"} and prints
+{\"context\": \"...\"}, for plugins written in code.
+
+See docs/harness-integration.md and docs/harness-hooks.md.
 ";
 
 const STATUSLINE_EXAMPLES: &str = "\
@@ -2164,17 +2173,28 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Tell a Claude Code session what changed in this repository's branches (run by the plugin's
-    /// hooks with the hook's JSON on stdin; prints nothing and exits 0 on any problem)
+    /// Tell a Claude Code session (or, with --harness, another harness's) what changed in this
+    /// repository's branches (run by the plugin's hooks with the hook's JSON on stdin; prints
+    /// nothing and exits 0 on any problem)
     #[command(display_order = 606, after_help = HOOK_EXAMPLES)]
     Hook {
+        /// Read and answer in this harness's hook dialect: claude-code (the default), codex,
+        /// gemini-cli, qwen-code, github-copilot, droid, deepseek-harness, cursor, antigravity,
+        /// kiro, hermes, or generic
+        #[arg(long, value_name = "ID")]
+        harness: Option<String>,
         /// session-start or user-prompt-submit
         event: String,
     },
-    /// Print one line about this repository's branches for Claude Code's status line (reads its
-    /// JSON on stdin; prints nothing outside a repository Branchyard uses)
+    /// Print one line about this repository's branches for Claude Code's (or, with --harness,
+    /// another harness's) status line (reads its JSON on stdin; prints nothing outside a
+    /// repository Branchyard uses)
     #[command(display_order = 607, after_help = STATUSLINE_EXAMPLES)]
-    Statusline,
+    Statusline {
+        /// Read the directory from this harness's status-line JSON (as for `by hook --harness`)
+        #[arg(long, value_name = "ID")]
+        harness: Option<String>,
+    },
     /// Run, stop or inspect this repository's connector gateway (Anvil), and its keys
     #[command(display_order = 403, subcommand_required = true, after_help = GATEWAY_EXAMPLES)]
     Gateway {
@@ -2596,6 +2616,10 @@ pub struct InitArgs {
     pub answers: Option<String>,
     pub defaults: bool,
     pub force: bool,
+    /// `by init plugin ID...`: the harnesses to install for.
+    pub harnesses: Vec<String>,
+    /// `by init plugin --all-detected`.
+    pub all_detected: bool,
 }
 
 /// `by init`'s options. At most one step; a step needs a topic; `--answers`
@@ -2606,6 +2630,13 @@ pub struct InitFlags {
     /// What to set up (default: the wizard asks)
     #[arg(value_name = "TOPIC", value_parser = TopicParser)]
     topic: Option<branchyard_setup::Topic>,
+    /// With plugin: the harnesses to install hooks, commands and skills for (by init plugin lists
+    /// them)
+    #[arg(value_name = "HARNESS", requires = "topic")]
+    harnesses: Vec<String>,
+    /// With plugin: every harness found on PATH
+    #[arg(long, conflicts_with = "harnesses")]
+    all_detected: bool,
     /// Print JSON (schema/setup.protocol.json): the topics, or the step's result
     #[arg(long)]
     json: bool,
@@ -2652,7 +2683,11 @@ impl Flags for InitFlags {
             (_, _, true) => Some(InitStep::Apply),
             _ => None,
         };
-        if self.json && self.topic.is_some() && step.is_none() {
+        let plugin = self.topic == Some(branchyard_setup::Topic::Plugin);
+        if (!self.harnesses.is_empty() || self.all_detected) && !plugin {
+            return Err("harnesses and --all-detected go with by init plugin".into());
+        }
+        if self.json && self.topic.is_some() && step.is_none() && !plugin {
             return Err("with --json and a topic, give --next, --dry-run or --apply".into());
         }
         Ok(InitArgs {
@@ -2662,6 +2697,8 @@ impl Flags for InitFlags {
             answers: self.answers,
             defaults: self.defaults,
             force: self.force,
+            harnesses: self.harnesses,
+            all_detected: self.all_detected,
         })
     }
 }
@@ -6837,8 +6874,15 @@ mod tests {
                 answers: None,
                 defaults: false,
                 force: false,
+                harnesses: Vec::new(),
+                all_detected: false,
             }
         );
+        let plugin = init("init plugin codex hermes --dry-run");
+        assert_eq!(plugin.harnesses, ["codex", "hermes"]);
+        assert_eq!(plugin.step, Some(InitStep::DryRun));
+        assert!(init("init plugin --all-detected").all_detected);
+        assert!(init("init plugin --json").json);
         assert_eq!(init("init --json").step, None);
         assert_eq!(init("init server --defaults").topic, Some(Topic::Server));
         let next = init("init project --json --next --answers=a.json");
@@ -6907,8 +6951,18 @@ mod tests {
             ),
             (
                 "init project extra",
-                ErrorKind::UnknownArgument,
-                "unexpected argument",
+                ErrorKind::ArgumentConflict,
+                "harnesses and --all-detected go with by init plugin",
+            ),
+            (
+                "init rig --all-detected",
+                ErrorKind::ArgumentConflict,
+                "go with by init plugin",
+            ),
+            (
+                "init plugin codex --all-detected",
+                ErrorKind::ArgumentConflict,
+                "cannot be used with",
             ),
             (
                 "init project --bogus",

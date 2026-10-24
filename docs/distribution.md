@@ -25,7 +25,29 @@ Register the packaged directory (`plugins/branchyard`, containing `.codex-plugin
 
 ## Install with `by`
 
-`by init plugin` installs the skills `by` was built with (embedded byte for byte from `plugins/branchyard/skills/`, so no checkout is needed) into a project's `.claude/skills`, `~/.claude/skills`, or `~/.codex/skills`, as a diffed plan like every `by init` topic, or prints the `claude --plugin-dir` command for the whole plugin.
+`by init plugin` installs the skills `by` was built with (embedded byte for byte from `plugins/branchyard/skills/`, so no checkout is needed) into a project's `.claude/skills`, `~/.claude/skills`, or `~/.codex/skills`, as a diffed plan like every `by init` topic, or prints the `claude --plugin-dir` command for the whole plugin. It also installs each harness's hooks, commands and skills ([below](#install-per-harness)).
+
+## Install per harness
+
+Every harness Branchyard has hooks for has an install manifest, `plugins/branchyard/install/<id>.toml`: the programs that show it is installed (`binaries`, looked for on `PATH`), what it gets (`provides`), each packaged file and where it goes (`[[file]]`: `from` under `plugins/branchyard`, `to` under `~` or `{project}`, the repository root, and `how`), and what only you can do afterwards (`[[note]]`). [Harness hooks](harness-hooks.md) has a section per harness: what it gets, its own marketplace or extension command, caveats and a live check.
+
+```sh
+by init plugin                          # every harness, detected ones first, and the files each would get
+by init plugin --json                   # the same as JSON (HarnessList in schema/setup.protocol.json)
+by init plugin codex hermes             # the plan: every file it would write or merge, as a diff; then asks
+by init plugin --all-detected --dry-run # the plan for every harness on PATH; writes nothing
+by init plugin cursor --apply           # writes without asking; --force also replaces differing written files
+```
+
+The plan is an ordinary `by init` plan (also `by init plugin --json --next` with `{"host": "harnesses", "harnesses": [...]}`), so a harness driving the setup skill gets the same diffs. On a terminal it asks before writing, and asks separately before replacing a file that exists with different content; elsewhere it prints the plan and writes nothing until `--apply`. The notes are printed with the plan and again after writing.
+
+- **`write`** writes the packaged file, or every file under a packaged directory, as it is (0755 when it starts with `#!`). A file you have that differs is shown as a diff and replaced only with your consent (`--force`, or yes to the question).
+- **`merge-json`, `merge-toml`, `merge-yaml`** merge a packaged fragment, in the target's own format, into your file (under the dotted key `at`, or the top level): objects merge key by key, deeply; a list gains the entries it does not already hold, equal by value; nothing is removed or replaced. A key that holds another kind of value, or another scalar, is refused with its name, and then nothing at all is written. Run twice, the second run changes nothing. A merge keeps the file's mode, and writes through a symbolic link rather than over it.
+- JSON is re-printed with the file's own indentation and key order; JSON with comments (JSONC) is refused. TOML is merged with `toml_edit`, so comments and formatting stay. YAML has no library in the build: `merge-yaml` reads block mappings and sequences by indentation and only inserts lines, so every existing line and comment stays; sequence items are compared by their text. It refuses tabs, several documents, flow collections (`{}`, `[]`) or a value with an anchor, alias or tag where it would have to enter them; a tag inside an item it copies (DeepSeek Harness's `!!js`) is kept as it is.
+
+The plugin directory reaches an installed `by` without a checkout: `crates/branchyard-setup/build.rs` embeds every text file under `plugins/branchyard` with `include_str!` when `by` is built (a generated list, re-run when anything under the directory changes), so `by init plugin` writes exactly the bytes the plugin archive carries. The Docker images copy all of `plugins/branchyard` for that reason ([deploy](deploy.md)).
+
+Tested hermetically (`crates/branchyard-setup/tests/install.rs` and the `install` module's unit tests): a fixture harness that uses every `how`, against existing files with comments and their own entries; a second run changing nothing; a clash refusing the plan; a differing written file needing consent; every shipped manifest planning validly into an empty home and again idempotently. Not done: no harness has been installed into by a real run of `by init plugin` on a machine that has it; detection is only the program on `PATH` (a harness installed elsewhere, or an app without a command, is not detected; name it); `merge-yaml` reads only the block YAML described above; there is no uninstall.
 
 ## Install anywhere else with a skill directory
 

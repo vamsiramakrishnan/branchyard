@@ -1,0 +1,18 @@
+harness = "antigravity"
+binaries = ["agy", "antigravity"]
+provides = ["hooks", "statusline"]
+
+[[file]]
+from = "harnesses/antigravity/hooks.json"
+to = "~/.gemini/config/hooks.json"
+how = "merge-json"
+at = ""
+
+[[file]]
+from = "harnesses/antigravity/settings.json"
+to = "~/.gemini/antigravity-cli/settings.json"
+how = "merge-json"
+at = ""
+
+[[note]]
+text = "Alternatively install the hooks as an Antigravity CLI plugin from a clone of this repository: `agy plugin install <clone>/plugins/branchyard/harnesses/antigravity`. Use the plugin or these global hooks, not both."

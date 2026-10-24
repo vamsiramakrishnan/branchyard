@@ -1,0 +1,23 @@
+{
+  "hook_event_name": "pre_llm_call",
+  "tool_name": null,
+  "tool_input": null,
+  "session_id": "20261024_115306_8306bb",
+  "cwd": "@CWD@",
+  "extra": {
+    "task_id": "7a08de7b-8707-496a-9d4f-79f2e65b1519",
+    "turn_id": "20261024_115306_8306bb:7a08de7b-8707-496a-9d4f-79f2e65b1519:0e499ff8",
+    "user_message": "Reply OK.",
+    "conversation_history": [
+      {
+        "role": "user",
+        "content": "Reply OK."
+      }
+    ],
+    "is_first_turn": true,
+    "model": "glm-4.6",
+    "platform": "cli",
+    "sender_id": "",
+    "telemetry_schema_version": "hermes.observer.v1"
+  }
+}

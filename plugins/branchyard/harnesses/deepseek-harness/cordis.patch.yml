@@ -1,0 +1,11 @@
+# Branchyard's hooks for DeepSeek Harness: the Claude Code hook bridge runs
+# $DSH_HOME/branchyard-hooks.json (a copy of harnesses/deepseek-harness/hooks.json),
+# whose commands call `by hook --harness deepseek-harness`. Merge this insert
+# into $DSH_HOME/cordis.patch.yml (every profile) or a profile's own patch
+# file; `by init plugin` does that for the default DSH_HOME, ~/.dsh. The bridge
+# must be added to each profile that runs it (see docs/harness-hooks.md).
+- insert:
+    - id: branchyard-hooks
+      name: '@deepseek-ai/dsh-hooks-claude-code'
+      config:
+        configPath: !!js dshHomePath('branchyard-hooks.json')

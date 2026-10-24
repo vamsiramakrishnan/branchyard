@@ -1,0 +1,17 @@
+{
+  "name": "branchyard",
+  "owner": {
+    "name": "Branchyard contributors"
+  },
+  "metadata": {
+    "description": "Branchyard's Cursor plugin, from this repository.",
+    "version": "0.0.1"
+  },
+  "plugins": [
+    {
+      "name": "branchyard",
+      "source": "./plugins/branchyard",
+      "description": "Set up Branchyard by interview and delegate work to child branches; a session-start hook that tells a session when its branches finish. Requires the by CLI."
+    }
+  ]
+}

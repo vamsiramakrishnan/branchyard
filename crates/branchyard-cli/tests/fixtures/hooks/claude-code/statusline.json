@@ -1,0 +1,41 @@
+{
+  "session_id": "cfcacf8a-3313-48fb-93ba-94a8d141829c",
+  "transcript_path": "/home/me/.claude/projects/-home-me-repo/cfcacf8a-3313-48fb-93ba-94a8d141829c.jsonl",
+  "cwd": "@CWD@",
+  "effort": {
+    "level": "high"
+  },
+  "model": {
+    "id": "glm-4.6",
+    "display_name": "glm-4.6"
+  },
+  "workspace": {
+    "current_dir": "@CWD@",
+    "project_dir": "@CWD@",
+    "added_dirs": []
+  },
+  "version": "2.1.310",
+  "output_style": {
+    "name": "default"
+  },
+  "cost": {
+    "total_cost_usd": 0,
+    "total_duration_ms": 662,
+    "total_api_duration_ms": 0,
+    "total_lines_added": 0,
+    "total_lines_removed": 0
+  },
+  "context_window": {
+    "total_input_tokens": 0,
+    "total_output_tokens": 0,
+    "context_window_size": 200000,
+    "current_usage": null,
+    "used_percentage": null,
+    "remaining_percentage": null
+  },
+  "exceeds_200k_tokens": false,
+  "fast_mode": false,
+  "thinking": {
+    "enabled": true
+  }
+}

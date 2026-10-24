@@ -1,0 +1,16 @@
+# What `by init plugin` installs for Qwen Code: Claude-style hooks and the
+# status line in the user settings. The slash commands come from the Gemini
+# CLI extension, which `qwen extensions install` converts; see
+# docs/harness-hooks.md.
+harness = "qwen-code"
+binaries = ["qwen"]
+provides = ["hooks", "statusline"]
+
+[[file]]
+from = "harnesses/qwen-code/settings.json"
+to = "~/.qwen/settings.json"
+how = "merge-json"
+at = ""
+
+[[note]]
+text = "For /setup, /wait and /branchyard.status (Qwen Code's own /status wins) in Qwen Code, install the Gemini CLI extension from a clone: qwen extensions install <clone>/plugins/branchyard/harnesses/gemini-cli"

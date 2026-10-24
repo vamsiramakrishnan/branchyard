@@ -1,0 +1,23 @@
+# What `by init plugin` installs for DeepSeek Harness: a Claude Code
+# hooks.json and the patch row that mounts the Claude Code hook bridge on it,
+# for every profile. See docs/harness-hooks.md.
+harness = "deepseek-harness"
+binaries = ["dsh"]
+provides = ["hooks"]
+
+[[file]]
+from = "harnesses/deepseek-harness/hooks.json"
+to = "~/.dsh/branchyard-hooks.json"
+how = "write"
+
+[[file]]
+from = "harnesses/deepseek-harness/cordis.patch.yml"
+to = "~/.dsh/cordis.patch.yml"
+how = "merge-yaml"
+at = ""
+
+[[note]]
+text = "Add the Claude Code hook bridge to each profile you run, at your dsh's own version (dsh --version): dsh plugin --profile <name> add @deepseek-ai/dsh-hooks-claude-code@<version> @deepseek-ai/dsh-hook-protocol@<version>. The bridge's npm `latest` tag is older than dsh and is refused, and dsh does not ship the protocol package the bridge needs. Until then dsh starts that profile with \"1 entry did not activate\" and no Branchyard news."
+
+[[note]]
+text = "Both files go to ~/.dsh, the default DSH_HOME; with DSH_HOME set elsewhere, move branchyard-hooks.json there and merge the insert into $DSH_HOME/cordis.patch.yml (the row finds the hooks under whatever DSH_HOME is)."

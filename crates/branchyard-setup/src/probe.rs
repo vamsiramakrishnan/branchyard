@@ -430,6 +430,10 @@ pub trait Probe {
     fn env_is_set(&self, name: &str) -> bool;
     /// `Some(version or "")` when `program` is on `PATH`.
     fn tool(&self, program: &str) -> Option<String>;
+    /// Whether `program` is on `PATH`, without running it.
+    fn on_path(&self, program: &str) -> bool {
+        self.tool(program).is_some()
+    }
     fn platform(&self) -> Platform;
     /// A file's text, relative to [`Probe::root`] unless absolute; `None`
     /// when missing. Only files setup may write are asked for.
@@ -480,6 +484,10 @@ pub struct Facts {
     /// The plugin's directory in this checkout, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_dir: Option<String>,
+    /// Harnesses with an install manifest (`plugins/branchyard/install`)
+    /// whose binaries are on `PATH`: what `by init plugin` offers first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub install_detected: Vec<String>,
     /// What the root's files suggest for `[workspace]`.
     #[serde(default, skip_serializing_if = "WorkspaceFacts::is_empty")]
     pub workspace: WorkspaceFacts,
@@ -526,6 +534,7 @@ impl Facts {
             plugin_dir: probe
                 .exists(PLUGIN_MANIFEST)
                 .then(|| format!("{}/plugins/branchyard", probe.root())),
+            install_detected: crate::install::detect(probe),
             workspace: WorkspaceFacts::detect(probe),
             logins: login_files(probe),
             project_text: probe.read(crate::config::PROJECT_FILE),
@@ -767,6 +776,8 @@ pub fn harness_label(harness: &str) -> String {
         "qwen-code" => "Qwen Code".into(),
         "kimi-cli" => "Kimi CLI".into(),
         "hermes" => "Hermes".into(),
+        "droid" => "Droid".into(),
+        "kiro" => "Kiro".into(),
         other => other.into(),
     }
 }

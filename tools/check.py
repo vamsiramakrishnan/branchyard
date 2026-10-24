@@ -170,6 +170,11 @@ STEPS = (
     Step("test_sdk_client", "controls", (PY, "tests/test_sdk_client.py")),
     Step("test_check", "controls", (PY, "tests/test_check.py")),
     Step("test_install_hooks", "controls", (PY, "tests/test_install_hooks.py")),
+    # The packaging for Codex, Gemini CLI, Qwen Code, Copilot CLI, Droid and DeepSeek Harness.
+    Step("test_plugin_claude_compat", "controls", (PY, "tests/test_plugin_claude_compat.py")),
+    # The Pi/Oh My Pi, Amp and OpenCode plugins under node with a stub `by` (skips without node).
+    Step("test_plugin_ts", "controls", (PY, "tests/test_plugin_ts.py")),
+    Step("test_plugin_config", "controls", (PY, "tests/test_plugin_config.py")),
     # Cargo: rustdoc (the docs job), formatting, the undocumented-items ratchet, Clippy, and the
     # schema freshness tests. The Clippy passes CI runs for the feature builds stay in the workflow.
     Step(

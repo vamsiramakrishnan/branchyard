@@ -2,6 +2,9 @@
 //! started (not one Branchyard runs, whose status comes from its own
 //! stream) learns about the repository's branches, through the plugin's
 //! hooks and the `statusLine` setting. See `docs/harness-integration.md`.
+//! `--harness ID` speaks another harness's dialect instead ([`DIALECTS`]):
+//! where its JSON keeps the session id and the directory, and the shape
+//! its reply takes. See `docs/harness-hooks.md`.
 //!
 //! Both run on every prompt or redraw of someone else's session, so they
 //! only read, where `by` itself would ([`source`]): the server `[remote]`
@@ -33,29 +36,259 @@ const MAX_LINES: usize = 12;
 /// At most this many characters of one line.
 const MAX_LINE: usize = 240;
 
-/// `by hook <event>`: always exits 0.
-pub fn hook(event: &str) -> ExitCode {
+/// `by hook [--harness ID] <event>`: always exits 0.
+pub fn hook(harness: Option<&str>, event: &str) -> ExitCode {
+    let harness = harness.map(str::to_owned);
     let event = event.to_owned();
     finish(
         "hook",
         within(DEADLINE, move || {
+            // Read the input even for a harness not known here, so the
+            // harness never writes into a closed pipe.
             let input = stdin_text();
+            let dialect = dialect(harness.as_deref())?;
             let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-            hook_output(&event, &input, &env, &cwd())
+            hook_output_as(dialect, &event, &input, &env, &cwd())
         }),
     )
 }
 
-/// `by statusline`: always exits 0.
-pub fn statusline() -> ExitCode {
+/// `by statusline [--harness ID]`: always exits 0.
+pub fn statusline(harness: Option<&str>) -> ExitCode {
+    let harness = harness.map(str::to_owned);
     finish(
         "statusline",
         within(DEADLINE, move || {
             let input = stdin_text();
+            let dialect = dialect(harness.as_deref())?;
             let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-            status_line(&input, &env, &cwd())
+            status_line_as(dialect, &input, &env, &cwd())
         }),
     )
+}
+
+/// The canonical hook events; each harness's packaging maps its own
+/// event names onto these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Event {
+    SessionStart,
+    UserPromptSubmit,
+}
+
+impl Event {
+    fn parse(event: &str) -> Result<Self, String> {
+        match event {
+            "session-start" => Ok(Event::SessionStart),
+            "user-prompt-submit" => Ok(Event::UserPromptSubmit),
+            other => Err(format!(
+                "unknown event {other:?}; expected session-start or user-prompt-submit"
+            )),
+        }
+    }
+}
+
+/// How a harness takes the context back on stdout.
+#[derive(Debug)]
+enum Reply {
+    /// Claude Code's `{"hookSpecificOutput": {"hookEventName": ..,
+    /// "additionalContext": ..}}`, with the harness's own event names.
+    HookSpecific {
+        session_start: &'static str,
+        user_prompt_submit: &'static str,
+    },
+    /// `{"<key>": "<text>"}`.
+    Field(&'static str),
+    /// Antigravity's `{"injectSteps": [{"ephemeralMessage": ..}]}`.
+    InjectSteps,
+    /// The text itself.
+    Plain,
+}
+
+/// One harness's hook and status-line dialect. Each path is a JSON
+/// pointer into the harness's stdin; the first that holds a non-empty
+/// string wins.
+#[derive(Debug)]
+pub(crate) struct Dialect {
+    id: &'static str,
+    /// Where the session id is.
+    session: &'static [&'static str],
+    /// Where the hook's working directory is.
+    cwd: &'static [&'static str],
+    /// Where the status line's working directory is.
+    status_cwd: &'static [&'static str],
+    reply: Reply,
+    /// Events whose output this harness drops: `by` says nothing there and
+    /// leaves the session's cursor alone, so the news waits for an event
+    /// that is heard.
+    deaf: &'static [Event],
+}
+
+/// Claude Code's own hook event names.
+const CLAUDE_REPLY: Reply = Reply::HookSpecific {
+    session_start: "SessionStart",
+    user_prompt_submit: "UserPromptSubmit",
+};
+/// Claude Code's status-line JSON: `workspace.current_dir`, else `cwd`.
+const CLAUDE_STATUS: &[&str] = &["/workspace/current_dir", "/cwd"];
+
+/// Every dialect `--harness` names; the first is the default.
+pub(crate) const DIALECTS: &[Dialect] = &[
+    Dialect {
+        id: "claude-code",
+        session: &["/session_id"],
+        cwd: &["/cwd"],
+        status_cwd: CLAUDE_STATUS,
+        reply: CLAUDE_REPLY,
+        deaf: &[],
+    },
+    Dialect {
+        id: "codex",
+        session: &["/session_id"],
+        cwd: &["/cwd"],
+        status_cwd: &["/cwd"],
+        reply: CLAUDE_REPLY,
+        deaf: &[],
+    },
+    Dialect {
+        id: "gemini-cli",
+        session: &["/session_id"],
+        cwd: &["/cwd"],
+        status_cwd: &["/cwd"],
+        reply: Reply::HookSpecific {
+            session_start: "SessionStart",
+            user_prompt_submit: "BeforeAgent",
+        },
+        // Headless, Gemini CLI puts a SessionStart context in front of the
+        // prompt, so `gemini -p "/cmd"` is no longer a command; BeforeAgent
+        // appends after the command is expanded, and hears everything.
+        deaf: &[Event::SessionStart],
+    },
+    Dialect {
+        id: "qwen-code",
+        session: &["/session_id"],
+        cwd: &["/cwd"],
+        status_cwd: CLAUDE_STATUS,
+        reply: CLAUDE_REPLY,
+        deaf: &[],
+    },
+    Dialect {
+        id: "github-copilot",
+        session: &["/sessionId", "/session_id"],
+        cwd: &["/cwd"],
+        status_cwd: CLAUDE_STATUS,
+        reply: Reply::Field("additionalContext"),
+        // A config-file userPromptSubmitted hook's output is dropped.
+        deaf: &[Event::UserPromptSubmit],
+    },
+    Dialect {
+        id: "droid",
+        session: &["/session_id"],
+        cwd: &["/cwd"],
+        // Its status-line JSON is undocumented.
+        status_cwd: &["/cwd", "/workspace/current_dir"],
+        reply: CLAUDE_REPLY,
+        deaf: &[],
+    },
+    Dialect {
+        id: "deepseek-harness",
+        session: &["/session_id"],
+        cwd: &["/cwd"],
+        status_cwd: &["/cwd"],
+        reply: CLAUDE_REPLY,
+        deaf: &[],
+    },
+    Dialect {
+        id: "cursor",
+        session: &["/session_id", "/conversation_id"],
+        // A hook runs from the plugin's directory and is given no `cwd`.
+        cwd: &["/workspace_roots/0", "/cwd"],
+        status_cwd: &["/cwd", "/workspace/current_dir", "/workspace/project_dir"],
+        reply: Reply::Field("additional_context"),
+        // beforeSubmitPrompt takes only `continue` and `user_message`.
+        deaf: &[Event::UserPromptSubmit],
+    },
+    Dialect {
+        id: "antigravity",
+        session: &["/conversationId"],
+        cwd: &["/workspacePaths/0", "/cwd"],
+        status_cwd: &["/cwd", "/workspacePaths/0", "/workspace/current_dir"],
+        reply: Reply::InjectSteps,
+        deaf: &[],
+    },
+    Dialect {
+        id: "kiro",
+        session: &["/session_id"],
+        cwd: &["/cwd"],
+        status_cwd: &["/cwd"],
+        reply: Reply::Plain,
+        deaf: &[],
+    },
+    Dialect {
+        id: "hermes",
+        session: &["/session_id"],
+        cwd: &["/cwd"],
+        status_cwd: &["/cwd"],
+        reply: Reply::Field("context"),
+        // Only pre_llm_call injects context; on_session_start observes.
+        deaf: &[Event::SessionStart],
+    },
+    Dialect {
+        id: "generic",
+        session: &["/session_id", "/sessionId"],
+        cwd: &["/cwd"],
+        status_cwd: &["/cwd"],
+        reply: Reply::Field("context"),
+        deaf: &[],
+    },
+];
+
+/// The dialect `--harness` names; Claude Code's without one.
+pub(crate) fn dialect(id: Option<&str>) -> Result<&'static Dialect, String> {
+    let id = id.unwrap_or("claude-code");
+    DIALECTS.iter().find(|d| d.id == id).ok_or_else(|| {
+        let known: Vec<&str> = DIALECTS.iter().map(|d| d.id).collect();
+        format!(
+            "unknown harness {id:?}; printed nothing (known: {})",
+            known.join(", ")
+        )
+    })
+}
+
+/// The first of `paths` in `input` that holds a non-empty string.
+fn first_str<'a>(input: &'a Value, paths: &[&str]) -> Option<&'a str> {
+    paths
+        .iter()
+        .filter_map(|path| input.pointer(path).and_then(Value::as_str))
+        .find(|text| !text.is_empty())
+}
+
+impl Dialect {
+    /// The hook's stdout for `lines` of context at `event`.
+    fn render(&self, event: Event, lines: &[String]) -> String {
+        let text = lines.join("\n");
+        let output = match &self.reply {
+            Reply::HookSpecific {
+                session_start,
+                user_prompt_submit,
+            } => serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": match event {
+                        Event::SessionStart => session_start,
+                        Event::UserPromptSubmit => user_prompt_submit,
+                    },
+                    "additionalContext": text,
+                }
+            }),
+            Reply::Field(key) => serde_json::json!({ *key: text }),
+            // An ephemeral message at either event: the documented shapes of
+            // a system message disagree with each other.
+            Reply::InjectSteps => serde_json::json!({
+                "injectSteps": [{"ephemeralMessage": text}]
+            }),
+            Reply::Plain => return format!("{text}\n"),
+        };
+        format!("{output}\n")
+    }
 }
 
 /// Print `outcome`'s text, if any; a failure is a note on stderr. Exit 0
@@ -324,31 +557,38 @@ fn ask_server(root: &Path, globals: &Globals, inbox_of: Option<&str>) -> Result<
     ))
 }
 
-/// A hook's stdout for `event`, given its JSON `input`: `None` when there
-/// is nothing new, or no yard.
+/// A hook's stdout for `event`, given Claude Code's JSON `input`: `None`
+/// when there is nothing new, or no yard.
+#[cfg(test)]
 pub(crate) fn hook_output(
     event: &str,
     input: &str,
     env: &dyn Fn(&str) -> Option<String>,
     cwd: &Path,
 ) -> Result<Option<String>, String> {
-    let name = match event {
-        "session-start" => "SessionStart",
-        "user-prompt-submit" => "UserPromptSubmit",
-        other => {
-            return Err(format!(
-                "unknown event {other:?}; expected session-start or user-prompt-submit"
-            ))
-        }
-    };
+    hook_output_as(&DIALECTS[0], event, input, env, cwd)
+}
+
+/// A hook's stdout for `event` in `dialect`, given the harness's JSON
+/// `input`: `None` when there is nothing new, no yard, or the harness
+/// drops what this event prints.
+pub(crate) fn hook_output_as(
+    dialect: &Dialect,
+    event: &str,
+    input: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+    cwd: &Path,
+) -> Result<Option<String>, String> {
+    let event = Event::parse(event)?;
     // Without the hook's JSON there is no session to remember for.
     let input = parse(input);
     if !input.is_object() {
         return Err("standard input is not a hook's JSON object; printed nothing".into());
     }
-    let dir = input["cwd"]
-        .as_str()
-        .map_or_else(|| cwd.to_path_buf(), PathBuf::from);
+    if dialect.deaf.contains(&event) {
+        return Ok(None);
+    }
+    let dir = first_str(&input, dialect.cwd).map_or_else(|| cwd.to_path_buf(), PathBuf::from);
     let Some(source) = source(&dir, env)? else {
         return Ok(None);
     };
@@ -356,7 +596,7 @@ pub(crate) fn hook_output(
     let Some(glance) = look(&source, branch.as_deref())? else {
         return Ok(None);
     };
-    let session = session_file_name(input["session_id"].as_str().unwrap_or_default());
+    let session = session_file_name(first_str(&input, dialect.session).unwrap_or_default());
     // For a server's repository too: only `.branchyard/hooks/` is made here.
     let path = glance::state_dir(source.root())
         .join("hooks")
@@ -374,13 +614,7 @@ pub(crate) fn hook_output(
     if lines.is_empty() {
         return Ok(None);
     }
-    let output = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": name,
-            "additionalContext": capped(lines).join("\n"),
-        }
-    });
-    Ok(Some(format!("{output}\n")))
+    Ok(Some(dialect.render(event, &capped(lines))))
 }
 
 /// What a session has been told: the last message id shown, and each
@@ -464,7 +698,7 @@ fn inbox_lines(glance: &Glance, branch: &str, cursor: Option<&Cursor>) -> (Vec<S
 /// Branches whose state a person acts on and that changed since this
 /// session's last hook call. On a session's first call, only what needs an
 /// answer now (asking, blocked, a plan to approve) and a count of what is
-/// running or ready: older endings are not news.
+/// running, ready or failed: older endings are not news one by one.
 fn change_lines(glance: &Glance, cursor: Option<&Cursor>) -> (Vec<String>, Cursor) {
     let mut next = Cursor::default();
     let mut changed = Vec::new();
@@ -498,6 +732,11 @@ fn change_lines(glance: &Glance, cursor: Option<&Cursor>) -> (Vec<String>, Curso
         }
         if counts.ready > 0 {
             parts.push(format!("{} ready to integrate", counts.ready));
+        }
+        // Counted as the status line counts them, since each still waits on
+        // a decision (retry or discard), though its ending is old news.
+        if counts.failed > 0 {
+            parts.push(format!("{} failed", counts.failed));
         }
         if !parts.is_empty() {
             lines.push(format!("Branchyard: {} (by ls).", parts.join(", ")));
@@ -580,16 +819,26 @@ fn plural(n: usize) -> &'static str {
 }
 
 /// The status line for Claude Code's JSON `input`: `None` outside a yard.
+#[cfg(test)]
 pub(crate) fn status_line(
     input: &str,
     env: &dyn Fn(&str) -> Option<String>,
     cwd: &Path,
 ) -> Result<Option<String>, String> {
+    status_line_as(&DIALECTS[0], input, env, cwd)
+}
+
+/// The status line for `dialect`'s JSON `input`, its directory read from
+/// the harness's own field, else this process's: `None` outside a yard.
+pub(crate) fn status_line_as(
+    dialect: &Dialect,
+    input: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+    cwd: &Path,
+) -> Result<Option<String>, String> {
     let input = parse(input);
-    let dir = input["workspace"]["current_dir"]
-        .as_str()
-        .or_else(|| input["cwd"].as_str())
-        .map_or_else(|| cwd.to_path_buf(), PathBuf::from);
+    let dir =
+        first_str(&input, dialect.status_cwd).map_or_else(|| cwd.to_path_buf(), PathBuf::from);
     let Some(source) = source(&dir, env)? else {
         return Ok(None);
     };
@@ -645,6 +894,123 @@ mod tests {
         assert_eq!(shown[MAX_LINES - 1], "- ... and 9 more (by ls)");
         assert_eq!(line("a\nb"), "a b");
         assert_eq!(line(&"x".repeat(500)).chars().count(), MAX_LINE);
+    }
+
+    #[test]
+    fn each_dialect_answers_in_its_harness_shape() {
+        let ids: BTreeSet<&str> = DIALECTS.iter().map(|d| d.id).collect();
+        assert_eq!(ids.len(), DIALECTS.len(), "ids are unique");
+        assert_eq!(dialect(None).unwrap().id, "claude-code");
+        let unknown = dialect(Some("nope")).unwrap_err();
+        assert!(unknown.starts_with("unknown harness \"nope\""), "{unknown}");
+        assert!(!unknown.contains('\n'), "{unknown}");
+
+        let lines = ["a".to_owned(), "b \"c\"".to_owned()];
+        let said = |id: &str, event| dialect(Some(id)).unwrap().render(event, &lines);
+        use Event::{SessionStart as Start, UserPromptSubmit as Prompt};
+        let claude = |name: &str| {
+            format!(
+                "{{\"hookSpecificOutput\":{{\"hookEventName\":\"{name}\",\
+                 \"additionalContext\":\"a\\nb \\\"c\\\"\"}}}}\n"
+            )
+        };
+        for id in [
+            "claude-code",
+            "codex",
+            "qwen-code",
+            "droid",
+            "deepseek-harness",
+        ] {
+            assert_eq!(said(id, Start), claude("SessionStart"), "{id}");
+            assert_eq!(said(id, Prompt), claude("UserPromptSubmit"), "{id}");
+        }
+        assert_eq!(said("gemini-cli", Start), claude("SessionStart"));
+        assert_eq!(said("gemini-cli", Prompt), claude("BeforeAgent"));
+        assert_eq!(
+            said("github-copilot", Start),
+            "{\"additionalContext\":\"a\\nb \\\"c\\\"\"}\n"
+        );
+        assert_eq!(
+            said("cursor", Start),
+            "{\"additional_context\":\"a\\nb \\\"c\\\"\"}\n"
+        );
+        for event in [Start, Prompt] {
+            assert_eq!(
+                said("antigravity", event),
+                "{\"injectSteps\":[{\"ephemeralMessage\":\"a\\nb \\\"c\\\"\"}]}\n"
+            );
+        }
+        assert_eq!(said("kiro", Prompt), "a\nb \"c\"\n");
+        for id in ["hermes", "generic"] {
+            assert_eq!(
+                said(id, Prompt),
+                "{\"context\":\"a\\nb \\\"c\\\"\"}\n",
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_dialect_finds_its_session_and_directory() {
+        let found = |id: &str, input: Value| {
+            let d = dialect(Some(id)).unwrap();
+            (
+                first_str(&input, d.session).map(str::to_owned),
+                first_str(&input, d.cwd).map(str::to_owned),
+                first_str(&input, d.status_cwd).map(str::to_owned),
+            )
+        };
+        let some = |s: &str| Some(s.to_owned());
+        assert_eq!(
+            found(
+                "github-copilot",
+                serde_json::json!({"sessionId": "s", "cwd": "/r"})
+            ),
+            (some("s"), some("/r"), some("/r"))
+        );
+        assert_eq!(
+            found(
+                "cursor",
+                serde_json::json!({"conversation_id": "c", "workspace_roots": ["/r", "/o"]})
+            ),
+            (some("c"), some("/r"), None)
+        );
+        assert_eq!(
+            found(
+                "antigravity",
+                serde_json::json!({"conversationId": "c", "workspacePaths": ["/r"]})
+            ),
+            (some("c"), some("/r"), some("/r"))
+        );
+        // An empty field is no field: the next one is read.
+        assert_eq!(
+            found(
+                "claude-code",
+                serde_json::json!({"session_id": "", "workspace": {"current_dir": ""}, "cwd": "/r"})
+            ),
+            (None, some("/r"), some("/r"))
+        );
+    }
+
+    #[test]
+    fn a_harness_that_drops_an_events_output_is_told_nothing_there() {
+        let dir = branchyard_testkit::Scratch::new("hook-deaf");
+        let none = |_: &str| None;
+        for (id, event) in [
+            ("github-copilot", "user-prompt-submit"),
+            ("cursor", "user-prompt-submit"),
+            ("hermes", "session-start"),
+            ("gemini-cli", "session-start"),
+        ] {
+            let d = dialect(Some(id)).unwrap();
+            assert_eq!(
+                hook_output_as(d, event, "{}", &none, dir.path()),
+                Ok(None),
+                "{id}"
+            );
+            // The event and the input are still checked.
+            assert!(hook_output_as(d, "stop", "{}", &none, dir.path()).is_err());
+        }
     }
 
     #[test]

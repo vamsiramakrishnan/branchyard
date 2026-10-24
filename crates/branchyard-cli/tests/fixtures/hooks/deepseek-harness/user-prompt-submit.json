@@ -1,0 +1,7 @@
+{
+  "session_id": "session-67e59601-4c76-40e0-9d8a-c9fad2916038",
+  "transcript_path": "",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "If your context contains a note starting with 'Branchyard:', repeat that note verbatim; otherwise reply NONE.",
+  "cwd": "@CWD@"
+}

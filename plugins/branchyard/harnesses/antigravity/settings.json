@@ -1,0 +1,7 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "command -v by >/dev/null 2>&1 && by statusline --harness antigravity || true",
+    "stack_with_default": true
+  }
+}

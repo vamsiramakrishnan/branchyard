@@ -1,0 +1,12 @@
+harness = "kiro"
+binaries = ["kiro-cli", "kiro"]
+provides = ["hooks"]
+
+[[file]]
+from = "harnesses/kiro/branchyard.json"
+to = "~/.kiro/hooks/branchyard.json"
+how = "write"
+at = ""
+
+[[note]]
+text = "Global hooks in ~/.kiro/hooks/ are read by Kiro CLI V3. For the Kiro IDE, copy the same file to .kiro/hooks/branchyard.json in the repository."
