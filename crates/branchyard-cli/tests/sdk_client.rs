@@ -4,8 +4,11 @@
 //! packages the connector bundles, delegation is allowed, and
 //! `tests/sdk_client_e2e.py` drives a surface's conversation through the
 //! client (grants given and narrowed, a branch that lives on, the busy
-//! policies, idempotency, typed refusals). Hermetic; skipped without
-//! `python3`.
+//! policies, idempotency, typed refusals), then one real call or more per
+//! family of the rest of the API (discovery, services and inventory,
+//! knowledge, scratch locks, the effect ledger and undo, task records, a
+//! map, a trigger's secret, Web Push without the companion). Hermetic;
+//! skipped without `python3`.
 
 use std::fs;
 use std::io::{BufRead, BufReader};

@@ -42,7 +42,7 @@ The server registers <!-- fact:http.route_count -->90<!-- /fact --> routes; each
 | Rewind to a checkpoint | `Branch::rewind` | `rewind --to N` | yes, the same note, question and output | `POST …/rewind` (`RewindRequest`, `Rewound`), not an operation: it holds the branch while it runs | `rewind` | no: not a delegation operation |
 | Try a branch in this checkout | `Yard::try_on`, `try_off`, `try_status`, `try_recover` | `try`, `try --off`, `try --status` | no: the server's checkout is not yours; refused | no | no | no |
 | Compare attempts | `Yard::compare`, `fan_branches`, `diff_between`; `compare_attempt`, `mark_unique`, `diff_files` | `compare` | yes, but not `--check` or `--diff` | from branches, events and diffs | the same | no |
-| Watch and act from a phone ([companion](companion.md)) | n/a | `serve --app`, `serve token new --link` | n/a | `/app/`, the same API under the caller's scopes | `Client::me` | no |
+| Watch and act from a phone ([companion](companion.md)) | n/a | `serve --app`, `serve token new --link` | n/a | `/app/`, the same API under the caller's scopes | `Client::me`; Python `Client.me`, `push_info`, `subscribe_push`, `unsubscribe_push`, `test_push` | no |
 
 ## Task options
 
@@ -113,9 +113,9 @@ See [storage](storage.md). Reads follow the delegation tree: a branch reads what
 | Create a scratch area | `Yard::create_scratch` | `scratch create NAME` | yes | `POST …/scratch` | `Repo::create_scratch` | `create_scratch` |
 | List reachable scratch areas | `Yard::scratch_areas` | `scratch list` | yes | `GET …/scratch` | `Repo::scratch_areas` | `list_scratch` |
 | Share a scratch area | `Yard::share_scratch` | `scratch share NAME --to BRANCH` | yes | `POST …/scratch/{name}/share` | `Repo::share_scratch` | `share_scratch` |
-| Acquire a scratch area's writer lock | `Yard::lock_scratch` | `scratch lock NAME` | yes | `POST …/scratch/{name}/lock` | `Repo::lock_scratch` | `lock_scratch` |
-| Release a scratch area's writer lock | `Yard::unlock_scratch` | `scratch unlock NAME` | yes | `POST …/scratch/{name}/unlock` | `Repo::unlock_scratch` | `unlock_scratch` |
-| A scratch area's lock state | `Yard::scratch_lock_state` | n/a | n/a | `GET /v1/repos/{repo}/scratch/{name}/lock` | `Repo::scratch_lock_state` | n/a |
+| Acquire a scratch area's writer lock | `Yard::lock_scratch` | `scratch lock NAME` | yes | `POST …/scratch/{name}/lock` | `Repo::lock_scratch`; Python `Repo.lock_scratch` | `lock_scratch` |
+| Release a scratch area's writer lock | `Yard::unlock_scratch` | `scratch unlock NAME` | yes | `POST …/scratch/{name}/unlock` | `Repo::unlock_scratch`; Python `Repo.unlock_scratch` | `unlock_scratch` |
+| A scratch area's lock state | `Yard::scratch_lock_state` | n/a | n/a | `GET /v1/repos/{repo}/scratch/{name}/lock` | `Repo::scratch_lock_state`; Python `Repo.scratch_lock_state` | n/a |
 | A turn's authorized scratch areas | n/a: set automatically | `BRANCHYARD_SCRATCH_<NAME>` (local), a mount (Microsandbox); none (Substrate) | n/a: the server has no turn's environment to expose to a remote caller | n/a | n/a | same |
 
 A remote caller reaches the scratch area's directory only through `lock`/`unlock` and whatever harnesses the server runs; there is no route that reads or writes its files directly (see `docs/storage.md`).
@@ -454,7 +454,7 @@ Tasks started on a schedule or by a signed webhook; see [triggers](triggers.md).
 | Create a trigger (cron, interval, GitHub, Slack, Linear or generic events) | no: a server object (`branchyard_server::triggers`) | `trigger add`, on the store `by serve` uses | yes | `POST /v1/triggers` | `create_trigger` | no: a harness has no server credential; the `by` command outside a harness |
 | List, show | no | `trigger list`, `show` | yes, the tenant's | `GET /v1/triggers`, `/{t}` | `triggers`, `trigger` | no |
 | Test (conditions, precheck, the rendered task; creates nothing) | no | `trigger test [--event FILE] [--precheck]` (the precheck at your terminal) | yes (`--precheck` where the server allows prechecks) | `POST /v1/triggers/{t}/test` | `test_trigger` | no |
-| Enable, disable, remove, set the secret | no | `trigger enable`, `disable`, `rm`, `secret` | yes | `POST …/enable`, `…/disable`, `…/secret`, `DELETE /v1/triggers/{t}` | `enable_trigger`, `disable_trigger`, `set_trigger_secret`, `remove_trigger` | no |
+| Enable, disable, remove, set the secret | no | `trigger enable`, `disable`, `rm`, `secret` | yes | `POST …/enable`, `…/disable`, `…/secret`, `DELETE /v1/triggers/{t}` | `enable_trigger`, `disable_trigger`, `set_trigger_secret`, `remove_trigger`; Python `enable_trigger`, `set_trigger_secret`, `delete_trigger` | no |
 | Runs | no | `trigger runs` | yes | `GET /v1/triggers/{t}/runs` | `trigger_runs` | no |
 | Receive a webhook | no | through `by serve`'s listener | n/a | `POST /v1/triggers/{id}/fire`, signed, no bearer token | n/a | n/a |
 
@@ -588,9 +588,9 @@ See [wide map](map.md), which has the full surface table for the server.
 
 | Operation | SDK | by | by --remote | HTTP | client | delegation |
 |---|---|---|---|---|---|---|
-| Run a map | `Yard::map(MapSpec, &MapOptions)` → `MapReport`; `MapProgress` per item | `map PROMPT --items FILE\|--from-command CMD\|stdin [--schema F] [--out F] ...` | the same; routing refused | `POST /v1/repos/{repo}/maps` (`MapRequest`) → `Operation` of kind `map` | `Repo::submit_map` | no |
-| Resume a map | `Yard::map_spec`, then `Yard::map` | `map resume NAME [--retry-failed]` (the recorded command line and items) | the server's recorded request | `POST .../maps/{name}/resume` (`MapResumeRequest`) | `Repo::resume_map` | no |
-| List, show, forget | `Yard::maps`, `map_report`, `remove_map` | `map ls\|show NAME\|rm NAME`; `ls` adds a `maps` section; `show NAME` shows a map when no branch has the name; `watch`'s header | the same (no `watch` line) | `GET .../maps`, `GET\|DELETE .../maps/{name}` | `Repo::maps`, `map`, `remove_map` | no |
+| Run a map | `Yard::map(MapSpec, &MapOptions)` → `MapReport`; `MapProgress` per item | `map PROMPT --items FILE\|--from-command CMD\|stdin [--schema F] [--out F] ...` | the same; routing refused | `POST /v1/repos/{repo}/maps` (`MapRequest`) → `Operation` of kind `map` | `Repo::submit_map`; Python `Repo.map` | no |
+| Resume a map | `Yard::map_spec`, then `Yard::map` | `map resume NAME [--retry-failed]` (the recorded command line and items) | the server's recorded request | `POST .../maps/{name}/resume` (`MapResumeRequest`) | `Repo::resume_map`; Python `Repo.resume_map` | no |
+| List, show, forget | `Yard::maps`, `map_report`, `remove_map` | `map ls\|show NAME\|rm NAME`; `ls` adds a `maps` section; `show NAME` shows a map when no branch has the name; `watch`'s header | the same (no `watch` line) | `GET .../maps`, `GET\|DELETE .../maps/{name}` | `Repo::maps`, `map`, `remove_map`; Python `maps`, `map_report`, `remove_map` | no |
 | Items, templates, answers, tables | `parse_map_items`, `ItemFormat`, `MapItem`, `map_item_id`, `check_map_template`, `render_map_prompt`, `parse_map_answer`, `JsonSchema`, `map_rows_csv`, `map_rows_jsonl`, `map_item_prompt`, `map_follow_up_prompt`, `map_reduce_prompt`, `check_map_spec`, `map_default_name` | n/a | n/a | n/a | n/a | no |
 
 | Surface | Before | Now |
@@ -700,8 +700,8 @@ Every connector call that changes the world is decided, written to a ledger befo
 | Answer an ask | `Yard::answer_approval` | `approvals allow\|deny ID\|--branch B [--reason]`; `A`, `D` in `by watch` | yes | `POST …/approvals/{id}/allow\|deny` (`ApprovalAnswerRequest`) | `Repo::answer_approval` | `Delegate::answer_approval`, the MCP `answer_approval` tool, `by approvals` in its shell; descendants only |
 | The ledger | `Yard::effects`, `effect`, `effect_history` | `effects [--branch B] [show ID] [--json]` | yes | `GET …/effects[?branch=]`, `GET …/effects/{id}` | `Repo::effects`, `effect` | no |
 | Promote a staged effect | `Yard::promote_effect`, `promote_staged` | `effects promote ID`; `merge --promote-effects` | yes | `POST …/effects/{id}/promote` | `Repo::promote_effect` | no |
-| Reconcile | `Yard::reconcile_effects`, `reconcile_effects_at` | `effects reconcile` | yes | `POST …/effects/reconcile` | `Repo::reconcile_effects` | no |
-| Undo | `Yard::undo_plan`, `undo_plan_at`, `undo_effects`, `undo_effects_at`; `effects::undo::render` | `undo BRANCH [--to N] [--plan] [--only ID...] [--yes] [--json]`; `rewind` notes what it leaves upstream | upstream only | `GET\|POST …/branches/{b}/undo` (`UndoRequest`, `UndoReport`) | `Repo::undo_plan`, `undo` | no |
+| Reconcile | `Yard::reconcile_effects`, `reconcile_effects_at` | `effects reconcile` | yes | `POST …/effects/reconcile` | `Repo::reconcile_effects`; Python `Repo.reconcile_effects` | no |
+| Undo | `Yard::undo_plan`, `undo_plan_at`, `undo_effects`, `undo_effects_at`; `effects::undo::render` | `undo BRANCH [--to N] [--plan] [--only ID...] [--yes] [--json]`; `rewind` notes what it leaves upstream | upstream only | `GET\|POST …/branches/{b}/undo` (`UndoRequest`, `UndoReport`) | `Repo::undo_plan`, `undo`; Python the same names | no |
 
 | Surface | Before | Now |
 |---|---|---|
@@ -772,6 +772,7 @@ A third-party surface (a Slack or Discord bot, a web app, a scheduler) drives `b
 | `Repo.rewind(branch, to)` → `Rewound`, `Repo.fork(..., at=N)`, `with repo.stream() as stream` | none; raw `client.request` | the client's `rewind` and `ForkRequest::at`, with `unknown_checkpoint` a `NotFoundError` and `checkpoint_unavailable` a `ConflictError`; the stream closes when the block ends |
 | `branchyard.wait(branch, timeout)` (the in-harness module) | took `poll`, ignored since the wait became `by wait` | no `poll`: a call that passes it is a `TypeError` |
 | Which routes the Python client lacks | unchecked | `RouteParity` in `tests/test_sdk_client.py`: every server route (`docs/facts.json`) is reached by a method, checked against a recorder, or excused with its reason ([SDKs](sdk.md#the-rest-of-the-api)) |
+| The routes `branchyard-client` had and the Python client did not (maps, task records, knowledge and distilling, undo and reconciling, scratch locks, a trigger's secret, services, inventory, discovery, Web Push) | excused in `RouteParity` as Rust-only; `client.request` | a method each on `Repo` or `Client`, under the Rust names where Python has no clash (`map`, `map_report`, `task_records`, `task_record`, `knowledge`, `add_knowledge`, ..., `undo_plan`, `undo`, `lock_scratch`, `well_known`, `inventory`, `services`, `register_service`, `push_info`, `subscribe_push`, ...); `unknown_knowledge` and `unknown_message` are `NotFoundError`, `service_held` a `ConflictError`; only routes that are not a client's stay excused |
 
 ## Added with the borrowed designs
 

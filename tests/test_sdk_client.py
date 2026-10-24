@@ -32,6 +32,8 @@ import branchyard_client as bc  # noqa: E402
 
 TOKEN = "secret-token"
 REPO = "/v1/repos/app"
+# Routes the fake answers without the token, as the server does.
+PUBLIC = ("/.well-known/branchyard",)
 
 
 def _error(code: str, message: str = "", detail: dict | None = None) -> dict:
@@ -130,7 +132,7 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/healthz":
             self._send(200, b"ok")
             return
-        if headers.get("authorization") != f"Bearer {TOKEN}":
+        if headers.get("authorization") != f"Bearer {TOKEN}" and url.path not in PUBLIC:
             self._send(401, _error("unauthorized", "no token"))
             return
         if url.path == f"{REPO}/events/stream":
@@ -1063,6 +1065,267 @@ class Checkpoints(ServerCase):
         self.assertEqual(raised.exception.code, "unknown_checkpoint")
 
 
+class Maps(ServerCase):
+    def test_a_map_is_an_operation_whose_items_carry_their_ids_and_whose_task_is_a_tasks(self):
+        self.fake.always("POST", f"{REPO}/maps", 202, self.op("op1", "queued", kind="map", branches=[]))
+        op = self.app.map(
+            "Triage {{item.title}}",
+            [{"id": "a", "title": "one"}, {"id": 7, "title": "two"}],
+            name="triage",
+            schema={"type": "object"},
+            concurrency=2,
+            harness="codex",
+            budget_usd=0.5,
+            connectors=["github:read"],
+        )
+        self.assertEqual((op.id, op.kind), ("op1", "map"))
+        ((_method, _path, headers, body),) = self.requests("POST", f"{REPO}/maps")
+        self.assertEqual(len(headers["idempotency-key"]), 32)
+        self.assertEqual(
+            body["items"],
+            [{"id": "a", "value": {"id": "a", "title": "one"}}, {"id": "7", "value": {"id": 7, "title": "two"}}],
+        )
+        self.assertEqual((body["name"], body["schema"], body["concurrency"]), ("triage", {"type": "object"}, 2))
+        self.assertEqual(
+            body["task"],
+            {
+                "prompt": "Triage {{item.title}}",
+                "harness": "codex",
+                "budget": {"max_usd": 0.5},
+                "isolated": True,
+                "provision": {"connectors": [{"connector": "github", "operations": ["*"], "mode": "read"}]},
+            },
+        )
+        for absent in ("retries", "remove_done", "retry_failed", "reduce"):
+            self.assertNotIn(absent, body)
+        # A dict gives the ids; a value without one is refused here.
+        self.app.map("p", {"x": 1, "y": [2]})
+        self.assertEqual(
+            self.requests("POST", f"{REPO}/maps")[1][3]["items"], [{"id": "x", "value": 1}, {"id": "y", "value": [2]}]
+        )
+        for bad in ([{"title": "no id"}], ["plain"], [{"id": True}], [{"id": " "}]):
+            with self.assertRaises(ValueError):
+                self.app.map("p", bad)
+        self.assertEqual(len(self.requests("POST", f"{REPO}/maps")), 2)
+
+    def test_maps_are_resumed_listed_shown_and_forgotten(self):
+        self.fake.answer("POST", f"{REPO}/maps/triage/resume", (202, self.op("op2", "queued", kind="map")))
+        self.fake.answer("GET", f"{REPO}/maps", (200, {"maps": [{"name": "triage", "total": 2, "done": 1}]}))
+        self.fake.answer("GET", f"{REPO}/maps/triage", (200, {"name": "triage", "rows": [], "columns": ["result"]}))
+        self.fake.answer("DELETE", f"{REPO}/maps/triage", (200, {"removed": "triage"}))
+        self.assertEqual(self.app.resume_map("triage", retry_failed=True, key="k1").id, "op2")
+        ((_m, _p, headers, body),) = self.requests("POST", f"{REPO}/maps/triage/resume")
+        self.assertEqual((headers["idempotency-key"], body), ("k1", {"retry_failed": True}))
+        self.assertEqual([(m.name, m.done) for m in self.app.maps()], [("triage", 1)])
+        self.assertEqual(self.app.map_report("triage").columns, ["result"])
+        self.assertIsNone(self.app.remove_map("triage"))
+
+    def test_task_records_are_listed_and_one_is_found_by_its_key(self):
+        view = {"id": "t-1234", "prompt": "fix", "attempts": [{"branch": "fix"}]}
+        self.fake.answer("GET", f"{REPO}/task-records", (200, {"tasks": [view]}))
+        self.fake.answer("GET", f"{REPO}/task-records/t-12", (200, view), (404, _error("not_found", "no task")))
+        self.assertEqual([t.id for t in self.app.task_records()], ["t-1234"])
+        self.assertEqual(self.app.task_record("t-12").attempts, [{"branch": "fix"}])
+        with self.assertRaises(bc.NotFoundError):
+            self.app.task_record("t-12")
+
+    def test_map_refusals_are_typed(self):
+        self.fake.answer("POST", f"{REPO}/maps", (400, _error("invalid_request", "a map takes no task.plan")))
+        self.fake.answer("POST", f"{REPO}/maps/old/resume", (400, _error("invalid_request", "not started here")))
+        with self.assertRaises(bc.InvalidRequestError):
+            self.app.map("p", {"a": 1}, plan=True)
+        with self.assertRaises(bc.InvalidRequestError):
+            self.app.resume_map("old")
+
+
+class Knowledge(ServerCase):
+    ENTRY: ClassVar[dict] = {
+        "id": 3,
+        "scope": {"path": "src/**"},
+        "text": "Run the parser tests",
+        "source": {"from": "person", "name": "ana"},
+        "status": "adopted",
+        "created_ms": 1,
+    }
+
+    def test_entries_are_added_listed_decided_edited_exported_and_removed(self):
+        entry = self.ENTRY
+        self.fake.answer("POST", f"{REPO}/knowledge", (200, entry), (200, dict(entry, status="proposed")))
+        self.fake.answer("GET", f"{REPO}/knowledge", (200, {"entries": [entry]}))
+        self.fake.answer("GET", f"{REPO}/knowledge/3", (200, entry))
+        self.fake.answer("POST", f"{REPO}/knowledge/3/adopt", (200, entry))
+        self.fake.answer("POST", f"{REPO}/knowledge/3/reject", (200, dict(entry, status="rejected")))
+        self.fake.answer("POST", f"{REPO}/knowledge/3/edit", (200, dict(entry, text="new")))
+        self.fake.answer("DELETE", f"{REPO}/knowledge/3", (200, entry))
+        self.fake.answer(
+            "GET", f"{REPO}/knowledge/export", (200, {"markdown": "- Run the parser tests\n", "entries": [3]})
+        )
+        self.fake.answer("POST", f"{REPO}/branches/b/distill", (200, {"branch": "b", "proposed": [entry]}))
+
+        self.assertEqual(self.app.add_knowledge("Run the parser tests", path="src/**").id, 3)
+        self.assertEqual(self.app.add_knowledge("Maybe", propose=True).status, "proposed")
+        first, second = (r[3] for r in self.requests("POST", f"{REPO}/knowledge"))
+        self.assertEqual(first, {"text": "Run the parser tests", "scope": {"path": "src/**"}})
+        self.assertEqual(second, {"text": "Maybe", "propose": True})
+        self.assertEqual([e.id for e in self.app.knowledge(status="adopted")], [3])
+        self.assertEqual(self.requests("GET", f"{REPO}/knowledge")[0][1], f"{REPO}/knowledge?status=adopted")
+        self.assertEqual(self.app.knowledge_entry(3).scope, {"path": "src/**"})
+        self.app.adopt_knowledge(3)
+        self.assertEqual(self.app.reject_knowledge(3, reason="stale").status, "rejected")
+        self.assertEqual(self.app.edit_knowledge(3, text="new", kind="").text, "new")
+        self.assertEqual(self.app.remove_knowledge(3).id, 3)
+        self.assertEqual(self.app.export_knowledge().entries, [3])
+        self.assertEqual(self.app.distill("b").proposed[0]["id"], 3)
+        self.assertEqual(self.requests("POST", f"{REPO}/knowledge/3/adopt")[0][3], {})
+        self.assertEqual(self.requests("POST", f"{REPO}/knowledge/3/reject")[0][3], {"reason": "stale"})
+        # `""` clears a field, so it is sent; an absent one is not.
+        self.assertEqual(self.requests("POST", f"{REPO}/knowledge/3/edit")[0][3], {"text": "new", "kind": ""})
+        self.assertEqual(self.requests("POST", f"{REPO}/branches/b/distill")[0][3], {})
+        for method, path in (
+            ("POST", f"{REPO}/knowledge"),
+            ("POST", f"{REPO}/knowledge/3/adopt"),
+            ("POST", f"{REPO}/knowledge/3/edit"),
+            ("POST", f"{REPO}/branches/b/distill"),
+        ):
+            self.assertEqual(len(self.requests(method, path)[0][2]["idempotency-key"]), 32, path)
+
+    def test_an_unknown_entry_is_not_found_and_a_bad_scope_is_invalid(self):
+        self.fake.answer("GET", f"{REPO}/knowledge/9", (404, _error("unknown_knowledge", "no knowledge entry 9")))
+        self.fake.answer("POST", f"{REPO}/knowledge", (422, _error("unsupported", "not a usable path glob")))
+        with self.assertRaises(bc.NotFoundError) as missing:
+            self.app.knowledge_entry(9)
+        self.assertEqual(missing.exception.code, "unknown_knowledge")
+        with self.assertRaises(bc.BranchyardError) as bad:
+            self.app.add_knowledge("x", path="[")
+        self.assertEqual((bad.exception.code, bad.exception.status), ("unsupported", 422))
+
+
+class Fleet(ServerCase):
+    SERVICE: ClassVar[dict] = {"id": "s1", "kind": "model_gateway", "health": "healthy", "endpoints": []}
+
+    def test_discovery_needs_no_token(self):
+        public = {"service": "branchyard", "api": "/v1", "repos": ["app"], "services": []}
+        self.fake.answer("GET", "/.well-known/branchyard", (200, public))
+        self.assertEqual(self.client.well_known().repos, ["app"])
+        ((_m, _p, headers, _b),) = self.requests("GET", "/.well-known/branchyard")
+        self.assertNotIn("authorization", headers)
+
+    def test_services_are_listed_registered_deregistered_and_reclaimed(self):
+        self.fake.answer("GET", "/v1/services", (200, {"services": [self.SERVICE]}))
+        self.fake.answer("POST", "/v1/services", (200, self.SERVICE))
+        self.fake.answer("DELETE", "/v1/services/s1", (200, self.SERVICE), (409, _error("service_held", "held")))
+        self.fake.answer("POST", "/v1/services/gc", (200, {"services": [self.SERVICE]}))
+        self.fake.answer("GET", "/v1/inventory", (200, {"workers": [{"id": "w1", "this": True, "inventory": None}]}))
+        self.assertEqual([s.id for s in self.client.services(kind="model_gateway")], ["s1"])
+        self.assertEqual(self.requests("GET", "/v1/services")[0][1], "/v1/services?kind=model_gateway")
+        self.client.register_service(
+            "model_gateway", id="s1", capabilities={"models": ["m"]}, endpoints=[{"url": "http://x"}], ttl_seconds=60
+        )
+        ((_m, _p, headers, body),) = self.requests("POST", "/v1/services")
+        self.assertEqual(
+            body,
+            {
+                "id": "s1",
+                "kind": "model_gateway",
+                "capabilities": {"models": ["m"]},
+                "endpoints": [{"url": "http://x"}],
+                "ttl_seconds": 60,
+            },
+        )
+        self.assertEqual(len(headers["idempotency-key"]), 32)
+        self.assertEqual(self.client.deregister_service("s1").kind, "model_gateway")
+        with self.assertRaises(bc.ConflictError) as held:
+            self.client.deregister_service("s1")
+        self.assertEqual(held.exception.code, "service_held")
+        self.assertEqual([s.id for s in self.client.reclaim_services()], ["s1"])
+        (worker,) = self.client.inventory()
+        self.assertTrue(worker.this)
+        self.assertIsNone(worker.inventory)
+
+    def test_admin_routes_without_the_scope_are_denied(self):
+        self.fake.answer("POST", "/v1/services/gc", (403, _error("scope_required", "", {"scope": "admin"})))
+        with self.assertRaises(bc.DeniedError) as denied:
+            self.client.reclaim_services()
+        self.assertEqual(denied.exception.detail, {"scope": "admin"})
+
+
+class Undo(ServerCase):
+    def test_reconcile_and_undo_plan_and_undo(self):
+        self.fake.answer("POST", f"{REPO}/effects/reconcile", (200, {"settled": [["e1", "performed"]], "unknown": []}))
+        self.fake.answer("GET", f"{REPO}/branches/b/undo", (200, {"branch": "b", "to": 1, "reversible": []}))
+        self.fake.always("POST", f"{REPO}/branches/b/undo", 200, {"plan": {"branch": "b"}, "outcomes": []})
+        self.assertEqual(self.app.reconcile_effects().settled, [["e1", "performed"]])
+        self.assertEqual(self.requests("POST", f"{REPO}/effects/reconcile")[0][3], {})
+        self.assertEqual(self.app.undo_plan("b", to=1).to, 1)
+        self.assertEqual(self.requests("GET", f"{REPO}/branches/b/undo")[0][1], f"{REPO}/branches/b/undo?to=1")
+        self.assertEqual(self.app.undo("b", only=["e1"]).outcomes, [])
+        self.app.undo("b", to=2)
+        every, later = self.requests("POST", f"{REPO}/branches/b/undo")
+        self.assertEqual(every[3], {"to": 0, "only": ["e1"]})
+        self.assertEqual(later[3], {"to": 2})
+        self.assertEqual(len(every[2]["idempotency-key"]), 32)
+
+    def test_undo_of_an_unknown_branch_is_not_found(self):
+        self.fake.answer("POST", f"{REPO}/branches/nope/undo", (404, _error("unknown_branch")))
+        with self.assertRaises(bc.NotFoundError):
+            self.app.undo("nope")
+
+
+class ScratchLocks(ServerCase):
+    LOCK: ClassVar[dict] = {"name": "cache", "holder_branch": "b", "acquired_at": 5}
+
+    def test_a_lock_is_taken_released_and_read(self):
+        self.fake.answer("POST", f"{REPO}/branches/b/scratch/cache/lock", (200, self.LOCK))
+        self.fake.answer("POST", f"{REPO}/branches/b/scratch/cache/unlock", (200, {"ok": True}))
+        self.fake.answer("GET", f"{REPO}/scratch/cache/lock", (200, {"lock": self.LOCK}), (200, {}))
+        self.assertEqual(self.app.lock_scratch("b", "cache", key="k1").holder_branch, "b")
+        ((_m, _p, headers, body),) = self.requests("POST", f"{REPO}/branches/b/scratch/cache/lock")
+        self.assertEqual((headers["idempotency-key"], body), ("k1", {}))
+        self.assertIsNone(self.app.unlock_scratch("b", "cache"))
+        self.assertEqual(self.app.scratch_lock_state("cache"), self.LOCK)
+        self.assertIsNone(self.app.scratch_lock_state("cache"))
+
+    def test_a_lock_another_turn_holds_is_running(self):
+        self.fake.answer("POST", f"{REPO}/branches/c/scratch/cache/lock", (409, _error("running", "held by b")))
+        with self.assertRaises(bc.RunningError):
+            self.app.lock_scratch("c", "cache")
+
+
+class TriggerSecretsAndPush(ServerCase):
+    def test_a_trigger_secret_is_set_or_generated(self):
+        self.fake.answer("POST", "/v1/triggers/hook/secret", (200, {}), (200, {"secret": "generated"}))
+        self.assertIsNone(self.client.set_trigger_secret("hook", "mine").secret)
+        self.assertEqual(self.client.set_trigger_secret("hook").secret, "generated")
+        given, generated = self.requests("POST", "/v1/triggers/hook/secret")
+        self.assertEqual((given[3], generated[3]), ({"secret": "mine"}, {}))
+        self.assertEqual(len(given[2]["idempotency-key"]), 32)
+
+    def test_web_push_is_described_subscribed_tested_and_unsubscribed(self):
+        info = {"enabled": True, "public_key": "BPk", "services": ["push.example"], "subscriptions": [], "kinds": []}
+        self.fake.answer("GET", "/v1/app/push", (200, info))
+        self.fake.answer("POST", "/v1/app/push/subscriptions", (200, {"subscriptions": 1, "delivered": 0}))
+        self.fake.answer("POST", "/v1/app/push/test", (200, {"subscriptions": 1, "delivered": 1}))
+        self.fake.answer("DELETE", "/v1/app/push/subscriptions", (200, {"subscriptions": 0, "delivered": 0}))
+        self.assertEqual(self.client.push_info().public_key, "BPk")
+        endpoint = "https://push.example/e1"
+        self.assertEqual(self.client.subscribe_push(endpoint, "p", "a", kinds=["approval"]).subscriptions, 1)
+        self.assertEqual(
+            self.requests("POST", "/v1/app/push/subscriptions")[0][3],
+            {"endpoint": endpoint, "keys": {"p256dh": "p", "auth": "a"}, "kinds": ["approval"]},
+        )
+        self.assertEqual(self.client.test_push().delivered, 1)
+        self.assertEqual(self.client.unsubscribe_push(endpoint).subscriptions, 0)
+        self.assertEqual(self.requests("DELETE", "/v1/app/push/subscriptions")[0][3], {"endpoint": endpoint})
+
+    def test_push_on_a_server_that_sends_none_is_not_allowed(self):
+        self.fake.answer("POST", "/v1/app/push/subscriptions", (403, _error("push_not_enabled")))
+        self.fake.answer("GET", "/v1/app/push", (404, _error("not_found", "no such route")))
+        with self.assertRaises(bc.NotAllowedError):
+            self.client.subscribe_push("https://push.example/e1", "p", "a")
+        with self.assertRaises(bc.NotFoundError):
+            self.client.push_info()
+
+
 class GrantsAndNames(unittest.TestCase):
     def test_a_grant_round_trips_between_the_flag_and_the_object(self):
         cases = {
@@ -1456,47 +1719,50 @@ COVERED: dict[str, list[Callable[[bc.Client, bc.Repo], Any]]] = {
     "/v1/triggers/{t}/enable": [lambda c, _r: c.enable_trigger("t")],
     "/v1/triggers/{t}/runs": [lambda c, _r: c.trigger_runs("t")],
     "/v1/triggers/{t}/test": [lambda c, _r: c.test_trigger("t")],
+    "/v1/triggers/{t}/secret": [lambda c, _r: c.set_trigger_secret("t")],
+    "/.well-known/branchyard": [lambda c, _r: c.well_known()],
+    "/v1/inventory": [lambda c, _r: c.inventory()],
+    "/v1/services": [lambda c, _r: c.services(), lambda c, _r: c.register_service("model_gateway")],
+    "/v1/services/gc": [lambda c, _r: c.reclaim_services()],
+    "/v1/services/{id}": [lambda c, _r: c.deregister_service("s1")],
+    "/v1/app/push": [lambda c, _r: c.push_info()],
+    "/v1/app/push/subscriptions": [
+        lambda c, _r: c.subscribe_push("https://push.example/e", "p", "a"),
+        lambda c, _r: c.unsubscribe_push("https://push.example/e"),
+    ],
+    "/v1/app/push/test": [lambda c, _r: c.test_push()],
+    "/v1/repos/{repo}/maps": [lambda _c, r: r.map("p", {"a": 1}), lambda _c, r: r.maps()],
+    "/v1/repos/{repo}/maps/{name}": [lambda _c, r: r.map_report("m"), lambda _c, r: r.remove_map("m")],
+    "/v1/repos/{repo}/maps/{name}/resume": [lambda _c, r: r.resume_map("m")],
+    "/v1/repos/{repo}/task-records": [lambda _c, r: r.task_records()],
+    "/v1/repos/{repo}/task-records/{task}": [lambda _c, r: r.task_record("t1")],
+    "/v1/repos/{repo}/knowledge": [lambda _c, r: r.knowledge(), lambda _c, r: r.add_knowledge("x")],
+    "/v1/repos/{repo}/knowledge/export": [lambda _c, r: r.export_knowledge()],
+    "/v1/repos/{repo}/knowledge/{id}": [lambda _c, r: r.knowledge_entry(1), lambda _c, r: r.remove_knowledge(1)],
+    "/v1/repos/{repo}/knowledge/{id}/adopt": [lambda _c, r: r.adopt_knowledge(1)],
+    "/v1/repos/{repo}/knowledge/{id}/edit": [lambda _c, r: r.edit_knowledge(1, text="x")],
+    "/v1/repos/{repo}/knowledge/{id}/reject": [lambda _c, r: r.reject_knowledge(1)],
+    "/v1/repos/{repo}/branches/{branch}/distill": [lambda _c, r: r.distill("b")],
+    "/v1/repos/{repo}/effects/reconcile": [lambda _c, r: r.reconcile_effects()],
+    "/v1/repos/{repo}/branches/{branch}/undo": [lambda _c, r: r.undo_plan("b"), lambda _c, r: r.undo("b")],
+    "/v1/repos/{repo}/branches/{branch}/scratch/{name}/lock": [lambda _c, r: r.lock_scratch("b", "s")],
+    "/v1/repos/{repo}/branches/{branch}/scratch/{name}/unlock": [lambda _c, r: r.unlock_scratch("b", "s")],
+    "/v1/repos/{repo}/scratch/{name}/lock": [lambda _c, r: r.scratch_lock_state("s")],
 }
 
 NOT_A_CLIENT_ROUTE = "not a client route: neither SDK calls it"
-RUST_ONLY = "branchyard-client has it; the Python client does not yet (client.request reaches it)"
 
 # The routes the Python client has no method for, and why.
 EXCUSED: dict[str, str] = {
-    "/.well-known/branchyard": f"{RUST_ONLY}: Client::discovery, which by pair and the companion use",
-    "/.well-known/jwks.json": f"{NOT_A_CLIENT_ROUTE}: the gateway's keys, read by Anvil",
-    "/app": f"{NOT_A_CLIENT_ROUTE}: the companion web app's pages",
-    "/app/": f"{NOT_A_CLIENT_ROUTE}: the companion web app's pages",
-    "/app/pair": f"{NOT_A_CLIENT_ROUTE}: the companion web app's pairing page",
-    "/app/{file}": f"{NOT_A_CLIENT_ROUTE}: the companion web app's files",
+    "/.well-known/jwks.json": f"{NOT_A_CLIENT_ROUTE}: the gateway's verification keys, read by Anvil",
+    "/app": f"{NOT_A_CLIENT_ROUTE}: the companion web app's pages, for a browser",
+    "/app/": f"{NOT_A_CLIENT_ROUTE}: the companion web app's pages, for a browser",
+    "/app/pair": f"{NOT_A_CLIENT_ROUTE}: the companion's pairing, a phone redeeming a one-time code for "
+    "a token of its own; a client already holds one",
+    "/app/{file}": f"{NOT_A_CLIENT_ROUTE}: the companion web app's files, for a browser",
     "/metrics": f"{NOT_A_CLIENT_ROUTE}: Prometheus scrapes it",
-    "/v1/app/push": f"{RUST_ONLY}: Web Push, a browser's concern",
-    "/v1/app/push/subscriptions": f"{RUST_ONLY}: Web Push, a browser's concern",
-    "/v1/app/push/test": f"{RUST_ONLY}: Web Push, a browser's concern",
-    "/v1/inventory": f"{RUST_ONLY}: Client::inventory",
-    "/v1/services": f"{RUST_ONLY}: the fleet's services (admin)",
-    "/v1/services/gc": f"{RUST_ONLY}: the fleet's services (admin)",
-    "/v1/services/{id}": f"{RUST_ONLY}: the fleet's services (admin)",
     "/v1/triggers/{t}/fire": f"{NOT_A_CLIENT_ROUTE}: a webhook sender's, signed rather than bearer-authenticated",
     "/v1/triggers/{t}/fire/{token}": f"{NOT_A_CLIENT_ROUTE}: a webhook sender's, its token in the path",
-    "/v1/triggers/{t}/secret": f"{RUST_ONLY}: Client::set_trigger_secret",
-    "/v1/repos/{repo}/branches/{branch}/distill": f"{RUST_ONLY}: knowledge (Repo::distill)",
-    "/v1/repos/{repo}/knowledge": f"{RUST_ONLY}: knowledge",
-    "/v1/repos/{repo}/knowledge/export": f"{RUST_ONLY}: knowledge",
-    "/v1/repos/{repo}/knowledge/{id}": f"{RUST_ONLY}: knowledge",
-    "/v1/repos/{repo}/knowledge/{id}/adopt": f"{RUST_ONLY}: knowledge",
-    "/v1/repos/{repo}/knowledge/{id}/edit": f"{RUST_ONLY}: knowledge",
-    "/v1/repos/{repo}/knowledge/{id}/reject": f"{RUST_ONLY}: knowledge",
-    "/v1/repos/{repo}/maps": f"{RUST_ONLY}: maps (Repo::map, maps)",
-    "/v1/repos/{repo}/maps/{name}": f"{RUST_ONLY}: maps",
-    "/v1/repos/{repo}/maps/{name}/resume": f"{RUST_ONLY}: maps",
-    "/v1/repos/{repo}/task-records": f"{RUST_ONLY}: Repo::tasks",
-    "/v1/repos/{repo}/task-records/{task}": f"{RUST_ONLY}: Repo::task_record",
-    "/v1/repos/{repo}/effects/reconcile": f"{RUST_ONLY}: Repo::reconcile_effects",
-    "/v1/repos/{repo}/branches/{branch}/undo": f"{RUST_ONLY}: Repo::undo_plan, undo",
-    "/v1/repos/{repo}/branches/{branch}/scratch/{name}/lock": f"{RUST_ONLY}: scratch locks",
-    "/v1/repos/{repo}/branches/{branch}/scratch/{name}/unlock": f"{RUST_ONLY}: scratch locks",
-    "/v1/repos/{repo}/scratch/{name}/lock": f"{RUST_ONLY}: scratch locks (the holder)",
 }
 
 
@@ -1517,7 +1783,7 @@ class RouteParity(unittest.TestCase):
         self.assertEqual(sorted(self.routes - set(COVERED) - set(EXCUSED)), [], "routes neither covered nor excused")
         self.assertEqual(sorted((set(COVERED) | set(EXCUSED)) - self.routes), [], "routes the server no longer has")
         for route, reason in EXCUSED.items():
-            self.assertTrue(reason.startswith((NOT_A_CLIENT_ROUTE, RUST_ONLY)), route)
+            self.assertTrue(reason.startswith(NOT_A_CLIENT_ROUTE), route)
 
     def test_each_covered_route_is_what_its_method_requests(self) -> None:
         client = bc.Client("http://127.0.0.1:9", TOKEN)

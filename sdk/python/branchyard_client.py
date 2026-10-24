@@ -154,7 +154,8 @@ class UnauthorizedError(BranchyardError):
 
 class NotFoundError(BranchyardError):
     """`unknown_repo`, `unknown_branch`, `unknown_operation`,
-    `unknown_trigger` or `not_found`: no such thing, or another tenant's."""
+    `unknown_trigger`, `unknown_checkpoint`, `unknown_knowledge`,
+    `unknown_message` or `not_found`: no such thing, or another tenant's."""
 
 
 class DeniedError(BranchyardError):
@@ -201,7 +202,8 @@ class RunningError(BranchyardError):
 class ConflictError(BranchyardError):
     """An engine refusal: `branch_exists`, `no_candidate`, `target_moved`,
     `conflict`, `dirty_target`, `already_merged`, `fenced`,
-    `detached_head`, `trigger_exists`, `no_plan`, `stale_revision`."""
+    `detached_head`, `trigger_exists`, `no_plan`, `stale_revision`,
+    `checkpoint_unavailable`, `service_held`."""
 
 
 class CheckFailedError(BranchyardError):
@@ -261,6 +263,8 @@ _BY_CODE: dict[str, Callable[..., BranchyardError]] = {
     "unknown_operation": NotFoundError,
     "unknown_trigger": NotFoundError,
     "unknown_checkpoint": NotFoundError,
+    "unknown_knowledge": NotFoundError,
+    "unknown_message": NotFoundError,
     "denied": DeniedError,
     "scope_required": DeniedError,
     "repo_not_allowed": DeniedError,
@@ -293,6 +297,7 @@ _BY_CODE: dict[str, Callable[..., BranchyardError]] = {
     "no_plan": ConflictError,
     "stale_revision": ConflictError,
     "checkpoint_unavailable": ConflictError,
+    "service_held": ConflictError,
     "check_failed": CheckFailedError,
     "check_timed_out": CheckFailedError,
     "check_not_started": CheckFailedError,
@@ -1061,6 +1066,115 @@ class Client:
     def trigger_runs(self, name_or_id: str, limit: Optional[int] = None) -> list[Record]:
         return [Record(r) for r in self.get(f"/v1/triggers/{_q(name_or_id)}/runs", limit=limit).get("runs", [])]
 
+    def set_trigger_secret(self, name_or_id: str, secret: Optional[str] = None, key: Optional[str] = None) -> Record:
+        """`POST /v1/triggers/{t}/secret`: set the webhook secret, or
+        generate one when `secret` is None. Returns `{"secret"?}`: the
+        generated secret, shown once; nothing for one you gave."""
+        body = _drop_none({"secret": secret})
+        return Record(self.post(f"/v1/triggers/{_q(name_or_id)}/secret", body, key=key or new_key()))
+
+    # -- the fleet ---------------------------------------------------------
+
+    def well_known(self) -> Record:
+        """`GET /.well-known/branchyard`, without the token: what this
+        server is (`service`, `version`, `api`, `jwks_uri` when it has
+        connectors, `services_uri`), the served `repos`, the `scopes` a
+        token may carry, and the live `services`' `id`, `kind`,
+        `capabilities` and `health`, not their endpoints or owners."""
+        return Record(self.request("GET", "/.well-known/branchyard", headers={"Authorization": None}))
+
+    def inventory(self) -> list[Record]:
+        """`GET /v1/inventory`: the live workers serving the caller's
+        repositories, the answering server's first (`this`), each with
+        `id`, `host`, `labels`, `repos`, `seen_ms_ago` and `inventory`, the
+        harnesses its machine has (None when it advertises nothing)."""
+        return [Record(w) for w in self.get("/v1/inventory").get("workers", [])]
+
+    def services(self, kind: Optional[str] = None) -> list[Record]:
+        """`GET /v1/services`: the fleet's service records, workers among
+        them, of `kind` when given, with endpoints, owners, health and
+        leases (`docs/registry.md`). The `read` scope."""
+        return [Record(s) for s in self.get("/v1/services", kind=kind).get("services", [])]
+
+    def register_service(
+        self,
+        kind: str,
+        *,
+        id: Optional[str] = None,
+        capabilities: Optional[JSON] = None,
+        endpoints: Optional[Sequence[JSON]] = None,
+        health: Optional[str] = None,
+        weight: Optional[int] = None,
+        ttl_seconds: Optional[int] = None,
+    ) -> Record:
+        """`POST /v1/services`: register a service of `kind` in the fleet's
+        registry, or renew one this caller registered (the same `id`; a
+        fresh one when absent). `capabilities` maps names to a flag, a
+        number, a text or a list of texts; `health` is `healthy` (the
+        default), `degraded`, `starting` or `unhealthy`; the lease is
+        `ttl_seconds` (30 by default, at most a day). The `admin` scope. A
+        live record another principal holds is `ConflictError`
+        (`service_held`). Returns the stored record."""
+        body = _drop_none(
+            {
+                "id": id,
+                "kind": kind,
+                "capabilities": capabilities,
+                "endpoints": list(endpoints or ()),
+                "health": health,
+                "weight": weight,
+                "ttl_seconds": ttl_seconds,
+            }
+        )
+        return Record(self.post("/v1/services", body, key=new_key()))
+
+    def deregister_service(self, id: str) -> Record:
+        """`DELETE /v1/services/{id}`: deregister a service this caller
+        registered; the record as it was left. `ConflictError`
+        (`service_held`) when it is not live or another principal holds
+        it, `NotFoundError` when there is none. The `admin` scope."""
+        return Record(self.delete(f"/v1/services/{_q(id)}"))
+
+    def reclaim_services(self) -> list[Record]:
+        """`POST /v1/services/gc`: expire and reclaim now the services whose
+        lease ran out, as the server does on its recovery interval; those
+        it expired. The `admin` scope."""
+        return [Record(s) for s in self.post("/v1/services/gc", {}, key=new_key()).get("services", [])]
+
+    # -- Web Push ----------------------------------------------------------
+
+    def push_info(self) -> Record:
+        """`GET /v1/app/push` (`docs/companion.md`): whether the server
+        sends Web Push notifications (`enabled`), the VAPID `public_key` a
+        subscription is made with, the push `services` an endpoint may
+        name, this token's `subscriptions` (their endpoints) and the
+        `kinds` a notification can be about. `NotFoundError` when the
+        server runs no companion."""
+        return Record(self.get("/v1/app/push"))
+
+    def subscribe_push(self, endpoint: str, p256dh: str, auth: str, kinds: Sequence[str] = ()) -> Record:
+        """`POST /v1/app/push/subscriptions`: notify a push subscription
+        (a browser's `PushSubscription.toJSON()`: its `endpoint` and its
+        `keys.p256dh` and `keys.auth`, base64url) for this token, of
+        `kinds` (every kind when empty). `NotAllowedError`
+        (`push_not_enabled`) on a server that sends none. Returns
+        `{"subscriptions": N}`, this token's count now."""
+        body: JSON = {"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}}
+        if kinds:
+            body["kinds"] = list(kinds)
+        return Record(self.post("/v1/app/push/subscriptions", body))
+
+    def unsubscribe_push(self, endpoint: str) -> Record:
+        """`DELETE /v1/app/push/subscriptions`: stop notifying `endpoint`,
+        if this token subscribed it. `{"subscriptions": N}`."""
+        return Record(self.request("DELETE", "/v1/app/push/subscriptions", {"endpoint": endpoint}))
+
+    def test_push(self) -> Record:
+        """`POST /v1/app/push/test`: a notification to this token's own
+        subscriptions: `subscriptions`, `delivered` (those a push service
+        accepted) and `failures`, one line each."""
+        return Record(self.post("/v1/app/push/test", {}))
+
 
 def _q(part: str) -> str:
     return urllib.parse.quote(part, safe="")
@@ -1324,27 +1438,104 @@ class Repo:
         `budget_usd` is `budget.max_usd`. `delegation` is the envelope
         `{max_depth, max_children, harnesses}`, with which the harness may
         spawn children, each given at most this branch's grant."""
-        body: JSON = {
-            "prompt": prompt,
-            "harness": harness,
-            "harnesses": list(harnesses or ()),
-            "name": name,
-            "base": base,
-            "budget": _budget(budget, budget_usd),
-            "policy": policy,
-            "check": list(check) if check is not None else None,
-            "isolated": bool(connectors) if isolated is None else isolated,
-            "provision": _provision(provision, connectors),
-            "delegation": delegation,
-            "allow_delegation": allow_delegation,
-            "provider": provider,
-            "seats": seats,
-            "priority": priority,
-            "plan": plan,
-            "goal": goal,
-        }
-        body.update(extra)
+        body = _task_body(
+            prompt,
+            harness=harness,
+            harnesses=harnesses,
+            name=name,
+            base=base,
+            budget=budget,
+            budget_usd=budget_usd,
+            policy=policy,
+            check=check,
+            isolated=isolated,
+            connectors=connectors,
+            provision=provision,
+            delegation=delegation,
+            allow_delegation=allow_delegation,
+            provider=provider,
+            seats=seats,
+            priority=priority,
+            plan=plan,
+            goal=goal,
+            **extra,
+        )
         return self.client._operation(f"{self._base}/tasks", body, key)
+
+    # -- maps and task records ---------------------------------------------
+
+    def map(
+        self,
+        prompt: str,
+        items: Union[Sequence[Any], dict[str, Any]],
+        *,
+        name: Optional[str] = None,
+        schema: Optional[JSON] = None,
+        concurrency: Optional[int] = None,
+        retries: Optional[int] = None,
+        total_usd: Optional[float] = None,
+        reduce: Optional[str] = None,
+        remove_done: bool = False,
+        retry_failed: bool = False,
+        key: Optional[str] = None,
+        **task: Any,
+    ) -> Operation:
+        """`POST .../maps`: a wide map (`docs/map.md`), one branch per item
+        running the `prompt` template, as one operation of kind `map`; like
+        `by map`. `items` is a list of values, each with an `id` field (a
+        string or a whole number), or a dict from id to value: a rerun of
+        the map `name` (default: a slug of the prompt) skips the items it
+        has done by their ids. `schema` is the JSON Schema every answer must
+        match; `task` is every branch's options as `task` takes them
+        (`harness`, `budget_usd`, `connectors`, ...), without `name`,
+        `harnesses`, `seats`, `plan` or `goal`. A value without an id is
+        refused here (`ValueError`): the default id is a BLAKE3 digest,
+        which the standard library cannot compute."""
+        body: JSON = {
+            "name": name,
+            "items": _map_items(items),
+            "schema": schema,
+            "concurrency": concurrency,
+            "retries": retries,
+            "total_usd": total_usd,
+            "reduce": reduce,
+            "remove_done": remove_done,
+            "retry_failed": retry_failed,
+            "task": _drop_none(_task_body(prompt, **task)),
+        }
+        return self.client._operation(f"{self._base}/maps", body, key)
+
+    def resume_map(self, name: str, *, retry_failed: bool = False, key: Optional[str] = None) -> Operation:
+        """`POST .../maps/{name}/resume`: run a recorded map again with the
+        request that started it, its done items skipped and, with
+        `retry_failed`, its failed ones run again. A map started outside
+        this server's API is refused (`InvalidRequestError`)."""
+        return self.client._operation(f"{self._base}/maps/{_q(name)}/resume", {"retry_failed": retry_failed}, key)
+
+    def maps(self) -> list[Record]:
+        """The recorded maps (`MapSummary`): `name`, `prompt`, `total`,
+        `done`, `failed`, `pending`, `running`, `spent_usd`, ..."""
+        return [Record(m) for m in self.client.get(f"{self._base}/maps").get("maps", [])]
+
+    def map_report(self, name: str) -> Record:
+        """A recorded map's progress and rows (`MapReport`): the counts,
+        `columns`, `rows` (each item's latest), `reduce`; like `by map
+        show`."""
+        return Record(self.client.get(f"{self._base}/maps/{_q(name)}"))
+
+    def remove_map(self, name: str) -> None:
+        """Forget a map's record; its branches stay."""
+        self.client.delete(f"{self._base}/maps/{_q(name)}")
+
+    def task_records(self) -> list[Record]:
+        """The repository's tasks, oldest first, each with its attempts
+        (`TaskView`, `docs/task-repos.md`); like `by task ls`."""
+        return [Record(t) for t in self.client.get(f"{self._base}/task-records").get("tasks", [])]
+
+    def task_record(self, task: str) -> Record:
+        """The task `task` names: its ID, a prefix of at least four
+        characters, or one of its attempts; like `by task show`."""
+        return Record(self.client.get(f"{self._base}/task-records/{_q(task)}"))
 
     def send(
         self,
@@ -1679,6 +1870,67 @@ class Repo:
     def reject_plan(self, branch: str, reason: str, replan: bool = False, key: Optional[str] = None) -> Operation:
         return self.client._operation(self._branch(branch, "/plan/reject"), {"reason": reason, "replan": replan}, key)
 
+    # -- knowledge ---------------------------------------------------------
+
+    def _knowledge(self, rest: str = "") -> str:
+        return f"{self._base}/knowledge{rest}"
+
+    def knowledge(self, status: Optional[str] = None) -> list[Record]:
+        """The repository's knowledge entries (`docs/knowledge.md`), or
+        those of `status` (`proposed`, `adopted` or `rejected`); like `by
+        knowledge list`. Each `KnowledgeEntry` has `id`, `scope`
+        (`{"path"?, "kind"?}`), `text`, `source`, `status`, `created_ms`,
+        and `adopted_by`, `decided_ms` and `note` once decided."""
+        return [Record(e) for e in self.client.get(self._knowledge(), status=status).get("entries", [])]
+
+    def knowledge_entry(self, id: int) -> Record:
+        """One entry; `NotFoundError` (`unknown_knowledge`) when there is
+        none."""
+        return Record(self.client.get(self._knowledge(f"/{id}")))
+
+    def add_knowledge(
+        self, text: str, *, path: Optional[str] = None, kind: Optional[str] = None, propose: bool = False
+    ) -> Record:
+        """Add an entry as the caller, scoped to files matching the glob
+        `path` and to tasks of `kind` when given (the whole repository
+        otherwise): adopted at once, or only proposed with `propose`; like
+        `by knowledge add`. The `run` scope."""
+        body = _drop_none({"text": text, "scope": _drop_none({"path": path, "kind": kind}), "propose": propose})
+        return Record(self.client.post(self._knowledge(), body, key=new_key()))
+
+    def adopt_knowledge(self, id: int) -> Record:
+        """Adopt a proposed entry as the caller; from the next turn on, it
+        is given to the harnesses whose branches it matches."""
+        return Record(self.client.post(self._knowledge(f"/{id}/adopt"), {}, key=new_key()))
+
+    def reject_knowledge(self, id: int, reason: Optional[str] = None) -> Record:
+        return Record(self.client.post(self._knowledge(f"/{id}/reject"), _drop_none({"reason": reason}), key=new_key()))
+
+    def edit_knowledge(
+        self, id: int, *, text: Optional[str] = None, path: Optional[str] = None, kind: Optional[str] = None
+    ) -> Record:
+        """Change an entry's `text`, `path` or `kind`, each when given; `""`
+        clears `path` or `kind`."""
+        body = {k: v for k, v in {"text": text, "path": path, "kind": kind}.items() if v is not None}
+        return Record(self.client.post(self._knowledge(f"/{id}/edit"), body, key=new_key()))
+
+    def remove_knowledge(self, id: int) -> Record:
+        """Remove an entry; the entry as it was."""
+        return Record(self.client.delete(self._knowledge(f"/{id}")))
+
+    def export_knowledge(self) -> Record:
+        """The adopted entries as an `AGENTS.md`-style file: `markdown`,
+        and `entries`, their ids."""
+        return Record(self.client.get(self._knowledge("/export")))
+
+    def distill(self, branch: str) -> Record:
+        """Propose entries from `branch` with the deterministic extractor
+        (the corrections sent into it, review comments), adopting none;
+        like `by knowledge distill`. A harness distiller runs only where
+        `by knowledge distill --harness` does. `Distilled`: `branch`,
+        `proposed` (the new entries), `duplicates`, `by`, `trigger`."""
+        return Record(self.client.post(self._branch(branch, "/distill"), {}, key=new_key()))
+
     # -- approvals and effects ---------------------------------------------
 
     def approvals(self, all: bool = False) -> list[Approval]:
@@ -1715,6 +1967,30 @@ class Repo:
     def promote_effect(self, effect_id: str) -> Effect:
         return Effect(self.client.post(f"{self._base}/effects/{_q(effect_id)}/promote", {}))
 
+    def reconcile_effects(self) -> Record:
+        """Reconcile the ledger now, as the server does on its own interval
+        (`docs/effects.md`); like `by effects reconcile`. `Reconciled`:
+        `settled`, `[id, state]` pairs, and `unknown`, `[id, why]` pairs.
+        The `run` scope."""
+        return Record(self.client.post(f"{self._base}/effects/reconcile", {}, key=new_key()))
+
+    def undo_plan(self, branch: str, to: int = 0) -> Record:
+        """What undoing `branch` to turn `to` (0: every turn) would do
+        upstream, changing nothing; like `by undo --plan`. `UndoPlan`:
+        `branch`, `to`, the effects after it as `reversible`, `compensable`,
+        `irreversible` and `unknown`, the `staged` calls, `at_ms`."""
+        return Record(self.client.get(self._branch(branch, "/undo"), to=to))
+
+    def undo(self, branch: str, to: int = 0, only: Sequence[str] = ()) -> Record:
+        """Undo, as the caller, the upstream effects of `branch`'s turns
+        after `to`: the effects `only` names, or every reversible effect and
+        staged call when it is empty. Files are not rewound (`rewind` or a
+        local `by undo` does that). `UndoReport`: `plan` and `outcomes`."""
+        body: JSON = {"to": to}
+        if only:
+            body["only"] = list(only)
+        return Record(self.client.post(self._branch(branch, "/undo"), body, key=new_key()))
+
     # -- artifacts and scratch areas ---------------------------------------
 
     def publish_artifact(
@@ -1747,12 +2023,107 @@ class Repo:
     def share_scratch(self, branch: str, name: str, to: str) -> None:
         self.client.post(self._branch(branch, f"/scratch/{_q(name)}/share"), {"to": to}, key=new_key())
 
+    def lock_scratch(self, branch: str, name: str, key: Optional[str] = None) -> Record:
+        """Acquire scratch area `name`'s writer lock for `branch`, as a
+        person acting for it; like `by scratch lock --branch`. Re-entrant
+        for its holder; `RunningError` while another branch's turn holds
+        it. `ScratchLock`: `name`, `holder_branch`, `acquired_at`."""
+        path = self._branch(branch, f"/scratch/{_q(name)}/lock")
+        return Record(self.client.post(path, {}, key=key or new_key()))
+
+    def unlock_scratch(self, branch: str, name: str, key: Optional[str] = None) -> None:
+        """Release scratch area `name`'s lock if `branch` holds it; like
+        `by scratch unlock --branch`. Nothing to do otherwise."""
+        self.client.post(self._branch(branch, f"/scratch/{_q(name)}/unlock"), {}, key=key or new_key())
+
+    def scratch_lock_state(self, name: str) -> Optional[Record]:
+        """Scratch area `name`'s writer lock, or None when none is held,
+        whether or not its turn still runs. Not scoped to a branch."""
+        lock = self.client.get(f"{self._base}/scratch/{_q(name)}/lock").get("lock")
+        return Record(lock) if isinstance(lock, dict) else None
+
     # -- surfaces ----------------------------------------------------------
 
     def surface(self, prefix: str, **defaults: Any) -> "Surface":
         """A `Surface`: one resident branch per conversation, named
         `<prefix>-<key>`, created with `defaults` (as `task` takes them)."""
         return Surface(self, prefix, **defaults)
+
+
+def _task_body(
+    prompt: str,
+    *,
+    harness: Optional[str] = None,
+    harnesses: Optional[Sequence[str]] = None,
+    name: Optional[str] = None,
+    base: Optional[str] = None,
+    budget: Optional[JSON] = None,
+    budget_usd: Optional[float] = None,
+    policy: Optional[JSON] = None,
+    check: Optional[Sequence[str]] = None,
+    isolated: Optional[bool] = None,
+    connectors: Optional[Grants] = None,
+    provision: Optional[JSON] = None,
+    delegation: Optional[JSON] = None,
+    allow_delegation: bool = False,
+    provider: Optional[JSON] = None,
+    seats: Optional[JSON] = None,
+    priority: Optional[int] = None,
+    plan: bool = False,
+    goal: Optional[JSON] = None,
+    **extra: Any,
+) -> JSON:
+    """A `TaskRequest`, as `Repo.task` and each item of `Repo.map` send it."""
+    body: JSON = {
+        "prompt": prompt,
+        "harness": harness,
+        "harnesses": list(harnesses or ()),
+        "name": name,
+        "base": base,
+        "budget": _budget(budget, budget_usd),
+        "policy": policy,
+        "check": list(check) if check is not None else None,
+        "isolated": bool(connectors) if isolated is None else isolated,
+        "provision": _provision(provision, connectors),
+        "delegation": delegation,
+        "allow_delegation": allow_delegation,
+        "provider": provider,
+        "seats": seats,
+        "priority": priority,
+        "plan": plan,
+        "goal": goal,
+    }
+    body.update(extra)
+    return body
+
+
+# The longest explicit map item id, as the server's `item_id` takes one.
+_ITEM_ID_MAX = 100
+
+
+def _map_items(items: Union[Sequence[Any], dict[str, Any]]) -> list[JSON]:
+    """`MapItem`s, `{"id", "value"}`: a dict's keys as the ids, else each
+    value's own `id` field, read as `branchyard::item_id` reads it."""
+    if isinstance(items, dict):
+        return [{"id": str(id), "value": value} for id, value in items.items()]
+    out: list[JSON] = []
+    for value in items:
+        given = value.get("id") if isinstance(value, dict) else None
+        if isinstance(given, str) and given.strip() and len(given.strip()) <= _ITEM_ID_MAX:
+            id = given.strip()
+        elif isinstance(given, int) and not isinstance(given, bool):
+            id = str(given)
+        elif given is None:
+            raise ValueError(
+                f"map item {value!r} has no id: give each an `id` field, or the items as a dict from id to value"
+            )
+        else:
+            raise ValueError(
+                f"map item {value!r}: its id must be a non-empty string of at most {_ITEM_ID_MAX} "
+                "characters or a whole number"
+            )
+        out.append({"id": id, "value": value})
+    return out
 
 
 def _budget(budget: Optional[JSON], budget_usd: Optional[float]) -> Optional[JSON]:
