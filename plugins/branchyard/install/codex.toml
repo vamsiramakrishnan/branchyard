@@ -1,5 +1,6 @@
 # What `by init plugin` installs for Codex. The plugin itself (skills and
-# the same hooks) installs with `codex plugin marketplace add`; see
+# the same hooks) installs with `codex plugin marketplace add` and
+# `codex plugin add branchyard@branchyard`; see
 # docs/harness-hooks.md. Install one or the other, not both.
 harness = "codex"
 binaries = ["codex"]
@@ -12,4 +13,4 @@ how = "merge-json"
 at = ""
 
 [[note]]
-text = "Open Codex and run /hooks to review and trust the Branchyard hooks; Codex skips hooks it has not been told to trust."
+text = "Codex runs no hook until you trust it: start codex once and choose \"Trust all and continue\" at \"Hooks need review\" (or run /hooks and press t). codex exec skips untrusted hooks without a word; for an unattended run, pass codex exec --dangerously-bypass-hook-trust."

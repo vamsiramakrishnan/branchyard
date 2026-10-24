@@ -1,9 +1,10 @@
 {
-  "session_id": "cx-1",
-  "turn_id": "t1",
-  "transcript_path": null,
+  "session_id": "01a16dba-7f5b-7dd0-b2e5-3b8f06247d92",
+  "turn_id": "01a16dba-7f83-7f52-a3d4-0c14166aa5ff",
+  "transcript_path": "/home/me/.codex/sessions/2026/10/24/rollout-2026-10-24T11-45-01-01a16dba-7f5b-7dd0-b2e5-3b8f06247d92.jsonl",
   "cwd": "@CWD@",
   "hook_event_name": "UserPromptSubmit",
-  "model": "gpt-5.5",
-  "prompt": "carry on"
+  "model": "glm-4.6",
+  "permission_mode": "bypassPermissions",
+  "prompt": "If your context contains a note starting with 'Branchyard:', repeat that note verbatim; otherwise reply NONE."
 }
