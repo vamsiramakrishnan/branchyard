@@ -1,0 +1,12 @@
+harness = "oh-my-pi"
+binaries = ["omp"]
+provides = ["hooks", "statusline"]
+
+# Oh My Pi keeps Pi's extension API, so it shares Pi's source.
+[[file]]
+from = "harnesses/pi/branchyard.ts"
+to = "~/.omp/agent/extensions/branchyard.ts"
+how = "write"
+
+[[note]]
+text = "Restart Oh My Pi, or start a new session, to load the Branchyard extension."

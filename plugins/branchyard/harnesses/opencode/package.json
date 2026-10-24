@@ -1,0 +1,13 @@
+{
+  "name": "branchyard-opencode",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Tells an OpenCode session which of the repository's Branchyard branches finished, failed, are blocked or ask. Silent without by on PATH.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./branchyard.js",
+  "exports": {
+    ".": "./branchyard.js",
+    "./server": "./branchyard.js"
+  }
+}
