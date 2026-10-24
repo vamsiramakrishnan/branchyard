@@ -89,8 +89,8 @@ fn main() -> ExitCode {
         branchyard_support::best_effort("print the help", args::command().print_help());
         return ExitCode::SUCCESS;
     };
-    // Run by a Claude Code session on every prompt and redraw: no
-    // configuration, no logging, and never a failure, whatever the
+    // Run by a Claude Code session on every prompt and redraw: the
+    // configuration only to find the yard, no logging, and never a failure, whatever the
     // repository holds (docs/harness-integration.md).
     match &command {
         Command::Hook { event } => return hook_cmd::hook(event),

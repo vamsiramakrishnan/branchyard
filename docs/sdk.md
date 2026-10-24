@@ -22,7 +22,7 @@ pip install ./sdk/python                     # from a checkout
 unzip branchyard-sdk-0.0.1.zip && pip install ./branchyard-sdk   # from the release archive
 ```
 
-`sdk/python/pyproject.toml` builds with setuptools (pip fetches it, or `--no-build-isolation` uses the one installed) and installs the two top-level modules, `branchyard` and `branchyard_client`, with no dependencies. Its version is the workspace's: `tools/package.py` refuses to build the archives when the two differ, and `tests/test_distribution.py` checks it, builds the project from the extracted archive and imports both modules from what was built. Nothing needs installing inside a harness: a delegated turn gets `branchyard.py` written to `.branchyard/sdk/python/`, first on its `PYTHONPATH` ([delegation](delegation.md#python)), so `import branchyard` works there as it did.
+`sdk/python/pyproject.toml` builds with setuptools (pip fetches it, or `--no-build-isolation` uses the one installed) and installs the two top-level modules, `branchyard` and `branchyard_client`, with no dependencies. Its version is the workspace's: `tools/package.py` refuses to build the archives when the two differ, and `tests/test_distribution.py` checks it, builds the project from the extracted archive and imports both modules from what was built. Nothing needs installing inside a harness: a delegated turn gets both modules written to `.branchyard/sdk/python/`, first on its `PYTHONPATH` ([delegation](delegation.md#python)), so `import branchyard` works there as it did, and `import branchyard_client` too.
 
 ## The HTTP client
 
@@ -38,32 +38,53 @@ branch = op.result_branches[0]
 print(branch.name, branch.state)              # "flaky-parser", "ready"
 ```
 
-`Client(url, token=..., token_file=..., ca_file=..., timeout=30)` is one server; `client.repo(name)` is one served repository, and every `Repo` method is one route of the [API reference](server.md#api-reference). Methods that start work (`task`, `send`, `fork`, `reincarnate`, `merge`, `spawn`, `integrate`, `approve_plan`, `reject_plan`) return an `Operation` and `client.wait(op, timeout=None, check=False)` waits for it, with long polls the server answers as the operation finishes (each at most 30 s, asked again until `timeout`, then `TimeoutError`); everything else returns at once. Results are `Record`s: dicts whose keys also read as attributes (`op.state`, `branch.status.state`), a missing key reading as `None`, so a newer server's fields never break an older client. `op.raw` is the plain dict.
+`Client(url, token=..., token_file=..., ca_file=..., timeout=30)` is one server; `client.repo(name)` is one served repository, and every `Repo` method is one route of the [API reference](server.md#api-reference). Methods that start work (`task`, `send`, `fork`, `reincarnate`, `merge`, `check`, `spawn`, `integrate`, `approve_plan`, `reject_plan`, `map`, `resume_map`) return an `Operation` and `client.wait(op, timeout=None, check=False)` waits for it, with long polls the server answers as the operation finishes (each at most 30 s, asked again until `timeout`, then `TimeoutError`); everything else returns at once. Results are `Record`s: dicts whose keys also read as attributes (`op.state`, `branch.status.state`), a missing key reading as `None`, so a newer server's fields never break an older client. `op.raw` is the plain dict.
 
 Every `POST` that creates an operation carries an `Idempotency-Key`, generated unless you pass `key=`: keep the key and a retry after a lost response returns the original operation (`op.replayed` is true) instead of starting another; the same key with a different body is `IdempotencyKeyReusedError` ([idempotency](server.md#idempotency)). `client.operation_by_key(key)` finds the operation a key created.
 
 ### Errors
 
-Every refusal is a `BranchyardError` subclass carrying the server's stable `code`, its `message`, its `detail` and the HTTP `status` ([errors](server.md#errors)). Catch the class, read the code when it matters.
+Every refusal is a `BranchyardError` subclass carrying the server's stable `code`, its `message`, its `detail` and the HTTP `status` ([errors](server.md#errors)). Catch the class, read the code when it matters. `kind` is the same value as `code`, by the name `by --json` gives it: `branchyard.py` raises these same classes (its names for them are these objects), mapping `by --json`'s kinds through the same table (`error_for_code`), so one `except` clause serves code inside a harness and outside it.
 
 | Exception | Codes |
 |---|---|
 | `UnauthorizedError` | `unauthorized` |
-| `NotFoundError` | `unknown_repo`, `unknown_branch`, `unknown_operation`, `unknown_trigger`, `unknown_checkpoint`, `not_found` |
+| `NotFoundError` | `unknown_repo`, `unknown_branch`, `unknown_operation`, `unknown_trigger`, `unknown_checkpoint`, `unknown_knowledge`, `unknown_message`, `not_found` |
 | `DeniedError` | `denied` (the envelope or a branch's authority refused), `scope_required`, `repo_not_allowed` |
 | `NotAllowedError` | what the server's operator did not allow: `connectors_not_configured`, `delegation_not_allowed`, `command_not_allowed`, `provider_not_allowed`, `secret_not_allowed`, `unapproved_tools_not_allowed`, ... |
 | `InvalidRequestError` | `invalid_request`, `invalid_name`, `unknown_harness`, `cursor_out_of_range`, `body_too_large`, ... |
 | `BranchBusyError` | `branch_busy`; `.holder` is the operation that holds the branch |
-| `RunningError` | `running` (a turn runs in another engine) |
-| `ConflictError` | `branch_exists`, `no_candidate`, `conflict`, `target_moved`, `already_merged`, `fenced`, `trigger_exists`, `no_plan`, `stale_revision`, `checkpoint_unavailable`, ... |
-| `CheckFailedError` | `check_failed`, `check_timed_out`, `check_not_started` |
+| `RunningError` | `running` (a turn runs in another engine; a wait that timed out) |
+| `NotRunningError`, `SteerRefusedError` | `not_running`, `steer_refused`: a steer with no turn to join, or one the turn did not take |
+| `UnsupportedError` | `unsupported`, `harness_unavailable` |
+| `ConflictError` | `branch_exists`, `no_candidate`, `conflict`, `target_moved`, `already_merged`, `fenced`, `trigger_exists`, `no_plan`, `checkpoint_unavailable`, `service_held`, `invalid_candidate`, ...; `StaleRevisionError` (`stale_revision`) is one |
+| `CheckFailedError` | `check_failed`; `CheckTimedOutError` (`check_timed_out`) and `CheckNotStartedError` (`check_not_started`) are ones. `checks`, `integrate_together`, `unsettled` and `own_work` read its `detail` |
 | `QuotaExceededError` | `quota_exceeded`, `rate_limited`; `.retry_after` when the server said |
 | `IdempotencyKeyReusedError` | `idempotency_key_reused`; `detail.operation` |
-| `ServerError` | 5xx, `shutting_down` |
+| `ServerError` | 5xx, `shutting_down`; from `by`, the kinds `git`, `io`, `state` and `harness` |
 | `OperationFailedError` | an operation that ended `failed` or `interrupted`, from `client.wait(..., check=True)` or `Reply.wait()`; `.operation` is it |
 | `TransportError` | the server could not be reached, or answered with something that is not its API |
 
 The client retries nothing but its event stream. A `TransportError` on a `POST` means the request may or may not have been admitted: retry it with the same `key`.
+
+## One API inside and outside a harness
+
+A meta-harness, code that splits work across child branches and lands what they make, can run as a harness turn (a script its harness runs) or as a service outside. `connect()` gives it the same calls in both places: inside a delegating turn (`BRANCHYARD_DELEGATION` set) it runs `branchyard.py`, acting as the turn's branch; given a `Client` or a `Repo`, or with `BRANCHYARD_REMOTE` and `BRANCHYARD_TOKEN_FILE` set (and `BRANCHYARD_REPO` when the server serves several), it speaks HTTP, acting as `branch` (default `BRANCHYARD_BRANCH`); with neither, it runs `branchyard.py` with your authority on the repository here.
+
+```python
+from branchyard_client import CheckFailedError, connect
+
+by = connect()                                  # or connect(client.repo("app"), branch="lead")
+kid = by.spawn("Make the parser test deterministic", harness="codex", name="parser", budget_usd=0.5)
+done = by.wait(kid.name, timeout=1800)          # an Inspection; RunningError past the timeout
+try:
+    by.integrate(kid.name)                      # a Merged; integrate(a, b) a MergedAll
+except CheckFailedError as error:               # the same class, kind and detail on both sides
+    by.send(kid.name, f"The check failed: {error.message}")
+by.report("parser fixed", result={"files": done.result["files"]})
+```
+
+The `Delegator` it returns has `spawn`, `send`, `steer`, `integrate`, `check`, `wait`, `wait_any`, `wait_all`, `inspect`, `events`, `report` and `report_status`, with `branchyard.py`'s argument names and order. `spawn` takes the common arguments (`harness`, `name`, `base`, `budget_usd`, `max_turns`, `check` as a command line or an argv, `seat`, `depends_on`, `after`, `model`, `result`, `why`) and passes any other to the backend's own spawn as it is. Both backends return `Record`s holding the whole answer: `BranchInfo` from `spawn` and `send`, `Inspection`, `Steer`, `Message`, `Reported`, `CheckReport`, `Waited`, and a `Record` for a `Merged` or `MergedAll`. A dict loses no field, where `branchyard.py`'s dataclasses keep only those they name. Both raise the same exceptions: over HTTP a call that is an operation is waited for, and one that fails raises the class of its error's code, with `operation` set, as the call inside would. One difference stays, and it is the server's: its spawn and send operations last until the turn they start settles, so outside, `spawn` and `send` return a settled branch, where inside they return as the turn starts.
 
 ## A surface: one branch per conversation
 
@@ -172,19 +193,43 @@ with Client.local(".") as client:     # a by serve of this process's own
 
 ## The rest of the API
 
-`Repo` also covers what the routes cover: `branches`, `branch`, `exists`, `remove`, `diff`, `children`, `graph`, `apply_graph`, `operations`, `event_page`, `wait_for` (asks again past the server's 30 s cap), [checkpoints](checkpoints.md) (`fork(branch, prompt, at=N)` forks from checkpoint N, 0 being the base, refused `unknown_checkpoint` before anything is queued; `rewind(branch, to)` resets a settled branch to one and returns a `Rewound`, `{branch, from, to, commit, session}`, at once: it is not an operation), the inbox as a branch (`inbox`, `ask`, `report`, `escalate`, `answer`), plans (`plan`, `approve_plan`, `reject_plan`), artifacts and scratch areas, and `Client` covers `repos`, `harnesses`, `me`, `healthy` and triggers (`triggers`, `trigger`, `create_trigger`, `delete_trigger`, `enable_trigger`, `test_trigger`, `trigger_runs`). `client.request(method, path, body, key=...)` is the escape hatch for a route the client has no method for; it returns the parsed JSON and raises the same typed errors. The module's docstrings are the reference; `docs/server.md` is the wire's.
+`Repo` also covers what the routes cover: `branches`, `branch`, `exists`, `remove`, `diff`, `children`, `graph`, `apply_graph`, `operations`, `event_page`, `wait_for` (asks again past the server's 30 s cap), [checkpoints](checkpoints.md) (`fork(branch, prompt, at=N)` forks from checkpoint N, 0 being the base, refused `unknown_checkpoint` before anything is queued; `rewind(branch, to)` resets a settled branch to one and returns a `Rewound`, `{branch, from, to, commit, session}`, at once: it is not an operation), the inbox as a branch (`inbox`, `ask`, `report`, `escalate`, `answer`), plans (`plan`, `approve_plan`, `reject_plan`), artifacts and scratch areas, and `Client` covers `repos`, `harnesses`, `me`, `healthy` and triggers (`triggers`, `trigger`, `create_trigger`, `delete_trigger`, `enable_trigger`, `test_trigger`, `trigger_runs`, `set_trigger_secret`). The families below are the Rust client's, under its names where Python has no clash; each `POST` carries an idempotency key, generated unless the method takes `key=`.
 
-Which routes have no method is checked: `RouteParity` in `tests/test_sdk_client.py` takes every route the server registers (`docs/facts.json`), calls the method that covers it against a recorder and checks the path it requested, or finds the route in `EXCUSED` with its reason, either not a client route (the companion's pages, `/metrics`, a trigger's webhook) or one the Rust client has and this one does not yet. A new server route fails the test until it is one or the other.
+| Family | Methods | Returns |
+|---|---|---|
+| [Maps](map.md) | `map(prompt, items, name=, schema=, concurrency=, retries=, total_usd=, reduce=, remove_done=, retry_failed=, key=, **task)`, `resume_map(name, retry_failed=, key=)`, `maps()`, `map_report(name)`, `remove_map(name)` | an `Operation` of kind `map` for the first two; `MapSummary`s, the `MapReport` |
+| [Task records](task-repos.md) | `task_records()`, `task_record(task)` (its ID, a prefix of four or more characters, or an attempt) | `TaskView`s, each with its attempts |
+| [Knowledge](knowledge.md) | `knowledge(status=)`, `knowledge_entry(id)`, `add_knowledge(text, path=, kind=, propose=)`, `adopt_knowledge(id)`, `reject_knowledge(id, reason=)`, `edit_knowledge(id, text=, path=, kind=)` (`""` clears), `remove_knowledge(id)`, `export_knowledge()`, `distill(branch)` | `KnowledgeEntry`s; `{markdown, entries}`; `Distilled` |
+| [Effects](effects.md) | `reconcile_effects()`, `undo_plan(branch, to=0)`, `undo(branch, to=0, only=())` | `Reconciled`, `UndoPlan`, `UndoReport` (`plan`, `outcomes`); files are not rewound |
+| [Scratch locks](storage.md) | `lock_scratch(branch, name, key=)`, `unlock_scratch(branch, name, key=)`, `scratch_lock_state(name)` | the `ScratchLock`; nothing; the lock or `None` |
+| [The fleet](registry.md) (on `Client`) | `well_known()` (sent without the token), `inventory()`, `services(kind=)`, `register_service(kind, id=, capabilities=, endpoints=, health=, weight=, ttl_seconds=)`, `deregister_service(id)`, `reclaim_services()` | `WellKnown`; `WorkerInventory`s; `Service`s; the registration needs the `admin` scope, and another principal's live record is `ConflictError` (`service_held`) |
+| [Web Push](companion.md) (on `Client`) | `push_info()`, `subscribe_push(endpoint, p256dh, auth, kinds=())`, `unsubscribe_push(endpoint)`, `test_push()` | `PushInfo`; `PushResult`; `NotFoundError` on a server without the companion, `NotAllowedError` (`push_not_enabled`) when it sends none |
+
+```python
+op = app.map("Find the license of {{item.repo}}", [{"id": "a", "repo": "x/a"}, {"id": "b", "repo": "x/b"}],
+             name="licenses", schema={"type": "object", "properties": {"license": {"type": "string"}}},
+             harness="codex")
+client.wait(op, check=True)
+print(app.map_report("licenses").rows)        # each item's latest row
+
+entry = app.add_knowledge("Run the parser tests before merging", path="src/parser/**")
+app.lock_scratch("build", "cache"); app.unlock_scratch("build", "cache")
+```
+
+`map`'s `items` is a list of values, each with an `id` field (a string or a whole number), or a dict from id to value; a value without an id is a `ValueError` here, since the server's default id is a BLAKE3 digest the standard library cannot compute. The rest of `map`'s keywords are every item branch's options, as `task` takes them, less `name`, `harnesses`, `seats`, `plan` and `goal`. `client.request(method, path, body, key=...)` is the escape hatch for a route the client has no method for; it returns the parsed JSON and raises the same typed errors. The module's docstrings are the reference; `docs/server.md` is the wire's.
+
+Which routes have no method is checked: `RouteParity` in `tests/test_sdk_client.py` takes every route the server registers (`docs/facts.json`), calls each method that covers it against a recorder and checks the path it requested, or finds the route in `EXCUSED` with its reason. Only routes that are not a client's are excused: the companion's pages and its pairing (a phone redeeming a code for a token of its own), `/metrics`, the gateway's JWKS and a trigger's webhook. A new server route fails the test until it is one or the other.
 
 ## What the client does not do
 
 It adds no authority: what a token may do, the server decides, and a `DeniedError` or `NotAllowedError` is the server's answer, not the client's. It does not route replies back to a channel on its own (your bot does, with `Reply`), does not compact or reincarnate a long conversation unasked, and retries nothing but the event stream. There is no TypeScript or Go client yet; the HTTP API and `schema/contract.json` are what one would be generated from.
 
-Not done: methods for the routes `branchyard-client` has and this client does not (maps, task records, knowledge and distilling, undo, reconciling effects, scratch locks, trigger secrets, services, inventory, discovery and Web Push; the `EXCUSED` list in `tests/test_sdk_client.py`); a published package on PyPI; a wheel built in the tests (the source distribution is, since some distributions' patched setuptools cannot build a wheel on every Python they ship).
+Not done: `connect()` covers the delegation calls above, not `delegate`, `brief`, graphs, storage or the inbox, which stay on each module's own API; typed records for the newer families (maps, knowledge, the fleet and Web Push answer plain `Record`s); a map item's default id when it has none; a published package on PyPI; a wheel built in the tests (the source distribution is, since some distributions' patched setuptools cannot build a wheel on every Python they ship).
 
 ## Tests
 
-- `tests/test_sdk_client.py`: the client against a fake server scripted per route (stdlib only): the token, the idempotency key and a replay, the grant with its private home, every error code's class and detail, `wait` and `wait_for`, the stream's parsing, filtering, resumption after a cut, idle hook and closing as a context manager, `rewind` and `fork(at=)` with their refusals, a reply's text between the operation's cursors and while running, the first message creating and the next continuing a branch, the three busy policies and a refused steer's fallback, approvals and effects, grant round trips and refusals, branch names, and the route parity above.
-- `crates/branchyard-cli/tests/sdk_client.rs` runs `tests/sdk_client_e2e.py` against a real `by serve` with the fake agent, a fake Anvil packager and delegation allowed: a surface's conversation created with a grant and an envelope, its harness spawning a child that asks for more than the parent holds and getting the intersection (visible in `inspect().grants`), a second message continuing the branch and keeping the grant, both turns' text on the stream, `skip` and `queue` against a slow turn, a replayed and a reused idempotency key, and the server's refusals (`unknown_branch`, a grant without a home, a child granted a connector its parent lacks) as typed errors.
+- `tests/test_sdk_client.py`: the client against a fake server scripted per route (stdlib only): the token, the idempotency key and a replay, the grant with its private home, every error code's class and detail, `wait` and `wait_for`, the stream's parsing, filtering, resumption after a cut, idle hook and closing as a context manager, `rewind` and `fork(at=)` with their refusals, a reply's text between the operation's cursors and while running, the first message creating and the next continuing a branch, the three busy policies and a refused steer's fallback, approvals and effects, maps and task records, knowledge, the fleet (discovery without the token, services, inventory), undo and reconciling, scratch locks, a trigger's secret and Web Push, each with its request's shape and a typed refusal, grant round trips and refusals, branch names, and the route parity above.
+- `crates/branchyard-cli/tests/sdk_client.rs` runs `tests/sdk_client_e2e.py` against a real `by serve` with the fake agent, a fake Anvil packager and delegation allowed: a surface's conversation created with a grant and an envelope, its harness spawning a child that asks for more than the parent holds and getting the intersection (visible in `inspect().grants`), a second message continuing the branch and keeping the grant, both turns' text on the stream, `skip` and `queue` against a slow turn, a replayed and a reused idempotency key, and the server's refusals (`unknown_branch`, a grant without a home, a child granted a connector its parent lacks) as typed errors; then one family after another for real: `well_known`, a service registered, listed and deregistered, knowledge added, decided, edited, exported and distilled (`unknown_knowledge` typed), a scratch lock taken and released, an undo plan and undo, the task records, a two-item map waited for, shown, resumed and forgotten, a generic trigger's generated secret, and `push_info` without the companion.
+- One API: `OneApi` in `tests/test_sdk_client.py` runs one script through `connect()` inside, over a fake `by` as `branchyard.py` runs it, and outside, over the fake server, and checks that the results and the refusals (`unknown_branch`, `denied`, and a failed check, an operation's failure over HTTP) are the same; `OneErrorHierarchy` checks that both modules' classes are one.
 - `tests/test_schema_validation.py` and `crates/branchyard-client/tests/contract.rs`: the wire contract, with a grant entry in either form.
 - Local mode: `tests/test_sdk_client.py` over a fake `by` (the server started with the arguments `Client.local` documents, its token read, stopped and removed on close; a server that does not start reported with what it said; `Local.up`, `doctor`, `harnesses` and `run` with their flags, `by`'s own error as the typed error, a missing answer as `LocalError`), and `crates/branchyard-cli/tests/sdk_client.rs` starting the real `by serve` through `Client.local` and stopping it.

@@ -73,7 +73,7 @@ Every turn of a branch that was given delegation gets these, for the duration of
 | A token for this turn | `BRANCHYARD_DELEGATION`, and `.branchyard/delegation/<branch>.json` (mode 0600) with the broker's socket |
 | Its branch and repository | `BRANCHYARD_BRANCH`, `BRANCHYARD_ROOT` (the harness's working directory is its worktree, not the repository root) |
 | `by` | `BRANCHYARD_BY`, and `by`'s directory first on `PATH` |
-| The Python module | `.branchyard/sdk/python/branchyard.py`, first on `PYTHONPATH` |
+| The Python modules | `.branchyard/sdk/python/`, first on `PYTHONPATH`: `branchyard.py`, and the `branchyard_client.py` whose error classes it raises and whose `connect()` runs the same script outside a turn ([SDKs](sdk.md#one-api-inside-and-outside-a-harness)) |
 | The MCP server | `by mcp --root <root> --branch <name>`, projected per harness (below) |
 | Instructions | The delegation skill for a branch that may spawn; for a leaf, a short note ([`plugins/branchyard/leaf.md`](../plugins/branchyard/leaf.md)) on what it may do. Projected per harness (below) |
 
@@ -200,7 +200,7 @@ These are the Rust types' serde forms, identical across `by --json`, the Python 
 
 ## Python
 
-The module is standard library only. It finds `by` from `BRANCHYARD_BY`, else on `PATH`, and raises `DeniedError`, `RunningError`, `NotRunningError`, `SteerRefusedError`, `NotFoundError`, `StaleRevisionError`, `CheckFailedError`, `CheckTimedOutError`, `CheckNotStartedError` or `BranchyardError`, each with the `kind` and the error's `detail`. `branchyard.steer(branch, text)` adds to a running child's turn; `branchyard.discard(branch, reason=None)` sets a settled one aside; `branchyard.check(branch=None)` runs a branch's check on its current work, your own by default, and returns a `CheckReport` whose `passed` says whether integrating it would get past its check; `branchyard.graph()` and `branchyard.apply_graph(edits, expected_revision)` reach [task graphs](graph.md), and `spawn` takes `depends_on`, `after`, `bindings`, `max_children`, `harnesses`, `plan` and `result`. `branchyard.wait_all(*branches, timeout=None)` and `wait_any(...)` run `by wait` and return a `Waited`, raising `RunningError` when the timeout passes; `wait(branch)` is the same for one branch. `branchyard.integrate(a, b, ...)` integrates several together and returns a `MergedAll`; one branch returns a `Merged`. A `status` (and a `Steer`'s `state`) is a `Status`: still the dict `by --json` gives, so `status["state"]` works, whose keys also read as attributes (`status.state`, `status.reason`, `status.limit`) and which compares equal to its state's name (`status == "ready"`); `Inspection.state` is the same. `branchyard.publish(path, name=, labels=, media_type=)` records the artifact's media type.
+The module is standard library only. It finds `by` from `BRANCHYARD_BY`, else on `PATH`, and raises `DeniedError`, `RunningError`, `NotRunningError`, `SteerRefusedError`, `NotFoundError`, `StaleRevisionError` (a `ConflictError`), `ConflictError`, `UnsupportedError`, `CheckFailedError`, `CheckTimedOutError`, `CheckNotStartedError` (both `CheckFailedError`s) or `BranchyardError`, each with the `kind` (also `code`) and the error's `detail` (`{}` when there is none): the same classes `branchyard_client` raises over HTTP ([SDKs](sdk.md#one-api-inside-and-outside-a-harness)). `branchyard.steer(branch, text)` adds to a running child's turn; `branchyard.discard(branch, reason=None)` sets a settled one aside; `branchyard.check(branch=None)` runs a branch's check on its current work, your own by default, and returns a `CheckReport` whose `passed` says whether integrating it would get past its check; `branchyard.graph()` and `branchyard.apply_graph(edits, expected_revision)` reach [task graphs](graph.md), and `spawn` takes `depends_on`, `after`, `bindings`, `max_children`, `harnesses`, `plan` and `result`. `branchyard.wait_all(*branches, timeout=None)` and `wait_any(...)` run `by wait` and return a `Waited`, raising `RunningError` when the timeout passes; `wait(branch)` is the same for one branch. `branchyard.integrate(a, b, ...)` integrates several together and returns a `MergedAll`; one branch returns a `Merged`. A `status` (and a `Steer`'s `state`) is a `Status`: still the dict `by --json` gives, so `status["state"]` works, whose keys also read as attributes (`status.state`, `status.reason`, `status.limit`) and which compares equal to its state's name (`status == "ready"`); `Inspection.state` is the same. `branchyard.publish(path, name=, labels=, media_type=)` records the artifact's media type.
 
 ```python
 import branchyard
@@ -221,7 +221,7 @@ branchyard.delegate([
 ], brief="Tokens are the Token type in src/token.rs.", land=True)
 ```
 
-Its source is [`sdk/python/branchyard.py`](../sdk/python/branchyard.py); the engine installs the same file for each delegating turn.
+Its source is [`sdk/python/branchyard.py`](../sdk/python/branchyard.py); the engine installs the same file, with [`branchyard_client.py`](../sdk/python/branchyard_client.py) beside it, for each delegating turn.
 
 ## Rust
 

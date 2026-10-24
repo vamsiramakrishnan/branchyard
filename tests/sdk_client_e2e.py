@@ -211,7 +211,105 @@ def main() -> None:
 
     # 9. The harness-side view agrees: `by inspect --json` is the same object.
     check(json.dumps(parent.raw)[:1] == "{", parent.raw)
+
+    # 10. The rest of the API, one real call or two per family.
+    rest(client, app, repo_name, branch)
     print("ok")
+
+
+def rest(client: bc.Client, app: bc.Repo, repo_name: str, branch: str) -> None:
+    # Discovery, without the token; the fleet and its workers.
+    known = client.well_known()
+    check(known.service == "branchyard" and known.repos == [repo_name], "well-known:", known)
+    check(isinstance(client.inventory(), list), "inventory")
+    registered = client.register_service("model_gateway", id="gw-e2e", capabilities={"models": ["m"]}, ttl_seconds=60)
+    check(registered.id == "gw-e2e" and registered.kind == "model_gateway", "registered:", registered)
+    check("gw-e2e" in [s.id for s in client.services(kind="model_gateway")], "services:", client.services())
+    check(client.deregister_service("gw-e2e").id == "gw-e2e", "deregistered")
+    check(isinstance(client.reclaim_services(), list), "reclaimed")
+    try:
+        client.deregister_service("no-such-service")
+    except bc.NotFoundError as error:
+        check(error.code == "not_found", error.code)
+    else:
+        raise AssertionError("deregistering a missing service succeeded")
+
+    # Knowledge: added as the caller (adopted), listed, edited, exported,
+    # distilled from a branch; an unknown entry is typed.
+    entry = app.add_knowledge("Run the parser tests before merging", path="src/**")
+    check(entry.status == "adopted" and entry.scope == {"path": "src/**"}, "added:", entry)
+    check([e.id for e in app.knowledge(status="adopted")] == [entry.id], "listed:", app.knowledge())
+    proposed = app.add_knowledge("Prefer small commits", propose=True)
+    check(proposed.status == "proposed", proposed)
+    check(app.adopt_knowledge(proposed.id).status == "adopted", "adopted")
+    check(app.edit_knowledge(entry.id, text="Run the parser tests").text == "Run the parser tests", "edited")
+    check(app.reject_knowledge(proposed.id, reason="too vague").status == "rejected", "rejected")
+    exported = app.export_knowledge()
+    check("Run the parser tests" in exported.markdown and exported.entries == [entry.id], "exported:", exported)
+    check(app.knowledge_entry(entry.id).id == entry.id, "entry")
+    check(app.distill(branch).branch == branch, "distilled")
+    check(app.remove_knowledge(proposed.id).id == proposed.id, "removed")
+    try:
+        app.knowledge_entry(9999)
+    except bc.NotFoundError as error:
+        check(error.code == "unknown_knowledge", error.code)
+    else:
+        raise AssertionError("an unknown knowledge entry was found")
+
+    # A scratch area's lock, taken for the branch and released.
+    app.create_scratch(branch, "cache")
+    lock = app.lock_scratch(branch, "cache")
+    check(lock.holder_branch == branch and lock.name == "cache", "lock:", lock)
+    held = app.scratch_lock_state("cache")
+    check(held is not None and held.holder_branch == branch, "lock state:", held)
+    app.unlock_scratch(branch, "cache")
+    check(app.scratch_lock_state("cache") is None, "unlocked")
+
+    # The effect ledger: nothing to reconcile or undo on a branch that
+    # called no connector.
+    check(isinstance(app.reconcile_effects().settled, list), "reconciled")
+    plan = app.undo_plan(branch)
+    check(plan.branch == branch and plan.to == 0 and plan.reversible == [], "undo plan:", plan)
+    check(app.undo(branch).outcomes == [], "undone")
+
+    # Task records: the tasks this run started, one found by its id.
+    records = app.task_records()
+    check(records, "task records")
+    check(app.task_record(records[0].id).id == records[0].id, "task record")
+
+    # A map over two items, waited for, shown, listed, resumed and forgotten.
+    items = [{"id": "a", "word": "alpha"}, {"id": "b", "word": "beta"}]
+    mapped = client.wait(app.map("SH echo {{item.word}}", items, name="words", harness="gemini-cli"), timeout=180)
+    check(mapped.kind == "map" and mapped.state == "succeeded", "map:", mapped.raw)
+    report = app.map_report("words")
+    check(report.total == 2 and report.done == 2, "map report:", report)
+    check("words" in [m.name for m in app.maps()], "maps:", app.maps())
+    again = client.wait(app.resume_map("words"), timeout=180, check=True)
+    check(app.map_report("words").done == 2, "resumed:", again.raw)
+    app.remove_map("words")
+    check("words" not in [m.name for m in app.maps()], "map removed")
+
+    # A generic trigger's secret, generated and shown once.
+    client.create_trigger(
+        {
+            "name": "e2e-hook",
+            "repo": repo_name,
+            "when": {"kind": "event", "source": "generic"},
+            "task": {"prompt": "{{event.text}}", "harness": "gemini-cli"},
+        }
+    )
+    secret = client.set_trigger_secret("e2e-hook")
+    check(isinstance(secret.secret, str) and len(secret.secret) >= 16, "secret:", secret)
+    check(client.set_trigger_secret("e2e-hook", "given-secret-value").secret is None, "a given secret is not echoed")
+    client.delete_trigger("e2e-hook")
+
+    # Web Push on a server without the companion: no such route.
+    try:
+        client.push_info()
+    except bc.NotFoundError as error:
+        check(error.code == "not_found", error.code)
+    else:
+        raise AssertionError("push info without the companion")
 
 
 if __name__ == "__main__":

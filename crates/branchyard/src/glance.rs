@@ -7,9 +7,13 @@
 //! upgrades an older store and recovers branches whose engine stopped,
 //! killing their processes. [`read`] opens `.branchyard/state.db` through a
 //! read-only connection, waits at most [`READ_WAIT`] for a writer, and reads
-//! three things. A repository whose state lives in PostgreSQL has no
-//! `state.db`, so it reads as no yard.
+//! three things. `read_postgres` (the `postgres` feature) reads the same
+//! three from a server's PostgreSQL store in a read-only transaction, and a
+//! caller that asked a server instead puts its answers together with
+//! [`Glance::from_parts`] and [`unanswered`], so every source gives the
+//! same [`Glance`].
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -17,13 +21,13 @@ use rusqlite::{params, Connection, OpenFlags};
 
 use crate::state::Record;
 use crate::store_codec::decode;
-use crate::{BranchInfo, BranchStatus, Error, Message};
+use crate::{BranchInfo, BranchStatus, Error, Message, MessageKind};
 
 /// How long a read waits for another process's write lock.
 pub const READ_WAIT: Duration = Duration::from_millis(300);
 
 /// At most this many unanswered questions are read, the newest.
-const QUESTIONS_MAX: u32 = 200;
+pub const QUESTIONS_MAX: u32 = 200;
 
 /// What [`read`] found.
 #[derive(Clone, Debug, PartialEq)]
@@ -42,6 +46,32 @@ pub struct Glance {
 }
 
 impl Glance {
+    /// A glance from what was read: `questions` are unanswered questions
+    /// and escalations, oldest first, of which those whose sender is
+    /// running are kept as [`Glance::asking`]; `unread` is
+    /// [`Glance::unread`].
+    pub fn from_parts(
+        root: PathBuf,
+        branches: Vec<BranchInfo>,
+        questions: Vec<Message>,
+        unread: Vec<Message>,
+    ) -> Glance {
+        let asking = questions
+            .into_iter()
+            .filter(|m| {
+                branches
+                    .iter()
+                    .any(|b| b.name == m.from && b.status == BranchStatus::Running)
+            })
+            .collect();
+        Glance {
+            root,
+            branches,
+            asking,
+            unread,
+        }
+    }
+
     /// How many branches are in each of the states a person acts on, in
     /// the order a status line shows them.
     pub fn counts(&self) -> Counts {
@@ -137,25 +167,68 @@ pub fn read(root: &Path, inbox_of: Option<&str>) -> Result<Option<Glance>, Error
     conn.busy_timeout(READ_WAIT)
         .map_err(|e| failed("busy timeout", e))?;
     let branches = branches(&conn).map_err(|e| failed("branches", e))??;
-    let asking = questions(&conn)
-        .map_err(|e| failed("questions", e))?
-        .into_iter()
-        .filter(|m| {
-            branches
-                .iter()
-                .any(|b| b.name == m.from && b.status == BranchStatus::Running)
-        })
-        .collect();
+    let questions = questions(&conn).map_err(|e| failed("questions", e))?;
     let unread = match inbox_of {
         Some(branch) => unread(&conn, branch).map_err(|e| failed("inbox", e))?,
         None => Vec::new(),
     };
-    Ok(Some(Glance {
-        root: root.to_path_buf(),
+    Ok(Some(Glance::from_parts(
+        root.to_path_buf(),
         branches,
-        asking,
+        questions,
         unread,
-    }))
+    )))
+}
+
+/// How long `read_postgres` waits to connect.
+pub const CONNECT_WAIT: Duration = Duration::from_millis(800);
+
+/// [`read`] for a repository whose state a server keeps in PostgreSQL at
+/// `url`, under `scope` (the name the server serves it by): one connection,
+/// given at most [`CONNECT_WAIT`], and one read-only transaction whose
+/// statements may take at most [`READ_WAIT`] each. Nothing is created or
+/// upgraded: a database without Branchyard's tables is an error. `root` is
+/// the repository's root on this machine.
+///
+/// # Errors
+///
+/// [`Error::State`] when the database cannot be reached or read in time,
+/// or holds a record this build cannot decode.
+#[cfg(feature = "postgres")]
+pub fn read_postgres(
+    root: &Path,
+    url: &str,
+    scope: &str,
+    inbox_of: Option<&str>,
+) -> Result<Glance, Error> {
+    let read = crate::pg::Glanced::read(url, scope, inbox_of, CONNECT_WAIT, READ_WAIT)?;
+    Ok(Glance::from_parts(
+        root.to_path_buf(),
+        read.branches,
+        read.questions,
+        read.unread,
+    ))
+}
+
+/// The questions and escalations in `messages` that no message in it
+/// answers, oldest first and each once: [`Glance::from_parts`]'s
+/// `questions`, from messages gathered from several inboxes. At most the
+/// newest [`QUESTIONS_MAX`].
+pub fn unanswered(messages: &[Message]) -> Vec<Message> {
+    let answered: HashSet<u64> = messages.iter().filter_map(|m| m.in_reply_to).collect();
+    let mut questions: Vec<Message> = messages
+        .iter()
+        .filter(|m| {
+            matches!(m.kind, MessageKind::Question | MessageKind::Escalation)
+                && !answered.contains(&m.id)
+        })
+        .cloned()
+        .collect();
+    questions.sort_by_key(|m| m.id);
+    questions.dedup_by_key(|m| m.id);
+    let extra = questions.len().saturating_sub(QUESTIONS_MAX as usize);
+    questions.drain(..extra);
+    questions
 }
 
 /// Every branch, oldest first; decoding errors are the inner result.
@@ -241,6 +314,45 @@ mod tests {
         assert!(glance.unread.is_empty());
         assert_eq!(glance.counts(), Counts::default());
         assert_eq!(glance.branch_at(&below), None);
+    }
+
+    fn message(id: u64, from: &str, kind: MessageKind, in_reply_to: Option<u64>) -> Message {
+        Message {
+            id,
+            from: from.into(),
+            to: "lead".into(),
+            kind,
+            text: format!("#{id}"),
+            in_reply_to,
+            at_ms: id,
+            delivered: false,
+        }
+    }
+
+    #[test]
+    fn gathered_messages_keep_the_unanswered_questions_of_running_branches() {
+        let q = |id, from| message(id, from, MessageKind::Question, None);
+        // Read from two inboxes: one question twice, one answered.
+        let gathered = [
+            q(3, "kid"),
+            message(5, "kid", MessageKind::Escalation, None),
+            q(1, "kid"),
+            message(2, "lead", MessageKind::Answer, Some(1)),
+            message(4, "kid", MessageKind::Report, None),
+            q(3, "kid"),
+            q(6, "gone"),
+        ];
+        let ids: Vec<u64> = unanswered(&gathered).iter().map(|m| m.id).collect();
+        assert_eq!(ids, [3, 5, 6]);
+        // No branch runs, so nothing is asking.
+        let parts = Glance::from_parts(
+            PathBuf::new(),
+            Vec::new(),
+            unanswered(&gathered),
+            Vec::new(),
+        );
+        assert!(parts.asking.is_empty());
+        assert_eq!(parts.counts(), Counts::default());
     }
 
     #[test]

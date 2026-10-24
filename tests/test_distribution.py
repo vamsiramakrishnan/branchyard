@@ -326,7 +326,17 @@ class SdkArchiveRuntimeTests(unittest.TestCase):
         self.assertEqual(self.module_path.read_bytes(), (package.SDK / "branchyard.py").read_bytes())
         spec = importlib.util.spec_from_file_location("branchyard_extracted", self.module_path)
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # Its error classes are its sibling `branchyard_client`'s, which
+        # it imports from beside it, as from the archive.
+        sys.modules.pop("branchyard_client", None)
+        sys.path.insert(0, str(self.module_path.parent))
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.path.remove(str(self.module_path.parent))
+        self.assertEqual(
+            Path(sys.modules.pop("branchyard_client").__file__).parent, self.module_path.parent, "the extracted sibling"
+        )
         stub = self._stub_by(
             {
                 "name": "demo",

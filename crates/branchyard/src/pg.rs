@@ -2143,6 +2143,113 @@ impl Backend for Postgres {
     }
 }
 
+/// What [`crate::glance::read_postgres`] reads: a repository's branches,
+/// its unanswered questions and escalations (the newest
+/// [`crate::glance::QUESTIONS_MAX`], oldest first), and one branch's
+/// undelivered messages.
+pub(crate) struct Glanced {
+    pub branches: Vec<crate::BranchInfo>,
+    pub questions: Vec<Message>,
+    pub unread: Vec<Message>,
+}
+
+impl Glanced {
+    /// Read without [`Postgres::open`], which creates and upgrades tables:
+    /// connect within `connect_wait`, then one `READ ONLY` transaction
+    /// whose statements each stop after `statement_wait`.
+    pub(crate) fn read(
+        url: &str,
+        repo: &str,
+        inbox_of: Option<&str>,
+        connect_wait: Duration,
+        statement_wait: Duration,
+    ) -> Result<Glanced, Error> {
+        let mut config: postgres::Config = url
+            .parse()
+            .map_err(|e: postgres::Error| Error::State(format!("database {}: {e}", redact(url))))?;
+        config.connect_timeout(connect_wait);
+        let mut client = off_runtime(|| config.connect(NoTls))
+            .map_err(|e| state(&format!("connect to {}", redact(url)), &e))?;
+        let read = off_runtime(|| Glanced::read_with(&mut client, repo, inbox_of, statement_wait));
+        close(client);
+        read
+    }
+
+    fn read_with(
+        client: &mut Client,
+        repo: &str,
+        inbox_of: Option<&str>,
+        statement_wait: Duration,
+    ) -> Result<Glanced, Error> {
+        let e = |context: &'static str| move |error: postgres::Error| state(context, &error);
+        let mut tx = client
+            .build_transaction()
+            .read_only(true)
+            .start()
+            .map_err(e("begin"))?;
+        tx.batch_execute(&format!(
+            "SET LOCAL statement_timeout = {}",
+            statement_wait.as_millis().max(1)
+        ))
+        .map_err(e("statement timeout"))?;
+        let rows = tx
+            .query(
+                "SELECT name, record FROM by_branches WHERE repo = $1 AND record IS NOT NULL \
+                 ORDER BY created_ms, name",
+                &[&repo],
+            )
+            .map_err(e("branches"))?;
+        let branches = rows
+            .iter()
+            .map(|r| {
+                decode::<Record>(
+                    &format!("record {}", r.get::<_, String>(0)),
+                    &r.get::<_, String>(1),
+                )
+                .map(|record| record.info)
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let limit = i64::from(crate::glance::QUESTIONS_MAX);
+        let rows = tx
+            .query(
+                "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                 delivered_ms FROM by_messages q \
+                 WHERE q.repo = $1 AND q.kind IN ('question', 'escalation') \
+                 AND NOT EXISTS (SELECT 1 FROM by_messages a \
+                 WHERE a.repo = $1 AND a.in_reply_to = q.id) \
+                 ORDER BY id DESC LIMIT $2",
+                &[&repo, &limit],
+            )
+            .map_err(e("questions"))?;
+        let mut questions = rows
+            .iter()
+            .map(message_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        questions.reverse();
+        let unread = match inbox_of {
+            Some(branch) => tx
+                .query(
+                    "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                     delivered_ms FROM by_messages \
+                     WHERE repo = $1 AND to_branch = $2 AND delivered_ms IS NULL ORDER BY id",
+                    &[&repo, &branch],
+                )
+                .map_err(e("inbox"))?
+                .iter()
+                .map(message_row)
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+        };
+        // Read only: nothing to commit.
+        branchyard_support::best_effort("end the read", tx.rollback());
+        Ok(Glanced {
+            branches,
+            questions,
+            unread,
+        })
+    }
+}
+
 /// Reads one `by_messages` row.
 fn message_row(r: &Row) -> Result<Message, Error> {
     let kind: String = r.get(3);
