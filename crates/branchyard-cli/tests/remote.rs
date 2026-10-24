@@ -2199,3 +2199,199 @@ fn by_services_lists_a_servers_fleet_and_the_local_registry_finds_by_serve() {
     let after: Value = serde_json::from_slice(&after.stdout).unwrap();
     assert_eq!(after["services"], serde_json::json!([]));
 }
+
+/// `by hook <event>` or `by statusline` (`args`) as a Claude Code session
+/// in `cwd` runs it, with `input` on stdin and `env` set: its output and
+/// how long it took. It must exit 0.
+fn session(cwd: &Path, args: &[&str], input: &Value, env: &[(&str, String)]) -> (String, Duration) {
+    use std::io::Write as _;
+    let mut command = command(BY, cwd);
+    command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let started = std::time::Instant::now();
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let took = started.elapsed();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    (text(&out.stdout), took)
+}
+
+/// The additionalContext of a hook's output, or `None` when it printed
+/// nothing.
+#[allow(clippy::unwrap_in_result)] // tests: a panic is the failure report
+fn context(out: &str) -> Option<String> {
+    if out.is_empty() {
+        return None;
+    }
+    let value: Value = serde_json::from_str(out).unwrap();
+    Some(
+        value["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+    )
+}
+
+/// A Claude Code session in a repository whose branches a server runs:
+/// its hook and status line ask the server, keep their cursor in the
+/// repository's own `.branchyard/hooks/`, and create nothing else there.
+#[test]
+fn a_session_hook_and_status_line_ask_the_server() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let here = dir.repo("here");
+    let server = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
+    let env = [
+        ("BRANCHYARD_REMOTE", server.url.clone()),
+        (
+            "BRANCHYARD_TOKEN_FILE",
+            server.token_file.display().to_string(),
+        ),
+    ];
+    let input = serde_json::json!({"session_id": "s1", "cwd": here, "prompt": "go"});
+    let hook = |event: &str| context(&session(&here, &["hook", event], &input, &env).0);
+    assert_eq!(hook("session-start"), None);
+    assert!(here.join(".branchyard/hooks/s1.json").is_file());
+    let made: Vec<_> = fs::read_dir(here.join(".branchyard"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(made, ["hooks"]);
+
+    let args = with_agent(&["run", "WRITE p.txt=1", "--name", "p", "--yes"]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = server.by(&here, &args);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let said = hook("user-prompt-submit").unwrap();
+    assert!(
+        said.contains("- p: finished, ready to integrate (1 file changed)"),
+        "{said}"
+    );
+    // Told once.
+    assert_eq!(hook("user-prompt-submit"), None);
+
+    let line = serde_json::json!({"workspace": {"current_dir": here}});
+    assert_eq!(
+        session(&here, &["statusline"], &line, &env).0,
+        "by: 1 ready\n"
+    );
+    // `[remote]` in branchyard.toml says the same as the variables.
+    fs::write(
+        here.join("branchyard.toml"),
+        format!(
+            "[remote]\nurl = \"{}\"\ntoken_file = \"{}\"\n",
+            server.url,
+            server.token_file.display()
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        session(&here, &["statusline"], &line, &[]).0,
+        "by: 1 ready\n"
+    );
+}
+
+/// A server that closes the connection unanswered, or never answers:
+/// nothing printed, exit 0, inside the hook's two seconds.
+#[test]
+fn a_session_hook_against_a_server_that_is_down_prints_nothing_in_time() {
+    let dir = Dir::new();
+    let here = dir.repo("here");
+    let token = dir.0.join("token");
+    fs::write(&token, "secret\n").unwrap();
+    use branchyard_testkit::{MockHttp, Response};
+    // Closes each connection unanswered, and reads each request then
+    // never answers.
+    let closing = MockHttp::start(|_| Response::close());
+    let silent = MockHttp::start(|_| Response::hang());
+    let input = serde_json::json!({"session_id": "s1", "cwd": here});
+    for url in [closing.url(), silent.url()] {
+        let env = [
+            ("BRANCHYARD_REMOTE", url.clone()),
+            ("BRANCHYARD_TOKEN_FILE", token.display().to_string()),
+        ];
+        for args in [&["hook", "session-start"][..], &["statusline"]] {
+            let (out, took) = session(&here, args, &input, &env);
+            assert_eq!(out, "", "{url} {args:?}");
+            assert!(
+                took < Duration::from_millis(2500),
+                "{url} {args:?}: {took:?}"
+            );
+        }
+    }
+    closing.finish();
+    silent.finish();
+}
+
+/// `by serve` keeping its state in PostgreSQL, with `[serve] config` in
+/// the served repository's `branchyard.toml`: a session there reads the
+/// server's store. Runs with the `postgres` feature when
+/// `BY_TEST_POSTGRES_URL` is set.
+#[cfg(feature = "postgres")]
+#[test]
+fn a_session_hook_reads_a_servers_postgres_store() {
+    let Some(url) = std::env::var("BY_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|u| !u.is_empty())
+    else {
+        eprintln!("skipped: set BY_TEST_POSTGRES_URL to run the PostgreSQL hook test");
+        return;
+    };
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    // A repository name no other run uses, since it scopes the state.
+    let name = format!("hook-pg-{}", std::process::id());
+    let mut repos = serde_json::Map::new();
+    repos.insert(name, Value::from(there.display().to_string()));
+    let config = dir.0.join("server.json");
+    fs::write(
+        &config,
+        serde_json::json!({
+            "repos": repos,
+            "data_dir": dir.0.join("pg-data"),
+            "database": url,
+            "tokens": [{"name": "t", "token": "hook-test-token"}],
+            "allow_client_commands": true,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        there.join("branchyard.toml"),
+        format!("[serve]\nconfig = \"{}\"\n", config.display()),
+    )
+    .unwrap();
+    let mut server = Served::start(&dir.0, &[], &["--config", &config.display().to_string()]);
+    server.token_file = dir.0.join("client.token");
+    fs::write(&server.token_file, "hook-test-token\n").unwrap();
+    let input = serde_json::json!({"session_id": "s1", "cwd": there});
+    let hook = |event: &str| context(&session(&there, &["hook", event], &input, &[]).0);
+    assert_eq!(hook("session-start"), None);
+    let args = with_agent(&["run", "WRITE p.txt=1", "--name", "p", "--yes"]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = server.by(&dir.0, &args);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!there.join(".branchyard/state.db").exists());
+    let said = hook("user-prompt-submit").unwrap();
+    assert!(
+        said.contains("- p: finished, ready to integrate (1 file changed)"),
+        "{said}"
+    );
+    assert_eq!(hook("user-prompt-submit"), None);
+    assert_eq!(
+        session(&there, &["statusline"], &input, &[]).0,
+        "by: 1 ready\n"
+    );
+}

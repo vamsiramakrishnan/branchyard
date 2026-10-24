@@ -4,11 +4,15 @@
 //! hooks and the `statusLine` setting. See `docs/harness-integration.md`.
 //!
 //! Both run on every prompt or redraw of someone else's session, so they
-//! read local state only ([`branchyard::glance`], a read-only look at
-//! `.branchyard/state.db`), give up after [`DEADLINE`], and never fail: any
-//! problem prints nothing on stdout, at most a note on stderr, and exits 0.
+//! only read, where `by` itself would ([`source`]): the server `[remote]`
+//! or `BRANCHYARD_REMOTE` names, asked with short timeouts; else
+//! `.branchyard/state.db`; else the PostgreSQL store `[serve] config`
+//! names (a build with the `postgres` feature). Each gives a
+//! [`branchyard::glance::Glance`]. They give up after [`DEADLINE`] and
+//! never fail: any problem prints nothing on stdout, at most a note on
+//! stderr, and exits 0.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal as _, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -19,6 +23,8 @@ use branchyard::glance::{self, Glance};
 use branchyard::{BranchInfo, BranchStatus, Message};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::args::Globals;
 
 /// How long either command may take before it gives up and prints nothing.
 const DEADLINE: Duration = Duration::from_secs(2);
@@ -120,12 +126,202 @@ fn parse(input: &str) -> Value {
     serde_json::from_str(input).unwrap_or(Value::Null)
 }
 
-/// The yard for `dir`: the one `BRANCHYARD_ROOT` names when it has one,
-/// else the nearest above `dir`.
+/// The local yard for `dir`: the one `BRANCHYARD_ROOT` names when it has
+/// one, else the nearest above `dir`.
 fn root_for(dir: &Path, env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
     env("BRANCHYARD_ROOT")
         .and_then(|root| glance::find_root(Path::new(&root)))
         .or_else(|| glance::find_root(dir))
+}
+
+/// How long one request to a server may take, connecting included: two of
+/// them in a row (the repository's name, then its branches) and the
+/// inboxes, read at once, stay inside [`DEADLINE`].
+const REQUEST_WAIT: Duration = Duration::from_millis(600);
+/// At most this many inboxes are read from a server for one glance.
+const MAX_INBOXES: usize = 16;
+
+/// Where a glance at the repository at `dir` reads from.
+#[derive(Debug, PartialEq)]
+enum Source {
+    /// The server `by` would run commands on. `root` is the repository
+    /// root here, where the session's cursor is kept.
+    Remote { root: PathBuf, globals: Globals },
+    /// `root/.branchyard/state.db`.
+    Local(PathBuf),
+    /// A server's PostgreSQL store at `url`, holding this repository under
+    /// `scope`.
+    Postgres {
+        root: PathBuf,
+        url: String,
+        scope: String,
+    },
+}
+
+impl Source {
+    /// The repository root the session's cursor is kept under.
+    fn root(&self) -> &Path {
+        match self {
+            Source::Remote { root, .. } | Source::Local(root) | Source::Postgres { root, .. } => {
+                root
+            }
+        }
+    }
+}
+
+/// Where `by` would read `dir`'s repository from: the server
+/// `BRANCHYARD_REMOTE` and its kin (no flags here) or `[remote]` name; else the nearest `.branchyard/state.db`;
+/// else, when `[serve] config` names a server configuration with a
+/// `database`, that store. `None` when it is none of these. A
+/// configuration file that does not load is ignored here, as if absent.
+fn source(dir: &Path, env: &dyn Fn(&str) -> Option<String>) -> Result<Option<Source>, String> {
+    let config = match crate::defaults::config_at(dir, env) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("by: ignoring the configuration: {error}");
+            None
+        }
+    };
+    let value = |name: &str| env(name).filter(|v| !v.trim().is_empty());
+    let mut globals = Globals {
+        remote: value("BRANCHYARD_REMOTE"),
+        token_file: value("BRANCHYARD_TOKEN_FILE"),
+        repo: value("BRANCHYARD_REPO"),
+        ca_file: value("BRANCHYARD_CA_FILE"),
+        ..Globals::default()
+    };
+    if let Some(config) = &config {
+        crate::defaults::apply_globals(config, &mut globals);
+    }
+    if globals.remote.is_some() {
+        let root = branchyard_config::project_root(dir);
+        return Ok(Some(Source::Remote { root, globals }));
+    }
+    if let Some(root) = root_for(dir, env) {
+        return Ok(Some(Source::Local(root)));
+    }
+    let Some(path) = config.as_ref().and_then(|c| c.serve.config.clone()) else {
+        return Ok(None);
+    };
+    let served = branchyard_server::cli::resolve(&["--config".to_owned(), path])?;
+    let Some(url) = served.database else {
+        return Ok(None);
+    };
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let repo = served
+        .repos
+        .iter()
+        .map(|(name, root)| {
+            let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            (name, root)
+        })
+        .filter(|(_, root)| dir.starts_with(root))
+        .max_by_key(|(_, root)| root.as_os_str().len());
+    Ok(repo.map(|(name, root)| Source::Postgres {
+        root,
+        url,
+        scope: name.clone(),
+    }))
+}
+
+/// Read `source`, with `inbox_of`'s unread messages; `None` when there is
+/// no yard there.
+fn look(source: &Source, inbox_of: Option<&str>) -> Result<Option<Glance>, String> {
+    match source {
+        Source::Local(root) => glance::read(root, inbox_of).map_err(|e| e.to_string()),
+        Source::Remote { root, globals } => ask_server(root, globals, inbox_of).map(Some),
+        #[cfg(feature = "postgres")]
+        Source::Postgres { root, url, scope } => glance::read_postgres(root, url, scope, inbox_of)
+            .map(Some)
+            .map_err(|e| e.to_string()),
+        #[cfg(not(feature = "postgres"))]
+        Source::Postgres { .. } => Err(
+            "the repository's state is in PostgreSQL, and this by is built without the \
+             postgres feature"
+                .into(),
+        ),
+    }
+}
+
+/// The glance a server gives: its branches, the inboxes that hold the
+/// running branches' questions (their parents') and answers (their own),
+/// and `inbox_of`'s. Each request is given [`REQUEST_WAIT`]; any failure
+/// is the whole glance's.
+fn ask_server(root: &Path, globals: &Globals, inbox_of: Option<&str>) -> Result<Glance, String> {
+    let url = globals.remote.as_deref().unwrap_or_default();
+    if crate::ssh_remote::is_ssh(url) {
+        return Err(
+            "an ssh:// remote is not read from a hook (docs/harness-integration.md)".into(),
+        );
+    }
+    let token_file = globals
+        .token_file
+        .as_deref()
+        .ok_or("remote mode needs a token: set BRANCHYARD_TOKEN_FILE or [remote] token_file")?;
+    let mut client = branchyard_client::Client::from_token_file(url, token_file)
+        .map_err(|e| e.to_string())?
+        .with_timeout(REQUEST_WAIT);
+    if let Some(ca) = &globals.ca_file {
+        client = client.with_ca_file(ca).map_err(|e| e.to_string())?;
+    }
+    let name = match &globals.repo {
+        Some(name) => name.clone(),
+        None => match client.repos().map_err(|e| e.to_string())?.as_slice() {
+            [only] => only.name.clone(),
+            _ => return Err("the server serves several repositories; set BRANCHYARD_REPO".into()),
+        },
+    };
+    let repo = client.repo(&name);
+    let branches = repo.branches().map_err(|e| e.to_string())?;
+    let mut inboxes: BTreeSet<&str> = inbox_of.into_iter().collect();
+    for info in &branches {
+        if let (BranchStatus::Running, Some(parent)) = (&info.status, &info.parent) {
+            inboxes.insert(parent);
+            inboxes.insert(&info.name);
+        }
+    }
+    if inboxes.len() > MAX_INBOXES {
+        return Err(format!(
+            "{} inboxes to read from the server; at most {MAX_INBOXES} are",
+            inboxes.len()
+        ));
+    }
+    let read: Vec<(&str, Result<branchyard::Inbox, String>)> = std::thread::scope(|scope| {
+        let reads: Vec<_> = inboxes
+            .iter()
+            .map(|&branch| {
+                let repo = &repo;
+                (
+                    branch,
+                    scope.spawn(move || repo.inbox(branch).map_err(|e| e.to_string())),
+                )
+            })
+            .collect();
+        reads
+            .into_iter()
+            .map(|(branch, read)| {
+                let inbox = read
+                    .join()
+                    .unwrap_or_else(|_| Err("reading an inbox panicked".into()));
+                (branch, inbox)
+            })
+            .collect()
+    });
+    let mut messages = Vec::new();
+    let mut unread = Vec::new();
+    for (branch, inbox) in read {
+        let inbox = inbox.map_err(|e| format!("{branch}'s inbox: {e}"))?;
+        if Some(branch) == inbox_of {
+            unread = inbox.clone().unread_only().messages;
+        }
+        messages.extend(inbox.messages);
+    }
+    Ok(Glance::from_parts(
+        root.to_path_buf(),
+        branches,
+        glance::unanswered(&messages),
+        unread,
+    ))
 }
 
 /// A hook's stdout for `event`, given its JSON `input`: `None` when there
@@ -153,15 +349,16 @@ pub(crate) fn hook_output(
     let dir = input["cwd"]
         .as_str()
         .map_or_else(|| cwd.to_path_buf(), PathBuf::from);
-    let Some(root) = root_for(&dir, env) else {
+    let Some(source) = source(&dir, env)? else {
         return Ok(None);
     };
     let branch = env("BRANCHYARD_BRANCH");
-    let Some(glance) = glance::read(&root, branch.as_deref()).map_err(|e| e.to_string())? else {
+    let Some(glance) = look(&source, branch.as_deref())? else {
         return Ok(None);
     };
     let session = session_file_name(input["session_id"].as_str().unwrap_or_default());
-    let path = glance::state_dir(&root)
+    // For a server's repository too: only `.branchyard/hooks/` is made here.
+    let path = glance::state_dir(source.root())
         .join("hooks")
         .join(format!("{session}.json"));
     let cursor = read_cursor(&path);
@@ -393,10 +590,10 @@ pub(crate) fn status_line(
         .as_str()
         .or_else(|| input["cwd"].as_str())
         .map_or_else(|| cwd.to_path_buf(), PathBuf::from);
-    let Some(root) = root_for(&dir, env) else {
+    let Some(source) = source(&dir, env)? else {
         return Ok(None);
     };
-    let Some(glance) = glance::read(&root, None).map_err(|e| e.to_string())? else {
+    let Some(glance) = look(&source, None)? else {
         return Ok(None);
     };
     let mut parts = Vec::new();
@@ -461,5 +658,79 @@ mod tests {
             Ok(None)
         );
         assert_eq!(status_line("", &none, dir.path()), Ok(None));
+    }
+
+    #[test]
+    fn the_source_is_where_by_would_read() {
+        let dir = branchyard_testkit::Scratch::new("hook-source");
+        let root = dir.path().to_path_buf();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(&root)
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let below = root.join("src");
+        std::fs::create_dir_all(&below).unwrap();
+        let none = |_: &str| None;
+        assert_eq!(source(&below, &none), Ok(None));
+
+        // A server named by the variables, whatever is here.
+        let remote = |name: &str| match name {
+            "BRANCHYARD_REMOTE" => Some("http://127.0.0.1:9".to_owned()),
+            "BRANCHYARD_REPO" => Some("app".to_owned()),
+            _ => None,
+        };
+        match source(&below, &remote) {
+            Ok(Some(Source::Remote { root: at, globals })) => {
+                assert_eq!(at, root);
+                assert_eq!(globals.repo.as_deref(), Some("app"));
+                assert_eq!(globals.token_file, None);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(look(&source(&below, &remote).unwrap().unwrap(), None)
+            .unwrap_err()
+            .contains("needs a token"));
+        // Nothing was made for it.
+        assert!(!root.join(".branchyard").exists());
+
+        // A server configuration keeping the state in PostgreSQL.
+        let served = root.join("server.json");
+        std::fs::write(
+            &served,
+            serde_json::json!({
+                "repos": {"app": root},
+                "data_dir": root.join("data"),
+                "database": "postgres://nobody@127.0.0.1:9/none",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("branchyard.toml"),
+            format!("[serve]\nconfig = \"{}\"\n", served.display()),
+        )
+        .unwrap();
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        assert_eq!(
+            source(&below, &none),
+            Ok(Some(Source::Postgres {
+                root: canonical,
+                url: "postgres://nobody@127.0.0.1:9/none".into(),
+                scope: "app".into(),
+            }))
+        );
+        // Unreachable, or not built in: an error, so nothing is printed.
+        assert!(look(&source(&below, &none).unwrap().unwrap(), None).is_err());
+        assert_eq!(status_line("{}", &none, &below).ok(), None);
+
+        // A state.db here comes first.
+        drop(branchyard::Yard::open(&root).unwrap());
+        assert_eq!(source(&below, &none), Ok(Some(Source::Local(root.clone()))));
+        assert_eq!(
+            status_line("{}", &none, &below),
+            Ok(Some("by: no branches\n".into()))
+        );
     }
 }

@@ -171,8 +171,11 @@ pub fn connect(
         .collect();
     let mut last = io::Error::new(io::ErrorKind::NotFound, "the host has no address");
     let mut tcp = None;
+    // A caller that gives a request less than that does not wait longer
+    // to connect (`by hook`'s requests).
+    let connect_wait = read_timeout.min(Duration::from_secs(10));
     for addr in addrs {
-        match TcpStream::connect_timeout(&addr, Duration::from_secs(10)) {
+        match TcpStream::connect_timeout(&addr, connect_wait) {
             Ok(stream) => {
                 tcp = Some(stream);
                 break;

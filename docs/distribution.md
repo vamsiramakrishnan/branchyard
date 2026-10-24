@@ -11,7 +11,7 @@ The repository is a Claude Code plugin marketplace: [`.claude-plugin/marketplace
 /plugin install branchyard@branchyard
 ```
 
-That gives the two skills, the `/branchyard:setup`, `/branchyard:status` and `/branchyard:wait` commands, and the `SessionStart` and `UserPromptSubmit` hooks, which run `by hook` when `by` is on `PATH` and do nothing otherwise. The status line is not part of a plugin; to show one, add `"statusLine": {"type": "command", "command": "by statusline"}` to your Claude Code settings yourself (nothing edits them for you).
+That gives the two skills, the `/branchyard:setup`, `/branchyard:status` and `/branchyard:wait` commands, and the `SessionStart` and `UserPromptSubmit` hooks, which run `by hook` when `by` is on `PATH` and do nothing otherwise; in a repository driven through a server (`[remote]` or `BRANCHYARD_REMOTE`) they ask that server, and a server's PostgreSQL store is read only by a `by` built with the `postgres` feature ([harness integration](harness-integration.md)). The status line is not part of a plugin; to show one, add `"statusLine": {"type": "command", "command": "by statusline"}` to your Claude Code settings yourself (nothing edits them for you).
 
 Or point Claude Code's plugin loader at a checkout or an extracted archive for one session:
 
