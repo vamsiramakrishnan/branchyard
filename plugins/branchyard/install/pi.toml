@@ -1,0 +1,11 @@
+harness = "pi"
+binaries = ["pi"]
+provides = ["hooks", "statusline"]
+
+[[file]]
+from = "harnesses/pi/branchyard.ts"
+to = "~/.pi/agent/extensions/branchyard.ts"
+how = "write"
+
+[[note]]
+text = "Run /reload in Pi, or start a new session, to load the Branchyard extension."

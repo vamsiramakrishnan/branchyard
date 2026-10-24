@@ -1,0 +1,11 @@
+harness = "opencode"
+binaries = ["opencode", "opencode2"]
+provides = ["hooks"]
+
+[[file]]
+from = "harnesses/opencode/branchyard.js"
+to = "~/.config/opencode/plugins/branchyard.js"
+how = "write"
+
+[[note]]
+text = "Restart OpenCode to load the Branchyard plugin. It is written for @opencode-ai/plugin 1.19; the 2.x plugin API differs."
