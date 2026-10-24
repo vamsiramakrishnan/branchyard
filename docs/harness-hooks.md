@@ -102,15 +102,21 @@ Tested against recorded payloads written from Factory's documentation; not run a
 
 ## DeepSeek Harness
 
-**What you get.** DeepSeek Harness runs a Claude Code `hooks.json` through its bridge plugin, `@deepseek-ai/dsh-hooks-claude-code`, mounted by a row in a Cordis patch file. [`harnesses/deepseek-harness/hooks.json`](../plugins/branchyard/harnesses/deepseek-harness/hooks.json) has `SessionStart` and `UserPromptSubmit` calling `by hook --harness deepseek-harness`, and [`harnesses/deepseek-harness/cordis.patch.yml`](../plugins/branchyard/harnesses/deepseek-harness/cordis.patch.yml) inserts the row, `id: branchyard-hooks`, whose `configPath` is `~/.dsh/branchyard-hooks.json`, written as a `!!js` expression (`os.homedir()`) because the bridge resolves a relative path against the directory `dsh` was started in. No status line or commands: the harness has neither for a hook to fill.
+**What you get.** DeepSeek Harness runs a Claude Code `hooks.json` through its bridge plugin, `@deepseek-ai/dsh-hooks-claude-code`, mounted by a row in a Cordis patch file. [`harnesses/deepseek-harness/hooks.json`](../plugins/branchyard/harnesses/deepseek-harness/hooks.json) has `SessionStart` and `UserPromptSubmit` calling `by hook --harness deepseek-harness`, and [`harnesses/deepseek-harness/cordis.patch.yml`](../plugins/branchyard/harnesses/deepseek-harness/cordis.patch.yml) inserts the row, `id: branchyard-hooks`, whose `configPath` is `!!js dshHomePath('branchyard-hooks.json')`: the hooks file in `DSH_HOME`, wherever that is, never a path relative to the directory `dsh` was started in. A new session hears the summary from `SessionStart` (its source is `startup`, or `resume` for `--session-id`); later prompts hear only what changed, from `UserPromptSubmit`. No status line or commands: the harness has neither for a hook to fill.
 
-**Install.** `by init plugin` writes the hooks to `~/.dsh/branchyard-hooks.json` and merges the insert into `~/.dsh/cordis.patch.yml`, the home patch every profile applies ([`install/deepseek-harness.toml`](../plugins/branchyard/install/deepseek-harness.toml)). By hand: copy the two files there, merging the insert into an existing patch file rather than replacing it.
+**Install.** `by init plugin` writes the hooks to `~/.dsh/branchyard-hooks.json` and merges the insert into `~/.dsh/cordis.patch.yml`, the home patch every profile applies ([`install/deepseek-harness.toml`](../plugins/branchyard/install/deepseek-harness.toml)). Then add the bridge to each profile you run, at the version of your `dsh` (`dsh --version`):
 
-**Caveats.** The bridge reads its configuration once, at start, and takes only JSON `additionalContext` (no plain stdout); its `SessionStart` runs detached, so the first request can go before the context arrives. With `DSH_HOME` set elsewhere than `~/.dsh`, move the insert into `$DSH_HOME/cordis.patch.yml`. The bridge package must resolve in the profile; `dsh --profile <name> --dump-config` shows whether the `branchyard-hooks` row loaded.
+```
+dsh plugin --profile headless add @deepseek-ai/dsh-hooks-claude-code@0.2.1-rc.2 @deepseek-ai/dsh-hook-protocol@0.2.1-rc.2
+```
 
-**Try it.** `dsh --profile web --dump-config | grep -A3 branchyard-hooks` shows the row; with a finished branch in the repository, start a DSH session there and send a prompt: the reply should know.
+Installing the bridge next to `dsh` with npm does not help: a profile resolves plugins from its own directory, `$DSH_HOME/profiles/<name>`. The bridge's npm `latest` tag (0.0.1-rc.5) is older than `dsh` and `dsh plugin add` refuses it as incompatible, so name the version. `dsh` does not ship `@deepseek-ai/dsh-hook-protocol`, the bridge's peer, so it is added too. By hand: copy the two files to `$DSH_HOME`, merging the insert into an existing patch file rather than replacing it, and add the bridge as above.
 
-Tested against recorded payloads written from the bridge's source and README (its supported events, its `hooks.json` parser, its `!!js` patch idiom); not run against the real harness. Not done: no live check in DeepSeek Harness; whether `dsh plugin` needs to add the bridge package before the row resolves is not checked.
+**Caveats.** A profile without the bridge still starts, printing `dsh: warning: 1 entry did not activate` and `branchyard-hooks ... ERR_MODULE_NOT_FOUND` on stderr, and hears nothing. The bridge reads its configuration once, at start, and takes only JSON `additionalContext` (no plain stdout). In bridge 0.2.1-rc.2 the session waits for `SessionStart` (its `agent/created` listener awaits the hook), so the first request carries the summary even when `by` is slow; the bridge's README still calls it detached. The `SessionStart` context is injected as a message of its own and then shows at the start of `UserPromptSubmit`'s `prompt`. With `DSH_HOME` set elsewhere than `~/.dsh`, move both files there.
+
+**Try it.** `dsh --profile headless --dump-config | grep -A4 branchyard-hooks` shows the row; with a finished branch in the repository, `dsh --profile headless "If your context contains a note starting with 'Branchyard:', repeat it verbatim; otherwise reply NONE."` there prints the note.
+
+Verified 24 October 2026 against DeepSeek Harness 0.2.1-rc.2 (`dsh --profile headless`, one-shot and `--session-id` resume, with GLM-4.6 through Z.ai's OpenAI-compatible coding endpoint as a custom `llm-pi-ai` provider) and dsh-hooks-claude-code 0.2.1-rc.2: a new session's reply quoted `Branchyard: 2 ready to integrate (by ls).`, delivered by `SessionStart` (the same turn's `UserPromptSubmit` printed nothing); a resumed session with nothing new answered `QUIET` (`SessionStart` with `source: resume` and `UserPromptSubmit` both silent); after another branch finished, the resumed session quoted `Branchyard: branches changed ... - hello3: finished, ready to integrate (1 file changed)`; a `SessionStart` delayed by three seconds still reached the first request; the row worked from `~/.dsh` and with `DSH_HOME` pointing elsewhere. The fixtures in `crates/branchyard-cli/tests/fixtures/hooks/deepseek-harness/` are those recorded payloads. Not done: the TUI (`dsh --profile tui`) drew nothing under tmux, so only the headless profile ran a model; the web profile was not started; `by init plugin` does not run `dsh plugin add` and writes to `~/.dsh` even when `DSH_HOME` is set.
 
 ## Pi
 
@@ -162,24 +168,25 @@ Run against the real CLI, OpenCode 1.19.4, `zai-coding-plan/glm-5.3-flash`, 24 O
 
 ## Hermes
 
-What you get: before each turn, Hermes's `pre_llm_call` shell hook runs `by hook --harness hermes user-prompt-submit`, and what `by` prints (`{"context": "..."}`) is appended to that turn's user message. A session's first turn gets the session-start summary (branches asking, blocked or with a plan to approve, and how many run or are ready); later turns get only what changed. There is no status line and no commands.
+What you get: before each turn, Hermes's `pre_llm_call` shell hook runs `by hook --harness hermes user-prompt-submit`, and what `by` prints (`{"context": "..."}`) is appended to that turn's user message. A session's first turn gets the session-start summary (branches asking, blocked or with a plan to approve, and how many run or are ready); later turns get only what changed. `pre_llm_call` runs once per turn, not once per model request: a turn whose tool loop makes three requests runs `by` once, and every request of the turn carries the same context. There is no status line and no commands.
 
 There is deliberately no `on_session_start` hook. Hermes ignores that event's output, and running `by` there would record the first summary as shown before any turn saw it.
 
 Install:
 
-- `by init plugin hermes` merges `plugins/branchyard/harnesses/hermes/hooks.yaml` into `~/.hermes/config.yaml` under `hooks:`.
+- `by init plugin hermes` merges `plugins/branchyard/harnesses/hermes/hooks.yaml` into `~/.hermes/config.yaml` under `hooks:`, beside any hooks already there; running it again changes nothing.
 - By hand: copy that `hooks:` block into `~/.hermes/config.yaml` (or a profile's own `config.yaml`).
 
 Caveats:
 
-- Hermes asks once before it runs a new shell hook, keyed on the exact `(event, command)` pair. A foreground `hermes chat` asks on its terminal; the gateway, cron and `hermes acp` never ask, so approve it from a terminal first, start them with `HERMES_ACCEPT_HOOKS=1`, or add the pair to `~/.hermes/shell-hooks-allowlist.json` yourself. `by init plugin` does not approve it for you.
+- Hermes asks once before it runs a new shell hook, keyed on the exact `(event, command)` pair, and keeps the answer in `~/.hermes/shell-hooks-allowlist.json`. A `hermes chat` in a terminal asks (`Allow this hook to run? [y/N]`). Without a terminal it never asks and skips the hook, writing only a warning to `~/.hermes/logs/agent.log`: that covers `hermes chat -q` run from a script as well as the gateway, cron and `hermes acp`. Approve it from a terminal first, or run once with `--accept-hooks` or `HERMES_ACCEPT_HOOKS=1`, which records the approval for later runs. `by init plugin` does not approve it for you.
 - Hermes splits the command with `shlex` and runs it without a shell, so the guard runs inside `sh -c '...'`. Windows without a POSIX `sh` is not covered.
+- `hermes hooks test pre_llm_call` sends a synthetic payload whose session is `test-session`, so only its first run prints the summary.
 - No Hermes Python plugin is shipped: it would need its own consent (`plugins.enabled`) and do the same thing as the one shell line.
 
-Try it: in a repository with a Branchyard branch waiting on a question, run `hermes hooks list` (the hook shows as approved), then `hermes hooks test pre_llm_call`; the parsed response carries a `context` naming that branch. A new `hermes chat` session hears about it on its first turn.
+Try it: in a repository with a Branchyard branch ready, run `hermes hooks list` (the hook shows as allowlisted once approved), then `hermes hooks test pre_llm_call`; the parsed response carries a `context` naming it. A new `hermes chat` session hears about it on its first turn.
 
-Not done: tested against recorded payloads written from Hermes's documentation; not run against the real CLI.
+Verified 24 October 2026 against Hermes Agent 0.19.0 (pip, GLM-4.6 through its `zai` provider on Z.ai's coding endpoint): `hermes chat -q` without a terminal skipped the unapproved hook; with `HERMES_ACCEPT_HOOKS=1` the reply was `Branchyard: 1 ready to integrate (by ls).`; the same session resumed with `--resume` and no variable (the allowlist kept the approval) answered `QUIET` across a three-request tool loop with one `by` call; after another branch finished, the next resumed turn quoted `Branchyard: branches changed ... - hello2: finished, ready to integrate (1 file changed)`; in tmux, `hermes chat` asked for consent, `y` recorded it, the first prompt quoted `Branchyard: 2 ready to integrate (by ls).` and the second answered `NONE`. With an `on_session_start` hook added for the recording, `by` printed nothing there and the first `pre_llm_call` still got the summary. The fixtures in `crates/branchyard-cli/tests/fixtures/hooks/hermes/` are the recorded payloads. Not done: the gateway, cron, `hermes acp` and non-default profiles were not run.
 
 ## Cursor
 

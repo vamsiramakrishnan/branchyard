@@ -1,7 +1,7 @@
 {
-  "session_id": "ds-1",
-  "transcript_path": "/tmp/transcript.jsonl",
-  "cwd": "@CWD@",
+  "session_id": "session-67e59601-4c76-40e0-9d8a-c9fad2916038",
+  "transcript_path": "",
   "hook_event_name": "SessionStart",
-  "source": "startup"
+  "source": "startup",
+  "cwd": "@CWD@"
 }
