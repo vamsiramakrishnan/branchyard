@@ -160,3 +160,16 @@ fn a_branch_session_hears_its_unread_messages_once() {
     let inbox = repo.json(&["inbox", "--as", "root", "--unread", "--json"]);
     assert_eq!(inbox["messages"].as_array().unwrap().len(), 1, "{inbox}");
 }
+
+#[test]
+fn a_new_session_hears_of_failed_branches_as_the_status_line_counts_them() {
+    let repo = branchyard_testkit::repo!();
+    let out = repo.by_agent(&["run", "WRITE hello.txt=hi", "--name", "hello"]);
+    assert!(out.status.success(), "{out:?}");
+    let out = repo.by_agent(&["run", "EXIT", "--name", "exits"]);
+    assert!(!out.status.success(), "{out:?}");
+    let told = hook(&repo, "session-start", "fresh").unwrap();
+    assert_eq!(told, "Branchyard: 1 ready to integrate, 1 failed (by ls).");
+    let line = statusline(&repo, &json!({"workspace": {"current_dir": repo.root}}));
+    assert_eq!(line, "by: 1 ready · 1 failed\n");
+}

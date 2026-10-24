@@ -25,12 +25,25 @@ pub use branchyard_config::{
 /// This machine and repository.
 pub struct HostProbe {
     root: PathBuf,
+    /// Whether to run each installed harness's `--version`; some of them
+    /// write their own directories into the home when they start.
+    versions: bool,
 }
 
 impl HostProbe {
     pub fn new(cwd: &Path) -> HostProbe {
         HostProbe {
             root: project_root(cwd),
+            versions: true,
+        }
+    }
+
+    /// A probe that finds harnesses on `PATH` without running them, for
+    /// installing hooks, which needs no versions.
+    pub fn without_versions(cwd: &Path) -> HostProbe {
+        HostProbe {
+            versions: false,
+            ..HostProbe::new(cwd)
         }
     }
 
@@ -147,7 +160,11 @@ impl Probe for HostProbe {
             .collect();
         // Logins as `by harnesses` reads them: its cached inventory, by
         // names and files only.
-        let inventory = crate::harness_cmd::detected_here().ok();
+        // Refreshing the inventory runs the harnesses too.
+        let inventory = match self.versions {
+            true => crate::harness_cmd::detected_here().ok(),
+            false => None,
+        };
         fn word<T: serde::Serialize>(value: &T) -> String {
             serde_json::to_value(value)
                 .ok()
@@ -163,6 +180,7 @@ impl Probe for HostProbe {
             })
         };
         // Ask each installed harness for its version at once, bounded.
+        let versions = self.versions;
         let handles: Vec<_> = defaults
             .into_iter()
             .map(|info| {
@@ -171,7 +189,7 @@ impl Probe for HostProbe {
                         .and_then(|p| p.command.first())
                         .and_then(|program| which(program));
                     let version = match (info.available, program) {
-                        (true, Some(program)) => {
+                        (true, Some(program)) if versions => {
                             first_line(&program, &["--version"], None, VERSION_TIMEOUT)
                         }
                         _ => None,

@@ -72,7 +72,9 @@ fn plugin(env: &Env, init: &InitArgs) -> Option<Outcome> {
         Ok(cwd) => cwd,
         Err(e) => return Some(Err(e.into())),
     };
-    let probe = HostProbe::new(&cwd);
+    // Installing hooks needs no harness versions, and running some
+    // harnesses writes their directories into the home.
+    let probe = HostProbe::without_versions(&cwd);
     if !named {
         // The listing: no harness versions are asked for, only PATH.
         let facts = Facts {

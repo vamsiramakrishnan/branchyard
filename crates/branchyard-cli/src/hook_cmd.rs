@@ -695,7 +695,7 @@ fn inbox_lines(glance: &Glance, branch: &str, cursor: Option<&Cursor>) -> (Vec<S
 /// Branches whose state a person acts on and that changed since this
 /// session's last hook call. On a session's first call, only what needs an
 /// answer now (asking, blocked, a plan to approve) and a count of what is
-/// running or ready: older endings are not news.
+/// running, ready or failed: older endings are not news one by one.
 fn change_lines(glance: &Glance, cursor: Option<&Cursor>) -> (Vec<String>, Cursor) {
     let mut next = Cursor::default();
     let mut changed = Vec::new();
@@ -729,6 +729,11 @@ fn change_lines(glance: &Glance, cursor: Option<&Cursor>) -> (Vec<String>, Curso
         }
         if counts.ready > 0 {
             parts.push(format!("{} ready to integrate", counts.ready));
+        }
+        // Counted as the status line counts them, since each still waits on
+        // a decision (retry or discard), though its ending is old news.
+        if counts.failed > 0 {
+            parts.push(format!("{} failed", counts.failed));
         }
         if !parts.is_empty() {
             lines.push(format!("Branchyard: {} (by ls).", parts.join(", ")));
