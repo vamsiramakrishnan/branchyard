@@ -21,7 +21,7 @@ By default the local process provider runs harnesses as the container's own user
 
 **Not built here.** This environment has no container runtime, so the image was validated statically (this file's build/run flags, the binary and feature it builds, the base images and packages) and the compose recipe only for YAML/schema validity (`docker compose -f deploy/compose.yaml config`, with placeholder values for its required variables), not by actually building or running either.
 
-`by init deploy` writes a compose file, its server configuration and generated secret files for one repository, checked with the server's loader and `docker compose config` ([setup](setup.md)). The image copies `plugins/branchyard/skills` as well as `crates`: `by init plugin` embeds the shipped skills.
+`by init deploy` writes a compose file, its server configuration and generated secret files for one repository, checked with the server's loader and `docker compose config` ([setup](setup.md)). The image copies `plugins/branchyard` as well as `crates`: `by init plugin` embeds the shipped skills, harness files and install manifests.
 
 ## Image with harnesses
 

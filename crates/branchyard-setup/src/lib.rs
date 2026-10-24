@@ -27,6 +27,7 @@ use serde_json::Value;
 
 pub mod config;
 pub mod import;
+pub mod install;
 pub mod interview;
 pub mod plan;
 pub mod probe;
@@ -102,7 +103,7 @@ impl Topic {
             Topic::Rig => "A rig TOML: a lead seat and the seats it delegates to, each with its harness, budget and policy",
             Topic::Server => "A server configuration: listen address and TLS, SQLite or PostgreSQL, tenants with hashed credentials and 0600 token files, quotas, providers, secrets, webhooks",
             Topic::Deploy => "compose.yaml with PostgreSQL, a server configuration and generated secret files",
-            Topic::Plugin => "Install the setup and delegate skills into Claude Code or Codex",
+            Topic::Plugin => "Install the setup and delegate skills into Claude Code or Codex, or each detected harness's hooks, commands and skills (plugins/branchyard/install)",
         }
     }
 }

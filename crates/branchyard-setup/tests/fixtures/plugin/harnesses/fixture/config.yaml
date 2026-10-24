@@ -1,0 +1,4 @@
+hooks:
+  on_session_start:
+    - command: "command -v by >/dev/null 2>&1 && by hook --harness fixture session-start || true"
+      timeout: 5

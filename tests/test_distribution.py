@@ -54,6 +54,41 @@ class ArchiveTests(unittest.TestCase):
 
                     self.assertEqual(hashlib.sha256(archive.read(f"{root_name}/{name}")).hexdigest(), digest)
 
+    def test_plugin_archive_carries_every_harness_file_and_install_manifest(self):
+        plugin = package.build(self.root / "dist")[0]
+        with zipfile.ZipFile(plugin) as archive:
+            names = set(archive.namelist())
+            for sub in ["harnesses", "install"]:
+                files = [p for p in (package.PLUGIN / sub).rglob("*") if p.is_file()]
+                self.assertTrue(files, sub)
+                for path in files:
+                    name = "branchyard/" + path.relative_to(package.PLUGIN).as_posix()
+                    self.assertIn(name, names)
+                    self.assertEqual(archive.read(name), path.read_bytes(), name)
+            # Every file a manifest installs is in the archive.
+            for manifest in sorted((package.PLUGIN / "install").glob("*.toml")):
+                data = tomllib.loads(manifest.read_text())
+                self.assertEqual(data["harness"], manifest.stem)
+                for entry in data.get("file", []):
+                    source = "branchyard/" + entry["from"]
+                    self.assertTrue(
+                        source in names or any(n.startswith(source + "/") for n in names),
+                        f"{manifest.name}: {entry['from']}",
+                    )
+
+    def test_executable_files_stay_executable(self):
+        source = self.root / "src"
+        (source / "bin").mkdir(parents=True)
+        (source / "bin/hook.sh").write_text("#!/bin/sh\n")
+        (source / "bin/hook.sh").chmod(0o755)
+        (source / "plain.json").write_text("{}\n")
+        files = package.inputs(source)
+        package.archive(self.root / "a.zip", files, "x", frozenset(package.executables(source)))
+        with zipfile.ZipFile(self.root / "a.zip") as archive:
+            modes = {i.filename: i.external_attr >> 16 for i in archive.infolist()}
+        self.assertEqual(modes["x/bin/hook.sh"], 0o100755)
+        self.assertEqual(modes["x/plain.json"], 0o100644)
+
     def test_plugin_archive_bundles_the_same_skill_bytes_as_the_standalone_one(self):
         plugin, skill, setup_skill, _sdk = package.build(self.root / "dist")
         with zipfile.ZipFile(plugin) as plugin_zip:

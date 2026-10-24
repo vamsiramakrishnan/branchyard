@@ -1,0 +1,36 @@
+# Claude Code without the marketplace plugin: the two skills and the
+# commands into your user directory, and the plugin's two hooks merged into
+# ~/.claude/settings.json (the same commands as hooks/hooks.json).
+harness = "claude-code"
+binaries = ["claude"]
+provides = ["hooks", "commands", "skills"]
+
+[[file]]
+from = "skills/setup"
+to = "~/.claude/skills/setup"
+how = "write"
+
+[[file]]
+from = "skills/delegate"
+to = "~/.claude/skills/delegate"
+how = "write"
+
+[[file]]
+from = "commands"
+to = "~/.claude/commands/branchyard"
+how = "write"
+
+[[file]]
+from = "harnesses/claude-code/settings-hooks.json"
+to = "~/.claude/settings.json"
+how = "merge-json"
+at = ""
+
+[[note]]
+text = "If the Branchyard plugin is also installed from the marketplace (/plugin install branchyard@branchyard), its hooks run too: keep one of the two."
+
+[[note]]
+text = "Status line (not merged, as it would replace yours): set \"statusLine\": {\"type\": \"command\", \"command\": \"by statusline\"} in ~/.claude/settings.json."
+
+[[note]]
+text = "Restart Claude Code; /hooks lists the two Branchyard hooks."

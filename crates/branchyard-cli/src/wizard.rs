@@ -105,6 +105,7 @@ pub fn review_text(plan: &Plan, color: bool) -> String {
     }
     for file in &plan.files {
         let action = match file.action {
+            _ if file.refusal.is_some() => paint(color, "31", "refused"),
             FileAction::Create => paint(color, "32", "create"),
             FileAction::Update => paint(color, "33", "update"),
             FileAction::Unchanged => paint(color, "2", "unchanged"),
@@ -127,8 +128,12 @@ pub fn review_text(plan: &Plan, color: bool) -> String {
                 ),
             ),
         };
+        let how = match &file.how {
+            Some(how) => format!(", {how}"),
+            None => String::new(),
+        };
         out.push_str(&format!(
-            "\n{action} {} (mode {})  {verdict}\n",
+            "\n{action} {} (mode {}{how})  {verdict}\n",
             file.path, file.mode
         ));
         if file.sensitive {

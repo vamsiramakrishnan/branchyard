@@ -2,6 +2,9 @@
 """Build reproducible plugin, standalone-skill and Python SDK archives from
 one canonical source: `plugins/branchyard`, `plugins/branchyard/skills/delegate`,
 `plugins/branchyard/skills/setup` and `sdk/python`. See `docs/distribution.md`.
+The plugin archive is the whole of `plugins/branchyard`, so it carries each
+harness's files (`harnesses/`) and the install manifests `by init plugin`
+reads (`install/`); executable files keep their executable bit.
 
 Determinism: inputs are read in sorted path order, every archive entry gets
 a fixed timestamp and mode, and compression is deflate at a fixed level, so
@@ -71,14 +74,26 @@ def inputs(root: Path) -> dict:
     return result
 
 
+def executables(root: Path) -> set:
+    """The files under `root` with an executable bit, by relative path: they
+    are archived 0755 (a harness's hook script must stay runnable), every
+    other file 0644."""
+    return {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and not path.is_symlink() and path.stat().st_mode & 0o111
+    }
+
+
 def sdk_version() -> str:
     """`sdk/python/pyproject.toml`'s `project.version`."""
     return tomllib.loads((SDK / "pyproject.toml").read_text())["project"]["version"]
 
 
-def archive(path: Path, files: dict, root_name: str) -> None:
+def archive(path: Path, files: dict, root_name: str, executable: frozenset = frozenset()) -> None:
     """Write `files` (name -> bytes) under `root_name/` in a new zip at
-    `path`, plus a `root_name/MANIFEST.sha256.json` of their digests."""
+    `path`, plus a `root_name/MANIFEST.sha256.json` of their digests; the
+    names in `executable` get mode 0755."""
     manifest = {name: hashlib.sha256(data).hexdigest() for name, data in sorted(files.items())}
     files = dict(files)
     files["MANIFEST.sha256.json"] = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
@@ -86,7 +101,7 @@ def archive(path: Path, files: dict, root_name: str) -> None:
         for name, data in sorted(files.items()):
             info = zipfile.ZipInfo(f"{root_name}/{name}", date_time=FIXED_TIME)
             info.create_system = 3  # Unix, so external_attr below is meaningful.
-            info.external_attr = 0o100644 << 16
+            info.external_attr = (0o100755 if name in executable else 0o100644) << 16
             info.compress_type = zipfile.ZIP_DEFLATED
             output.writestr(info, data)
 
@@ -128,7 +143,7 @@ def build(destination: Path) -> list[Path]:
         files = inputs(root)
         files["LICENSE"] = license_bytes
         path = destination / f"branchyard-{kind}-{version}.zip"
-        archive(path, files, root_name)
+        archive(path, files, root_name, frozenset(executables(root)))
         paths.append(path)
     return paths
 

@@ -726,6 +726,20 @@
                 "type": "string"
               },
               "description": "For a server configuration: the flags it is served with\n(`by serve --config FILE FLAGS`), which its validation uses too."
+            },
+            "how": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "For a harness install (`by init plugin`): how the packaged file is\ninstalled, such as `write` or `merge-json at hooks`. A merge only\nadds, so it never counts as replacing the file."
+            },
+            "refusal": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why this file cannot be installed (a merge that would have to\nreplace something): the plan is then invalid and writes nothing."
             }
           },
           "required": [
@@ -770,6 +784,11 @@
               "type": "string",
               "const": "skill",
               "description": "A skill's `SKILL.md` or reference file."
+            },
+            {
+              "type": "string",
+              "const": "harness_config",
+              "description": "A harness's own settings, hooks or extension file, installed by\n`by init plugin`: parsed as JSON or TOML by its extension (YAML is\nnot parsed here)."
             },
             {
               "type": "string",
@@ -1019,6 +1038,137 @@
             "kind",
             "message"
           ]
+        }
+      }
+    },
+    "HarnessList": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "description": "[`crate::PROTOCOL`]."
+        },
+        "harnesses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HarnessInstall"
+          },
+          "description": "Detected harnesses first, then the rest, each by id."
+        }
+      },
+      "required": [
+        "protocol",
+        "harnesses"
+      ],
+      "description": "`by init plugin --json`: every installable harness, detected first.",
+      "title": "HarnessList",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "HarnessInstall": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "The catalog id, as `by init plugin ID` takes it."
+            },
+            "label": {
+              "type": "string",
+              "description": "Its display name."
+            },
+            "detected": {
+              "type": "boolean",
+              "description": "One of its binaries is on `PATH`."
+            },
+            "binaries": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The programs looked for on `PATH`."
+            },
+            "provides": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "What the install gives: hooks, commands, skills, statusline..."
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ListedFile"
+              },
+              "description": "Every file it writes or merges into."
+            },
+            "notes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "What only the person can do afterwards."
+            }
+          },
+          "required": [
+            "harness",
+            "label",
+            "detected",
+            "binaries",
+            "provides",
+            "files"
+          ],
+          "description": "A harness `by init plugin` can install for, as `by init plugin`\n(no harnesses named) lists it."
+        },
+        "ListedFile": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Where it goes, `~` and `{project}` expanded."
+            },
+            "how": {
+              "$ref": "#/$defs/How",
+              "description": "How it is installed."
+            },
+            "at": {
+              "type": "string",
+              "description": "For a merge: the dotted key it merges under, when not the top level."
+            },
+            "from": {
+              "type": "string",
+              "description": "What it installs, under `plugins/branchyard`."
+            }
+          },
+          "required": [
+            "path",
+            "how",
+            "from"
+          ],
+          "description": "One file a harness's install touches, as listed."
+        },
+        "How": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "write",
+              "description": "Write the file (or every file under a directory) as packaged."
+            },
+            {
+              "type": "string",
+              "const": "merge-json",
+              "description": "Merge a JSON fragment into the target ([`merge::json`])."
+            },
+            {
+              "type": "string",
+              "const": "merge-toml",
+              "description": "Merge a TOML fragment, keeping formatting ([`merge::toml`])."
+            },
+            {
+              "type": "string",
+              "const": "merge-yaml",
+              "description": "Merge a block-YAML fragment by indentation ([`merge_yaml`])."
+            }
+          ],
+          "description": "How a file is installed."
         }
       }
     }
