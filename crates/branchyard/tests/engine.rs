@@ -325,6 +325,19 @@ fn reincarnation_starts_fresh_with_a_handoff_brief_and_marks_the_old_branch_supe
         "the candidate's commit"
     );
     assert!(prompt.contains("1 file(s) changed"), "{prompt}");
+    // It says what to do, in the words of any other handoff, and not what the
+    // engine calls it.
+    assert!(
+        prompt.starts_with("Continue elder's work in a fresh session."),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("is being reincarnated"), "{prompt}");
+    assert!(
+        prompt.contains(
+            "The working tree is as the last turn left it; check it (`git status`, `git log`)"
+        ),
+        "{prompt}"
+    );
 
     let old = f.yard.branch("elder").unwrap();
     assert_eq!(old.info().superseded_by.as_deref(), Some("reborn"));

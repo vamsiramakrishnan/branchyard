@@ -1,6 +1,6 @@
 # Contributing
 
-Start with [the implementation plan](docs/implementation-plan.md). The next deliverable is the domain/provider contract and sandbox qualification, followed by one complete remote task. The workspace has <!-- fact:workspace.crate_count -->23<!-- /fact --> crates. The current crates provide the harness identity registry, unqualified harness protocol drivers with per-capability support reasons, sandbox capability admission, and an unqualified Agent Substrate adapter.
+Start with [the roadmap](docs/roadmap.md), which says what is done and what comes next; [the implementation plan](docs/implementation-plan.md) records the original foundation and is not a to-do list. The workspace has <!-- fact:workspace.crate_count -->23<!-- /fact --> crates. Agents working in this repository: read [AGENTS.md](AGENTS.md) first.
 
 ## Before you push
 

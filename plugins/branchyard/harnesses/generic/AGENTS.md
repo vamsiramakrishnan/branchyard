@@ -6,4 +6,14 @@ This repository runs work on Branchyard branches (`by`). Copy the section for yo
 
 ## Goose and the rest
 
-Before you start a task, and again before you report back, run `printf '{"cwd": "%s"}' "$PWD" | by hook --harness generic user-prompt-submit 2>/dev/null` and act on the `context` of what it prints: branches that finished, failed, are blocked or ask a question since the last run. When it prints nothing, nothing changed. `by ls` lists every branch; `by inbox --unread` shows the questions.
+Before you start a task, and again before you report back, run this check:
+
+```sh
+printf '{"cwd": "%s"}' "$PWD" | by hook --harness generic user-prompt-submit 2>/dev/null
+```
+
+It prints nothing when nothing changed since the last time you ran it. Otherwise it prints `{"context": "..."}`, and the lines in `context` name the branches that finished, failed, are blocked, wait for a plan's approval or ask a question, each with the `by` command that deals with it.
+
+Tell the person each question or failure in one line, with the branch's name. Do not answer, merge, discard or cancel anything unless they ask you to. `by ls` lists every branch and `by show NAME` shows one.
+
+Questions from a branch's children sit in the parent's inbox. A line that says `(under PARENT)` names it: read it with `by inbox --as PARENT --unread`.
