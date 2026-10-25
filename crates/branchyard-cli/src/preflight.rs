@@ -13,8 +13,12 @@
 //! | not installed | refuse, with `by harnesses install ID`, or the catalog's command when the install policy would refuse it |
 //! | found, not on `PATH` | refuse, with the directory to add |
 //! | logged out, verified by the harness's own status command | refuse, with the login hint; `--no-preflight` runs anyway |
+//! | logged out, but the run is isolated and its secrets (`--secret`, `[secrets]`) name the harness's key variable | one note, and go on: the private home gets a login the host's status command cannot see |
 //! | logged out, likely (a guess from credential files) | one note, and go on |
 //! | logged in, or unknown | go on |
+//!
+//! A key `by harnesses login ID --api-key` stored counts as a login here as
+//! it does in the listing.
 //!
 //! Nothing here is checked for a run that names its own executable
 //! (`--command`, which a branch keeps for its later sends), a routed run (the router asks the same inventory), a run
@@ -57,9 +61,26 @@ pub(crate) fn check(
         }
     };
     for id in &wanted {
-        decide(env, &found, id, by_default)?;
+        decide(env, task, &found, id, by_default)?;
     }
     Ok(())
+}
+
+/// The key variable of `id` that this run places in the harness's private
+/// home (`--secret`, or `[secrets]` applied to an isolated run): a login
+/// the host's status command cannot see. `None` without a private home,
+/// since the key would not reach the harness.
+fn provisioned_key(task: &TaskArgs, id: &str) -> Option<String> {
+    if !task.isolated {
+        return None;
+    }
+    let names = inventory::key_variables(id);
+    task.provision
+        .as_ref()?
+        .secrets
+        .iter()
+        .map(|secret| secret.name.clone())
+        .find(|name| names.contains(name))
 }
 
 /// A pre-flight refusal, as `--json` reports an unavailable harness:
@@ -111,7 +132,13 @@ fn detectable(requested: &[String]) -> Vec<String> {
 }
 
 /// What the inventory says about `id`: refuse, note, or nothing.
-fn decide(env: &Env, found: &Inventory, id: &str, by_default: bool) -> Result<(), Failure> {
+fn decide(
+    env: &Env,
+    task: &TaskArgs,
+    found: &Inventory,
+    id: &str,
+    by_default: bool,
+) -> Result<(), Failure> {
     let Some(state) = found.get(id) else {
         return match found.checked(id) {
             true => Err(Failure::Message(not_installed(env, found, id, by_default))),
@@ -127,6 +154,15 @@ fn decide(env: &Env, found: &Inventory, id: &str, by_default: bool) -> Result<()
     };
     if !state.on_path {
         return Err(Failure::Message(why));
+    }
+    if logged_out {
+        if let Some(var) = provisioned_key(task, id) {
+            eprintln!(
+                "by: note: {id} is logged out here; the isolated run gets {var} from its \
+                 secrets. Going on."
+            );
+            return Ok(());
+        }
     }
     if logged_out && certain {
         return Err(Failure::Message(format!(

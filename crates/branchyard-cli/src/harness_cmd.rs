@@ -155,15 +155,17 @@ pub(crate) fn qualification_of(known: &[HarnessInfo], id: &str) -> Option<String
 /// them, else a detection of just those, which is not kept.
 pub(crate) fn detected_only(ids: &[String]) -> Result<Inventory, String> {
     let options = DetectOptions::from_env();
-    if let Some(found) = cache().get(&options) {
-        if ids.iter().all(|id| found.checked(id)) {
-            return Ok(found);
-        }
-    }
-    inventory::detect_local(&DetectOptions {
-        only: Some(ids.to_vec()),
-        ..options
-    })
+    let mut found = match cache().get(&options) {
+        Some(found) if ids.iter().all(|id| found.checked(id)) => found,
+        _ => inventory::detect_local(&DetectOptions {
+            only: Some(ids.to_vec()),
+            ..options
+        })?,
+    };
+    // The keys `by harnesses login ID --api-key` stored are logins here as
+    // in the listing: an isolated run gets them.
+    count_stored_keys(&mut found);
+    Ok(found)
 }
 
 fn log() -> HarnessLog {

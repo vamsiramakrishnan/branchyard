@@ -1344,6 +1344,74 @@ fn a_run_is_refused_before_a_branch_when_its_harness_cannot_start() {
     assert_eq!(w.branches(), ["cx", "cx2"]);
 }
 
+/// A key the isolated run will get (`--secret`, `[secrets]`, or one `by
+/// harnesses login --api-key` stored) is a login the host's status command
+/// cannot see: the run goes on with a note instead of being refused.
+#[test]
+fn a_provisioned_key_lets_an_isolated_run_past_a_verified_logout() {
+    let w = World::new();
+    w.fake_codex(&w.bin, "0.157.1");
+    // The fake cannot speak Codex's protocol, so the branch fails after it
+    // exists; that it exists is the point.
+    let out = w.by_env(
+        &[
+            "run",
+            "say hi",
+            "--harness",
+            "codex",
+            "-n",
+            "cx",
+            "--isolated",
+            "--secret",
+            "OPENAI_API_KEY=MY_KEY",
+            "--yes",
+        ],
+        &[("MY_KEY", "sk-test-0123456789")],
+    );
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("by: note: codex is logged out here; the isolated run gets OPENAI_API_KEY"),
+        "{err}"
+    );
+    assert!(!err.contains("Nothing was started"), "{err}");
+    assert_eq!(w.branches(), ["cx"]);
+    // A key Branchyard stored counts too, whether or not the listing's cache
+    // is fresh.
+    let mut child = w
+        .command(BY)
+        .args(["harnesses", "login", "codex", "--api-key"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"sk-test-9876543210")
+        .unwrap();
+    let stored = child.wait_with_output().unwrap();
+    assert!(stored.status.success(), "{}", text(&stored.stderr));
+    let out = w.by(&[
+        "run",
+        "say hi",
+        "--harness",
+        "codex",
+        "-n",
+        "cx2",
+        "--isolated",
+        "--yes",
+    ]);
+    assert!(
+        !text(&out.stderr).contains("Nothing was started"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(w.branches(), ["cx", "cx2"]);
+}
+
 #[test]
 fn a_harness_that_is_not_installed_is_refused_with_how_to_install_it() {
     let w = World::new();
