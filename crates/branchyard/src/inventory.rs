@@ -1501,6 +1501,19 @@ struct Cached {
     inventory: Inventory,
 }
 
+/// The cache file's text: `None` when there is none yet (the usual first
+/// run), and `None` with a warning when it cannot be read.
+fn read_cache(path: &Path) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => branchyard_support::best_effort(
+            "read the harness inventory cache",
+            Err::<String, _>(error),
+        ),
+    }
+}
+
 impl InventoryCache {
     pub fn new(path: impl Into<PathBuf>, ttl: Duration) -> InventoryCache {
         InventoryCache {
@@ -1526,7 +1539,7 @@ impl InventoryCache {
     /// The cached inventory, if it is fresh and was taken under the same
     /// `PATH`, `HOME` and directories.
     pub fn get(&self, options: &DetectOptions) -> Option<Inventory> {
-        let text = std::fs::read_to_string(&self.path).ok()?;
+        let text = read_cache(&self.path)?;
         let cached: Cached = serde_json::from_str(&text).ok()?;
         let age = now_ms().saturating_sub(cached.inventory.detected_at_ms);
         (cached.key == Self::key(options) && Duration::from_millis(age) < self.ttl)
@@ -1536,7 +1549,7 @@ impl InventoryCache {
     /// The inventory last kept, however old and whatever machine state it
     /// was taken under.
     fn last(&self) -> Option<Inventory> {
-        let text = std::fs::read_to_string(&self.path).ok()?;
+        let text = read_cache(&self.path)?;
         serde_json::from_str::<Cached>(&text)
             .ok()
             .map(|cached| cached.inventory)

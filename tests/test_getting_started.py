@@ -9,8 +9,8 @@
   collapsed, and `…` stands for any text (a hash, a time, a path); a line that is only `…` is skipped.
   Output the page leaves out does not matter, so only the lines the page teaches are pinned.
 * Every `by` command in a ```` ```sh ```` block or a `by …` code span: its subcommand exists in the
-  built `by` (`by help all` lists them all), and each `--flag` it shows is in that subcommand's `--help`. `by setup` is skipped while the
-  built `by` lacks it.
+  built `by` (`by help all` lists them all), and each `--flag` it shows is in that subcommand's
+  `--help`. `by setup` is skipped while the built `by` lacks it.
 * The symptoms and messages troubleshooting.md and upgrade.md quote are in the code and on the page.
 
 The tests that run a program need a built `by` and `fake-acp-agent`, so they run only when asked, and

@@ -15,6 +15,23 @@ use crate::state::{Fence, Record};
 use crate::{Error, SubstrateOptions, Yard};
 
 impl ProviderKind for SubstrateOptions {
+    fn banner(&self, _isolated: bool, server: bool) -> (&'static str, String) {
+        let what = match server {
+            false => format!(
+                "harnesses run in Agent Substrate actors from template {} (unqualified); the \
+                 worktree is copied to {} and back",
+                self.template,
+                self.workdir()
+            ),
+            true => format!(
+                "harnesses run in Agent Substrate actors from template {} (unqualified), reached \
+                 from the server",
+                self.template
+            ),
+        };
+        ("sandbox", what)
+    }
+
     fn name(&self) -> &'static str {
         "substrate"
     }

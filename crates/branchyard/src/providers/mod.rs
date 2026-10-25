@@ -61,6 +61,13 @@ pub(crate) trait ProviderKind {
         self.name().to_owned()
     }
 
+    /// `by`'s banner for a run under this provider: the mode word (`local`,
+    /// `isolated` or `sandbox`) and what the mode does and does not give,
+    /// said as plainly as what it does. `isolated`: the branch has a private
+    /// home, which only a local run minds. `server`: the harness runs on a
+    /// server, as the server's user.
+    fn banner(&self, isolated: bool, server: bool) -> (&'static str, String);
+
     /// What these options ask of the sandbox's lifecycle; `None` when
     /// there is no sandbox (a local harness).
     fn lifecycle(&self) -> Option<Lifecycle>;
@@ -156,6 +163,22 @@ impl Provider {
     /// spelling `--provider` takes.
     pub fn label(&self) -> String {
         self.kind().label()
+    }
+
+    /// `by`'s banner for a run under `provider` (`None` is local): the mode
+    /// word and what the mode gives; see [`ProviderKind::banner`].
+    pub fn banner_of(
+        provider: Option<&Provider>,
+        isolated: bool,
+        server: bool,
+    ) -> (&'static str, String) {
+        of(provider).banner(isolated, server)
+    }
+
+    /// Whether `provider` (`None` is local) runs the harness on this host,
+    /// in no sandbox.
+    pub fn is_local(provider: Option<&Provider>) -> bool {
+        !of(provider).sandboxed()
     }
 
     /// A Microsandbox provider with `options`: how a caller outside this

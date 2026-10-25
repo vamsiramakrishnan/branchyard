@@ -45,10 +45,6 @@
       "count": 3,
       "why": "a branch's dependents and its parent, and its children, read with the fallback of 'none'. Not told apart from an absent record."
     },
-    "crates/branchyard/src/inventory.rs": {
-      "count": 1,
-      "why": "the inventory cache: unreadable is a cache miss."
-    },
     "crates/branchyard/src/land.rs": {
       "count": 2,
       "why": "children's records while landing: an unreadable child is skipped, as one that is gone is."

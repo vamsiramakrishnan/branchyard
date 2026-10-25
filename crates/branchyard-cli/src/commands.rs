@@ -176,67 +176,7 @@ pub(crate) fn configure(yard: Yard) -> Result<Yard, branchyard::Error> {
 /// `server` (its label), a server doing either on its host. It says what
 /// the mode does not give as plainly as what it does.
 pub(crate) fn banner(provider: Option<&Provider>, isolated: bool, server: Option<&str>) -> String {
-    let (who, whose) = match server {
-        None => ("your user", "your"),
-        Some(_) => ("the server's user", "the server's"),
-    };
-    let (mode, what) = match (provider, server) {
-        (None | Some(Provider::Local), _) if isolated => (
-            "isolated",
-            format!(
-                "harnesses run as {who} with a private HOME under .branchyard/homes/; not a \
-                 sandbox, so they can still read {whose} files and reach the network"
-            ),
-        ),
-        (None | Some(Provider::Local), _) => (
-            "local",
-            format!("harnesses run as {who}, in {whose} own HOME; no sandbox"),
-        ),
-        (Some(Provider::Microsandbox(sandbox)), None) => (
-            "sandbox",
-            format!(
-                "harnesses run in Microsandbox microVMs from {}; the worktree is mounted at {}",
-                sandbox.image,
-                branchyard::SANDBOX_WORKSPACE
-            ),
-        ),
-        (Some(Provider::Microsandbox(sandbox)), Some(_)) => (
-            "sandbox",
-            format!(
-                "harnesses run in Microsandbox microVMs on the server, from {}",
-                sandbox.image
-            ),
-        ),
-        (Some(Provider::Substrate(options)), None) => (
-            "sandbox",
-            format!(
-                "harnesses run in Agent Substrate actors from template {} (unqualified); the \
-                 worktree is copied to {} and back",
-                options.template,
-                options.workdir()
-            ),
-        ),
-        (Some(Provider::Substrate(options)), Some(_)) => (
-            "sandbox",
-            format!(
-                "harnesses run in Agent Substrate actors from template {} (unqualified), \
-                 reached from the server",
-                options.template
-            ),
-        ),
-        (Some(Provider::Recipe(options)), None) => (
-            "sandbox",
-            format!(
-                "harnesses run on machines recipe {} makes; the worktree is copied there and back",
-                options.name
-            ),
-        ),
-        // Refused before anything is sent.
-        (Some(Provider::Recipe(options)), Some(_)) => (
-            "sandbox",
-            format!("recipe {} is not run by a server", options.name),
-        ),
-    };
+    let (mode, what) = Provider::banner_of(provider, isolated, server.is_some());
     match server {
         None => format!("by: {mode} mode: {what}"),
         Some(label) => format!("by: remote mode on {label}: {what}"),
@@ -348,7 +288,7 @@ impl Live {
         // The plain local mode is a fact about the repository's setup, said the
         // first time and not on every run (`first_local_note`); a private home,
         // a sandbox or a server is said every time.
-        let plain_local = matches!(provider, None | Some(Provider::Local)) && !isolated;
+        let plain_local = !isolated && Provider::is_local(provider.as_ref());
         if !plain_local || first_local_note() {
             eprintln!("{}", banner(provider.as_ref(), isolated, None));
         }
@@ -871,7 +811,7 @@ pub fn send(
     let branch = open()?.branch(branch)?;
     // The branch keeps its harness; check that one still starts (preflight.rs),
     // unless it runs a command of its own or somewhere else.
-    if matches!(branch.provider()?, None | Some(Provider::Local)) && branch.command()?.is_none() {
+    if Provider::is_local(branch.provider()?.as_ref()) && branch.command()?.is_none() {
         let profile = branch.info().profile.clone();
         if let Err(failure) = crate::preflight::check(env, task, &[profile], false) {
             return crate::preflight::refused(json, failure);
@@ -3464,7 +3404,7 @@ fn rig_refused(args: &args::RigArgs, error: &rig::RigError) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use branchyard::{RecipeOptions, SandboxOptions, SubstrateOptions};
+    use branchyard::SandboxOptions;
 
     /// Each way a harness can run says so, and says what that does not
     /// give: the lines differ, and only a sandbox provider says "sandbox".
@@ -3475,7 +3415,6 @@ mod tests {
             local,
             "by: local mode: harnesses run as your user, in your own HOME; no sandbox"
         );
-        assert_eq!(banner(Some(&Provider::Local), false, None), local);
 
         let isolated = banner(None, true, None);
         assert!(isolated.starts_with("by: isolated mode:"), "{isolated}");
@@ -3484,7 +3423,7 @@ mod tests {
         assert!(isolated.contains("read your files"), "{isolated}");
         assert_ne!(isolated, local);
 
-        let microsandbox = Provider::Microsandbox(SandboxOptions {
+        let microsandbox = Provider::microsandbox(SandboxOptions {
             image: "alpine:3.20".into(),
             ..SandboxOptions::default()
         });
@@ -3494,18 +3433,7 @@ mod tests {
         // A private home asked for beside a sandbox changes nothing: the
         // sandbox is what the harness runs in.
         assert_eq!(banner(Some(&microsandbox), true, None), sandbox);
-
-        let substrate = Provider::Substrate(SubstrateOptions {
-            template: "by".into(),
-            ..SubstrateOptions::default()
-        });
-        assert!(banner(Some(&substrate), false, None)
-            .contains("Agent Substrate actors from template by"));
-        let recipe = Provider::Recipe(RecipeOptions {
-            name: "devbox".into(),
-            ..RecipeOptions::default()
-        });
-        assert!(banner(Some(&recipe), false, None).contains("recipe devbox"));
+        // Substrate and recipe words: the providers' own tests.
     }
 
     /// Against a server the line names it, whose user the harness runs as,
@@ -3525,7 +3453,7 @@ mod tests {
             "{isolated}"
         );
         assert!(isolated.contains("not a sandbox"), "{isolated}");
-        let microsandbox = Provider::Microsandbox(SandboxOptions {
+        let microsandbox = Provider::microsandbox(SandboxOptions {
             image: "alpine:3.20".into(),
             ..SandboxOptions::default()
         });

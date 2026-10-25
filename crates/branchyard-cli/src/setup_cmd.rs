@@ -300,7 +300,7 @@ fn detected_text(facts: &Facts) -> String {
         "harnesses",
         &match found.is_empty() {
             true => "none on PATH".to_owned(),
-            false => found.join(", "),
+            false => found.join("; "),
         },
     );
     if let Some(check) = &facts.suggested_check {
@@ -309,29 +309,33 @@ fn detected_text(facts: &Facts) -> String {
     out
 }
 
-/// `Claude Code 2.1.3 (no login found, unverified)`.
+/// `Claude Code 2.1.3, login not verified`: the harness, its version and
+/// its login in the words `by harnesses` uses.
 fn harness_phrase(h: &HarnessFact) -> String {
     let named = match &h.version {
         Some(v) if !v.is_empty() => format!("{} {v}", harness_label(&h.harness)),
         _ => harness_label(&h.harness),
     };
-    format!("{named} ({})", login_words(h))
+    format!("{named}, {}", login_words(h))
 }
 
-/// A login in honest words: what Branchyard saw, and how sure it is.
+/// A login in the words of the `by harnesses` table (`logged in`, `key set
+/// (VAR)`, `credentials found`, `logged out`, `login not verified`,
+/// `unknown`): what Branchyard saw, and no more.
 fn login_words(h: &HarnessFact) -> String {
     let Some(login) = &h.login else {
         return "login not checked".into();
     };
-    let sure = |evidence: &str| match evidence {
-        "verified" => "verified",
-        _ => "likely",
-    };
-    match login.state.as_str() {
-        "logged_in" => format!("logged in, {}", sure(&login.evidence)),
-        "logged_out" if login.evidence == "verified" => "logged out, verified".into(),
-        "logged_out" => "no login found, unverified".into(),
-        _ => "login unknown".into(),
+    if !login.label.is_empty() {
+        return login.label.clone();
+    }
+    // A probe without the label: the same words from what it did record.
+    match (login.state.as_str(), login.evidence.as_str()) {
+        ("logged_in", "verified") => "logged in".into(),
+        ("logged_in", _) => "credentials found".into(),
+        ("logged_out", "verified") => "logged out".into(),
+        ("logged_out", _) => "login not verified".into(),
+        _ => "unknown".into(),
     }
 }
 
@@ -1174,9 +1178,7 @@ fn card_text(report: &Report) -> String {
                 h.login.as_ref().map(|l| l.state.as_str()),
                 login_verified(h),
             ) {
-                (Some("logged_in"), true) => "logged in, verified".to_owned(),
-                (Some("logged_in"), false) => "logged in, likely".to_owned(),
-                (Some("logged_out"), true) => "logged out, verified".to_owned(),
+                (Some("logged_in"), _) | (Some("logged_out"), true) => login_words(h),
                 _ => format!("not verified (checked: {})", checked(h)),
             };
             let mut line = String::new();
@@ -1692,6 +1694,7 @@ mod tests {
                 state: state.into(),
                 evidence: evidence.into(),
                 detail: detail.into(),
+                label: String::new(),
             }),
         }
     }
@@ -1699,7 +1702,7 @@ mod tests {
     #[test]
     fn a_guess_is_never_called_logged_out() {
         let guess = fact("logged_out", "likely", "no ~/.claude/.credentials.json");
-        assert_eq!(login_words(&guess), "no login found, unverified");
+        assert_eq!(login_words(&guess), "login not verified");
         assert!(!login_verified(&guess));
         assert_eq!(auth_source(&guess), "unknown");
         assert_eq!(checked(&guess), "no ~/.claude/.credentials.json");
@@ -1708,12 +1711,12 @@ mod tests {
             "verified",
             "codex login status: Not logged in",
         );
-        assert_eq!(login_words(&said), "logged out, verified");
+        assert_eq!(login_words(&said), "logged out");
         let known = fact("logged_in", "verified", "~/.claude/.credentials.json");
-        assert_eq!(login_words(&known), "logged in, verified");
+        assert_eq!(login_words(&known), "logged in");
         assert_eq!(auth_source(&known), "~/.claude/.credentials.json");
         let unknown = fact("unknown", "none", "");
-        assert_eq!(login_words(&unknown), "login unknown");
+        assert_eq!(login_words(&unknown), "unknown");
         assert_eq!(checked(&unknown), "no check ran");
     }
 

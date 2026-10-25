@@ -390,7 +390,7 @@ fn a_remote_dead_end_ends_with_the_fix() {
     );
     assert!(
         text.contains(
-            "Next: start a server with `by serve` on that host, or fix the URL, token or CA file"
+            "next: start a server with `by serve` on that host, or fix the URL, token or CA file"
         ),
         "{text}"
     );
@@ -404,7 +404,7 @@ fn a_remote_dead_end_ends_with_the_fix() {
     let out = repo.by(&["ls"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        stderr(&out).contains("Next: start a server with `by serve`"),
+        stderr(&out).contains("next: start a server with `by serve`"),
         "{}",
         stderr(&out)
     );

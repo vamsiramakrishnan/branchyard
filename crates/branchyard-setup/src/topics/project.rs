@@ -1782,6 +1782,7 @@ mod tests {
             state: state.into(),
             evidence: evidence.into(),
             detail: format!("{state} ({evidence})"),
+            label: String::new(),
         })
     }
 

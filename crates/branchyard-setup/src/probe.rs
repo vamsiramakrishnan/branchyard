@@ -317,6 +317,11 @@ pub struct HarnessLogin {
     pub evidence: String,
     /// What decided it: `codex login status: Logged in using ChatGPT`.
     pub detail: String,
+    /// The login in the words `by harnesses` shows (`logged in`, `key set
+    /// (VAR)`, `key stored (VAR)`, `credentials found`, `logged out`,
+    /// `login not verified`, `unknown`); empty from an older probe.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
 }
 
 impl HarnessLogin {

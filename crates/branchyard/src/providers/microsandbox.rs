@@ -18,6 +18,21 @@ use crate::{git, Error, SandboxOptions, Yard};
 use branchyard_support::time::now_ms;
 
 impl ProviderKind for SandboxOptions {
+    fn banner(&self, _isolated: bool, server: bool) -> (&'static str, String) {
+        let what = match server {
+            false => format!(
+                "harnesses run in Microsandbox microVMs from {}; the worktree is mounted at {}",
+                self.image,
+                crate::SANDBOX_WORKSPACE
+            ),
+            true => format!(
+                "harnesses run in Microsandbox microVMs on the server, from {}",
+                self.image
+            ),
+        };
+        ("sandbox", what)
+    }
+
     fn name(&self) -> &'static str {
         "microsandbox"
     }

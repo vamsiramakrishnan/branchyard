@@ -378,7 +378,7 @@ fn an_unverified_login_is_never_called_logged_out_and_names_its_source() {
     let out = s.by(&["setup", "--yes"]);
     let card = flat(&stdout(&out));
     assert!(
-        card.contains("claude-code: logged in, likely. Auth source:"),
+        card.contains("claude-code: credentials found. Auth source:"),
         "{card}"
     );
     assert!(!card.contains("Claude Code: login not verified"), "{card}");
@@ -521,10 +521,7 @@ fn bare_by_is_a_status_card_with_one_next_step() {
     assert!(card.contains("Next: by show hello"), "{card}");
     // The full list is one flag away.
     let help = stdout(&s.by(&["--help"]));
-    assert!(
-        help.contains("Start here:") && help.contains("Work on branches:"),
-        "{help}"
-    );
+    assert!(help.contains("Start:") && help.contains("Work:"), "{help}");
     assert!(help.contains("\n  setup "), "{help}");
 }
 

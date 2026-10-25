@@ -134,8 +134,8 @@ repo = "app"                              # when the server serves several
 When the server does not answer, `by` ends with the way out:
 
 ```text
-by: cannot reach http://127.0.0.1:8421: Connection refused
-Next: start a server with `by serve` on that host, or fix the URL, token or CA file ([remote] url, token_file, ca_file)
+by: cannot reach http://127.0.0.1:8421: Connection refused (os error 111)
+  next: start a server with `by serve` on that host, or fix the URL, token or CA file ([remote] url, token_file, ca_file)
 ```
 
 `by doctor` asks a configured server once (`server.reachable`), and reads the file `[serve] config` names without starting anything: `serve.config` is `by serve --check` on it, and `serve.database` says which store it names.

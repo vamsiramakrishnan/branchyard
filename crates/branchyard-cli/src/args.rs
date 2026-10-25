@@ -779,7 +779,6 @@ pub struct Cli {
 
 /// The groups of `by --help`'s command list, by `display_order / 100`.
 pub const GROUPS: &[(usize, &str)] = &[
-    (0, "Start here"),
     (1, "Work on branches"),
     (2, "Inspect"),
     (3, "Delegate and coordinate (usually from inside a harness)"),
@@ -7767,17 +7766,18 @@ mod tests {
             parse_str("setup --bogus").unwrap_err().kind(),
             ErrorKind::UnknownArgument
         );
-        // "Start here" leads the list, with setup in it.
+        // "Start" leads the first screen, with setup first in it; `by help
+        // all` files it under "Shell and setup".
         let general = command().render_help().to_string();
-        let start = general.find("Start here:").unwrap();
+        let start = general.find("Start:").unwrap();
+        assert!(start < general.find("Work:").unwrap(), "{general}");
         assert!(
-            start < general.find("Work on branches:").unwrap(),
+            general[start..].starts_with("Start:\n  setup "),
             "{general}"
         );
-        assert!(
-            general[start..].starts_with("Start here:\n  setup "),
-            "{general}"
-        );
+        let all = listing_text(Listing::All, false);
+        let shell = all.find("Shell and setup:").unwrap();
+        assert!(all[shell..].contains("\n  setup "), "{all}");
         let help = help("setup");
         for word in [
             "--yes",

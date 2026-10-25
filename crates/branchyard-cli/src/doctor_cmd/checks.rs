@@ -89,11 +89,15 @@ fn serve_uses_postgres(ctx: &Context, config: &ProjectConfig) -> bool {
         return false;
     };
     let root = ctx.root().unwrap_or(&ctx.base);
-    std::fs::read_to_string(crate::setup_io::resolve(root, file))
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|v| v["database"].as_str().map(str::to_owned))
-        .is_some_and(|url| url.starts_with("postgres://") || url.starts_with("postgresql://"))
+    // An unreadable file is the `serve.config` row's finding; the Mode line
+    // then says SQLite.
+    branchyard_support::best_effort(
+        "read the [serve] config file for the Mode line",
+        std::fs::read_to_string(crate::setup_io::resolve(root, file)),
+    )
+    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    .and_then(|v| v["database"].as_str().map(str::to_owned))
+    .is_some_and(|url| url.starts_with("postgres://") || url.starts_with("postgresql://"))
 }
 
 /// `url` without the `user:password@` of its authority.

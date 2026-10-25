@@ -181,6 +181,7 @@ impl Probe for HostProbe {
                 state: word(&state.login.state),
                 evidence: word(&state.login.evidence),
                 detail: state.login.detail.clone(),
+                label: state.login.label(),
             })
         };
         // The versions are the inventory's, which asks every installed

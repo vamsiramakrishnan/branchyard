@@ -326,7 +326,8 @@ pub(crate) fn remote(error: &branchyard_client::Error, branch: Option<&str>) -> 
             report.detail = body.detail.clone();
             report
         }
-        Client::Transport { .. } => Report::new("remote_unreachable", error.to_string()),
+        Client::Transport { .. } => Report::new("remote_unreachable", error.to_string())
+            .next(crate::remote::UNREACHABLE_FIX),
         Client::Protocol(_) => Report::new("remote_protocol", error.to_string()),
         Client::Config(_) => Report::new("config", error.to_string()),
     }

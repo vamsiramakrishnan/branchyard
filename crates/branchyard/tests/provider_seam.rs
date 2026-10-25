@@ -38,9 +38,9 @@ const SEAM: &str = "crates/branchyard/src/providers/";
 ///   `allow_providers` (`api.rs`). These crates cannot reach the
 ///   crate-private trait; they need a public accessor first.
 const RATCHET: &[(&str, usize)] = &[
-    ("crates/branchyard-cli/src/commands.rs", 8),
+    ("crates/branchyard-cli/src/commands.rs", 4),
     ("crates/branchyard-cli/src/harness_cmd.rs", 1),
-    ("crates/branchyard-cli/src/remote.rs", 5),
+    ("crates/branchyard-cli/src/remote.rs", 1),
     ("crates/branchyard-server/src/api.rs", 6),
 ];
 

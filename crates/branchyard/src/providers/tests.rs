@@ -464,3 +464,76 @@ fn open_and_destroy_through_the_trait() {
     let micro = samples(&fixture).remove(1).0;
     assert!(micro.kind().destroy(yard, "by-b-1").is_err());
 }
+
+/// Every variant says where the harness runs and what that does not give;
+/// only a sandbox provider says "sandbox", and a private home changes the
+/// words of a local run alone.
+#[test]
+fn each_variant_has_a_banner_of_its_own() {
+    let (mode, local) = Provider::banner_of(None, false, false);
+    assert_eq!(mode, "local");
+    assert_eq!(
+        local,
+        "harnesses run as your user, in your own HOME; no sandbox"
+    );
+    assert_eq!(
+        Provider::banner_of(Some(&Provider::Local), false, false).1,
+        local
+    );
+    let (mode, isolated) = Provider::banner_of(None, true, false);
+    assert_eq!(mode, "isolated");
+    assert!(
+        isolated.contains("private HOME") && isolated.contains("not a sandbox"),
+        "{isolated}"
+    );
+    let (mode, served) = Provider::banner_of(None, false, true);
+    assert_eq!(mode, "local");
+    assert!(served.contains("the server's user"), "{served}");
+    assert!(Provider::banner_of(None, true, true)
+        .1
+        .contains("the server's user with a private HOME"));
+
+    let microsandbox = Provider::Microsandbox(SandboxOptions {
+        image: "alpine:3.20".into(),
+        ..SandboxOptions::default()
+    });
+    let (mode, what) = Provider::banner_of(Some(&microsandbox), false, false);
+    assert_eq!(mode, "sandbox");
+    assert!(what.contains("microVMs from alpine:3.20"), "{what}");
+    assert_eq!(
+        Provider::banner_of(Some(&microsandbox), true, false).1,
+        what
+    );
+    assert!(Provider::banner_of(Some(&microsandbox), false, true)
+        .1
+        .contains("on the server, from alpine:3.20"));
+
+    let substrate = Provider::Substrate(SubstrateOptions {
+        template: "by".into(),
+        ..SubstrateOptions::default()
+    });
+    let (mode, what) = Provider::banner_of(Some(&substrate), false, false);
+    assert_eq!(mode, "sandbox");
+    assert!(
+        what.contains("Agent Substrate actors from template by"),
+        "{what}"
+    );
+    assert!(Provider::banner_of(Some(&substrate), false, true)
+        .1
+        .contains("reached from the server"));
+
+    let recipe = Provider::Recipe(RecipeOptions {
+        name: "devbox".into(),
+        ..RecipeOptions::default()
+    });
+    let (mode, what) = Provider::banner_of(Some(&recipe), false, false);
+    assert_eq!(mode, "sandbox");
+    assert!(what.contains("recipe devbox"), "{what}");
+    assert!(Provider::banner_of(Some(&recipe), false, true)
+        .1
+        .contains("is not run by a server"));
+
+    assert!(Provider::is_local(None) && Provider::is_local(Some(&Provider::Local)));
+    assert!(!Provider::is_local(Some(&microsandbox)));
+    assert!(!Provider::is_local(Some(&recipe)));
+}

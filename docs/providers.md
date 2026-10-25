@@ -174,7 +174,7 @@ It does not mount: a spec with a mount, an image or limits is refused, because t
 
 ## Adding a provider
 
-A branch stores a [`Provider`](../crates/branchyard/src/lib.rs): the closed, serialized enum `local`, `microsandbox`, `substrate` or `recipe`. What each variant means to the engine (its name and key, its sandbox lifecycle, whether its options can run, where the harness sees the worktree and `HOME`, how a stopped engine's sandbox is recovered and a reaped one destroyed, how its sandbox provider is opened, whether it can confine egress, whether its sandbox can reach the engine's host) is one crate-private trait, `ProviderKind` in [`providers/mod.rs`](../crates/branchyard/src/providers/mod.rs), implemented once per variant:
+A branch stores a [`Provider`](../crates/branchyard/src/lib.rs): the closed, serialized enum `local`, `microsandbox`, `substrate` or `recipe`. What each variant means to the engine (its name and key, its sandbox lifecycle, whether its options can run, where the harness sees the worktree and `HOME`, how a stopped engine's sandbox is recovered and a reaped one destroyed, how its sandbox provider is opened, whether it can confine egress, whether its sandbox can reach the engine's host, and the line `by` prints before a run) is one crate-private trait, `ProviderKind` in [`providers/mod.rs`](../crates/branchyard/src/providers/mod.rs), implemented once per variant:
 
 | Variant | File |
 |---|---|
