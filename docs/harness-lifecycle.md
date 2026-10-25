@@ -23,19 +23,24 @@ by harnesses --all                             # every CLI in the catalog
 
 ```text
 $ by harnesses
-HARNESS      VERSION  LOGIN                 QUOTA            PATH
-claude-code  2.1.283  logged in (likely)    5h 50% · wk -    /home/me/.local/bin/claude
-codex        0.157.1  logged in (verified)  5h 93% · wk 40%  /usr/local/bin/codex
-goose        ?        unknown               -                /usr/local/bin/goose
-  claude-code: ~/.claude/.credentials.json exists
-  codex: codex login status: Logged in using ChatGPT
+HARNESS      VERSION        LOGIN                     LIVE RUN     QUOTA            PATH
+claude-code  2.1.310        logged in                 live 9/9     5h 50% · wk -    /home/me/.local/bin/claude
+codex        0.157.1        key set (CODEX_API_KEY)   live 9/9     5h 93% · wk 40%  /usr/local/bin/codex
+gemini-cli   slow to start  login not verified       live 8/9     -                /usr/local/bin/gemini
+goose        ?              unknown                   no live run  -                /usr/local/bin/goose
+  claude-code: claude auth status: logged in (oauth_token)
+  claude-code: installed 2.1.310 · live-tested 2.1.283
+  codex: codex login status: Logged in using ChatGPT; CODEX_API_KEY is set, and Codex uses it instead of the login ...
+  gemini-cli: version: slow to start (took >10 s); `by harnesses --refresh` asks again, and BRANCHYARD_HARNESS_TIMEOUT (seconds) sets how long to wait
+  gemini-cli: login not verified: no ~/.gemini/oauth_creds.json and no GEMINI_API_KEY or GOOGLE_API_KEY; run `by harnesses login gemini-cli`, or set GEMINI_API_KEY or GOOGLE_API_KEY
+  gemini-cli: installed 0.65.0 · live-tested 0.63.0
   goose: no version: its version command printed no version
-  goose: Branchyard knows no way to tell for this harness
+  goose: Branchyard cannot read goose's login: the catalog records no status command, credential file or key variable for it; sign in inside goose itself
 
 3 of the 45 harnesses with a known executable are installed on this machine. ...
 ```
 
-Only installed harnesses are listed. `--json` prints the `Inventory`: `host`, `os`, `detected_at_ms`, `checked` (the IDs looked for), `harnesses` (each `id`, `path`, `on_path`, `version` or `version_note`, `login` with `state`, `evidence` and `detail`, and `quota`), and `tools` (the install programs found: `npm`, `bun`, `pipx`, `uv`, `brew`, `curl`, `bash`, `sh`).
+Only installed harnesses are listed. `--json` prints the `Inventory`: `host`, `os`, `detected_at_ms`, `checked` (the IDs looked for), `harnesses` (each `id`, `path`, `on_path`, `version` or `version_note`, `login` with `state`, `evidence`, `detail` and, when the login rests on a key, `key` (its variable's name) and `stored`, and `quota`), and `tools` (the install programs found: `npm`, `bun`, `pipx`, `uv`, `brew`, `curl`, `bash`, `sh`). The table's words for a login are in [login states](#login-states). Beside the table, `LIVE RUN` says what is known of the harness driven: `live 9/9` is a recorded session of the harness itself, `no live run` is none. The line `installed X · live-tested Y` appears when the version installed is not the version the live run was on: a run says nothing about another version (the scenarios and the version are in [qualification](qualification/README.md)).
 
 A harness **can run** on a machine when it is installed, found on `PATH`, not logged out, and its login has not reached a usage limit. Otherwise the table says why, and what to do.
 
@@ -44,7 +49,7 @@ A harness **can run** on a machine when it is installed, found on `PATH`, not lo
 Detection is one POSIX `sh` script, generated from the [harness catalog](../catalog/harnesses.toml) and run on the machine: with `/bin/sh -s` here, over `ssh`, or through a recipe's transport. Nothing needs installing there. For each harness with a known executable it:
 
 1. **Finds the executable**: the first of its names on `PATH`, else in the usual install directories (`~/.local/bin`, `~/.npm-global/bin`, `~/.bun/bin`, `~/.claude/local`, `~/.cargo/bin`, `/usr/local/bin`, `/opt/homebrew/bin`). One found only there is marked "not on PATH": a harness started by name would not find it. `BRANCHYARD_HARNESS_DIRS` (colon-separated, `$HOME/` expanded on the machine) replaces the list.
-2. **Runs its version command** (`--version`; Jules's `version`) with no input, killed after 5 seconds (`BRANCHYARD_HARNESS_TIMEOUT` sets the seconds). The first version-shaped word of its output is the version (`codex-cli 0.157.1` is `0.157.1`).
+2. **Runs its version command** (`--version`; Jules's `version`) with no input, killed after 10 seconds (`BRANCHYARD_HARNESS_TIMEOUT` sets the seconds): a Node harness takes three to six seconds to start cold. Every installed harness is asked at once, each in a background subshell of the script, so a run takes as long as the slowest harness and not the sum (nine real CLIs took 42.7 seconds one after the other with a 5-second bound and 4.4 seconds together; see [what is tested](#what-is-tested)). The first version-shaped word of its output is the version (`codex-cli 0.157.1` is `0.157.1`). One that still has not answered is `slow to start (took >10 s)`, with the next step, not a bare `?`; one that answered the last time keeps that version, noted as such.
 3. **Reads its login without reading a secret.** See below.
 4. **Looks for install programs**, for [installing](#installing-and-updating).
 
@@ -54,20 +59,36 @@ Only names, paths, versions and the first lines of a status command's output com
 
 | Evidence | When |
 |---|---|
-| `verified` | The harness's own status command said so. Upstream records one only for Codex: emdash runs `codex login status` and reads it with "not authenticated", "not logged in", "not signed in", "login required" (logged out) and "authenticated", "logged in", "signed in" (logged in). |
+| `verified` | The harness's own status command said so. Upstream records one only for Codex: emdash runs `codex login status` and reads it with "not authenticated", "not logged in", "not signed in", "login required" (logged out) and "authenticated", "logged in", "signed in" (logged in). Branchyard also asks Claude Code `claude auth status` (JSON with `loggedIn`; run on 2.1.310), which sees a login the credential file does not, such as a token the host provides. |
 | `likely` | A key variable is set (logged in), a credential file exists (logged in), or none of the harness's known credential files and variables exist (logged out). |
 | `unknown` | Branchyard knows no credential file or status command for the harness, and no key variable is set. |
+
+`by harnesses`, `by doctor` and `by up` use the same words, and each says only what is known:
+
+| Shown | Means |
+|---|---|
+| `logged in` | The harness's own status command said so (`verified`). |
+| `key set (GEMINI_API_KEY)` | A key variable is in the environment, named; the key is not checked. |
+| `key stored (DEEPSEEK_API_KEY)` | `by harnesses login ID --api-key` stored the key in a file named in `[secrets]`, and the file exists. Branches with a private home get it; export it for your own sessions. |
+| `credentials found` | A credential file exists. It is not read, so this is not a verified login. |
+| `logged out` | The harness's own status command said so. |
+| `login not verified` | None of the credential files and key variables Branchyard knows of is there. That is not the same as logged out: a login Branchyard does not look for may work. The detail says what was missing and the command. |
+| `unknown` | Branchyard has nothing to go on. The detail says what would tell: a key variable it recognises, or that the catalog records no status command, credential file or key variable (sign in inside the harness itself, then `by harnesses --refresh`). |
+
+A harness "cannot run" only for something that stops it: it is off `PATH`, it is at its usage limit, or its own command said it is logged out. A login that is only not verified is never called that.
+
+The command to get a harness logged in is one wording for the listing, `by doctor`, `by up` and the router: `run \`by harnesses login ID\`` when the catalog records a login command, `run \`by harnesses login ID --api-key\`` when it records only a key variable, and, for a harness with neither, to sign in inside it and `by harnesses --refresh`; the key variables that would do instead follow.
 
 A key variable wins over a status command that says logged out: Codex runs with `OPENAI_API_KEY` whatever its login says. It wins over one that says logged in, too: with `CODEX_API_KEY` set, Codex sends its requests with that key whatever `codex login status` says, so a `verified` Codex login's detail names the variable when it is set. A key without quota answers `Quota exceeded. Check your plan and billing details.` beside a valid ChatGPT login; unset the variable, or run the branch isolated (which drops `CODEX*` variables and takes the login as `CODEX_AUTH`), to use the login. Where the files are comes from Scion's harness configurations (`auth.types.*.required_files`, `autodetect.env`): `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR`), `~/.codex/auth.json` (or `$CODEX_HOME`), `~/.gemini/oauth_creds.json`, `~/.local/share/opencode/auth.json`, `~/.gemini/antigravity-cli/antigravity-oauth-token`, `~/.copilot/config.json` and `~/.grok/auth.json`. Key variables are the catalog's `auth_env` and Scion's (`CLAUDE_CODE_OAUTH_TOKEN`, `CODEX_API_KEY`, `GEMINI_API_KEY`, ...). On macOS, Claude Code keeps its login in the keychain, so a missing file there is `unknown`, not logged out.
 
 Four harnesses need more than a file's presence. The script searches their configuration for one setting and prints a fact, never a line of the file:
 
-- **Antigravity** (`agy` 1.3.3) reads a key from `GEMINI_API_KEY` alone (`GOOGLE_API_KEY` has no effect), and only when `~/.gemini/antigravity-cli/settings.json` has `"modelProvider": "gemini"`. With both, it is `likely` logged in (`GEMINI_API_KEY is set and settings.json selects the gemini provider`). With the key and no such setting `agy` would ask for a Google sign-in, but Branchyard sets the provider in isolated runs ([provisioning](provisioning.md)), so it stays `likely` logged in and the detail says `agy will ask for a Google sign-in; Branchyard sets it in isolated runs`. A Google sign-in (`~/.gemini/antigravity-cli/antigravity-oauth-token`) or `AGY_TOKEN` counts whatever the key and the setting say, and with none of them it is `likely` logged out; `agy` itself is the sign-in command.
+- **Antigravity** (`agy` 1.3.3) reads a key from `GEMINI_API_KEY` alone (`GOOGLE_API_KEY` has no effect), and only when `~/.gemini/antigravity-cli/settings.json` has `"modelProvider": "gemini"`. With both, it is `likely` logged in (`GEMINI_API_KEY is set and settings.json selects the gemini provider`). With the key and no such setting `agy` would ask for a Google sign-in, but Branchyard sets the provider in isolated runs ([provisioning](provisioning.md)), so it stays `likely` logged in and the detail says `agy will ask for a Google sign-in; Branchyard sets it in isolated runs`; `by harnesses login antigravity` writes the setting for your own sessions ([logging in](#logging-in)). A Google sign-in (`~/.gemini/antigravity-cli/antigravity-oauth-token`) or `AGY_TOKEN` counts whatever the key and the setting say, and with none of them it is `likely` logged out; `agy` itself is the sign-in command.
 - **DeepSeek Harness** (`dsh` 0.2.0-rc.2) has no login command. It is `likely` logged in when `DEEPSEEK_API_KEY` is set (the key of its shipped provider, `deepseek-official`), when a variable named by an `apiKeyEnv:` line in `$DSH_HOME/cordis.patch.yml` or `$DSH_HOME/profiles/acp/cordis.patch.yml` is set (`DSH_HOME` defaults to `~/.dsh`; a commented line does not count), or when either file has a `providers:` key (its own key variable is then not checked). Otherwise it is `likely` logged out, and the detail says to set `DEEPSEEK_API_KEY` or configure a provider under the `llm-pi-ai` plugin; `dsh --profile acp --dump-config` prints the composed configuration. The version is `dsh --version`.
 - **Oh My Pi** (`omp` 18.10.3) reads a provider key from its environment (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` or `ZAI_API_KEY`: `likely` logged in, `GEMINI_API_KEY is set (an API key; not checked)`), or from `~/.omp/agent/.env` or `~/.omp/.env`, which it loads (the script prints the variable's name, never its line). `omp login PROVIDER` stores an OAuth login as a row of `~/.omp/agent/agent.db`; where the machine has `sqlite3` or `python3`, the script reads the provider names of the stored logins and nothing else, and the detail says `omp login stored for anthropic in ~/.omp/agent/agent.db (not checked)`. With the database and neither reader the login is `unknown` and the detail says what is missing; with no key and no login it is `likely` logged out, and the detail says to set a key or run `omp login`. `omp` is also a Bun script that needs Bun 1.3.14 or newer: when its version command fails and the Bun on `PATH` is missing or older, the version note says so and names the installer that upgrades it (`curl -fsSL https://omp.sh/install | sh`), because `npm install -g` or `bun install -g` of `@oh-my-pi/pi-coding-agent` leaves Bun as it is.
 - **Gemini CLI** (0.63.0) takes `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) or `~/.gemini/oauth_creds.json`. Its headless `gemini -p` refuses an untrusted directory unless `GEMINI_CLI_TRUST_WORKSPACE=true` (or `--skip-trust`), so a logged-in Gemini CLI's detail says whether that variable is set and how to set it.
 
-Claude Code has `claude auth status`, and emdash calls a status check for it, but that check's source (`claude/auth.ts`) is not in the vendored files, so Branchyard does not run it: a Claude Code login is `likely` at best.
+Claude Code has `claude auth status`, and emdash calls a status check for it, but that check's source (`claude/auth.ts`) is not in the vendored files. Branchyard asks the command itself, and reads only the `loggedIn` flag and `authMethod` from its JSON: `claude auth status: logged in (oauth_token)`. It was run on 2.1.310 and printed `{"loggedIn": true, ...}`; a Claude Code too old to have it says nothing usable, and the credential file and key variables decide, as for the harnesses below. Not tested against a real logged-out Claude Code.
 
 ### Quota
 
@@ -75,7 +96,11 @@ On this machine, Claude Code's and Codex's default logins carry the usage `by us
 
 ### Caching
 
-This machine's inventory is kept for a minute in `harness-inventory.json` beside your user configuration, keyed by `PATH`, `HOME` and the install directories. `--refresh` detects again; an install, update or login here clears it. Other machines are detected each time.
+This machine's inventory is kept for a minute in `harness-inventory.json` beside your user configuration, keyed by `PATH`, `HOME`, the install directories and the time limit, so a second `by harnesses` (or `by doctor`) within the minute reads the file and runs nothing. `--refresh` detects again; an install, update or login here clears it. Other machines are detected each time.
+
+Versions outlive the minute: when a fresh detection finds a version command too slow to answer, a harness at the same path that answered last time keeps that version, and the note under the table says `slow to start (took >10 s); the version is from the last time it answered`. A harness that has never answered says only that it is slow, with `--refresh` and `BRANCHYARD_HARNESS_TIMEOUT` as the next step.
+
+A key `by harnesses login ID --api-key` stored is added after the cache is read, from `[secrets]` and the files it names (by name, never read): the harness then shows `key stored (VARIABLE)`.
 
 ## Other machines
 
@@ -131,7 +156,9 @@ printf %s "$KEY" | by harnesses login claude-code --api-key
 
 `login` runs the harness's own login command from the catalog (`claude auth login`, `codex login --device-auth`, `opencode auth login`, `gemini` and `agy`, which sign in on their first interactive run) with your terminal, so a URL or device code it prints reaches you directly. Over ssh it uses `ssh -t`. A harness found off `PATH` is run by its path. Afterwards detection runs again and `by` prints the login state.
 
-Without a terminal (a script, or `--remote`, since a worker has none) nothing runs: `by` says what to run and where (`run \`codex login --device-auth\` there, in a terminal, as the worker's user`). A recipe's machine gets its login from the recipe's create script or its environment.
+Without a terminal (a script, or `--remote`, since a worker has none) nothing runs: `by` says what to run and where (`run \`codex login --device-auth\` there, in a terminal, as the worker's user`). A recipe's machine gets its login from the recipe's create script or its environment. A harness whose catalog entry records no login command says what to do instead: give it a key with `--api-key` when it has a key variable, or start it and sign in inside it, then `by harnesses --refresh`.
+
+**Antigravity with a key.** With `GEMINI_API_KEY` set, `by harnesses login antigravity` has nothing to sign in to; `agy` needs `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json` to read the key. `by` merges that one key into the file (the rest of it kept, with its key order and indentation; the file is rewritten as plain JSON, so comments in it would be refused), shows the change as a diff, and writes it after you answer yes on a terminal or with `--yes`. Without a terminal and without `--yes` it shows the diff and writes nothing (exit 2, `status` `manual`, like any login that only says what to run). A different provider already chosen (`"modelProvider": "vertex"`) is never replaced: `by` says so and leaves the file. The write is recorded in the harness log as `wrote_settings`. With the setting already there it says so and does nothing.
 
 **Exit codes.** `login` says whether it logged in.
 
@@ -177,7 +204,7 @@ A harness the catalog knows but nothing drives (`droid`, `kiro`) is not "no harn
 A routed `by run` or `by fan` ([fleet](fleet.md)) asks this machine's inventory about each candidate that runs a harness by name (no `command`, no sandbox), after its profile checks and before the `PATH` check. A candidate that is not installed, is logged out, is off `PATH` or is at its usage limit is excluded with that reason, like an unavailable one:
 
 ```text
-by:   not codex: codex is verified logged out (codex login status: Not logged in); run by harnesses login codex
+by:   not codex: codex is verified logged out (codex login status: Not logged in); run `by harnesses login codex`, or set OPENAI_API_KEY or CODEX_API_KEY
 by:   not qwen-code: qwen-code is not installed on this machine; install it with `by harnesses install qwen-code` (the router installs on demand only with [harnesses] install = "auto")
 ```
 
@@ -208,6 +235,7 @@ With no `[fleet]` configured, `--auto` routes among the harnesses this inventory
 ## What is tested
 
 - `crates/branchyard/tests/inventory.rs`: detection on a temporary `PATH` of fake harnesses: versions read, Antigravity's key counting only with `modelProvider` gemini in a fake home's settings, DeepSeek Harness's provider read from `cordis.patch.yml` (either file, `DSH_HOME`, an `apiKeyEnv` variable, a comment ignored), Gemini CLI's trusted-workspace note, a status command saying logged out (verified), a key variable seen by name (its value in no output), unknown logins, a missing harness, a version command that hangs killed by the timeout, each command run once; `only`; the cache's key and TTL; an install through a fake `npm`, pinned, verified by detecting again, and a pin not delivered or a failing command not verified; the log; the router excluding a logged-out and a missing candidate with reasons, a candidate with a command left to the `PATH` check, the allowlist; a gate installing on demand under `auto` and recording it, a preview that runs nothing, `ask` never installing.
+- Probing, this round: unit tests for the timeout note and its bound, the script's concurrency and read-back order, the versions kept from the last answer, the login words, `claude auth status`, the one login hint and the live-run levels (`crates/branchyard/src/inventory.rs`); `crates/branchyard-cli/tests/harnesses.rs` runs fake harnesses that each wait for a peer to start (printing `-alone` when asked one after the other), one that takes four seconds to print a version under the default bound, one that answered and then hangs, and Antigravity's settings merge (shown without `--yes` and not written, written with it with the rest of the file kept, already set, a different provider refused, no file). Measured here with the real CLIs, no model calls, page cache dropped before each run: `by harnesses` took 42.7 seconds and showed `?` for six of nine versions with the 5-second bound and the harnesses asked in turn, and 4.4 seconds with every version with the 10-second bound and all asked at once; a second call took 0.08 seconds.
 - `crates/branchyard-server`: the store conformance (`check_labels`, on SQLite and, in `tests/postgres.rs`, PostgreSQL) for a beat carrying an inventory, derived labels, steering and `WorkersGate`; an older SQLite `workers` table migrated; `tests/inventory.rs` over HTTP: work requiring `harness:codex` waiting and saying why, then claimed by a worker whose inventory has Codex with no label configured, `GET /v1/inventory`, a task naming Codex steered and one naming a harness no worker has not held back; on PostgreSQL, two servers on one database, the second a worker with Codex.
 - `crates/branchyard-cli/tests/harnesses.rs`, with the built `by`: the table and JSON (verified, likely, unknown, a timeout, off `PATH`), the cache and `--refresh`, `--on ssh://` and `--on recipe:` through `fake-ssh` (the recipe's machine destroyed after, an untrusted recipe refused), installs under `never`, `ask`, `--yes`, `auto` and an allowlist, a repository trying to allow installs refused, a pin and a failed verification, the log; install and login over ssh (`ssh -t`); a login through a pty (the device code passed through, verified after; `--json` `done`), without a terminal (exit 2, `manual`), an API key stored 0600 and named in `[secrets]` (`--json` `stored`); `by run`, `by fan` and `by send` refused before a branch for a verified logged-out and a missing harness, noting a guess, skipping the check for `--command` and `--no-preflight`; `by harnesses --profiles` outside a repository; a refused install naming the file and key; the router excluding a logged-out and a missing candidate, previewing, and installing one on demand before running it on the fake ACP agent; `by serve` advertising its inventory to `by harnesses --remote`, login reported for a worker, install refused.
 

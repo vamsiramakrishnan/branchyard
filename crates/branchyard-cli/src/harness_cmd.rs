@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use branchyard::inventory::{
-    self, DetectOptions, Evidence, HarnessEvent, HarnessLog, HarnessState, InstallAction,
-    InstallMode, InstallPolicy, Inventory, InventoryCache, LoginState, Permission, Quota,
+    self, DetectOptions, HarnessEvent, HarnessLog, HarnessState, InstallAction, InstallMode,
+    InstallPolicy, Inventory, InventoryCache, LoginState, Permission, Quota, Standing,
 };
+use branchyard::HarnessInfo;
 use branchyard_controls::catalog;
 use branchyard_setup::config::HarnessInstall;
 use serde_json::json;
@@ -121,7 +122,32 @@ fn cache() -> InventoryCache {
 /// (detected afresh once it is older than its time to live), without the
 /// usage meters. For `by doctor`.
 pub(crate) fn detected_here() -> Result<Inventory, String> {
-    cache().local(&DetectOptions::from_env(), false)
+    let mut found = cache().local(&DetectOptions::from_env(), false)?;
+    count_stored_keys(&mut found);
+    Ok(found)
+}
+
+/// The keys `by harnesses login ID --api-key` stored count as logins, by
+/// name: they are in `[secrets]`, which the inventory's script cannot see.
+fn count_stored_keys(found: &mut Inventory) {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let vars = |name: &str| std::env::var(name).ok();
+    let Some(config) = crate::defaults::config_at(&cwd, &vars).ok().flatten() else {
+        return;
+    };
+    let root = crate::setup_io::project_root(&cwd);
+    inventory::count_stored_keys(found, &inventory::stored_keys(&root, &config.secrets));
+}
+
+/// The qualification of `id`'s default profile (else any profile of it).
+pub(crate) fn qualification_of(known: &[HarnessInfo], id: &str) -> Option<String> {
+    let mine = || known.iter().filter(|k| k.harness == id || k.profile == id);
+    mine()
+        .find(|k| k.default)
+        .and_then(|k| k.qualification.clone())
+        .or_else(|| mine().find_map(|k| k.qualification.clone()))
 }
 
 /// What this machine has of `ids` (catalog IDs), for the check before a
@@ -232,6 +258,7 @@ fn detect(
             }
             .map_err(Failure::Message)?;
             attach_quota(&mut found);
+            count_stored_keys(&mut found);
             Ok(found)
         }
         Machine::Ssh(url) => inventory::detect_with(options, true, |_| {
@@ -344,7 +371,9 @@ pub fn main(
         Some(HarnessesAction::Update(change)) => {
             change_harness(env, target, json, on, change, InstallAction::Update)
         }
-        Some(HarnessesAction::Login { id, api_key }) => login(env, target, json, on, id, *api_key),
+        Some(HarnessesAction::Login { id, api_key, yes }) => {
+            login(env, target, json, on, id, *api_key, *yes)
+        }
         Some(HarnessesAction::Log) => show_log(env, json),
     }
 }
@@ -413,28 +442,22 @@ fn quota_text(quota: Option<&Quota>) -> String {
     text
 }
 
+/// The login cell: `Login::label`, green when logged in, red when logged out.
 fn login_text(state: &HarnessState) -> (String, Tone) {
-    let l = &state.login;
-    let how = match l.evidence {
-        Evidence::Verified => "verified",
-        Evidence::Likely => "likely",
-        Evidence::None => "",
-    };
-    let tone = match l.state {
+    let tone = match state.login.state {
         LoginState::LoggedIn => Tone::Green,
         LoginState::LoggedOut => Tone::Red,
         LoginState::Unknown => Tone::Dim,
     };
-    match how {
-        "" => (l.state.to_string(), tone),
-        how => (format!("{} ({how})", l.state), tone),
-    }
+    (state.login.label(), tone)
 }
 
 /// An inventory as a table with what is not ready and why.
 /// `local`: the inventory is of this machine, which is how it is named.
 fn inventory_text(found: &Inventory, local: bool, style: Style) -> String {
-    let columns = [
+    let known = branchyard::harnesses();
+    let any_quota = found.harnesses.iter().any(|h| h.quota.is_some());
+    let mut columns = vec![
         Column {
             header: "HARNESS",
             max: 20,
@@ -447,38 +470,56 @@ fn inventory_text(found: &Inventory, local: bool, style: Style) -> String {
         },
         Column {
             header: "LOGIN",
-            max: 24,
+            max: 34,
             right: false,
         },
         Column {
-            header: "QUOTA",
-            max: 22,
-            right: false,
-        },
-        Column {
-            header: "PATH",
-            max: 48,
+            header: "LIVE RUN",
+            max: 12,
             right: false,
         },
     ];
+    if any_quota {
+        columns.push(Column {
+            header: "QUOTA",
+            max: 22,
+            right: false,
+        });
+    }
+    columns.push(Column {
+        header: "PATH",
+        max: 48,
+        right: false,
+    });
     let rows: Vec<Vec<Cell>> = found
         .harnesses
         .iter()
         .map(|h| {
             let (login, tone) = login_text(h);
-            vec![
+            let version = h.version_text();
+            let mut row = vec![
                 Cell::plain(&h.id),
-                match &h.version {
-                    Some(v) => Cell::plain(v),
-                    None => Cell::toned("?", Tone::Yellow),
+                match h.version {
+                    Some(_) => Cell::plain(version),
+                    None => Cell::toned(version, Tone::Yellow),
                 },
                 Cell::toned(login, tone),
-                Cell::plain(quota_text(h.quota.as_ref())),
-                match h.on_path {
-                    true => Cell::plain(&h.path),
-                    false => Cell::toned(format!("{} (not on PATH)", h.path), Tone::Yellow),
+                match qualification_of(&known, &h.id)
+                    .as_deref()
+                    .and_then(inventory::live_score)
+                {
+                    Some(score) => Cell::plain(format!("live {score}")),
+                    None => Cell::toned("no live run", Tone::Dim),
                 },
-            ]
+            ];
+            if any_quota {
+                row.push(Cell::plain(quota_text(h.quota.as_ref())));
+            }
+            row.push(match h.on_path {
+                true => Cell::plain(&h.path),
+                false => Cell::toned(format!("{} (not on PATH)", h.path), Tone::Yellow),
+            });
+            row
         })
         .collect();
     let mut text = match rows.is_empty() {
@@ -486,12 +527,34 @@ fn inventory_text(found: &Inventory, local: bool, style: Style) -> String {
         false => table(&columns, &rows, style),
     };
     for h in &found.harnesses {
-        if let Some(note) = &h.version_note {
-            text.push_str(&format!("  {}: no version: {note}\n", h.id));
+        match (&h.version, &h.version_note) {
+            (None, Some(note)) if note.starts_with(inventory::SLOW_START) => {
+                text.push_str(&format!(
+                    "  {}: version: {note}; `by harnesses --refresh` asks again, and \
+                 BRANCHYARD_HARNESS_TIMEOUT (seconds) sets how long to wait\n",
+                    h.id
+                ))
+            }
+            (None, Some(note)) => text.push_str(&format!("  {}: no version: {note}\n", h.id)),
+            (Some(_), Some(note)) => text.push_str(&format!("  {}: version: {note}\n", h.id)),
+            (_, None) => {}
         }
-        match h.ready() {
-            Ok(()) => text.push_str(&format!("  {}: {}\n", h.id, h.login.detail)),
-            Err(why) => text.push_str(&format!("  {}: cannot run: {why}\n", h.id)),
+        match h.standing() {
+            Standing::Ready => text.push_str(&format!("  {}: {}\n", h.id, h.login.detail)),
+            Standing::NotVerified(why) => text.push_str(&format!("  {}: {why}\n", h.id)),
+            Standing::CannotRun(why) => text.push_str(&format!("  {}: cannot run: {why}\n", h.id)),
+        }
+        if h.id == "antigravity" && antigravity_key_unused(h) {
+            text.push_str(
+                "  antigravity: `by harnesses login antigravity` writes modelProvider gemini \
+                 into its settings, after showing you the change\n",
+            );
+        }
+        if let Some(drift) = inventory::live_drift(
+            h.version.as_deref(),
+            qualification_of(&known, &h.id).as_deref(),
+        ) {
+            text.push_str(&format!("  {}: {drift}\n", h.id));
         } // What `by catalog refresh` found on npm, never fetched here.
         if let Some(latest) = crate::live_catalog::latest(&h.id) {
             if h.version
@@ -517,6 +580,16 @@ fn inventory_text(found: &Inventory, local: bool, style: Style) -> String {
         }
     ));
     text
+}
+
+/// Antigravity has `GEMINI_API_KEY` but its settings do not select the
+/// provider that reads it: its login detail says so.
+fn antigravity_key_unused(state: &HarnessState) -> bool {
+    state.login.key.as_deref() == Some("GEMINI_API_KEY")
+        && state
+            .login
+            .detail
+            .contains("does not set modelProvider gemini")
 }
 
 #[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-cli
@@ -745,6 +818,7 @@ fn login(
     on: Option<&str>,
     id: &str,
     api_key: bool,
+    yes: bool,
 ) -> Outcome {
     let e = entry(id)?;
     not_in_harness("log in to")?;
@@ -806,25 +880,40 @@ fn login(
     if api_key {
         return store_key(env, as_json, &machine, id);
     }
+    // Antigravity with a key in the environment has nothing to sign in to:
+    // it needs its settings to select the provider that reads the key.
+    if id == "antigravity"
+        && matches!(machine, Machine::Local)
+        && std::env::var_os("GEMINI_API_KEY").is_some_and(|v| !v.is_empty())
+        && e.binaries
+            .iter()
+            .any(|b| crate::setup_io::which(b).is_some())
+    {
+        return antigravity_provider(env, as_json, yes);
+    }
     let Some(mut command) = command else {
         let vars = inventory::key_variables(id);
+        let program = e.binaries.first().map_or(id, String::as_str);
         return manual_login(
             id,
             &machine,
             None,
             as_json,
             format!(
-                "the catalog records no login command for {id}{}",
+                "the catalog records no login command for {id}; {}{}",
                 match vars.is_empty() {
-                    true => e
-                        .homepage
-                        .as_deref()
-                        .map(|h| format!("; see {h}"))
-                        .unwrap_or_default(),
+                    true => format!(
+                        "start `{program}` and sign in inside it, then `by harnesses --refresh`"
+                    ),
                     false => format!(
-                        "; give it an API key with `by harnesses login {id} --api-key` ({})",
+                        "give it an API key with `by harnesses login {id} --api-key` ({}), or \
+                         sign in inside `{program}` itself",
                         vars.join(" or ")
                     ),
+                },
+                match (vars.is_empty(), e.homepage.as_deref()) {
+                    (true, Some(h)) => format!(" ({h})"),
+                    _ => String::new(),
                 }
             ),
         );
@@ -953,6 +1042,126 @@ fn login(
             "`{command}` exited with {status}"
         ))),
     }
+}
+
+/// Where Antigravity keeps its settings, under the home.
+const ANTIGRAVITY_SETTINGS: &str = ".gemini/antigravity-cli/settings.json";
+
+/// `by harnesses login antigravity` with `GEMINI_API_KEY` set: `agy` reads
+/// the key only when its `settings.json` has `"modelProvider": "gemini"`
+/// (docs/harness-lifecycle.md). Merge that one key in, keeping everything
+/// else in the file (and its order and indentation), show the change, and
+/// write it when confirmed on a terminal or with `--yes`. A different
+/// provider already chosen is never replaced.
+fn antigravity_provider(env: &Env, as_json: bool, yes: bool) -> Outcome {
+    let Some(home) = crate::setup_io::home() else {
+        return Err(Failure::Message(
+            "no home directory: set HOME so Antigravity's settings can be found".into(),
+        ));
+    };
+    let path = home.join(ANTIGRAVITY_SETTINGS);
+    let shown = format!("~/{ANTIGRAVITY_SETTINGS}");
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(Failure::Message(format!("reading {shown}: {e}"))),
+    };
+    let merged = branchyard_setup::install::merge::json(
+        existing.as_deref(),
+        r#"{"modelProvider": "gemini"}"#,
+        "",
+    )
+    .map_err(|why| Failure::Message(format!("{shown}: {why}")))?;
+    let before = existing.clone().unwrap_or_default();
+    // `status` as every login says it: done, or manual when only the change
+    // was shown and the person has the step to take.
+    let reported = |wrote: bool, manual: bool, diff: &str, said: &str| -> Outcome {
+        match as_json {
+            true => print(&json::text(&json!({
+                "harness": "antigravity", "status": if manual { "manual" } else { "done" },
+                "settings": shown, "changed": !diff.is_empty(), "wrote": wrote, "diff": diff,
+            }))),
+            false => print(said),
+        }
+    };
+    if merged == before {
+        return reported(
+            false,
+            false,
+            "",
+            &format!(
+                "antigravity already reads GEMINI_API_KEY: {shown} has modelProvider gemini. \
+                 Nothing to sign in to; `by harnesses --refresh` shows it.\n"
+            ),
+        );
+    }
+    let diff = branchyard_setup::plan::unified_diff(&shown, &before, &merged);
+    let interactive = interactive(env);
+    let mut asked = false;
+    let confirmed = match (yes, interactive) {
+        (true, _) => true,
+        (false, true) => {
+            asked = true;
+            eprint!("{diff}");
+            let answer = crate::console::terminal_prompt(&format!(
+                "by: GEMINI_API_KEY is set, and agy reads it only with modelProvider gemini in \
+                 {shown}. Write that? [y/N] "
+            ))?;
+            matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
+        }
+        (false, false) => {
+            reported(
+                false,
+                true,
+                &diff,
+                &format!(
+                    "{diff}\nGEMINI_API_KEY is set, and agy reads it only with modelProvider \
+                     gemini in {shown}. Not written: there is no terminal to ask on. Run `by \
+                     harnesses login antigravity --yes` to write exactly the change above.\n"
+                ),
+            )?;
+            // Exit 2, as for any login that only says what to run.
+            return Err(Failure::Manual(String::new()));
+        }
+    };
+    if !confirmed {
+        return Err(Failure::Message(format!(
+            "not confirmed; {shown} was not changed"
+        )));
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mode = std::fs::metadata(&path)
+        .map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o777)
+        .unwrap_or(0o644);
+    crate::setup_io::write_file(&path, &merged, mode)?;
+    record(HarnessEvent {
+        at_ms: branchyard_support::time::now_ms(),
+        on: "local".into(),
+        harness: "antigravity".into(),
+        action: InstallAction::Login,
+        by: "by harnesses".into(),
+        command: None,
+        outcome: "wrote_settings".into(),
+        version_before: None,
+        version_after: None,
+        detail: Some(format!("modelProvider gemini in {shown}")),
+    });
+    cache().clear();
+    reported(
+        true,
+        false,
+        &diff,
+        &format!(
+            "{}wrote {shown}: antigravity reads GEMINI_API_KEY now. `by harnesses --refresh` \
+             shows it.\n",
+            match asked {
+                true => "",
+                false => diff.as_str(),
+            }
+        ),
+    )
 }
 
 /// Keep an API key for `id`'s key variable in a 0600 file beside the user

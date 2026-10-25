@@ -1,9 +1,9 @@
 # Doctor
 
-`by doctor` answers one question: is this machine, and this repository, ready to use Branchyard? It runs a fixed list of checks and prints one row for each: a status (`ok`, `warn` or `fail`), what it found in one line, and, for every row that is not `ok`, what to do in one line. It reads; it repairs nothing, and it prints no secret.
+`by doctor` answers one question: is this machine, and this repository, ready to use Branchyard? It runs a fixed list of checks and prints one row for each: a status (`ok`, `todo`, `warn` or `fail`), what it found in one line, and, for every row that is not `ok`, what to do in one line. A line above the table, `Mode:`, says how this repository runs (below). It reads; it repairs nothing, and it prints no secret.
 
 ```sh
-by doctor                    # a table, then what to do about each row that is not ok
+by doctor                    # the mode, a table, then what to do about each row that is not ok
 by doctor --json             # the same as JSON, for a script or a CI step
 by doctor --path ~/src/app   # check that repository instead of the one around here
 ```
@@ -17,35 +17,58 @@ The checks reuse what `by` already knows rather than looking again: the loaders 
 | Status | Means |
 |---|---|
 | `ok` | Nothing to do. Also what a check says when the thing it checks is not configured (`server.reachable: not configured`). |
+| `todo` | A step you have not taken yet, with nothing wrong: Branchyard has not been set up in this repository (`by setup`), or a harness is installed and not logged in yet. Where everyone starts, so it is not a warning. |
 | `warn` | Worth looking at, or a check that could not run. Nothing that stops a command working. |
 | `fail` | A command that needs this would fail. |
+
+`todo` is a status of its own and not a `warn` with a gentler word: a script that treats `warn` as something to read can leave `todo` alone, and `status` in the JSON is `todo` for a report whose worst row is one. The order is `ok`, `todo`, `warn`, `fail`; the report's status is the worst row.
 
 A check that cannot run because another failed is a `warn` whose detail begins `not checked:` and whose fix names the check to fix first (`fix repository.git first`). It is never an `ok`: the report does not claim what it did not look at. The text output leaves these rows out of its *To do* list, since the failed row above them says what to do.
 
 | Exit | When |
 |---|---|
-| 0 | No row failed. Warnings do not fail. |
+| 0 | No row failed: the report is `ok`, `todo` or `warn`. A fresh repository exits 0. |
 | 1 | At least one row failed. |
 | 2 | A usage error, as for every `by` command (`by doctor --nonsense`). |
 
 There is no separate status for "doctor itself could not run". A problem with finding something out is a row (`repository.git` fails when `--path` is not a directory), and the rest of the report still prints. The report is on standard output.
 
+## The mode
+
+The line above the table says how this repository runs, from the same effective configuration the checks read (the user file, `branchyard.toml`, the `BRANCHYARD_*` variables and `--remote`):
+
+```
+Mode: local, no isolation · SQLite (.branchyard/state.db) · no server
+```
+
+| Mode line | When |
+|---|---|
+| `local, no isolation · SQLite (.branchyard/state.db) · no server` | The default: harnesses run as your user in a worktree. |
+| `local, isolated (private HOME, no sandbox) · SQLite … · no server` | `[defaults] isolated = true`: a scrubbed environment and a private HOME, which is not a sandbox. |
+| `sandbox: microsandbox · SQLite … · no server` | `[defaults] provider = "microsandbox"`. |
+| `sandbox: recipe NAME · SQLite … · no server` | `[defaults] provider = "recipe"` with `recipe = "NAME"`. |
+| `server: URL · state is kept by the server` | `--remote`, `BRANCHYARD_REMOTE` or `[remote] url`. Any `user:password@` in the URL is left out. |
+| `… · by serve here uses PostgreSQL` | `[serve] config` names a server file whose `database` is a PostgreSQL URL. The URL is never shown. |
+
+When the configuration does not load there is no mode to read: the line says `not known`, and `config.merged` says why. In `--json` it is `mode`.
+
 ## The checks
 
-Rows come in this order, and their names are stable: a script may match on them.
+Rows come in this order, and their names are stable: a script may match on them. `harnesses.ID` has one row for each installed harness, so its names depend on the machine.
 
 | Check | What it looks at | `warn` | `fail` |
 |---|---|---|---|
 | `repository.git` | The repository around the current directory (`git rev-parse --show-toplevel`), or `--path`, or `BRANCHYARD_ROOT` inside a harness; its branch | no commit yet: branches start from one | not in a repository, `--path` is not a directory, or git cannot run |
-| `repository.state` | `.branchyard/` exists and its store opens, by `Yard::open`, the open every `by` command makes (it also recovers a branch whose engine stopped) | not opened on purpose (see `repository.schema`) | no `.branchyard/`: Branchyard has not been used here, with the hint to run `by init`; or the store does not open |
+| `repository.state` | `.branchyard/` exists and its store opens, by `Yard::open`, the open every `by` command makes (it also recovers a branch whose engine stopped) | not opened on purpose (see `repository.schema`) | the store does not open (no `.branchyard/` is a `todo`, below the table) |
 | `repository.schema` | The schema version recorded in `.branchyard/state.db` against the one this binary reads, read through a read-only connection | older: the next `by` command that opens the store upgrades it in place, and an older `by` cannot read it after | newer than this binary, a version it does not read, or a file that is not a readable database |
 | `repository.services` | `.branchyard/registry.db`, the registry `by services` shows | a record is expired or reclaiming, or live with a lease that ran out: `by services gc` reclaims it | the registry cannot be read |
 | `config.user` | The user file (`BRANCHYARD_USER_CONFIG`, else `~/.config/branchyard/config.toml`) loads and validates, strictly, as `by config validate` loads it | | the loader refused it; the row shows its message, which names the file and the line |
 | `config.project` | `branchyard.toml` at or above the repository, the same way | | the same |
 | `config.merged` | The two files merged with the `BRANCHYARD_*` variables that override `[remote]`, as `by config show` merges them | a file above did not load | the merge was refused |
 | `config.workspace_trust` | `[workspace]` scripts: whether they are trusted, as they are now (the digest of the section against the one `by workspace trust` recorded) | untrusted, or changed since trusted: new branches are refused until `by workspace trust` | |
-| `harnesses.installed` | What `by harnesses` detects, from the same cache: each installed harness, its version, its qualification (`branchyard::harnesses`), and whether it can run (on `PATH`, logged in, under its limit) | none installed, or none can run | |
-| `harnesses.default` | `[defaults] harness`, or `claude-code` (what `by run` starts) when unset, is installed | unset and `claude-code` is not installed | set to a harness that is not installed |
+| `harnesses.summary` | How many harnesses `by harnesses` finds and how many can be used: `9 installed: 1 logged in, 2 login unknown, 5 login not verified, 1 logged out` | none installed, or a harness off `PATH` or at its usage limit | |
+| `harnesses.ID` | One row for each installed harness, from the same cache: `VERSION · LOGIN · LIVE RUN` in at most 120 characters (below) | off `PATH`, or at its usage limit | |
+| `harnesses.default` | `[defaults] harness`, or `claude-code` (what `by run` starts) when unset, is installed, and its login is not known to be missing | unset and `claude-code` is not installed; or it is installed and its login is not verified, or it is logged out | set to a harness that is not installed |
 | `harnesses.credentials` | Which of the usual credential variables are set (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `GH_TOKEN` and the rest of the list `by init` detects), by name only; and each `[secrets]` entry's source (a variable, or an `@file`) | a `[secrets]` entry whose variable is unset or file is missing | |
 | `provider.default` | `[defaults] provider`. Local always passes. Microsandbox goes through the engine's own check (a build with the `microsandbox` feature, an image). A recipe must be defined and trusted | a recipe that is not trusted as it is now; or the check could not run without the store | Microsandbox the engine refuses; a recipe that is not defined |
 | `provider.sandboxes` | With Microsandbox as the default: the kept sandboxes and snapshots the store holds, the oldest kept one's age, and any older than `[microsandbox] max_kept_minutes` | a kept sandbox past `max_kept_minutes`: nothing destroys it until a turn ends on the provider or its branch takes its next turn; `by rm BRANCH` destroys it now | the rows cannot be read |
@@ -58,13 +81,25 @@ Rows come in this order, and their names are stable: a script may match on them.
 | `models.keys` | With `[models]`: each backend's key, as the gateway reads it (an entry of `[secrets]`, else a variable of that name), is set, by name | a backend that needs a key names none, or `[models]` names no backend | a key variable that is unset, or a key file that is missing |
 | `models.prices` | With `[[models.routes]]`: each route that names one model has a price on every backend the gateway may send it to (its weighted backends and fallbacks), as the model that backend is asked for: the route's, or its `backend_model` where the call is translated; from `[models.prices]` or the built-in catalog | a routed model nothing prices on a backend it may reach: those calls are recorded unpriced, and a dollar budget cannot count them | |
 
+A repository with no `.branchyard/` is a `todo` (`not set up yet`, with `by setup` as the fix), not a `fail`: nothing is broken, it has not been set up. Any other `by` command in the repository, such as `by ls`, also creates `.branchyard/`.
+
+**The harness rows.** A harness row reads like `installed 2.1.310 · login not verified · live-tested 2.1.283 (9/9)`, three parts:
+
+- the version, or `slow to start` when its version command did not answer in time ([harness lifecycle](harness-lifecycle.md#how-detection-works)); it reads `installed X` when the version a live run was on is a different one, since a run says nothing about another version;
+- the login, in the words `by harnesses` uses (`logged in`, `key set (VARIABLE)`, `key stored (VARIABLE)`, `credentials found`, `logged out`, `login not verified`, `unknown`; [login states](harness-lifecycle.md#login-states));
+- the live run: `live 9/9` for a recorded session of the harness itself, `live-tested Y (9/9)` beside `installed X` when it was on another version, `no live run` for none.
+
+The row is `ok` for a harness that can be used, including one whose login cannot be read. `todo` is a login still to make (`login not verified`, or `logged out` by the harness's own command), with `by harnesses login ID` as the fix, the same command `by up` gives. `warn` is a harness found off `PATH` or at its usage limit. A login that is only not verified is never called "cannot run". `harnesses.default` says the same about the default harness: `warn` with that command when its login is not verified.
+
 A route whose model is a pattern (`claude-*`) is priced per model when a call is made; the row names such patterns as not checked. The Substrate provider is chosen by flags, never by a file, so there is nothing configured for doctor to check; no cheap reachability check for it exists.
 
 ## An example
 
-A repository `by` has been used in, on a machine whose one harness is logged out:
+A repository `by` has been used in, on a machine with two harnesses, one of them not logged in to the default:
 
 ```
+Mode: local, no isolation · SQLite (.branchyard/state.db) · no server
+
 STATUS  CHECK                   DETAIL
 ok      repository.git          /home/me/app (on branch main)
 ok      repository.state        /home/me/app/.branchyard opens; 3 branches
@@ -74,8 +109,10 @@ ok      config.user             no user file at /home/me/.config/branchyard/conf
 ok      config.project          /home/me/app/branchyard.toml loads and validates
 ok      config.merged           the files merge with the BRANCHYARD_* variables
 warn    config.workspace_trust  [workspace] in /home/me/app/branchyard.toml has scripts you have not trusted (digest 3f9a1c07b2e4); new branches are refused until you do
-warn    harnesses.installed     claude-code 2.1.296 [qualified 9/9 on 2.1.283 (Claude Code)] - cannot run: claude-code is likely logged out (no ~/.claude/.credentials.json and no ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN); run by harnesses login claude-code
-ok      harnesses.default       not set: `by run` without --harness uses claude-code, which is installed
+ok      harnesses.summary       2 installed: 1 logged in, 1 login not verified
+todo    harnesses.claude-code   installed 2.1.310 · login not verified · live-tested 2.1.283 (9/9)
+ok      harnesses.codex         installed 0.164.0 · logged in · live-tested 0.157.1 (9/9)
+warn    harnesses.default       not set: `by run` without --harness uses claude-code, which is installed, but its login is not verified
 ok      harnesses.credentials   set: GH_TOKEN (names only)
 ok      provider.default        local (the default): harnesses run as your user in a worktree, with no isolation
 ok      provider.sandboxes      no sandbox provider is configured, so no sandbox is kept
@@ -88,18 +125,39 @@ ok      models.prices           not configured: no [models]
 
 To do:
   config.workspace_trust: review it with `by workspace show`, then run `by workspace trust`
-  harnesses.installed: fix what each says: `by harnesses login ID` for a logged-out harness
+  harnesses.claude-code: run `by harnesses login claude-code`, or set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
+  harnesses.default: run `by harnesses login claude-code`, or set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
   host.kvm: load the kvm module and add your user to the kvm group; local branches need none
 
-warn: 3 warnings, 16 ok
+warn: 3 warnings, 1 to do, 17 ok
 ```
 
-The exit status is 0. Where a row would fail, the summary reads `fail: 1 failed, 2 warnings, 16 ok` and the status is 1. The table never cuts a detail, so a configuration refusal is shown whole.
+The exit status is 0. Where a row would fail, the summary reads `fail: 1 failed, 2 warnings, 1 to do, 16 ok` and the status is 1. The table never cuts a detail, so a configuration refusal is shown whole.
+
+In a repository `by` has not been used in, the same report says:
+
+```
+Mode: local, no isolation · SQLite (.branchyard/state.db) · no server
+
+STATUS  CHECK             DETAIL
+ok      repository.git    /home/me/app (on branch main)
+todo    repository.state  not set up yet (no .branchyard/ in /home/me/app)
+...
+
+To do:
+  repository.state: run `by setup`
+
+todo: 1 to do, 18 ok
+```
+
+and exits 0.
 
 `--json` prints:
 
 ```json
 {
+  "format": 2,
+  "mode": "local, no isolation · SQLite (.branchyard/state.db) · no server",
   "checks": [
     {
       "name": "repository.git",
@@ -109,21 +167,23 @@ The exit status is 0. Where a row would fail, the summary reads `fail: 1 failed,
     },
     {
       "name": "repository.state",
-      "status": "fail",
-      "detail": "/home/me/app/.branchyard does not exist: Branchyard has not been used in this repository",
-      "fix": "run `by init` to write its configuration; any `by` command in the repository, such as `by ls`, then creates .branchyard/"
+      "status": "todo",
+      "detail": "not set up yet (no .branchyard/ in /home/me/app)",
+      "fix": "run `by setup`"
     }
   ],
-  "status": "fail"
+  "status": "todo"
 }
 ```
 
-`status` is the worst of the rows. `fix` is a string for every `warn` and `fail` and `null` for every `ok`; `detail` and `fix` are one line each. (The example shows two rows; the real list has every check above, in the order above.)
+`status` is the worst of the rows. `fix` is a string for every row that is not `ok` and `null` for every `ok`; `detail` and `fix` are one line each. (The example shows two rows; the real list has every check above, in the order above.)
+
+**`format`.** The report is versioned. Format 2, this one, differs from the unversioned report before it in four ways: the `todo` status (a repository with no `.branchyard/` was a `fail`, exit 1); `mode`; `harnesses.summary` and one `harnesses.ID` row for each installed harness in place of the single `harnesses.installed` row; and `format` itself. Rows that were there keep their names. A reader that treats any status it does not know as "not ok, not fail" reads both formats; the Python SDK's `Report` ([sdk](sdk.md)) passes the strings through.
 
 ## What it reads, writes and costs
 
 - **Offline.** The only network use is one `GET /v1/repos` to a server you configured, with a five-second deadline however the network behaves. An `ssh://` remote is not contacted (it starts its own server; `by remote ssh status` shows it).
-- **Quick.** Harness detection comes from the cache `by harnesses` keeps beside the user configuration, so a run takes well under a second once it is warm; the first run, or one after the cache expires, asks each installed harness for its version (bounded, as `by harnesses` does). `by harnesses --refresh` refreshes the cache.
+- **Quick.** Harness detection comes from the cache `by harnesses` keeps beside the user configuration, so a run takes well under a second once it is warm; the first run, or one after the cache expires, asks every installed harness for its version at once (ten seconds at most each, as `by harnesses` does: nine real CLIs took 4.4 seconds cold). `by harnesses --refresh` refreshes the cache.
 - **Changes nothing you keep.** It creates no `.branchyard/` and writes no exclude entry in a repository that has none, opens a `.branchyard/` that exists as every command does, and does not open one whose schema is older (opening would upgrade it) or newer. It runs no `[workspace]` script and no recipe. It opens a listener on loopback and starts one confined `/bin/sh -c 'exit 0'` for the namespace probe, both gone before it prints.
 - **No secret.** Credentials and keys are reported by variable or file name. The server's token is sent to the server and printed nowhere.
 
@@ -137,9 +197,11 @@ The exit status is 0. Where a row would fail, the summary reads `fail: 1 failed,
 
 ## What it does not do
 
-- It does not repair. Each fix is a command for you to run: `by init`, `by workspace trust`, `by services gc`, `by harnesses login ID`.
+- It does not repair. Each fix is a command for you to run: `by setup`, `by workspace trust`, `by services gc`, `by harnesses login ID`.
 - It does not run a recipe's own doctor (`by recipe check NAME` does, and a smoke test), a harness, a model call or a sandbox. It does not reach a Microsandbox or Substrate provider.
-- It does not look at `[connectors]`, `[sync]`, `[usage]`, trackers, the `gh` CLI, or the recipes other than the default provider's.
+- It does not look at `[connectors]`, `[sync]`, `[usage]`, trackers, the `gh` CLI, or the recipes other than the default provider's. Of `[serve]` it reads only whether the server file names a PostgreSQL database, for the `Mode:` line.
+- The `Mode:` line is read from configuration. It connects to no database and no server, so `PostgreSQL` there means a server file names one, not that it answers.
+- Not done: the harness rows were checked against fake harnesses and the nine real CLIs on this machine (no model call); no Claude Code that is really logged out was available, so the `loggedIn: false` case in the unit tests is written from the shape of the logged-in output, not recorded.
 - `serve.config` and `serve.database` read the server file `[serve] config` names. They never start the server, open its stores or connect to its database: a wrong host, user or password shows when `by serve` starts.
 - Nothing is checked on a server beyond `GET /v1/repos`; `by --remote URL harnesses` and `by --remote URL services` show more.
 
@@ -151,7 +213,9 @@ A check is a function from the shared context to rows, in `crates/branchyard-cli
 
 `crates/branchyard-cli/tests/doctor.rs` runs the built `by` against temporary repositories:
 
-- a repository without `.branchyard/` fails with the init hint, and the report creates neither `.branchyard/` nor an exclude entry;
+- a repository without `.branchyard/` is a `todo` with `by setup` as its fix and the report exits 0, and the report creates neither `.branchyard/` nor an exclude entry; the table starts with the `Mode:` line and ends with `1 to do`;
+- the `Mode:` line for local, isolated, microsandbox and recipe providers, a `--remote` URL with its credentials left out, and a `[serve]` file naming PostgreSQL (the URL never shown); and `not known` when the configuration does not load;
+- the harness rows with fake harnesses on a temporary `PATH` and a home of its own: a summary and one row of at most 120 characters for each, the version beside the live-tested one, a login not verified as a `todo` that never says "cannot run", a login the harness's own command says is missing as a `todo`, and the default harness agreeing with its row;
 - an initialized repository has no failure;
 - a broken `branchyard.toml` and a broken user file each fail naming the file and line, in JSON and in the table, and what depends on them says `not checked`;
 - untrusted `[workspace]` scripts warn, are `ok` after `by workspace trust`, warn again naming both digests after a change, and copy-only sections need no trust;
@@ -163,4 +227,4 @@ A check is a function from the shared context to rows, in `crates/branchyard-cli
 - a configured server asked once with its token against a mock, a refused token, a missing token file, a repository it does not serve, a server that stopped, and an `ssh://` remote left alone;
 - the model gateway's key variables named and never shown, and an unpriced routed model.
 
-Unit tests cover the rendering (the table never cuts a detail, the summary, the JSON shape, colour on the status only), each check's pure part (stale services, sandbox age against `max_kept_minutes`, the harness and default-harness rows, `[secrets]` sources, key rows, trust rows), and a request to a server that hangs ending at its deadline. The engine's read-only schema reader, its sandbox listing and its price lookup are tested in `crates/branchyard/src/doctor.rs`.
+Unit tests cover the rendering (the table never cuts a detail, the summary with to-dos, the mode line, the JSON shape, colour on the status only), each check's pure part (stale services, sandbox age against `max_kept_minutes`, the harness summary and rows and the default-harness row, a server URL without its credentials, `[secrets]` sources, key rows, trust rows), and a request to a server that hangs ending at its deadline. The engine's read-only schema reader, its sandbox listing and its price lookup are tested in `crates/branchyard/src/doctor.rs`.

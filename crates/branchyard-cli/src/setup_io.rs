@@ -109,7 +109,9 @@ fn first_line(
     }
 }
 
-const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a version command may run: the inventory's bound, generous
+/// because a Node harness takes three to six seconds to start cold.
+const VERSION_TIMEOUT: Duration = branchyard::inventory::DEFAULT_TIMEOUT;
 
 /// `git version 2.45.2` as `2.45.2`, `Docker version 27.1.1, build x` as `27.1.1`.
 fn short_version(line: &str) -> String {
@@ -181,18 +183,29 @@ impl Probe for HostProbe {
                 detail: state.login.detail.clone(),
             })
         };
-        // Ask each installed harness for its version at once, bounded.
-        let versions = self.versions;
+        // The versions are the inventory's, which asks every installed
+        // harness at once and keeps what it learns, so nothing is asked
+        // twice. Only when detection itself failed does each installed
+        // harness get a bounded `--version` of its own, at once.
+        let known: std::collections::BTreeMap<String, Option<String>> = inventory
+            .iter()
+            .flat_map(|i| i.harnesses.iter())
+            .map(|h| (h.id.clone(), h.version.clone()))
+            .collect();
+        let ask = self.versions && inventory.is_none();
         let handles: Vec<_> = defaults
             .into_iter()
             .map(|info| {
+                let from_inventory = known.get(&info.harness).cloned().flatten();
                 std::thread::spawn(move || {
                     let program = branchyard_harness::profiles::by_id(&info.profile)
                         .and_then(|p| p.command.first())
                         .and_then(|program| which(program));
                     let version = match (info.available, program) {
-                        (true, Some(program)) if versions => {
+                        _ if from_inventory.is_some() => from_inventory,
+                        (true, Some(program)) if ask => {
                             first_line(&program, &["--version"], None, VERSION_TIMEOUT)
+                                .map(|v| short_version(&v))
                         }
                         _ => None,
                     };
@@ -200,7 +213,7 @@ impl Probe for HostProbe {
                         harness: info.harness,
                         profile: info.profile,
                         installed: info.available,
-                        version: version.map(|v| short_version(&v)),
+                        version,
                         qualification: info.qualification,
                         login: None,
                     }

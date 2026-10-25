@@ -1203,7 +1203,7 @@ pub fn harness_table(harnesses: &[HarnessInfo], style: Style) -> String {
             right: false,
         },
         Column {
-            header: "QUALIFICATION",
+            header: "LIVE RUN",
             max: 48,
             right: false,
         },
@@ -1219,9 +1219,16 @@ pub fn harness_table(harnesses: &[HarnessInfo], style: Style) -> String {
                     true => Cell::toned("yes", Tone::Green),
                     false => Cell::toned("no", Tone::Dim),
                 },
-                match &h.qualification {
-                    Some(q) => Cell::plain(q),
-                    None => Cell::toned("unqualified", Tone::Dim),
+                // Three honest levels: a recorded session on a version, or none.
+                match h
+                    .qualification
+                    .as_deref()
+                    .and_then(branchyard::inventory::live_score)
+                {
+                    Some(_) => Cell::plain(branchyard::inventory::live_level(
+                        h.qualification.as_deref(),
+                    )),
+                    None => Cell::toned("no live run", Tone::Dim),
                 },
             ]
         })
@@ -2903,9 +2910,9 @@ mod tests {
         ];
         assert_eq!(
             harness_table(&harnesses, PLAIN),
-            "HARNESS      PROFILE                  DEFAULT  ON PATH  QUALIFICATION\n\
-             claude-code  claude-code-stream-json  *        yes      9/9 on Claude Code 2.1.283\n\
-             codex        codex-app-server                  no       unqualified\n"
+            "HARNESS      PROFILE                  DEFAULT  ON PATH  LIVE RUN\n\
+             claude-code  claude-code-stream-json  *        yes      live 9/9 (2.1.283)\n\
+             codex        codex-app-server                  no       no live run\n"
         );
     }
 

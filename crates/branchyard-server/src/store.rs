@@ -2886,6 +2886,7 @@ pub fn test_inventory(id: &str) -> branchyard::inventory::Inventory {
                 state: LoginState::LoggedIn,
                 evidence: Evidence::Verified,
                 detail: "logged in".into(),
+                ..Login::default()
             },
             quota: None,
         }],
