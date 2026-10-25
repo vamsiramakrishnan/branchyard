@@ -1,6 +1,6 @@
 # Contributing
 
-Start with [the roadmap](docs/roadmap.md), the live plan, and [the documentation index](docs/README.md). [Status](docs/status.md) says what is built and what has run; the harness drivers, sandbox providers and server it lists are the code you will change. The workspace has <!-- fact:workspace.crate_count -->23<!-- /fact --> crates.
+Start with [the roadmap](docs/roadmap.md), the live plan, and [the documentation index](docs/README.md). [Status](docs/status.md) says what is built and what has run; the harness drivers, sandbox providers and server it lists are the code you will change. [The implementation plan](docs/implementation-plan.md) records the original foundation and is not a to-do list. The workspace has <!-- fact:workspace.crate_count -->23<!-- /fact --> crates. Agents working in this repository: read [AGENTS.md](AGENTS.md) first.
 
 ## Before you push
 

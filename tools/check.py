@@ -187,6 +187,8 @@ STEPS = (
     # The Pi/Oh My Pi, Amp and OpenCode plugins under node with a stub `by` (skips without node).
     Step("test_plugin_ts", "controls", (PY, "tests/test_plugin_ts.py")),
     Step("test_plugin_config", "controls", (PY, "tests/test_plugin_config.py")),
+    # What the skills, slash commands and instructions files tell a model about `by` stays true.
+    Step("test_agent_text_drift", "controls", (PY, "tests/test_agent_text_drift.py")),
     # Cargo: rustdoc (the docs job), formatting, the undocumented-items ratchet, Clippy, and the
     # schema freshness tests. The Clippy passes CI runs for the feature builds stay in the workflow.
     Step(

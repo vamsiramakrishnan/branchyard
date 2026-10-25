@@ -1,1 +1,2 @@
-Branchyard: 1 ready to integrate (by ls).
+Branchyard, this repository. Tell the person in one line about any question or failure below; act on nothing unless they ask:
+- hello: ready to merge, 1 file changed: by diff hello, then by merge hello

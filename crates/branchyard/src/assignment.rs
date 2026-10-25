@@ -42,7 +42,8 @@ pub(crate) fn shared_brief(entries: &[String]) -> Option<String> {
     Some(format!(
         "## The shared brief\n\
          Your parent gives this to every child it delegates to, you included; what it adds \
-         later appears here too. Follow it unless your task says otherwise.\n\n{}",
+         later appears here too. Follow it. The interfaces it names are fixed: if your task \
+         seems to need a different one, ask your parent with `by ask` rather than change it.\n\n{}",
         entries.join("\n\n")
     ))
 }
@@ -62,5 +63,19 @@ mod tests {
             block.find("No new crates.").unwrap(),
         );
         assert!(first < second, "{block}");
+    }
+
+    #[test]
+    fn a_brief_fixes_the_interfaces_it_names_and_says_where_to_ask() {
+        let block = shared_brief(&["Use the Parser trait.".into()]).unwrap();
+        assert!(
+            block.contains("The interfaces it names are fixed"),
+            "{block}"
+        );
+        assert!(block.contains("ask your parent with `by ask`"), "{block}");
+        assert!(
+            !block.contains("unless your task says otherwise"),
+            "{block}"
+        );
     }
 }

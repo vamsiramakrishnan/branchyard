@@ -371,8 +371,8 @@ pub fn tools() -> Vec<Tool> {
         ),
         Tool::new(
             "propose_integration",
-            "Merge a finished descendant's candidate into your own branch, after its check \
-             passes on the exact merge. With branches, merge several together, in order, all or \
+            "Integrate (merge now): merge a finished descendant's candidate into your own \
+             branch, after its check passes on the exact merge. With branches, merge several together, in order, all or \
              none, and run their check once on the result: for children that share a test \
              suite none passes alone. Your uncommitted changes are committed first, and your \
              working tree moves to the merge. A candidate your branch already contains is \
@@ -589,8 +589,8 @@ pub fn tools() -> Vec<Tool> {
             "ask",
             "Ask your parent a question. Without wait_seconds, returns once it is sent. With \
              it, blocks for up to that long for an answer (in_reply_to your question); a wait \
-             that passes with no answer yet is not an error, answer is just absent, ask inbox \
-             or ask again.",
+             that passes with no answer yet is not an error, answer is just absent: read your \
+             inbox, or ask again.",
             schema(json!({
                 "type": "object",
                 "properties": {
@@ -934,6 +934,29 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    fn description(name: &str) -> String {
+        let tool = tools().into_iter().find(|t| t.name == name).unwrap();
+        tool.description.unwrap().to_string()
+    }
+
+    /// A model reads these two before it chooses: `ask` must not read as
+    /// a call to make with the text "inbox", and `propose_integration`
+    /// merges at once, whatever its name suggests.
+    #[test]
+    fn the_descriptions_of_ask_and_propose_integration_say_what_happens() {
+        let ask = description("ask");
+        assert!(
+            ask.ends_with("answer is just absent: read your inbox, or ask again."),
+            "{ask}"
+        );
+        assert!(!ask.contains("ask inbox"), "{ask}");
+        let integrate = description("propose_integration");
+        assert!(
+            integrate.starts_with("Integrate (merge now): merge a finished descendant's"),
+            "{integrate}"
+        );
+    }
 
     /// An error with a detail, as the broker returns a failed integration
     /// check, gives it as structured content beside its text; one without
