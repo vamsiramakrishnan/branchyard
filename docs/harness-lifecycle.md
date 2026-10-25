@@ -32,7 +32,7 @@ goose        ?        unknown               -                /usr/local/bin/goos
   goose: no version: its version command printed no version
   goose: Branchyard knows no way to tell for this harness
 
-3 of the 45 harnesses with a known executable are installed on box. ...
+3 of the 45 harnesses with a known executable are installed on this machine. ...
 ```
 
 Only installed harnesses are listed. `--json` prints the `Inventory`: `host`, `os`, `detected_at_ms`, `checked` (the IDs looked for), `harnesses` (each `id`, `path`, `on_path`, `version` or `version_note`, `login` with `state`, `evidence` and `detail`, and `quota`), and `tools` (the install programs found: `npm`, `bun`, `pipx`, `uv`, `brew`, `curl`, `bash`, `sh`).

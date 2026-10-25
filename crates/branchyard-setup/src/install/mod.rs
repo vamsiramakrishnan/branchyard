@@ -11,6 +11,7 @@
 //! to = "~/.codex/hooks.json"            # ~ = home; {project} = repository root
 //! how = "merge-json"                    # write | merge-json | merge-toml | merge-yaml
 //! at = ""                               # merge-*: dotted key to merge under
+//! unless_set = "statusLine"             # merge-json: leave out when the file sets this key
 //! [[note]]
 //! text = "Open Codex and run /hooks to trust the Branchyard hooks."
 //! ```
@@ -133,6 +134,13 @@ pub struct InstallFile {
     /// For `merge-*`: the dotted key the fragment merges under.
     #[serde(default)]
     pub at: String,
+    /// For `merge-json` at the top level: a dotted key of the target file.
+    /// When the file already sets it, the fragment is left out (instead of
+    /// being refused for clashing), and the plan says so: for a setting
+    /// the person may have chosen otherwise, such as Claude Code's
+    /// `statusLine`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unless_set: String,
 }
 
 /// A `[[note]]`: something only the person can do.
@@ -214,6 +222,12 @@ impl Bundle<'_> {
             if file.how == How::Write && !file.at.is_empty() {
                 problems.push(format!("{}: `at` is only for merge-*", file.to));
             }
+            if !file.unless_set.is_empty() && (file.how != How::MergeJson || !file.at.is_empty()) {
+                problems.push(format!(
+                    "{}: `unless_set` is only for merge-json at the top level",
+                    file.to
+                ));
+            }
         }
         for note in &manifest.notes {
             if note.text.trim().is_empty() {
@@ -261,6 +275,10 @@ pub struct ListedFile {
     pub at: String,
     /// What it installs, under `plugins/branchyard`.
     pub from: String,
+    /// For a merge: the key that, when the file already sets it, leaves
+    /// this fragment out (the manifest's `unless_set`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unless_set: String,
 }
 
 /// A harness `by init plugin` can install for, as `by init plugin`
@@ -308,6 +326,7 @@ pub fn listing(facts: &Facts) -> Result<HarnessList, String> {
                     how: f.how,
                     at: f.at.clone(),
                     from: f.from.clone(),
+                    unless_set: f.unless_set.clone(),
                 })
                 .collect(),
             notes: m.notes.iter().map(|n| n.text.clone()).collect(),
@@ -362,7 +381,60 @@ pub fn planned_files_from(
     facts: &Facts,
     probe: &dyn Probe,
 ) -> Vec<PlannedFile> {
+    install_from(bundle, manifests, facts, probe).files
+}
+
+/// A fragment left out because the person's file already sets its key
+/// ([`InstallFile::unless_set`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Kept {
+    /// The harness whose manifest names it.
+    pub harness: String,
+    /// The file, `~` expanded as the plan shows it.
+    pub path: String,
+    /// The key the file sets.
+    pub key: String,
+    /// The fragment's value there, as compact JSON: what to set to take
+    /// Branchyard's instead.
+    pub ours: String,
+    /// The file's value there is already the fragment's: nothing to say.
+    pub same: bool,
+}
+
+/// What installing `manifests` plans: the files, and the fragments left
+/// out for keys the person already set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Install {
+    /// As [`planned_files`].
+    pub files: Vec<PlannedFile>,
+    /// Fragments not merged, in the order of the manifests.
+    pub kept: Vec<Kept>,
+}
+
+/// [`planned_files`] with what it left out.
+pub fn planned_install(manifests: &[Manifest], facts: &Facts, probe: &dyn Probe) -> Install {
+    install_from(BUILT, manifests, facts, probe)
+}
+
+/// The JSON value at the dotted `key` of `text`, when it parses and holds
+/// a non-null one there.
+fn json_at(text: &str, key: &str) -> Option<serde_json::Value> {
+    let root: serde_json::Value = serde_json::from_str(text).ok()?;
+    let mut value = &root;
+    for part in key.split('.').filter(|k| !k.is_empty()) {
+        value = value.get(part)?;
+    }
+    (!value.is_null()).then(|| value.clone())
+}
+
+fn install_from(
+    bundle: Bundle,
+    manifests: &[Manifest],
+    facts: &Facts,
+    probe: &dyn Probe,
+) -> Install {
     let mut files: Vec<PlannedFile> = Vec::new();
+    let mut kept: Vec<Kept> = Vec::new();
     let mut originals: BTreeMap<String, Option<String>> = BTreeMap::new();
     for manifest in manifests {
         for f in &manifest.files {
@@ -381,6 +453,20 @@ pub fn planned_files_from(
                         Some(p) => Some(p.body().to_owned()),
                         None => probe.read(&target),
                     };
+                    if !f.unless_set.is_empty() {
+                        let theirs = existing.as_deref().and_then(|t| json_at(t, &f.unless_set));
+                        if let Some(theirs) = theirs {
+                            let ours = json_at(fragment, &f.unless_set).unwrap_or_default();
+                            kept.push(Kept {
+                                harness: manifest.harness.clone(),
+                                path: target,
+                                key: f.unless_set.clone(),
+                                same: theirs == ours,
+                                ours: ours.to_string(),
+                            });
+                            continue;
+                        }
+                    }
                     let merged = match how {
                         How::MergeJson => merge::json(existing.as_deref(), fragment, &f.at),
                         How::MergeToml => merge::toml(existing.as_deref(), fragment, &f.at),
@@ -414,5 +500,104 @@ pub fn planned_files_from(
             }
         }
     }
-    files
+    Install { files, kept }
+}
+
+/// The hooks a JSON file holds: the entries of its `hooks`, or, for a
+/// file that is itself the event map (`hooks.json`), its events; `None`
+/// for a file that holds none, or is not JSON.
+fn hook_count(from: &str, text: &str) -> Option<usize> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let len = |v: &serde_json::Value| match v {
+        serde_json::Value::Object(map) => Some(map.len()),
+        serde_json::Value::Array(list) => Some(list.len()),
+        _ => None,
+    };
+    if let Some(hooks) = value.get("hooks") {
+        return len(hooks);
+    }
+    let stem = from.rsplit('/').next().and_then(|n| n.split('.').next());
+    let events = value.as_object()?;
+    match (stem, events.len()) {
+        (Some("hooks"), 1) => events.values().next().and_then(len),
+        (Some("hooks"), _) => Some(events.keys().filter(|k| *k != "version").count()),
+        _ => None,
+    }
+}
+
+fn counted(n: usize, what: &str) -> String {
+    match n {
+        1 => format!("1 {what}"),
+        n => format!("{n} {what}s"),
+    }
+}
+
+/// What installing `manifest` gives, in a line: `2 skills, 3 commands, 2
+/// hooks, status line in ~/.claude/settings.json`. `kept` are the
+/// fragments left out, whose parts are not claimed.
+pub fn summary(manifest: &Manifest, kept: &[Kept]) -> String {
+    summary_from(BUILT, manifest, kept)
+}
+
+/// [`summary`] from another bundle.
+pub fn summary_from(bundle: Bundle, manifest: &Manifest, kept: &[Kept]) -> String {
+    let left_out = |f: &InstallFile| {
+        !f.unless_set.is_empty()
+            && kept
+                .iter()
+                .any(|k| k.harness == manifest.harness && k.key == f.unless_set)
+    };
+    let mut skills = 0;
+    let mut commands = 0;
+    let mut hooks = 0;
+    let mut status_line = manifest.provides.iter().any(|p| p == "statusline");
+    let mut places: Vec<String> = Vec::new();
+    for f in &manifest.files {
+        let text = bundle.file(&f.from);
+        if left_out(f) {
+            if text.is_some_and(|t| t.contains("statusLine")) {
+                status_line = false;
+            }
+            continue;
+        }
+        if f.from.starts_with("skills/") {
+            skills += 1;
+            continue;
+        }
+        if f.from.split('/').any(|part| part == "commands") {
+            commands += match text {
+                Some(_) => 1,
+                None => bundle.dir(&f.from).len(),
+            };
+            continue;
+        }
+        hooks += text.and_then(|t| hook_count(&f.from, t)).unwrap_or(0);
+        let place = f.to.strip_prefix("{project}/").unwrap_or(&f.to).to_owned();
+        if !places.contains(&place) {
+            places.push(place);
+        }
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if skills > 0 {
+        parts.push(counted(skills, "skill"));
+    }
+    if commands > 0 {
+        parts.push(counted(commands, "command"));
+    }
+    match (hooks, manifest.provides.iter().any(|p| p == "hooks")) {
+        (0, true) => parts.push("hooks".into()),
+        (0, false) => {}
+        (n, _) => parts.push(counted(n, "hook")),
+    }
+    if status_line {
+        parts.push("status line".into());
+    }
+    if parts.is_empty() {
+        parts.push(manifest.provides.join(", "));
+    }
+    let mut line = parts.join(", ");
+    if !places.is_empty() {
+        line.push_str(&format!(" in {}", places.join(" and ")));
+    }
+    line
 }

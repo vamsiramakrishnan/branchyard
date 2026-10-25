@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 use super::{flag, harness_question, list, secret_choices, secret_ref_question, text};
 use crate::config::{self, ProjectConfig, ProviderKind};
+use crate::hint;
 use crate::interview::{number, Answers, Choice, Condition, Kind, Question, Rule};
 use crate::plan::{ArtifactKind, Plan, PlannedFile};
 use crate::probe::{harness_label, unapproved_tools, Facts, HarnessFact, LoginFile, Probe};
@@ -12,27 +13,32 @@ use crate::Topic;
 const SECRET_PREFIX: &str = "secret.";
 
 /// The file the answers go to, and what it holds now.
-fn target(facts: &Facts, answers: &Answers) -> (String, Option<ProjectConfig>) {
-    match text(answers, "scope").as_deref() {
-        Some("user") => (
-            facts.user_config_path.clone(),
-            facts
-                .user_text
-                .as_deref()
-                .and_then(|t| config::parse(t).ok()),
-        ),
+struct Target {
+    path: String,
+    /// What the file says, when it loads.
+    existing: Option<ProjectConfig>,
+    /// Why it does not load, when it exists and `by` refuses it: its
+    /// values are then not used, and the plan replaces the file.
+    unreadable: Option<hint::Unreadable>,
+}
+
+fn target(facts: &Facts, answers: &Answers) -> Target {
+    let (path, text) = match text(answers, "scope").as_deref() {
+        Some("user") => (facts.user_config_path.clone(), facts.user_text.as_deref()),
         _ => (
             config::PROJECT_FILE.to_owned(),
-            facts
-                .project_text
-                .as_deref()
-                .and_then(|t| config::parse(t).ok()),
+            facts.project_text.as_deref(),
         ),
+    };
+    Target {
+        existing: text.and_then(|t| config::parse(t).ok()),
+        unreadable: text.and_then(hint::unreadable),
+        path,
     }
 }
 
 pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
-    let (_, existing) = target(facts, answers);
+    let existing = target(facts, answers).existing;
     let current = existing.clone().unwrap_or_default();
     let d = &current.defaults;
     let or = |value: Option<Value>, fallback: Value| value.unwrap_or(fallback);
@@ -864,14 +870,19 @@ fn workspace_questions(facts: &Facts, current: &ProjectConfig, qs: &mut Vec<Ques
         setup,
         "No setup",
     ));
-    qs.push(command(
-        "workspace.run",
-        "Run",
-        "Which command starts a development server in a branch?",
-        "`by workspace run BRANCH` runs it in the branch's worktree, with its own port in $BRANCHYARD_PORT.",
-        run,
-        "No run script",
-    ));
+    // Asked only when there is a server to start (a script the repository
+    // has, or one the file already names): a default that fails on the
+    // first worktree is worse than no question.
+    if run.is_some() {
+        qs.push(command(
+            "workspace.run",
+            "Run",
+            "Which command starts a development server in a branch?",
+            "`by workspace run BRANCH` runs it in the branch's worktree, with its own port in $BRANCHYARD_PORT.",
+            run,
+            "No run script",
+        ));
+    }
     qs.push(command(
         "workspace.teardown",
         "Teardown",
@@ -891,7 +902,11 @@ fn workspace_questions(facts: &Facts, current: &ProjectConfig, qs: &mut Vec<Ques
 }
 
 pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
-    let (path, existing) = target(facts, answers);
+    let Target {
+        path,
+        existing,
+        unreadable,
+    } = target(facts, answers);
     let mut flat = existing.clone().unwrap_or_default().flatten();
     fn put(flat: &mut std::collections::BTreeMap<String, Value>, key: &str, value: Option<Value>) {
         match value {
@@ -1045,8 +1060,11 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
                 .iter()
                 .find(|(_, r)| r.default)
                 .map_or_else(|| "dev".into(), |(name, _)| name.clone());
-            match text(answers, "workspace.run") {
-                Some(command) => {
+            match (
+                text(answers, "workspace.run"),
+                answers.contains_key("workspace.run"),
+            ) {
+                (Some(command), _) => {
                     runs.insert(
                         name,
                         config::RunScript {
@@ -1055,9 +1073,11 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
                         },
                     );
                 }
-                None => {
+                // Asked and cleared. A question never asked leaves them.
+                (None, true) => {
                     runs.remove(&name);
                 }
+                (None, false) => {}
             }
             if !runs.is_empty() {
                 flat.insert(
@@ -1068,8 +1088,20 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
         }
     }
     let mut plan = Plan::new(Topic::Project);
+    // Whether the file written carries [workspace] scripts, and whether
+    // they differ from the ones in the file now (a trust decision is of
+    // their digest).
+    let mut scripts = None;
     let body = match ProjectConfig::unflatten(&flat) {
         Ok(config) => {
+            scripts = config
+                .workspace
+                .as_ref()
+                .filter(|w| w.has_scripts())
+                .map(|w| {
+                    let before = existing.as_ref().and_then(|c| c.workspace.as_ref());
+                    before.is_none_or(|b| b.digest() != w.digest())
+                });
             let heading = match path.as_str() {
                 config::PROJECT_FILE => {
                     "Branchyard project defaults, written by `by init project`."
@@ -1096,11 +1128,37 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
             _ => ", in local mode".into(),
         }
     ));
+    if let Some(problem) = &unreadable {
+        plan.notes.push(format!(
+            "{path} does not load: {}; its values are not used here, so the plan replaces the \
+             file. See what `by` says of it with `by config validate`.",
+            problem.problem()
+        ));
+    }
     if existing.is_some() {
         plan.notes.push(
             "Keys the interview does not ask about are kept; comments in the old file are not."
                 .into(),
         );
+    }
+    // The default harness must run here, unless branches run elsewhere.
+    let runs_here = text(answers, "remote").as_deref() != Some("server")
+        && text(answers, "provider").as_deref() != Some("microsandbox");
+    if let Some(harness) = text(answers, "harness").filter(|_| runs_here) {
+        if !facts.installed().any(|h| h.harness == harness) {
+            let found: Vec<&str> = facts.installed().map(|h| h.harness.as_str()).collect();
+            plan.notes.push(match found.is_empty() {
+                true => format!(
+                    "No harness is on PATH here, so `by run` cannot start {harness} yet: \
+                     `by harnesses install {harness}` installs it."
+                ),
+                false => format!(
+                    "{harness} is not on PATH here (found: {}), so `by run` cannot start it yet: \
+                     `by harnesses install {harness}` installs it, or choose one of those.",
+                    found.join(", ")
+                ),
+            });
+        }
     }
     let mut secret_note = list(answers, "secrets");
     for login in list(answers, "logins") {
@@ -1151,16 +1209,25 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
         "by config validate",
         "Check the merged configuration with the loader by uses.",
     );
-    if workspace && flag(answers, "workspace") {
+    if let Some(changed) = scripts {
         plan.notes.push(
             "[workspace] scripts run only once you trust them: review them, then run \
              `by workspace trust`. A change to them asks again."
                 .into(),
         );
-        plan.command(
-            "by workspace trust",
-            "Let [workspace]'s setup, run and teardown scripts run for this repository.",
-        );
+        // New or changed scripts are refused by the next `by run` until
+        // then, so the trust leads the list; scripts already as they were
+        // keep whatever decision was made.
+        match changed {
+            true => plan.command_first(
+                "by workspace trust",
+                "Your first `by run` needs this: it lets [workspace]'s setup, run and teardown scripts run for this repository.",
+            ),
+            false => plan.command(
+                "by workspace trust",
+                "Let [workspace]'s setup, run and teardown scripts run for this repository.",
+            ),
+        }
     }
     plan.command(
         "by config show",
@@ -1208,6 +1275,10 @@ mod tests {
         ] {
             probe.files.insert(file.into(), String::new());
         }
+        probe.files.insert(
+            "package.json".into(),
+            r#"{"scripts": {"dev": "vite"}}"#.into(),
+        );
         let facts = Facts::gather(&probe);
         assert_eq!(facts.workspace.copy, [".env", ".env.local"]);
         assert_eq!(
@@ -1302,6 +1373,305 @@ mod tests {
         assert_eq!(workspace.teardown.commands(), ["docker compose down"]);
         assert_eq!(workspace.shell_setup.as_deref(), Some("nvm use"));
         assert!(plan.valid);
+    }
+
+    /// A repository with a `package.json` holding `scripts`, and a lockfile.
+    fn node(lock: &str, scripts: &str) -> FakeProbe {
+        let mut probe = FakeProbe::typical();
+        // Only the package: Cargo.toml would add `cargo fetch` to the setup.
+        probe.files.remove("Cargo.toml");
+        probe.files.insert(lock.into(), String::new());
+        probe.files.insert(
+            "package.json".into(),
+            format!(r#"{{"name": "x", "scripts": {scripts}}}"#),
+        );
+        probe
+    }
+
+    #[test]
+    fn a_run_script_is_proposed_only_for_a_script_the_package_has() {
+        // `dev` first, then `start`, in the package manager the lockfile names.
+        for (lock, scripts, run) in [
+            (
+                "package-lock.json",
+                r#"{"dev": "vite", "start": "node ."}"#,
+                "npm run dev",
+            ),
+            (
+                "package-lock.json",
+                r#"{"start": "node ."}"#,
+                "npm run start",
+            ),
+            ("pnpm-lock.yaml", r#"{"dev": "vite"}"#, "pnpm dev"),
+            ("pnpm-lock.yaml", r#"{"start": "node ."}"#, "pnpm start"),
+            ("yarn.lock", r#"{"dev": "vite"}"#, "yarn dev"),
+            ("bun.lock", r#"{"start": "bun ."}"#, "bun run start"),
+            ("bun.lockb", r#"{"dev": "bun --hot ."}"#, "bun run dev"),
+        ] {
+            let facts = Facts::gather(&node(lock, scripts));
+            assert_eq!(
+                facts.workspace.run.as_deref(),
+                Some(format!("PORT=$BRANCHYARD_PORT {run}").as_str()),
+                "{lock} {scripts}"
+            );
+        }
+        // A package with a test script and nothing to serve gets setup, and no run.
+        for scripts in [r#"{"test": "node --test"}"#, "{}", "null", r#"{"dev": 1}"#] {
+            let facts = Facts::gather(&node("package-lock.json", scripts));
+            assert_eq!(facts.workspace.setup, ["npm ci"], "{scripts}");
+            assert_eq!(facts.workspace.run, None, "{scripts}");
+        }
+        // No scripts at all, or not JSON: the same.
+        let mut broken = node("pnpm-lock.yaml", "{}");
+        broken
+            .files
+            .insert("package.json".into(), "{ not json".into());
+        assert_eq!(Facts::gather(&broken).workspace.run, None);
+        let mut empty = node("yarn.lock", "{}");
+        empty.files.insert("package.json".into(), String::new());
+        assert_eq!(Facts::gather(&empty).workspace.run, None);
+    }
+
+    #[test]
+    fn the_run_question_is_not_asked_without_a_script_to_run() {
+        let ids = |probe: &FakeProbe| -> Vec<String> {
+            let facts = Facts::gather(probe);
+            let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+            assert!(state.done(), "{state:?}");
+            state.asked.iter().map(|q| q.id.clone()).collect()
+        };
+        let without = ids(&node("package-lock.json", r#"{"test": "node --test"}"#));
+        assert!(
+            without.contains(&"workspace.setup".to_owned()),
+            "{without:?}"
+        );
+        assert!(
+            !without.contains(&"workspace.run".to_owned()),
+            "{without:?}"
+        );
+        // A repository with no package.json at all is asked no more than that.
+        assert!(!ids(&FakeProbe::typical()).contains(&"workspace.run".to_owned()));
+        let with = ids(&node("package-lock.json", r#"{"dev": "vite"}"#));
+        assert!(with.contains(&"workspace.run".to_owned()), "{with:?}");
+
+        // The plan writes setup and no run script, and parses.
+        let probe = node("package-lock.json", r#"{"test": "node --test"}"#);
+        let facts = Facts::gather(&probe);
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        let body = plan_body(&facts, &state.answers, &probe);
+        let workspace = config::parse(&body).unwrap().workspace.unwrap();
+        assert_eq!(workspace.setup.commands(), ["npm ci"]);
+        assert!(workspace.run.is_empty(), "{body}");
+    }
+
+    #[test]
+    fn a_run_script_the_file_already_has_is_kept_when_none_is_detected() {
+        let mut probe = node("package-lock.json", r#"{"test": "node --test"}"#);
+        probe.files.insert(
+            "branchyard.toml".into(),
+            "version = 1\n[workspace]\nsetup = \"npm ci\"\n[workspace.run.web]\ncommand = \"node server.js\"\ndefault = true\n"
+                .into(),
+        );
+        let facts = Facts::gather(&probe);
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        assert_eq!(
+            state.answers["workspace.run"],
+            json!("node server.js"),
+            "asked, with the file's script as the default"
+        );
+        // Not asked (the file's script is not a default): kept, not removed.
+        let mut answers = state.answers.clone();
+        answers.remove("workspace.run");
+        let body = plan_body(&facts, &answers, &probe);
+        let workspace = config::parse(&body).unwrap().workspace.unwrap();
+        assert!(workspace.run.contains_key("web"), "{body}");
+    }
+
+    #[test]
+    fn a_file_that_does_not_load_is_said_first_and_replaced() {
+        let mut probe = FakeProbe::typical();
+        probe.files.insert(
+            "branchyard.toml".into(),
+            "version = 1\nagent = \"claude\"\nbudget = 5\n[workspace]\nsetup = \"npm ci\"\n".into(),
+        );
+        let facts = Facts::gather(&probe);
+        // Before the questions: a fact line, in the protocol's `facts` too.
+        let lines = facts.lines();
+        let line = lines.iter().find(|l| l.id == "config_problem").unwrap();
+        assert_eq!(line.label, "branchyard.toml");
+        assert!(
+            line.value.starts_with(
+                "does not load: line 2: unknown field `agent` (did you mean `harness`, under [defaults]?)"
+            ),
+            "{}",
+            line.value
+        );
+        // Its values are not defaults, and the plan's first note says why.
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        assert_eq!(state.answers["harness"], json!("claude-code"));
+        let plan = plan(&facts, &state.answers, &probe);
+        assert!(
+            plan.notes[0]
+                .starts_with("branchyard.toml does not load: line 2: unknown field `agent`"),
+            "{:?}",
+            plan.notes
+        );
+        assert!(
+            plan.notes[0].contains("its values are not used here"),
+            "{:?}",
+            plan.notes
+        );
+        assert!(
+            plan.notes[0].contains("replaces the file"),
+            "{:?}",
+            plan.notes
+        );
+        assert!(
+            !plan
+                .notes
+                .iter()
+                .any(|n| n.contains("Keys the interview does not ask about are kept")),
+            "nothing of the old file is kept: {:?}",
+            plan.notes
+        );
+        assert!(plan.valid || plan.files[0].overwrites);
+        // A file that loads says nothing of the kind.
+        probe
+            .files
+            .insert("branchyard.toml".into(), "version = 1\n".into());
+        let facts = Facts::gather(&probe);
+        assert!(!facts.lines().iter().any(|l| l.id == "config_problem"));
+    }
+
+    #[test]
+    fn a_user_file_that_does_not_load_is_said_too() {
+        let mut probe = FakeProbe::typical();
+        let facts = Facts::gather(&probe);
+        probe.files.insert(
+            facts.user_config_path.clone(),
+            "[defaults]\nbudget = 3\n".into(),
+        );
+        let facts = Facts::gather(&probe);
+        let line = facts
+            .lines()
+            .into_iter()
+            .find(|l| l.id == "config_problem")
+            .unwrap();
+        assert_eq!(line.label, facts.user_config_path);
+        assert!(
+            line.value
+                .contains("line 2: unknown field `budget` (did you mean `budget_usd`?)"),
+            "{}",
+            line.value
+        );
+        let user = answers(json!({"scope": "user"}));
+        let state = resolve(&|a| questions(&facts, a), &user, true);
+        let plan = plan(&facts, &state.answers, &probe);
+        assert!(
+            plan.notes[0].starts_with(&format!("{} does not load", facts.user_config_path)),
+            "{:?}",
+            plan.notes
+        );
+    }
+
+    #[test]
+    fn new_workspace_scripts_lead_the_next_steps_with_the_trust_they_need() {
+        let mut probe = node("package-lock.json", r#"{"dev": "vite"}"#);
+        probe.files.insert(".env".into(), String::new());
+        let facts = Facts::gather(&probe);
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        let first = plan(&facts, &state.answers, &probe);
+        let commands: Vec<&str> = first.commands.iter().map(|c| c.command.as_str()).collect();
+        assert_eq!(commands[0], "by workspace trust", "{commands:?}");
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|c| **c == "by workspace trust")
+                .count(),
+            1
+        );
+        assert!(
+            first.commands[0]
+                .why
+                .contains("Your first `by run` needs this"),
+            "{:?}",
+            first.commands[0]
+        );
+        assert!(commands.contains(&"by config validate"), "{commands:?}");
+
+        // The same scripts in the file now: its decision stands, nothing leads.
+        let written = plan_body(&facts, &state.answers, &probe);
+        probe.files.insert("branchyard.toml".into(), written);
+        let facts = Facts::gather(&probe);
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        let again = plan(&facts, &state.answers, &probe);
+        assert_eq!(again.commands[0].command, "by config validate");
+        assert!(again
+            .commands
+            .iter()
+            .any(|c| c.command == "by workspace trust"));
+
+        // Copying files runs nothing, so there is nothing to trust.
+        let mut copy_only = FakeProbe::typical();
+        copy_only.files.remove("Cargo.toml");
+        copy_only.files.insert(".env".into(), String::new());
+        let facts = Facts::gather(&copy_only);
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        let plan = plan(&facts, &state.answers, &copy_only);
+        assert!(
+            !plan
+                .commands
+                .iter()
+                .any(|c| c.command == "by workspace trust"),
+            "{:?}",
+            plan.commands
+        );
+        // Declining the workspace writes nothing to trust either.
+        let mut declined = state.answers.clone();
+        declined.insert("workspace".into(), json!(false));
+        assert!(!super::plan(&facts, &declined, &copy_only)
+            .commands
+            .iter()
+            .any(|c| c.command == "by workspace trust"));
+    }
+
+    #[test]
+    fn a_default_harness_that_is_not_on_path_is_warned_about_in_the_plan() {
+        let mut probe = FakeProbe::typical();
+        for h in &mut probe.harnesses {
+            h.installed = h.harness == "codex";
+        }
+        let facts = Facts::gather(&probe);
+        let note = |answers: &Answers| plan(&facts, answers, &probe).notes.join("\n");
+        let claude = answers(json!({"harness": "claude-code"}));
+        let state = resolve(&|a| questions(&facts, a), &claude, true);
+        let text = note(&state.answers);
+        assert!(
+            text.contains("claude-code is not on PATH here (found: codex)")
+                && text.contains("`by harnesses install claude-code`"),
+            "{text}"
+        );
+        // One that is installed, a server that runs it elsewhere: no warning.
+        let codex = resolve(
+            &|a| questions(&facts, a),
+            &answers(json!({"harness": "codex"})),
+            true,
+        );
+        assert!(!note(&codex.answers).contains("not on PATH"));
+        let server = answers(json!({"harness": "claude-code", "remote": "server"}));
+        let remote = resolve(&|a| questions(&facts, a), &server, true);
+        assert!(!note(&remote.answers).contains("not on PATH"));
+        // Nothing installed at all.
+        for h in &mut probe.harnesses {
+            h.installed = false;
+        }
+        let facts = Facts::gather(&probe);
+        let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
+        let text = plan(&facts, &state.answers, &probe).notes.join("\n");
+        assert!(
+            text.contains("No harness is on PATH here, so `by run` cannot start claude-code yet"),
+            "{text}"
+        );
     }
 
     #[test]

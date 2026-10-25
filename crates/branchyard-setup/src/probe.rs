@@ -95,6 +95,16 @@ pub const ENV_INPUTS: &[&str] = &[
     ".python-version",
 ];
 
+/// The `package.json` script that starts a development server: `dev`,
+/// else `start`; `None` when it has neither, or the text is not JSON.
+fn server_script(package_json: &str) -> Option<&'static str> {
+    let package: serde_json::Value = serde_json::from_str(package_json).ok()?;
+    let scripts = package.get("scripts")?.as_object()?;
+    ["dev", "start"]
+        .into_iter()
+        .find(|name| scripts.get(*name).is_some_and(serde_json::Value::is_string))
+}
+
 /// What the files at a repository root suggest for `[workspace]`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspaceFacts {
@@ -146,27 +156,29 @@ impl WorkspaceFacts {
             }
             here
         };
-        // JavaScript: the lockfile names the package manager.
+        // JavaScript: the lockfile names the package manager, and
+        // package.json's scripts say whether there is a server to run.
         let node = [
-            (
-                "pnpm-lock.yaml",
-                "pnpm install --frozen-lockfile",
-                "pnpm dev",
-            ),
-            ("yarn.lock", "yarn install --frozen-lockfile", "yarn dev"),
-            ("bun.lock", "bun install --frozen-lockfile", "bun run dev"),
-            ("bun.lockb", "bun install --frozen-lockfile", "bun run dev"),
-            ("package-lock.json", "npm ci", "npm run dev"),
+            ("pnpm-lock.yaml", "pnpm install --frozen-lockfile", "pnpm"),
+            ("yarn.lock", "yarn install --frozen-lockfile", "yarn"),
+            ("bun.lock", "bun install --frozen-lockfile", "bun run"),
+            ("bun.lockb", "bun install --frozen-lockfile", "bun run"),
+            ("package-lock.json", "npm ci", "npm run"),
         ]
         .into_iter()
         .find(|(lock, _, _)| found(lock))
-        .map(|(_, install, dev)| (install, dev));
+        .map(|(_, install, runner)| (install, runner));
         let mut setup = Vec::new();
         let mut run = None;
         if found("package.json") {
-            let (install, dev) = node.unwrap_or(("npm install", "npm run dev"));
+            let (install, runner) = node.unwrap_or(("npm install", "npm run"));
             setup.push(install.to_owned());
-            run = Some(format!("PORT=$BRANCHYARD_PORT {dev}"));
+            // Only a script that exists: a run script for a missing one
+            // fails on the first worktree, after it was trusted.
+            run = probe
+                .read("package.json")
+                .and_then(|text| server_script(&text))
+                .map(|script| format!("PORT=$BRANCHYARD_PORT {runner} {script}"));
         }
         if found("Cargo.toml") {
             setup.push("cargo fetch".to_owned());
@@ -620,6 +632,23 @@ impl Facts {
                 None => format!("{} (not a git repository)", self.root),
             },
         );
+        // A configuration file `by` itself refuses is said first: the
+        // interview cannot start from its values.
+        for (file, text) in [
+            (crate::config::PROJECT_FILE, &self.project_text),
+            (self.user_config_path.as_str(), &self.user_text),
+        ] {
+            if let Some(problem) = text.as_deref().and_then(crate::hint::unreadable) {
+                push(
+                    "config_problem",
+                    file,
+                    format!(
+                        "does not load: {}; its values are not used here",
+                        problem.problem()
+                    ),
+                );
+            }
+        }
         let installed: Vec<String> = self
             .installed()
             .map(|h| {

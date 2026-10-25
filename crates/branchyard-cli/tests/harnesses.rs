@@ -437,6 +437,8 @@ fn detection_reads_versions_and_logins_without_reading_secrets() {
         "{table}"
     );
     assert!(table.contains("6 of the"), "{table}");
+    // This machine is called "this machine", not its hostname.
+    assert!(table.contains("are installed on this machine."), "{table}");
 
     // Off PATH, in a known install directory: found, but cannot run.
     let other = w.base.join("other-home");
@@ -585,7 +587,7 @@ fn installs_follow_the_policy_and_are_verified_and_logged() {
     // With it: the catalog's npm command, pinned to the profile's version.
     let out = w.ok(&["harnesses", "install", "codex", "--yes"]);
     assert!(
-        text(&out.stdout).contains("installed codex 0.157.1 on local"),
+        text(&out.stdout).contains("installed codex 0.157.1 on this machine"),
         "{}",
         text(&out.stdout)
     );
@@ -747,7 +749,10 @@ fn login_runs_the_harness_own_flow_or_stores_a_key_and_says_what_to_run() {
     // A terminal: the harness's own flow, passed through.
     let out = in_pty(&w, &["harnesses", "login", "codex"]);
     assert!(out.contains("https://auth.example/device"), "{out}");
-    assert!(out.contains("codex on local: logged in (verified"), "{out}");
+    assert!(
+        out.contains("codex on this machine: logged in (verified"),
+        "{out}"
+    );
     assert_eq!(w.calls("codex login --device-auth").len(), 1);
     let inventory = w.json(&["harnesses", "--json"]);
     assert_eq!(
