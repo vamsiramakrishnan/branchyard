@@ -189,7 +189,7 @@ After a run, send or fork, `next` lists the commands that fit the branch's state
 ## Where to go next
 
 - [Concepts](concepts.md): the words (task, branch, turn, candidate, run, fan, map, spawn) and the states.
-- `docs/modes.md`: local, isolated, sandbox, server, PostgreSQL, each with its one setting and its `by doctor` row.
+- [`docs/modes.md`](modes.md): local, isolated, sandbox, server, PostgreSQL, each with its one setting and its `by doctor` row.
 - [Setup](setup.md): `branchyard.toml`, `by config show`, the interview behind `by init`.
 - [Harness hooks](harness-hooks.md): how a Claude Code or Codex session hears about your branches.
 - [The Python SDK](sdk.md): the same operations from a script.

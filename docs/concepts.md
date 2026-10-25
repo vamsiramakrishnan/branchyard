@@ -33,7 +33,7 @@ The words Branchyard uses, in the order a newcomer meets them. Each one is a thi
 
 ## Modes
 
-How much stands between a harness and your machine, in steps. `docs/modes.md` gives the one setting and the one `by doctor` row for each.
+How much stands between a harness and your machine, in steps. [`docs/modes.md`](modes.md) gives the one setting and the one `by doctor` row for each.
 
 - **local**: the harness runs as your user in a git worktree, with no isolation beyond that.
 - **isolated**: `--isolated` gives it a scrubbed environment and a private `HOME`.
