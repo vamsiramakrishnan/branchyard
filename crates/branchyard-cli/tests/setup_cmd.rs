@@ -143,7 +143,7 @@ fn setup_yes_writes_the_config_and_the_hooks_and_prints_the_card() {
         "Claude Code 9.9.9",
         "Qwen Code 9.9.9",
         "wrote branchyard.toml: harness claude-code · check \"cargo test\" · local, no isolation",
-        "installed 13 files (hooks, commands, skills)",
+        "installed 13 files (hooks, commands, skills, statusline)",
         "installed 1 file (hooks)",
         "hooks: verified",
         "Only you can do:",

@@ -2291,7 +2291,7 @@ fn a_session_hook_and_status_line_ask_the_server() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     let said = hook("user-prompt-submit").unwrap();
     assert!(
-        said.contains("- p: finished, ready to integrate (1 file changed)"),
+        said.contains("- p: ready to merge, 1 file changed: by diff p, then by merge p"),
         "{said}"
     );
     // Told once.
@@ -2408,7 +2408,7 @@ fn a_session_hook_reads_a_servers_postgres_store() {
     assert!(!there.join(".branchyard/state.db").exists());
     let said = hook("user-prompt-submit").unwrap();
     assert!(
-        said.contains("- p: finished, ready to integrate (1 file changed)"),
+        said.contains("- p: ready to merge, 1 file changed: by diff p, then by merge p"),
         "{said}"
     );
     assert_eq!(hook("user-prompt-submit"), None);

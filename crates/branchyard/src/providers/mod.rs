@@ -166,7 +166,8 @@ impl Provider {
     }
 
     /// `by`'s banner for a run under `provider` (`None` is local): the mode
-    /// word and what the mode gives; see [`ProviderKind::banner`].
+    /// word and what the mode gives, as the provider's `ProviderKind::banner`
+    /// says them.
     pub fn banner_of(
         provider: Option<&Provider>,
         isolated: bool,
