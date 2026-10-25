@@ -472,7 +472,8 @@ fn inventory_text(found: &Inventory, local: bool, style: Style) -> String {
         },
         Column {
             header: "LOGIN",
-            max: 34,
+            // `key set (GOOGLE_GENERATIVE_AI_API_KEY)`, OpenCode's, is 38.
+            max: 40,
             right: false,
         },
         Column {
@@ -501,9 +502,12 @@ fn inventory_text(found: &Inventory, local: bool, style: Style) -> String {
             let version = h.version_text();
             let mut row = vec![
                 Cell::plain(&h.id),
-                match h.version {
-                    Some(_) => Cell::plain(version),
-                    None => Cell::toned(version, Tone::Yellow),
+                match (&h.version, h.too_old()) {
+                    // A release the driver cannot follow; the line under
+                    // the table says which and what to install.
+                    (Some(_), Some(_)) => Cell::toned(format!("{version} (too old)"), Tone::Yellow),
+                    (Some(_), None) => Cell::plain(version),
+                    (None, _) => Cell::toned(version, Tone::Yellow),
                 },
                 Cell::toned(login, tone),
                 match qualification_of(&known, &h.id)

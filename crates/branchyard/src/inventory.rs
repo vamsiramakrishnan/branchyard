@@ -302,6 +302,17 @@ pub enum Standing {
 }
 
 impl HarnessState {
+    /// Why this release is too old for Branchyard's driver, with the
+    /// command that installs a newer one: `("0.73.1 is older than 0.80.4,
+    /// ...", "npm install ...")`. `None` when it is new enough, or when
+    /// its version is not known.
+    pub fn too_old(&self) -> Option<(String, &'static str)> {
+        let version = self.version.as_deref()?;
+        let (_, floor, lacks, fix) = DRIVER_FLOORS.iter().find(|(id, ..)| *id == self.id)?;
+        version_below(version, floor)
+            .then(|| (format!("{version} is older than {floor}, {lacks}"), *fix))
+    }
+
     /// Where it stands, with the reason and the next step.
     pub fn standing(&self) -> Standing {
         let id = &self.id;
@@ -310,6 +321,9 @@ impl HarnessState {
                 "at {} but not on PATH; add its directory to PATH",
                 self.path
             ));
+        }
+        if let Some((why, fix)) = self.too_old() {
+            return Standing::CannotRun(format!("{why}; {fix}"));
         }
         if self.quota.as_ref().is_some_and(|q| q.limit_reached) {
             return Standing::CannotRun(
@@ -342,6 +356,9 @@ impl HarnessState {
                 "{id} is at {} but not on PATH; add its directory to PATH",
                 self.path
             ));
+        }
+        if let Some((why, fix)) = self.too_old() {
+            return Err(format!("{id} {why}; {fix}"));
         }
         if self.login.state == LoginState::LoggedOut {
             return Err(format!(
@@ -600,6 +617,9 @@ const DSH_CONFIGS: &[&str] = &[
 /// Where Oh My Pi keeps the logins `omp login` stores, as shown to people.
 const OMP_LOGINS: &str = "~/.omp/agent/agent.db";
 
+/// Where Pi keeps the logins `/login` stores, as shown to people.
+const PI_LOGINS: &str = "~/.pi/agent/auth.json";
+
 /// The Bun release Oh My Pi 18.10.3 needs (`engines.bun` of
 /// `@oh-my-pi/pi-coding-agent`, and `MIN_BUN_VERSION` of its installer): an
 /// older Bun fails to parse `omp` and its version command exits 1.
@@ -627,8 +647,17 @@ const OMP_MIN_BUN: &str = "1.3.14";
 ///   does); the provider's name is read, never the credential. A key in
 ///   `~/.omp/agent/.env` or `~/.omp/.env`, which omp loads, is `env-file
 ///   NAME FILE`, the name alone.
+/// - Pi 0.73.1 keeps what `/login` stored in `$PI_CODING_AGENT_DIR` or
+///   `~/.pi/agent/auth.json`, and creates the file as `{}` on its first
+///   start, so the file existing says nothing: an entry (`"type":`) is
+///   `login-stored`.
 fn probes(id: &str) -> &'static str {
     match id {
+        "pi" => {
+            r##"  pd=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
+  grep -Eq '"type"[[:space:]]*:' "$pd/auth.json" 2>/dev/null && echo 'fact pi login-stored'
+"##
+        }
         "antigravity" => {
             r##"  grep -Eq '"modelProvider"[[:space:]]*:[[:space:]]*"gemini"' "$HOME/.gemini/antigravity-cli/settings.json" 2>/dev/null && echo 'fact antigravity model-provider-gemini'
 "##
@@ -676,14 +705,33 @@ print("\n".join(r[0] for r in c.execute(sys.argv[2])))' "$db" "$q" 2>/dev/null);
 
 /// Whether a Bun `version` (`1.3.11`) is older than [`OMP_MIN_BUN`].
 fn bun_too_old(version: &str) -> bool {
+    version_below(version, OMP_MIN_BUN)
+}
+
+/// Whether `version` (`0.73.1`, `1.3.14-rc.1`) is older than `floor`,
+/// comparing the first three numbers; a suffix is not looked at.
+fn version_below(version: &str, floor: &str) -> bool {
     let parts = |v: &str| -> Vec<u64> {
         v.split(['.', '-', '+'])
             .take(3)
             .map(|p| p.parse().unwrap_or(0))
             .collect()
     };
-    parts(version) < parts(OMP_MIN_BUN)
+    parts(version) < parts(floor)
 }
+
+/// The oldest release of a harness whose protocol Branchyard's driver can
+/// follow to the end of a turn, with why and what to install instead:
+/// `(harness, release, what older ones lack, the command)`. An older one
+/// starts, answers and does the work, and the driver then waits for ever.
+const DRIVER_FLOORS: &[(&str, &str, &str, &str)] = &[(
+    "pi",
+    "0.80.4",
+    "the first with the `agent_settled` event that ends a turn in its RPC mode, which Branchyard \
+     waits for: an older Pi finishes the work and the run never ends",
+    "npm install -g @earendil-works/pi-coding-agent (the old @mariozechner/pi-coding-agent \
+     package stopped at 0.73.1)",
+)];
 
 fn version_args(id: &str) -> &'static [&'static str] {
     VERSION_ARGS
@@ -1214,6 +1262,12 @@ fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
         return likely(
             LoginState::LoggedIn,
             format!("~/.dsh/{file} configures a provider (its key variable is not checked)"),
+        );
+    }
+    if id == "pi" && found.facts.iter().any(|f| f == "login-stored") {
+        return likely(
+            LoginState::LoggedIn,
+            format!("{PI_LOGINS} holds a login (not checked)"),
         );
     }
     if id == "deepseek-harness" {
@@ -2599,6 +2653,121 @@ mod tests {
     }
 
     #[test]
+    fn pi_is_logged_in_by_a_key_or_a_stored_login_and_otherwise_unknown() {
+        // Pi 0.73.1 reads the provider keys of its docs from the
+        // environment: ZAI_API_KEY and GEMINI_API_KEY made `pi
+        // --list-models` offer the zai and google providers.
+        let keyed = found("pi", &["env pi ZAI_API_KEY"]);
+        assert_eq!(keyed.login.state, LoginState::LoggedIn);
+        assert_eq!(keyed.login.evidence, Evidence::Likely);
+        assert_eq!(
+            keyed.login.detail,
+            "ZAI_API_KEY is set (an API key; not checked)"
+        );
+        assert_eq!(keyed.login.key.as_deref(), Some("ZAI_API_KEY"));
+        // What `/login` stored in auth.json (never its content).
+        let stored = found("pi", &["fact pi login-stored"]);
+        assert_eq!(stored.login.state, LoginState::LoggedIn);
+        assert_eq!(stored.login.evidence, Evidence::Likely);
+        assert_eq!(
+            stored.login.detail,
+            "~/.pi/agent/auth.json holds a login (not checked)"
+        );
+        // Nothing: unknown, since `/login` can leave a login nowhere
+        // Branchyard looks; the file pi creates as `{}` is no evidence.
+        let nothing = found("pi", &[]);
+        assert_eq!(nothing.login.state, LoginState::Unknown);
+        assert_eq!(
+            nothing.login.detail,
+            "Branchyard cannot read pi's login; a key in ANTHROPIC_API_KEY or OPENAI_API_KEY or \
+             GEMINI_API_KEY or OPENROUTER_API_KEY or ZAI_API_KEY would tell"
+        );
+        assert!(nothing.ready().is_ok());
+        let text = script(&DetectOptions {
+            only: Some(vec!["pi".into()]),
+            ..DetectOptions::default()
+        });
+        assert!(text.contains("echo 'env pi ZAI_API_KEY'"));
+        assert!(text.contains("echo 'fact pi login-stored'"));
+        assert!(text.contains("\"type\"[[:space:]]*:"));
+        // A harness with no key variable recorded still says so.
+        let qwen = found("qwen-code", &[]);
+        assert!(qwen.login.detail.contains("records no status command"));
+    }
+
+    #[test]
+    fn opencode_reads_a_google_key_from_the_variable_its_sdk_reads() {
+        // OpenCode 1.19.4 lists GEMINI_API_KEY for its Google provider and
+        // then fails with "Google Generative AI API key is missing": the
+        // variable that works is GOOGLE_GENERATIVE_AI_API_KEY.
+        let keyed = found("opencode", &["env opencode GOOGLE_GENERATIVE_AI_API_KEY"]);
+        assert_eq!(keyed.login.state, LoginState::LoggedIn);
+        assert_eq!(
+            keyed.login.detail,
+            "GOOGLE_GENERATIVE_AI_API_KEY is set (an API key; not checked)"
+        );
+        let text = script(&DetectOptions {
+            only: Some(vec!["opencode".into()]),
+            ..DetectOptions::default()
+        });
+        assert!(text.contains("echo 'env opencode GOOGLE_GENERATIVE_AI_API_KEY'"));
+        assert!(!text.contains("GEMINI_API_KEY"), "{text}");
+        let nothing = found("opencode", &[]);
+        assert_eq!(nothing.login.state, LoginState::LoggedOut);
+        assert!(
+            nothing
+                .login
+                .detail
+                .contains("GOOGLE_GENERATIVE_AI_API_KEY"),
+            "{}",
+            nothing.login.detail
+        );
+    }
+
+    #[test]
+    fn a_pi_older_than_the_driver_can_follow_cannot_run() {
+        let pi = |version: &str| {
+            let output = format!(
+                "by-inventory 1\nhost box\nos Linux\nchecked pi\nfound pi 1 /bin/pi\n\
+                 version pi 0\nversion-out pi {version}\nend\n"
+            );
+            parse(&output, 0).unwrap().get("pi").unwrap().clone()
+        };
+        // 0.73.1 is the release the old @mariozechner package stopped at:
+        // it sends `agent_end` and never `agent_settled`.
+        let old = pi("0.73.1");
+        let (why, fix) = old.too_old().unwrap();
+        assert!(
+            why.starts_with(
+                "0.73.1 is older than 0.80.4, the first with the `agent_settled` event"
+            ),
+            "{why}"
+        );
+        assert!(fix.starts_with("npm install -g @earendil-works/pi-coding-agent"));
+        assert!(old
+            .ready()
+            .unwrap_err()
+            .starts_with("pi 0.73.1 is older than 0.80.4"));
+        match old.standing() {
+            Standing::CannotRun(text) => {
+                assert!(text.starts_with("0.73.1 is older than 0.80.4"), "{text}");
+                assert!(text.ends_with("stopped at 0.73.1)"), "{text}");
+            }
+            other => panic!("{other:?}"),
+        }
+        for fine in ["0.80.4", "0.87.1", "1.4.0", "0.80.4-rc.1"] {
+            assert_eq!(pi(fine).too_old(), None, "{fine}");
+        }
+        assert!(pi("0.80.3").too_old().is_some() && pi("0.79.10").too_old().is_some());
+        // No version, no refusal; and only Pi has a floor.
+        let mut unknown = pi("0.73.1");
+        unknown.version = None;
+        assert_eq!(unknown.too_old(), None);
+        assert_eq!(found("codex", &[]).too_old(), None);
+        assert!(version_below("0.9.9", "0.80.4") && !version_below("0.80.4", "0.80.4"));
+    }
+
+    #[test]
     fn deepseek_harness_is_logged_in_by_a_key_or_a_configured_provider() {
         let version = found("deepseek-harness", &[]);
         assert_eq!(version.version.as_deref(), Some("1.0.0"));
@@ -2936,13 +3105,21 @@ mod tests {
             "sign in inside qwen itself, then `by harnesses --refresh`"
         );
         // The unreadable login says what would tell.
-        let pi = found("pi", &[]);
-        assert_eq!(pi.login.state, LoginState::Unknown);
-        assert!(pi
+        let qwen = found("qwen-code", &[]);
+        assert_eq!(qwen.login.state, LoginState::Unknown);
+        assert!(qwen
             .login
             .detail
             .contains("the catalog records no status command"));
-        assert!(pi.login.detail.contains("sign in inside pi itself"));
+        assert!(qwen.login.detail.contains("sign in inside qwen itself"));
+        // Pi has key variables since 25 October 2026 (it reads ZAI_API_KEY
+        // and the rest): the hint names them, and the unreadable login
+        // names them as what would tell.
+        assert_eq!(
+            login_hint("pi"),
+            "run `by harnesses login pi --api-key`, or set ANTHROPIC_API_KEY, OPENAI_API_KEY, \
+             GEMINI_API_KEY or another provider key"
+        );
     }
 
     #[test]

@@ -70,6 +70,14 @@ pub(crate) const REPORTS: &[(&str, &str)] = &[
         "oh-my-pi-acp",
         include_str!("../../../docs/qualification/oh-my-pi-acp.json"),
     ),
+    (
+        "opencode-acp",
+        include_str!("../../../docs/qualification/opencode-acp.json"),
+    ),
+    (
+        "pi-rpc",
+        include_str!("../../../docs/qualification/pi-rpc.json"),
+    ),
 ];
 
 /// A harness ID picks its default profile; otherwise a profile ID.
@@ -322,6 +330,7 @@ mod tests {
             "codex-acp",
             "gemini-cli-acp",
             "hermes-acp",
+            "opencode-acp",
         ] {
             assert!(check(id, true).is_ok(), "{id}: {:?}", check(id, true));
         }
@@ -329,7 +338,7 @@ mod tests {
         assert!(check("claude-code-acp", false).is_ok());
         assert!(check("hermes-acp", false).is_ok());
         // A setting written into the home needs one of its own.
-        for id in ["codex-acp", "gemini-cli-acp"] {
+        for id in ["codex-acp", "gemini-cli-acp", "opencode-acp"] {
             let refused = check(id, false);
             assert!(
                 matches!(&refused, Err(Error::Unsupported(why))
@@ -338,13 +347,7 @@ mod tests {
                 "{refused:?}"
             );
         }
-        // A provisioner that refuses it, and a driver left to choose it
-        // that cannot.
-        let refused = check("opencode-acp", true);
-        assert!(
-            matches!(&refused, Err(Error::Unsupported(why)) if why.contains("a model cannot be provisioned for opencode")),
-            "{refused:?}"
-        );
+        // A driver left to choose it that cannot.
         let refused = check("goose-acp", true);
         assert!(
             matches!(&refused, Err(Error::Unsupported(why))
@@ -392,7 +395,9 @@ mod tests {
             qualification("codex-app-server").unwrap(),
             "9/9 on codex-cli 0.157.1"
         );
-        assert_eq!(qualification("oh-my-pi-acp").unwrap(), "9/9 on omp/18.10.3");
+        assert_eq!(qualification("oh-my-pi-acp").unwrap(), "9/9 on omp/18.12.6");
+        assert_eq!(qualification("opencode-acp").unwrap(), "9/9 on 1.19.4");
+        assert_eq!(qualification("pi-rpc").unwrap(), "9/9 on 1.4.0");
     }
 
     #[test]
