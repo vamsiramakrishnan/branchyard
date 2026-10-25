@@ -397,16 +397,18 @@ fn a_pinned_port_held_by_something_else_is_refused_not_adopted() {
     repo.configure(Some(&url));
     let out = repo.by(&["gateway", "start", "--json"]);
     assert!(!out.status.success(), "{}", stdout(&out));
-    let text = stderr(&out);
+    // With `--json` the refusal is the error envelope on stdout.
+    let error: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let text = error["error"]["message"].as_str().unwrap_or_default();
     assert!(
         text.contains(&format!(
             "port {} is held by something that is not a Branchyard gateway",
             web.port()
         )),
-        "{text}"
+        "{error}"
     );
-    assert!(text.contains("404"), "what it answered: {text}");
-    assert!(text.contains("Next:"), "{text}");
+    assert!(text.contains("404"), "what it answered: {error}");
+    assert!(text.contains("Next:"), "{error}");
     let listed = repo.json(&["services", "--kind", "connector_gateway", "--json"]);
     assert_eq!(listed["services"], serde_json::json!([]), "{listed}");
 }
