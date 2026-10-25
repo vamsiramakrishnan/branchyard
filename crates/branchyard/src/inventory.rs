@@ -2309,6 +2309,21 @@ mod tests {
         );
     }
 
+    /// Codex prints a warning naming its home before the answer; the login
+    /// detail is the answer, not the warning cut mid-path.
+    #[test]
+    fn a_status_command_detail_is_its_last_line() {
+        let output = "by-inventory 1\nhost box\nos Linux\nchecked codex\n\
+            found codex 1 /bin/codex\nversion codex 0\nversion-out codex codex-cli 0.157.1\n\
+            status codex 1\n\
+            status-out codex WARNING: proceeding, even though we could not update PATH: Refusing to create helper binaries under temporary dir \"/nonexistent/x\" (codex_home: AbsolutePathBuf(\"/nonexistent/claude-0/-home-user-branchyard/f2a73\n\
+            status-out codex Not logged in\nend\n";
+        let codex = parse(output, 7).unwrap();
+        let login = &codex.get("codex").unwrap().login;
+        assert_eq!(login.state, LoginState::LoggedOut);
+        assert_eq!(login.detail, "codex login status: Not logged in");
+    }
+
     #[test]
     fn output_is_parsed_into_states() {
         let output = "by-inventory 1\nhost box\nos Linux\ntool npm /usr/bin/npm\n\

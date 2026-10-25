@@ -1,6 +1,6 @@
 # SDKs
 
-Written 10 October 2026.
+Written 10 October 2026, revised 25 October 2026.
 
 Branchyard has three programmatic surfaces besides `by` itself. Which one you use depends on where your code runs.
 
@@ -13,32 +13,98 @@ Branchyard has three programmatic surfaces besides `by` itself. Which one you us
 
 Both Python modules ship in `branchyard-sdk-<version>.zip` ([distribution](distribution.md)) and install as one distribution, `branchyard` ([install](#install)); they need nothing but the standard library (Python 3.9 or newer). Everything a module returns is the Rust type's serde form, the same bytes on every surface ([surfaces](surfaces.md)), so a result read through `by --json`, the HTTP API or either module is one shape.
 
-The rest of this page is about the HTTP client: what a third-party surface needs to run conversations on Branchyard, see what they say, and give and inspect connector grants without ever holding a credential.
+The rest of this page is about the HTTP client: what a third-party surface needs to run conversations on Branchyard, see what they say, and give and inspect connector grants without ever holding a credential. It starts with the shortest way to a first run, which needs no server at all.
 
 ## Install
 
+The SDK drives a `by`, so there are two things to install. Neither is published yet: there is no release of `by`, and no `pip install branchyard` from an index. From a checkout:
+
 ```sh
-pip install ./sdk/python                     # from a checkout
-unzip branchyard-sdk-0.0.1.zip && pip install ./branchyard-sdk   # from the release archive
+cargo install --locked --path crates/branchyard-cli     # `by`, onto PATH
+pip install ./sdk/python                                # branchyard and branchyard_client
 ```
+
+`pip install ./branchyard-sdk` does the same from the extracted release archive (`unzip branchyard-sdk-0.0.1.zip` first). `by` is found from `BRANCHYARD_BY`, else `PATH`; a missing one is a `LocalError` that says so and gives the `cargo install` line. [`sdk/python/README.md`](../sdk/python/README.md) is this install and the first run in one page.
 
 `sdk/python/pyproject.toml` builds with setuptools (pip fetches it, or `--no-build-isolation` uses the one installed) and installs the two top-level modules, `branchyard` and `branchyard_client`, with no dependencies. Its version is the workspace's: `tools/package.py` refuses to build the archives when the two differ, and `tests/test_distribution.py` checks it, builds the project from the extracted archive and imports both modules from what was built. Nothing needs installing inside a harness: a delegated turn gets both modules written to `.branchyard/sdk/python/`, first on its `PYTHONPATH` ([delegation](delegation.md#python)), so `import branchyard` works there as it did, and `import branchyard_client` too.
 
-## The HTTP client
+## First run
+
+In a git repository with a commit, with `by` and the SDK [installed](#install). There is no server to start, no token to copy and no port to pick: `Client.local` runs a `by serve` of this process's own on the repository and stops it when the block ends ([local mode](#local-mode)).
 
 ```python
-from branchyard_client import Client, Grant
+from branchyard_client import Client
 
-client = Client("http://127.0.0.1:8421", token_file=".branchyard/server/token")
-app = client.repo("app")
-
-op = app.task("Make the flaky parser test deterministic", harness="claude-code", budget_usd=2)
-op = client.wait(op, check=True)              # long-polls GET /v1/operations/{id}?wait=
-branch = op.result_branches[0]
-print(branch.name, branch.state)              # "flaky-parser", "ready"
+with Client.local(".") as client:
+    app = client.repo("app")                       # Client.local serves the repository as "app"
+    op = app.task("Make the flaky parser test deterministic", name="flaky-parser",
+                  budget_usd=2, policy={"preset": "edit-worktree"})
+    op = client.wait(op, check=True)               # raises if the request failed, or the branch it made did
+    branch = op.result_branches[0]
+    print(branch.name, branch.state)               # flaky-parser ready
+    print(branch.candidate)                        # its commit and how much it changed; None if nothing
 ```
 
-`Client(url, token=..., token_file=..., ca_file=..., timeout=30)` is one server; `client.repo(name)` is one served repository, and every `Repo` method is one route of the [API reference](server.md#api-reference). Methods that start work (`task`, `send`, `fork`, `reincarnate`, `merge`, `check`, `spawn`, `integrate`, `approve_plan`, `reject_plan`, `map`, `resume_map`) return an `Operation` and `client.wait(op, timeout=None, check=False)` waits for it, with long polls the server answers as the operation finishes (each at most 30 s, asked again until `timeout`, then `TimeoutError`); everything else returns at once. Results are `Record`s: dicts whose keys also read as attributes (`op.state`, `branch.status.state`), a missing key reading as `None`, so a newer server's fields never break an older client. `op.raw` is the plain dict.
+The harness is the repository's default; `harness="codex"` names another. Its tool requests are answered by `policy`, which denies them unless told otherwise (a server has no terminal to ask on), so a harness that must edit files needs the `edit-worktree` preset ([permission presets](egress.md#permission-presets)) or `{"mode": "allow"}`. The branch belongs to the repository, not to the script: `by diff flaky-parser` and `by merge flaky-parser` work on it afterwards.
+
+`name=` is optional. Without it the branch is named from the prompt, as `by run` names one: lower-case words joined by hyphens, cut at a word boundary to 40 characters (`make-the-flaky-parser-test-deterministic`), with `-2`, `-3`, ... added when the name is taken, so the same prompt twice makes `...-2`. A `name=` that is taken is `ConflictError` (`branch_exists`).
+
+`wait(op, check=True)` raises for two failures. An operation that failed, such as one refused as it ran, raises `OperationFailedError`. An operation that succeeded can still have made a branch whose harness turn failed (it crashed, never answered, or ran out of its budget): that raises `BranchFailedError`, a subclass of `OperationFailedError`, naming the branch and its state (`failed`, `budget_exceeded` or `interrupted`), with `reason` or `limit`, and the finished `operation`. Without `check=True` neither raises: read `op.state` and `op.failed_branches`.
+
+With the fake ACP agent standing in for a model (a checkout builds it: `cargo build -p branchyard-runtime --bin fake-acp-agent`), the same calls, with `args=["--harness-command", "gemini-cli=/path/to/branchyard/target/debug/fake-acp-agent"]` on `Client.local` (an absolute path: the server runs in the repository) and `harness="gemini-cli"` on the task, print:
+
+```text
+flaky-parser ready
+{'commit': 'e988d1ebf3f244d0ac4c261e9ecbd9610f95a62b', 'files_changed': 1, 'insertions': 1, 'deletions': 0}
+```
+
+and a turn that fails, as the fake's `EXIT` prompt does, raises instead:
+
+```text
+BranchFailedError: failed: branch flaky-parser ended failed: the turn's outcome is unknown: the harness connection closed before the turn ended. to fix: read why with `by log flaky-parser` or app.events("flaky-parser"), then app.send("flaky-parser", "try again")
+```
+
+[`examples/python/`](../examples/python/) has this as scripts that run as they are: `first_run.py` (the diff summary, and exit 1 for a failed branch), `stream_events.py` (the [event stream](#streaming) until the branch settles) and `delegate.py` (spawn, wait and integrate through [`connect()`](#one-api-inside-and-outside-a-harness); it runs inside a harness turn, or as a named branch of a server that allows delegation). Each takes `--command CMD` to run the harness as a stand-in, so they need no model; `tests/test_sdk_examples.py` runs them that way against the built `by`.
+
+### Before real harnesses
+
+A real harness has to be installed and logged in. The first run does not call `Local(".").up()`, because `up` can install software; ask it what is missing first, with `plan=True`:
+
+```python
+from branchyard_client import Local
+
+plan = Local(".").up(plan=True)               # changes nothing
+for step in plan.todo:                        # the steps that are not ready, in report order
+    print(step.name, step.state, step.detail)
+# harness.claude-code needs_person not installed: [harnesses] install is "never" here (set install = "ask" or "auto" in your user configuration to allow it)
+```
+
+`Local(".").up(yes=True)` then installs what the `[harnesses]` policy allows and lists what only a person can do (log in, set a key) ([up](up.md)); `Local(".").doctor()` is `by doctor`.
+
+## The HTTP client
+
+For a service that is not on the machine that does the work, or that outlives a run: serve the repository, then connect.
+
+```sh
+by serve --repo app=.        # listening on 127.0.0.1:8421; the token is created in .branchyard/server/token
+```
+
+```python
+from branchyard_client import Client
+
+client = Client("http://127.0.0.1:8421", token_file=".branchyard/server/token")
+app = client.repo("app")                       # the NAME of --repo NAME=PATH; unnamed, the repository's directory name
+
+op = app.task("Make the flaky parser test deterministic", name="flaky-parser", harness="claude-code",
+              budget_usd=2, policy={"preset": "edit-worktree"})
+op = client.wait(op, check=True)               # long-polls GET /v1/operations/{id}?wait=
+branch = op.result_branches[0]
+print(branch.name, branch.state)               # flaky-parser ready
+```
+
+The repository's name is the one the server was started with; a name it does not serve is `NotFoundError` (`unknown_repo`) with the fix in its message, and `client.repos()` lists what it serves. A server that is not running is a `TransportError` that says what to start. The token is on the first line of `DATA-DIR/token` (`--data-dir`, default `.branchyard/server` in the first repository), created with mode 600 when missing ([server](server.md#running-it)).
+
+`Client(url, token=..., token_file=..., ca_file=..., timeout=30)` is one server; `client.repo(name)` is one served repository, and every `Repo` method is one route of the [API reference](server.md#api-reference). Methods that start work (`task`, `send`, `fork`, `reincarnate`, `merge`, `check`, `spawn`, `integrate`, `approve_plan`, `reject_plan`, `map`, `resume_map`) return an `Operation` and `client.wait(op, timeout=None, check=False)` waits for it, with long polls the server answers as the operation finishes (each at most 30 s, asked again until `timeout`, then `TimeoutError`); everything else returns at once. Results are `Record`s: dicts whose keys also read as attributes (`op.state`, `branch.status.state`). A key the answer does not carry reads as `None`, so a newer server's fields never break an older client and an older server's absent fields are only `None`; the price is that a typo (`op.stat`) is `None` too. `dir(op)` lists the keys the record holds beside its properties, and the class docstrings list the fields. `op.raw` is the plain dict. `Operation`, `BranchInfo`, `Inspection`, `FeedEntry`, `Message` and `CheckReport` declare their fields as annotations, which editors that read the source (Pyright, Pylance) complete and check; see [what the client does not do](#what-the-client-does-not-do) for what mypy sees.
 
 Every `POST` that creates an operation carries an `Idempotency-Key`, generated unless you pass `key=`: keep the key and a retry after a lost response returns the original operation (`op.replayed` is true) instead of starting another; the same key with a different body is `IdempotencyKeyReusedError` ([idempotency](server.md#idempotency)). `client.operation_by_key(key)` finds the operation a key created.
 
@@ -63,9 +129,13 @@ Every refusal is a `BranchyardError` subclass carrying the server's stable `code
 | `IdempotencyKeyReusedError` | `idempotency_key_reused`; `detail.operation` |
 | `ServerError` | 5xx, `shutting_down`; from `by`, the kinds `git`, `io`, `state` and `harness` |
 | `OperationFailedError` | an operation that ended `failed` or `interrupted`, from `client.wait(..., check=True)` or `Reply.wait()`; `.operation` is it |
-| `TransportError` | the server could not be reached, or answered with something that is not its API |
+| `BranchFailedError` | a subclass of the above: the operation succeeded but a branch it made ended `failed`, `budget_exceeded` or `interrupted`. `.code` and `.state` are that state, `.branch` the name, `.branch_info` its `BranchInfo`, `.reason` or `.limit` why, `.branches` every such branch (a map can have several) |
+| `TransportError` | the server could not be reached, or answered with something that is not its API. A connection refused says to start `by serve`, or use `Client.local` |
+| `LocalError` | `Client.local` or `Local` could not run `by`, or it printed no JSON. A `by` that is not installed says where to get one |
 
 The client retries nothing but its event stream. A `TransportError` on a `POST` means the request may or may not have been admitted: retry it with the same `key`.
+
+**Errors end with the fix.** An error the client knows a remedy for ends with `to fix: ...`, after what went wrong: a missing `by` (`cargo install --locked --path crates/branchyard-cli`), a connection refused (`by serve --repo app=.`, or `Client.local(".")`), an `unknown_repo` (`client.repos()` lists the names), a `BranchFailedError` (`by log NAME`, then `app.send(...)`). A message the server wrote keeps its own words; the client adds `to fix:` only where the server's text has none. A new error that has a known remedy follows the same rule.
 
 ## One API inside and outside a harness
 
@@ -84,7 +154,7 @@ except CheckFailedError as error:               # the same class, kind and detai
 by.report("parser fixed", result={"files": done.result["files"]})
 ```
 
-The `Delegator` it returns has `spawn`, `send`, `steer`, `integrate`, `check`, `wait`, `wait_any`, `wait_all`, `inspect`, `events`, `report` and `report_status`, with `branchyard.py`'s argument names and order. `spawn` takes the common arguments (`harness`, `name`, `base`, `budget_usd`, `max_turns`, `check` as a command line or an argv, `seat`, `depends_on`, `after`, `model`, `result`, `why`) and passes any other to the backend's own spawn as it is. Both backends return `Record`s holding the whole answer: `BranchInfo` from `spawn` and `send`, `Inspection`, `Steer`, `Message`, `Reported`, `CheckReport`, `Waited`, and a `Record` for a `Merged` or `MergedAll`. A dict loses no field, where `branchyard.py`'s dataclasses keep only those they name. Both raise the same exceptions: over HTTP a call that is an operation is waited for, and one that fails raises the class of its error's code, with `operation` set, as the call inside would. One difference stays, and it is the server's: its spawn and send operations last until the turn they start settles, so outside, `spawn` and `send` return a settled branch, where inside they return as the turn starts.
+The `Delegator` it returns has `spawn`, `send`, `steer`, `integrate`, `check`, `wait`, `wait_any`, `wait_all`, `inspect`, `events`, `report` and `report_status`, with `branchyard.py`'s argument names and order, which `OneApi` in `tests/test_sdk_client.py` checks for every call by comparing the two signatures. `spawn` is the portable subset in full, all 23 of `branchyard.spawn`'s arguments: `harness`, `name`, `base`, `budget_usd`, `max_turns`, `max_minutes`, `check` (a command line or an argv), `max_depth`, `max_children`, `harnesses`, `deny`, `seat`, `depends_on`, `after`, `bindings` (a dict from scratch area to `read_only` or `exclusive_write`), `connectors` (grants in any form `Grant` takes), `plan`, `model`, `result`, `why`, `owns`, `land` and `review` (a harness ID or `{harness, model, rubric, budget_usd}`). Each reaches the backend in its own terms: `max_minutes` is `--max-minutes` inside and `budget.max_seconds` over HTTP, `bindings` are `--bind` flags and `{scratch, access}` entries. Any other keyword goes to the backend's own spawn as it is (`Repo.spawn`'s over HTTP: `policy`, `priority`, `require_labels`, ...), and is not portable. Both backends return `Record`s holding the whole answer: `BranchInfo` from `spawn` and `send`, `Inspection`, `Steer`, `Message`, `Reported`, `CheckReport`, `Waited`, and a `Record` for a `Merged` or `MergedAll`. A dict loses no field, where `branchyard.py`'s dataclasses keep only those they name. Both raise the same exceptions: over HTTP a call that is an operation is waited for, and one that fails raises the class of its error's code, with `operation` set, as the call inside would. One difference stays, and it is the server's: its spawn and send operations last until the turn they start settles, so outside, `spawn` and `send` return a settled branch, where inside they return as the turn starts.
 
 ## A surface: one branch per conversation
 
@@ -107,7 +177,7 @@ def on_message(channel: str, text: str) -> str:
 
 `conversation(key)` names the branch `branch_name(prefix, key)`: lowercased, letters, digits, `_`, `.` and `-` kept, the rest folded to `-`, so a channel id, a thread timestamp or a user id becomes a valid name (`slack-c0123`). `say(text)` is a `task` with the surface's defaults when the branch does not exist and a `send` when it does (a branch created between the look and the task is continued, not duplicated). It returns a `Reply`:
 
-- `reply.wait(timeout)` blocks until the turn's operation finishes; a failed one raises `OperationFailedError`.
+- `reply.wait(timeout)` blocks until the turn's operation finishes; a failed one raises `OperationFailedError`, and a turn that ended with the branch `failed`, `budget_exceeded` or `interrupted` raises `BranchFailedError`. `reply.text` still reads what the harness said before it stopped.
 - `reply.text` is the harness's message text for that operation, this branch's `message_delta`s between the operation's feed `cursor` and `end_cursor`, so it is this turn's reply and nothing of earlier turns or of children.
 - `reply.deltas()` yields the same text as it arrives, for a surface that streams or edits a message in place; it ends when the operation does.
 - `reply.branch_info.state` says how the branch ended the turn: `ready`, `failed`, `budget_exceeded`, `awaiting_plan_approval`, ...
@@ -136,6 +206,19 @@ for entry in stream:                           # FeedEntry: seq, branch, at_ms, 
     elif entry.status is not None:             # the branch's status changed
         show(entry.branch, f"is now {entry.status}")
     remember(stream.cursor)                    # resume here after a restart
+```
+
+The connection opens when the loop starts, and `cursor=None` means from then, so a stream opened after `app.task(...)` can miss what the branch did first. To follow one request from its start, pass the position it was admitted at and name the branch: `app.stream(op.cursor, branches=["flaky-parser"])`. [`examples/python/stream_events.py`](../examples/python/stream_events.py) does that and stops at the first status that means the branch will not move by itself (`ready`, `no_changes`, `failed`, `budget_exceeded`, `interrupted`):
+
+```text
+  78  s2-ex  status: running
+  80  s2-ex  prompt: WRITE s2.txt=hi
+  81  s2-ex  harness: session_started
+  82  s2-ex  says: wrote s2.txt
+  83  s2-ex  harness: turn_ended
+  85  s2-ex  candidate: 1 file(s), +1 -0
+  87  s2-ex  status: ready
+s2-ex: ready
 ```
 
 `with app.stream() as stream:` closes the connection however the block ends, a `break` or an exception included; without it, call `stream.close()`. `entry.activity` is the recorded `Activity` (`{"harness": {...}}`, `{"prompt": ...}`, `{"status": {...}}`, `{"connector_call": {...}}`, ...; [surfaces](surfaces.md#output-types)). A connection quiet for `read_timeout` seconds (60 by default; the server comments every 15) is reconnected; `max_failures` connection failures in a row raise the last `TransportError`. For one branch's log by its own numbering, `app.events(branch, cursor)` pages `RecordedEvent`s and `app.said(branch, cursor)` is its text after a cursor, for a bot that polls.
@@ -175,21 +258,9 @@ for child in app.children("slack-c0123"):      # every branch it delegated to, d
 
 ## Local mode
 
-A program that is not `by` and has no server to talk to can run one of its own. `Client.local(root, name="app")` starts `by serve` on the repository at `root`, on a free loopback port with a fresh token in a private data directory, and returns a client on it; `close()`, or leaving the `with`, stops the server and removes the directory. The server reads the repository's configuration as every `by` command does and keeps its branches in the repository's `.branchyard/`; only its operation registry is in the private directory. `by` is `BRANCHYARD_BY`, else `by` on `PATH`, else the `by=` argument; `args` are more `by serve` flags.
+A program that is not `by` and has no server to talk to can run one of its own. `Client.local(root, name="app")` starts `by serve` on the repository at `root`, on a free loopback port with a fresh token in a private data directory, and returns a client on it; `close()`, or leaving the `with`, stops the server and removes the directory. The server reads the repository's configuration as every `by` command does and keeps its branches in the repository's `.branchyard/`; only its operation registry is in the private directory. `by` is `BRANCHYARD_BY`, else `by` on `PATH`, else the `by=` argument; `args` are more `by serve` flags (`--allow-delegation` lets the harness's children be spawned, `--harness-command H=CMD` runs harness `H` as `CMD`). It is the [first run](#first-run) above; the name is `app` unless you pass `name=`. A `by` that cannot be run is a `LocalError` that says how to get one.
 
-```python
-from branchyard_client import Client, Local
-
-if not Local(".").up().ready:         # install, start the gateway, list what only you can do
-    raise SystemExit("run `by up` and do what it lists")
-
-with Client.local(".") as client:     # a by serve of this process's own
-    app = client.repo("app")
-    op = app.task("Make the flaky parser test deterministic", harness="codex", budget_usd=2)
-    print(client.wait(op).state)
-```
-
-`Local(root)` is this machine's `by` for what a server does not do: `up(plan=False, yes=False)` returns a `Plan` (`steps`, `todo`, `ready`, `step(name)`; [up](up.md)), `doctor()` a `Report` (`checks`, `failed`, `status`), `harnesses(refresh=False)` the inventory, and `run(*args)` any command with `--json`. A `by` that cannot run or prints no JSON is a `LocalError` carrying what it said; `by`'s own `{"error": {"kind", "message"}}` is a `BranchyardError` with that kind, such as `config` for a configuration file that does not load.
+`Local(root)` is this machine's `by` for what a server does not do, and the step before a real harness ([above](#before-real-harnesses)): `up(plan=False, yes=False)` returns a `Plan` (`steps`, `todo`, `ready`, `step(name)`; [up](up.md)), `doctor()` a `Report` (`checks`, `failed`, `status`), `harnesses(refresh=False)` the inventory, and `run(*args)` any command with `--json`. A `by` that cannot run or prints no JSON is a `LocalError` carrying what it said; `by`'s own `{"error": {"kind", "message"}}` is a `BranchyardError` with that kind, such as `config` for a configuration file that does not load.
 
 ## The rest of the API
 
@@ -224,12 +295,26 @@ Which routes have no method is checked: `RouteParity` in `tests/test_sdk_client.
 
 It adds no authority: what a token may do, the server decides, and a `DeniedError` or `NotAllowedError` is the server's answer, not the client's. It does not route replies back to a channel on its own (your bot does, with `Reply`), does not compact or reincarnate a long conversation unasked, and retries nothing but the event stream. There is no TypeScript or Go client yet; the HTTP API and `schema/contract.json` are what one would be generated from.
 
-Not done: `connect()` covers the delegation calls above, not `delegate`, `brief`, graphs, storage or the inbox, which stay on each module's own API; typed records for the newer families (maps, knowledge, the fleet and Web Push answer plain `Record`s); a map item's default id when it has none; a published package on PyPI; a wheel built in the tests (the source distribution is, since some distributions' patched setuptools cannot build a wheel on every Python they ship).
+Not done:
+
+- **No wheel, no PyPI package, no bundled `by`.** `pip install branchyard` finds nothing; the SDK installs from a checkout or the release archive and needs a `by` installed beside it (`cargo install`, as [above](#install)). A wheel with the platform's `by` inside, built by the release workflow, is what would change that. The source distribution is built in the tests, a wheel is not (some distributions' patched setuptools cannot build one on every Python they ship).
+- **No async.** Every call blocks, `reply.wait()` and the event stream included; call them from a thread, or from `asyncio.to_thread`. There is no `AsyncClient`.
+- **No TypeScript client.** Nothing generates one yet: `schema/contract.json` has the types but no paths or methods, and the 90 routes are listed in `docs/facts.json` and the server's router only.
+- **No `py.typed`.** A marker needs a package directory, and both modules are single files that Branchyard also writes, by name, into a delegating turn (`crates/branchyard/src/projection.rs`) and into the archives. So mypy treats the installed modules as untyped (`Any`). What is done instead: every public name has a docstring (a test fails on one without), `Operation`, `BranchInfo`, `Inspection`, `FeedEntry`, `Message` and `CheckReport` declare their fields for editors that read the source, and `dir(record)` lists the keys a record holds. Records still read a missing key as `None`, so `op.stat` is `None` and not an error.
+- **Real harnesses.** The quickstart, the examples and their tests run against the fake ACP agent and the built `by`; no model is called. The `edit-worktree` policy, and what a given harness does with it, is as `docs/egress.md` describes, not checked here.
+- `connect()` covers the delegation calls above, not `delegate`, `brief`, graphs, storage or the inbox, which stay on each module's own API.
+- Typed records for the newer families (maps, knowledge, the fleet and Web Push answer plain `Record`s), and a map item's default id when it has none.
 
 ## Tests
 
 - `tests/test_sdk_client.py`: the client against a fake server scripted per route (stdlib only): the token, the idempotency key and a replay, the grant with its private home, every error code's class and detail, `wait` and `wait_for`, the stream's parsing, filtering, resumption after a cut, idle hook and closing as a context manager, `rewind` and `fork(at=)` with their refusals, a reply's text between the operation's cursors and while running, the first message creating and the next continuing a branch, the three busy policies and a refused steer's fallback, approvals and effects, maps and task records, knowledge, the fleet (discovery without the token, services, inventory), undo and reconciling, scratch locks, a trigger's secret and Web Push, each with its request's shape and a typed refusal, grant round trips and refusals, branch names, and the route parity above.
 - `crates/branchyard-cli/tests/sdk_client.rs` runs `tests/sdk_client_e2e.py` against a real `by serve` with the fake agent, a fake Anvil packager and delegation allowed: a surface's conversation created with a grant and an envelope, its harness spawning a child that asks for more than the parent holds and getting the intersection (visible in `inspect().grants`), a second message continuing the branch and keeping the grant, both turns' text on the stream, `skip` and `queue` against a slow turn, a replayed and a reused idempotency key, and the server's refusals (`unknown_branch`, a grant without a home, a child granted a connector its parent lacks) as typed errors; then one family after another for real: `well_known`, a service registered, listed and deregistered, knowledge added, decided, edited, exported and distilled (`unknown_knowledge` typed), a scratch lock taken and released, an undo plan and undo, the task records, a two-item map waited for, shown, resumed and forgotten, a generic trigger's generated secret, and `push_info` without the companion.
 - One API: `OneApi` in `tests/test_sdk_client.py` runs one script through `connect()` inside, over a fake `by` as `branchyard.py` runs it, and outside, over the fake server, and checks that the results and the refusals (`unknown_branch`, `denied`, and a failed check, an operation's failure over HTTP) are the same; `OneErrorHierarchy` checks that both modules' classes are one.
+- One API, the signatures: `OneApi` compares each `Delegator` call's parameters, names, order and defaults, with `branchyard.py`'s, and runs `spawn` with all 23 arguments inside (the flags a fake `by` receives) and outside (the request body the fake server receives).
+- A failed branch: `Waiting` in `tests/test_sdk_client.py` ends operations that succeeded with a branch `failed`, `budget_exceeded` or `interrupted` and checks `wait(check=True)` raises `BranchFailedError` naming it, with its reason or limit and a `to fix:`; that a ready, no-change or merged branch does not; a map's several failures; that a failed operation stays an `OperationFailedError`; and that a `Reply` still reads what the harness said.
+- Errors that end with the fix: a missing, unreadable or not executable `by`, a connection refused (a mocked `urllib` error, so no port is freed for it), and an `unknown_repo` with and without the server's own hint.
+- Documentation and typing: every public name the module exports has a docstring (a test fails on one without), and `dir(record)` lists its keys.
+- `tests/test_sdk_examples.py`: `examples/python/` against a built `by` and the fake ACP agent in a temporary repository: `first_run.py` makes a change and prints its status and diff summary, says when nothing changed, exits 1 for a branch whose turn failed (the fake agent exits mid-turn) with the branch named and a fix, and reports a taken name and a missing `by` without a traceback; `stream_events.py` prints the activity in order until the branch is ready, and stops at a failed one; `delegate.py` spawns, waits for and integrates a child as a branch of a server of its own, and says it has nothing to act as when it runs outside both. It finds `by` in `BRANCHYARD_BY`, else `target/debug`, else `PATH`, and skips without one, so the Python job, which builds nothing, passes; `crates/branchyard-cli/tests/sdk_client.rs` runs it with the `by` and agent it was built with and fails if it skipped, so `cargo test` runs it for real.
 - `tests/test_schema_validation.py` and `crates/branchyard-client/tests/contract.rs`: the wire contract, with a grant entry in either form.
+- `tests/test_distribution.py`: the README, the project URLs and the classifiers reach the source distribution built from the archive.
 - Local mode: `tests/test_sdk_client.py` over a fake `by` (the server started with the arguments `Client.local` documents, its token read, stopped and removed on close; a server that does not start reported with what it said; `Local.up`, `doctor`, `harnesses` and `run` with their flags, `by`'s own error as the typed error, a missing answer as `LocalError`), and `crates/branchyard-cli/tests/sdk_client.rs` starting the real `by serve` through `Client.local` and stopping it.

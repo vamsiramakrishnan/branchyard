@@ -59,6 +59,7 @@ The server registers <!-- fact:http.route_count -->90<!-- /fact --> routes; each
 | Rig seats ([rigs](rigs.md)) | `TaskOptions::seats` | `rig run` | server opt-in `--allow-delegation`; each seat's provisioning under the same rules as provisioning below | `seats`, on task requests only | yes | a child gets the seats below its own |
 | Allow delegation commands | `Policy::allow_delegation_commands` | `--allow-delegation` | server opt-in `--allow-delegation` | `allow_delegation` | yes | inherited |
 | Unapproved tools | `TaskOptions::unapproved_tools` | `--allow-unapproved-tools` | server opt-in `--allow-unapproved-tools` | `unapproved_tools` | yes | inherited |
+| Check the harness first ([before a run](harness-lifecycle.md#before-a-run)) | n/a | on by default for `run`, `fan` and `send`; `--no-preflight` skips | no: the server's router and workers decide | n/a | n/a | no |
 | Provisioning: secrets ([provisioning](provisioning.md)) | `Provisioning::secrets`, with `isolated` or a sandbox provider | `--secret NAME[=VAR\|=@FILE]`, read from your environment or files | `--secret NAME` only: the server reads each from the source its operator defined with `by serve --secret`; a named source is refused | `provision.secrets`, names only; `403 secret_not_allowed` for one the server does not define | yes | inherited, with the parent's sources |
 | Provisioning: MCP servers | `Provisioning::mcp_servers` | `--mcp NAME=COMMAND` | server opt-in `--allow-client-commands`: the server runs them | `provision.mcp_servers`, same opt-in | yes | inherited |
 | Provisioning: instructions, model, effort, telemetry, auth method | `Provisioning` | `--instructions FILE`, `--model`, `--effort`, `--telemetry URL\|off`, `--auth` | yes; `by` reads the instructions file and sends its text | `provision` | yes | inherited |
@@ -193,7 +194,7 @@ A server-only addition: identity, scopes and quotas are meaningful only where mo
 
 ## Changed with the clap command line
 
-Every `by` command, flag and JSON output is unchanged; the parsing around them is stricter and the help is generated. See the [README](../README.md#command-line).
+Every `by` command, flag and JSON output is unchanged; the parsing around them is stricter and the help is generated. See [command line](cli.md).
 
 | Surface | Before | Now |
 |---|---|---|
@@ -268,7 +269,7 @@ The cockpit branch made `by watch` act on the selected branch; integrating it wi
 | Surface | Before | Now |
 |---|---|---|
 | `by watch`'s detail pane | status, cost, inbox, children, prompt, events | also the checkpoint the branch is at, its merge readiness once it has pull-request steps, and whether it is being tried |
-| `--no-notify`, `[notify]` in `branchyard.toml` | none | notices from `by watch` and waiting commands ([README](../README.md#watching-branches)); `schema/branchyard.config.json` regenerated |
+| `--no-notify`, `[notify]` in `branchyard.toml` | none | notices from `by watch` and waiting commands ([watching branches](watch.md)); `schema/branchyard.config.json` regenerated |
 | `--log-format` (server, `by serve`, `by worker`, `branchyard-herdr`) | human-readable only | `pretty` (the default) or `json`, one object per line |
 | `branchyard_workspace::git`, `Git` | private | public: the one place that starts `git` on the host; `Git::stdin` and `Git::run_bytes` added at integration for `by try`'s patches and blobs, and `by pr` uses it too |
 | `Yard::try_recorded` | none | the recorded try, read without the try lock (what `by watch` polls) |
@@ -386,14 +387,16 @@ Ports from emdash and Orca ([roadmap](roadmap.md), Wave 1). The review and catal
 
 ## Changed from 4609ca1
 
+The Before column is the state at that commit (September 2026); the Now column is current.
+
 | Gap | Before | Now |
 |---|---|---|
 | `by --remote --provider`, `--delegate`, `--allow-delegation`, `--allow-unapproved-tools` | refused by the CLI | sent in the request; the server's operator opts in |
-| `by --remote spawn`, `inspect`, `events`, `integrate`, `children`, `send --json` | refused: "does not run with --remote yet" | server endpoints, the same JSON as local |
+| `by --remote spawn`, `inspect`, `events`, `integrate`, `children`, `send --json` | refused: "does not run with --remote yet" | server endpoints, the same JSON as local; spawn, integrate and the rest of delegation need a server started with `--allow-delegation` |
 | Providers on the server | local only | `--allow-provider microsandbox,substrate` |
 | Delegation for the server's harnesses | none | `--allow-delegation`, `--by-path` |
 | Unapproved tools on the server | refused | `--allow-unapproved-tools` |
-| PostgreSQL | design only | `Yard::open_postgres`, `by serve --database` |
+| PostgreSQL | design only | `Yard::open_postgres`, `by serve --database` (built behind the `postgres` cargo feature) |
 | Several servers, and execute-only workers, on one database | one server per data directory | `by serve --database` on each, `by worker --database`; operations looked up by key with `GET /v1/operations?idempotency_key=` (`Client::operation_by_key`) ([server](server.md#several-servers-on-one-database)) |
 | `HarnessInfo` | not `Serialize`; copied field by field | serde |
 | `by --remote artifact`/`scratch`, the server's HTTP API, `branchyard-client` for storage | refused: "does not yet reach a server over --remote" | server endpoints, the same JSON as local; `--max-artifact-bytes` |
@@ -614,7 +617,7 @@ See [harness lifecycle](harness-lifecycle.md).
 | `by harnesses --on TARGET` | none | `ssh://[user@]host[:port]` or `recipe:NAME` (a fresh machine, destroyed after) |
 | `by harnesses --remote URL` | the server's profiles | its live workers and their inventories (`GET /v1/inventory`; the profiles are `--profiles`) |
 | `by harnesses install\|update ID` | none | the catalog's command, pinned where it can be (`--version`), under `[harnesses] install` and `allow` (`--yes` answers an ask), verified by detecting again; here or `--on ssh://`; refused on a recipe and with `--remote` |
-| `by harnesses login ID` | none | the harness's own login with the terminal (also over `ssh -t`); without one, the exact command to run and where; `--api-key` stores a key 0600 and names it in `[secrets]`; for Antigravity with `GEMINI_API_KEY` set, shows and (with `--yes`, or a yes on a terminal) merges `modelProvider: "gemini"` into its settings |
+| `by harnesses login ID` | none | the harness's own login with the terminal (also over `ssh -t`); without one, the exact command to run and where, and exit 2 (`--json` `status` `manual`; `done`, `stored` and `failed` otherwise); `--api-key` stores a key 0600 and names it in `[secrets]`; for Antigravity with `GEMINI_API_KEY` set, shows and (with `--yes`, or a yes on a terminal) merges `modelProvider: "gemini"` into its settings |
 | `by harnesses log` | none | every install, update and login, from `harness-events.jsonl` beside the user configuration |
 | `[harnesses]` in `branchyard.toml` | none | `install` (`never`, `ask`, `auto`) and `allow`; a repository may only set `install = "never"`; in `schema/branchyard.config.json` |
 | SDK | none | `branchyard::inventory`: `Inventory`, `HarnessState`, `Login`, `LoginState`, `Evidence`, `Quota`, `DetectOptions`, `detect_local`, `detect_with`, `script`, `parse`, `InventoryCache`, `InstallPolicy`, `InstallMode`, `Permission`, `InstallPlan`, `plan`, `install`, `Installed`, `HarnessLog`, `HarnessEvent`, `HarnessGate`, `LocalGate`, `harness_of`, `key_variables` |
@@ -870,7 +873,7 @@ See [harness integration](harness-integration.md#claude-code) and [distribution]
 
 | Surface | Before | Now |
 |---|---|---|
-| `by hook session-start\|user-prompt-submit` | none: a Claude Code session a person started learned a branch finished by polling `by ls` or blocking in `by wait` | reads the hook's JSON on stdin and prints `hookSpecificOutput.additionalContext`: with `BRANCHYARD_BRANCH`, that branch's unread messages; otherwise branches that finished, failed, are blocked or ask since the session's last call (`.branchyard/hooks/<session_id>.json`); at most twelve lines; read-only, two seconds at most, always exit 0; reads the server `[remote]`/`BRANCHYARD_REMOTE` names (600 ms a request), else `state.db`, else the PostgreSQL store `[serve] config` names (`postgres` feature) ([harness integration](harness-integration.md)) |
+| `by hook session-start\|user-prompt-submit` | none: a Claude Code session a person started learned a branch finished by polling `by ls` or blocking in `by wait` | reads the hook's JSON on stdin and prints `hookSpecificOutput.additionalContext`: with `BRANCHYARD_BRANCH`, that branch's unread messages; otherwise branches that finished, failed, are blocked or ask since the session's last call (`.branchyard/hooks/<session_id>.json`); at most twelve lines, each naming the command that deals with it ([harness hooks](harness-hooks.md)); read-only, two seconds at most, always exit 0; reads the server `[remote]`/`BRANCHYARD_REMOTE` names (600 ms a request), else `state.db`, else the PostgreSQL store `[serve] config` names (`postgres` feature) ([harness integration](harness-integration.md)) |
 | `by hook --harness ID <event>` | none: only Claude Code's hook JSON and reply | the same, in another harness's dialect: where its stdin keeps the session id and directory, and its reply's shape (`hookSpecificOutput` for Codex, Gemini CLI's `BeforeAgent`, Qwen Code, Droid and DeepSeek Harness; `additionalContext` for GitHub Copilot; `additional_context` for Cursor; `injectSteps` for Antigravity; plain text for Kiro; `{"context"}` for Hermes and `generic`); nothing at an event the harness drops; an unknown `ID` prints nothing, one stderr line, exit 0 ([harness hooks](harness-hooks.md)) |
 | `by statusline [--harness ID]` | none | one line for Claude Code's `statusLine` command, `by: feat-x · 2 running · 1 asking · 3 ready`; nothing outside a repository Branchyard uses; read from the same place as `by hook`; `--harness` reads the directory from that harness's status-line field, else the process's |
 | `branchyard::glance` (`read`, `read_postgres` with the `postgres` feature, `find_root`, `state_dir`, `unanswered`, `Glance` with `Glance::from_parts`, `Counts`, `READ_WAIT`, `CONNECT_WAIT`, `QUESTIONS_MAX`) | none; `Yard::open` creates, upgrades and recovers | a read-only look at `.branchyard/state.db`, or at a server's PostgreSQL store in a read-only transaction: branches, unanswered questions from running branches, a branch's unread messages; `from_parts` and `unanswered` build the same `Glance` from a server's answers |

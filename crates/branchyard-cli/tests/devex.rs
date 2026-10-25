@@ -14,7 +14,6 @@
 #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::collections::BTreeMap;
 use std::fs;
-use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -738,24 +737,30 @@ fn listening_ports_belong_to_their_branch_and_can_be_browsed_and_stopped() {
     // A server started by hand in the worktree, without Branchyard's
     // variables, is the branch's by its working directory.
     let worktree = shown["worktree"].as_str().unwrap().to_owned();
-    let free = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    // The server binds port 0 itself and reports the port it was given:
+    // a number freed here and handed over could be taken by another test
+    // in between.
+    const SERVE_ON_ANY_PORT: &str = "import http.server, sys\n\
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), http.server.SimpleHTTPRequestHandler)\n\
+        print(server.server_address[1], flush=True)\n\
+        server.serve_forever()\n";
     let mut manual = branchyard_testkit::hermetic(&mut Command::new("python3"))
-        .args([
-            "-m",
-            "http.server",
-            "--bind",
-            "127.0.0.1",
-            &free.to_string(),
-        ])
+        .args(["-c", SERVE_ON_ANY_PORT])
         .current_dir(&worktree)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()
         .unwrap();
+    let mut first_line = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(manual.stdout.take().unwrap()),
+        &mut first_line,
+    )
+    .unwrap();
+    let free: u64 = first_line
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("the server reported {first_line:?} instead of its port"));
     let by_cwd = wait::until("the hand-started server", || {
         repo.json(&["workspace", "ports", "srv", "--json"])
             .as_array()

@@ -1843,7 +1843,7 @@ mod tests {
     use super::*;
 
     fn config(listen: &str) -> Config {
-        let mut c = Config::new(PathBuf::from("/tmp/x"));
+        let mut c = Config::new(PathBuf::from("/nonexistent/x"));
         c.listen = listen.parse().unwrap();
         c.repos.push(("app".into(), PathBuf::from("/srv/app")));
         c.tokens.push(Token {

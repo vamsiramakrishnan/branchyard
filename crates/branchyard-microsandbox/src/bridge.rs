@@ -439,7 +439,13 @@ mod tests {
             feed.send(GuestEvent::Stdout(chunk.clone())).unwrap();
         }
         feed.send(GuestEvent::Exited { code: 0 }).unwrap();
-        std::thread::sleep(Duration::from_millis(50));
+        // Nothing reads the pipe, which holds 64 KiB: it is full as soon as
+        // the pump has written that much. Time for the pump to reach it is
+        // all this waits for; the check below holds whether or not it has.
+        branchyard_testkit::wait::settle(
+            "the pump has had time to fill the pipe",
+            Duration::from_millis(50),
+        );
         // The pipe is full: the exit is not recorded before the output.
         assert_eq!(process.try_wait().unwrap(), None);
         assert_eq!(
@@ -447,15 +453,6 @@ mod tests {
             16 * 64 * 1024
         );
         assert!(process.wait().unwrap().success());
-    }
-
-    fn alive(pid: u32) -> bool {
-        std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .map(|stat| {
-                let state = stat.rsplit_once(") ").map(|(_, rest)| rest);
-                !state.is_some_and(|s| s.starts_with('Z'))
-            })
-            .unwrap_or(false)
     }
 
     /// The guest teardown script, run against a local process group.
@@ -479,14 +476,7 @@ mod tests {
         let child: u32 = line.trim().parse().unwrap();
         // `$!` is known as soon as the shell forks, before the child has
         // exec'd `sleep`; until it has, it is still named `sh`.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while std::fs::read_to_string(format!("/proc/{child}/comm"))
-            .map(|comm| comm.trim() != "sleep")
-            .unwrap_or(true)
-        {
-            assert!(Instant::now() < deadline, "{child} never became sleep");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        branchyard_testkit::wait::exec(child, "sleep");
         let output = Command::new("sh")
             .args(["-c", GROUP_TEARDOWN, "sh", &leader.id().to_string()])
             .output()
@@ -501,11 +491,7 @@ mod tests {
             started.elapsed() < Duration::from_secs(10),
             "the leader outlived the teardown"
         );
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while alive(child) {
-            assert!(Instant::now() < deadline, "{child} survived the teardown");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        branchyard_testkit::wait::gone(child);
         let empty = Command::new("sh")
             .args(["-c", GROUP_TEARDOWN, "sh", &leader.id().to_string()])
             .output()

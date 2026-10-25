@@ -348,7 +348,6 @@ fn watch_prints_the_tree_once_or_logs_changes_until_q() {
 fn the_watch_cockpit_merges_the_selected_branch_on_m_then_y() {
     use std::io::Write;
     use std::process::Stdio;
-    use std::time::Duration;
     if !Path::new("/usr/bin/script").exists() {
         eprintln!("skipped: no /usr/bin/script for a pseudo-terminal");
         return;
@@ -434,13 +433,30 @@ fn the_watch_cockpit_merges_the_selected_branch_on_m_then_y() {
             Err(shown)
         }
     });
-    // `m` asks only once the dashboard has seen the branch ready again;
-    // until its question (its `n not now` choice) is drawn, ask again.
-    wait::until("m to ask to merge", || {
-        let from = drawn();
-        keys.write_all(b"m").unwrap();
-        wait::try_until_for(Duration::from_secs(2), || shows_after(from, "not now")).is_ok()
+    // `m` asks only once the dashboard has seen the branch ready again. Its
+    // detail pane is drawn from the same refresh that `m` reads, and says
+    // `status ✔ ready` and `2 turns` once it has: that is the event to wait
+    // for, on the screen as it is now (the last 30 rows). One keypress then,
+    // not one per retry.
+    wait::until("the detail of w to say ready, 2 turns", || {
+        let screens = screens.lock().unwrap();
+        let now = &screens[screens.len().saturating_sub(30)..];
+        let says = |phrase: &str| {
+            now.iter().any(|row| {
+                row.split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains(phrase)
+            })
+        };
+        if says("status ✔ ready") && says("· 2 turns") {
+            return Ok(());
+        }
+        Err(format!("the screen:\n{}", now.join("\n")))
     });
+    let asked = drawn();
+    keys.write_all(b"m").unwrap();
+    wait_for(asked, "not now");
     let from = drawn();
     keys.write_all(b"y").unwrap();
     wait::until("the merge to happen", || {

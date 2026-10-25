@@ -13,13 +13,18 @@ Standard library only (`urllib`, `json`, `ssl`); Python 3.9 or newer.
 
     from branchyard_client import Client, Grant
 
-    client = Client("http://127.0.0.1:8421", token_file=".branchyard/server/token")
-    app = client.repo("app")
-
-    # Or local mode: a `by serve` of this process's own, on the repository
+    # Local mode: a `by serve` of this process's own, on the repository
     # here, stopped when the client is closed (`docs/sdk.md#local-mode`).
     with Client.local(".") as client:
         app = client.repo("app")
+        op = app.task("Make the flaky parser test deterministic", name="flaky-parser", budget_usd=2)
+        op = client.wait(op, check=True)   # raises if the request failed or its branch did
+        print(op.result_branches[0].state)  # "ready"
+
+    # Or a server that is running (`by serve --repo app=.`; the token is in
+    # `.branchyard/server/token`): the same calls.
+    client = Client("http://127.0.0.1:8421", token_file=".branchyard/server/token")
+    app = client.repo("app")
 
     # One branch per conversation, as a chat assistant keeps a session.
     chat = app.surface("slack", harness="claude-code", budget_usd=5,
@@ -69,6 +74,7 @@ __all__ = [
     "Approval",
     "BranchBusyError",
     "BranchEvents",
+    "BranchFailedError",
     "BranchInfo",
     "BranchyardError",
     "CheckFailedError",
@@ -205,6 +211,7 @@ class InvalidRequestError(BranchyardError):
 
     @property
     def field(self) -> Optional[str]:
+        """The request field that broke a rule when the server names one, else None."""
         value = self.detail.get("field")
         return value if isinstance(value, str) else None
 
@@ -216,6 +223,7 @@ class BranchBusyError(BranchyardError):
 
     @property
     def holder(self) -> Optional[str]:
+        """The id of the operation that holds the branch, when the server says; else None."""
         value = self.detail.get("holder")
         return value if isinstance(value, str) else None
 
@@ -268,18 +276,22 @@ class CheckFailedError(BranchyardError):
 
     @property
     def checks(self) -> list[JSON]:
+        """Every check of the branches integrated, in the order they ran: dicts `{check, branches, outcome}`."""
         return list(self.detail.get("checks", []))
 
     @property
     def integrate_together(self) -> list[str]:
+        """The branches to integrate at once, when siblings sharing the check could change the result."""
         return list(self.detail.get("integrate_together", []))
 
     @property
     def unsettled(self) -> list[str]:
+        """Those of `integrate_together` that have still to settle."""
         return list(self.detail.get("unsettled", []))
 
     @property
     def own_work(self) -> list[str]:
+        """The branches integrated, on whose own work the check failed."""
         return list(self.detail.get("own_work", []))
 
 
@@ -334,6 +346,63 @@ class OperationFailedError(BranchyardError):
             error.get("detail"),
         )
         self.operation = operation
+
+
+# The states a branch ends in when the work it was asked for did not get done.
+_FAILED_STATES = ("failed", "budget_exceeded", "interrupted")
+
+
+class BranchFailedError(OperationFailedError):
+    """An operation succeeded, but a branch it made ended `failed`,
+    `budget_exceeded` or `interrupted`: the harness's turn did not do the
+    work. Raised by `Client.wait(..., check=True)` and `Reply.wait`, which
+    would otherwise return normally for a run whose turn never started.
+
+    `code` is the branch's state, `branch` its name, `branch_info` its
+    `BranchInfo`, `branch_status` its `Status` (`status` is the HTTP status
+    of every `BranchyardError`, 0 here) and `state` that status's state;
+    `reason` is why (`failed`)
+    and `limit` which limit (`budget_exceeded`), None when the status names
+    none. `operation` is the finished operation. `branches` holds every
+    result branch that ended this way, the first being `branch_info` (a map
+    can have several)."""
+
+    def __init__(self, operation: "Operation", failed: Optional[Sequence["BranchInfo"]] = None):
+        branches = list(failed if failed is not None else operation.failed_branches)
+        if not branches:
+            raise ValueError("BranchFailedError needs a result branch that ended failed")
+        first = branches[0]
+        status = first.status
+        state = status.state
+        why = status.get("reason") or status.get("limit")
+        name = str(first.get("name", ""))
+        message = f"branch {name} ended {state}" + (f": {why}" if why else "")
+        if len(branches) > 1:
+            message += f" (and {len(branches) - 1} more: {', '.join(str(b.get('name', '')) for b in branches[1:])})"
+        message += f". {_branch_fix(state, name)}"
+        BranchyardError.__init__(
+            self,
+            state,
+            message,
+            {"branch": name, "status": status.raw, "branches": [str(b.get("name", "")) for b in branches]},
+        )
+        self.operation = operation
+        self.branch: str = name
+        self.branch_info: BranchInfo = first
+        self.branch_status: Status = status
+        self.branches: list[BranchInfo] = branches
+        self.state: str = state
+        self.reason: Optional[str] = status.get("reason") if isinstance(status.get("reason"), str) else None
+        self.limit: Optional[str] = status.get("limit") if isinstance(status.get("limit"), str) else None
+
+
+def _branch_fix(state: str, name: str) -> str:
+    """The `to fix:` clause for a branch that ended `state`."""
+    if state == "budget_exceeded":
+        return f'to fix: raise the limit and give it another turn, app.send("{name}", "continue", budget_usd=...)'
+    if state == "interrupted":
+        return f'to fix: give it another turn, app.send("{name}", "continue")'
+    return f'to fix: read why with `by log {name}` or app.events("{name}"), then app.send("{name}", "try again")'
 
 
 _BY_CODE: dict[str, Callable[..., BranchyardError]] = {
@@ -419,6 +488,7 @@ def error_for_code(
     --json` prints, else by `status` (5xx `ServerError`, the rest
     `BranchyardError`). Both Python modules raise through it."""
     detail = detail if isinstance(detail, dict) else None
+    message = _with_fix(code, message, detail)
     cls = _BY_CODE.get(code)
     if cls is QuotaExceededError:
         return QuotaExceededError(code, message, detail, status, retry_after)
@@ -552,17 +622,35 @@ def grants_json(grants: Optional[Grants]) -> list[JSON]:
 
 class Record(dict):
     """A server object as a dict whose keys also read as attributes
-    (`op.state`, `branch.status`); a missing key reads as `None`, so a
-    newer server's fields never break an older client, and an older
-    server's absent fields are simply `None`. `raw` is the dict itself."""
+    (`op.state`, `branch.status`).
+
+    **A key the answer does not carry reads as `None`**, not as an error:
+    a newer server's fields never break an older client, and an older
+    server's absent fields are simply `None`. The price is that a typo is
+    `None` too (`op.stat`): the fields of a record are in its class's
+    docstring, in `docs/server.md`, and in `dir(record)`, which lists the
+    keys it holds with the names of its properties. `raw` is the plain
+    dict. `Operation`, `BranchInfo`, `Inspection`, `FeedEntry`, `Message`
+    and `CheckReport` declare their fields as class annotations, which an
+    editor that reads the source (Pyright, Pylance) completes and checks;
+    the other records read as `Any`. mypy treats the installed module as
+    untyped: a single-file module cannot carry the `py.typed` marker, and
+    making this a package changes how Branchyard writes it into a
+    delegating turn (`docs/sdk.md#what-the-client-does-not-do`)."""
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("__"):
             raise AttributeError(name)
         return self.get(name)
 
+    def __dir__(self) -> list[str]:
+        """The record's keys beside its properties and methods, so a REPL or an editor completes `op.sta` to `state`."""
+        keys = [key for key in self if isinstance(key, str) and key.isidentifier()]
+        return sorted(set(super().__dir__()) | set(keys))
+
     @property
     def raw(self) -> JSON:
+        """The plain dict (a copy), for code that wants a dict and nothing else, such as `json.dumps`."""
         return dict(self)
 
 
@@ -589,12 +677,28 @@ class BranchInfo(Record):
     `children`, `depth`, `base`, `candidate`, `status`, `turns`,
     `cost_usd`, `created_at`, `stalled`, ..."""
 
+    name: str
+    git_branch: str
+    harness: str
+    profile: str
+    parent: Optional[str]
+    children: list[str]
+    depth: int
+    base: str
+    candidate: Optional[JSON]  # {commit, files_changed, insertions, deletions}; None before it has changes
+    turns: int
+    cost_usd: Optional[float]  # None when the harness reports none
+    created_at: int
+    stalled: bool
+
     @property
     def status(self) -> Status:
+        """The branch's `Status` (an empty one when the answer carried none)."""
         return Status(self.get("status") or {})
 
     @property
     def state(self) -> str:
+        """The name of the status's state, such as `ready`; the empty string when there is none."""
         return str(self.status.get("state", ""))
 
     @property
@@ -629,10 +733,12 @@ class Reported(Record):
 
     @property
     def report(self) -> StatusReport:
+        """The recorded `StatusReport`."""
         return StatusReport(self.get("report") or {})
 
     @property
     def escalation(self) -> Optional["Message"]:
+        """The `Message` sent to the parent for a `blocked` or `failure` report, else None."""
         value = self.get("escalation")
         return Message(value) if isinstance(value, dict) else None
 
@@ -648,6 +754,7 @@ class Rewound(Record):
 
     @property
     def session_mode(self) -> Optional[str]:
+        """How the branch's next turn continues: `native`, `summary` or `fresh`; None when not stated."""
         session = self.get("session")
         return session.get("mode") if isinstance(session, dict) else None
 
@@ -660,6 +767,12 @@ class CheckReport(Record):
     `outcome` (`passed`, `failed`, `timed_out`, `not_started`, or `not_run`
     when there is no check or `conflicts` names files), `conflicts` and
     `output_tail`. From `Operation.check_report`."""
+
+    branch: str
+    check: Optional[list[str]]
+    outcome: str
+    conflicts: list[str]
+    output_tail: Optional[str]
 
     @property
     def passed(self) -> bool:
@@ -678,12 +791,22 @@ class Inspection(Record):
     `last_message`, `check`, `model`, `grants`, `reported`, ...
     (`docs/delegation.md`)."""
 
+    name: str
+    harness: str
+    parent: Optional[str]
+    children: list[str]
+    depth: int
+    turns: int
+    cost_usd: Optional[float]
+
     @property
     def status(self) -> Status:
+        """The branch's `Status` (an empty one when the answer carried none)."""
         return Status(self.get("status") or {})
 
     @property
     def state(self) -> str:
+        """The name of the status's state, such as `ready`; the empty string when there is none."""
         return str(self.status.get("state", ""))
 
     @property
@@ -722,7 +845,13 @@ class Steer(Record):
 
 
 class Message(Record):
-    """`Message`: `id`, `from`/`to` branches, `kind`, `text`, `at_ms`, ..."""
+    """`Message`: `id`, `from`/`to` branches, `kind`, `text`, `at_ms`, ... (`from` is a keyword: `message["from"]`)."""
+
+    id: int
+    to: str
+    kind: str
+    text: str
+    at_ms: int
 
 
 class Approval(Record):
@@ -732,6 +861,7 @@ class Approval(Record):
 
     @property
     def pending(self) -> bool:
+        """Whether nobody has answered it yet."""
         return self.get("answer") is None
 
 
@@ -744,6 +874,11 @@ class FeedEntry(Record):
     """One entry of a repository's feed: `seq`, `branch`, `at_ms`,
     `activity` (an `Activity`, externally tagged: `{"harness": {...}}`,
     `{"prompt": "..."}`, `{"status": {...}}`, ...)."""
+
+    seq: int
+    branch: str
+    at_ms: int
+    activity: JSON
 
     @property
     def harness_event(self) -> Optional[JSON]:
@@ -762,6 +897,7 @@ class FeedEntry(Record):
 
     @property
     def turn_ended(self) -> bool:
+        """Whether the activity is a harness turn ending."""
         event = self.harness_event
         return event is not None and event.get("type") == "turn_ended"
 
@@ -779,6 +915,7 @@ class BranchEvents(Record):
 
     @property
     def events(self) -> list[JSON]:
+        """The recorded events of the page, as dicts."""
         return list(self.get("events") or ())
 
 
@@ -790,14 +927,27 @@ class Operation(Record):
     `waiting`, `priority`. `replayed` is true when the server answered a
     repeated idempotency key with the original operation."""
 
+    id: str
+    repo: str
+    kind: str
+    state: str
+    branches: list[str]
+    cursor: int
+    end_cursor: Optional[int]  # None until it has finished
+    result: Optional[JSON]  # None until it has succeeded
+    error: Optional[JSON]  # {code, message, detail?} once it failed
+    priority: int
     replayed: bool = False
 
     @property
     def done(self) -> bool:
+        """Whether it has finished, however it ended: `succeeded`, `failed` or `interrupted`."""
         return self.get("state") in ("succeeded", "failed", "interrupted")
 
     @property
     def failed(self) -> bool:
+        """Whether the operation itself ended `failed` or `interrupted`. A succeeded operation can still have a failed
+        branch: see `failed_branches`."""
         return self.get("state") in ("failed", "interrupted")
 
     @property
@@ -808,11 +958,21 @@ class Operation(Record):
 
     @property
     def result_branches(self) -> list[BranchInfo]:
+        """The `BranchInfo` of each branch the operation's result holds, as the operation left them."""
         result = self.get("result") or {}
         return [BranchInfo(b) for b in result.get("branches") or ()]
 
     @property
+    def failed_branches(self) -> list[BranchInfo]:
+        """The result branches that ended `failed`, `budget_exceeded` or
+        `interrupted`: empty for an operation that did its work. An
+        operation can be `succeeded` while its branch is not: the
+        operation is the request, the branch is the harness's turn."""
+        return [b for b in self.result_branches if b.state in _FAILED_STATES]
+
+    @property
     def inspection(self) -> Optional[Inspection]:
+        """The result's `Inspection` (a spawn's child, for one), else None."""
         result = self.get("result") or {}
         value = result.get("inspection")
         return Inspection(value) if isinstance(value, dict) else None
@@ -914,7 +1074,8 @@ class Client:
         with a fresh token and a private data directory, and a client on
         it. `by` is the executable (default: `BRANCHYARD_BY`, else `by` on
         `PATH`); `args` are more `by serve` flags (`--allow-delegation`,
-        `--harness-command`). The server reads the repository's
+        `--harness-command H=CMD`, whose program path is absolute: the
+        server runs in the repository). The server reads the repository's
         configuration as every `by` command does and keeps its branches in
         the repository's `.branchyard/`; only its operation registry is in
         the private directory, which goes when the client is closed.
@@ -944,7 +1105,7 @@ class Client:
                 )
         except OSError as error:
             shutil.rmtree(data_dir, ignore_errors=True)
-            raise LocalError(f"could not run {program}: {error}") from None
+            raise LocalError(_cannot_run(program, error)) from None
         line = _first_line(process, start_timeout)
         if not line.startswith("listening on "):
             _stop(process)
@@ -1007,7 +1168,7 @@ class Client:
         if query:
             pairs = {k: v for k, v in query.items() if v is not None}
             if pairs:
-                url += "?" + urllib.parse.urlencode(pairs)
+                url += "?" + urllib.parse.urlencode(pairs, doseq=True)
         data: Optional[bytes] = None
         request_headers = {
             "Authorization": f"Bearer {self.token}",
@@ -1039,7 +1200,7 @@ class Client:
             response_headers = {k.lower(): v for k, v in error.headers.items()}
             raise error_for(error.code, _json_or_text(content), response_headers) from None
         except (urllib.error.URLError, OSError, ssl.SSLError) as error:
-            raise TransportError(f"{method} {url}: {error}") from None
+            raise TransportError(_unreachable(f"{method} {url}: {error}", error)) from None
         if raw:
             return status, response_headers, content
         parsed = _json_or_text(content) if content else {}
@@ -1048,12 +1209,16 @@ class Client:
         return parsed
 
     def get(self, path: str, **query: Any) -> Any:
+        """`GET path` with `query` parameters; the parsed JSON. The escape hatch for a route with no method, as
+        `request`."""
         return self.request("GET", path, query=query or None)
 
     def post(self, path: str, body: Any = None, key: Optional[str] = None, **query: Any) -> Any:
+        """`POST path` with `body` as JSON and `key` as the idempotency key; the parsed JSON. See `request`."""
         return self.request("POST", path, body if body is not None else {}, key=key, query=query or None)
 
     def delete(self, path: str) -> Any:
+        """`DELETE path`; the parsed JSON, empty for most."""
         return self.request("DELETE", path)
 
     def _operation(self, path: str, body: JSON, key: Optional[str]) -> "Operation":
@@ -1087,11 +1252,13 @@ class Client:
         return [Record(h) for h in self.get("/v1/harnesses").get("harnesses", [])]
 
     def repo(self, name: str) -> "Repo":
+        """The served repository `name`. No request is made: an unknown name fails at the first call, `unknown_repo`."""
         return Repo(self, name)
 
     # -- operations --------------------------------------------------------
 
     def operation(self, id: str) -> Operation:
+        """Operation `id` as it is now, without waiting for it: `wait` blocks."""
         return Operation(self.get(f"/v1/operations/{_q(id)}"))
 
     def operation_by_key(self, key: str) -> Operation:
@@ -1110,7 +1277,10 @@ class Client:
         (`TimeoutError`), with `GET /v1/operations/{id}?wait=` long polls:
         the server answers as it finishes, or at its 30 s cap, and this asks
         again. With `check`, a failed or interrupted operation raises
-        `OperationFailedError`."""
+        `OperationFailedError`, and so does a succeeded one whose result
+        has a branch that ended `failed`, `budget_exceeded` or
+        `interrupted`: `BranchFailedError`, a subclass, naming the branch
+        and its status. Without `check`, read `op.failed_branches`."""
         id = operation.id if isinstance(operation, Operation) else operation
         deadline = None if timeout is None else time.monotonic() + timeout
         op = operation if isinstance(operation, Operation) and operation.done else None
@@ -1126,14 +1296,18 @@ class Client:
             )
         if check and op.failed:
             raise OperationFailedError(op)
+        if check and op.failed_branches:
+            raise BranchFailedError(op)
         return op
 
     # -- triggers ----------------------------------------------------------
 
     def triggers(self) -> list[Record]:
+        """The server's triggers (`docs/triggers.md`), as the server lists them."""
         return [Record(t) for t in self.get("/v1/triggers").get("triggers", [])]
 
     def trigger(self, name_or_id: str) -> Record:
+        """One trigger by name or id."""
         return Record(self.get(f"/v1/triggers/{_q(name_or_id)}"))
 
     def create_trigger(self, spec: JSON) -> Record:
@@ -1146,9 +1320,11 @@ class Client:
         return Record(self.post("/v1/triggers", spec))
 
     def delete_trigger(self, name_or_id: str) -> None:
+        """Delete a trigger by name or id; `NotFoundError` when there is none."""
         self.delete(f"/v1/triggers/{_q(name_or_id)}")
 
     def enable_trigger(self, name_or_id: str, enabled: bool = True) -> Record:
+        """Enable a trigger, or with `enabled=False` disable it; returns it."""
         verb = "enable" if enabled else "disable"
         return Record(self.post(f"/v1/triggers/{_q(name_or_id)}/{verb}"))
 
@@ -1159,10 +1335,13 @@ class Client:
         event_type: Optional[str] = None,
         run_precheck: bool = False,
     ) -> Record:
+        """Evaluate a trigger against `event` (or a sample `event_type` event) without creating anything;
+        `run_precheck` also runs its precheck."""
         body = _drop_none({"event": event, "event_type": event_type, "run_precheck": run_precheck})
         return Record(self.post(f"/v1/triggers/{_q(name_or_id)}/test", body))
 
     def trigger_runs(self, name_or_id: str, limit: Optional[int] = None) -> list[Record]:
+        """The trigger's recent runs, newest first, at most `limit`."""
         return [Record(r) for r in self.get(f"/v1/triggers/{_q(name_or_id)}/runs", limit=limit).get("runs", [])]
 
     def set_trigger_secret(self, name_or_id: str, secret: Optional[str] = None, key: Optional[str] = None) -> Record:
@@ -1279,6 +1458,30 @@ def _q(part: str) -> str:
     return urllib.parse.quote(part, safe="")
 
 
+def _unreachable(said: str, error: BaseException) -> str:
+    """`said`, with the fix appended when nothing listens at the address
+    (the server is not running, or the URL names another port)."""
+    if isinstance(getattr(error, "reason", error), ConnectionRefusedError):
+        return (
+            f"{said}. Nothing is listening there. to fix: start a server with `by serve --repo app=.`, "
+            'check the URL, or use Client.local(".") for a server of your own'
+        )
+    return said
+
+
+def _with_fix(code: str, message: str, detail: Optional[JSON]) -> str:
+    """`message` with the remedy the client knows for `code` appended, unless
+    the server's own text already carries one."""
+    if code == "unknown_repo" and "to fix" not in message.lower():
+        served = (detail or {}).get("served")
+        names = f"This server serves: {', '.join(map(str, served))}. " if isinstance(served, list) and served else ""
+        return (
+            f"{message.rstrip('. ')}. {names}to fix: name a served repository (`client.repos()` lists them); "
+            "`by serve --repo NAME=.` serves one"
+        )
+    return message
+
+
 def _json_or_text(content: bytes) -> Any:
     try:
         return json.loads(content.decode("utf-8"))
@@ -1294,6 +1497,22 @@ def _by_command(by: Optional[str]) -> str:
     """The `by` to run: `by` as given, else `BRANCHYARD_BY`, else `by` on
     `PATH`."""
     return by or os.environ.get("BRANCHYARD_BY") or "by"
+
+
+def _cannot_run(program: str, error: OSError) -> str:
+    """Why `program` (a `by`) could not be started, ending with the fix
+    where it is known."""
+    said = f"could not run {program}: {error}"
+    if isinstance(error, FileNotFoundError) and os.sep not in program:
+        return (
+            f"{said}. `by` is not on PATH (or set BRANCHYARD_BY). to fix: install it with "
+            "`cargo install --locked --path crates/branchyard-cli` from a checkout (no release is published yet)"
+        )
+    if isinstance(error, FileNotFoundError):
+        return f"{said}. to fix: point BRANCHYARD_BY (or `by=`) at the `by` executable, or put `by` on PATH"
+    if isinstance(error, PermissionError):
+        return f"{said}. to fix: make it executable (`chmod +x {program}`), or point BRANCHYARD_BY at another `by`"
+    return said
 
 
 def _first_line(process: subprocess.Popen, timeout: float) -> str:
@@ -1372,6 +1591,7 @@ class Step(Record):
 
     @property
     def ready(self) -> bool:
+        """Whether the step needs nothing more."""
         return self.get("state") == "ready"
 
 
@@ -1381,10 +1601,12 @@ class Plan(Record):
 
     @property
     def steps(self) -> list[Step]:
+        """Every step, in report order."""
         return [Step(s) for s in self.get("steps") or []]
 
     @property
     def ready(self) -> bool:
+        """Whether everything is in place."""
         return bool(self.get("ready"))
 
     @property
@@ -1393,6 +1615,7 @@ class Plan(Record):
         return [s for s in self.steps if not s.ready]
 
     def step(self, name: str) -> Optional[Step]:
+        """The step named `name` (`harness.codex`, `connectors`, ...), else None."""
         return next((s for s in self.steps if s.get("name") == name), None)
 
 
@@ -1402,13 +1625,16 @@ class Report(Record):
 
     @property
     def checks(self) -> list[Record]:
+        """Every check, in report order."""
         return [Record(c) for c in self.get("checks") or []]
 
     @property
     def failed(self) -> list[Record]:
+        """The checks that failed."""
         return [c for c in self.checks if c.get("status") == "fail"]
 
     def check(self, name: str) -> Optional[Record]:
+        """The check named `name` (`repository.git`, ...), else None."""
         return next((c for c in self.checks if c.get("name") == name), None)
 
 
@@ -1441,9 +1667,12 @@ class Local:
                 check=False,
             )
         except OSError as error:
-            raise LocalError(f"could not run {self.by}: {error}") from None
+            raise LocalError(_cannot_run(self.by, error)) from None
         except subprocess.TimeoutExpired:
-            raise LocalError(f"`{' '.join(command)}` did not finish in {self.timeout:g}s") from None
+            raise LocalError(
+                f"`{' '.join(command)}` did not finish in {self.timeout:g}s. "
+                "to fix: give `Local` a longer timeout=, or run that command yourself to see where it waits"
+            ) from None
         try:
             value = json.loads(done.stdout.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -1684,6 +1913,8 @@ class Repo:
         return list(self.client.post(self._branch(branch, "/cancel"), {}).get("cancelled", []))
 
     def discard(self, branch: str, reason: Optional[str] = None) -> Inspection:
+        """Set `branch` aside on purpose, with `reason`: it runs no more turns and is never integrated; its record is
+        kept. Returns its `Inspection`."""
         return Inspection(self.client.post(self._branch(branch, "/discard"), _drop_none({"reason": reason})))
 
     def fork(
@@ -1735,6 +1966,8 @@ class Repo:
         return self.client._operation(self._branch(branch, "/reincarnate"), body, key)
 
     def merge(self, branch: str, target: Optional[str] = None, key: Optional[str] = None) -> Operation:
+        """`POST .../merge`: merge `branch` into `target` (default: the branch checked out in the served repository), as
+        `by merge`. An `Operation`."""
         return self.client._operation(self._branch(branch, "/merge"), {"target": target}, key)
 
     def check(self, branch: str, key: Optional[str] = None) -> Operation:
@@ -1766,13 +1999,16 @@ class Repo:
         seat: Optional[str] = None,
         depends_on: Optional[Sequence[str]] = None,
         after: Optional[str] = None,
-        bindings: Optional[Sequence[JSON]] = None,
+        bindings: Union[Sequence[JSON], dict[str, str], None] = None,
         harnesses: Optional[Sequence[str]] = None,
         plan: bool = False,
         model: Optional[str] = None,
         priority: Optional[int] = None,
         result: Optional[JSON] = None,
         why: Optional[str] = None,
+        owns: Optional[Sequence[str]] = None,
+        land: bool = False,
+        review: Union[str, JSON, None] = None,
         key: Optional[str] = None,
         **extra: Any,
     ) -> Operation:
@@ -1782,7 +2018,13 @@ class Repo:
         `inspection.grants` is what it got. `result` is the child's result
         contract, `{"schema": {...}, "required": bool}`: the child reports a
         JSON value matching the schema, and `inspection.result` reads it
-        back; a schema keyword outside the contract's subset is refused."""
+        back; a schema keyword outside the contract's subset is refused.
+        `bindings` is a list of `{"scratch", "access"}` or a dict from
+        scratch area to `read_only` or `exclusive_write`. `owns` are the
+        paths the child owns, `land` leaves it to the engine to land, and
+        `review` is a harness ID or `{"harness", "model", "rubric",
+        "budget_usd"}` for the reviewer that reads its work first (needs
+        `land`; `docs/delegation.md`)."""
         body: JSON = {
             "prompt": prompt,
             "harness": harness,
@@ -1798,13 +2040,16 @@ class Repo:
             "seat": seat,
             "depends_on": list(depends_on or ()),
             "after": after,
-            "bindings": list(bindings or ()),
+            "bindings": _binding_list(bindings),
             "harnesses": list(harnesses) if harnesses is not None else None,
             "plan": plan,
             "model": model,
             "priority": priority,
             "result": result,
             "why": why,
+            "owns": list(owns or ()),
+            "land": land,
+            "review": _reviewer(review),
         }
         body.update(extra)
         return self.client._operation(self._branch(parent, "/spawn"), body, key)
@@ -1817,12 +2062,15 @@ class Repo:
     # -- looking -----------------------------------------------------------
 
     def branches(self) -> list[BranchInfo]:
+        """Every branch of the repository, as `BranchInfo`s."""
         return [BranchInfo(b) for b in self.client.get(f"{self._base}/branches").get("branches", [])]
 
     def branch(self, name: str) -> BranchInfo:
+        """One branch as `BranchInfo`; `NotFoundError` (`unknown_branch`) when there is none."""
         return BranchInfo(self.client.get(self._branch(name)))
 
     def exists(self, name: str) -> bool:
+        """Whether branch `name` exists; any other failure raises."""
         try:
             self.branch(name)
         except NotFoundError as error:
@@ -1832,9 +2080,12 @@ class Repo:
         return True
 
     def remove(self, name: str) -> None:
+        """Remove branch `name`, its worktree and its record, as `by rm`; a name used by a merged or discarded branch is
+        free again."""
         self.client.delete(self._branch(name))
 
     def diff(self, name: str) -> str:
+        """The unified diff of `name`'s candidate against its base, as text; empty for a branch with no changes."""
         return str(self.client.get(self._branch(name, "/diff")).get("diff", ""))
 
     def inspect(self, branch: str) -> Inspection:
@@ -1846,9 +2097,13 @@ class Repo:
         return [BranchInfo(b) for b in self.client.get(self._branch(branch, "/children")).get("descendants", [])]
 
     def graph(self, branch: str) -> Record:
+        """`branch`'s task graph: its children, their prerequisites and the revision a proposal must be made against
+        (`docs/graph.md`)."""
         return Record(self.client.get(self._branch(branch, "/graph")))
 
     def apply_graph(self, branch: str, expected_revision: int, edits: Sequence[JSON], **options: Any) -> Record:
+        """Apply a graph proposal to `branch`'s children against `expected_revision`; `StaleRevisionError` when it moved
+        on. `options` are the request's others (`policy`, ...)."""
         body: JSON = {"expected_revision": expected_revision, "edits": list(edits)}
         body.update(options)
         return Record(self.client.post(self._branch(branch, "/graph"), body))
@@ -1910,9 +2165,12 @@ class Repo:
     # -- the inbox, as a branch --------------------------------------------
 
     def inbox(self, branch: str) -> list[Message]:
+        """`branch`'s own inbox, as `Message`s."""
         return [Message(m) for m in self.client.get(self._branch(branch, "/inbox")).get("messages", [])]
 
     def ask(self, branch: str, text: str, wait_seconds: Optional[float] = None) -> Record:
+        """Ask `branch`'s parent a question, as `branch`. With `wait_seconds` (capped at 120 on the server) it waits for
+        the answer, `answer` being None when none came."""
         return Record(
             self.client.post(self._branch(branch, "/ask"), _drop_none({"text": text, "wait_seconds": wait_seconds}))
         )
@@ -1928,6 +2186,7 @@ class Repo:
         return Message(self.client.post(self._branch(branch, "/report"), body))
 
     def escalate(self, branch: str, text: str) -> Message:
+        """Escalate `text` as `branch` to its parent, or further up if its rig seat allows."""
         return Message(self.client.post(self._branch(branch, "/escalate"), {"text": text}))
 
     def report_status(
@@ -1957,16 +2216,19 @@ class Repo:
     # -- plans -------------------------------------------------------------
 
     def plan(self, branch: str) -> Record:
+        """`branch`'s plan and its phase (`docs/plans-and-goals.md`)."""
         return Record(self.client.get(self._branch(branch, "/plan")))
 
     def approve_plan(
         self, branch: str, edited: Optional[str] = None, key: Optional[str] = None, **options: Any
     ) -> Operation:
+        """Approve `branch`'s plan, optionally replaced by `edited`; the branch then runs it. An `Operation`."""
         body: JSON = {"edited": edited}
         body.update(options)
         return self.client._operation(self._branch(branch, "/plan/approve"), body, key)
 
     def reject_plan(self, branch: str, reason: str, replan: bool = False, key: Optional[str] = None) -> Operation:
+        """Reject `branch`'s plan with `reason`; with `replan` the branch plans again. An `Operation`."""
         return self.client._operation(self._branch(branch, "/plan/reject"), {"reason": reason, "replan": replan}, key)
 
     # -- knowledge ---------------------------------------------------------
@@ -2003,6 +2265,7 @@ class Repo:
         return Record(self.client.post(self._knowledge(f"/{id}/adopt"), {}, key=new_key()))
 
     def reject_knowledge(self, id: int, reason: Optional[str] = None) -> Record:
+        """Reject a proposed knowledge entry, with `reason`."""
         return Record(self.client.post(self._knowledge(f"/{id}/reject"), _drop_none({"reason": reason}), key=new_key()))
 
     def edit_knowledge(
@@ -2048,6 +2311,7 @@ class Repo:
         )
 
     def deny(self, approval_id: str, reason: Optional[str] = None, surface: Optional[str] = None) -> Approval:
+        """Answer an approval no, as the caller (`run` scope)."""
         return Approval(
             self.client.post(
                 f"{self._base}/approvals/{_q(approval_id)}/deny", _drop_none({"reason": reason, "surface": surface})
@@ -2064,6 +2328,7 @@ class Repo:
         return Record(self.client.get(f"{self._base}/effects/{_q(effect_id)}"))
 
     def promote_effect(self, effect_id: str) -> Effect:
+        """Perform a staged effect now, as the caller; returns its ledger entry."""
         return Effect(self.client.post(f"{self._base}/effects/{_q(effect_id)}/promote", {}))
 
     def reconcile_effects(self) -> Record:
@@ -2093,17 +2358,35 @@ class Repo:
     # -- artifacts and scratch areas ---------------------------------------
 
     def publish_artifact(
-        self, branch: str, data: bytes, name: str, kind: Optional[str] = None, key: Optional[str] = None
+        self,
+        branch: str,
+        data: bytes,
+        name: str,
+        media_type: Optional[str] = None,
+        key: Optional[str] = None,
+        *,
+        labels: Optional[dict[str, str]] = None,
+        kind: Optional[str] = None,
     ) -> Record:
-        query = _drop_none({"name": name, "kind": kind})
+        """Publish `data` as a new immutable artifact of `branch` called `name`, with `media_type` (default
+        `application/octet-stream`) and `labels`. Its ancestors and descendants can read it; a sibling after
+        `share_artifact`. `kind` is the old name of `media_type`: the server never took a `kind`, so before this it was
+        dropped."""
+        query: dict[str, Any] = {
+            "name": name,
+            "media_type": media_type or kind,
+            "label": [f"{k}={v}" for k, v in (labels or {}).items()] or None,
+        }
         return Record(
             self.client.request("POST", self._branch(branch, "/artifacts"), data, key=key or new_key(), query=query)
         )
 
     def artifacts(self, branch: str) -> list[Record]:
+        """Every artifact `branch` may read."""
         return [Record(a) for a in self.client.get(self._branch(branch, "/artifacts")).get("artifacts", [])]
 
     def read_artifact(self, branch: str, artifact_id: str) -> tuple[Record, bytes]:
+        """An artifact's record and its content, `(ref, bytes)`."""
         ref = Record(self.client.get(self._branch(branch, f"/artifacts/{_q(artifact_id)}")))
         _, _, content = self.client.request(
             "GET", self._branch(branch, f"/artifacts/{_q(artifact_id)}/content"), raw=True
@@ -2111,15 +2394,19 @@ class Repo:
         return ref, content
 
     def share_artifact(self, branch: str, artifact_id: str, to: str) -> None:
+        """Share an artifact `branch` may read with branch `to`."""
         self.client.post(self._branch(branch, f"/artifacts/{_q(artifact_id)}/share"), {"to": to}, key=new_key())
 
     def create_scratch(self, branch: str, name: str) -> Record:
+        """Create scratch area `name`, owned by `branch` and visible to its ancestors and descendants."""
         return Record(self.client.post(self._branch(branch, "/scratch"), {"name": name}, key=new_key()))
 
     def scratch_areas(self, branch: str) -> list[Record]:
+        """Every scratch area `branch` may reach."""
         return [Record(a) for a in self.client.get(self._branch(branch, "/scratch")).get("areas", [])]
 
     def share_scratch(self, branch: str, name: str, to: str) -> None:
+        """Share `branch`'s scratch area `name` with branch `to`."""
         self.client.post(self._branch(branch, f"/scratch/{_q(name)}/share"), {"to": to}, key=new_key())
 
     def lock_scratch(self, branch: str, name: str, key: Optional[str] = None) -> Record:
@@ -2233,6 +2520,41 @@ def _budget(budget: Optional[JSON], budget_usd: Optional[float]) -> Optional[JSO
     return merged
 
 
+_ACCESS = {"read_only": "read_only", "ro": "read_only", "exclusive_write": "exclusive_write", "rw": "exclusive_write"}
+
+
+def _binding_list(bindings: Union[Sequence[JSON], dict[str, str], None]) -> list[JSON]:
+    """A spawn's scratch bindings as the server takes them, `{"scratch",
+    "access"}` each, from that list or from `branchyard.spawn`'s dict of
+    scratch area to access (`read_only`, `exclusive_write`, or `ro`, `rw`)."""
+    if isinstance(bindings, dict):
+        return [
+            {"scratch": str(name), "access": _ACCESS.get(str(access), str(access))} for name, access in bindings.items()
+        ]
+    return list(bindings or ())
+
+
+def _binding_map(bindings: Union[Sequence[JSON], dict[str, str], None]) -> Optional[dict[str, str]]:
+    """The same bindings as `branchyard.spawn` takes them, a dict from
+    scratch area to access; None when there are none."""
+    if isinstance(bindings, dict):
+        return dict(bindings) or None
+    return {str(b["scratch"]): str(b["access"]) for b in bindings or ()} or None
+
+
+def _reviewer(review: Union[str, JSON, None]) -> Optional[JSON]:
+    """A reviewer as the server takes it, from a harness ID or a dict of
+    `harness`, `model`, `rubric` and `budget_usd`: what `branchyard.spawn`
+    accepts, so one call means the same inside and outside."""
+    if review is None:
+        return None
+    if isinstance(review, str):
+        return {"harness": review}
+    if isinstance(review, dict) and "harness" in review and set(review) <= {"harness", "model", "rubric", "budget_usd"}:
+        return dict(review)
+    raise ValueError('review must be a harness ID or {"harness": ..., "model": ..., "rubric": ..., "budget_usd": ...}')
+
+
 def _provision(provision: Optional[JSON], connectors: Optional[Grants]) -> Optional[JSON]:
     if connectors is None:
         return provision
@@ -2318,6 +2640,7 @@ class EventStream:
                 self._drop()
 
     def close(self) -> None:
+        """Stop and close the connection; safe to call twice, and from `on_idle`."""
         self._closed = True
         self._drop()
 
@@ -2346,7 +2669,7 @@ class EventStream:
                 error.code, _json_or_text(content), {k.lower(): v for k, v in error.headers.items()}
             ) from None
         except (urllib.error.URLError, OSError, ssl.SSLError) as error:
-            raise TransportError(f"GET {url}: {error}") from None
+            raise TransportError(_unreachable(f"GET {url}: {error}", error)) from None
 
     def _entries(self) -> Iterator[FeedEntry]:
         event_name = ""
@@ -2445,9 +2768,11 @@ class Conversation:
         self.branch = branch
 
     def exists(self) -> bool:
+        """Whether the conversation's branch exists yet: it is made by the first message."""
         return self.repo.exists(self.branch)
 
     def inspect(self) -> Inspection:
+        """The conversation's branch as an `Inspection`: `turns`, `cost_usd`, `remaining_usd`, its grant."""
         return self.repo.inspect(self.branch)
 
     def history(self, limit: int = 50) -> list[JSON]:
@@ -2455,9 +2780,12 @@ class Conversation:
         return list(self.repo.event_page(self.branch, limit=limit).get("events") or ())
 
     def cancel(self) -> list[str]:
+        """Stop the turn running on the conversation's branch; the names cancelled."""
         return self.repo.cancel(self.branch)
 
     def steer(self, text: str) -> Steer:
+        """Join `text` to the running turn as steered input, without interrupting it (`say(busy="steer")` falls back
+        when that is refused)."""
         return self.repo.steer(self.branch, text)
 
     def say(
@@ -2537,15 +2865,23 @@ class Reply:
 
     @property
     def steered(self) -> bool:
+        """Whether the message was steered into a running turn instead of starting one."""
         return self.steer is not None
 
     def wait(self, timeout: Optional[float] = None) -> "Reply":
         """Block until the operation finishes (`Client.wait`'s long poll);
-        `OperationFailedError` when it failed, `TimeoutError` past
-        `timeout`. Then `text` is ready."""
+        `OperationFailedError` when it failed, `BranchFailedError` (a
+        subclass) when its turn ended with the branch `failed`,
+        `budget_exceeded` or `interrupted`, `TimeoutError` past `timeout`.
+        Then `text` is ready, also after either error: what the harness
+        said before it stopped."""
         if self.operation is None:
             raise ValueError("no operation to wait for: the message was steered into a turn without one")
-        self.operation = self.repo.client.wait(self.operation, timeout=timeout, check=True)
+        try:
+            self.operation = self.repo.client.wait(self.operation, timeout=timeout, check=True)
+        except OperationFailedError as error:
+            self.operation = error.operation
+            raise
         return self
 
     @property
@@ -2640,10 +2976,12 @@ class Waited(Record):
 
     @property
     def settled(self) -> list[Inspection]:
+        """The `Inspection` of each branch that settled."""
         return [Inspection(i) for i in self.get("settled") or ()]
 
     @property
     def pending(self) -> list[str]:
+        """The names of the branches still running."""
         return list(self.get("pending") or ())
 
 
@@ -2754,40 +3092,98 @@ class Delegator:
         base: Optional[str] = None,
         budget_usd: Optional[float] = None,
         max_turns: Optional[int] = None,
+        max_minutes: Optional[float] = None,
         check: Union[str, Sequence[str], None] = None,
+        max_depth: Optional[int] = None,
+        max_children: Optional[int] = None,
+        harnesses: Optional[Sequence[str]] = None,
+        deny: Optional[Sequence[str]] = None,
         seat: Optional[str] = None,
         depends_on: Optional[Sequence[str]] = None,
         after: Optional[str] = None,
+        bindings: Union[Sequence[JSON], dict[str, str], None] = None,
+        connectors: Optional[Grants] = None,
+        plan: bool = False,
         model: Optional[str] = None,
         result: Optional[JSON] = None,
         why: Optional[str] = None,
+        owns: Optional[Sequence[str]] = None,
+        land: bool = False,
+        review: Union[str, JSON, None] = None,
         **options: Any,
     ) -> BranchInfo:
-        """A child of this branch running `prompt`; its `BranchInfo`.
-        `check` is a command line or its argv. `options` go to the
-        backend's own spawn as they are (`branchyard.spawn`'s or
-        `Repo.spawn`'s), so they are not portable."""
-        common: JSON = {
-            "harness": harness,
-            "name": name,
-            "base": base,
-            "budget_usd": budget_usd,
-            "seat": seat,
-            "after": after,
-            "model": model,
-            "result": result,
-            "why": why,
-        }
+        """A child of this branch running `prompt`; its `BranchInfo`. The
+        arguments are `branchyard.spawn`'s, by name and in order, and mean
+        the same on both sides (`docs/sdk.md#one-api-inside-and-outside-a-harness`):
+        `check` is a command line or its argv, `max_minutes` the turn's
+        time limit, `connectors` grants in any form `Grant` takes,
+        `bindings` a dict from scratch area to `read_only` or
+        `exclusive_write`, and `review` a harness ID or `{"harness",
+        "model", "rubric", "budget_usd"}`. `options` go to the backend's
+        own spawn as they are (`Repo.spawn`'s over HTTP: `policy`,
+        `priority`, ...), so they are not portable."""
         if self.inside:
-            line = check if check is None or isinstance(check, str) else _shell_line(check)
-            needs = list(depends_on) if depends_on else None
             return BranchInfo(
-                self._by("spawn", prompt, max_turns=max_turns, check=line, depends_on=needs, **common, **options)
+                self._by(
+                    "spawn",
+                    prompt,
+                    harness=harness,
+                    name=name,
+                    base=base,
+                    budget_usd=budget_usd,
+                    max_turns=max_turns,
+                    max_minutes=max_minutes,
+                    check=check if check is None or isinstance(check, str) else _shell_line(check),
+                    max_depth=max_depth,
+                    max_children=max_children,
+                    harnesses=list(harnesses) if harnesses is not None else None,
+                    deny=list(deny) if deny is not None else None,
+                    seat=seat,
+                    depends_on=list(depends_on) if depends_on else None,
+                    after=after,
+                    bindings=_binding_map(bindings),
+                    connectors=[str(Grant.from_json(g)) for g in connectors] if connectors is not None else None,
+                    plan=plan,
+                    model=model,
+                    result=result,
+                    why=why,
+                    owns=list(owns) if owns is not None else None,
+                    land=land,
+                    review=review,
+                    **options,
+                )
             )
-        words = _shell_words(check) if isinstance(check, str) else check
-        budget = {"max_turns": max_turns} if max_turns is not None else None
+        budget: JSON = {}
+        if max_turns is not None:
+            budget["max_turns"] = max_turns
+        if max_minutes is not None:
+            budget["max_seconds"] = max_minutes * 60
         op = self._http().spawn(
-            self._acting("spawn"), prompt, budget=budget, check=words, depends_on=depends_on, **common, **options
+            self._acting("spawn"),
+            prompt,
+            harness=harness,
+            name=name,
+            base=base,
+            budget=budget or None,
+            budget_usd=budget_usd,
+            check=_shell_words(check) if isinstance(check, str) else check,
+            connectors=connectors,
+            max_depth=max_depth,
+            max_children=max_children,
+            deny=deny,
+            seat=seat,
+            depends_on=depends_on,
+            after=after,
+            bindings=bindings,
+            harnesses=harnesses,
+            plan=plan,
+            model=model,
+            result=result,
+            why=why,
+            owns=owns,
+            land=land,
+            review=review,
+            **options,
         )
         return self._done(op).result_branches[0]
 

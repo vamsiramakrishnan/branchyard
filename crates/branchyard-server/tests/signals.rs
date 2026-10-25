@@ -92,11 +92,30 @@ fn sigterm_and_sigint_stop_an_idle_server_at_once() {
              Authorization: Bearer {TOKEN}\r\n\r\n"
         )
         .unwrap();
-        wait::settle("the stream is established", Duration::from_millis(200));
+        // The stream is established once the server has answered with its
+        // headers; the signal goes after that, not after a guess.
+        let mut headers = BufReader::new(stream.try_clone().unwrap());
+        stream
+            .set_read_timeout(Some(wait::scaled(Duration::from_secs(30))))
+            .unwrap();
+        let mut status = String::new();
+        headers.read_line(&mut status).unwrap();
+        assert!(status.contains(" 200 "), "the stream: {status:?}");
+        loop {
+            let mut line = String::new();
+            headers.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+        }
         let (code, elapsed, stderr) = stop(&mut child, signal, Duration::from_secs(20));
         assert_eq!(code, Some(0), "SIG{signal}: {stderr}");
+        // Contract: an idle server does not wait out its grace period (60 s
+        // here). The bound is a sixth of it: room for the spawn of `kill` and
+        // a coverage-instrumented shutdown on a loaded runner, and still far
+        // under the 60 s a server that waited would take.
         assert!(
-            elapsed < Duration::from_secs(3),
+            elapsed < wait::scaled(Duration::from_secs(10)),
             "SIG{signal} took {elapsed:?}"
         );
     }
@@ -121,15 +140,34 @@ fn sigterm_stops_the_server_within_its_grace_period() {
     let mut slow = TcpStream::connect(addr).unwrap();
     slow.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n")
         .unwrap();
-    wait::settle("the slow request is read", Duration::from_millis(200));
+    // Connections are accepted in the order they arrive: a request that
+    // gets its answer on a later connection means the slow one was
+    // accepted before it and is being read.
+    let mut probe = TcpStream::connect(addr).unwrap();
+    probe
+        .set_read_timeout(Some(wait::scaled(Duration::from_secs(30))))
+        .unwrap();
+    probe
+        .write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut answer = String::new();
+    std::io::Read::read_to_string(&mut probe, &mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer:?}");
     let (code, elapsed, stderr) = stop(&mut child, "TERM", Duration::from_secs(30));
     assert_eq!(code, Some(0), "{stderr}");
+    // Contract: a running operation gets the whole grace period (2 s). The
+    // clock is the server's, so this bound is not scaled.
     assert!(
         elapsed >= Duration::from_millis(1900),
         "running operations get the grace period: {elapsed:?}"
     );
+    // Contract: the process is gone within the grace period plus the time
+    // to record the operation, not the grace period plus the ten seconds
+    // connections used to get first. The bound is the grace period plus a
+    // margin of 5 s (half of that regression's ten) for the spawn of `kill`
+    // and a slow, instrumented shutdown.
     assert!(
-        elapsed < Duration::from_millis(4500),
+        elapsed < wait::scaled(Duration::from_secs(7)),
         "SIGTERM took {elapsed:?}; the grace period is 2s"
     );
     drop(slow);

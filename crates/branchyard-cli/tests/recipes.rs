@@ -528,7 +528,10 @@ fn defaults_can_choose_a_recipe_and_a_changed_recipe_is_refused_again() {
     let worktree = repo.root.join(".branchyard/worktrees/by-default");
     let workdir =
         PathBuf::from(branchyard::RecipeOptions::default().workdir("by-default", &worktree));
+    // The default workdir of a recipe machine is /tmp/branchyard/<branch>-<hash of the worktree
+    // path>, a product contract; the "machine" is this host and the directory is removed below.
     assert!(
+        // hygiene-allow: tmp the product's default workdir, unique to this worktree
         workdir.starts_with("/tmp/branchyard") && workdir.join("d.txt").is_file(),
         "{}",
         workdir.display()

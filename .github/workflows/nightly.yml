@@ -1,0 +1,81 @@
+name: Nightly
+# What a push does not need but a night can afford. Two jobs, both on a stock
+# ubuntu-latest runner and both warm from the cache `check.yml` writes on
+# main (they read it and never write it). docs/ci-gates.md has the table.
+#
+#   ignored  every `#[ignore]` test a stock runner can run
+#   repeat   the timing-sensitive suites, five passes with the machine
+#            oversubscribed, so that a test that needs a quiet machine fails
+#            here, with its pass number, and not on someone's pull request
+#
+# A failing night is a flake or a regression; either way it is worth a look
+# before the next push, because nothing else runs these two things.
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  ignored:
+    # 29 tests carry `#[ignore]`. Counted by their reason:
+    #   15  the child process of a crash or recovery test: the parent runs it
+    #       with `--ignored --exact` and a variable naming its work; run bare
+    #       it returns at once, which is what this job checks (that it still
+    #       compiles and still does nothing without its parent)
+    #    7  need Linux with KVM and the `msb` 0.7.3 runtime
+    #       (crates/branchyard-microsandbox/tests/microsandbox.rs, behind the
+    #       `microsandbox` feature, so not built here). Skipped: a hosted
+    #       runner has no msb runtime to install from this repository, and
+    #       the unit tests of the provider run in `check.yml`
+    #    4  need an Agent Substrate cluster (crates/branchyard-substrate/
+    #       tests/cluster.rs; docs/testing-live.md). Skipped below by name
+    #    3  need node, python3 and a built Anvil (ANVIL_BIN)
+    #       (crates/branchyard-cli/tests/anvil_e2e.rs). Anvil is not on a
+    #       stock runner; each says why it skipped and passes. Run, so that
+    #       they keep compiling and keep skipping rather than failing
+    # `--tests` leaves out the doctests: a code block marked `ignore` in a doc
+    # comment is an example, not a test, and `--ignored` would try to compile
+    # it (the one in crates/branchyard/src/store_codec.rs does not).
+    # Nothing here needs a secret.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: workspace-tests
+          save-if: 'false'
+      - run: cargo fetch --locked
+      - run: cargo test --workspace --locked --offline --tests -- --ignored --skip cluster_ --skip create_bridge_template
+  repeat:
+    # The suites the flakes of October 2026 came from (ports freed and reused,
+    # settles used as waits, tight budgets), run five times with 16 test
+    # threads on a runner of 4 cores. Nothing is scaled: the point is the
+    # slow machine, not a patient test. Each pass is a group in the log.
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: workspace-tests
+          save-if: 'false'
+      - run: cargo fetch --locked
+      - name: Five passes, 16 threads
+        run: |
+          set -e
+          for pass in 1 2 3 4 5; do
+            echo "::group::pass $pass"
+            cargo test -p branchyard-bridge --test bridge --locked --offline -- --test-threads=16
+            cargo test -p branchyard-workspace --test workspace --locked --offline -- --test-threads=16
+            cargo test -p branchyard-server --test signals --test sync --test webhook --locked --offline -- --test-threads=16
+            cargo test -p branchyard-cli --test connectors --test devex --test cli --locked --offline -- --test-threads=16
+            cargo test -p branchyard --test engine --test engine_env --test claude_turns --locked --offline -- --test-threads=16
+            echo "::endgroup::"
+          done

@@ -83,15 +83,15 @@ class DocsFacts(Tree):
         self.assertIn(f"<!-- fact:vendor.files -->{count}<!-- /fact -->", validation)
 
     def test_a_hand_edited_fact_fails(self):
-        self.edit("README.md", "<!-- fact:vendor.files -->", "<!-- fact:vendor.files -->1")
+        self.edit("docs/status.md", "<!-- fact:vendor.files -->", "<!-- fact:vendor.files -->1")
         done = self.facts("--check")
         self.assertNotEqual(done.returncode, 0)
-        self.assertIn("README.md", done.stderr)
+        self.assertIn("docs/status.md", done.stderr)
         self.assertEqual(self.facts("--write").returncode, 0)
         self.assertEqual(self.facts("--check").returncode, 0)
 
     def test_an_unknown_region_fails(self):
-        self.edit("README.md", "<!-- fact:vendor.files -->", "<!-- fact:no.such.fact -->")
+        self.edit("docs/status.md", "<!-- fact:vendor.files -->", "<!-- fact:no.such.fact -->")
         done = self.facts("--check")
         self.assertNotEqual(done.returncode, 0)
         self.assertIn("unknown fact region", done.stderr)
@@ -129,6 +129,31 @@ class DocsFacts(Tree):
         self.edit("crates/branchyard-runtime/src/lib.rs", "[&str; 4]", "[&str; 5]")
         self.assertEqual(self.facts("--write").returncode, 0)
         self.assertIn("`GEMINI*`", (self.root / "docs" / "qualification" / "README.md").read_text())
+
+    def test_the_harness_table_follows_the_compatibility_page(self):
+        status = self.root / "docs" / "status.md"
+        before = status.read_text()
+        self.assertIn("| Gemini CLI | `gemini-cli-acp` (default) | partial | 8 of 9 pass,", before)
+        self.assertIn("| Aider | none | not built |", before)
+        self.assertIn("| OpenCode | `opencode-acp` (default) | unqualified | not run |", before)
+        self.edit(
+            "docs/compatibility.md",
+            "[8 of 9 pass](qualification/gemini-cli-acp.json)",
+            "[9 of 9 pass](qualification/gemini-cli-acp.json)",
+        )
+        done = self.facts("--check")
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("docs/status.md", done.stderr)
+        self.assertEqual(self.facts("--write").returncode, 0)
+        after = status.read_text()
+        self.assertIn("| Gemini CLI | `gemini-cli-acp` (default) | live-qualified | 9 of 9 pass,", after)
+        counts = re.search(
+            r"cover (\d+) of (\d+) harness targets: (\d+) live-qualified, (\d+) partial and (\d+) unqualified", after
+        )
+        self.assertIsNotNone(counts)
+        live, partial = int(counts.group(3)), int(counts.group(4))
+        self.assertEqual(live, int(re.search(r"(\d+) live-qualified", before).group(1)) + 1)
+        self.assertEqual(partial, int(re.search(r"(\d+) partial", before).group(1)) - 1)
 
     def test_the_test_count_is_not_called_what_cargo_runs(self):
         claim = re.compile(r"cargo test --workspace[^|\n]*?\bruns\b[^|\n]*fact:tests\.total")

@@ -1740,7 +1740,7 @@ fn handoff_brief(
     let events = record::read(store, name).unwrap_or_default();
     let last = delegation::last_message(&events);
     let mut brief = format!(
-        "{name} is being reincarnated: continue its work in a fresh session.\n\n\
+        "Continue {name}'s work in a fresh session.\n\n\
          ## Original task\n{}\n\n\
          ## Progress so far\n{} turn(s) completed with {}.\n\n\
          ## Latest candidate\n{} ({} file(s) changed, +{} -{})\n",
@@ -1773,6 +1773,9 @@ fn handoff_brief(
         }
         _ => {}
     }
-    brief.push_str("\nPick up from the candidate above and continue the task.");
+    brief.push_str(
+        "\nThe working tree is as the last turn left it; check it (`git status`, `git log`) \
+         before going on. Pick up from the candidate above and continue the task.",
+    );
     brief
 }

@@ -167,6 +167,24 @@ class SdkProjectTests(unittest.TestCase):
         modules = sorted(path.stem for path in package.SDK.glob("*.py"))
         self.assertEqual(sorted(self.project["tool"]["setuptools"]["py-modules"]), modules)
 
+    def test_it_has_a_readme_urls_and_classifiers_for_a_package_index(self):
+        project = self.project["project"]
+        self.assertEqual(project["readme"], "README.md")
+        readme = (package.SDK / "README.md").read_text()
+        # The README is read away from the checkout (an index shows it): its links are absolute.
+        self.assertNotRegex(readme, r"\]\((?!https?://|#)")
+        for needle in (
+            "pip install ./sdk/python",
+            "cargo install --locked --path crates/branchyard-cli",
+            "Client.local",
+        ):
+            self.assertIn(needle, readme)
+        self.assertEqual(sorted(project["urls"]), ["Documentation", "Homepage", "Issues", "Source"])
+        self.assertTrue(all(url.startswith("https://github.com/") for url in project["urls"].values()))
+        classifiers = project["classifiers"]
+        self.assertIn("Programming Language :: Python :: 3.9", classifiers)
+        self.assertNotIn("Typing :: Typed", classifiers, "a single-file module cannot carry py.typed")
+
     def test_setuptools_builds_it_from_the_extracted_archive(self):
         if importlib.util.find_spec("setuptools") is None:
             self.skipTest("setuptools is not installed; pip install ./sdk/python needs it, or network to fetch it")
@@ -202,6 +220,12 @@ class SdkProjectTests(unittest.TestCase):
             info = (unpacked / "PKG-INFO").read_text()
             self.assertIn(f"Version: {version}", info)
             self.assertIn("Requires-Python: >=3.9", info)
+            # The README is the long description, and the URLs and classifiers are metadata.
+            self.assertEqual((unpacked / "README.md").read_bytes(), (package.SDK / "README.md").read_bytes())
+            self.assertIn("Description-Content-Type: text/markdown", info)
+            self.assertIn("Project-URL: Documentation, https://github.com/", info)
+            self.assertIn("Classifier: Programming Language :: Python :: 3.9", info)
+            self.assertIn("# Branchyard for Python", info)
             # Both modules import from what was built, nothing from the checkout.
             code = f"import sys; sys.path.insert(0, {str(unpacked)!r}); import branchyard, branchyard_client"
             imported = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True)

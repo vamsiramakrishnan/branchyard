@@ -523,14 +523,13 @@ mod tests {
             let waiter = scope.spawn(|| wait_for_answer(&store, id, Duration::MAX));
             // The waiter is counted as waiting (its deadline is stored and
             // is far off) until the parent answers.
-            let started = std::time::Instant::now();
-            while !waiting_for_answer(&store, "kid") {
-                if waiter.is_finished() {
-                    // It failed before it waited: report why.
-                    return waiter.join().unwrap();
-                }
-                assert!(started.elapsed() < Duration::from_secs(30), "never waited");
-                std::thread::sleep(Duration::from_millis(10));
+            // Or it failed before it waited, and says why.
+            let waited = branchyard_testkit::wait::try_until_for(Duration::from_secs(30), || {
+                waiting_for_answer(&store, "kid") || waiter.is_finished()
+            });
+            assert!(waited.is_ok(), "never waited");
+            if !waiting_for_answer(&store, "kid") {
+                return waiter.join().unwrap();
             }
             let mut reply = message(0, MessageKind::Answer, "yes, rename it");
             (reply.from, reply.to, reply.in_reply_to) = ("parent".into(), "kid".into(), Some(id));

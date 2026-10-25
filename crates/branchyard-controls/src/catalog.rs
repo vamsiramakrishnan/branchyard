@@ -20,7 +20,7 @@
 //!   claude-model-pricing.ts`, `vendor/orca/src/main/codex-usage/
 //!   codex-model-pricing.ts`).
 //!
-//! Three harness entries are corrected after generation (`curated`, in the
+//! A few harness entries are corrected after generation (`curated`, in the
 //! tests that generate the file) where the CLIs themselves were checked and
 //! the upstream sources describe them differently or not at all.
 //!
@@ -293,6 +293,15 @@ pub(crate) mod tests {
                     "ZAI_API_KEY",
                 ]);
                 e.resume_flag = Some("--resume".into());
+            }
+            // Cursor CLI: its driver profile launches `agent` (`cursor-acp`
+            // runs `agent acp`), the name the Cursor CLI installs; Orca and
+            // emdash know only the older `cursor-agent`. Detection looks for
+            // both, so a machine with only `agent` has Cursor.
+            "cursor" => {
+                if !e.binaries.iter().any(|b| b == "agent") {
+                    e.binaries.push("agent".into());
+                }
             }
             _ => {}
         }

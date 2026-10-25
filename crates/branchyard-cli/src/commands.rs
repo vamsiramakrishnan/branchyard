@@ -80,6 +80,10 @@ pub enum Failure {
     Message(String),
     /// Already explained on stdout, such as a branch that failed; exit 1.
     Reported,
+    /// A step only the person can do remains, such as a login that needs a
+    /// terminal; exit 2. The text says what to run (empty when stdout
+    /// already did).
+    Manual(String),
 }
 
 impl fmt::Display for Failure {
@@ -90,6 +94,7 @@ impl fmt::Display for Failure {
             Failure::Io(error) => write!(f, "{error}"),
             Failure::Message(message) => f.write_str(message),
             Failure::Reported => Ok(()),
+            Failure::Manual(message) => f.write_str(message),
         }
     }
 }
@@ -394,8 +399,11 @@ pub(crate) fn run_in(
 ) -> Outcome {
     let yard = yard.clone();
     if !crate::fleet_cmd::is_routed(task) {
-        // A login near its 5-hour or weekly limit (docs/usage.md).
         let harness = task.harness.clone().unwrap_or_else(|| "claude-code".into());
+        // Installed and not logged out, before a branch exists (preflight.rs).
+        let by_default = task.harness.is_none();
+        crate::preflight::check(env, task, std::slice::from_ref(&harness), by_default)?;
+        // A login near its 5-hour or weekly limit (docs/usage.md).
         crate::usage::guard(&[harness])?;
     }
     let (prompt, task, issue) = crate::pr::issue_task(prompt, task, Some(&yard))?;
@@ -475,6 +483,7 @@ pub fn fan(
     }
     let yard = open()?;
     if !routed {
+        crate::preflight::check(env, task, harnesses, false)?;
         // Logins near their 5-hour or weekly limits (docs/usage.md).
         crate::usage::guard(harnesses)?;
     }
@@ -643,6 +652,14 @@ pub fn send(
         }
     };
     let branch = open()?.branch(branch)?;
+    // The branch keeps its harness; check that one still starts (preflight.rs),
+    // unless it runs a command of its own or somewhere else.
+    if matches!(branch.provider()?, None | Some(Provider::Local)) && branch.command()?.is_none() {
+        let profile = branch.info().profile.clone();
+        if let Err(failure) = crate::preflight::check(env, task, &[profile], false) {
+            return crate::preflight::refused(json, failure);
+        }
+    }
     if json {
         let live = Live::start_to(env, task, true, true, branch.provider()?);
         let options = live.options(task)?;
@@ -2873,7 +2890,8 @@ fn remote_scratch(server: &remote::Remote, args: &ScratchArgs) -> Outcome {
 
 pub fn harnesses(env: &Env, target: &Target, as_json: bool) -> Outcome {
     let harnesses = match target {
-        Target::Local => open()?.harnesses(),
+        // The table is static: no repository needed.
+        Target::Local => branchyard::harnesses(),
         Target::Remote(remote) => remote.client.harnesses()?,
     };
     if as_json {

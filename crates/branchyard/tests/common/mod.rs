@@ -48,13 +48,15 @@ pub struct Fixture {
 impl Fixture {
     pub fn new() -> Fixture {
         HERMETIC.call_once(|| {
-            // Keep the host's git configuration out, and set a nested-session
-            // marker and a Branchyard variable the engine must strip.
+            // Keep the host's git configuration out, set a nested-session
+            // marker the engine must strip and a variable it must pass on.
+            // Nothing that changes where the engine itself talks to is set
+            // here (a `BRANCHYARD_REMOTE`, say): that would reach every test
+            // in the binary. `engine_env.rs` sets its own.
             std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
             std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
             std::env::set_var("CLAUDECODE", "1");
             std::env::set_var("BY_TEST_VISIBLE", "yes");
-            std::env::set_var("BRANCHYARD_REMOTE", "http://127.0.0.1:9");
         });
         // Build the agent before any test body runs. The first build can
         // recompile dependencies (a single-package build unifies features

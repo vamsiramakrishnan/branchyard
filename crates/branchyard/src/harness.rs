@@ -80,6 +80,33 @@ pub(crate) fn select(id: Option<&str>) -> Result<&'static Profile, Error> {
         .ok_or_else(|| Error::UnknownHarness(id.to_owned()))
 }
 
+/// What `--harness NAME` was refused for, when no profile answers to `NAME`.
+/// A harness the catalog knows but no profile drives (`droid`, `kiro`) is
+/// not "no harness named": it says so, why when there is a recorded reason,
+/// and what can be driven.
+pub(crate) fn unknown_message(name: &str) -> String {
+    let mut drivable: Vec<&str> = Vec::new();
+    for profile in PROFILES {
+        if !drivable.contains(&profile.harness) {
+            drivable.push(profile.harness);
+        }
+    }
+    let drivable = drivable.join(", ");
+    if branchyard_controls::catalog::harness(name).is_none() {
+        return format!(
+            "no harness or profile named {name}; drivable: {drivable} (by harnesses --profiles \
+             lists the profiles)"
+        );
+    }
+    let why = profiles::NOT_IMPLEMENTED
+        .iter()
+        .find(|(id, _)| *id == name)
+        .map_or("it has no driver profile".to_owned(), |(_, why)| {
+            (*why).to_owned()
+        });
+    format!("{name} is known to Branchyard but not drivable ({why}); drivable: {drivable}")
+}
+
 /// The command to launch: the override, else the profile's own.
 pub(crate) fn command(profile: &Profile, over: Option<&[String]>) -> Vec<String> {
     match over {
@@ -261,6 +288,27 @@ mod tests {
             select(Some("nope")),
             Err(Error::UnknownHarness(id)) if id == "nope"
         ));
+    }
+
+    #[test]
+    fn a_harness_the_catalog_knows_but_no_profile_drives_is_not_called_unknown() {
+        let droid = Error::UnknownHarness("droid".into()).to_string();
+        assert!(
+            droid.starts_with("droid is known to Branchyard but not drivable"),
+            "{droid}"
+        );
+        assert!(droid.contains("drivable: claude-code, codex, "), "{droid}");
+        // A recorded reason is quoted.
+        let aider = Error::UnknownHarness("aider".into()).to_string();
+        assert!(aider.contains("batch process"), "{aider}");
+        // A name the catalog does not have is still "no harness named".
+        let nope = Error::UnknownHarness("nope".into()).to_string();
+        assert!(
+            nope.starts_with("no harness or profile named nope; drivable: claude-code, "),
+            "{nope}"
+        );
+        // Each harness is listed once, though it has two profiles.
+        assert_eq!(nope.matches("claude-code").count(), 1, "{nope}");
     }
 
     #[test]

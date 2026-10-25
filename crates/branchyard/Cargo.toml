@@ -6,6 +6,13 @@ license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 description = "Delegate coding work to agent harnesses on git branches, and merge only validated results"
+readme = "README.md"
+repository = "https://github.com/vamsiramakrishnan/branchyard"
+
+# What docs.rs builds once the crate is published (it is not: the workspace sets
+# `publish = false`). `microsandbox` stays out because it links libcap-ng.
+[package.metadata.docs.rs]
+features = ["postgres", "schema"]
 
 [lints]
 workspace = true

@@ -15,7 +15,7 @@ by harnesses update codex --version 0.200.0 --yes
 by harnesses login codex                       # its own login flow, once
 printf %s "$KEY" | by harnesses login claude-code --api-key
 by harnesses log                               # every install, update and login here
-by harnesses --profiles                        # the profiles Branchyard drives
+by harnesses --profiles                        # the profiles Branchyard drives (no repository needed)
 by harnesses --all                             # every CLI in the catalog
 ```
 
@@ -53,7 +53,7 @@ Detection is one POSIX `sh` script, generated from the [harness catalog](../cata
 3. **Reads its login without reading a secret.** See below.
 4. **Looks for install programs**, for [installing](#installing-and-updating).
 
-Only names, paths, versions and the first lines of a status command's output come back. A key variable is tested with `[ -n "${NAME:-}" ]` and a credential file with `[ -e ]`; neither is read. Three harnesses also have a configuration file searched for one setting (`grep -q`, below); nothing in the file is printed.
+Only names, paths, versions and the first lines of a status command's output come back; the login detail shows the last of them, since a CLI may print a warning before its answer (Codex names its home directory). A key variable is tested with `[ -n "${NAME:-}" ]` and a credential file with `[ -e ]`; neither is read. Three harnesses also have a configuration file searched for one setting (`grep -q`, below); nothing in the file is printed.
 
 ### Login states
 
@@ -125,7 +125,7 @@ by up                                     # installs every harness the configura
 
 **Verification.** After the command, detection runs again for that harness. The install is verified when the command exited 0, the harness is found, and its version is the pinned one when pinned. Otherwise `by` fails and shows the end of the output.
 
-**Policy.** `[harnesses]` in your user configuration:
+**Policy.** `[harnesses]` in your user configuration (`~/.config/branchyard/config.toml`, or `BRANCHYARD_USER_CONFIG`):
 
 ```toml
 [harnesses]
@@ -139,6 +139,8 @@ allow = ["codex", "claude-code"]   # when set, only these
 | `ask` | Asks on a terminal; `--yes` answers in advance | Never installs |
 | `auto` | Runs | Installs a missing candidate on demand |
 | unset | `ask` on a terminal, `never` without one (a script, a server, a worker) | Never installs |
+
+A refused install names the file and the key: without a terminal and with nothing set, `not running ...: [harnesses] install is "never" here`, then `put this in <your user file>: [harnesses] install = "ask"`, and `by harnesses install ID --yes` to run it. An `allow` list that leaves the harness out says to add it there.
 
 **Trust.** Installing runs software on your machine, so only your user file can allow it. A repository's `branchyard.toml` may set `install = "never"`; `install = "ask"`, `"auto"` or `allow` there is a configuration error, as `by config validate` reports. Install commands come only from the catalog built into `by`, never from a repository. A harness running on a branch (`BRANCHYARD_BRANCH` set) can never install or log in.
 
@@ -158,11 +160,22 @@ Without a terminal (a script, or `--remote`, since a worker has none) nothing ru
 
 **Antigravity with a key.** With `GEMINI_API_KEY` set, `by harnesses login antigravity` has nothing to sign in to; `agy` needs `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json` to read the key. `by` merges that one key into the file (the rest of it kept, with its key order and indentation; the file is rewritten as plain JSON, so comments in it would be refused), shows the change as a diff, and writes it after you answer yes on a terminal or with `--yes`. Without a terminal and without `--yes` it shows the diff and writes nothing. A different provider already chosen (`"modelProvider": "vertex"`) is never replaced: `by` says so and leaves the file. The write is recorded in the harness log as `wrote_settings`. With the setting already there it says so and does nothing.
 
+**Exit codes.** `login` says whether it logged in.
+
+| Exit | `--json` `status` | When |
+|---|---|---|
+| 0 | `done` | The harness's own flow ran and exited 0; the state afterwards is `login` in the JSON |
+| 0 | `stored` | `--api-key` stored a key |
+| 2 | `manual` | Nothing ran: there is no terminal, the machine is a recipe's, a worker needs a login, or the catalog records no login command (it names `--api-key` or where to look). The message (stderr; with `--json`, `run` or `workers` in the JSON) says what to run and where |
+| 1 | `failed` | The flow ran and exited non-zero. `by` also exits 1, with a message and no `status`, when it cannot start one: the harness is not installed here |
+
+So `by harnesses login codex && by run ...` goes on only after a login that happened. The log records a `manual` outcome the same way.
+
 **An API key.** `--api-key` reads a key from standard input (hidden on a terminal) for the harness's first key variable, writes it to `secrets/<VARIABLE>` beside your user configuration (directory 0700, file 0600), and names it in your user file's `[secrets]` (`ANTHROPIC_API_KEY = "@…/secrets/ANTHROPIC_API_KEY"`). That is the existing secrets path: branches with a private home (`--isolated`, a sandbox) are given it ([setup](setup.md)). The key is never printed, never on a command line, never in the log, and refused when the file would land inside the repository. A harness you run directly reads its own environment, so export the variable from that file yourself.
 
 ## The log
 
-Every install, update and login attempt is a line in `harness-events.jsonl` beside your user configuration (0600): when, the machine (`local`, `ssh://host`), the harness, the action, who asked (`by harnesses` or `router`), the command, the outcome (`verified`, `failed`, `refused`, `ran`, `reported`, `stored_key`), the versions before and after, and why. `by harnesses log [--json]` prints it.
+Every install, update and login attempt is a line in `harness-events.jsonl` beside your user configuration (0600): when, the machine (`local`, `ssh://host`), the harness, the action, who asked (`by harnesses` or `router`), the command, the outcome (`verified`, `failed`, `refused`, `ran`, `manual`, `stored_key`; older lines say `reported` for what is now `manual`), the versions before and after, and why. `by harnesses log [--json]` prints it.
 
 ## Workers
 
@@ -171,6 +184,20 @@ Every install, update and login attempt is a line in `harness-events.jsonl` besi
 **Steering.** A task that runs harnesses by name (no `command` of its own or from `harness_commands`, and no sandbox provider) gets `harness:<id>` added to its required labels when some live worker serving the repository advertises an inventory in which all of them can run. When none does, nothing is added: work is steered toward a worker that has its harnesses, never held back because no worker advertises them. `by --remote ... run --harness codex` therefore lands on a worker that has Codex logged in.
 
 `"inventory": false` in the server configuration, or `--no-inventory`, turns detection and advertising off. A server that triggers routed tasks ([triggers](triggers.md)) consults the live workers' inventories the same way.
+
+## Before a run
+
+`by run`, `by fan` and `by send` look at the harness before they create a branch, so a harness that cannot start fails with the command to run, not after a branch exists and a 401 has been retried for half a minute. They ask the inventory `by harnesses` shows: this machine's cached one when it is a minute old or less, else a detection of just the harnesses named.
+
+| The inventory says | `by run --harness ID` |
+|---|---|
+| not installed | Refuses with `Next: by harnesses install ID` (`--yes` too, where `install = "ask"` and there is no terminal), or the catalog's own command when the install policy would refuse it, with the file and key that would allow it |
+| found, not on `PATH` | Refuses, with the directory to add |
+| logged out, verified (the harness's own status command said so) | Refuses, with the login hint; `--no-preflight` runs anyway |
+| logged out, likely (credential files and key variables, a guess) | One note on stderr, and goes on |
+| logged in, or unknown | Goes on, silently |
+
+A harness the catalog knows but nothing drives (`droid`, `kiro`) is not "no harness named": `by` says it is known but not drivable, and lists what is. `by send` checks the harness the branch already has. Nothing is checked, and `--no-preflight` is not needed, with `--command` (the executable is yours; a branch started with one keeps it for its later sends), a routed run (below: the router asks the same inventory), `--provider` of a sandbox or a recipe (the image provides the harness), or inside a harness's own branch. The check is for the default harness too, and then says that `by run` uses `claude-code` unless `--harness` or `[defaults] harness` says otherwise. `--no-preflight` is for a login Branchyard cannot see, such as Codex with a model provider of its own; `--yes` is not used for this, since it answers tool permission requests.
 
 ## The router
 
@@ -187,6 +214,7 @@ With no `[fleet]` configured, `--auto` routes among the harnesses this inventory
 
 ## Not done yet
 
+- The check before a run covers `by run`, `by fan` and `by send` here; `by fork`, `by map` and `by reincarnate` do not make it, and `--remote` is the server's.
 - A delegated child, graph node or rig seat that names its harness is not checked against the inventory before it starts here; on a server, only tasks (one branch or a fan) are steered, not sends, forks, spawns or graph nodes.
 - Workers never install on demand, whatever their configuration; install on a worker's machine with `--on ssh://` or in its image.
 - Detection inside a sandbox image (Microsandbox, Substrate) is not wired: `--on` takes ssh and recipes only.
@@ -209,7 +237,7 @@ With no `[fleet]` configured, `--auto` routes among the harnesses this inventory
 - `crates/branchyard/tests/inventory.rs`: detection on a temporary `PATH` of fake harnesses: versions read, Antigravity's key counting only with `modelProvider` gemini in a fake home's settings, DeepSeek Harness's provider read from `cordis.patch.yml` (either file, `DSH_HOME`, an `apiKeyEnv` variable, a comment ignored), Gemini CLI's trusted-workspace note, a status command saying logged out (verified), a key variable seen by name (its value in no output), unknown logins, a missing harness, a version command that hangs killed by the timeout, each command run once; `only`; the cache's key and TTL; an install through a fake `npm`, pinned, verified by detecting again, and a pin not delivered or a failing command not verified; the log; the router excluding a logged-out and a missing candidate with reasons, a candidate with a command left to the `PATH` check, the allowlist; a gate installing on demand under `auto` and recording it, a preview that runs nothing, `ask` never installing.
 - Probing, this round: unit tests for the timeout note and its bound, the script's concurrency and read-back order, the versions kept from the last answer, the login words, `claude auth status`, the one login hint and the live-run levels (`crates/branchyard/src/inventory.rs`); `crates/branchyard-cli/tests/harnesses.rs` runs fake harnesses that each wait for a peer to start (printing `-alone` when asked one after the other), one that takes four seconds to print a version under the default bound, one that answered and then hangs, and Antigravity's settings merge (shown without `--yes` and not written, written with it with the rest of the file kept, already set, a different provider refused, no file). Measured here with the real CLIs, no model calls, page cache dropped before each run: `by harnesses` took 42.7 seconds and showed `?` for six of nine versions with the 5-second bound and the harnesses asked in turn, and 4.4 seconds with every version with the 10-second bound and all asked at once; a second call took 0.08 seconds.
 - `crates/branchyard-server`: the store conformance (`check_labels`, on SQLite and, in `tests/postgres.rs`, PostgreSQL) for a beat carrying an inventory, derived labels, steering and `WorkersGate`; an older SQLite `workers` table migrated; `tests/inventory.rs` over HTTP: work requiring `harness:codex` waiting and saying why, then claimed by a worker whose inventory has Codex with no label configured, `GET /v1/inventory`, a task naming Codex steered and one naming a harness no worker has not held back; on PostgreSQL, two servers on one database, the second a worker with Codex.
-- `crates/branchyard-cli/tests/harnesses.rs`, with the built `by`: the table and JSON (verified, likely, unknown, a timeout, off `PATH`), the cache and `--refresh`, `--on ssh://` and `--on recipe:` through `fake-ssh` (the recipe's machine destroyed after, an untrusted recipe refused), installs under `never`, `ask`, `--yes`, `auto` and an allowlist, a repository trying to allow installs refused, a pin and a failed verification, the log; install and login over ssh (`ssh -t`); a login through a pty (the device code passed through, verified after), without a terminal (reported), an API key stored 0600 and named in `[secrets]`; the router excluding a logged-out and a missing candidate, previewing, and installing one on demand before running it on the fake ACP agent; `by serve` advertising its inventory to `by harnesses --remote`, login reported for a worker, install refused.
+- `crates/branchyard-cli/tests/harnesses.rs`, with the built `by`: the table and JSON (verified, likely, unknown, a timeout, off `PATH`), the cache and `--refresh`, `--on ssh://` and `--on recipe:` through `fake-ssh` (the recipe's machine destroyed after, an untrusted recipe refused), installs under `never`, `ask`, `--yes`, `auto` and an allowlist, a repository trying to allow installs refused, a pin and a failed verification, the log; install and login over ssh (`ssh -t`); a login through a pty (the device code passed through, verified after; `--json` `done`), without a terminal (exit 2, `manual`), an API key stored 0600 and named in `[secrets]` (`--json` `stored`); `by run`, `by fan` and `by send` refused before a branch for a verified logged-out and a missing harness, noting a guess, skipping the check for `--command` and `--no-preflight`; `by harnesses --profiles` outside a repository; a refused install naming the file and key; the router excluding a logged-out and a missing candidate, previewing, and installing one on demand before running it on the fake ACP agent; `by serve` advertising its inventory to `by harnesses --remote`, login reported for a worker, install refused.
 
 **Not tested:** a real harness installed, updated or logged in to; a real `npm`, `curl` installer or Homebrew; a real `sshd`; macOS's keychain case; quota on a real login; a trigger's routed task consulting the workers' inventories (`WorkersGate` is tested in the store conformance, not through a firing trigger). The status phrases are emdash's; only `codex login status` printing `Logged in using ChatGPT` was observed, on Codex 0.157.1. The Antigravity, DeepSeek Harness and Gemini CLI paths above are tested against fake binaries and configuration files, not by signing in to the real CLIs.
 

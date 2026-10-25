@@ -155,6 +155,9 @@ pub struct TaskArgs {
     pub goal_judge: Option<String>,
     /// `--goal-judge-command`: launch the goal judge with this.
     pub goal_judge_command: Option<Vec<String>>,
+    /// `--no-preflight`: do not check, before the branch is created, that
+    /// the harness is installed and not logged out; see `crate::preflight`.
+    pub no_preflight: bool,
 }
 
 const PLAN_EXAMPLES: &str = "\
@@ -1037,7 +1040,11 @@ is asked its version at once, ten seconds at most (BRANCHYARD_HARNESS_TIMEOUT se
 the seconds); one that is slower is slow to start, not unknown. Installs run only
 as [harnesses] install allows (ask on a terminal, never elsewhere, unless your user
 file says otherwise) and are logged. --all reads catalog/harnesses.toml, generated
-from emdash's and Orca's agent registries. See docs/harness-lifecycle.md.";
+from emdash's and Orca's agent registries. See docs/harness-lifecycle.md.
+
+login exits 0 when the login ran or a key was stored, 2 when it only printed
+what you must run (no terminal here), and 1 when it failed; --json adds
+\"status\": done, stored, manual or failed.";
 
 const USAGE_EXAMPLES: &str = "\
 Examples:
@@ -3293,6 +3300,23 @@ impl Perms {
     }
 }
 
+/// `--no-preflight`, for the commands that start a harness turn in this
+/// repository (`run`, `fan`, `send`).
+#[derive(Args, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[command(next_help_heading = "Launch")]
+pub struct Preflight {
+    /// Skip the check, before any branch is created, that the harness is installed and not
+    /// verified logged out (it is not made for --command or a routed run)
+    #[arg(long)]
+    no_preflight: bool,
+}
+
+impl Preflight {
+    fn apply(self, task: &mut TaskArgs) {
+        task.no_preflight = self.no_preflight;
+    }
+}
+
 /// Where and how the harness is launched.
 #[derive(Args, Clone, Debug, Default, PartialEq)]
 #[command(next_help_heading = "Launch")]
@@ -3861,6 +3885,8 @@ pub struct RunFlags {
     #[command(flatten)]
     launch: Launch,
     #[command(flatten)]
+    preflight: Preflight,
+    #[command(flatten)]
     delegation: Delegation,
     #[command(flatten)]
     provision: Provision,
@@ -3889,6 +3915,7 @@ impl Flags for RunFlags {
         self.perms.apply(&mut task);
         task.deny = self.deny.into_iter().flat_map(|list| list.0).collect();
         self.launch.apply(&mut task)?;
+        self.preflight.apply(&mut task);
         self.delegation.apply(&mut task);
         self.provision.apply(&mut task)?;
         self.plan_goal.apply(&mut task);
@@ -3980,6 +4007,8 @@ pub struct FanFlags {
     #[command(flatten)]
     launch: Launch,
     #[command(flatten)]
+    preflight: Preflight,
+    #[command(flatten)]
     delegation: Delegation,
     #[command(flatten)]
     provision: Provision,
@@ -4000,6 +4029,7 @@ impl Flags for FanFlags {
             limits: self.limits,
             perms: self.perms,
             launch: self.launch,
+            preflight: self.preflight,
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: self.plan_goal,
@@ -4253,6 +4283,7 @@ impl Flags for MapFlags {
             limits: self.limits,
             perms: self.perms,
             launch: self.launch,
+            preflight: Preflight::default(),
             delegation: Delegation::default(),
             provision: self.provision,
             plan_goal: PlanGoal::default(),
@@ -4273,6 +4304,8 @@ pub struct SendFlags {
     /// Launch this instead of the profile's executable, for development and testing
     #[arg(long, value_name = "CMD", value_parser = command_argv, help_heading = "Launch")]
     command: Option<Argv>,
+    #[command(flatten)]
+    preflight: Preflight,
     #[command(flatten)]
     delegation: Delegation,
     #[command(flatten)]
@@ -4302,6 +4335,7 @@ impl Flags for SendFlags {
         };
         self.limits.apply(&mut task);
         self.perms.apply(&mut task);
+        self.preflight.apply(&mut task);
         self.delegation.apply(&mut task);
         self.provision.apply(&mut task)?;
         Ok(task)
@@ -4339,6 +4373,7 @@ impl Flags for ForkFlags {
             limits: self.limits,
             perms: self.perms,
             launch: self.launch,
+            preflight: Preflight::default(),
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: PlanGoal::default(),
@@ -4382,6 +4417,7 @@ impl Flags for ReincarnateFlags {
             limits: self.limits,
             perms: self.perms,
             launch: self.launch,
+            preflight: Preflight::default(),
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: PlanGoal::default(),
@@ -5149,6 +5185,25 @@ mod tests {
         command().debug_assert();
     }
 
+    /// `--no-preflight` skips the check made before a harness starts, on the
+    /// commands that make it (`crate::preflight`) and on no other.
+    #[test]
+    fn no_preflight_is_a_flag_of_the_commands_that_check_the_harness() {
+        for line in ["run go", "fan go --harness a,b", "send b go"] {
+            assert!(!task(line).no_preflight, "{line}");
+            assert!(
+                task(&format!("{line} --no-preflight")).no_preflight,
+                "{line}"
+            );
+        }
+        for line in ["fork b go", "map go", "reincarnate b"] {
+            assert_eq!(
+                kind(&format!("{line} --no-preflight")),
+                ErrorKind::UnknownArgument
+            );
+        }
+    }
+
     #[test]
     fn map_runs_a_prompt_or_takes_an_action() {
         let Command::Map {
@@ -5257,6 +5312,7 @@ mod tests {
                 goal_rounds: None,
                 goal_judge: None,
                 goal_judge_command: None,
+                no_preflight: false,
             }
         );
     }

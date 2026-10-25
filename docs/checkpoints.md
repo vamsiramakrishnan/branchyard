@@ -1,6 +1,6 @@
 # Checkpoints, rewind, try and compare
 
-Every turn leaves a checkpoint. A branch can be forked from any of them, or rewound to one and forward again. A branch's changes can be tried in the repository's own checkout and taken back out exactly. Several attempts at one task can be put side by side, and one of them merged. These answer items 5 and 6 of the [developer experience plan](devex.md#plan): §3 (compare), §6 (undo one step) and §7 (try in the running app).
+Every turn leaves a checkpoint. A branch can be forked from any of them, or rewound to one and forward again. A branch's changes can be tried in the repository's own checkout and taken back out exactly. Several attempts at one task can be put side by side, and one of them merged. These answer items 5 and 6 of the [developer experience plan](competitive-notes.md#plan): §3 (compare), §6 (undo one step) and §7 (try in the running app).
 
 > **Status.** Implemented in local mode. Tested hermetically against the fake ACP agent, including real crashes (a child process aborted between an intent and its effect) for rewind and try. `by compare` also works with `by --remote`; checkpoints are listed remotely from the event log. Rewind and `fork --at` work with `by --remote` too, through `POST …/rewind` and `POST …/fork` with `at`. `compare --diff`, `compare --check` and `try` are local only for now (see [what is not done](#not-done-yet)). Not yet run with a real harness.
 
@@ -104,7 +104,7 @@ The check column is `none` for a branch without a check, `passed` for one merged
 
 ## For `by watch`
 
-`by watch` binds three keys to these commands ([README](../README.md#watching-branches) has the whole key table):
+`by watch` binds three keys to these commands ([watching branches](watch.md) has the whole key table):
 
 - `r` opens a box under the selected branch's checkpoint list (`by show`'s, with `*` where the branch is); a turn number and Enter ask *Reset … to checkpoint N?*, and a yes runs `by rewind <branch> --to N --yes`, waited for, with its output (how the next turn continues) in a pane.
 - `c` shows `by compare`'s table for the selected branch and its siblings in a pane: the rest of its `by fan` (top-level branches named `<name>-<harness>` with one prompt), or its parent's other children. It works remotely, from the server's records, events and diffs.

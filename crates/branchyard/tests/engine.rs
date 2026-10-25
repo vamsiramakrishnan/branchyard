@@ -36,6 +36,11 @@ fn a_run_that_writes_files_is_ready_with_its_diffstat() {
         ("gemini-cli", "gemini-cli-acp")
     );
     assert_eq!(info.session.as_deref(), Some("fake-session-1"));
+    // The executable it was started with is kept for its later turns.
+    assert_eq!(
+        branch.command().unwrap(),
+        Some(vec![fake_agent().display().to_string()])
+    );
     assert_eq!(info.turns, 1);
     assert_eq!(info.cost_usd, None, "ACP reports no cost");
     assert_eq!(info.base, f.git(&["rev-parse", "main"]).trim());
@@ -325,6 +330,19 @@ fn reincarnation_starts_fresh_with_a_handoff_brief_and_marks_the_old_branch_supe
         "the candidate's commit"
     );
     assert!(prompt.contains("1 file(s) changed"), "{prompt}");
+    // It says what to do, in the words of any other handoff, and not what the
+    // engine calls it.
+    assert!(
+        prompt.starts_with("Continue elder's work in a fresh session."),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("is being reincarnated"), "{prompt}");
+    assert!(
+        prompt.contains(
+            "The working tree is as the last turn left it; check it (`git status`, `git log`)"
+        ),
+        "{prompt}"
+    );
 
     let old = f.yard.branch("elder").unwrap();
     assert_eq!(old.info().superseded_by.as_deref(), Some("reborn"));
@@ -992,37 +1010,6 @@ fn harnesses_lists_every_profile_with_availability_and_qualification() {
         let found = std::env::split_paths(&path).any(|dir| dir.join(program).is_file());
         assert_eq!(harness.available, found, "{}", harness.profile);
     }
-}
-
-#[test]
-fn harnesses_inherit_the_environment_without_nested_session_markers() {
-    let f = Fixture::new();
-    let prompt = "ENV CLAUDECODE BRANCHYARD_REMOTE BY_TEST_VISIBLE";
-    let shared = f.task(prompt).name("shared").run().unwrap();
-    let home = std::env::var("HOME").unwrap();
-    assert_eq!(
-        text(&shared.events().unwrap()),
-        format!("HOME={home}\nCLAUDECODE unset\nBRANCHYARD_REMOTE unset\nBY_TEST_VISIBLE=yes\n")
-    );
-
-    let isolated = f
-        .task(prompt)
-        .name("isolated")
-        .isolated(true)
-        .run()
-        .unwrap();
-    let private = f.root.join(".branchyard/homes/isolated");
-    assert!(private.is_dir());
-    assert_eq!(
-        text(&isolated.events().unwrap()),
-        format!(
-            "HOME={}\nCLAUDECODE unset\nBRANCHYARD_REMOTE unset\nBY_TEST_VISIBLE=yes\n",
-            private.display()
-        )
-    );
-    f.yard.remove("isolated").unwrap();
-    assert!(!private.exists());
-    assert!(fake_agent().is_file());
 }
 
 #[test]

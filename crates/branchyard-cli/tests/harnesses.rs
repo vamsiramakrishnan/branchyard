@@ -202,6 +202,29 @@ impl World {
         path
     }
 
+    /// A fake `gemini` that prints a version and otherwise speaks ACP, as
+    /// the fake agent: a harness that is installed, with no login file.
+    fn fake_gemini(&self) {
+        let agent = fake_agent!().display().to_string();
+        self.script(
+            "gemini",
+            &format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 0.65.0; exit 0; fi\nexec {agent}\n"),
+        );
+    }
+
+    /// The names of the branches here.
+    fn branches(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .json(&["ls", "--json"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["name"].as_str().unwrap().to_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// A fake `npm` whose `install -g PACKAGE[@VERSION]` records the call
     /// and installs a fake harness for the package into
     /// `$HOME/.local/bin`; version `9.9.9` is "installed" without changing
@@ -584,6 +607,15 @@ fn installs_follow_the_policy_and_are_verified_and_logged() {
         never.contains("[harnesses] install is \"never\" here"),
         "{never}"
     );
+    // It names the file to edit and the key to set, and what to run after.
+    assert!(
+        never.contains(&format!(
+            "put this in {}:\n  [harnesses]\n  install = \"ask\"\nThen run `by harnesses install \
+             codex --yes`",
+            w.user.display()
+        )),
+        "{never}"
+    );
     assert!(w.calls("npm ").is_empty());
     // A repository cannot allow installs.
     fs::write(
@@ -657,6 +689,13 @@ fn installs_follow_the_policy_and_are_verified_and_logged() {
         allow.contains("codex is not in [harnesses] allow (goose)"),
         "{allow}"
     );
+    assert!(
+        allow.contains(&format!(
+            "add \"codex\" to `allow` under [harnesses] in {}",
+            w.user.display()
+        )),
+        "{allow}"
+    );
     // Never from a harness's own `by`.
     let inside = w.by_env(
         &["harnesses", "install", "goose"],
@@ -722,10 +761,11 @@ fn installs_and_logins_reach_another_machine_over_ssh() {
     assert_eq!(out["on"], "ssh://dev@vm.test");
     assert!(w.vm_home.join(".local/bin/codex").is_file());
     assert!(!w.home.join(".local/bin/codex").exists());
-    // No terminal: the login is reported, with where to run it.
-    let out = w.ok(&["harnesses", "login", "codex", "--on", "ssh://dev@vm.test"]);
+    // No terminal: the login is not done (exit 2), with where to run it.
+    let out = w.by(&["harnesses", "login", "codex", "--on", "ssh://dev@vm.test"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     // Codex is off PATH there, so the login names the executable found.
-    let said = text(&out.stdout);
+    let said = text(&out.stderr);
     assert!(said.contains("run `ssh -t dev@vm.test /"), "{said}");
     assert!(
         said.contains(".local/bin/codex login --device-auth`"),
@@ -949,7 +989,7 @@ fn login_antigravity_writes_the_model_provider_when_a_gemini_key_is_set() {
 
     // No terminal and no --yes: the change is shown, nothing is written.
     let out = w.by_env(&["harnesses", "login", "antigravity"], &key);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     let shown = text(&out.stdout);
     assert!(
         shown.contains("+    \"modelProvider\": \"gemini\""),
@@ -1042,19 +1082,37 @@ fn login_prints_the_exact_command_for_a_harness_it_cannot_log_in_itself() {
 fn login_runs_the_harness_own_flow_or_stores_a_key_and_says_what_to_run() {
     let w = World::new();
     w.fake_codex(&w.bin, "0.157.1");
-    // No terminal: say what to run.
-    let out = w.ok(&["harnesses", "login", "codex"]);
+    // No terminal: nothing ran, so it says what to run and exits 2, not 0,
+    // and `by harnesses login codex && by run ...` stops here.
+    let out = w.by(&["harnesses", "login", "codex"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     assert!(
-        text(&out.stdout).contains("no terminal here; run `codex login --device-auth`"),
+        text(&out.stderr).contains("no terminal here; run `codex login --device-auth`"),
         "{}",
-        text(&out.stdout)
+        text(&out.stderr)
     );
+    assert!(text(&out.stdout).is_empty(), "{}", text(&out.stdout));
     assert!(w.calls("codex login --device-auth").is_empty());
+    // With --json: the same exit, and the status on stdout.
+    let out = w.by(&["harnesses", "login", "codex", "--json"]);
+    assert_eq!(out.status.code(), Some(2));
+    let said: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(said["status"], "manual", "{said}");
+    assert!(said["run"]
+        .as_str()
+        .unwrap()
+        .contains("codex login --device-auth"));
     // A terminal: the harness's own flow, passed through.
     let out = in_pty(&w, &["harnesses", "login", "codex"]);
     assert!(out.contains("https://auth.example/device"), "{out}");
     assert!(out.contains("codex on local: logged in (verified"), "{out}");
     assert_eq!(w.calls("codex login --device-auth").len(), 1);
+    // Done, as --json says it.
+    let out = in_pty(&w, &["harnesses", "login", "codex", "--json"]);
+    let start = out.find('{').unwrap();
+    let done: Value = serde_json::from_str(&out[start..]).unwrap();
+    assert_eq!(done["status"], "done", "{out}");
+    assert_eq!(done["login"]["state"], "logged_in", "{out}");
     let inventory = w.json(&["harnesses", "--json"]);
     assert_eq!(
         harness(&inventory, "codex").unwrap()["login"]["state"],
@@ -1081,6 +1139,27 @@ fn login_runs_the_harness_own_flow_or_stores_a_key_and_says_what_to_run() {
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(!text(&out.stdout).contains(key) && !text(&out.stderr).contains(key));
+    // Stored, as --json says it (the same key again: nothing new is named).
+    let mut again = w
+        .command(BY)
+        .args(["harnesses", "login", "claude-code", "--api-key", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    again
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(key.as_bytes())
+        .unwrap();
+    let again = again.wait_with_output().unwrap();
+    assert!(again.status.success(), "{}", text(&again.stderr));
+    let stored: Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert_eq!(stored["status"], "stored", "{stored}");
+    assert_eq!(stored["secrets_entry_added"], false);
+    assert!(!text(&again.stdout).contains(key));
     let file = w.user.parent().unwrap().join("secrets/ANTHROPIC_API_KEY");
     assert_eq!(fs::read_to_string(&file).unwrap(), key);
     assert_eq!(
@@ -1114,8 +1193,21 @@ fn login_runs_the_harness_own_flow_or_stores_a_key_and_says_what_to_run() {
         .iter()
         .map(|e| e["outcome"].as_str().unwrap())
         .collect();
-    assert_eq!(outcomes, ["reported", "ran", "stored_key"]);
+    assert_eq!(
+        outcomes,
+        ["manual", "manual", "ran", "ran", "stored_key", "stored_key"]
+    );
     assert!(!serde_json::to_string(&log).unwrap().contains(key));
+    // No login command in the catalog but a key variable: nothing ran either,
+    // and it says which form works.
+    let out = w.by(&["harnesses", "login", "deepseek-harness"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr)
+            .contains("give it an API key with `by harnesses login deepseek-harness --api-key`"),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 #[test]
@@ -1194,6 +1286,234 @@ fn the_router_skips_what_cannot_run_and_installs_on_demand_under_auto() {
     assert_eq!(log[0]["version_after"], "0.5.0");
 }
 
+/// Before `by run`, `by fan` and `by send` create a branch: a harness
+/// that is not installed, or is verified logged out, is refused with the
+/// command to run; a guess, a named executable and `--no-preflight` go on.
+#[test]
+fn a_run_is_refused_before_a_branch_when_its_harness_cannot_start() {
+    let w = World::new();
+    // Installed, and its own status command says it is logged out.
+    w.fake_codex(&w.bin, "0.157.1");
+    let why = w.fails(&["run", "say hi", "--harness", "codex", "-n", "cx"]);
+    assert!(
+        why.contains(
+            "codex is verified logged out (codex login status: Not logged in); run by harnesses \
+             login codex"
+        ),
+        "{why}"
+    );
+    assert!(why.contains("Nothing was started"), "{why}");
+    assert!(why.contains("--no-preflight"), "{why}");
+    assert!(w.branches().is_empty());
+    assert!(w.calls("app-server").is_empty());
+    // A fan refuses the same, whichever harness is among the list.
+    let why = w.fails(&["fan", "say hi", "--harness", "gemini-cli,codex"]);
+    assert!(why.contains("gemini-cli is not installed"), "{why}");
+    assert!(w.branches().is_empty());
+    let why = w.fails(&["fan", "say hi", "--harness", "codex"]);
+    assert!(why.contains("codex is verified logged out"), "{why}");
+    assert!(w.branches().is_empty());
+    // --no-preflight tries anyway: Codex is started (the fake cannot speak
+    // its protocol, so the branch fails, after it exists).
+    w.by(&[
+        "run",
+        "say hi",
+        "--harness",
+        "codex",
+        "-n",
+        "cx",
+        "--no-preflight",
+        "--yes",
+    ]);
+    assert_eq!(w.branches(), ["cx"]);
+    assert!(!w.calls("app-server").is_empty());
+    // Logged in: nothing is said, and the harness starts.
+    fs::write(w.bin.join("codex.status"), "Logged in using ChatGPT\n").unwrap();
+    let out = w.by(&["run", "again", "--harness", "codex", "-n", "cx2", "--yes"]);
+    assert!(
+        !text(&out.stderr).contains("Nothing was started"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(w.branches(), ["cx", "cx2"]);
+}
+
+#[test]
+fn a_harness_that_is_not_installed_is_refused_with_how_to_install_it() {
+    let w = World::new();
+    // No terminal and no setting: installs are off, so the catalog's own
+    // command, and the file and key that would turn them on.
+    let why = w.fails(&["run", "x", "--harness", "qwen-code"]);
+    assert!(
+        why.contains("qwen-code is not installed on this machine."),
+        "{why}"
+    );
+    assert!(
+        why.contains("Next: npm install -g @qwen-code/qwen-code"),
+        "{why}"
+    );
+    assert!(
+        why.contains(&format!(
+            "set install = \"ask\" under [harnesses] in {}",
+            w.user.display()
+        )),
+        "{why}"
+    );
+    // Allowed to ask, with no terminal to ask on: --yes.
+    w.user_config("[harnesses]\ninstall = \"ask\"\n");
+    let why = w.fails(&["run", "x", "--harness", "qwen-code"]);
+    assert!(
+        why.contains("Next: by harnesses install qwen-code --yes"),
+        "{why}"
+    );
+    // Allowed without asking: the command itself.
+    w.user_config("[harnesses]\ninstall = \"auto\"\n");
+    let why = w.fails(&["run", "x", "--harness", "qwen-code"]);
+    assert!(
+        why.contains("Next: by harnesses install qwen-code\n"),
+        "{why}"
+    );
+    // Without a harness named, the built-in default is the one refused, and
+    // the way to name another is said.
+    let why = w.fails(&["run", "x"]);
+    assert!(why.contains("claude-code is not installed"), "{why}");
+    assert!(
+        why.contains("`by run` uses claude-code unless --harness"),
+        "{why}"
+    );
+    // A branch keeps its harness: a send checks that one (here a gemini that
+    // has gone since the branch was made), and --json says so as the error
+    // it is.
+    w.fake_gemini();
+    w.ok(&[
+        "run",
+        "WRITE a.txt=1",
+        "-n",
+        "keep",
+        "--harness",
+        "gemini-cli",
+        "--yes",
+    ]);
+    fs::remove_file(w.bin.join("gemini")).unwrap();
+    let why = w.fails(&["send", "keep", "more"]);
+    assert!(why.contains("gemini-cli is not installed"), "{why}");
+    let out = w.by(&["send", "keep", "more", "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "harness_unavailable", "{error}");
+    // The executable named on the command line is the person's business.
+    let agent = fake_agent!().display().to_string();
+    w.ok(&["send", "keep", "more", "--command", &agent, "--yes"]);
+    assert_eq!(w.branches(), ["keep"]);
+}
+
+#[test]
+fn a_guess_that_a_harness_is_logged_out_is_a_note_not_a_refusal() {
+    let w = World::new();
+    // Installed, no login file and no key: "likely" logged out.
+    w.fake_gemini();
+    let out = w.ok(&[
+        "run",
+        "WRITE g.txt=1",
+        "-n",
+        "g",
+        "--harness",
+        "gemini-cli",
+        "--yes",
+    ]);
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("by: note: gemini-cli is likely logged out"),
+        "{err}"
+    );
+    assert!(err.contains("Going on, since that is a guess"), "{err}");
+    let show = w.json(&["show", "g", "--json"]);
+    assert_eq!(show["status"]["state"], "ready", "{show}");
+    // A key variable is a login: nothing is said.
+    let out = w.by_env(
+        &[
+            "run",
+            "WRITE h.txt=1",
+            "-n",
+            "h",
+            "--harness",
+            "gemini-cli",
+            "--yes",
+        ],
+        &[("GEMINI_API_KEY", "not-a-key")],
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        !text(&out.stderr).contains("note:"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[test]
+fn a_named_executable_or_a_harness_nothing_drives_skips_or_explains_the_check() {
+    let w = World::new();
+    let agent = fake_agent!().display().to_string();
+    // Not installed, but --command names the executable: no check.
+    w.ok(&[
+        "run",
+        "WRITE a.txt=1",
+        "-n",
+        "named",
+        "--harness",
+        "qwen-code",
+        "--command",
+        &agent,
+        "--yes",
+    ]);
+    // A branch started that way keeps the executable for its later turns.
+    w.ok(&["send", "named", "more", "--yes"]);
+    // Known to Branchyard, not drivable: not "no harness named".
+    let why = w.fails(&["run", "x", "--harness", "droid"]);
+    assert!(
+        why.contains("droid is known to Branchyard but not drivable"),
+        "{why}"
+    );
+    assert!(why.contains("drivable: claude-code, codex, "), "{why}");
+    assert!(!why.contains("no harness or profile named droid"), "{why}");
+    // Not known at all: the name, and what would have worked.
+    let why = w.fails(&["run", "x", "--harness", "nope"]);
+    assert!(
+        why.contains("no harness or profile named nope; drivable: claude-code, "),
+        "{why}"
+    );
+    assert_eq!(w.branches(), ["named"]);
+}
+
+/// `by harnesses --profiles` is a static table: it needs no repository.
+#[test]
+fn the_profile_table_works_outside_a_repository() {
+    let w = World::new();
+    let outside = w.base.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let run = |args: &[&str]| {
+        let out = w
+            .command(BY)
+            .current_dir(&outside)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        text(&out.stdout)
+    };
+    let table = run(&["harnesses", "--profiles"]);
+    assert!(table.contains("claude-code-stream-json"), "{table}");
+    assert!(table.contains("cursor-acp"), "{table}");
+    let profiles: Value =
+        serde_json::from_str(&run(&["harnesses", "--profiles", "--json"])).unwrap();
+    assert!(profiles
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["profile"] == "codex-app-server"));
+}
+
 #[test]
 fn a_server_shows_its_workers_harnesses_and_says_where_to_log_in() {
     use std::io::{BufRead, BufReader};
@@ -1256,11 +1576,18 @@ fn a_server_shows_its_workers_harnesses_and_says_where_to_log_in() {
     assert!(table.contains("(this server), serving app"), "{table}");
     assert!(table.contains("codex: cannot run"), "{table}");
     // A worker has no terminal: login says what to run there.
-    let said = text(&remote(&["harnesses", "login", "codex"]).stdout);
+    let out = remote(&["harnesses", "login", "codex"]);
+    let said = text(&out.stdout);
     assert!(
         said.contains("run `codex login --device-auth` there, in a terminal"),
         "{said}"
     );
+    // Nothing was logged in: exit 2, as without a terminal here.
+    assert_eq!(out.status.code(), Some(2), "{said}");
+    let out = remote(&["harnesses", "login", "codex", "--json"]);
+    assert_eq!(out.status.code(), Some(2));
+    let said: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(said["status"], "manual", "{said}");
     // Workers never install.
     let out = remote(&["harnesses", "install", "codex"]);
     assert!(!out.status.success());

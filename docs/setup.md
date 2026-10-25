@@ -171,7 +171,7 @@ The default harness it suggests is Claude Code or Codex when installed and not k
 |---|---|---|
 | `ANTHROPIC_API_KEY` | `anthropic`: `api = "anthropic"` | `claude-*` |
 | `OPENAI_API_KEY`, else `CODEX_API_KEY` | `openai`: `api = "openai"`, `key` the variable that is set | `gpt-*`, `codex-*` |
-| `GEMINI_API_KEY` | `gemini`: `api = "openai"`, `url = "https://generativelanguage.googleapis.com/v1beta/openai"`, `compat = "gemini"` ([Gemini](model-gateway.md#gemini)) | `gemini-*` |
+| `GEMINI_API_KEY` | `gemini`: `api = "openai"`, `url = "https://generativelanguage.googleapis.com/v1beta/openai"`, `compat = "gemini"` ([Gemini](model-gateway.md#gemini-through-the-openai-compatible-endpoint)) | `gemini-*` |
 
 Keys are named, never written. The backends do not put a branch on the gateway: a branch uses them when run with `--model-gateway`, or once `[models] allow` is set. On a machine with `GEMINI_API_KEY` and `CODEX_API_KEY` set, Codex logged in by device code and Gemini CLI by its key, choosing the login, the fleet and Claude on Gemini gives, in short:
 

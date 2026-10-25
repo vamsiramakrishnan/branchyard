@@ -8,6 +8,10 @@ use std::process::Output;
 
 use serde_json::{json, Value};
 
+/// The line every call that says anything opens with.
+const HEADER: &str = "Branchyard, this repository. Tell the person in one line about any \
+                      question or failure below; act on nothing unless they ask:";
+
 fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
@@ -93,8 +97,11 @@ fn a_parent_session_hears_once_that_a_branch_finished() {
     let out = repo.by_agent(&["run", "WRITE hello.txt=hi", "--name", "hello"]);
     assert!(out.status.success(), "{out:?}");
     let said = hook(&repo, "user-prompt-submit", "s1").unwrap();
+    assert!(said.starts_with(HEADER), "{said}");
     assert!(
-        said.contains("- hello: finished, ready to integrate (1 file changed)"),
+        said.contains(
+            "\n- hello: ready to merge, 1 file changed: by diff hello, then by merge hello"
+        ),
         "{said}"
     );
     // Told once.
@@ -102,15 +109,19 @@ fn a_parent_session_hears_once_that_a_branch_finished() {
 
     // A new session is told what stands, not old news.
     let first = hook(&repo, "session-start", "s2").unwrap();
-    assert!(first.contains("1 ready to integrate"), "{first}");
-    assert!(!first.contains("hello:"), "{first}");
+    assert_eq!(
+        first,
+        format!(
+            "{HEADER}\n- hello: ready to merge, 1 file changed: by diff hello, then by merge hello"
+        )
+    );
     assert_eq!(hook(&repo, "user-prompt-submit", "s2"), None);
 
     // A second turn that ends the same way is news again.
     let out = repo.by_agent(&["send", "hello", "WRITE again.txt=2"]);
     assert!(out.status.success(), "{out:?}");
     let said = hook(&repo, "user-prompt-submit", "s1").unwrap();
-    assert!(said.contains("- hello: finished"), "{said}");
+    assert!(said.contains("- hello: ready to merge"), "{said}");
 
     assert_eq!(
         statusline(&repo, &json!({"cwd": repo.root})),
@@ -169,7 +180,18 @@ fn a_new_session_hears_of_failed_branches_as_the_status_line_counts_them() {
     let out = repo.by_agent(&["run", "EXIT", "--name", "exits"]);
     assert!(!out.status.success(), "{out:?}");
     let told = hook(&repo, "session-start", "fresh").unwrap();
-    assert_eq!(told, "Branchyard: 1 ready to integrate, 1 failed (by ls).");
+    let lines: Vec<&str> = told.lines().collect();
+    assert_eq!(lines.len(), 3, "{told}");
+    assert_eq!(lines[0], HEADER);
+    assert_eq!(
+        lines[1],
+        "- hello: ready to merge, 1 file changed: by diff hello, then by merge hello"
+    );
+    assert!(lines[2].starts_with("- exits: failed: "), "{told}");
+    assert!(lines[2].ends_with(". by log exits shows why"), "{told}");
+    // What it names, a session can run.
+    let log = repo.ok(&["log", "exits"]);
+    assert!(!log.stdout.is_empty(), "{log:?}");
     let line = statusline(&repo, &json!({"workspace": {"current_dir": repo.root}}));
     assert_eq!(line, "by: 1 ready · 1 failed\n");
 }

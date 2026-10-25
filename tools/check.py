@@ -11,10 +11,10 @@ Each step prints `ok` or `FAILED` (with the last lines of its output); a step th
 skips prints `skip`. The verdict is `check: PASSED` or `check: FAILED (n steps)`, and the exit
 code is 0 or 1. Standard library only.
 
-CI's controls job runs `--fast --keep-going` for the Python steps, so each gate is defined
-once, here. Its cargo steps stay in the workflow where they are: they need `cargo fetch`
-first, and check_missing_docs.py runs `cargo check` itself. A new Python gate goes in STEPS;
-tests/test_check.py fails when check.yml runs a script that STEPS does not.
+CI's fast job runs `--fast --keep-going` (and rustfmt), so each Python gate is defined once,
+here, and runs once. The cargo steps stay in the workflow's other jobs, where they are: they
+need `cargo fetch` first, and check_missing_docs.py runs `cargo check` itself. A new Python
+gate goes in STEPS; tests/test_check.py fails when check.yml runs a script that STEPS does not.
 """
 
 import argparse
@@ -26,14 +26,16 @@ from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
-TARGETS = ("tools", "tests", "sdk/python/branchyard_client.py")
+TARGETS = ("tools", "tests", "sdk/python/branchyard_client.py", "examples/python")
 TAIL_LINES = 20
 # A check only reads. These make the schema generators and the catalog rewrite what they compare.
 REWRITE_VARIABLES = ("BY_UPDATE_SCHEMA", "BRANCHYARD_BLESS")
 
 
 class Step(NamedTuple):
-    """One gate. `job` is the check.yml job that runs it; `cargo` steps are skipped by --fast."""
+    """One gate. `job` names where it was first grouped in check.yml: the `fast` job runs every
+    step --fast keeps (the Python gates, whichever label they carry), `docs` and `controls` run
+    the cargo ones; `cargo` steps are skipped by --fast."""
 
     name: str
     job: str
@@ -48,7 +50,7 @@ STEPS = (
     # --fix, in the order it runs.
     Step("fix_docs_facts", "controls", (PY, "tools/docs_facts.py", "--write"), fix=True),
     Step("fix_cargo_fmt", "controls", ("cargo", "fmt", "--all"), cargo=True, fix=True),
-    Step("fix_ruff_format", "python", (PY, "-m", "ruff", "format", *TARGETS), fix=True),
+    Step("fix_ruff_format", "fast", (PY, "-m", "ruff", "format", *TARGETS), fix=True),
     Step(
         "fix_contract_schema",
         "controls",
@@ -117,12 +119,12 @@ STEPS = (
         fix=True,
         env=(("BY_UPDATE_SCHEMA", "1"),),
     ),
-    # The python job: lint, format and type-check tools/, tests/ and the shipped client.
-    Step("ruff_check", "python", (PY, "-m", "ruff", "check", *TARGETS)),
-    Step("ruff_format", "python", (PY, "-m", "ruff", "format", "--check", *TARGETS)),
+    # Lint, format and type-check tools/, tests/ and the shipped client.
+    Step("ruff_check", "fast", (PY, "-m", "ruff", "check", *TARGETS)),
+    Step("ruff_format", "fast", (PY, "-m", "ruff", "format", "--check", *TARGETS)),
     Step(
         "mypy",
-        "python",
+        "fast",
         (
             PY,
             "-m",
@@ -134,8 +136,8 @@ STEPS = (
             *TARGETS,
         ),
     ),
-    Step("test_install_ci_tool", "python", (PY, "tests/test_install_ci_tool.py")),
-    Step("test_check_coverage", "python", (PY, "tests/test_check_coverage.py")),
+    Step("test_install_ci_tool", "fast", (PY, "tests/test_install_ci_tool.py")),
+    Step("test_check_coverage", "fast", (PY, "tests/test_check_coverage.py")),
     # The controls job's Python gates, in its order.
     Step("verify_vendor", "controls", (PY, "tools/verify_vendor.py")),
     Step("test_verify_vendor", "controls", (PY, "tests/test_verify_vendor.py")),
@@ -146,6 +148,12 @@ STEPS = (
     Step("check_handrolled", "controls", (PY, "tools/check_handrolled.py")),
     Step("test_check_handrolled", "controls", (PY, "tests/test_check_handrolled.py")),
     Step("check_docs", "controls", (PY, "tools/check_docs.py")),
+    Step("test_check_docs", "controls", (PY, "tests/test_check_docs.py")),
+    # The branch-state table in docs/concepts.md against the BranchStatus enum and `by ls`'s words.
+    Step("test_concepts_states", "controls", (PY, "tests/test_concepts_states.py")),
+    # The new guides' messages and build commands against the code. The walkthrough and the command checks
+    # need a build, so they wait for test_getting_started_built below.
+    Step("test_getting_started", "controls", (PY, "tests/test_getting_started.py")),
     Step("check_test_hygiene", "controls", (PY, "tools/check_test_hygiene.py")),
     Step("test_check_test_hygiene", "controls", (PY, "tests/test_check_test_hygiene.py")),
     Step("check_silent_failures", "controls", (PY, "tools/check_silent_failures.py")),
@@ -158,6 +166,8 @@ STEPS = (
     Step("test_check_wire", "controls", (PY, "tests/test_check_wire.py")),
     Step("docs_facts", "controls", (PY, "tools/docs_facts.py", "--check")),
     Step("test_docs_facts", "controls", (PY, "tests/test_docs_facts.py")),
+    # docs/README.md lists every page under docs/.
+    Step("test_docs_index", "controls", (PY, "tests/test_docs_index.py")),
     # Dependency versions are declared once, in [workspace.dependencies].
     Step("check_workspace_deps", "controls", (PY, "tools/check_workspace_deps.py")),
     Step("test_check_workspace_deps", "controls", (PY, "tests/test_check_workspace_deps.py")),
@@ -168,6 +178,10 @@ STEPS = (
     Step("test_distribution", "controls", (PY, "tests/test_distribution.py")),
     Step("test_schema_validation", "controls", (PY, "tests/test_schema_validation.py")),
     Step("test_sdk_client", "controls", (PY, "tests/test_sdk_client.py")),
+    # examples/python/ against a built `by` and the fake agent. This job has no cargo build when it
+    # runs, so the file skips here; `cargo test --workspace` runs it for real
+    # (crates/branchyard-cli/tests/sdk_client.rs), and so does a local run once `by` is built.
+    Step("test_sdk_examples", "controls", (PY, "tests/test_sdk_examples.py")),
     Step("test_check", "controls", (PY, "tests/test_check.py")),
     Step("test_install_hooks", "controls", (PY, "tests/test_install_hooks.py")),
     # The packaging for Codex, Gemini CLI, Qwen Code, Copilot CLI, Droid and DeepSeek Harness.
@@ -175,6 +189,11 @@ STEPS = (
     # The Pi/Oh My Pi, Amp and OpenCode plugins under node with a stub `by` (skips without node).
     Step("test_plugin_ts", "controls", (PY, "tests/test_plugin_ts.py")),
     Step("test_plugin_config", "controls", (PY, "tests/test_plugin_config.py")),
+    # What the skills, slash commands and instructions files tell a model about `by` stays true.
+    Step("test_agent_text_drift", "controls", (PY, "tests/test_agent_text_drift.py")),
+    # The catalog, the driver profiles, the install manifests, the hook dialects and docs/harness-hooks.md
+    # agree on which harnesses exist (docs/adding-a-harness.md).
+    Step("test_harness_identity", "controls", (PY, "tests/test_harness_identity.py")),
     # Cargo: rustdoc (the docs job), formatting, the undocumented-items ratchet, Clippy, and the
     # schema freshness tests. The Clippy passes CI runs for the feature builds stay in the workflow.
     Step(
@@ -249,6 +268,35 @@ STEPS = (
             "rig_json",
         ),
         cargo=True,
+    ),
+    # docs/getting-started.md run for real: `by` and the fake ACP agent built, then every tested block run
+    # in a temporary repository with a private HOME, and every `by` command the new guides show checked
+    # against the built `by --help`. CI runs the same test after its `cargo test --workspace` built them.
+    Step(
+        "build_by",
+        "controls",
+        (
+            "cargo",
+            "build",
+            "--locked",
+            "--offline",
+            "-p",
+            "branchyard-cli",
+            "-p",
+            "branchyard-runtime",
+            "--bin",
+            "by",
+            "--bin",
+            "fake-acp-agent",
+        ),
+        cargo=True,
+    ),
+    Step(
+        "test_getting_started_built",
+        "controls",
+        (PY, "tests/test_getting_started.py"),
+        cargo=True,
+        env=(("REQUIRE_BINARIES", "1"),),
     ),
 )
 

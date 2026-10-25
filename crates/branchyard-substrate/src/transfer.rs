@@ -1504,7 +1504,7 @@ mod tests {
         let err = clear_for_push(
             &Exec::new(&HostProvider { broken: true }, "box"),
             &s.guest,
-            Path::new("/tmp/h"),
+            Path::new("/srv/h"),
         )
         .unwrap_err();
         assert!(
@@ -1570,10 +1570,12 @@ mod tests {
     fn a_pull_tree_target_needs_a_file_name_and_may_not_already_be_received() {
         let s = setup();
         let exec = Exec::new(&PROVIDER, "box");
+        // hygiene-allow: tmp a guest directory on the fake provider; nothing is created
         let err = pull_tree(&exec, Path::new("/tmp"), Path::new("/")).unwrap_err();
         assert!(matches!(err, Error::Host(_)), "{err}");
         let existing = s.root.parent().unwrap().join("existing");
         fs::create_dir_all(&existing).unwrap();
+        // hygiene-allow: tmp a guest directory on the fake provider; nothing is created
         let err = Guest::get_tree(&exec, Path::new("/tmp"), &existing).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
     }

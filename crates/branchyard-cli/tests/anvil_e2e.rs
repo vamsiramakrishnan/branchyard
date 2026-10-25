@@ -41,7 +41,6 @@
 )] // tests: a panic is the failure report
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 
@@ -245,16 +244,13 @@ fn start_with(name: &str, connectors: &[&str]) -> Option<Anvil> {
     fs::write(root.join("a.txt"), "one\n").unwrap();
     git(&root, &["add", "."]);
     git(&root, &["commit", "-q", "-m", "initial"]);
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let gateway = format!("http://127.0.0.1:{port}/mcp");
+    // No gateway URL is pinned: `by gateway start` chooses the port, and
+    // `by` finds the gateway it started. A port freed here and pinned could
+    // be taken by another process before Anvil binds it.
     fs::write(
         root.join("branchyard.toml"),
         format!(
-            "[connectors]\ngateway = \"{gateway}\"\nbundles = \"{}\"\nanvil = \"node {}\"\n",
+            "[connectors]\nbundles = \"{}\"\nanvil = \"node {}\"\n",
             bundles.display(),
             anvil.display()
         ),

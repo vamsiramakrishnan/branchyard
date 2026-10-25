@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Delegate parts of a coding task to child branches with Branchyard. Use when you run on a Branchyard branch (BRANCHYARD_BRANCH is set) and the work splits into pieces with separate files, needs a second harness or a reviewer from another vendor, or should be tried more than one way. Covers `by delegate` (a whole plan at once, with a shared brief, children the engine lands and reviews for you), `by brief`, `by spawn` (including children that wait for siblings), `by graph`, `by inspect`, `by wait`, `by integrate` (several children at once), `by check` (run your check before you finish), `by discard`, ending your turn while children run, artifacts, messaging your parent, the Python module and the MCP tools.
+description: Use whenever you run on a Branchyard branch (BRANCHYARD_BRANCH is set), before you start and before you finish. Covers when to split work into child branches (`by delegate` with a plan, or `by spawn`), how to write a child's brief and prompt, ending your turn while children run, integrating and checking results, and the `by check` you run before you end.
 ---
 
 # Delegating with Branchyard
@@ -11,6 +11,9 @@ worktree, and have their work brought into your branch. You act only as
 your own branch and only on your descendants. Branchyard enforces your
 envelope (depth, number of children, allowed harnesses) and your budget; a
 refusal says why.
+
+The rules below apply to every task on a branch, split or not: run `by check`
+before you finish, and end your turn when you wait on children.
 
 ## When to delegate
 
@@ -92,11 +95,36 @@ the turns sent to fix it) and its `review`.
 
 The rest of this skill is the long way: driving each child yourself.
 
+## Writing a child's prompt
+
+A child sees your committed work, the shared brief and its prompt, not this
+conversation. Write the prompt so that someone who knows nothing else could
+do the task and show it is done. Say, in this order:
+
+1. The goal, in one sentence.
+2. The files it owns, and the ones it may read but not change.
+3. The constraints: interfaces already settled (those belong in the brief),
+   crates not to add, the style to match.
+4. How it checks its work: the exact command, and what passing means.
+5. What to report: what changed, what it could not do, what you must do next.
+
+Good:
+
+```sh
+by spawn "Write the lexer for the calculator. You own src/lexer/ and may read src/token.rs, which you must not change. Match the error style in src/error.rs. Check with cargo test -p lexer; it must pass. Then report the token kinds you handle and anything you left out." \
+  --name lexer --owns src/lexer --budget-usd 0.50
+```
+
+Bad: `"Do the lexer."` or `"Implement the plan we discussed."` The first names
+no files, no interface and no check, so the child guesses all three; the second
+points at a conversation the child never saw. Either one costs you a turn at
+integration.
+
 ## The loop, by hand
 
-1. Decompose. Give each child a self-contained prompt: the goal, the files
-   involved, the constraints, and how to check the result. A child sees
-   your committed work, not this conversation.
+1. Decompose. Give each child a self-contained prompt (see "Writing a
+   child's prompt"): the goal, the files involved, the constraints, and how
+   to check the result.
 2. Spawn. Pick a harness per subtask and a budget that fits in what you
    have left (`by inspect` shows `remaining_usd`). A child starts from your
    current work: your uncommitted changes are committed to your branch
@@ -195,8 +223,18 @@ The rest of this skill is the long way: driving each child yourself.
 
 Statuses: `running`, `ready` (a candidate to merge), `no_changes`,
 `interrupted`, `budget_exceeded`, `failed`, `merged`, `discarded`,
-`waiting` and `blocked` (prerequisites), `waiting_on_children` (its turn
-ended while its children run; it is woken when they settle).
+`waiting` and `blocked` (prerequisites), `awaiting_plan_approval` (a child
+spawned with `--plan` wrote its plan and waits for you), `waiting_on_children`
+(its turn ended while its children run; it is woken when they settle).
+
+A child spawned with `by spawn --plan` plans read-only first and escalates
+its plan to your inbox. Read it with `by plan show <child>`. `by plan approve
+<child>` runs it as the child's next turn (`--edit` or `--file PATH` changes
+the plan first); `by plan reject <child> --reason "<why>"` ends the child, or
+with `--replan` has it plan again. When a descendant's tool or connector call
+needs approval, the ask comes to you too: `by approvals ls` lists what waits,
+`by approvals allow <id>` or `by approvals deny <id> --reason "<why>"` answers
+it. Only an ancestor may decide either.
 
 Inside a harness, `by spawn` refuses `--parent`, `--yes`, `--ask` and
 `--permissions`: your children run under your policy. `by spawn --help`
@@ -368,13 +406,16 @@ the MCP `spawn` tool takes `seat`.
 
 Read a child's answer as JSON instead of prose by saying its shape at spawn:
 `--result-schema '<JSON Schema>'` (or `--result-schema-file PATH`), with
-`--result-required` when it must answer. The schema may use only `type`,
-`properties`, `required`, `additionalProperties` (`false`), `items`, `enum`,
-`minimum`, `maximum`, `minLength`, `maxLength` and `description`; anything
-else, such as `pattern`, is refused by name. The child reports with
-`by report "<text>" --result '<JSON>'`, which is refused, naming the path
-(`result.files[2]: expected string, got number`), when the JSON does not
-match. You read it as `result` in `by inspect <child> --json` and in each
+`--result-required` when it must answer. The schema may use only `type`
+(`object`, `array`, `string`, `number`, `integer`, `boolean`, `null`, or a
+list of them), `properties`, `required`, `additionalProperties`, `items`,
+`enum`, `const`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`,
+`minLength`, `maxLength`, `pattern`, `minItems`, `maxItems`, `uniqueItems`,
+`anyOf` and `oneOf`, and annotations such as `title` and `description`; any
+other keyword, such as `$ref`, `allOf` or `format`, is refused by name. The
+child reports with `by report "<text>" --result '<JSON>'`, which is refused,
+naming the path (`result.files[2]: expected string, got number`), when the
+JSON does not match. You read it as `result` in `by inspect <child> --json` and in each
 settled child of `by wait --json`; a child that ends its turn without a
 required result leaves a warning in your log. In Python,
 `branchyard.spawn(..., result={"schema": {...}, "required": True})` and
@@ -423,7 +464,8 @@ The `branchyard` module is on `PYTHONPATH`; it runs `by --json` for you.
 import branchyard
 
 me = branchyard.inspect()
-share = (me.remaining_usd or 0) / 2
+# remaining_usd is None on a branch with no cost limit: then give no budget.
+share = None if me.remaining_usd is None else me.remaining_usd / 2
 parts = [
     branchyard.spawn("Port the tokenizer to the new API; run its tests",
                      name="tokenizer", budget_usd=share),
@@ -464,5 +506,7 @@ If you cannot run commands, the same operations are MCP tools on the
 `spawn` (with `depends_on`, `owns`, `land`, `review` and `result`), `inspect`, `events`, `send`,
 `steer`, `propose_integration` (`branch`, or `branches` to integrate several
 together), `check` (your own work before you finish, or a child's), `wait` (`branches`, `any`, `timeout_seconds`), `cancel`, `discard`,
-`children`, `graph`, `apply_graph`, the artifact and scratch tools, and `ask`,
-`report` (with `result`), `escalate`, `report_status`, `answer` and `inbox`.
+`children`, `graph`, `apply_graph`, `approve_plan` and `reject_plan` (a
+plan-first child's plan), `answer_approval`, the artifact and scratch tools, and
+`ask`, `report` (with `result`), `escalate`, `report_status`, `answer` and
+`inbox`.
