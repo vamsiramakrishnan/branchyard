@@ -34244,7 +34244,7 @@
                 "string",
                 "null"
               ],
-              "description": "The key variable the login rests on, when it does: `GEMINI_API_KEY`.\nOnly its name is ever recorded."
+              "description": "The key variable the login rests on, when it does: `GEMINI_API_KEY`.\nFor a login that is not there, the variable it is waiting for, when\nthe configuration names one (a DeepSeek Harness provider's\n`apiKeyEnv`). Only its name is ever recorded."
             },
             "stored": {
               "type": "boolean",
@@ -34515,7 +34515,7 @@
                 "string",
                 "null"
               ],
-              "description": "The key variable the login rests on, when it does: `GEMINI_API_KEY`.\nOnly its name is ever recorded."
+              "description": "The key variable the login rests on, when it does: `GEMINI_API_KEY`.\nFor a login that is not there, the variable it is waiting for, when\nthe configuration names one (a DeepSeek Harness provider's\n`apiKeyEnv`). Only its name is ever recorded."
             },
             "stored": {
               "type": "boolean",
