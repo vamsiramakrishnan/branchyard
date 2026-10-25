@@ -41,7 +41,7 @@ See [modes](modes.md) for how to choose between these.
 
 ## Harness drivers
 
-<!-- fact:profiles.summary -->17 driver profiles cover 15 of 16 harness targets: 5 live-qualified, 3 partial and 9 unqualified.<!-- /fact -->
+<!-- fact:profiles.summary -->17 driver profiles cover 15 of 16 harness targets: 6 live-qualified, 3 partial and 8 unqualified.<!-- /fact -->
 
 A live run is protocol qualification against the real binary as a local process. It is not a sandbox run: isolation, credentials and recovery are unqualified for every profile. "Permissions answered" and "Steer" are the two gates Branchyard can intercept mid-turn; [compatibility](compatibility.md) defines their values and lists every capability and the reason for each `no`.
 
@@ -51,7 +51,7 @@ A live run is protocol qualification against the real binary as a local process.
 |---|---|---|---|---|---|
 | Claude Code | `claude-code-stream-json` (default) | live-qualified | 9 of 9 pass, 2026-10-25, 2.1.310 (Claude Code) ([report](qualification/claude-code-stream-json.json)) | live-tested | live-tested |
 | Claude Code | `claude-code-acp` (alternate) | live-qualified | 9 of 9 pass, 2026-09-26, 0.81.2 ([report](qualification/claude-code-acp.json)) | live-tested | live-tested |
-| Codex | `codex-app-server` (default) | live-qualified | 9 of 9 pass, 2026-10-16, codex-cli 0.157.1 ([report](qualification/codex-app-server.json)) | live-tested | live-tested |
+| Codex | `codex-app-server` (default) | live-qualified | 9 of 9 pass, 2026-10-25, codex-cli 0.164.0 ([report](qualification/codex-app-server.json)) | live-tested | live-tested |
 | Codex | `codex-acp` (alternate) | unqualified | not run | contract-only | not verified |
 | Antigravity | `antigravity-stream-json` (default) | live-qualified | 9 of 9 pass, 2026-10-16, 1.4.0 ([report](qualification/antigravity-stream-json.json)) | — | — |
 | Oh My Pi | `oh-my-pi-acp` (default) | live-qualified | 9 of 9 pass, 2026-10-16, omp/18.10.3 ([report](qualification/oh-my-pi-acp.json)) | live-tested | not verified |
@@ -64,7 +64,7 @@ A live run is protocol qualification against the real binary as a local process.
 | Cursor CLI | `cursor-acp` (default) | unqualified | not run | contract-only | not verified |
 | GitHub Copilot CLI | `github-copilot-acp` (default) | unqualified | not run | contract-only | not verified |
 | Amp | `amp-stream-json` (default) | unqualified | not run | — | — |
-| Qwen Code | `qwen-code-acp` (default) | unqualified | not run | contract-only | not verified |
+| Qwen Code | `qwen-code-acp` (default) | live-qualified | 9 of 9 pass, 2026-10-25, 0.26.0 ([report](qualification/qwen-code-acp.json)) | live-tested | not verified |
 | Kimi CLI | `kimi-cli-acp` (default) | unqualified | not run | contract-only | not verified |
 | Hermes | `hermes-acp` (default) | partial | 6 of 9 pass, 2026-10-25, Hermes Agent v0.19.0 (2026.7.20) ([report](qualification/hermes-acp.json)) | live-tested | not verified |
 
