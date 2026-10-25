@@ -1,0 +1,8 @@
+{
+  "model": "google/gemini-flash-lite-latest",
+  "permission": {
+    "bash": "ask",
+    "edit": "ask",
+    "webfetch": "ask"
+  }
+}

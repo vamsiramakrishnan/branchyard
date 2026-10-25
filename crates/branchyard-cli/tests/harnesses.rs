@@ -917,12 +917,55 @@ fn an_unreadable_login_says_what_would_tell() {
     w.script("pi", "#!/bin/sh\necho 'pi 0.87.1'\n");
     w.script("qwen", "#!/bin/sh\necho '0.26.0'\n");
     let out = text(&w.ok(&["harnesses"]).stdout);
+    // Qwen Code records no key variable: only signing in inside it tells.
     assert!(
-        out.contains("pi: Branchyard cannot read pi's login")
-            && out.contains("sign in inside pi itself"),
+        out.contains("qwen-code: Branchyard cannot read qwen's login")
+            && out.contains("sign in inside qwen itself"),
+        "{out}"
+    );
+    // Pi's provider keys are known (`ZAI_API_KEY` and the rest), so a
+    // missing one is named, not "sign in inside pi itself".
+    assert!(
+        out.contains("pi: Branchyard cannot read pi's login; a key in ANTHROPIC_API_KEY")
+            && out.contains("ZAI_API_KEY would tell"),
         "{out}"
     );
     assert!(!out.contains("knows no way to tell"), "{out}");
+}
+
+#[test]
+fn a_pi_provider_key_in_the_environment_is_a_login() {
+    let w = World::new();
+    w.script("pi", "#!/bin/sh\necho 'pi 0.87.1'\n");
+    let out = w.by_env(
+        &["harnesses", "--json"],
+        &[("ZAI_API_KEY", "not-a-real-key")],
+    );
+    let keyed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let pi = harness(&keyed, "pi").unwrap();
+    assert_eq!(pi["login"]["state"], "logged_in", "{pi}");
+    assert_eq!(pi["login"]["key"], "ZAI_API_KEY", "{pi}");
+}
+
+#[test]
+fn a_pi_older_than_the_driver_can_follow_is_refused_before_a_branch_exists() {
+    let w = World::new();
+    w.script("pi", "#!/bin/sh\necho '0.73.1'\n");
+    let listed = text(&w.ok(&["harnesses"]).stdout);
+    assert!(
+        listed.contains("0.73.1 (too old)")
+            && listed.contains("pi: cannot run: 0.73.1 is older than 0.80.4")
+            && listed.contains("npm install -g @earendil-works/pi-coding-agent"),
+        "{listed}"
+    );
+    let err = w.fails(&["run", "say hello", "--harness", "pi", "-n", "old"]);
+    assert!(
+        err.contains("by: pi 0.73.1 is older than 0.80.4")
+            && err.contains("Nothing was started.")
+            && err.contains("next: npm install -g @earendil-works/pi-coding-agent"),
+        "{err}"
+    );
+    assert!(w.branches().is_empty());
 }
 
 #[test]
@@ -1111,12 +1154,22 @@ fn login_antigravity_writes_the_model_provider_when_a_gemini_key_is_set() {
 #[test]
 fn login_prints_the_exact_command_for_a_harness_it_cannot_log_in_itself() {
     let w = World::new();
+    w.script("qwen", "#!/bin/sh\necho '0.26.0'\n");
     w.script("pi", "#!/bin/sh\necho 'pi 0.87.1'\n");
     w.script("claude", "#!/bin/sh\necho '2.1.283'\n");
     // No login command, no key variable: what to do, not a dead end.
+    let why = w.fails(&["harnesses", "login", "qwen-code"]);
+    assert!(
+        why.contains("start `qwen` and sign in inside it, then `by harnesses --refresh`"),
+        "{why}"
+    );
+    // No login command but key variables (Pi reads ZAI_API_KEY and the
+    // rest): the key, or signing in inside it.
     let why = w.fails(&["harnesses", "login", "pi"]);
     assert!(
-        why.contains("start `pi` and sign in inside it, then `by harnesses --refresh`"),
+        why.contains(
+            "give it an API key with `by harnesses login pi --api-key` (ANTHROPIC_API_KEY"
+        ) && why.contains("or sign in inside `pi` itself"),
         "{why}"
     );
     // A catalog login command: the exact command, without a terminal.

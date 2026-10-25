@@ -30,7 +30,7 @@ cargo run -p branchyard-qualify -- --profile codex-app-server \
     --report /tmp/codex-app-server.json     # or rely on `codex login`
 ```
 
-The ACP profiles (`gemini-cli-acp`, `opencode-acp`, `goose-acp` and others) take the same command. The Antigravity, Pi and Amp drivers are unqualified and need the most attention: Amp's driver was written from documentation only.
+The ACP profiles (`gemini-cli-acp`, `opencode-acp`, `goose-acp` and others) take the same command. The Antigravity and Amp drivers are unqualified here and need the most attention (Pi's passed 9 of 9 on Pi 1.4.0 on 25 October 2026; a Pi older than 0.80.4 never ends a turn and is refused first): Amp's driver was written from documentation only.
 
 **Pass:** every scenario passes, or each failure is understood and filed.
 
@@ -57,7 +57,7 @@ In the throwaway repository:
 | Crash recovery | `kill -9` the `by` process mid-turn (after the prompt is submitted), then `by ls` | The harness's process group is gone; the branch is `interrupted` with a `recovered` event saying the outcome is unknown; the prompt was not sent again; `by send <b> …` resumes the session |
 | One server | `by serve --data-dir D` in two terminals | The second fails within 2 seconds, naming the first's pid |
 | Two terminals | `by send <b> …` while another `by` runs a turn on `<b>` | Refused as running; no race |
-| Unapproved tools | `by run "…" --harness pi` | Refused; with `--allow-unapproved-tools` it runs |
+| Unapproved tools | `by run "…" --harness pi` | Refused (`by: unsupported: pi-rpc does not route tool permission requests to Branchyard…`); with `--allow-unapproved-tools` it runs, on Pi 0.80.4 or newer (an older Pi is refused first, with `next: npm install -g @earendil-works/pi-coding-agent`) |
 | Watch | `by watch` in a second terminal during the above | The tree updates live; the detail pane follows the selection; resizing redraws; `q` exits and restores the terminal |
 
 **Record:** anything that differs from the expectation, in an issue or in [validation](validation.md). Recovery is described in [durability](durability.md); on macOS it relies on `ps -o lstart=` for process start times, which is untested.

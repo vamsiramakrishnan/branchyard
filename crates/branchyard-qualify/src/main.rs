@@ -493,9 +493,18 @@ fn scenarios(run: &mut Run) {
             "Use your shell/Bash tool to run exactly this command in the foreground, not in the background: \
              python3 -c \"import time; time.sleep(45)\" Then reply DONE.",
         )?;
-            pump(&mut main, turn_timeout, Policy::Allow, |e| {
-                matches!(e, Event::PermissionRequested { .. })
-            })?;
+            // The command is under way once it is allowed; a profile whose
+            // harness asks nobody (Pi) never sends a request to wait for,
+            // so there the harness's own word that the tool started does.
+            pump(
+                &mut main,
+                turn_timeout,
+                Policy::Allow,
+                |e| match capabilities.tool_approvals {
+                    true => matches!(e, Event::PermissionRequested { .. }),
+                    false => matches!(e, Event::ToolStarted { .. }),
+                },
+            )?;
             // Let the command start before interrupting it.
             if let Ok(ended) = pump(
                 &mut main,
@@ -656,10 +665,14 @@ fn interrupt(
         format!("outcome {outcome:?}")
     })?;
     check(waited < 30.0, || format!("took {waited:.1}s to stop"))?;
-    let acknowledged = saw(
-        session,
-        |e| matches!(e, Event::InterruptAcknowledged { turn: t } if *t == turn),
-    );
+    let acknowledged_turn =
+        |e: &Event| matches!(e, Event::InterruptAcknowledged { turn: t } if *t == turn);
+    let mut acknowledged = saw(session, acknowledged_turn);
+    if acknowledgment && !acknowledged {
+        // Pi answers `abort` only once the session is idle, so the
+        // acknowledgment follows the turn's end.
+        acknowledged = pump(session, Duration::from_secs(10), policy, acknowledged_turn).is_ok();
+    }
     check(!acknowledgment || acknowledged, || {
         "no interrupt acknowledgment".into()
     })?;

@@ -12,6 +12,7 @@
 //! |---|---|
 //! | not installed | refuse (`by: ID is not installed on this machine.` / `next: by harnesses install ID`, or the catalog's command when the install policy would refuse it) |
 //! | found, not on `PATH` | refuse, with the directory to add |
+//! | found, older than the driver can follow (Pi before 0.80.4 sends no `agent_settled`, so a run never ends) | refuse, with the command that installs a newer one; `--no-preflight` runs anyway |
 //! | logged out, verified by the harness's own status command | refuse, with the login hint; `--no-preflight` runs anyway |
 //! | logged out, but the run is isolated and its secrets (`--secret`, `[secrets]`) name the harness's key variable | one note, and go on: the private home gets a login the host's status command cannot see |
 //! | logged out, likely (a guess from credential files) | one note, and go on |
@@ -163,6 +164,17 @@ fn decide(
             .next("pass --isolated --secret GEMINI_API_KEY")
             .next("pass --no-preflight if agy signs in another way here"),
         ));
+    }
+    // A release the driver cannot follow to the end of a turn: the harness
+    // would do the work and the run would never finish.
+    if state.on_path {
+        if let Some((why, fix)) = state.too_old() {
+            return Err(Box::new(
+                Report::new(KIND, format!("{id} {why}. Nothing was started."))
+                    .next(fix)
+                    .next("pass --no-preflight to start it anyway (the turn will not end)"),
+            ));
+        }
     }
     let logged_out = state.login.state == LoginState::LoggedOut;
     let certain = state.login.evidence == Evidence::Verified;

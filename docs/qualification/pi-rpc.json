@@ -1,0 +1,69 @@
+{
+  "profile": "pi-rpc",
+  "harness": "pi",
+  "command": "pi",
+  "harness_version": "1.4.0",
+  "driver_version": "0.0.1",
+  "host": "Linux 6.18.44-fc-v153 x86_64",
+  "date": "2026-10-25",
+  "installed_from": "npm @earendil-works/pi-coding-agent@1.4.0",
+  "execution": "local process with scrubbed environment and private home; not a Branchyard sandbox",
+  "seconds": 21.0,
+  "harness_estimated_cost_usd": "not reported by the harness; the cost cap did not apply",
+  "scenarios": [
+    {
+      "name": "fresh_turn",
+      "passed": true,
+      "detail": "session 01a172b6-a3e2-73e0-9612-44e34cf29a83; replied \"OK\"",
+      "seconds": 3.0
+    },
+    {
+      "name": "permission_denied",
+      "passed": true,
+      "detail": "declared: the profile has no tool approvals; the harness's own rules decide, never a Branchyard policy, and its profile needs --allow-unapproved-tools",
+      "seconds": 0.0
+    },
+    {
+      "name": "permission_allowed",
+      "passed": true,
+      "detail": "request allowed; command ran",
+      "seconds": 3.5
+    },
+    {
+      "name": "interrupt_during_permission",
+      "passed": true,
+      "detail": "declared: the profile has no tool approvals, so no request is ever pending",
+      "seconds": 0.0
+    },
+    {
+      "name": "interrupt_during_tool",
+      "passed": true,
+      "detail": "stopped 0.0s after interrupt; acknowledged: true",
+      "seconds": 6.4
+    },
+    {
+      "name": "clean_close",
+      "passed": true,
+      "detail": "closed cleanly; no descendants outlived the harness; session cost $0.0000",
+      "seconds": 0.0
+    },
+    {
+      "name": "resume",
+      "passed": true,
+      "detail": "session 01a172b6-a3e2-73e0-9612-44e34cf29a83; remembered PELICAN-7; cost $0.0000",
+      "seconds": 2.4
+    },
+    {
+      "name": "fork",
+      "passed": true,
+      "detail": "session 01a172b6-df99-762d-b210-8f75c1b3da35; remembered PELICAN-7; cost $0.0000",
+      "seconds": 2.4
+    },
+    {
+      "name": "connection_lost",
+      "passed": true,
+      "detail": "killed mid-turn; outcome reported unknown",
+      "seconds": 3.2
+    }
+  ]
+}

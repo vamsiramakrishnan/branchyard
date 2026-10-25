@@ -285,7 +285,11 @@ fn hex_runs(line: &str) -> String {
             }
             let run = &chars[i..j];
             let bounded = j == chars.len() || !chars[j].is_ascii_alphanumeric();
-            if bounded && run.len() >= 7 && run.iter().any(|c| c.is_ascii_digit()) {
+            // A word spelt from a to f is not a commit ID (`acceded`, `defaced`),
+            // so a short run needs a digit; a commit ID of ten or more letters
+            // without one (`cbcfabfded`, once in CI) is still a commit ID.
+            let digit = run.iter().any(|c| c.is_ascii_digit());
+            if bounded && run.len() >= 7 && (digit || run.len() >= 10) {
                 out.push_str("<sha>");
                 i = j;
                 continue;
