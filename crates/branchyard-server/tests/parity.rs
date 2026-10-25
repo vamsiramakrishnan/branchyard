@@ -156,7 +156,7 @@ fn opt_ins_are_refused_unless_the_operator_allows_them() {
     assert_eq!(error.code(), Some("denied"));
     assert_eq!(
         error.to_string(),
-        "denied: plain was not delegated by another branch; merge it with by merge"
+        "plain was not delegated by another branch; merge it with by merge"
     );
     let (status, _, _) = raw(
         server.addr,
