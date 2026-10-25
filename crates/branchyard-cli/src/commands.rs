@@ -514,7 +514,7 @@ fn run_in_as(
         let harness = task.harness.clone().unwrap_or_else(|| "claude-code".into());
         // Installed and not logged out, before a branch exists (preflight.rs).
         let by_default = task.harness.is_none();
-        crate::preflight::check(env, task, std::slice::from_ref(&harness), by_default)?;
+        crate::preflight::check(env, task, std::slice::from_ref(&harness), by_default, json)?;
         // A login near its 5-hour or weekly limit (docs/usage.md).
         crate::usage::guard(&[harness])?;
     }
@@ -601,7 +601,7 @@ pub fn fan(
     }
     let yard = open()?;
     if !routed {
-        crate::preflight::check(env, task, harnesses, false)?;
+        crate::preflight::check(env, task, harnesses, false, route.json)?;
         // Logins near their 5-hour or weekly limits (docs/usage.md).
         crate::usage::guard(harnesses)?;
     }
@@ -813,9 +813,7 @@ pub fn send(
     // unless it runs a command of its own or somewhere else.
     if Provider::is_local(branch.provider()?.as_ref()) && branch.command()?.is_none() {
         let profile = branch.info().profile.clone();
-        if let Err(failure) = crate::preflight::check(env, task, &[profile], false) {
-            return crate::preflight::refused(json, failure);
-        }
+        crate::preflight::check(env, task, &[profile], false, json)?;
     }
     if json {
         let live = Live::start_for(env, task, true, true, &branch)?;

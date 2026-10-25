@@ -1303,15 +1303,46 @@ fn a_run_is_refused_before_a_branch_when_its_harness_cannot_start() {
     let why = w.fails(&["run", "say hi", "--harness", "codex", "-n", "cx"]);
     assert!(
         why.contains(
-            "codex is verified logged out (codex login status: Not logged in); run `by \
-             harnesses login codex`"
+            "by: codex is verified logged out (codex login status: Not logged in). Nothing was \
+             started."
         ),
         "{why}"
     );
-    assert!(why.contains("Nothing was started"), "{why}");
+    assert!(
+        why.contains("next: run `by harnesses login codex`"),
+        "{why}"
+    );
     assert!(why.contains("--no-preflight"), "{why}");
     assert!(w.branches().is_empty());
     assert!(w.calls("app-server").is_empty());
+    // With --json the refusal is the error envelope on stdout, with its next.
+    let out = w.by(&["run", "say hi", "--harness", "codex", "-n", "cx", "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "harness_unavailable", "{error}");
+    assert!(
+        error["error"]["next"][0]
+            .as_str()
+            .unwrap_or_default()
+            .contains("by harnesses login codex"),
+        "{error}"
+    );
+    // A key named by --secret reaches the harness only in a private home:
+    // the refusal says to add --isolated.
+    let why = w.fails(&[
+        "run",
+        "say hi",
+        "--harness",
+        "codex",
+        "-n",
+        "cx",
+        "--secret",
+        "OPENAI_API_KEY=MY_KEY",
+    ]);
+    assert!(
+        why.contains("add --isolated, so the run gets OPENAI_API_KEY"),
+        "{why}"
+    );
     // A fan refuses the same, whichever harness is among the list.
     let why = w.fails(&["fan", "say hi", "--harness", "gemini-cli,codex"]);
     assert!(why.contains("gemini-cli is not installed"), "{why}");
@@ -1423,7 +1454,7 @@ fn a_harness_that_is_not_installed_is_refused_with_how_to_install_it() {
         "{why}"
     );
     assert!(
-        why.contains("Next: npm install -g @qwen-code/qwen-code"),
+        why.contains("next: npm install -g @qwen-code/qwen-code"),
         "{why}"
     );
     assert!(
@@ -1437,14 +1468,14 @@ fn a_harness_that_is_not_installed_is_refused_with_how_to_install_it() {
     w.user_config("[harnesses]\ninstall = \"ask\"\n");
     let why = w.fails(&["run", "x", "--harness", "qwen-code"]);
     assert!(
-        why.contains("Next: by harnesses install qwen-code --yes"),
+        why.contains("next: by harnesses install qwen-code --yes"),
         "{why}"
     );
     // Allowed without asking: the command itself.
     w.user_config("[harnesses]\ninstall = \"auto\"\n");
     let why = w.fails(&["run", "x", "--harness", "qwen-code"]);
     assert!(
-        why.contains("Next: by harnesses install qwen-code\n"),
+        why.contains("next: by harnesses install qwen-code\n"),
         "{why}"
     );
     // Without a harness named, the built-in default is the one refused, and

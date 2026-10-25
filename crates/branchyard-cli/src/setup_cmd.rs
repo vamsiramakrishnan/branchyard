@@ -871,6 +871,9 @@ fn finish(report: &mut Report) {
         let text = match h.login.as_ref().map(|l| l.state.as_str()) {
             Some("logged_in") => continue,
             Some("logged_out") if login_verified(h) => format!("{label} is logged out. {how}"),
+            // Nothing to go on at all (no status command, file or variable
+            // the catalog knows): unknown, in the listing's word.
+            Some("unknown") => format!("{label}: login unknown ({}). {how}", checked(h)),
             // Never "logged out" for a guess: an environment can authenticate
             // a harness without any of the files Branchyard looks for.
             _ => format!(

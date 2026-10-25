@@ -190,9 +190,9 @@ Every install, update and login attempt is a line in `harness-events.jsonl` besi
 
 | The inventory says | `by run --harness ID` |
 |---|---|
-| not installed | Refuses with `Next: by harnesses install ID` (`--yes` too, where `install = "ask"` and there is no terminal), or the catalog's own command when the install policy would refuse it, with the file and key that would allow it |
+| not installed | Refuses in the error style: `by: ID is not installed on this machine.` and `next: by harnesses install ID` (`--yes` too, where `install = "ask"` and there is no terminal), or the catalog's own command when the install policy would refuse it, with a `note:` naming the file and key that would allow it. `--json` gives the envelope with `kind: "harness_unavailable"` and `next` |
 | found, not on `PATH` | Refuses, with the directory to add |
-| logged out, verified (the harness's own status command said so) | Refuses, with the login hint; `--no-preflight` runs anyway |
+| logged out, verified (the harness's own status command said so) | Refuses: `by: ID is verified logged out (…). Nothing was started.` with `next:` the login hint, `add --isolated` when `--secret` names the harness's key, and `--no-preflight` for a login Branchyard cannot see |
 | logged out, but `--isolated` and the run's secrets (`--secret`, `[secrets]`, a key `by harnesses login ID --api-key` stored) name the harness's key variable | One note on stderr, and goes on: the private home gets a login the host's status command cannot see |
 | logged out, likely (credential files and key variables, a guess) | One note on stderr, and goes on |
 | logged in, or unknown | Goes on, silently |

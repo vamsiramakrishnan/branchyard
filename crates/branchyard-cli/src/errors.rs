@@ -47,7 +47,7 @@ pub(crate) struct Report {
 }
 
 impl Report {
-    fn new(kind: impl Into<String>, message: impl Into<String>) -> Report {
+    pub(crate) fn new(kind: impl Into<String>, message: impl Into<String>) -> Report {
         Report {
             kind: kind.into(),
             message: message.into(),
@@ -57,12 +57,12 @@ impl Report {
         }
     }
 
-    fn line(mut self, label: &'static str, text: impl Into<String>) -> Report {
+    pub(crate) fn line(mut self, label: &'static str, text: impl Into<String>) -> Report {
         self.lines.push((label, text.into()));
         self
     }
 
-    fn next(mut self, step: impl Into<String>) -> Report {
+    pub(crate) fn next(mut self, step: impl Into<String>) -> Report {
         self.next.push(step.into());
         self
     }

@@ -10,7 +10,7 @@
 //!
 //! | The inventory says | Here |
 //! |---|---|
-//! | not installed | refuse, with `by harnesses install ID`, or the catalog's command when the install policy would refuse it |
+//! | not installed | refuse (`by: ID is not installed on this machine.` / `next: by harnesses install ID`, or the catalog's command when the install policy would refuse it) |
 //! | found, not on `PATH` | refuse, with the directory to add |
 //! | logged out, verified by the harness's own status command | refuse, with the login hint; `--no-preflight` runs anyway |
 //! | logged out, but the run is isolated and its secrets (`--secret`, `[secrets]`) name the harness's key variable | one note, and go on: the private home gets a login the host's status command cannot see |
@@ -32,7 +32,11 @@ use branchyard_controls::catalog;
 use branchyard_harness::profiles;
 
 use crate::args::TaskArgs;
-use crate::commands::{Env, Failure, Outcome};
+use crate::commands::{Env, Failure};
+use crate::errors::{self, Report};
+
+/// The `--json` kind of every pre-flight refusal.
+const KIND: &str = "harness_unavailable";
 
 /// Refuse, before any branch is created, a harness among `requested`
 /// (harness or profile IDs, as `--harness` takes them) that is not
@@ -45,6 +49,7 @@ pub(crate) fn check(
     task: &TaskArgs,
     requested: &[String],
     by_default: bool,
+    json: bool,
 ) -> Result<(), Failure> {
     if skipped(task) {
         return Ok(());
@@ -61,19 +66,20 @@ pub(crate) fn check(
         }
     };
     for id in &wanted {
-        decide(env, task, &found, id, by_default)?;
+        if let Err(report) = decide(env, task, &found, id, by_default) {
+            // The refusal in the error style, `--json` as the envelope on
+            // stdout: `{"error": {"kind": "harness_unavailable", ...}}`.
+            errors::print(&report, json);
+            return Err(Failure::Reported);
+        }
     }
     Ok(())
 }
 
-/// The key variable of `id` that this run places in the harness's private
-/// home (`--secret`, or `[secrets]` applied to an isolated run): a login
-/// the host's status command cannot see. `None` without a private home,
-/// since the key would not reach the harness.
-fn provisioned_key(task: &TaskArgs, id: &str) -> Option<String> {
-    if !task.isolated {
-        return None;
-    }
+/// The key variable of `id` that this run's secrets name (`--secret`, or
+/// `[secrets]` applied to an isolated run), whether or not the run has a
+/// private home to place it in.
+fn named_key(task: &TaskArgs, id: &str) -> Option<String> {
     let names = inventory::key_variables(id);
     task.provision
         .as_ref()?
@@ -83,19 +89,13 @@ fn provisioned_key(task: &TaskArgs, id: &str) -> Option<String> {
         .find(|name| names.contains(name))
 }
 
-/// A pre-flight refusal, as `--json` reports an unavailable harness:
-/// `{"error": {"kind": "harness_unavailable", "message"}}` on stdout, exit 1.
-/// Any other failure is returned as it is.
-pub(crate) fn refused(json: bool, failure: Failure) -> Outcome {
-    match (json, failure) {
-        (true, Failure::Message(message)) => {
-            let value = serde_json::json!({
-                "error": {"kind": "harness_unavailable", "message": message},
-            });
-            crate::commands::print(&crate::json::text(&value))?;
-            Err(Failure::Reported)
-        }
-        (_, other) => Err(other),
+/// [`named_key`] when the run has a private home to place it in: a login
+/// the host's status command cannot see. `None` otherwise, since the key
+/// would not reach the harness.
+fn provisioned_key(task: &TaskArgs, id: &str) -> Option<String> {
+    match task.isolated {
+        true => named_key(task, id),
+        false => None,
     }
 }
 
@@ -131,29 +131,38 @@ fn detectable(requested: &[String]) -> Vec<String> {
     ids
 }
 
-/// What the inventory says about `id`: refuse, note, or nothing.
+/// What the inventory says about `id`: refuse (the report, boxed for its size),
+/// note, or nothing.
 fn decide(
     env: &Env,
     task: &TaskArgs,
     found: &Inventory,
     id: &str,
     by_default: bool,
-) -> Result<(), Failure> {
+) -> Result<(), Box<Report>> {
     let Some(state) = found.get(id) else {
         return match found.checked(id) {
-            true => Err(Failure::Message(not_installed(env, found, id, by_default))),
+            true => Err(Box::new(not_installed(env, found, id, by_default))),
             false => Ok(()),
         };
     };
     let logged_out = state.login.state == LoginState::LoggedOut;
     let certain = state.login.evidence == Evidence::Verified;
-    // `ready` words each case, and its first two are the ones that matter
-    // here; its usage-limit case is `[usage] guard`'s business.
+    // `ready` words each case as `WHAT; NEXT`, and its first two are the
+    // ones that matter here; its usage-limit case is `[usage] guard`'s
+    // business.
     let Err(why) = state.ready() else {
         return Ok(());
     };
+    let (what, next) = why
+        .split_once("; ")
+        .map_or((why.as_str(), None), |(what, next)| (what, Some(next)));
     if !state.on_path {
-        return Err(Failure::Message(why));
+        let mut report = Report::new(KIND, what);
+        if let Some(next) = next {
+            report = report.next(next);
+        }
+        return Err(Box::new(report));
     }
     if logged_out {
         if let Some(var) = provisioned_key(task, id) {
@@ -165,9 +174,17 @@ fn decide(
         }
     }
     if logged_out && certain {
-        return Err(Failure::Message(format!(
-            "{why}\nNothing was started. If the login is fine (Codex with a model provider of its \
-             own, say), pass --no-preflight."
+        let mut report = Report::new(KIND, format!("{what}. Nothing was started."));
+        if let Some(next) = next {
+            report = report.next(next);
+        }
+        if let Some(var) = named_key(task, id) {
+            report = report.next(format!(
+                "add --isolated, so the run gets {var} from its secrets in a private home"
+            ));
+        }
+        return Err(Box::new(report.next(
+            "pass --no-preflight if the login is fine (Codex with a model provider of its own, say)",
         )));
     }
     if logged_out {
@@ -177,8 +194,8 @@ fn decide(
 }
 
 /// `id` is not installed: what to run, under the install policy.
-fn not_installed(env: &Env, found: &Inventory, id: &str, by_default: bool) -> String {
-    let mut text = format!("{id} is not installed on this machine.");
+fn not_installed(env: &Env, found: &Inventory, id: &str, by_default: bool) -> Report {
+    let mut report = Report::new(KIND, format!("{id} is not installed on this machine."));
     let interactive = env.stdin_tty && env.stderr_tty;
     let policy = crate::harness_cmd::policy(env).ok();
     let permitted = policy
@@ -190,11 +207,11 @@ fn not_installed(env: &Env, found: &Inventory, id: &str, by_default: bool) -> St
         .is_some_and(|p| !p.allow.is_empty() && !p.allow.iter().any(|a| a == id));
     match (permitted, &policy) {
         (Permission::Run | Permission::Ask, _) => {
-            text.push_str(&format!("\nNext: by harnesses install {id}"))
+            report = report.next(format!("by harnesses install {id}"));
         }
         // Allowed, but there is no terminal to ask on.
         (Permission::Refused(_), Some(p)) if p.mode == InstallMode::Ask && !left_out => {
-            text.push_str(&format!("\nNext: by harnesses install {id} --yes"))
+            report = report.next(format!("by harnesses install {id} --yes"));
         }
         (Permission::Refused(_), _) => {
             let command = inventory::plan(id, InstallAction::Install, None, &found.tools)
@@ -202,32 +219,35 @@ fn not_installed(env: &Env, found: &Inventory, id: &str, by_default: bool) -> St
                 .map(|p| p.command)
                 .or_else(|| catalog::harness(id).and_then(|e| e.install.first().cloned()));
             let Some(command) = command else {
-                text.push_str(" The catalog records no install command for it.");
-                return text;
+                report
+                    .message
+                    .push_str(" The catalog records no install command for it.");
+                return report;
             };
-            text.push_str(&format!("\nNext: {command}"));
             let file = crate::setup_io::user_file();
-            text.push_str(&match left_out {
+            let note = match left_out {
                 true => format!(
-                    "\n(To let `by harnesses install {id}` do it, add \"{id}\" to allow under \
-                     [harnesses] in {}.)",
+                    "to let `by harnesses install {id}` do it, add \"{id}\" to allow under \
+                     [harnesses] in {}",
                     file.display()
                 ),
                 false => format!(
-                    "\n(To let `by harnesses install {id}` do it, set install = \"ask\" under \
-                     [harnesses] in {}.)",
+                    "to let `by harnesses install {id}` do it, set install = \"ask\" under \
+                     [harnesses] in {}",
                     file.display()
                 ),
-            });
+            };
+            report = report.line("note", note).next(command);
         }
     }
     if by_default {
-        text.push_str(
-            "\n`by run` uses claude-code unless --harness (or [defaults] harness) says otherwise; \
-             `by harnesses` lists what is installed.",
+        report = report.line(
+            "note",
+            "`by run` uses claude-code unless --harness (or [defaults] harness) says otherwise; \
+             `by harnesses` lists what is installed",
         );
     }
-    text
+    report
 }
 
 #[cfg(test)]
