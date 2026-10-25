@@ -9,7 +9,7 @@
   collapsed, and `…` stands for any text (a hash, a time, a path); a line that is only `…` is skipped.
   Output the page leaves out does not matter, so only the lines the page teaches are pinned.
 * Every `by` command in a ```` ```sh ```` block or a `by …` code span: its subcommand exists in the
-  built `by`, and each `--flag` it shows is in that subcommand's `--help`. `by setup` is skipped while the
+  built `by` (`by help all` lists them all), and each `--flag` it shows is in that subcommand's `--help`. `by setup` is skipped while the
   built `by` lacks it.
 * The symptoms and messages troubleshooting.md and upgrade.md quote are in the code and on the page.
 
@@ -309,6 +309,11 @@ class CommandsExist(unittest.TestCase):
         cls.by, _ = need_binaries()
         cls.cache = {}
         cls.top = cls.help_text([])
+        # `by --help` is the first hour's commands; `by help all` is every command.
+        done = subprocess.run(
+            [str(cls.by), "help", "all"], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL
+        )
+        cls.every = done.stdout if done.returncode == 0 else cls.top
 
     @classmethod
     def help_text(cls, path):
@@ -326,7 +331,7 @@ class CommandsExist(unittest.TestCase):
 
     def test_every_command_shown_exists_with_the_flags_shown(self):
         problems, checked, skipped = [], 0, set()
-        top_commands = self.subcommands(self.top)
+        top_commands = self.subcommands(self.every) + self.subcommands(self.top)
         for page in GUIDES:
             for number, argv in by_commands((DOCS / page).read_text()):
                 flags, sub, rest = split_global(argv)
@@ -369,12 +374,16 @@ class Messages(unittest.TestCase):
             "cancelled by",
             "the prompt had been submitted and the turn's outcome is unknown",
             "the harness connection closed before the turn ended",
-            "its version command timed out",
-            "remote mode needs a token: pass --token-file or set BRANCHYARD_TOKEN_FILE",
+            "slow to start",
+            "asks again, and",
+            "remote mode needs a token: pass --token-file, set",
             "or fix the URL, token or CA file",
             "this build has no PostgreSQL support",
             "this build has no Microsandbox support",
+            "login not verified",
             "likely logged out",
+            "; nothing was merged.",
+            "runs the check without merging",
         ],
         "upgrade.md": [
             "if you may go back to an older by, then run any",

@@ -41,9 +41,9 @@ A limit stopped the branch. `by ls` names it: `max_usd (--budget-usd)`, `max_tur
 
 ## Messages and other errors
 
-### `check failed`
+### `the check for <NAME> failed`
 
-`by merge` printed `by: check failed:` followed by the check's output, and moved nothing. The check ran on the exact merge result, so it can fail where the branch's own tests passed. A check that overran shows `check timed out after …`.
+`by merge` printed `by: the check for NAME failed (exit N); nothing was merged.`, then `check:` with the command, `output:` with the last lines it printed, and `next: by check NAME (runs the check without merging)`. Nothing moved. The check ran on the exact merge result, so it can fail where the branch's own tests passed. A check that overran shows `check timed out after …`.
 
 - `by compare NAME --check` runs the check on the candidate in a private worktree and shows `failed` or `passed`.
 - `by try NAME` applies the branch's changes to your checkout (it must be clean) so you can run the check yourself; `by try --off` takes them back out.
@@ -59,25 +59,26 @@ by: /path/to/repo's [workspace] in /path/to/repo/branchyard.toml has scripts you
 
 A repository's `[workspace]` scripts run as you, so they never run before you say so; on a terminal `by run` asks instead. `by workspace show` prints them; `by workspace trust` records their digest. A change to the scripts asks again (`changed since you trusted it`). `by doctor` shows the same state as `config.workspace_trust`.
 
-### `likely logged out`
+### `login not verified`
 
-`by harnesses`, `by doctor` and `by up` say `ID is likely logged out (no ~/.claude/.credentials.json and no ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN)`. "Likely" means Branchyard looked for credential files and key variables by name and found none; the harness's own status command was not asked. A login kept somewhere else, such as a keychain, a cloud provider's variables or a key helper, looks the same, and `by run` still starts the harness. "Verified" means the harness itself said so.
+`by harnesses`, `by doctor` and `by up` show `login not verified` in the LOGIN column and a line such as `ID: login not verified: no ~/.claude/.credentials.json and no ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN; run `by harnesses login ID``. Not verified means Branchyard looked for credential files and key variables by name and found none; a login kept somewhere else, such as a keychain, a cloud provider's variables or a key helper, looks the same, and `by run --harness ID` still starts the harness. `logged out` with no qualifier means the harness's own status command said so (Claude Code is asked `claude auth status`), and `by run --harness ID` then refuses before it creates a branch. The other words are `logged in`, `key set (VAR)`, `key stored (VAR)` and `credentials found`.
 
-- If the harness works when you start it yourself, ignore the row. `--auto` routing leaves such a harness out; name it with `--harness` instead.
+- If the harness works when you start it yourself, ignore the row. `--auto` routing leaves such a harness out (`ID is likely logged out`); name it with `--harness` instead.
 - Otherwise `by harnesses login ID` runs the harness's own sign-in, or stores a key (`printf %s "$KEY" | by harnesses login ID --api-key`). `by up --plan` lists what only you can do.
 
-### `its version command timed out`
+### `slow to start`
 
-`by harnesses` shows `?` as the version and `ID: no version: its version command timed out`. The probe waits a few seconds for `ID --version`, and a Node-based CLI can take longer on its first start after an install or a reboot. Run the CLI once yourself, then `by harnesses --refresh`. Without a version the qualification note cannot be matched, but the timeout alone does not stop `by run`.
+`by harnesses` shows `slow to start` as the version and `ID: version: slow to start (took >10 s); `by harnesses --refresh` asks again, and BRANCHYARD_HARNESS_TIMEOUT (seconds) sets how long to wait`. Every installed harness is asked for its version at once, with ten seconds for all of them, and a Node-based CLI can take longer than that on its first start after an install or a reboot. A harness that answered before keeps that version, with the note. Run the CLI once yourself, then `by harnesses --refresh`. Without a version the qualification note cannot be matched, but a slow start alone does not stop `by run`.
 
 ### `cannot reach`
 
 ```text
 by: cannot reach http://host:8421: Connection refused (os error 111)
-by: remote mode needs a token: pass --token-file or set BRANCHYARD_TOKEN_FILE
+  next: start a server with `by serve` on that host, or fix the URL, token or CA file ([remote] url, token_file, ca_file)
+by: remote mode needs a token: pass --token-file, set BRANCHYARD_TOKEN_FILE, or set token_file under [remote] in branchyard.toml (`by serve` writes one at .branchyard/server/token on the server's host)
 ```
 
-The first comes from `--remote` (or `BRANCHYARD_REMOTE`, or `[remote] url`) when nothing answers; the second when no token file is given. `by doctor` shows the first as `server.reachable` and adds "start the server (`by serve`), or fix the URL, token or CA file". Check the scheme and port, start `by serve` on the host, and pass `--ca-file` for an https server with a private CA. Without `--remote`, commands run here and need no server.
+The first comes from `--remote` (or `BRANCHYARD_REMOTE`, or `[remote] url`) when nothing answers; the second when no token file is given. `by doctor` shows the first as `server.reachable` with the same next step, and with `--json` the failure is `{"error": {"kind": "remote_unreachable", …}}`. Check the scheme and port, start `by serve` on the host, and pass `--ca-file` for an https server with a private CA. Without `--remote`, commands run here and need no server.
 
 ### `this build has no PostgreSQL support` and `this build has no Microsandbox support`
 

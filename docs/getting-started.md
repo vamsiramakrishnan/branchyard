@@ -28,11 +28,20 @@ by harnesses
 ```
 
 ```text
-HARNESS      VERSION  LOGIN                QUOTA  PATH
-claude-code  2.1.310  logged out (likely)  -      /opt/node22/bin/claude
+HARNESS      VERSION  LOGIN                    LIVE RUN     QUOTA        PATH
+claude-code  2.1.310  logged in                live 9/9     5h - · wk -  /opt/node22/bin/claude
+codex        0.164.0  key set (CODEX_API_KEY)  live 9/9     -            ~/.npm-global/bin/codex
+qwen-code    0.26.0   unknown                  no live run  -            ~/.npm-global/bin/qwen
+  claude-code: claude auth status: logged in (oauth_token)
+  claude-code: installed 2.1.310 · live-tested 2.1.283
+  codex: CODEX_API_KEY is set (an API key; not checked)
+  codex: installed 0.164.0 · live-tested 0.157.1
+  qwen-code: Branchyard cannot read qwen's login: the catalog records no status command, credential file or key variable for it; sign in inside qwen itself
+
+3 of the 45 harnesses with a known executable are installed on this machine. `by harnesses --all` lists the rest with their install commands; `by harnesses install ID` installs one.
 ```
 
-One row per installed harness. `logged out (likely)` means `by` found no credential file or key variable; it did not ask the harness (see [troubleshooting](troubleshooting.md#likely-logged-out)). `by harnesses login ID` signs in through the harness's own flow. When something else looks wrong, `by doctor` checks the machine and the repository and ends with what to fix.
+One row per installed harness, asked all at once (ten seconds at most). LOGIN says what is known and no more: `logged in` or `logged out` when the harness's own status command said so, `key set (VAR)` when a key variable is in the environment (its name, never its value), `credentials found` when a credential file exists, `login not verified` when `by` found neither and could not ask (see [troubleshooting](troubleshooting.md#login-not-verified)), `unknown` when it has nothing to go on. LIVE RUN is the score of the last recorded run of that harness through Branchyard with a real model, and the line under the table says which version it was. `by harnesses login ID` signs in through the harness's own flow, or stores a key. When something else looks wrong, `by doctor` checks the machine and the repository and ends with what to fix.
 
 ## 3. Set up the repository
 
@@ -47,6 +56,30 @@ It ends with a short card: what was detected, written and installed, the `Only y
 
 The same work, one piece at a time: `by init project`, `by init plugin --all-detected`, `by harnesses login ID`. The settings are in [setup](setup.md).
 
+`--dry-run` shows the plan and writes nothing. In a throwaway repository with no harness on `PATH`, followed by the bare `by`:
+
+```sh test
+cd "$(mktemp -d)" && git init -q -b main plan-by && cd plan-by && git commit -q --allow-empty -m "first commit"
+by setup --dry-run
+by
+```
+
+```text
+Detected
+  repository  … (default branch main)
+  harnesses   …
+Summary
+  config      would write branchyard.toml: harness … · no check · local, no isolation
+Nothing was written (--dry-run).
+Next: by setup…
+Branchyard
+  repository  …
+  set up      not yet: branchyard.toml no · .branchyard/ no
+  branches    none yet
+Next: by setup
+All commands: by --help
+```
+
 ## 4. Run a task
 
 With your harness, in your repository:
@@ -57,7 +90,7 @@ by run "Make the flaky parser test deterministic" --check "cargo test" --yes
 
 `by run` starts the harness on a new branch `by/NAME` in its own git worktree under `.branchyard/` (git ignores that directory) and streams what it does. `--check` is the command that must pass on the merged result before `by merge` moves anything. `--yes` allows every tool permission request the harness makes; `--ask` asks you at the terminal instead, and `--permissions read-only|edit-worktree|full` answers by a preset. `--harness ID` picks another harness, `--name` names the branch. In a second terminal, `by watch` shows every branch live.
 
-Two things to know first. The harness runs as you, in local mode, with no isolation beyond your user (`by` prints that on its first line); `docs/modes.md` shows the steps up. And a real run spends your login's allowance or your API key: cap it with `--budget-usd`, `--max-turns` or `--max-minutes`.
+Two things to know first. The harness runs as you, in local mode, with no isolation beyond your user (`by` says so the first time it runs in a repository); `docs/modes.md` shows the steps up. And a real run spends your login's allowance or your API key: cap it with `--budget-usd`, `--max-turns` or `--max-minutes`.
 
 Every run ends with a card: the branch, its status, the candidate (the files it changed), the cost, and `next`, the commands that fit. Step 5 shows one.
 
@@ -80,7 +113,7 @@ by run "WRITE hello.txt=hello" --name hello --harness gemini-cli --command "$FAK
 ```
 
 ```text
-by: local mode: harnesses run as your user, with no isolation beyond it
+by: local mode: harnesses run as your user, in your own HOME; no sandbox
 wrote hello.txt
 turn 1 completed
 candidate … (1 file +1 -0)
@@ -129,12 +162,12 @@ cat hello.txt
 ```
 
 ```text
-merged hello into main (…)
+merged hello into main (…); `by rm hello` frees the name
 hello   gemini-cli  merged into main  1 file +1 -0      1     -  …
 hello
 ```
 
-`by merge` runs the check on the exact merge result, then moves your current branch. If the check fails it moves nothing and prints the check's output ([troubleshooting](troubleshooting.md#check-failed)). The branch and its worktree stay until you remove them:
+`by merge` runs the check on the exact merge result, then moves your current branch. If the check fails it moves nothing and prints the check's output ([troubleshooting](troubleshooting.md#the-check-for--failed)). The branch and its worktree stay until you remove them:
 
 ```sh test
 by log hello
@@ -196,4 +229,4 @@ After a run, send or fork, `next` lists the commands that fit the branch's state
 - [`docs/adding-a-harness.md`](adding-a-harness.md): a driver for a CLI Branchyard does not know yet.
 - [Troubleshooting](troubleshooting.md) and [upgrading](upgrade.md).
 
-Not done: `by setup` and the status card of a bare `by` are described from the specification and the command's help text as they stood while the command was being built; they were not run, and step 3 shows no output for them. The real-harness command in step 4 and the `by harnesses` rows were not run against a model here. The install command was run in debug mode, offline, into a scratch directory. Everything was run on Linux; macOS and Windows were not.
+Not done: step 3's `by setup --dry-run` and the bare `by` run in CI in a repository with no harness on `PATH`; `by setup` writing a configuration and installing hooks into a real harness was not run here. The real-harness command in step 4 and the `by harnesses` rows were not run against a model here. The install command was run in debug mode, offline, into a scratch directory. Everything was run on Linux; macOS and Windows were not.

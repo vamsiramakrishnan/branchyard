@@ -48,7 +48,7 @@ Local mode runs the engine in your process and each harness as a child of it, in
 
 **Not guaranteed:** anything beyond your operating-system user. The harness has your `HOME`, your login, your other variables, your filesystem and your network. A `--yes` run lets it use all of that without asking.
 
-Before it starts, `by` says so: `by: local mode: harnesses run as your user, in your own HOME; no sandbox`.
+Before it starts, `by` says so, the first time in a repository: `by: local mode: harnesses run as your user, in your own HOME; no sandbox` (the marker is `.branchyard/local-mode-noted`). The other modes are said on every run.
 
 ## Isolated
 
