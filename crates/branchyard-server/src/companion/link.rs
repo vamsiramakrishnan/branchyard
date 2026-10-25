@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn links_carry_the_code_in_the_fragment_and_record_only_its_hash() {
-        let mut config = Config::new("/tmp/unused".into());
+        let mut config = Config::new("/nonexistent/unused".into());
         config.tokens.push(crate::config::Token {
             name: "ops".into(),
             secret: "0123456789abcdef".into(),

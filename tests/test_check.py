@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """tools/check.py: step selection, --fast and --fix, the verdict and exit code, and the
-step table against .github/workflows/check.yml. A fake step table runs the runner; no cargo."""
+step table against .github/workflows/check.yml (and what that workflow promises: one run per
+change, no job that repeats another, a cache on every job that compiles, actions pinned to a
+commit). A fake step table runs the runner; no cargo."""
 
 import ast
 import contextlib
@@ -21,6 +23,7 @@ check = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check)
 
 WORKFLOW = (ROOT / ".github/workflows/check.yml").read_text()
+NIGHTLY = (ROOT / ".github/workflows/nightly.yml").read_text()
 
 
 def fake(name, code=0, *, job="controls", cargo=False, fix=False, lines=("ok",)):
@@ -152,7 +155,10 @@ class RealTable(unittest.TestCase):
     def test_names_are_unique_and_every_job_is_known(self):
         names = [step.name for step in check.STEPS]
         self.assertEqual(len(names), len(set(names)))
-        self.assertTrue({step.job for step in check.STEPS} <= {"python", "docs", "controls"})
+        self.assertTrue({step.job for step in check.STEPS} <= {"fast", "docs", "controls"})
+        self.assertTrue(
+            {step.job for step in check.STEPS} <= set(controls_jobs()), "a step names a job check.yml lacks"
+        )
 
     def test_rewriting_steps_are_the_fix_steps(self):
         for step in check.STEPS:
@@ -169,16 +175,81 @@ class RealTable(unittest.TestCase):
             step = next(step for step in check.STEPS if step.name == name)
             self.assertIn(" ".join(step.argv), WORKFLOW, name)
 
-    def test_check_yml_runs_check_py_for_the_controls_python_gates(self):
-        jobs = controls_job_lines()
-        self.assertEqual(sum("python3 tools/check.py --fast --keep-going" in line for line in jobs), 1)
+    def test_the_python_gates_run_once_in_the_fast_job(self):
+        runs = [
+            name
+            for name, lines in controls_jobs().items()
+            for line in lines
+            if line.lstrip().startswith("- run:") and "tools/check.py" in line
+        ]
+        self.assertEqual(runs, ["fast"])
+        self.assertIn("python3 tools/check.py --fast --keep-going", job_text("fast"))
+        self.assertIn("cargo fmt --all -- --check", job_text("fast"))
 
     def test_every_python_script_check_yml_runs_is_a_step(self):
         scripts = set()
-        for job in ("python", "docs", "controls"):
+        # The jobs whose gates tools/check.py also runs; coverage, deny and unused-deps run
+        # tools only CI uses (check_coverage.py, install_ci_tool.py).
+        for job in ("fast", "docs", "controls"):
             scripts |= set(re.findall(r"\bpython3?\s+((?:tools|tests)/[\w./-]+\.py)", job_text(job)))
         steps = {arg for step in check.STEPS for arg in step.argv if isinstance(arg, str)}
         self.assertEqual(sorted(scripts - steps - {"tools/check.py"}), [])
+
+
+class Workflow(unittest.TestCase):
+    """What .github/workflows/check.yml promises beyond running the steps."""
+
+    def test_a_change_gets_one_run_not_two(self):
+        header = WORKFLOW.split("\njobs:", 1)[0]
+        self.assertNotIn("[push, pull_request]", header)
+        self.assertRegex(header, r"(?m)^on:\n  push:\n    branches: \[main\]\n  pull_request:\n")
+
+    def test_the_python_job_is_gone_and_the_fast_job_is_first(self):
+        jobs = list(controls_jobs())
+        self.assertNotIn("python", jobs)
+        self.assertEqual(jobs[0], "fast")
+
+    def test_no_job_reruns_a_filtered_part_of_the_workspace_tests(self):
+        text = job_text("controls")
+        self.assertEqual(len(re.findall(r"- run: cargo test --workspace", text)), 1)
+        self.assertNotIn("branchyard-controls --locked --offline catalog", text)
+        self.assertNotIn("--test compatibility", text)
+
+    def test_every_job_that_compiles_restores_a_cache(self):
+        compiling = re.compile(r"cargo (?:test|clippy|doc|check|build|llvm-cov)\b")
+        for name in controls_jobs():
+            text = job_text(name)
+            if compiling.search(text):
+                self.assertIn("Swatinem/rust-cache@", text, f"the {name} job compiles without a cache")
+
+    def test_the_cache_is_written_only_on_main(self):
+        for name in controls_jobs():
+            text = job_text(name)
+            if "Swatinem/rust-cache@" in text:
+                self.assertIn("save-if: ${{ github.ref == 'refs/heads/main' }}", text, name)
+
+    def test_every_action_is_pinned_to_a_full_commit(self):
+        for text in (WORKFLOW, NIGHTLY):
+            uses = re.findall(r"(?m)^\s*(?:- )?uses:\s*(\S+)", text)
+            self.assertTrue(uses)
+            for use in uses:
+                self.assertRegex(use, r"^[\w./-]+@[0-9a-f]{40}$", use)
+
+    def test_the_nightly_workflow_runs_on_a_schedule_and_on_request(self):
+        header = NIGHTLY.split("\njobs:", 1)[0]
+        self.assertIn("schedule:", header)
+        self.assertIn("workflow_dispatch:", header)
+        self.assertNotIn("pull_request", header)
+        self.assertNotIn("push:", header)
+        self.assertIn("permissions:\n  contents: read", header)
+
+    def test_the_nightly_workflow_skips_what_a_stock_runner_cannot_run(self):
+        # Each skip is explained where it is made; none of the KVM, cluster and Anvil tests runs.
+        # Not the doctests: `--ignored` would compile the examples marked `ignore`.
+        self.assertIn("--tests -- --ignored", NIGHTLY)
+        self.assertIn("--skip cluster_", NIGHTLY)
+        self.assertIn("--skip create_bridge_template", NIGHTLY)
+        self.assertNotIn("--features microsandbox", NIGHTLY)
 
 
 def job_text(name):
@@ -186,13 +257,11 @@ def job_text(name):
     return "\n".join(controls_jobs()[name])
 
 
-def controls_job_lines():
-    return controls_jobs()["controls"]
-
-
 def controls_jobs():
+    """{job name: its lines} for the jobs of check.yml, in file order."""
     jobs, current = {}, None
-    for line in WORKFLOW.splitlines():
+    lines = WORKFLOW.splitlines()
+    for line in lines[lines.index("jobs:") + 1 :]:
         match = re.match(r"^  (\w[\w-]*):\s*$", line)
         if match:
             current = jobs.setdefault(match.group(1), [])

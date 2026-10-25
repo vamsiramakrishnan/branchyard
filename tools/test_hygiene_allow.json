@@ -1,0 +1,45 @@
+{
+  "format": 1,
+  "long_settle": [
+    {
+      "file": "crates/branchyard-server/tests/postgres.rs",
+      "why": "several recovery ticks pass",
+      "reason": "A quiet period in which nothing may happen: a waiting branch must stay waiting while the recovery loop ticks several times. No event marks 'the ticks ran'; the duration is against the loop's own interval, which a slow machine does not stretch."
+    },
+    {
+      "file": "crates/branchyard-server/tests/postgres.rs",
+      "why": "recovery ticks pass",
+      "reason": "A quiet period in which nothing may happen: the dependent stays waiting while the recovery loops of three processes tick over it. Against the loops' own interval."
+    },
+    {
+      "file": "crates/branchyard-server/tests/postgres.rs",
+      "why": "many more ticks pass",
+      "reason": "A quiet period in which nothing may happen: the dependent, started once, is not started again by many more ticks on every process. Against the loops' own interval."
+    },
+    {
+      "file": "crates/branchyard-server/tests/sync.rs",
+      "why": "pushes that must not happen would have by now",
+      "reason": "A quiet period in which nothing may happen: three of the replicator's one-second intervals pass with the task fenced, and nothing reaches the remote. Against the replicator's clock."
+    },
+    {
+      "file": "crates/branchyard-server/tests/triggers.rs",
+      "why": "the other server would have fired too, if it was going to",
+      "reason": "A quiet period in which nothing may happen: of two servers sharing one store, only one fires a schedule, so the other's runs stay at one. Against the dispatchers' own interval."
+    },
+    {
+      "file": "crates/branchyard-workspace/tests/workspace.rs",
+      "why": "to just after a second begins",
+      "reason": "The test is about files and an index that share one second of timestamp granularity (racy git), so the clock must cross into the next second. Time itself is the input."
+    },
+    {
+      "file": "crates/branchyard/tests/engine.rs",
+      "why": "past the stall window, with the child still running",
+      "reason": "The stall window is the engine's clock: the test needs it to elapse while the child keeps running, and nothing else marks that moment."
+    },
+    {
+      "file": "crates/branchyard/tests/messaging.rs",
+      "why": "the stall window passes while the turn waits for an answer",
+      "reason": "The stall window is the engine's clock: a turn waiting for an answer must not be reported stalled once it passes, and nothing else marks that moment."
+    }
+  ]
+}

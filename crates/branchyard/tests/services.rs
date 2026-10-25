@@ -318,7 +318,10 @@ fn an_expired_recipe_machine_is_destroyed_through_its_recorded_destroy() {
     machines.ensure(&SandboxSpec::new("by-ghost-1")).unwrap();
     assert!(machines.result("by-ghost-1").is_some());
 
-    std::env::set_var("BRANCHYARD_SSH", &ssh);
+    // The engine reads the wrapper when it rebuilds the provider to destroy
+    // the machine. This is the one test here that does; set once.
+    static SSH: std::sync::Once = std::sync::Once::new();
+    SSH.call_once(|| std::env::set_var("BRANCHYARD_SSH", &ssh));
     let mut service = Service::new(
         services::KIND_RECIPE_MACHINE,
         gone_owner().for_branch("ghost"),

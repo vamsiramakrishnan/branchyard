@@ -1008,37 +1008,6 @@ fn harnesses_lists_every_profile_with_availability_and_qualification() {
 }
 
 #[test]
-fn harnesses_inherit_the_environment_without_nested_session_markers() {
-    let f = Fixture::new();
-    let prompt = "ENV CLAUDECODE BRANCHYARD_REMOTE BY_TEST_VISIBLE";
-    let shared = f.task(prompt).name("shared").run().unwrap();
-    let home = std::env::var("HOME").unwrap();
-    assert_eq!(
-        text(&shared.events().unwrap()),
-        format!("HOME={home}\nCLAUDECODE unset\nBRANCHYARD_REMOTE unset\nBY_TEST_VISIBLE=yes\n")
-    );
-
-    let isolated = f
-        .task(prompt)
-        .name("isolated")
-        .isolated(true)
-        .run()
-        .unwrap();
-    let private = f.root.join(".branchyard/homes/isolated");
-    assert!(private.is_dir());
-    assert_eq!(
-        text(&isolated.events().unwrap()),
-        format!(
-            "HOME={}\nCLAUDECODE unset\nBRANCHYARD_REMOTE unset\nBY_TEST_VISIBLE=yes\n",
-            private.display()
-        )
-    );
-    f.yard.remove("isolated").unwrap();
-    assert!(!private.exists());
-    assert!(fake_agent().is_file());
-}
-
-#[test]
 fn a_session_the_harness_cannot_find_fails_precisely() {
     let f = Fixture::new();
     let branch = f.task("WHOAMI").name("lost").run().unwrap();

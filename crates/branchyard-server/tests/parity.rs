@@ -64,7 +64,7 @@ fn opt_ins_are_refused_unless_the_operator_allows_them() {
         &TaskRequest {
             provider: Some(Provider::Recipe(RecipeOptions {
                 name: "devbox".into(),
-                create: "touch /tmp/never-run".into(),
+                create: "echo never-run".into(),
                 ..RecipeOptions::default()
             })),
             ..task("x", "vm")

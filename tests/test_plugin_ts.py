@@ -36,6 +36,9 @@ def find_node():
 
 
 NODE = find_node()
+# BY_TEST_TIMEOUT_SCALE multiplies the margins of the timing bounds, as it does in the Rust tests
+# (branchyard_testkit::wait::scale).
+TIMEOUT_SCALE = float(os.environ.get("BY_TEST_TIMEOUT_SCALE") or 1)
 
 # Logs each call's arguments and stdin (one line each), then answers by STUB_MODE.
 STUB = r"""#!/bin/sh
@@ -400,9 +403,15 @@ class Plugins(unittest.TestCase):
             with self.subTest(kind=kind):
                 out = self.run_plugin(kind, mode="hang", scenario="one")
                 self.assert_nothing_added(kind, out)
+                # The plugin's own clock: it gives up after its 3 s timeout, never earlier.
                 self.assertGreaterEqual(out["elapsed"][0], 2900)
-                self.assertLess(out["elapsed"][0], 4500)
-                self.assertLess(self.elapsed, 10)
+                # Contract plus margin: 3 s, plus 7 s for a node start and the stub's spawn on a
+                # loaded runner (BY_TEST_TIMEOUT_SCALE multiplies the margin, as in the Rust
+                # tests). A plugin that waited for the stub would take its 30 s sleep, so the
+                # bound still sits far below the regression.
+                margin = 7000 * TIMEOUT_SCALE
+                self.assertLess(out["elapsed"][0], 3000 + margin)
+                self.assertLess(self.elapsed, 10 + margin / 1000)
 
 
 if __name__ == "__main__":

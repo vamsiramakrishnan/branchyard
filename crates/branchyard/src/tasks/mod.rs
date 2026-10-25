@@ -987,7 +987,11 @@ mod tests {
     #[test]
     fn ids_are_ulids_in_creation_order() {
         let a = new_id().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        // A ULID sorts by its millisecond: the second must be made in a later one.
+        branchyard_testkit::wait::settle(
+            "the clock moves to the next millisecond",
+            std::time::Duration::from_millis(2),
+        );
         let b = new_id().unwrap();
         assert_eq!(a.len(), 26);
         assert!(a

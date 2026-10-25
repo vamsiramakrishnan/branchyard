@@ -11,10 +11,10 @@ Each step prints `ok` or `FAILED` (with the last lines of its output); a step th
 skips prints `skip`. The verdict is `check: PASSED` or `check: FAILED (n steps)`, and the exit
 code is 0 or 1. Standard library only.
 
-CI's controls job runs `--fast --keep-going` for the Python steps, so each gate is defined
-once, here. Its cargo steps stay in the workflow where they are: they need `cargo fetch`
-first, and check_missing_docs.py runs `cargo check` itself. A new Python gate goes in STEPS;
-tests/test_check.py fails when check.yml runs a script that STEPS does not.
+CI's fast job runs `--fast --keep-going` (and rustfmt), so each Python gate is defined once,
+here, and runs once. The cargo steps stay in the workflow's other jobs, where they are: they
+need `cargo fetch` first, and check_missing_docs.py runs `cargo check` itself. A new Python
+gate goes in STEPS; tests/test_check.py fails when check.yml runs a script that STEPS does not.
 """
 
 import argparse
@@ -33,7 +33,9 @@ REWRITE_VARIABLES = ("BY_UPDATE_SCHEMA", "BRANCHYARD_BLESS")
 
 
 class Step(NamedTuple):
-    """One gate. `job` is the check.yml job that runs it; `cargo` steps are skipped by --fast."""
+    """One gate. `job` names where it was first grouped in check.yml: the `fast` job runs every
+    step --fast keeps (the Python gates, whichever label they carry), `docs` and `controls` run
+    the cargo ones; `cargo` steps are skipped by --fast."""
 
     name: str
     job: str
@@ -48,7 +50,7 @@ STEPS = (
     # --fix, in the order it runs.
     Step("fix_docs_facts", "controls", (PY, "tools/docs_facts.py", "--write"), fix=True),
     Step("fix_cargo_fmt", "controls", ("cargo", "fmt", "--all"), cargo=True, fix=True),
-    Step("fix_ruff_format", "python", (PY, "-m", "ruff", "format", *TARGETS), fix=True),
+    Step("fix_ruff_format", "fast", (PY, "-m", "ruff", "format", *TARGETS), fix=True),
     Step(
         "fix_contract_schema",
         "controls",
@@ -117,12 +119,12 @@ STEPS = (
         fix=True,
         env=(("BY_UPDATE_SCHEMA", "1"),),
     ),
-    # The python job: lint, format and type-check tools/, tests/ and the shipped client.
-    Step("ruff_check", "python", (PY, "-m", "ruff", "check", *TARGETS)),
-    Step("ruff_format", "python", (PY, "-m", "ruff", "format", "--check", *TARGETS)),
+    # Lint, format and type-check tools/, tests/ and the shipped client.
+    Step("ruff_check", "fast", (PY, "-m", "ruff", "check", *TARGETS)),
+    Step("ruff_format", "fast", (PY, "-m", "ruff", "format", "--check", *TARGETS)),
     Step(
         "mypy",
-        "python",
+        "fast",
         (
             PY,
             "-m",
@@ -134,8 +136,8 @@ STEPS = (
             *TARGETS,
         ),
     ),
-    Step("test_install_ci_tool", "python", (PY, "tests/test_install_ci_tool.py")),
-    Step("test_check_coverage", "python", (PY, "tests/test_check_coverage.py")),
+    Step("test_install_ci_tool", "fast", (PY, "tests/test_install_ci_tool.py")),
+    Step("test_check_coverage", "fast", (PY, "tests/test_check_coverage.py")),
     # The controls job's Python gates, in its order.
     Step("verify_vendor", "controls", (PY, "tools/verify_vendor.py")),
     Step("test_verify_vendor", "controls", (PY, "tests/test_verify_vendor.py")),

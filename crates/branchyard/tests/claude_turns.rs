@@ -113,9 +113,17 @@ fn a_harness_with_background_work_is_closed_quietly() {
         .run()
         .unwrap();
     assert_eq!(branch.info().status, BranchStatus::NoChanges);
+    // The precise check: a close that waited out its grace and killed the
+    // harness says so in a warning.
     assert_eq!(warnings(&f, "quiet"), Vec::<String>::new());
+    // Contract: the close ends the session at once instead of waiting for
+    // the background task; a close that does not waits the engine's whole
+    // `CLOSE_GRACE` (10 s) first. The run takes a fraction of a second, so
+    // 9 s leaves a margin of two orders of magnitude on a slow runner while
+    // staying below the grace. It is not scaled: the grace is the engine's
+    // clock, and scaling the bound past it would make the check vacuous.
     assert!(
-        started.elapsed() < Duration::from_secs(8),
+        started.elapsed() < Duration::from_secs(9),
         "the close waited {:?}",
         started.elapsed()
     );

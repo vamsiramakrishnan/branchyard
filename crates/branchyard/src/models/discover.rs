@@ -993,11 +993,10 @@ mod tests {
         assert!(denied.models.is_empty());
         let html = failing(Kind::Gemini, &server.url());
         assert_eq!(html.reason.as_deref(), Some("the answer is not JSON"));
-        // Nothing listens there.
-        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", closed.local_addr().unwrap());
-        drop(closed);
-        let refused = failing(Kind::Anthropic, &url);
+        // Port 1 is privileged, so no mock in this process can be given it,
+        // as a freed ephemeral port can be: connecting to it is always
+        // refused.
+        let refused = failing(Kind::Anthropic, "http://127.0.0.1:1");
         assert_eq!(refused.status, Status::Failed);
         assert!(
             refused.reason.unwrap().starts_with("could not connect"),

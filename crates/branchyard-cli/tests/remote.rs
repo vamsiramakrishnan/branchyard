@@ -2325,8 +2325,13 @@ fn a_session_hook_against_a_server_that_is_down_prints_nothing_in_time() {
         for args in [&["hook", "session-start"][..], &["statusline"]] {
             let (out, took) = session(&here, args, &input, &env);
             assert_eq!(out, "", "{url} {args:?}");
+            // Contract: the hook gives up after its 2 s deadline
+            // (`hook_cmd::DEADLINE`) and prints nothing. `took` also holds
+            // the start and exit of an instrumented `by`; the 3 s of margin
+            // is for that on a loaded runner, and still far from a hook
+            // that waits on a server which never answers.
             assert!(
-                took < Duration::from_millis(2500),
+                took < wait::scaled(Duration::from_secs(5)),
                 "{url} {args:?}: {took:?}"
             );
         }

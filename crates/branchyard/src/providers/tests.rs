@@ -338,6 +338,7 @@ fn guest_paths_are_where_the_harness_will_see_them() {
                 assert_eq!(home, placement::HOME);
             }
             _ => {
+                // hygiene-allow: tmp the recipe machine's default workdir is a product contract
                 assert!(workdir.starts_with("/tmp/branchyard/b-"), "{workdir}");
                 assert!(home.ends_with("/home"), "{home}");
             }

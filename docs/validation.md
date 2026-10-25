@@ -129,6 +129,6 @@ cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 cargo run --locked --offline -p branchyard-controls --example plan_resume
 ```
 
-`tools/check_test_hygiene.py` keeps the tests on `branchyard-testkit` (no local `wait_until` or `fake_agent`, no raw `thread::sleep`, and counted ratchets that can only fall for `wait::settle`, hand-rolled temporary directories and hand-rolled TCP servers); see "Writing tests" in [CONTRIBUTING.md](../CONTRIBUTING.md). `BY_TEST_TIMEOUT_SCALE=3 cargo test --workspace --locked --offline` runs every wait with three times its timeout, for a slow machine.
+`tools/check_test_hygiene.py` keeps the tests on `branchyard-testkit` (no local `wait_until` or `fake_agent`; no raw sleep, no port freed and reused, no process-wide `set_var`, no `/tmp` path, no unexplained settle of 500 ms or more; and counted ratchets that can only fall for `wait::settle`, hand-rolled temporary directories and hand-rolled TCP servers), in `crates/*/tests` and in the `#[cfg(test)]` code of `crates/*/src`; see "Writing tests" in [CONTRIBUTING.md](../CONTRIBUTING.md). `BY_TEST_TIMEOUT_SCALE=3 cargo test --workspace --locked --offline` runs every wait with three times its timeout, for a slow machine.
 
 `python3 tools/test_scion.py` without `--qualified` runs the same suites at this revision. CI runs the suites and the compatibility check as separate required steps.

@@ -580,6 +580,7 @@ mod tests {
             "by plan show parser",
             "by approvals ls",
             "by",
+            // hygiene-allow: tmp a command line the policy must refuse; it is never run
             "/tmp/by spawn x",
             "./by spawn x",
             "by spawn x; rm -rf /",

@@ -544,11 +544,11 @@ mod tests {
                 env: vec![(b"A".to_vec(), b"1".to_vec()), (b"B".to_vec(), Vec::new())],
             },
             Frame::PutFile {
-                path: b"/tmp/x".to_vec(),
+                path: b"/work/x".to_vec(),
                 mode: 0o755,
             },
             Frame::GetFile {
-                path: b"/tmp/x".to_vec(),
+                path: b"/work/x".to_vec(),
             },
             Frame::PutTree {
                 path: b"/home".to_vec(),
