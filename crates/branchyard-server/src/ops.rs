@@ -1372,14 +1372,17 @@ mod tests {
         let (queued, _) = registry
             .submit(new(None, &["b"]), serde_json::json!({ "n": 7 }))
             .unwrap();
-        while state(&registry, &running.id) != OperationState::Running {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        branchyard_testkit::wait::until("the first operation to run", || {
+            state(&registry, &running.id) == OperationState::Running
+        });
         registry.stop_accepting();
         assert!(!registry.wait_running(Duration::from_millis(50)));
         assert_eq!(registry.close(), 1);
         release.send(()).unwrap();
-        std::thread::sleep(Duration::from_millis(50));
+        branchyard_testkit::wait::settle(
+            "a closed registry would have started the queued operation by now",
+            Duration::from_millis(50),
+        );
         assert_eq!(state(&registry, &queued.id), OperationState::Queued);
         drop(registry);
 

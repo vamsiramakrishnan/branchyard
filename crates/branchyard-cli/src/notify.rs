@@ -678,7 +678,7 @@ mod tests {
             ..Notify::default()
         };
         let s = Settings::resolve(false, &desktop, &|n: &str| {
-            (n == "TMUX").then(|| "/tmp/tmux".to_owned())
+            (n == "TMUX").then(|| "tmux-socket".to_owned())
         });
         assert_eq!((s.desktop, s.escape, s.tmux), (true, Escape::None, true));
         let in_harness = |n: &str| (n == "BRANCHYARD_BRANCH").then(|| "impl".to_owned());

@@ -518,25 +518,28 @@ fn check_timeout_kills_process_group() {
     let expected = fixture.head("main");
     let candidate = fixture.candidate("slow", "feature.txt", "feature\n");
     // The background sleep holds the output pipe; it must be killed too.
-    let check = sh(
-        "echo started; sleep 30 & sleep 30",
-        Duration::from_millis(300),
-    );
+    // The timeout has to outlast the shell's start, which must have printed
+    // `started` before the clock runs out (300 ms did not on a loaded
+    // runner): 3 s leaves the margin of an instrumented, busy machine, and
+    // the check is still cut at the timeout, not at the 30 s of its sleeps.
+    let timeout = wait::scaled(Duration::from_secs(3));
+    let check = sh("echo started; sleep 30 & sleep 30", timeout);
     let started = Instant::now();
     match fixture
         .repo
         .integrate(&candidate, "main", &expected, Some(&check))
     {
         Err(IntegrationError::CheckTimedOut {
-            timeout,
+            timeout: reported,
             output_tail,
         }) => {
-            assert_eq!(timeout, Duration::from_millis(300));
+            assert_eq!(reported, timeout);
             assert!(output_tail.contains("started"));
         }
         other => panic!("{other:?}"),
     }
-    assert!(started.elapsed() < Duration::from_secs(10));
+    // The kill is prompt: well under the 30 s the sleeps would take.
+    assert!(started.elapsed() < timeout + wait::scaled(Duration::from_secs(10)));
     assert_eq!(fixture.head("main"), expected);
     fixture.assert_no_integration_worktrees();
 }

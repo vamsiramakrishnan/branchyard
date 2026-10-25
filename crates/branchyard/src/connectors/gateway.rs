@@ -454,16 +454,13 @@ mod tests {
             }),
         )
         .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while fs::read_to_string(&marker)
-            .unwrap_or_default()
-            .lines()
-            .count()
-            < 2
-        {
-            assert!(Instant::now() < deadline, "not restarted");
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        branchyard_testkit::wait::until("the gateway to be started again", || {
+            fs::read_to_string(&marker)
+                .unwrap_or_default()
+                .lines()
+                .count()
+                >= 2
+        });
         drop(supervisor);
         assert!(ticks.load(Ordering::SeqCst) >= 2);
         let text = fs::read_to_string(&log).unwrap();

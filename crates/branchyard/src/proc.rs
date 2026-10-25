@@ -287,17 +287,15 @@ mod tests {
         let mut other = spawn(&format!("{marker}-other"));
         // `spawn` returns once the child is inside `execve`, before the
         // kernel publishes its new environment; wait until it has.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         for child in [&a, &b, &other] {
             let path = format!("/proc/{}/environ", child.id());
-            while !std::fs::read(&path).is_ok_and(|environ| {
-                environ
-                    .split(|byte| *byte == 0)
-                    .any(|entry| entry.starts_with(ENV_SPAWN.as_bytes()))
-            }) {
-                assert!(std::time::Instant::now() < deadline, "{path} stayed empty");
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
+            branchyard_testkit::wait::until(&format!("{path} to be published"), || {
+                std::fs::read(&path).is_ok_and(|environ| {
+                    environ
+                        .split(|byte| *byte == 0)
+                        .any(|entry| entry.starts_with(ENV_SPAWN.as_bytes()))
+                })
+            });
         }
         let mut expected = vec![a.id(), b.id()];
         expected.sort_unstable();

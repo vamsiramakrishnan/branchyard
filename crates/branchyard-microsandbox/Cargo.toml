@@ -23,3 +23,6 @@ branchyard-sandbox = { path = "../branchyard-sandbox" }
 # build-time runtime download, no keyring.
 microsandbox = { version = "=0.7.3", default-features = false, features = ["local", "net"], optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread"], optional = true }
+
+[dev-dependencies]
+branchyard-testkit = { path = "../branchyard-testkit" }

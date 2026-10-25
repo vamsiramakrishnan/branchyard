@@ -1190,10 +1190,31 @@ fn a_registry_opened_beside_a_working_server_does_not_deadlock_with_it() {
             &[],
         )
         .unwrap();
+        // The opening connections carry a name of their own, so that the
+        // wait below sees them and no other test's.
+        let opening_url = format!(
+            "{url}&application_name=by_open_{}",
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let name = opening_url.rsplit('=').next().unwrap().to_owned();
+        let mut monitor = postgres::Client::connect(&url, postgres::NoTls).unwrap();
         std::thread::scope(|scope| {
-            let opening = scope.spawn(|| PostgresStore::open(&url).map(drop));
-            // Long enough for the open to reach the queue.
-            wait::settle("the open to reach the queue", Duration::from_millis(500));
+            let opening = scope.spawn(|| PostgresStore::open(&opening_url).map(drop));
+            // The write below must come while the open is waiting for the
+            // lock the working server holds on the queue. Wait for that, as
+            // PostgreSQL reports it; an open that never needs the lock
+            // (nothing to migrate) has finished instead.
+            wait::until("the open to wait on the working server's lock", || {
+                let waiting: i64 = monitor
+                    .query_one(
+                        "SELECT count(*) FROM pg_stat_activity \
+                         WHERE application_name = $1 AND wait_event_type = 'Lock'",
+                        &[&name],
+                    )
+                    .unwrap()
+                    .get(0);
+                (waiting > 0 || opening.is_finished()).then_some(())
+            });
             tx.execute(
                 "UPDATE by_operations SET body = '{\"done\":true}' WHERE id = 'op-old'",
                 &[],
