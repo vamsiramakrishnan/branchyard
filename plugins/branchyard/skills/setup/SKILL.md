@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up Branchyard for the user by interviewing them and writing validated configuration. Use when the user asks to set up, configure, initialize, install or onboard Branchyard or `by`; to create or edit branchyard.toml, a rig (a team of harnesses), a Branchyard server configuration, tenants, tokens, credentials or quotas, a Docker Compose deployment; or to install the Branchyard skills into Claude Code or Codex. Drives `by init <topic> --json`, asks with your own question tool, shows the diff, and applies only after the user agrees.
+description: Set up Branchyard for the user by interviewing them and writing validated configuration. Use when the user asks to set up, configure, initialize, install or onboard Branchyard or `by`; to create or edit branchyard.toml, a rig (a team of harnesses), a Branchyard server configuration, tenants, tokens, credentials or quotas, a Docker Compose deployment; or to install Branchyard's hooks, commands and skills into the harnesses on this machine. Drives `by init <topic> --json`, asks with your own question tool, shows the diff, and applies only after the user agrees.
 ---
 
 # Setting up Branchyard
@@ -17,7 +17,7 @@ write these files by hand, and never invent answers the user did not give.
 | `server` | A server configuration with hashed credentials, 0600 token files, tenants and quotas |
 | `rig` | A rig TOML: a lead seat and the seats it delegates to |
 | `deploy` | `compose.yaml`, its server configuration and generated secret files |
-| `plugin` | These skills, into Claude Code or Codex |
+| `plugin` | Each detected harness's hooks, commands and skills, from `plugins/branchyard/install` |
 
 If the request is unclear, run `by init --json` and ask which topic.
 Before you start, read that topic's notes: `references/project.md`,
