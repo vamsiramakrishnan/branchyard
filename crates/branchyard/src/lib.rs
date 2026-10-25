@@ -773,13 +773,14 @@ impl Yard {
     /// Remove environments beyond the newest `keep` of each recipe or unused
     /// for longer than `max_age`, and old failures; never the newest good
     /// one of a recipe, nor one a branch links into. With `only`, just those
-    /// keys.
+    /// keys. An error, with nothing removed, when the branches and pool
+    /// slots that may link an environment cannot be read.
     pub fn prune_environments(
         &self,
         keep: usize,
         max_age: Duration,
         only: &[String],
-    ) -> environments::Pruned {
+    ) -> Result<environments::Pruned, Error> {
         environments::prune(self, keep, max_age, only)
     }
 
@@ -3016,6 +3017,24 @@ pub struct RecordedEvent {
     pub activity: Activity,
 }
 
+/// The text a branch's [`Activity::Warning`] begins with when it records a
+/// step that failed during its turn and that the engine survived. The same
+/// failure is logged where it happened (on `by`'s standard error); this keeps
+/// it with the branch for `by log` and `by show` afterwards.
+pub const SURVIVED_FAILURE: &str = "a step failed and the run carried on: ";
+
+/// The survived failures `events` record (see [`SURVIVED_FAILURE`]), each as
+/// `step: error`, oldest first.
+pub fn survived_failures(events: &[RecordedEvent]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|event| match &event.activity {
+            Activity::Warning(text) => text.strip_prefix(SURVIVED_FAILURE),
+            _ => None,
+        })
+        .collect()
+}
+
 /// A page of one branch's events; see [`Branch::events_since`].
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -3373,6 +3392,22 @@ impl fmt::Display for Error {
             Error::Harness(message) => write!(f, "harness: {message}"),
             Error::Io(error) => write!(f, "{error}"),
             Error::State(message) => write!(f, "state: {message}"),
+        }
+    }
+}
+
+impl Error {
+    /// This error, said as the reason a read or write of the store `could
+    /// not` be done: `could not read the record for x: <why>`. A store that
+    /// cannot be read is an error the caller returns, not an answer such as
+    /// "no such branch" or "nothing recorded". An I/O or state error takes
+    /// the sentence; one that already says something specific (an unknown
+    /// branch, a lost lease) keeps its kind and message.
+    pub(crate) fn could_not(self, doing: impl fmt::Display) -> Error {
+        match self {
+            Error::State(why) => Error::State(format!("could not {doing}: {why}")),
+            Error::Io(why) => Error::State(format!("could not {doing}: {why}")),
+            other => other,
         }
     }
 }

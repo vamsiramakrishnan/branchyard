@@ -988,6 +988,9 @@ fn store_key(env: &Env, as_json: bool, machine: &Machine, id: &str) -> Outcome {
             root.display()
         )));
     }
+    // The user file is read before anything is written, so one that cannot
+    // be read leaves the key file unwritten too.
+    crate::user_config::read(&crate::setup_io::user_file())?;
     {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new()
@@ -1054,7 +1057,7 @@ fn read_hidden() -> Result<String, Failure> {
 /// `var` already; whether it was added.
 fn name_secret(var: &str, path: &Path) -> Result<bool, Failure> {
     let file = crate::setup_io::user_file();
-    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    let text = crate::user_config::read(&file)?;
     let parsed = match text.trim().is_empty() {
         true => Default::default(),
         false => branchyard_setup::config::parse(&text)

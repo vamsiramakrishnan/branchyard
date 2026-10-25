@@ -171,8 +171,8 @@ fn handshake(tcp: TcpStream, host: &str, config: Arc<ClientConfig>) -> Result<St
 }
 
 /// A direct connection to `target`: TCP, or TLS trusting the Mozilla roots.
-fn connect(target: &Target) -> Result<Stream, Failure> {
-    let tcp = dial(&target.host, target.port, QUIET)?;
+fn connect(target: &Target, quiet: Duration) -> Result<Stream, Failure> {
+    let tcp = dial(&target.host, target.port, quiet)?;
     if !target.tls {
         return Ok(Stream::Plain(tcp));
     }
@@ -207,7 +207,21 @@ pub fn send(
     headers: &[(String, String)],
     body: &[u8],
 ) -> Result<Response, Failure> {
-    exchange(connect(target)?, target, method, path, headers, body)
+    send_within(target, method, path, headers, body, QUIET)
+}
+
+/// [`send`], giving up when the connection goes quiet for `quiet` (a read
+/// that waits that long): for asking a port what it is, where a listener
+/// that never answers must not hold the caller for [`QUIET`].
+pub fn send_within(
+    target: &Target,
+    method: &str,
+    path: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    quiet: Duration,
+) -> Result<Response, Failure> {
+    exchange(connect(target, quiet)?, target, method, path, headers, body)
 }
 
 /// Write the request on `stream`, and read the response head.

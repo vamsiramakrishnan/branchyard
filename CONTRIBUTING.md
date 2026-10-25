@@ -19,7 +19,7 @@ Run `python3 tools/check.py --fast` before you push. It runs the Python gates, r
 
 ## Failures that may be ignored
 
-Never write `let _ = fallible();` or `.lock().unwrap_or_else(|e| e.into_inner())`. When a failure is acceptable (cleanup on an error path, a `Drop`, a process that may already be gone), say so with [`branchyard-support`](crates/branchyard-support/src/lib.rs), which logs it with a name so it is seen. Add `branchyard-support = { path = "../branchyard-support" }` to the crate and use:
+Never write `let _ = fallible();` or `.lock().unwrap_or_else(|e| e.into_inner())`. When a failure is acceptable (cleanup on an error path, a `Drop`, a process that may already be gone), say so with [`branchyard-support`](crates/branchyard-support/src/lib.rs). It logs the failure at `warn` with the name you gave it, and every `by` command prints that log on standard error as `by: warning: <name>: <error>`; during a turn the engine also records it in the branch's log, where `by log` and `by show` list it (see [survived failures](docs/observability.md#survived-failures)). Add `branchyard-support = { path = "../branchyard-support" }` to the crate and use:
 
 | You want | Use |
 | --- | --- |
@@ -30,12 +30,15 @@ Never write `let _ = fallible();` or `.lock().unwrap_or_else(|e| e.into_inner())
 | to take a `Mutex` | `use branchyard_support::LockExt as _;` then `lock.lock_recovering("name")`; likewise `RwLockExt` (`read_recovering`, `write_recovering`) and `CondvarExt` (`wait_timeout_recovering`, ...) |
 | to wait for a thread you do not need a result from | `join_reporting("what the thread did", handle)` |
 | a thread whose panic should reach a log | `spawn_named(name, |panic| record(panic), body)`; the sink gets the panic message (the delegation engine writes it to the branch's event log) |
+| to call code that is not yours and must not end you (an observer, a callback) | `survive_panic("what it does", closure)`; a panic in it is reported as a survived failure |
+| to know what a piece of work survived | `let (value, survived) = collect_failures(closure);` returns the `Failure`s survived on this thread meanwhile |
+| to read the store, a log or a file and fall back | do not write `.ok()` or `.unwrap_or_default()` on it: a locked or damaged store then reads as "no such branch" or "an empty log". Return the error (`error.could_not(format_args!("read the record for {name}"))` in the engine), or wrap the read in `best_effort` and say in a comment why the fallback is safe |
 
 Name the lock after what it guards (`"claims"`, `"conn"`), not its type. Nothing in the crate panics, so all of it is safe in a `Drop`. A test that must show a failure was logged uses `branchyard_support::testing::capture` (feature `testing`, as a dev-dependency): see `a_failed_release_on_drop_is_logged_not_lost` in `crates/branchyard/src/state.rs`.
 
 Two checks enforce this, in CI and locally:
 
-- `cargo test -p branchyard-support` scans every crate and fails on the poison idiom; `python3 tools/check_silent_failures.py` does the same. A bare `let _ =` on a fallible value is denied by Clippy (`let_underscore_must_use`): see [Lints and the ratchet](#lints-and-the-ratchet).
+- `cargo test -p branchyard-support` scans every crate and fails on the poison idiom; `python3 tools/check_silent_failures.py` does the same, and also fails on `.ok()` or `.unwrap_or_default()` on a read of the store (`store()`, `store.`), the effect ledger (`ledger.`), a branch's event log (`record::read(`) or a file (`fs::read*(`). The reads that predate the check are counted per file, each with what an error does there, in `tools/silent_failures_ratchet.json`; a count may only fall (`python3 tools/check_silent_failures.py --update` lowers it, `--list` shows every site), and a file that is not listed has none allowed. A bare `let _ =` on a fallible value is denied by Clippy (`let_underscore_must_use`): see [Lints and the ratchet](#lints-and-the-ratchet).
 
 ## Lints and the ratchet
 

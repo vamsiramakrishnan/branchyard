@@ -2546,9 +2546,16 @@ fn checked_alone(
     let store = yard.store();
     let name = &record.info.name;
     let mut last: Option<(u64, Option<bool>)> = None;
-    let events = [name.as_str(), caller]
-        .into_iter()
-        .flat_map(|log| record::read(&store, log).unwrap_or_default());
+    // A log that cannot be read shows no check, and `None` is the cautious
+    // answer ("not known to have passed alone"): it is not guessed at, and
+    // the failure is logged.
+    let events = [name.as_str(), caller].into_iter().flat_map(|log| {
+        branchyard_support::best_effort(
+            &format!("read the log of {log} for how its check ended"),
+            record::read(&store, log),
+        )
+        .unwrap_or_default()
+    });
     for event in events {
         if let Activity::Delegation {
             tool,

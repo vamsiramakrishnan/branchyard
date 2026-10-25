@@ -924,9 +924,16 @@ fn release_snapshot(yard: &Yard, snapshot: &EnvironmentSnapshot) -> Result<(), S
 
 /// Branches whose worktrees link into an environment, and warm pool slots
 /// that do, by key.
-fn in_use(yard: &Yard) -> BTreeMap<String, Vec<String>> {
-    let mut using: BTreeMap<String, Vec<String>> = crate::pool::linking(yard);
-    for record in yard.store().list().unwrap_or_default() {
+fn in_use(yard: &Yard) -> Result<BTreeMap<String, Vec<String>>, Error> {
+    let mut using: BTreeMap<String, Vec<String>> = crate::pool::linking(yard)?;
+    // Branches that cannot be listed are an error, not "none link anything":
+    // `prune` removes what nothing links into, so an empty answer here
+    // deleted environments a branch's worktree was using.
+    let records = yard
+        .store()
+        .list()
+        .map_err(|e| e.could_not("list the branches that link an environment"))?;
+    for record in records {
         if let Some(workspace) = &record.workspace {
             if let (Some(key), false) = (&workspace.environment, workspace.spec.share.is_empty()) {
                 using
@@ -936,7 +943,7 @@ fn in_use(yard: &Yard) -> BTreeMap<String, Vec<String>> {
             }
         }
     }
-    using
+    Ok(using)
 }
 
 /// What `by env prune` removed or kept.
@@ -953,12 +960,20 @@ pub struct Pruned {
 /// good one of a recipe (its last good build) nor one a branch's worktree
 /// links into; with `only`, just those keys (a newest one included). Also
 /// removes what stopped builds left behind.
-pub(crate) fn prune(yard: &Yard, keep: usize, max_age: Duration, only: &[String]) -> Pruned {
+///
+/// An error, with nothing removed, when the branches and warm pool slots
+/// that may link an environment cannot be read.
+pub(crate) fn prune(
+    yard: &Yard,
+    keep: usize,
+    max_age: Duration,
+    only: &[String],
+) -> Result<Pruned, Error> {
     let root = &yard.root;
     let mut pruned = Pruned::default();
     let now = now_ms();
     let old = |ms: u64| now.saturating_sub(ms) > max_age.as_millis() as u64;
-    let using = in_use(yard);
+    let using = in_use(yard)?;
     let all = list(root);
     let mut by_recipe: BTreeMap<&str, Vec<&EnvironmentInfo>> = BTreeMap::new();
     for info in all.iter().filter(|i| i.state == EnvironmentState::Good) {
@@ -1030,7 +1045,7 @@ pub(crate) fn prune(yard: &Yard, keep: usize, max_age: Duration, only: &[String]
             }
         }
     }
-    pruned
+    Ok(pruned)
 }
 
 /// Remove one environment, under its key's lock, releasing its provider
@@ -1048,7 +1063,10 @@ fn remove(yard: &Yard, info: &EnvironmentInfo) -> Result<(), String> {
 
 /// Prune after a build, with the defaults.
 pub(crate) fn prune_after_build(yard: &Yard) {
-    let _ = prune(yard, DEFAULT_KEEP, DEFAULT_MAX_AGE, &[]);
+    branchyard_support::best_effort(
+        "prune environments after a build",
+        prune(yard, DEFAULT_KEEP, DEFAULT_MAX_AGE, &[]),
+    );
 }
 
 /// What `Yard::rebuild_environment` did.

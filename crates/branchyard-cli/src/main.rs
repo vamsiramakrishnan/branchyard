@@ -7,6 +7,37 @@
 // reader (`[fleet]`, `HOST:PORT`, `<commit>`), not as rustdoc links or HTML.
 #![allow(rustdoc::broken_intra_doc_links, rustdoc::invalid_html_tags)]
 
+// `eprintln!` and `eprint!` for the whole crate, defined before the modules
+// so that they are the ones the modules see. The standard ones panic when
+// standard error cannot be written (`by run 2>&1 | head -1`, a full disk),
+// which ended the command and, with it, a turn that had completed. What
+// `by` says on standard error is for whoever is reading; once nobody is,
+// there is nobody to tell, so a write that fails is dropped. (ripgrep does
+// the same.) Output a command exists to produce goes through
+// [`commands::print`], which returns its error.
+macro_rules! eprintln {
+    () => {
+        $crate::write_stderr(format_args!("\n"))
+    };
+    ($($arg:tt)*) => {
+        $crate::write_stderr(format_args!("{}\n", format_args!($($arg)*)))
+    };
+}
+
+macro_rules! eprint {
+    ($($arg:tt)*) => {
+        $crate::write_stderr(format_args!($($arg)*))
+    };
+}
+
+/// Write to standard error, ignoring a failure: see the `eprintln!` above.
+fn write_stderr(args: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+    match io::stderr().write_fmt(args) {
+        Ok(()) | Err(_) => {}
+    }
+}
+
 mod adf;
 mod adopt;
 mod args;
@@ -57,6 +88,7 @@ mod trackers;
 mod trigger_cmd;
 mod up_cmd;
 mod usage;
+mod user_config;
 mod watch;
 mod wizard;
 mod workspace_cmd;
@@ -82,12 +114,12 @@ fn main() -> ExitCode {
         // Help and --version come this way too, to stdout with exit 0;
         // usage errors go to stderr with exit 2.
         Err(error) => {
-            branchyard_support::best_effort("print the usage error", error.print());
+            print_or_warn("print the help or usage message", error.print());
             return ExitCode::from(error.exit_code() as u8);
         }
     };
     let Some(command) = cli.command else {
-        branchyard_support::best_effort("print the help", args::command().print_help());
+        print_or_warn("print the help message", args::command().print_help());
         return ExitCode::SUCCESS;
     };
     // Run by a Claude Code session on every prompt and redraw: the
@@ -137,13 +169,28 @@ fn main() -> ExitCode {
     }
 }
 
+/// Print what `by` was asked to print (help, a usage error) and, when that
+/// fails, say so on standard error: `by --help > /dev/full` once failed
+/// without a word, because the subscriber that shows a survived failure was
+/// not installed yet on this path. A closed pipe (`by --help | head -1`) is
+/// the reader's choice and is not a failure.
+fn print_or_warn(context: &str, result: io::Result<()>) {
+    branchyard_server::logging::init_for_commands();
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+        other => {
+            branchyard_support::best_effort(context, other);
+        }
+    }
+}
+
 /// `by serve`, `by worker` and their help: the server's own command line.
 /// `prefix` is `by`'s part, parsed only for its global options.
 fn serve(prefix: &[OsString], call: args::ServerCall) -> ExitCode {
     let globals = match args::parse_from(prefix) {
         Ok(cli) => cli.globals,
         Err(error) => {
-            branchyard_support::best_effort("print the server usage error", error.print());
+            print_or_warn("print the help or usage message", error.print());
             return ExitCode::from(error.exit_code() as u8);
         }
     };

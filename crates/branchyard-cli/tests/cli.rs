@@ -2975,7 +2975,7 @@ fn discard_sets_a_settled_child_aside_and_frees_its_slot() {
     let removed = repo.by(&["rm", "b"]);
     assert!(removed.status.success(), "{}", stderr(&removed));
     let err = stderr(&removed);
-    assert!(!err.contains("WARN") && !err.contains("fenced"), "{err}");
+    assert!(!err.contains("warning") && !err.contains("fenced"), "{err}");
     assert!(
         !err.contains('\x1b') && !stdout(&removed).contains('\x1b'),
         "{err}"

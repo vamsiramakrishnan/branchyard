@@ -79,3 +79,22 @@ pub fn join_reporting<T>(context: &str, handle: JoinHandle<T>) -> Option<T> {
         }
     }
 }
+
+/// Run `body`, containing a panic in it: the panic is reported as a survived
+/// failure under `context` (what `body` was doing, as for
+/// [`crate::best_effort()`]) and `None` is returned. For code the caller does
+/// not own and must not be ended by, such as an observer the engine tells of
+/// each event: a reader whose output is a closed pipe must not lose the turn
+/// it was watching.
+pub fn survive_panic<T>(context: &str, body: impl FnOnce() -> T) -> Option<T> {
+    match catch_unwind(AssertUnwindSafe(body)) {
+        Ok(value) => Some(value),
+        Err(payload) => {
+            crate::best_effort::report(
+                context,
+                &format!("it panicked: {}", message_of(payload.as_ref())),
+            );
+            None
+        }
+    }
+}

@@ -695,13 +695,25 @@ pub(crate) fn briefing_for(yard: &Yard, record: &Record) -> Briefing {
     if !settings.provision {
         return Briefing::default();
     }
-    let Ok(entries) = yard.store().knowledge().knowledge_entries() else {
+    // The briefing only adds to the prompt, so a turn without it is the turn
+    // as it was before knowledge existed: safe to go on, and the failure is
+    // logged. (An empty log read as "not a scratch branch" would brief a
+    // judge, so a failed read skips the briefing too.)
+    let Some(entries) = branchyard_support::best_effort(
+        "read the knowledge entries for a briefing",
+        yard.store().knowledge().knowledge_entries(),
+    ) else {
         return Briefing::default();
     };
     if !entries.iter().any(|e| e.status == KnowledgeStatus::Adopted) {
         return Briefing::default();
     }
-    let events = crate::record::read(&yard.store(), &record.info.name).unwrap_or_default();
+    let Some(events) = branchyard_support::best_effort(
+        "read the log for a knowledge briefing",
+        crate::record::read(&yard.store(), &record.info.name),
+    ) else {
+        return Briefing::default();
+    };
     // A judge's or distiller's scratch branch gets none: it judges the
     // work, it does not do it.
     if is_scratch(&events) {

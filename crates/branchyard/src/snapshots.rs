@@ -348,8 +348,23 @@ pub(crate) struct Detail {
 }
 
 impl Detail {
-    fn parse(text: &str) -> Detail {
-        serde_json::from_str(text).unwrap_or_default()
+    /// The details a row holds. Text that does not parse is an error, not
+    /// the default details: those claim a full-scope snapshot taken by no
+    /// method, and a release would destroy a checkpoint's reference as if it
+    /// were a sandbox.
+    fn parse(text: &str) -> Result<Detail, serde_json::Error> {
+        serde_json::from_str(text)
+    }
+
+    /// An environment snapshot's details. `null` is a snapshot planned and
+    /// journaled before the provider took it: it has none yet, which is not
+    /// a failure. Anything else that does not read is.
+    fn of_value(value: &serde_json::Value) -> Result<Detail, String> {
+        match value {
+            serde_json::Value::Null => Ok(Detail::default()),
+            other => serde_json::from_value(other.clone())
+                .map_err(|e| format!("the environment snapshot's details could not be read: {e}")),
+        }
     }
 
     fn guarantee(&self) -> SnapshotGuarantee {
@@ -667,7 +682,13 @@ fn seeded_row(rows: Vec<SandboxRow>, seed: &SandboxSeed, key: &str) -> Option<Sa
         .filter(|r| {
             r.kind == SandboxKind::Snapshot
                 && r.provider == key
-                && Detail::parse(&r.detail).commit.as_deref() == Some(seed.commit.as_str())
+                // A row whose details cannot be read is not the snapshot
+                // wanted; it is logged, and a fresh sandbox is used.
+                && branchyard_support::best_effort(
+                    &format!("read the details of snapshot {}", r.name),
+                    Detail::parse(&r.detail),
+                )
+                .is_some_and(|d| d.commit.as_deref() == Some(seed.commit.as_str()))
         })
         .collect();
     rows.sort_by_key(|r| r.turn);
@@ -703,7 +724,13 @@ fn branch_from_seed(
         };
         return Err(why);
     };
-    let detail = Detail::parse(&row.detail);
+    // Details that cannot be read are the reason a fresh sandbox is used.
+    let detail = Detail::parse(&row.detail).map_err(|e| {
+        format!(
+            "the details of snapshot {} could not be read: {e}",
+            row.name
+        )
+    })?;
     let turn = row.turn.unwrap_or_default();
     let method = detail.method.unwrap_or(SnapshotMethod::LiveBranch);
     journal(&spec.name)?;
@@ -815,7 +842,7 @@ fn branch_environment(
     snapshot: &crate::environments::EnvironmentSnapshot,
     spec: &SandboxSpec,
 ) -> Result<SnapshotMethod, String> {
-    let detail: Detail = serde_json::from_value(snapshot.detail.clone()).unwrap_or_default();
+    let detail = Detail::of_value(&snapshot.detail)?;
     let made: Result<SandboxInfo, ProviderError> = match snapshot.method {
         SnapshotMethod::LiveBranch => provider
             .branch_live(&snapshot.handle, std::slice::from_ref(spec))
@@ -850,7 +877,7 @@ pub(crate) fn release_environment(
     provider: &dyn SandboxProvider,
     snapshot: &crate::environments::EnvironmentSnapshot,
 ) -> Result<(), String> {
-    let detail: Detail = serde_json::from_value(snapshot.detail.clone()).unwrap_or_default();
+    let detail = Detail::of_value(&snapshot.detail)?;
     let released = match snapshot.method {
         SnapshotMethod::Checkpoint => provider.release_checkpoint(&ProviderCheckpoint {
             sandbox: detail.sandbox.clone().unwrap_or_default(),
@@ -1055,10 +1082,19 @@ pub(crate) fn expire(yard: &Yard, key: &str, except: &str, now_ms: u64) -> Vec<A
 /// Destroy the sandbox of a kept row taken from the store, through its
 /// branch's provider.
 fn destroy_kept(yard: &Yard, store: &Store, row: &SandboxRow) -> Result<(), String> {
-    store
-        .read(&row.branch)
-        .ok()
-        .and_then(|owner| owner.provider)
+    // A branch that is gone has no provider to destroy this with; a record
+    // that cannot be read is not that.
+    let owner = match store.read(&row.branch) {
+        Ok(owner) => owner.provider,
+        Err(crate::Error::UnknownBranch(_)) => None,
+        Err(error) => {
+            return Err(format!(
+                "could not read the record for {}: {error}",
+                row.branch
+            ))
+        }
+    };
+    owner
         .ok_or_else(|| format!("{} has no provider", row.branch))
         .and_then(|p| open(yard, &p))
         .and_then(|provider| provider.destroy(&row.name).map_err(|e| e.to_string()))
@@ -1272,11 +1308,33 @@ fn release(
     kind: &str,
     row: SandboxRow,
 ) -> Option<Activity> {
-    let row = store
+    // Read before the row is taken: details that cannot be read leave the
+    // row where it is, with a warning, rather than guessing how to release
+    // what it names.
+    let detail = match Detail::parse(&row.detail) {
+        Ok(detail) => detail,
+        Err(error) => {
+            return Some(Activity::Warning(format!(
+                "could not release {kind} sandbox {}: its details could not be read: {error}",
+                row.name
+            )))
+        }
+    };
+    // Already taken by another release: nothing to do. A store that would not
+    // answer is said so in the branch's log, not taken for that.
+    let row = match store
         .sandboxes()
         .take_sandbox(&row.branch, row.kind, &row.name)
-        .ok()??;
-    let detail = Detail::parse(&row.detail);
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return None,
+        Err(error) => {
+            return Some(Activity::Warning(format!(
+                "could not release {kind} sandbox {}: its record could not be taken: {error}",
+                row.name
+            )))
+        }
+    };
     let released = match (row.kind, detail.method) {
         (SandboxKind::Snapshot, Some(SnapshotMethod::Checkpoint)) => {
             provider.release_checkpoint(&ProviderCheckpoint {
@@ -1485,7 +1543,8 @@ mod tests {
         assert!(can_keep(&plain).unwrap_err().contains("can't pause"));
         let detail = Detail::of(&disk);
         assert_eq!(detail.guarantee(), disk);
-        assert_eq!(Detail::parse(&detail.text()), detail);
+        assert_eq!(Detail::parse(&detail.text()).unwrap(), detail);
+        assert!(Detail::parse("{not json").is_err(), "no default details");
     }
 
     #[test]

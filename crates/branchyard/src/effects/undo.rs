@@ -258,7 +258,16 @@ pub(crate) fn execute(
     now_ms: u64,
 ) -> Result<Vec<UndoOutcome>, Error> {
     let ledger = yard.store();
-    let record = ledger.read(&plan.branch).ok();
+    // Only a branch that is gone has no grant to undo under. A record that
+    // cannot be read (a locked or damaged store) is an error: reading it as
+    // "gone" told the person their effects could not be undone, wrongly.
+    let record = match ledger.read(&plan.branch) {
+        Ok(record) => Some(record),
+        Err(Error::UnknownBranch(_)) => None,
+        Err(error) => {
+            return Err(error.could_not(format_args!("read the record for {}", plan.branch)))
+        }
+    };
     let settings = yard.approval_settings();
     let mut declared: Option<Vec<serde_json::Value>> = None;
     let mut outcomes = Vec::new();

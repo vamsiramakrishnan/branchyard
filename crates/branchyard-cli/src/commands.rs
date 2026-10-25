@@ -1130,6 +1130,9 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
     if let Some((_, text)) = crate::effects_cmd::summary(&events) {
         extra.push(("effects", text));
     }
+    if let Some(text) = survived_line(&branchyard::survived_failures(&events), &info.name) {
+        extra.push(("survived", text));
+    }
     if let Some(listening) = listening.filter(|l| !l.is_empty()) {
         extra.push(("listening", crate::ports::lines(&listening).join("; ")));
     }
@@ -1146,6 +1149,21 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         env.style(),
     ));
     print(&text)
+}
+
+/// The one line `by show` gives steps a branch's engine survived (a sandbox
+/// that would not tear down, a lease that would not release): how many, the
+/// first, and where the rest are. `None` when there are none. The same
+/// failures were printed as `by: warning: ...` when they happened.
+pub(crate) fn survived_line(failures: &[&str], branch: &str) -> Option<String> {
+    let first = failures.first()?;
+    let count = match failures.len() {
+        1 => "1 step failed".to_owned(),
+        n => format!("{n} steps failed"),
+    };
+    Some(format!(
+        "{count} and the run carried on, the first: {first}. See: by log {branch}"
+    ))
 }
 
 /// The branch's latest self-reported status, as JSON and as one line for
@@ -3285,5 +3303,19 @@ mod tests {
             "by: remote mode on http://127.0.0.1:8421 (app): harnesses run in Microsandbox \
              microVMs on the server, from alpine:3.20"
         );
+
+    #[test]
+    fn steps_the_run_survived_get_one_line_in_show() {
+        assert_eq!(survived_line(&[], "b"), None);
+        assert_eq!(
+            survived_line(&["destroy the sandbox: gone"], "hello").as_deref(),
+            Some(
+                "1 step failed and the run carried on, the first: destroy the sandbox: gone. \
+                 See: by log hello"
+            )
+        );
+        let two = survived_line(&["a: x", "b: y"], "hello").unwrap();
+        assert!(two.starts_with("2 steps failed and the run carried on, the first: a: x."));
+        assert!(two.ends_with("See: by log hello"), "{two}");
     }
 }
