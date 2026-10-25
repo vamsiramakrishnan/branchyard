@@ -145,6 +145,21 @@ A branch's provider is the closed enum `Provider` (`crates/branchyard/src/lib.rs
 
 `crates/branchyard/tests/provider_seam.rs` fails when a variant is named outside `providers/`. The few surfaces that still match (the CLI and server) are a ratchet in that file: lower a count when you remove a site, never raise one. See [Adding a provider](docs/providers.md#adding-a-provider).
 
+## CLI style
+
+**An error says what failed, why when that is not obvious, and what to run next.** Name the object (the branch, the absolute path, the harness), keep Rust and OS words out (no `state:` or `denied:` prefixes, no `os error 2`, no `invalid float literal`), and end with the exact command:
+
+```text
+by: stuck is still running its turn
+  next: by wait stuck (blocks until it settles), or by cancel stuck (stops it)
+```
+
+`by: <what failed, naming the object>`, then `  why: <only when it is not obvious>`, then `  next: <the command>`; more labelled lines (`check:`, `output:`) go between them. Up to three fixes, joined with `, or `. The engine's `Error` texts in `crates/branchyard` stay plain statements of fact, because the server, the MCP tools and the Python module share them; the CLI adds the next command in `crates/branchyard-cli/src/errors.rs`, which also renders `--json`. A new message gets a test that asserts its text and exit code, in `crates/branchyard-cli/tests/cli.rs` or beside the code.
+
+**`--json` is a contract.** With `--json` anywhere on the command line, standard output holds JSON and nothing else, success or failure; activity and warnings go to standard error. A failure is `{"error": {"kind", "message", "next", "detail"}}` (`next` and `detail` only when there is something to say), for an engine error, a server's, a configuration file, a refused command line (`kind` is `usage`, exit 2) and a server that did not answer (`remote_unreachable`). A command that takes `--json` takes it on every path; [surfaces](docs/surfaces.md#the---json-contract) lists the kinds. A change that adds a command adds its `--json` error path to the test that walks them.
+
+**Help text is read on a terminal.** A command's first doc-comment paragraph is its summary in `by help all`: under 80 characters, no full stop, and the detail in a second paragraph (`--help` shows it). Every argument has a doc comment, positionals included; a number takes a placeholder that says what it is (`<DOLLARS>`, `<SECONDS>`), not `<X>`. `--yes` says what it grants or confirms in that command. The commands a person uses in a first hour are in `args::FRONT`; a command a harness runs for itself, or plumbing, is `#[command(hide = true)]` and listed by `by help agents` or `by help all`. `args.rs` has tests for all of this.
+
 ## Validation
 
 Run the commands in [validation](docs/validation.md). Add regression tests for behavioral changes and contract failures. Keep external provider smoke tests opt-in and document the exact profile they qualify. Use immutable fixtures for protocol parsing; a fake driver cannot establish sandbox isolation.
