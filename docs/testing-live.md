@@ -118,9 +118,9 @@ BY_MSB_IMAGE=alpine:3.20 cargo test -p branchyard-microsandbox --features micros
 
 **Record:** in [sandbox providers](providers.md); mark the provider qualified only when all of this passed.
 
-## 6. Agent Substrate (cluster; model calls only in the last step)
+## 6. Agent Substrate cluster
 
-The Substrate provider has run only against the in-process fake. On a machine with Docker, `kind`, `kubectl`, `openssl` and Envoy:
+Model calls happen only in the last step. The Substrate provider has run only against the in-process fake. On a machine with Docker, `kind`, `kubectl`, `openssl` and Envoy:
 
 1. **Cluster.** Check out Substrate at the pinned revision (`1d7ca8ced056192a1801d6565251adcaab3eb0c9`) and run `hack/create-kind-cluster.sh` and `hack/install-ate-kind.sh`. Port-forward the `Control` API and the router to this host and note both URLs; plain HTTP is accepted to loopback, so the first runs need no TLS. Find how the router addresses an actor and write it as a URL template with `{atespace}` and `{actor}`; the provider cannot know it from the vendored API. Note whether the installation serves TLS on either endpoint itself.
 2. **Key.** `cargo build --release -p branchyard-bridge`, then `target/release/branchyard-bridge keygen --out bridge.key`, which prints the public key.
