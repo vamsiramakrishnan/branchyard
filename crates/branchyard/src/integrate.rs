@@ -30,8 +30,8 @@ use crate::ops::{self, CHECK_TIMEOUT};
 use crate::record::Recorder;
 use crate::state::{Begun, Lease, Record};
 use crate::{
-    git, names, Activity, BranchStatus, CheckReport, CheckVerdict, Error, IntegrationCheck, Merged,
-    MergedAll, RecordedEvent, Yard,
+    git, names, Activity, BranchStatus, CheckReport, CheckVerdict, Error, FailedCheck,
+    IntegrationCheck, Merged, MergedAll, RecordedEvent, Yard,
 };
 use branchyard_support::time::now_ms;
 
@@ -533,8 +533,17 @@ fn many_error(
             files,
         },
         IntegrationError::CheckStopped { index, error } => match *error {
-            IntegrationError::CheckFailed { output_tail, .. } => Error::CheckFailed {
+            IntegrationError::CheckFailed {
+                status,
                 output_tail,
+            } => Error::CheckFailed {
+                output_tail,
+                ran: Some(Box::new(FailedCheck {
+                    command: owners
+                        .get(index)
+                        .map_or_else(Vec::new, |(check, _)| check.clone()),
+                    status: ops::exit_text(status),
+                })),
                 checks: verdicts(owners, index, CheckVerdict::Failed),
                 shared: None,
                 own_work: Vec::new(),

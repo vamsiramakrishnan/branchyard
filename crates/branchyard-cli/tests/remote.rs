@@ -483,7 +483,7 @@ fn remote_commands_print_what_local_ones_do() {
     }
     assert_eq!(
         server.by(&dir.0, &["merge", "nope"]).stderr,
-        b"by: no branch named nope\n"
+        b"by: no branch named nope\n  next: by ls\n"
     );
 }
 
@@ -671,7 +671,7 @@ fn by_send_steer_reaches_a_turn_on_the_server() {
     let late = server.by(&dir.0, &["send", "live", "--steer", "late"]);
     assert!(!late.status.success());
     assert!(
-        text(&late.stderr).contains("is not running a turn"),
+        text(&late.stderr).contains("has no running turn to steer"),
         "{}",
         text(&late.stderr)
     );
@@ -1741,11 +1741,25 @@ fn the_server_comes_from_flags_after_the_command_or_the_environment() {
         .output()
         .unwrap();
     assert_eq!(flag_wins.status.code(), Some(1));
+    // `--json` makes the refusal an envelope on standard output, and the
+    // server's own error says which repository it does serve.
+    let refused: Value = serde_json::from_slice(&flag_wins.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", text(&flag_wins.stdout)));
+    assert_eq!(refused["error"]["kind"], "unknown_repo", "{refused}");
+    let message = refused["error"]["message"].as_str().unwrap();
     assert!(
-        text(&flag_wins.stderr).contains("nope"),
-        "{}",
-        text(&flag_wins.stderr)
+        message.starts_with("no repository named nope; this server serves ")
+            && message.ends_with("serve it with `by serve --repo NAME=PATH`"),
+        "{message}"
     );
+    assert!(
+        refused["error"]["detail"]["served"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::from("app")),
+        "{refused}"
+    );
+    assert_eq!(text(&flag_wins.stderr), "");
 }
 
 #[test]

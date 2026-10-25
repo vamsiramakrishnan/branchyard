@@ -47,9 +47,13 @@ pub enum TriggerAction {
     #[command(alias = "ls")]
     List,
     /// One trigger in full
-    Show { name: String },
+    Show {
+        /// The trigger's name
+        name: String,
+    },
     /// What the trigger would do with an event (or at its next time), creating nothing
     Test {
+        /// The trigger's name
         name: String,
         /// A delivery body, as the trigger's sender would post it
         #[arg(long, value_name = "FILE")]
@@ -62,13 +66,23 @@ pub enum TriggerAction {
         precheck: bool,
     },
     /// Enable it again: after a pause too, with its failure count reset
-    Enable { name: String },
+    Enable {
+        /// The trigger's name
+        name: String,
+    },
     /// Stop it firing until enabled
-    Disable { name: String },
+    Disable {
+        /// The trigger's name
+        name: String,
+    },
     /// Remove it and its runs
-    Rm { name: String },
+    Rm {
+        /// The trigger's name
+        name: String,
+    },
     /// Its recent runs, newest first
     Runs {
+        /// The trigger's name
         name: String,
         /// How many
         #[arg(long, default_value_t = 20)]
@@ -76,7 +90,9 @@ pub enum TriggerAction {
     },
     /// Set the webhook secret from a file (Slack's or Linear's signing secret), or generate one
     Secret {
+        /// The trigger's name
         name: String,
+        /// A file whose first line is the secret (default: generate one)
         #[arg(long, value_name = "FILE")]
         secret_file: Option<PathBuf>,
     },
@@ -115,7 +131,7 @@ pub struct AddArgs {
     /// Seconds the precheck may take (1 to 600; default 60)
     #[arg(
         long,
-        value_name = "SECS",
+        value_name = "SECONDS",
         requires = "precheck",
         help_heading = "When"
     )]
@@ -182,8 +198,8 @@ pub struct AddArgs {
     /// Check to pass before merging, such as "cargo test"
     #[arg(long, value_name = "CMD", help_heading = "Task")]
     pub check: Option<String>,
-    /// Stop once the harness's cost estimate exceeds X dollars
-    #[arg(long, value_name = "X", help_heading = "Task")]
+    /// Stop once the harness's cost estimate exceeds this many dollars
+    #[arg(long, value_name = "DOLLARS", help_heading = "Task")]
     pub budget_usd: Option<f64>,
     /// Stop after N turns
     #[arg(long, value_name = "N", help_heading = "Task")]
@@ -197,7 +213,8 @@ pub struct AddArgs {
     /// A worker label the task needs; repeatable
     #[arg(long = "require-label", value_name = "LABEL", help_heading = "Task")]
     pub require_labels: Vec<String>,
-    /// Allow every tool permission request (otherwise each is denied)
+    /// Grant every tool permission request without asking; the harness may write files and
+    /// run commands (otherwise each is denied)
     #[arg(short, long, help_heading = "Task")]
     pub yes: bool,
     /// Pause after N failed runs in a row; 0 never (default 3)

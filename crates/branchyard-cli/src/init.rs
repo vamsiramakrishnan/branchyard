@@ -504,7 +504,12 @@ fn finish(probe: &HostProbe, flags: &InitArgs, step: InitStep, response: Respons
                     .files
                     .iter()
                     .find(|f| f.path == *path && f.kind == ArtifactKind::ProjectConfig)?;
-                let text = std::fs::read_to_string(probe.resolve(&file.path)).ok()?;
+                // Unreadable here means the plain refusal below, which still
+                // names the file.
+                let text = branchyard_support::best_effort(
+                    "read the configuration file by refuses to overwrite",
+                    std::fs::read_to_string(probe.resolve(&file.path)),
+                )?;
                 let problem = branchyard_setup::hint::unreadable(&text)?;
                 let line = problem.line.map(|n| format!(" (line {n})")).unwrap_or_default();
                 Some(format!(

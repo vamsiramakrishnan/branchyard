@@ -195,7 +195,7 @@ fn by_cancel_stops_a_turn_that_another_by_runs() {
     let refused = repo.by_agent(&["send", "held", "WHOAMI"]);
     assert!(!refused.status.success());
     assert!(
-        stderr(&refused).contains("branch held is running a turn"),
+        stderr(&refused).contains("by: held is still running its turn\n  next: by wait held"),
         "{}",
         stderr(&refused)
     );
@@ -225,7 +225,10 @@ fn errors_exit_nonzero() {
     let repo = Repo::new();
     let missing = repo.by(&["merge", "nope"]);
     assert_eq!(missing.status.code(), Some(1));
-    assert_eq!(stderr(&missing), "by: no branch named nope\n");
+    assert_eq!(
+        stderr(&missing),
+        "by: no branch named nope\n  next: by ls\n"
+    );
 
     let usage = repo.by(&["run"]);
     assert_eq!(usage.status.code(), Some(2));
@@ -263,7 +266,7 @@ fn errors_exit_nonzero() {
         .output()
         .unwrap();
     assert_eq!(outside.status.code(), Some(1));
-    assert!(stderr(&outside).contains("not inside a git work tree"));
+    assert!(stderr(&outside).contains("not inside a git repository"));
 }
 
 #[test]
@@ -2459,20 +2462,32 @@ fn help_version_typos_and_exit_codes() {
     assert!(help.status.success());
     let text = stdout(&help);
     for heading in [
-        "Start here:",
-        "Work on branches:",
-        "Inspect:",
-        "Servers:",
+        "Start:",
+        "Work:",
+        "Look:",
+        "Clean up:",
+        "More:",
         "Options:",
         "Examples:",
     ] {
         assert!(text.contains(heading), "{heading}: {text}");
     }
+    // The commands a harness runs are not on the first screen, but `by help
+    // all` and `by help agents` list them.
+    assert!(!text.contains("\n  spawn "), "{text}");
+    for topic in ["all", "agents"] {
+        let listed = stdout(&repo.ok(&["help", topic]));
+        assert!(listed.contains("\n  spawn "), "{topic}: {listed}");
+    }
+    let all = stdout(&repo.ok(&["help", "all"]));
+    for heading in ["Work on branches:", "Inspect:", "Servers:"] {
+        assert!(all.contains(heading), "{heading}: {all}");
+    }
     // No command is a status card with the next step, not the help
     // (tests/setup_cmd.rs); `help` and `--help` are the full list.
     let bare = stdout(&repo.by(&[]));
     assert!(bare.contains("Next: "), "{bare}");
-    assert!(!bare.contains("Work on branches:"), "{bare}");
+    assert!(!bare.contains("Work:"), "{bare}");
     assert_eq!(stdout(&repo.by(&["help"])), text);
     assert_eq!(
         stdout(&repo.by(&["-V"])),
@@ -3747,7 +3762,7 @@ fn by_wait_prints_each_branch_as_it_settles() {
     }
     let help = stdout(&repo.by(&["wait", "--help"]));
     assert!(
-        help.contains("Keep S under any limit of your own"),
+        help.contains("Keep it under any limit of your own"),
         "{help}"
     );
     fs::write(&go, "").unwrap();
@@ -3935,7 +3950,7 @@ fn by_check_runs_a_childs_check_on_its_current_work() {
     assert!(text.contains("passed"), "{text}");
     assert!(text.contains("inherited from root"), "{text}");
     let out = repo.by(&["check"]);
-    assert!(stderr(&out).contains("outside a harness, by check needs a branch"));
+    assert!(stderr(&out).contains("check needs a branch outside a harness"));
 }
 
 /// `by check` merged into the parent's committed head while integrating
@@ -4635,7 +4650,7 @@ fn a_child_answers_in_the_shape_its_parent_asked_for_and_by_shows_it() {
     assert_eq!(refused["error"]["kind"], "denied", "{refused}");
     assert_eq!(
         refused["error"]["message"],
-        "denied: result.files: expected array, got number"
+        "result.files: expected array, got number"
     );
     let not_json = repo.by(&[
         "report", "bad", "--as", "kid", "--result", "{nope", "--json",
@@ -4668,7 +4683,7 @@ fn a_child_answers_in_the_shape_its_parent_asked_for_and_by_shows_it() {
     assert_eq!(outside["error"]["kind"], "denied", "{outside}");
     assert_eq!(
         outside["error"]["message"],
-        "denied: result.schema uses `$ref`, which the contract does not support"
+        "result.schema uses `$ref`, which the contract does not support"
     );
     assert!(
         !repo.json(&["ls", "--json"]).to_string().contains("\"bad\""),

@@ -19,8 +19,8 @@ The server registers <!-- fact:http.route_count -->90<!-- /fact --> routes; each
 
 | Operation | SDK | by | by --remote | HTTP | client | delegation |
 |---|---|---|---|---|---|---|
-| Run a task on one branch | `TaskBuilder::run` | `run` | yes | `POST …/tasks` | `submit_task` | `spawn` creates a child instead |
-| Fan out to several harnesses | `run_on` | `fan` | yes | `harnesses` in the task | yes | no: a child has one harness; spawn one per harness |
+| Run a task on one branch | `TaskBuilder::run` | `run [--json]` | yes | `POST …/tasks` | `submit_task` | `spawn` creates a child instead |
+| Fan out to several harnesses | `run_on` | `fan [--json]` | yes | `harnesses` in the task | yes | no: a child has one harness; spawn one per harness |
 | Check a [rig](rigs.md) and print its plan | no: the planner is the CLI's (`rig::plan`); build `Seats` yourself | `rig check` | the same, locally: nothing is sent | n/a | n/a | n/a |
 | Run a rig's root seat | `TaskOptions::seats` with `delegation` | `rig run` | server opt-in `--allow-delegation` | `seats` in the task | yes | no: a child's seats come from its parent's rig |
 | Continue a branch | `Branch::send` | `send` | yes, `--retry` too | `POST …/send`, `retry` for `--retry` | `send` | `send`, to a descendant, returning once its turn started |
@@ -31,8 +31,8 @@ The server registers <!-- fact:http.route_count -->90<!-- /fact --> routes; each
 | Diff | `Branch::diff` | `diff` | yes | yes | yes | no: `inspect` reports the candidate |
 | Event log | `events`, `events_since` | `log` | yes | `GET …/events?cursor` | `events` | `events` |
 | Activity across branches from a cursor | `Yard::events_since`, `wait_for_events` | `watch` | `watch` | SSE stream | `stream` | no |
-| Validated merge | `Yard::merge` | `merge` | yes | `POST …/merge` | `merge` | `integrate`, into the acting branch only |
-| Remove | `Yard::remove` | `rm` | yes | `DELETE …` | `remove` | no |
+| Validated merge | `Yard::merge` | `merge [--rm] [--json]` | yes | `POST …/merge` | `merge` | `integrate`, into the acting branch only |
+| Remove | `Yard::remove` | `rm [--json]` | yes | `DELETE …` | `remove` | no |
 | Cancel a turn and its subtree | `Yard::cancel` | `cancel` | yes, with the server's authority | `POST …/cancel` | `cancel` | `cancel`, descendants only |
 | Steer a running turn ([harness support](harness-integration.md#steering-a-running-turn)) | `Branch::steer`, `Yard::steer_as`; `steer_state`, `wait_steer` follow it | `send --steer` | yes, as the server's caller | `POST …/steer` | `steer` | `steer` (`by send --steer`, `branchyard.steer`, `Delegate::steer`, MCP), descendants only |
 | Harness profiles | `Yard::harnesses` | `harnesses` | yes, the server's `PATH` | `GET /v1/harnesses` | `harnesses` | no |
@@ -93,7 +93,7 @@ A person acts with their own authority, or the server's, bounded by the branch's
 | Answer a descendant's message | `Delegate::answer` | `answer <message-id> "<text>"` | yes | `POST …/answer` | `answer` |
 | The branch's own inbox | `Delegate::inbox` | `inbox [--unread]` | yes | `GET …/inbox` | `inbox` |
 
-`by --remote` prints the same JSON as `by` for each, and the same `{"error": {"kind", "message"}}` for refusals; tests compare them. Outside a harness every messaging command needs `--as <branch>`, since there is no other way to say who is asking; see [delegation](delegation.md#inbox). A message to a branch with a running turn is steered into it on every surface (`SteerDelivery`, the default `DeliveryHook` of every `Yard`), and otherwise delivered at its next turn's start; `Activity::MessagesDelivered` (`messages_delivered` in `by log --json`) records which ([delegation](delegation.md#delivery)).
+`by --remote` prints the same JSON as `by` for each, and the same `{"error": {"kind", "message", "next", "detail"}}` for refusals; tests compare them. [The `--json` contract](#the---json-contract) below says what every command does with it. Outside a harness every messaging command needs `--as <branch>`, since there is no other way to say who is asking; see [delegation](delegation.md#inbox). A message to a branch with a running turn is steered into it on every surface (`SteerDelivery`, the default `DeliveryHook` of every `Yard`), and otherwise delivered at its next turn's start; `Activity::MessagesDelivered` (`messages_delivered` in `by log --json`) records which ([delegation](delegation.md#delivery)).
 
 A harness reaches the same waits and integrations: `by wait`, `branchyard.wait_any`/`wait_all`, `Delegate::wait_for` and the MCP `wait` tool; `by integrate a b`, `branchyard.integrate("a", "b")`, `Delegate::integrate_all` and the MCP `propose_integration` with `branches`. A harness whose turn ends while its children run is woken when they settle, on every surface ([delegation](delegation.md#waiting-on-children)); `by run --no-wake` and `Envelope::no_wake` opt out.
 
@@ -132,6 +132,19 @@ A remote caller reaches the scratch area's directory only through `lock`/`unlock
 ## Output types
 
 Every result a surface returns is the SDK's serde form: `BranchInfo`, `RecordedEvent`, `Activity`, `Merged`, `HarnessInfo`, `Inspection`, `Spawned`, `Sent`, `Steer`, `EventPage`, `Children`, `Cancelled`, `Recovery`, `FeedPage`, `ArtifactRef`, `ScratchArea`, `ScratchLock`, `Graph`, `GraphApplied`. `by --json` prints them through serde, except `by log --json`, whose flattened event shape is the CLI's own.
+
+## The `--json` contract
+
+`--json` anywhere on the command line makes `by` print JSON on standard output and nothing else there; activity, warnings and notes go to standard error. That holds for a failure too, whichever layer failed:
+
+```json
+{"error": {"kind": "unknown_branch", "message": "no branch named brokn; did you mean broken?",
+           "next": ["by ls"]}}
+```
+
+`kind` is `Error::kind` for the engine's errors (`unknown_branch`, `running`, `check_failed`, `usage`, ...) and the server's `code` for a server's, as `by --remote` reports it (the server's `git_error` is `git`, and so on). The layers above the engine add `usage` (a command line or an argument `by` refused, including clap's own usage errors, which exit 2), `config` (a configuration file that cannot be applied), `remote_unreachable` (a server that did not answer), `remote_protocol` and `io`. `message` is the text `by` prints after `by: `, with the lines under it (`check:`, `output:`); `next` lists what to run next, each a command or a short sentence around one; `detail` is what the error carries beyond its message (a failed check's `status` and `command`, the `checks` of an integration). The exit status is 1, or 2 for a command line clap refused.
+
+Every command that takes a branch or prints a result takes `--json`. This round added it to `merge` (the `Merged` fields, `check`: `{"command", "result"}` or `null`, and `removed`), `fan` (`branches`, as `ls --json` prints them, and `judgement` with `--judge`), `rm` (`{"removed": NAME}`) and `review` (`send`'s `Sent`, or with `--print` the prompt), and let `run --json` and `fork --json` wait for the turn and print what `show --json` prints; before, `--json` without `--detach` was refused. `crates/branchyard-cli/tests/cli.rs` runs the error path of each of these commands with `--json` and parses standard output.
 
 ## Added with steering
 
@@ -203,6 +216,9 @@ Every `by` command, flag and JSON output is unchanged; the parsing around them i
 | Usage errors | `by: MESSAGE` and `Try 'by help CMD'.`, exit 2 | clap's `error: MESSAGE`, a `tip:` where one helps (a similar command or flag, quoting a prompt), the command's usage line, exit 2 |
 | `--help` | anywhere on the command line, it won over any other mistake | it wins over missing arguments and everything after it; an unknown flag before it is reported instead |
 | `--check`, `--command` and `PAGER` splitting | own POSIX-like splitter | `shlex`, which also drops a `#` comment starting a word |
+| `by --help` | every command, in six groups, 112 lines | the commands of a first hour in Start, Work, Look and Clean up, and the names of the rest; `by help all` lists every command, hidden ones included, under the old groups; `by help agents` lists what a harness runs for itself. The commands a harness runs (`ask`, `answer`, `inbox`, `escalate`, `report`, `report-status`, `brief`, `delegate`, `spawn`, `children`, `graph`, `integrate`, `inspect`, `events`, `discard`) and the plumbing (`mcp`, `hook`, `statusline`, `completions`, `man`, `worker`, `serve`) are `hide = true`: they work as before, and `by help NAME` and `NAME --help` still show them |
+| `by mcp --list-tools` | `--root` and `--branch` were required | prints the MCP `tools/list` result as JSON with each tool's input schema, with no repository, branch or token |
+| Command summaries | up to 227 characters | under 80, with the detail in the second paragraph of `--help`; every argument has help text, numbers say `<DOLLARS>` or `<SECONDS>`, and `--yes` says what it grants or confirms in each command |
 | New | none | `by completions <bash\|zsh\|fish\|powershell\|elvish>`, `by man`, short flags, durations with units, `$` in `--budget-usd` |
 
 ## Added with setup
@@ -370,7 +386,7 @@ Ports from emdash and Orca ([roadmap](roadmap.md), Wave 1). The review and catal
 | Operation | SDK | by | by --remote | HTTP | client | delegation |
 |---|---|---|---|---|---|---|
 | Comment on a diff and send the comments as one prompt | no: `Branch::diff` and `send`; the editor and format are the CLI's | `review [--print] [--file F] [--detach]` | yes: the diff comes from the server, the editor runs here, the prompt is a `send` | `GET` the diff, then a send | `diff`, then a send | no: `by review` refuses inside a harness (it needs a person and an editor); send a prompt with `by send` |
-| Run a local turn detached from the terminal | no: the CLI starts itself again in its own process group | `run`, `send`, `fork` with `--detach [--json]`: returns once the turn has started, prints the branch, its log under `.branchyard/detached/` and `log -f`/`watch`/`wait`/`cancel` to follow it; `--ask` is a usage error, and an `ask` from the configuration, `--prompt-file -` and a call inside a harness are refused; `fan` has none | no: refused, since a server's turn already outlives the command | no | no | no: inside a harness, `spawn` and `send` already return |
+| Run a local turn detached from the terminal | no: the CLI starts itself again in its own process group | `run`, `send`, `fork` with `--detach [--json]`: returns once the turn has started, prints the branch, its log under `.branchyard/detached/` and `log -f`/`watch`/`wait`/`cancel` to follow it (`run --json` and `fork --json` without `--detach` wait for the turn, activity on stderr, and print what `show --json` prints); `--ask` is a usage error, and an `ask` from the configuration, `--prompt-file -` and a call inside a harness are refused; `fan` has none | no: refused, since a server's turn already outlives the command | no | no | no: inside a harness, `spawn` and `send` already return |
 | Answer and resolve the review threads a push addressed | `PullRequestActivity::ThreadsResolved` records it | inside `pr --watch` (`--no-resolve` to leave them) | no: `pr` is local only | no | no | no |
 | Harness CLIs Branchyard knows of | `branchyard_controls::catalog::harnesses` | `harnesses --all [--json]` | yes: the catalog is built in; profiles are listed, `PATH` is not checked | no | no | the `by` command |
 | Connector catalog | `branchyard_controls::catalog::connectors` | `connectors catalog [--json]` | yes, built in (no server is contacted) | no | no | the `by` command |

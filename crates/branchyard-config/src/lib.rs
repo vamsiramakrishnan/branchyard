@@ -1901,6 +1901,9 @@ pub fn parse(text: &str) -> Result<ProjectConfig, ConfigError> {
             .span()
             .map(|span| text[..span.start.min(text.len())].matches('\n').count() + 1);
         let message = e.message().trim_end().to_owned();
+        let message = line
+            .and_then(|line| type_sentence(text, line, &message))
+            .unwrap_or(message);
         ConfigError(match line {
             Some(line) => format!("line {line}: {message}"),
             None => message,
@@ -1908,6 +1911,55 @@ pub fn parse(text: &str) -> Result<ProjectConfig, ConfigError> {
     })?;
     config.check()?;
     Ok(config)
+}
+
+/// A value of the wrong type, said as a sentence instead of with serde's
+/// Rust types: `defaults.budget_usd needs a number, not "five"`, for
+/// `invalid type: string "five", expected f64` at `line` of `text`. `None`
+/// for any other message.
+fn type_sentence(text: &str, line: usize, message: &str) -> Option<String> {
+    let rest = message
+        .strip_prefix("invalid type: ")
+        .or_else(|| message.strip_prefix("invalid value: "))?;
+    let (found, expected) = rest.split_once(", expected ")?;
+    let source = text.lines().nth(line.checked_sub(1)?)?;
+    let name = source.split_once('=')?.0.trim().trim_matches('"');
+    let table = text
+        .lines()
+        .take(line)
+        .filter_map(|l| {
+            let l = l.trim();
+            l.strip_prefix('[')
+                .filter(|_| !l.starts_with("[["))
+                .and_then(|l| l.strip_suffix(']'))
+        })
+        .last();
+    let key = match table {
+        Some(table) => format!("{table}.{name}"),
+        None => name.to_owned(),
+    };
+    let wanted = match expected {
+        "f64" | "f32" => "a number",
+        "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" => "a whole number",
+        "a boolean" => "true or false",
+        "a string" => "text in quotes",
+        "a sequence" => "a list",
+        "a map" => "a table",
+        other => other,
+    };
+    let got = match found.split_once(' ') {
+        Some(("string" | "integer" | "floating", value)) => value
+            .trim_start_matches("point ")
+            .trim_matches('`')
+            .to_owned(),
+        Some(("boolean", value)) => value.trim_matches('`').to_owned(),
+        _ => match found {
+            "sequence" => "a list".to_owned(),
+            "map" => "a table".to_owned(),
+            other => other.to_owned(),
+        },
+    };
+    Some(format!("{key} needs {wanted}, not {got}"))
 }
 
 impl ProjectConfig {
@@ -3145,7 +3197,7 @@ classes = { compensable = "allow" }
                 "[[models.routes]]\nmodel = \"*\"\nbackends = [\"x\"]\n",
                 "no backend x",
             ),
-            ("[models]\nlisten = 1\n", "expected a string"),
+            ("[models]\nlisten = 1\n", "needs text in quotes, not 1"),
             ("[models]\nkeys = 1\n", "keys"),
         ] {
             let error = parse(text).unwrap_err().to_string();
@@ -3241,6 +3293,32 @@ classes = { compensable = "allow" }
         ] {
             let error = parse(text).unwrap_err().to_string();
             assert!(error.contains(needle), "{text}: {error}");
+        }
+    }
+
+    /// A value of the wrong type is a sentence naming the key and what it
+    /// needs, not serde's Rust types.
+    #[test]
+    fn a_value_of_the_wrong_type_is_a_sentence() {
+        for (text, expected) in [
+            (
+                "[defaults]\nbudget_usd = \"five\"",
+                "line 2: defaults.budget_usd needs a number, not \"five\"",
+            ),
+            (
+                "[defaults]\nmax_turns = 2.5",
+                "line 2: defaults.max_turns needs a whole number, not 2.5",
+            ),
+            (
+                "[defaults]\nisolated = \"yes\"",
+                "line 2: defaults.isolated needs true or false, not \"yes\"",
+            ),
+            (
+                "[defaults]\nharness = 3",
+                "line 2: defaults.harness needs text in quotes, not 3",
+            ),
+        ] {
+            assert_eq!(parse(text).unwrap_err().to_string(), expected, "{text}");
         }
     }
 
@@ -3685,7 +3763,10 @@ command = ["pnpm build", "pnpm worker"]
                 "[workspace]\n[workspace.env]\nBRANCHYARD_PORT = \"1\"\n",
                 "Branchyard's own",
             ),
-            ("[workspace]\n[workspace.env]\nA = 1\n", "expected a string"),
+            (
+                "[workspace]\n[workspace.env]\nA = 1\n",
+                "needs text in quotes, not 1",
+            ),
         ] {
             let error = parse(bad).map(|_| ()).unwrap_err().to_string();
             assert!(error.contains(why), "{bad}: {error}");

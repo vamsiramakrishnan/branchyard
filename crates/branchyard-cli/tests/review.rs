@@ -313,3 +313,63 @@ fn detach_sends_in_the_background() {
         stderr(&out)
     );
 }
+
+#[test]
+fn review_prints_json_for_the_prompt_the_send_and_no_comments() {
+    let repo = Repo::new();
+    let agent = repo.agent();
+    repo.ok(repo.by(
+        None,
+        &[
+            "run",
+            "WRITE a.txt=two",
+            "--name",
+            "feat",
+            "--harness",
+            "gemini-cli",
+            "--command",
+            &agent,
+        ],
+    ));
+    let commenting = repo.editor("comment.sh", COMMENT);
+
+    // --print --json: the prompt and the count, and nothing sent.
+    let printed = repo.ok(repo.by(Some(&commenting), &["review", "feat", "--print", "--json"]));
+    let printed: Value = serde_json::from_str(&printed).unwrap();
+    assert_eq!(printed["branch"], "feat");
+    assert_eq!(printed["sent"], false);
+    assert_eq!(printed["comments"], 3);
+    assert!(
+        printed["prompt"].as_str().unwrap().contains(EXPECTED),
+        "{printed}"
+    );
+    assert_eq!(repo.prompts("feat").len(), 1);
+
+    // Sent: what `by send --json` prints, with the activity on stderr.
+    let sent = repo.by(
+        Some("true"),
+        &["review", "feat", "--json", "--yes", "--command", &agent],
+    );
+    assert!(sent.status.success(), "{}", stderr(&sent));
+    let sent: Value = serde_json::from_str(&stdout(&sent)).unwrap();
+    assert_eq!(sent["name"], "feat");
+    assert_eq!(sent["status"]["state"], "ready");
+    assert_eq!(repo.prompts("feat").len(), 2);
+
+    // No comments: nothing sent, and the JSON says so.
+    let none = repo.by(
+        Some("true"),
+        &["review", "feat", "--json", "--yes", "--command", &agent],
+    );
+    assert!(none.status.success(), "{}", stderr(&none));
+    let none: Value = serde_json::from_str(&stdout(&none)).unwrap();
+    assert_eq!(none["sent"], false);
+    assert_eq!(none["comments"], 0);
+    assert_eq!(repo.prompts("feat").len(), 2);
+
+    // A refusal is the envelope.
+    let missing = repo.by(Some("true"), &["review", "nope", "--json"]);
+    assert_eq!(missing.status.code(), Some(1));
+    let missing: Value = serde_json::from_str(&stdout(&missing)).unwrap();
+    assert_eq!(missing["error"]["kind"], "unknown_branch");
+}

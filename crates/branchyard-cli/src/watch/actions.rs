@@ -803,6 +803,7 @@ mod tests {
                         into: None,
                         rm: false,
                         promote_effects: false,
+                        json: false,
                     },
                 ) => {
                     assert_eq!(branch, "impl")

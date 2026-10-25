@@ -95,7 +95,7 @@ A new top-level branch is routed when `by run` or `by fan` is given `--auto`, or
 ```text
 by: routed as bugfix (classifier: fix, flaky) by [fleet.default], seed 1834...
 by:   codex effort=medium — sampled success rate 0.81 (6 recorded bugfix outcomes, 4.5 successes)
-by:   not gemini-cli: gemini-cli is unavailable: gemini was not found on PATH
+by:   not gemini-cli: gemini-cli is not installed: gemini was not found on PATH
 ```
 
 The router (`branchyard::fleet::plan`) works per kind and candidate (harness, model, effort):

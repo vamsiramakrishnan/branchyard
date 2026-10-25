@@ -2410,6 +2410,7 @@ fn sharing_check(store: &Store, record: &Record) -> Vec<Record> {
 fn with_shared_check(yard: &Yard, caller: &str, error: Error, branches: &[String]) -> Error {
     let Error::CheckFailed {
         output_tail,
+        ran,
         checks,
         shared: None,
         own_work,
@@ -2480,6 +2481,7 @@ fn with_shared_check(yard: &Yard, caller: &str, error: Error, branches: &[String
     };
     Error::CheckFailed {
         output_tail,
+        ran,
         checks,
         shared,
         own_work,
@@ -5311,6 +5313,7 @@ mod tests {
     fn a_shared_check_names_the_siblings_still_running() {
         let error = Error::CheckFailed {
             output_tail: "2 failed".into(),
+            ran: None,
             checks: Vec::new(),
             shared: Some(Box::new(SharedCheck {
                 check: vec!["make".into(), "test".into()],
@@ -5338,6 +5341,7 @@ mod tests {
         assert_eq!(detail["failed_alone"], json!(["a"]));
         let plain = Error::CheckFailed {
             output_tail: "x".into(),
+            ran: None,
             checks: Vec::new(),
             shared: None,
             own_work: Vec::new(),
@@ -5354,6 +5358,7 @@ mod tests {
     fn a_check_failed_on_own_work_names_no_sibling() {
         let error = Error::CheckFailed {
             output_tail: "1 failed".into(),
+            ran: None,
             checks: Vec::new(),
             shared: None,
             own_work: vec!["a".into(), "b".into()],
@@ -5405,6 +5410,7 @@ mod tests {
         ];
         let error = Error::CheckFailed {
             output_tail: "2 failed".into(),
+            ran: None,
             checks: checks.clone(),
             shared: None,
             own_work: Vec::new(),
@@ -5423,6 +5429,7 @@ mod tests {
 
         let shared = Error::CheckFailed {
             output_tail: "2 failed".into(),
+            ran: None,
             checks,
             shared: Some(Box::new(SharedCheck {
                 check: vec!["make".into(), "test".into()],

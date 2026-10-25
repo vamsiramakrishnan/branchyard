@@ -376,13 +376,21 @@ impl Executor for AppExecutor {
             };
         }
         let Some(repo) = app.repos.get(&operation.repo) else {
+            // The repositories its principal may use, and no one else's.
+            let served: Vec<&str> = app
+                .repos
+                .keys()
+                .map(String::as_str)
+                .filter(|served| match &stored.principal {
+                    Some(principal) => {
+                        let policy = app.config.tenant_policy(&principal.tenant);
+                        principal.repo_allowed(&policy, served)
+                    }
+                    None => true,
+                })
+                .collect();
             return Finished {
-                result: Err(*ApiError::new(
-                    StatusCode::NOT_FOUND,
-                    "unknown_repo",
-                    format!("this worker serves no repository named {}", operation.repo),
-                )
-                .body),
+                result: Err(*crate::api::unknown_repo("worker", &operation.repo, &served).body),
                 end_cursor: None,
             };
         };
