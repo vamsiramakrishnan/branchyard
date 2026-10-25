@@ -1651,6 +1651,9 @@ pub fn card() -> Outcome {
                 (0, _) if !configured => "by setup".to_owned(),
                 (0, _) => format!("by run \"{EXAMPLE_TASK}\""),
                 (_, Some(name)) => format!("by show {name}"),
+                // Branches do not make a repository set up: without a
+                // branchyard.toml the next step is still the setup.
+                (_, None) if !configured => "by setup".to_owned(),
                 (_, None) => "by ls".to_owned(),
             }
         }
