@@ -245,7 +245,7 @@ mod tests {
         c.remote = "ftp://x".into();
         assert!(c.check().is_err());
         let c = SyncConfig {
-            remote: "file:///tmp/x".into(),
+            remote: "file:///srv/bucket".into(),
             grace: Some("1m".into()),
             ..SyncConfig::default()
         };

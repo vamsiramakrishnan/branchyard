@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use branchyard::inventory::{
-    self, DetectOptions, Evidence, HarnessEvent, HarnessLog, HarnessState, InstallAction,
-    InstallMode, InstallPolicy, Inventory, InventoryCache, LoginState, Permission, Quota,
+    self, DetectOptions, HarnessEvent, HarnessLog, HarnessState, InstallAction, InstallMode,
+    InstallPolicy, Inventory, InventoryCache, LoginState, Permission, Quota, Standing,
 };
+use branchyard::HarnessInfo;
 use branchyard_controls::catalog;
 use branchyard_setup::config::HarnessInstall;
 use serde_json::json;
@@ -55,6 +56,15 @@ impl Machine {
         Err(Failure::Message(format!(
             "--on {on:?} is not ssh://[user@]host[:port] or recipe:NAME"
         )))
+    }
+
+    /// For a sentence: where, in a person's words. `name` is for the log
+    /// and JSON, where a program reads it.
+    fn place(&self) -> String {
+        match self {
+            Machine::Local => "this machine".into(),
+            other => other.name(),
+        }
     }
 
     /// For messages and the log.
@@ -112,7 +122,50 @@ fn cache() -> InventoryCache {
 /// (detected afresh once it is older than its time to live), without the
 /// usage meters. For `by doctor`.
 pub(crate) fn detected_here() -> Result<Inventory, String> {
-    cache().local(&DetectOptions::from_env(), false)
+    let mut found = cache().local(&DetectOptions::from_env(), false)?;
+    count_stored_keys(&mut found);
+    Ok(found)
+}
+
+/// The keys `by harnesses login ID --api-key` stored count as logins, by
+/// name: they are in `[secrets]`, which the inventory's script cannot see.
+fn count_stored_keys(found: &mut Inventory) {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let vars = |name: &str| std::env::var(name).ok();
+    let Some(config) = crate::defaults::config_at(&cwd, &vars).ok().flatten() else {
+        return;
+    };
+    let root = crate::setup_io::project_root(&cwd);
+    inventory::count_stored_keys(found, &inventory::stored_keys(&root, &config.secrets));
+}
+
+/// The qualification of `id`'s default profile (else any profile of it).
+pub(crate) fn qualification_of(known: &[HarnessInfo], id: &str) -> Option<String> {
+    let mine = || known.iter().filter(|k| k.harness == id || k.profile == id);
+    mine()
+        .find(|k| k.default)
+        .and_then(|k| k.qualification.clone())
+        .or_else(|| mine().find_map(|k| k.qualification.clone()))
+}
+
+/// What this machine has of `ids` (catalog IDs), for the check before a
+/// run: the cache `by harnesses` keeps when it is fresh and looked for
+/// them, else a detection of just those, which is not kept.
+pub(crate) fn detected_only(ids: &[String]) -> Result<Inventory, String> {
+    let options = DetectOptions::from_env();
+    let mut found = match cache().get(&options) {
+        Some(found) if ids.iter().all(|id| found.checked(id)) => found,
+        _ => inventory::detect_local(&DetectOptions {
+            only: Some(ids.to_vec()),
+            ..options
+        })?,
+    };
+    // The keys `by harnesses login ID --api-key` stored are logins here as
+    // in the listing: an isolated run gets them.
+    count_stored_keys(&mut found);
+    Ok(found)
 }
 
 fn log() -> HarnessLog {
@@ -130,7 +183,7 @@ fn record(event: HarnessEvent) {
 
 /// The effective `[harnesses]` as a policy. A repository's file cannot
 /// allow installs; reading it refuses one that tries (`check_layer`).
-fn policy(env: &Env) -> Result<InstallPolicy, Failure> {
+pub(crate) fn policy(env: &Env) -> Result<InstallPolicy, Failure> {
     let cwd = std::env::current_dir()?;
     let vars = |name: &str| std::env::var(name).ok();
     let config = crate::defaults::config_at(&cwd, &vars)
@@ -143,6 +196,27 @@ fn policy(env: &Env) -> Result<InstallPolicy, Failure> {
         HarnessInstall::Auto => InstallMode::Auto,
     });
     Ok(InstallPolicy::new(mode, config.allow, interactive(env)))
+}
+
+/// The lines that end a refused install: the file to edit and the key to
+/// set (the SDK's refusal says only "your user configuration"), or the
+/// command to run by hand.
+fn how_to_allow(policy: &InstallPolicy, id: &str, command: &str) -> String {
+    let file = crate::setup_io::user_file();
+    let file = file.display();
+    if !policy.allow.is_empty() && !policy.allow.iter().any(|a| a == id) {
+        return format!(
+            "\nTo allow it, add \"{id}\" to `allow` under [harnesses] in {file}; or run the \
+             command yourself."
+        );
+    }
+    match policy.mode {
+        InstallMode::Never => format!(
+            "\nTo allow installs, put this in {file}:\n  [harnesses]\n  install = \"ask\"\nThen run \
+             `by harnesses install {id} --yes`. Or run `{command}` yourself."
+        ),
+        _ => String::new(),
+    }
 }
 
 fn interactive(env: &Env) -> bool {
@@ -186,6 +260,7 @@ fn detect(
             }
             .map_err(Failure::Message)?;
             attach_quota(&mut found);
+            count_stored_keys(&mut found);
             Ok(found)
         }
         Machine::Ssh(url) => inventory::detect_with(options, true, |_| {
@@ -193,7 +268,7 @@ fn detect(
             command.arg("sh -s");
             command
         })
-        .map_err(|e| Failure::Message(format!("on {}: {e}", machine.name()))),
+        .map_err(|e| Failure::Message(format!("on {}: {e}", machine.place()))),
         Machine::Recipe(name) => on_recipe(env, name, |transport| {
             inventory::detect_with(options, false, |script| transport.command(script, &[]))
                 .map_err(Failure::Message)
@@ -298,7 +373,9 @@ pub fn main(
         Some(HarnessesAction::Update(change)) => {
             change_harness(env, target, json, on, change, InstallAction::Update)
         }
-        Some(HarnessesAction::Login { id, api_key }) => login(env, target, json, on, id, *api_key),
+        Some(HarnessesAction::Login { id, api_key, yes }) => {
+            login(env, target, json, on, id, *api_key, *yes)
+        }
         Some(HarnessesAction::Log) => show_log(env, json),
     }
 }
@@ -328,7 +405,7 @@ fn list(env: &Env, target: &Target, as_json: bool, refresh: bool, on: Option<&st
                 worker.repos.join(", ")
             ));
             match &worker.inventory {
-                Some(found) => text.push_str(&inventory_text(found, env.style())),
+                Some(found) => text.push_str(&inventory_text(found, false, env.style())),
                 None => {
                     text.push_str("  advertises no harness inventory (run with inventory on)\n")
                 }
@@ -344,7 +421,11 @@ fn list(env: &Env, target: &Target, as_json: bool, refresh: bool, on: Option<&st
             &serde_json::to_value(&found).expect("serializes"),
         ));
     }
-    print(&inventory_text(&found, env.style()))
+    print(&inventory_text(
+        &found,
+        matches!(machine, Machine::Local),
+        env.style(),
+    ))
 }
 
 fn quota_text(quota: Option<&Quota>) -> String {
@@ -363,27 +444,24 @@ fn quota_text(quota: Option<&Quota>) -> String {
     text
 }
 
+/// The login cell: `Login::label`, green when logged in, red when logged out.
 fn login_text(state: &HarnessState) -> (String, Tone) {
-    let l = &state.login;
-    let how = match l.evidence {
-        Evidence::Verified => "verified",
-        Evidence::Likely => "likely",
-        Evidence::None => "",
-    };
-    let tone = match l.state {
+    let tone = match state.login.state {
+        // A key the harness will not use is not a login to be pleased by.
+        LoginState::LoggedIn if state.login.key_unused() => Tone::Yellow,
         LoginState::LoggedIn => Tone::Green,
         LoginState::LoggedOut => Tone::Red,
         LoginState::Unknown => Tone::Dim,
     };
-    match how {
-        "" => (l.state.to_string(), tone),
-        how => (format!("{} ({how})", l.state), tone),
-    }
+    (state.login.label(), tone)
 }
 
 /// An inventory as a table with what is not ready and why.
-fn inventory_text(found: &Inventory, style: Style) -> String {
-    let columns = [
+/// `local`: the inventory is of this machine, which is how it is named.
+fn inventory_text(found: &Inventory, local: bool, style: Style) -> String {
+    let known = branchyard::harnesses();
+    let any_quota = found.harnesses.iter().any(|h| h.quota.is_some());
+    let mut columns = vec![
         Column {
             header: "HARNESS",
             max: 20,
@@ -396,38 +474,60 @@ fn inventory_text(found: &Inventory, style: Style) -> String {
         },
         Column {
             header: "LOGIN",
-            max: 24,
+            // `key set (GOOGLE_GENERATIVE_AI_API_KEY)`, OpenCode's, is 38.
+            max: 40,
             right: false,
         },
         Column {
-            header: "QUOTA",
-            max: 22,
-            right: false,
-        },
-        Column {
-            header: "PATH",
-            max: 48,
+            header: "LIVE RUN",
+            max: 12,
             right: false,
         },
     ];
+    if any_quota {
+        columns.push(Column {
+            header: "QUOTA",
+            max: 22,
+            right: false,
+        });
+    }
+    columns.push(Column {
+        header: "PATH",
+        max: 48,
+        right: false,
+    });
     let rows: Vec<Vec<Cell>> = found
         .harnesses
         .iter()
         .map(|h| {
             let (login, tone) = login_text(h);
-            vec![
+            let version = h.version_text();
+            let mut row = vec![
                 Cell::plain(&h.id),
-                match &h.version {
-                    Some(v) => Cell::plain(v),
-                    None => Cell::toned("?", Tone::Yellow),
+                match (&h.version, h.too_old()) {
+                    // A release the driver cannot follow; the line under
+                    // the table says which and what to install.
+                    (Some(_), Some(_)) => Cell::toned(format!("{version} (too old)"), Tone::Yellow),
+                    (Some(_), None) => Cell::plain(version),
+                    (None, _) => Cell::toned(version, Tone::Yellow),
                 },
                 Cell::toned(login, tone),
-                Cell::plain(quota_text(h.quota.as_ref())),
-                match h.on_path {
-                    true => Cell::plain(&h.path),
-                    false => Cell::toned(format!("{} (not on PATH)", h.path), Tone::Yellow),
+                match qualification_of(&known, &h.id)
+                    .as_deref()
+                    .and_then(inventory::live_score)
+                {
+                    Some(score) => Cell::plain(format!("live {score}")),
+                    None => Cell::toned("no live run", Tone::Dim),
                 },
-            ]
+            ];
+            if any_quota {
+                row.push(Cell::plain(quota_text(h.quota.as_ref())));
+            }
+            row.push(match h.on_path {
+                true => Cell::plain(&h.path),
+                false => Cell::toned(format!("{} (not on PATH)", h.path), Tone::Yellow),
+            });
+            row
         })
         .collect();
     let mut text = match rows.is_empty() {
@@ -435,12 +535,34 @@ fn inventory_text(found: &Inventory, style: Style) -> String {
         false => table(&columns, &rows, style),
     };
     for h in &found.harnesses {
-        if let Some(note) = &h.version_note {
-            text.push_str(&format!("  {}: no version: {note}\n", h.id));
+        match (&h.version, &h.version_note) {
+            (None, Some(note)) if note.starts_with(inventory::SLOW_START) => {
+                text.push_str(&format!(
+                    "  {}: version: {note}; `by harnesses --refresh` asks again, and \
+                 BRANCHYARD_HARNESS_TIMEOUT (seconds) sets how long to wait\n",
+                    h.id
+                ))
+            }
+            (None, Some(note)) => text.push_str(&format!("  {}: no version: {note}\n", h.id)),
+            (Some(_), Some(note)) => text.push_str(&format!("  {}: version: {note}\n", h.id)),
+            (_, None) => {}
         }
-        match h.ready() {
-            Ok(()) => text.push_str(&format!("  {}: {}\n", h.id, h.login.detail)),
-            Err(why) => text.push_str(&format!("  {}: cannot run: {why}\n", h.id)),
+        match h.standing() {
+            Standing::Ready => text.push_str(&format!("  {}: {}\n", h.id, h.login.detail)),
+            Standing::NotVerified(why) => text.push_str(&format!("  {}: {why}\n", h.id)),
+            Standing::CannotRun(why) => text.push_str(&format!("  {}: cannot run: {why}\n", h.id)),
+        }
+        if h.login.key_unused() {
+            text.push_str(
+                "  antigravity: `by harnesses login antigravity` writes modelProvider gemini \
+                 into its settings, after showing you the change\n",
+            );
+        }
+        if let Some(drift) = inventory::live_drift(
+            h.version.as_deref(),
+            qualification_of(&known, &h.id).as_deref(),
+        ) {
+            text.push_str(&format!("  {}: {drift}\n", h.id));
         } // What `by catalog refresh` found on npm, never fetched here.
         if let Some(latest) = crate::live_catalog::latest(&h.id) {
             if h.version
@@ -460,9 +582,9 @@ fn inventory_text(found: &Inventory, style: Style) -> String {
          one.\n",
         found.harnesses.len(),
         found.checked.len(),
-        match found.host.as_str() {
-            "" => "this machine",
-            host => host,
+        match (local, found.host.as_str()) {
+            (true, _) | (_, "") => "this machine",
+            (false, host) => host,
         }
     ));
     text
@@ -517,7 +639,7 @@ fn change_harness(
             false => print(&format!(
                 "{id} is already installed on {} ({version}); `by harnesses update {id}` updates \
                  it\n",
-                machine.name()
+                machine.place()
             )),
         };
     }
@@ -550,7 +672,7 @@ fn change_harness(
         Permission::Ask => {
             let answer = crate::console::terminal_prompt(&format!(
                 "by: {action} {id} on {} by running `{}`? [y/N] ",
-                machine.name(),
+                machine.place(),
                 plan.command
             ))?;
             if !matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
@@ -563,12 +685,13 @@ fn change_harness(
         Permission::Refused(why) => {
             record(event("refused", Some(why.clone()), None));
             return Err(Failure::Message(format!(
-                "not running `{}`: {why}",
-                plan.command
+                "not running `{}`: {why}{}",
+                plan.command,
+                how_to_allow(&policy, id, &plan.command)
             )));
         }
     }
-    eprintln!("by: on {}: {}", machine.name(), plan.command);
+    eprintln!("by: on {}: {}", machine.place(), plan.command);
     if let Some(why) = &plan.unpinned {
         eprintln!("by: unpinned: {why}");
     }
@@ -622,7 +745,7 @@ fn change_harness(
                 _ => "installed",
             },
             state.version.as_deref().unwrap_or("(version unknown)"),
-            machine.name(),
+            machine.place(),
             match (&current, action) {
                 (Some(c), InstallAction::Update) =>
                     format!(" (was {})", c.version.as_deref().unwrap_or("unknown")),
@@ -631,7 +754,7 @@ fn change_harness(
         )),
         _ => Err(Failure::Message(format!(
             "{action} of {id} on {} did not verify: {}{}",
-            machine.name(),
+            machine.place(),
             result.problem.unwrap_or_default(),
             match result.output_tail.trim() {
                 "" => String::new(),
@@ -645,6 +768,47 @@ fn machine_is_local(machine: &Machine) -> bool {
     matches!(machine, Machine::Local)
 }
 
+/// A login that ran nothing: the person has a step to do, which `how` says.
+/// Recorded as `manual`, and exit 2, so `by harnesses login X && by run ...`
+/// stops here.
+fn manual_login(
+    id: &str,
+    machine: &Machine,
+    command: Option<String>,
+    as_json: bool,
+    how: String,
+) -> Outcome {
+    record(HarnessEvent {
+        at_ms: branchyard_support::time::now_ms(),
+        on: machine.name(),
+        harness: id.to_owned(),
+        action: InstallAction::Login,
+        by: "by harnesses".into(),
+        command,
+        outcome: "manual".into(),
+        version_before: None,
+        version_after: None,
+        detail: Some(how.clone()),
+    });
+    match as_json {
+        true => {
+            print(&json::text(&json!({
+                "harness": id, "on": machine.name(), "status": "manual", "run": how,
+            })))?;
+            Err(Failure::Manual(String::new()))
+        }
+        false => Err(Failure::Manual(how)),
+    }
+}
+
+/// Exit 2 when a person still has something to run (already printed).
+fn finish_manual(manual: bool) -> Outcome {
+    match manual {
+        true => Err(Failure::Manual(String::new())),
+        false => Ok(()),
+    }
+}
+
 fn login(
     env: &Env,
     target: &Target,
@@ -652,6 +816,7 @@ fn login(
     on: Option<&str>,
     id: &str,
     api_key: bool,
+    yes: bool,
 ) -> Outcome {
     let e = entry(id)?;
     not_in_harness("log in to")?;
@@ -660,8 +825,11 @@ fn login(
         // A worker has no terminal: say what to run where.
         let report = remote.client.inventory()?;
         let mut lines = Vec::new();
+        // Whether any worker still needs a login (or an install) from a person.
+        let mut manual = false;
         for worker in &report.workers {
             let state = worker.inventory.as_ref().and_then(|i| i.get(id));
+            manual |= !matches!(state, Some(s) if s.login.state == LoginState::LoggedIn);
             let what = match (state, &command) {
                 (None, _) if worker.inventory.is_some() => format!(
                     "{id} is not installed; install it there first (by harnesses install {id} \
@@ -682,7 +850,12 @@ fn login(
             lines.push(json!({ "worker": worker.id, "host": worker.host, "do": what }));
         }
         if as_json {
-            return print(&json::text(&json!({ "harness": id, "workers": lines })));
+            print(&json::text(&json!({
+                "harness": id,
+                "status": if manual { "manual" } else { "done" },
+                "workers": lines,
+            })))?;
+            return finish_manual(manual);
         }
         if lines.is_empty() {
             return print("no live worker serves a repository you can see\n");
@@ -698,28 +871,50 @@ fn login(
                 )
             })
             .collect();
-        return print(&text);
+        print(&text)?;
+        return finish_manual(manual);
     }
     let machine = Machine::parse(on)?;
     if api_key {
         return store_key(env, as_json, &machine, id);
     }
+    // Antigravity with a key in the environment has nothing to sign in to:
+    // it needs its settings to select the provider that reads the key.
+    if id == "antigravity"
+        && matches!(machine, Machine::Local)
+        && std::env::var_os("GEMINI_API_KEY").is_some_and(|v| !v.is_empty())
+        && e.binaries
+            .iter()
+            .any(|b| crate::setup_io::which(b).is_some())
+    {
+        return antigravity_provider(env, as_json, yes);
+    }
     let Some(mut command) = command else {
         let vars = inventory::key_variables(id);
-        return Err(Failure::Message(format!(
-            "the catalog records no login command for {id}{}",
-            match vars.is_empty() {
-                true => e
-                    .homepage
-                    .as_deref()
-                    .map(|h| format!("; see {h}"))
-                    .unwrap_or_default(),
-                false => format!(
-                    "; give it an API key with `by harnesses login {id} --api-key` ({})",
-                    vars.join(" or ")
-                ),
-            }
-        )));
+        let program = e.binaries.first().map_or(id, String::as_str);
+        return manual_login(
+            id,
+            &machine,
+            None,
+            as_json,
+            format!(
+                "the catalog records no login command for {id}; {}{}",
+                match vars.is_empty() {
+                    true => format!(
+                        "start `{program}` and sign in inside it, then `by harnesses --refresh`"
+                    ),
+                    false => format!(
+                        "give it an API key with `by harnesses login {id} --api-key` ({}), or \
+                         sign in inside `{program}` itself",
+                        vars.join(" or ")
+                    ),
+                },
+                match (vars.is_empty(), e.homepage.as_deref()) {
+                    (true, Some(h)) => format!(" ({h})"),
+                    _ => String::new(),
+                }
+            ),
+        );
     };
     if !matches!(machine, Machine::Recipe(_)) {
         // The executable detection found, which may be off PATH there.
@@ -731,7 +926,7 @@ fn login(
         let Some(state) = found.get(id) else {
             return Err(Failure::Message(format!(
                 "{id} is not installed on {}; `by harnesses install {id}{}` first",
-                machine.name(),
+                machine.place(),
                 match &machine {
                     Machine::Local => String::new(),
                     other => format!(" --on {}", other.name()),
@@ -746,29 +941,10 @@ fn login(
         }
     }
     let command = command;
-    let reported = |how: String| -> Outcome {
-        record(HarnessEvent {
-            at_ms: branchyard_support::time::now_ms(),
-            on: machine.name(),
-            harness: id.to_owned(),
-            action: InstallAction::Login,
-            by: "by harnesses".into(),
-            command: Some(command.clone()),
-            outcome: "reported".into(),
-            version_before: None,
-            version_after: None,
-            detail: Some(how.clone()),
-        });
-        match as_json {
-            true => print(&json::text(
-                &json!({ "harness": id, "on": machine.name(), "run": how }),
-            )),
-            false => print(&format!("{how}\n")),
-        }
-    };
+    let manual = |how: String| manual_login(id, &machine, Some(command.clone()), as_json, how);
     let mut process = match &machine {
         Machine::Recipe(name) => {
-            return reported(format!(
+            return manual(format!(
                 "a recipe's machines are made fresh each time; log in from recipe {name}'s create \
                  script, or give it {} through the recipe's env",
                 inventory::key_variables(id).join(" or ")
@@ -786,7 +962,7 @@ fn login(
                 ),
                 _ => command.clone(),
             };
-            return reported(format!(
+            return manual(format!(
                 "{id}'s login is interactive and there is no terminal here; run `{place}` in a \
                  terminal"
             ));
@@ -802,7 +978,7 @@ fn login(
             c
         }
     };
-    eprintln!("by: on {}: {command}", machine.name());
+    eprintln!("by: on {}: {command}", machine.place());
     // The harness's own flow, with this terminal: a URL or device code it
     // prints reaches the person directly.
     let status = process
@@ -836,26 +1012,154 @@ fn login(
         detail: state.as_ref().map(|l| format!("{}: {}", l.state, l.detail)),
     });
     if as_json {
-        return print(&json::text(&json!({
-            "harness": id, "on": machine.name(), "exit": status.code(), "login": state,
-        })));
+        print(&json::text(&json!({
+            "harness": id,
+            "on": machine.name(),
+            "status": if status.success() { "done" } else { "failed" },
+            "exit": status.code(),
+            "login": state,
+        })))?;
+        return match status.success() {
+            true => Ok(()),
+            false => Err(Failure::Reported),
+        };
     }
     match (status.success(), state) {
         (true, Some(login)) => print(&format!(
             "{id} on {}: {} ({}: {})\n",
-            machine.name(),
+            machine.place(),
             login.state,
             login.evidence,
             login.detail
         )),
         (true, None) => print(&format!(
             "{id} ran its login; it is not found on {} now\n",
-            machine.name()
+            machine.place()
         )),
         (false, _) => Err(Failure::Message(format!(
             "`{command}` exited with {status}"
         ))),
     }
+}
+
+/// Where Antigravity keeps its settings, under the home.
+const ANTIGRAVITY_SETTINGS: &str = ".gemini/antigravity-cli/settings.json";
+
+/// `by harnesses login antigravity` with `GEMINI_API_KEY` set: `agy` reads
+/// the key only when its `settings.json` has `"modelProvider": "gemini"`
+/// (docs/harness-lifecycle.md). Merge that one key in, keeping everything
+/// else in the file (and its order and indentation), show the change, and
+/// write it when confirmed on a terminal or with `--yes`. A different
+/// provider already chosen is never replaced.
+fn antigravity_provider(env: &Env, as_json: bool, yes: bool) -> Outcome {
+    let Some(home) = crate::setup_io::home() else {
+        return Err(Failure::Message(
+            "no home directory: set HOME so Antigravity's settings can be found".into(),
+        ));
+    };
+    let path = home.join(ANTIGRAVITY_SETTINGS);
+    let shown = format!("~/{ANTIGRAVITY_SETTINGS}");
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(Failure::Message(format!("reading {shown}: {e}"))),
+    };
+    let merged = branchyard_setup::install::merge::json(
+        existing.as_deref(),
+        r#"{"modelProvider": "gemini"}"#,
+        "",
+    )
+    .map_err(|why| Failure::Message(format!("{shown}: {why}")))?;
+    let before = existing.clone().unwrap_or_default();
+    // `status` as every login says it: done, or manual when only the change
+    // was shown and the person has the step to take.
+    let reported = |wrote: bool, manual: bool, diff: &str, said: &str| -> Outcome {
+        match as_json {
+            true => print(&json::text(&json!({
+                "harness": "antigravity", "status": if manual { "manual" } else { "done" },
+                "settings": shown, "changed": !diff.is_empty(), "wrote": wrote, "diff": diff,
+            }))),
+            false => print(said),
+        }
+    };
+    if merged == before {
+        return reported(
+            false,
+            false,
+            "",
+            &format!(
+                "antigravity already reads GEMINI_API_KEY: {shown} has modelProvider gemini. \
+                 Nothing to sign in to; `by harnesses --refresh` shows it.\n"
+            ),
+        );
+    }
+    let diff = branchyard_setup::plan::unified_diff(&shown, &before, &merged);
+    let interactive = interactive(env);
+    let mut asked = false;
+    let confirmed = match (yes, interactive) {
+        (true, _) => true,
+        (false, true) => {
+            asked = true;
+            eprint!("{diff}");
+            let answer = crate::console::terminal_prompt(&format!(
+                "by: GEMINI_API_KEY is set, and agy reads it only with modelProvider gemini in \
+                 {shown}. Write that? [y/N] "
+            ))?;
+            matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
+        }
+        (false, false) => {
+            reported(
+                false,
+                true,
+                &diff,
+                &format!(
+                    "{diff}\nGEMINI_API_KEY is set, and agy reads it only with modelProvider \
+                     gemini in {shown}. Not written: there is no terminal to ask on. Run `by \
+                     harnesses login antigravity --yes` to write exactly the change above.\n"
+                ),
+            )?;
+            // Exit 2, as for any login that only says what to run.
+            return Err(Failure::Manual(String::new()));
+        }
+    };
+    if !confirmed {
+        return Err(Failure::Message(format!(
+            "not confirmed; {shown} was not changed"
+        )));
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mode = std::fs::metadata(&path)
+        .map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o777)
+        .unwrap_or(0o644);
+    crate::setup_io::write_file(&path, &merged, mode)?;
+    record(HarnessEvent {
+        at_ms: branchyard_support::time::now_ms(),
+        on: "local".into(),
+        harness: "antigravity".into(),
+        action: InstallAction::Login,
+        by: "by harnesses".into(),
+        command: None,
+        outcome: "wrote_settings".into(),
+        version_before: None,
+        version_after: None,
+        detail: Some(format!("modelProvider gemini in {shown}")),
+    });
+    cache().clear();
+    reported(
+        true,
+        false,
+        &diff,
+        &format!(
+            "{}wrote {shown}: antigravity reads GEMINI_API_KEY now. `by harnesses --refresh` \
+             shows it.\n",
+            match asked {
+                true => "",
+                false => diff.as_str(),
+            }
+        ),
+    )
 }
 
 /// Keep an API key for `id`'s key variable in a 0600 file beside the user
@@ -905,6 +1209,9 @@ fn store_key(env: &Env, as_json: bool, machine: &Machine, id: &str) -> Outcome {
             root.display()
         )));
     }
+    // The user file is read before anything is written, so one that cannot
+    // be read leaves the key file unwritten too.
+    crate::user_config::read(&crate::setup_io::user_file())?;
     {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new()
@@ -929,7 +1236,8 @@ fn store_key(env: &Env, as_json: bool, machine: &Machine, id: &str) -> Outcome {
     cache().clear();
     match as_json {
         true => print(&json::text(&json!({
-            "harness": id, "variable": var, "file": path, "secrets_entry_added": named,
+            "harness": id, "status": "stored", "variable": var, "file": path,
+            "secrets_entry_added": named,
         }))),
         false => print(&format!(
             "stored {var} for {id} in {} (0600){}; branches with a private home (--isolated, a \
@@ -970,7 +1278,7 @@ fn read_hidden() -> Result<String, Failure> {
 /// `var` already; whether it was added.
 fn name_secret(var: &str, path: &Path) -> Result<bool, Failure> {
     let file = crate::setup_io::user_file();
-    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    let text = crate::user_config::read(&file)?;
     let parsed = match text.trim().is_empty() {
         true => Default::default(),
         false => branchyard_setup::config::parse(&text)
@@ -1093,6 +1401,7 @@ fn show_log(env: &Env, as_json: bool) -> Outcome {
                     match e.outcome.as_str() {
                         "verified" | "ran" | "stored_key" => Tone::Green,
                         "failed" => Tone::Red,
+                        "manual" => Tone::Yellow,
                         _ => Tone::Dim,
                     },
                 ),

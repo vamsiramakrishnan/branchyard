@@ -4,6 +4,7 @@
     "allow": [
       "command(regex:make .*)",
       "command(*)",
+      "write_file(*)",
       "mcp(docs/*)",
       "mcp(search/*)",
       "mcp(branchyard/*)"

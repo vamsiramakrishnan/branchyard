@@ -157,6 +157,8 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
             stalled: false,
             superseded_by: None,
             model: new.provision.as_ref().and_then(|p| p.model.clone()),
+            provider: crate::providers::label_of(new.provider.as_ref()),
+            isolated: new.home.is_some() && !placement::sandboxed(new.provider.as_ref()),
         },
         created_ms,
         check: new.check,
@@ -1172,6 +1174,10 @@ fn prepare(
         std::fs::create_dir_all(&home)?;
         record.home = Some(home);
     }
+    // What `by show` says about where it runs: kept in step with the
+    // fields the turn uses, and set for a record from before it was kept.
+    record.info.provider = crate::providers::label_of(record.provider.as_ref());
+    record.info.isolated = record.home.is_some() && !placement::sandboxed(record.provider.as_ref());
     if !record.info.worktree.is_dir() {
         return Err(Error::State(format!(
             "{name}'s worktree {} is missing",
@@ -1287,7 +1293,7 @@ fn prepare(
             crate::state::LEASE_TTL,
             crate::wake::is_parked,
         )? {
-            Some(fence) => crate::state::Lease::new(store.clone(), fence),
+            Some(fence) => crate::state::Lease::new(store.clone(), fence)?,
             None => return Ok(None),
         },
         false => match store.acquire(&record)? {
@@ -1602,7 +1608,9 @@ pub(crate) fn reincarnate_with(
     let provision = options.provision.clone().or(parent.provision.clone());
     crate::provisioning::check(provision.as_ref(), private)?;
     let brief = match &candidate {
-        Some(candidate) => handoff_brief(&store, name, &parent, candidate, profile, parent_profile),
+        Some(candidate) => {
+            handoff_brief(&store, name, &parent, candidate, profile, parent_profile)?
+        }
         // Nothing to hand off: no turn of it submitted a prompt.
         None if parent.info.turns == 0 => parent.info.prompt.clone(),
         None => base_brief(
@@ -1612,7 +1620,7 @@ pub(crate) fn reincarnate_with(
             profile,
             parent_profile,
             how.why.as_deref(),
-        ),
+        )?,
     };
     let reserved = names::reserve(
         &store,
@@ -1707,8 +1715,11 @@ fn base_brief(
     profile: &Profile,
     parent_profile: &Profile,
     why: Option<&str>,
-) -> String {
-    let events = record::read(store, name).unwrap_or_default();
+) -> Result<String, Error> {
+    // Its last message is part of the brief: a log that cannot be read stops
+    // the restart rather than starting the branch over from a thinner brief.
+    let events = record::read(store, name)
+        .map_err(|e| e.could_not(format_args!("read the log of {name} for its brief")))?;
     let last = delegation::last_message(&events);
     let mut brief = format!(
         "{name} is being restarted with {}: do its task in a fresh session.\n\n\
@@ -1723,7 +1734,7 @@ fn base_brief(
         brief.push_str(&format!("\n## Why it was restarted\n{why}\n"));
     }
     brief.push_str("\nStart from the repository as it is and do the task.");
-    brief
+    Ok(brief)
 }
 
 /// The first prompt for a reincarnated branch: the original task, turns so
@@ -1736,11 +1747,13 @@ fn handoff_brief(
     candidate: &CandidateInfo,
     profile: &Profile,
     parent_profile: &Profile,
-) -> String {
-    let events = record::read(store, name).unwrap_or_default();
+) -> Result<String, Error> {
+    // As in `base_brief`: no log, no handoff.
+    let events = record::read(store, name)
+        .map_err(|e| e.could_not(format_args!("read the log of {name} for its brief")))?;
     let last = delegation::last_message(&events);
     let mut brief = format!(
-        "{name} is being reincarnated: continue its work in a fresh session.\n\n\
+        "Continue {name}'s work in a fresh session.\n\n\
          ## Original task\n{}\n\n\
          ## Progress so far\n{} turn(s) completed with {}.\n\n\
          ## Latest candidate\n{} ({} file(s) changed, +{} -{})\n",
@@ -1773,6 +1786,9 @@ fn handoff_brief(
         }
         _ => {}
     }
-    brief.push_str("\nPick up from the candidate above and continue the task.");
-    brief
+    brief.push_str(
+        "\nThe working tree is as the last turn left it; check it (`git status`, `git log`) \
+         before going on. Pick up from the candidate above and continue the task.",
+    );
+    Ok(brief)
 }

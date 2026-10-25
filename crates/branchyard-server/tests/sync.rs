@@ -167,6 +167,10 @@ fn a_run_that_loses_its_lease_is_cancelled_not_accepted_and_not_pushed() {
     let f = Fixture::new();
     let bucket = f.dir.join("bucket");
     let mut config = f.config();
+    config.metrics = Some(MetricsConfig {
+        listen: None,
+        token_sha256: None,
+    });
     config.sync = Some(SyncSettings {
         config: SyncConfig {
             remote: format!("file://{}", bucket.display()),
@@ -251,12 +255,15 @@ fn a_run_that_loses_its_lease_is_cancelled_not_accepted_and_not_pushed() {
     );
 
     // What changes here afterwards is not pushed while another runner
-    // holds the task (a push already under way when the lease was lost
-    // has finished by now).
-    wait::settle(
-        "a push under way when the lease was lost finishes",
-        Duration::from_millis(1500),
-    );
+    // holds the task. The fence went up before the run was cancelled, so no
+    // push of this task starts from here; and the run's end queued the task,
+    // which the fence keeps queued rather than pushed. The outbox gauge
+    // reads that, so the snapshot is taken once the replicator has been
+    // told the run is over, not after a guess at how long a push takes.
+    wait::until("the lost run's task to sit queued and fenced", || {
+        let (_, _, text) = raw(server.addr, &get("/metrics", Some(TOKEN)));
+        text.contains(r#"branchyard_sync_pending{repo="app"} 1"#)
+    });
     let before = pushed();
     let git_branch = branch.info().git_branch.clone();
     let tip = git(&f.root, &["rev-parse", &format!("refs/heads/{git_branch}")]);
@@ -280,6 +287,9 @@ fn a_run_that_loses_its_lease_is_cancelled_not_accepted_and_not_pushed() {
             late.trim(),
         ],
     );
+    // A quiet period in which nothing may happen: three of the replicator's
+    // one-second intervals, against its clock, which a slow runner does not
+    // stretch (an allowed long settle in tools/check_test_hygiene.py).
     wait::settle(
         "pushes that must not happen would have by now",
         Duration::from_secs(3),
@@ -287,6 +297,10 @@ fn a_run_that_loses_its_lease_is_cancelled_not_accepted_and_not_pushed() {
     let after = pushed();
     assert_eq!(after.seq, before.seq, "{after:?}");
     assert_eq!(after.refs, before.refs);
+    assert!(
+        !after.refs.values().any(|tip| tip == late.trim()),
+        "the commit made after the loss reached the remote: {after:?}"
+    );
     elsewhere.release_lease(taken).unwrap();
     server.stop();
 }

@@ -2,9 +2,9 @@
 //! and repository are ready to use Branchyard.
 //!
 //! Each check (in [`checks`]) is a function from what was found
-//! ([`Context`]) to rows: a name, a status (`ok`, `warn` or `fail`), what
-//! was found in one line, and, for a row that is not `ok`, what to do in one
-//! line. The checks are listed once, in [`CHECKS`], in report order; to add
+//! ([`Context`]) to rows: a name, a status (`ok`, `todo`, `warn` or `fail`),
+//! what was found in one line, and, for a row that is not `ok`, what to do in
+//! one line. The checks are listed once, in [`CHECKS`], in report order; to add
 //! one, write its function and list it there.
 //!
 //! The run is offline except for a configured `[remote]`, asked once with a
@@ -12,10 +12,12 @@
 //! `.branchyard/` that exists, as every `by` command does, creates none, and
 //! leaves an older store at its schema. Credentials are reported by
 //! variable name, never by value. Exit status: 0 when nothing failed
-//! (warnings do not fail), 1 when something did. See docs/doctor.md.
+//! (a to-do and a warning do not fail), 1 when something did. A line above
+//! the table says which mode this repository runs in. See docs/doctor.md.
 
 mod checks;
 mod context;
+mod serve;
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -32,6 +34,10 @@ use context::Context;
 pub(crate) enum Status {
     /// Nothing to do.
     Ok,
+    /// A step not taken yet, with nothing wrong: Branchyard has not been set
+    /// up in this repository. It is where everyone starts, so it is not a
+    /// warning.
+    Todo,
     /// Something to look at, or a check that could not run; nothing that
     /// stops Branchyard working.
     Warn,
@@ -43,6 +49,7 @@ impl Status {
     fn as_str(self) -> &'static str {
         match self {
             Status::Ok => "ok",
+            Status::Todo => "todo",
             Status::Warn => "warn",
             Status::Fail => "fail",
         }
@@ -51,6 +58,7 @@ impl Status {
     fn tone(self) -> Tone {
         match self {
             Status::Ok => Tone::Green,
+            Status::Todo => Tone::Cyan,
             Status::Warn => Tone::Yellow,
             Status::Fail => Tone::Red,
         }
@@ -60,8 +68,9 @@ impl Status {
 /// One row of the report.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct Check {
-    /// A stable dotted name, such as `repository.git`.
-    pub name: &'static str,
+    /// A stable dotted name, such as `repository.git`; `harnesses.ID` has one
+    /// row for each installed harness.
+    pub name: String,
     /// How it came out.
     pub status: Status,
     /// What was found, in one line.
@@ -78,23 +87,37 @@ fn one_line(text: impl Into<String>) -> String {
 
 impl Check {
     /// A row that needs nothing.
-    pub(crate) fn ok(name: &'static str, detail: impl Into<String>) -> Check {
+    pub(crate) fn ok(name: impl Into<String>, detail: impl Into<String>) -> Check {
         Check {
-            name,
+            name: name.into(),
             status: Status::Ok,
             detail: one_line(detail),
             fix: None,
         }
     }
 
-    /// A row to look at, with what to do.
-    pub(crate) fn warn(
-        name: &'static str,
+    /// A step not taken yet, with the command that takes it.
+    pub(crate) fn todo(
+        name: impl Into<String>,
         detail: impl Into<String>,
         fix: impl Into<String>,
     ) -> Check {
         Check {
-            name,
+            name: name.into(),
+            status: Status::Todo,
+            detail: one_line(detail),
+            fix: Some(one_line(fix)),
+        }
+    }
+
+    /// A row to look at, with what to do.
+    pub(crate) fn warn(
+        name: impl Into<String>,
+        detail: impl Into<String>,
+        fix: impl Into<String>,
+    ) -> Check {
+        Check {
+            name: name.into(),
             status: Status::Warn,
             detail: one_line(detail),
             fix: Some(one_line(fix)),
@@ -103,12 +126,12 @@ impl Check {
 
     /// A row that stops something working, with what to do.
     pub(crate) fn fail(
-        name: &'static str,
+        name: impl Into<String>,
         detail: impl Into<String>,
         fix: impl Into<String>,
     ) -> Check {
         Check {
-            name,
+            name: name.into(),
             status: Status::Fail,
             detail: one_line(detail),
             fix: Some(one_line(fix)),
@@ -143,18 +166,29 @@ const CHECKS: &[CheckFn] = &[
     checks::host_loopback,
     checks::host_kvm,
     checks::server_reachable,
+    serve::config,
+    serve::database,
     checks::models_keys,
     checks::models_prices,
 ];
 
-/// Every check's rows.
+/// The version of the JSON report: 1 had `ok`, `warn` and `fail`, one
+/// `harnesses.installed` row, and no `mode`; 2 adds the `todo` status,
+/// `harnesses.summary` with one `harnesses.ID` row for each installed
+/// harness in its place, and `mode`.
+const FORMAT: u32 = 2;
+
+/// Every check's rows, and the mode the repository runs in.
 struct Report {
+    /// The `Mode:` line's text, without the label.
+    mode: Option<String>,
     checks: Vec<Check>,
 }
 
 impl Report {
     fn run(context: &Context) -> Report {
         Report {
+            mode: Some(checks::mode(context)),
             checks: CHECKS.iter().flat_map(|check| check(context)).collect(),
         }
     }
@@ -172,9 +206,15 @@ impl Report {
         self.checks.iter().filter(|c| c.status == status).count()
     }
 
-    /// `{"checks": [{"name", "status", "detail", "fix"}], "status"}`.
+    /// `{"format", "mode", "checks": [{"name", "status", "detail", "fix"}],
+    /// "status"}`.
     fn json(&self) -> Value {
-        json!({ "checks": self.checks, "status": self.status() })
+        json!({
+            "format": FORMAT,
+            "mode": self.mode,
+            "checks": self.checks,
+            "status": self.status(),
+        })
     }
 
     /// A table of the rows, what to do about each that is not `ok`, and a
@@ -188,7 +228,7 @@ impl Report {
             },
             Column {
                 header: "CHECK",
-                max: 24,
+                max: 40,
                 right: false,
             },
             // A refusal is shown whole, however long its path.
@@ -204,12 +244,16 @@ impl Report {
             .map(|c| {
                 vec![
                     Cell::toned(c.status.as_str(), c.status.tone()),
-                    Cell::plain(c.name),
+                    Cell::plain(&c.name),
                     Cell::plain(&c.detail),
                 ]
             })
             .collect();
-        let mut text = table(&columns, &rows, style);
+        let mut text = String::new();
+        if let Some(mode) = &self.mode {
+            text.push_str(&format!("Mode: {mode}\n\n"));
+        }
+        text.push_str(&table(&columns, &rows, style));
         // A row that could not run only points at the row that failed first.
         let todo: Vec<&Check> = self
             .checks
@@ -232,20 +276,29 @@ impl Report {
 
     fn summary(&self, style: Style) -> String {
         let status = self.status();
-        let (warn, fail) = (self.count(Status::Warn), self.count(Status::Fail));
+        let (warn, fail, todo) = (
+            self.count(Status::Warn),
+            self.count(Status::Fail),
+            self.count(Status::Todo),
+        );
         let plural = |n: usize, one: &str, many: &str| match n {
             1 => format!("1 {one}"),
             n => format!("{n} {many}"),
         };
+        let to_do = match todo {
+            0 => String::new(),
+            n => format!("{n} to do, "),
+        };
         let detail = match status {
             Status::Ok => format!("all {} checks passed", self.checks.len()),
+            Status::Todo => format!("{to_do}{} ok", self.count(Status::Ok)),
             Status::Warn => format!(
-                "{}, {} ok",
+                "{}, {to_do}{} ok",
                 plural(warn, "warning", "warnings"),
                 self.count(Status::Ok)
             ),
             Status::Fail => format!(
-                "{} failed, {}, {} ok",
+                "{} failed, {}, {to_do}{} ok",
                 fail,
                 plural(warn, "warning", "warnings"),
                 self.count(Status::Ok)
@@ -267,7 +320,7 @@ pub fn main(env: &Env, globals: &Globals, path: Option<&str>, json: bool) -> Out
     }
     match report.status() {
         Status::Fail => Err(Failure::Reported),
-        Status::Ok | Status::Warn => Ok(()),
+        Status::Ok | Status::Todo | Status::Warn => Ok(()),
     }
 }
 
@@ -277,6 +330,7 @@ mod tests {
 
     fn report() -> Report {
         Report {
+            mode: None,
             checks: vec![
                 Check::ok("repository.git", "/src/app (on branch main)"),
                 Check::warn(
@@ -295,18 +349,29 @@ mod tests {
 
     #[test]
     fn statuses_order_by_severity_and_a_report_is_as_bad_as_its_worst_row() {
-        assert!(Status::Ok < Status::Warn && Status::Warn < Status::Fail);
+        assert!(
+            Status::Ok < Status::Todo && Status::Todo < Status::Warn && Status::Warn < Status::Fail
+        );
         assert_eq!(report().status(), Status::Fail);
         let mut checks = report().checks;
         checks.pop();
-        assert_eq!(Report { checks }.status(), Status::Warn);
-        assert_eq!(Report { checks: Vec::new() }.status(), Status::Ok);
+        assert_eq!(Report { mode: None, checks }.status(), Status::Warn);
+        assert_eq!(
+            Report {
+                mode: None,
+                checks: Vec::new()
+            }
+            .status(),
+            Status::Ok
+        );
     }
 
     #[test]
     fn the_json_has_the_documented_shape() {
         let value = report().json();
         assert_eq!(value["status"], "fail");
+        assert_eq!(value["format"], 2);
+        assert_eq!(value["mode"], Value::Null);
         let rows = value["checks"].as_array().unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(
@@ -349,12 +414,33 @@ mod tests {
     }
 
     #[test]
+    fn the_mode_is_one_line_above_the_table_and_a_key_in_the_json() {
+        let report = Report {
+            mode: Some("local, no isolation · SQLite (.branchyard/state.db) · no server".into()),
+            checks: vec![Check::ok("a.b", "x")],
+        };
+        let text = report.text(Style::PLAIN);
+        assert!(
+            text.starts_with(
+                "Mode: local, no isolation · SQLite (.branchyard/state.db) · no server\n\nSTATUS"
+            ),
+            "{text}"
+        );
+        assert_eq!(
+            report.json()["mode"],
+            "local, no isolation · SQLite (.branchyard/state.db) · no server"
+        );
+    }
+
+    #[test]
     fn the_summary_counts_each_status() {
         let ok = Report {
+            mode: None,
             checks: vec![Check::ok("a.b", "x"), Check::ok("a.c", "y")],
         };
         assert!(ok.text(Style::PLAIN).ends_with("ok: all 2 checks passed\n"));
         let warned = Report {
+            mode: None,
             checks: vec![
                 Check::ok("a.b", "x"),
                 Check::warn("a.c", "y", "z"),
@@ -364,6 +450,30 @@ mod tests {
         assert!(warned
             .text(Style::PLAIN)
             .ends_with("warn: 2 warnings, 1 ok\n"));
+        // A to-do is not a warning, and nothing broken exits 0.
+        let new = Report {
+            mode: None,
+            checks: vec![
+                Check::ok("a.b", "x"),
+                Check::todo("a.c", "not set up yet", "run `by setup`"),
+            ],
+        };
+        assert_eq!(new.status(), Status::Todo);
+        let text = new.text(Style::PLAIN);
+        assert!(text.contains("todo    a.c "), "{text}");
+        assert!(text.contains("To do:\n  a.c: run `by setup`\n"), "{text}");
+        assert!(text.ends_with("todo: 1 to do, 1 ok\n"), "{text}");
+        let mixed = Report {
+            mode: None,
+            checks: vec![
+                Check::todo("a.c", "x", "y"),
+                Check::warn("a.d", "x", "y"),
+                Check::ok("a.e", "x"),
+            ],
+        };
+        assert!(mixed
+            .text(Style::PLAIN)
+            .ends_with("warn: 1 warning, 1 to do, 1 ok\n"));
     }
 
     #[test]
@@ -377,6 +487,7 @@ mod tests {
         assert!(!check.detail.contains('\n') && !check.fix.as_deref().unwrap().contains('\n'));
         assert_eq!(check.fix.as_deref(), Some("fix the line"));
         let text = Report {
+            mode: None,
             checks: vec![check],
         }
         .text(Style::PLAIN);

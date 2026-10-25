@@ -89,7 +89,7 @@ input = 0.2
 output = 0.6
 ```
 
-`by init project` proposes backends and routes from the provider keys set when it runs, by name: `anthropic` for `ANTHROPIC_API_KEY`, `openai` for `OPENAI_API_KEY` or `CODEX_API_KEY`, and the `gemini` backend above for `GEMINI_API_KEY`, each with a route by model, and optionally Claude models on Gemini ([setup](setup.md#routing-and-the-gateway-from-what-is-present)).
+`by init project` offers backends and routes from the provider keys set when it runs, by name (the answer is no unless you say yes, so `--defaults` and `by setup` write none, only a comment pointing here): `anthropic` for `ANTHROPIC_API_KEY`, `openai` for `OPENAI_API_KEY` or `CODEX_API_KEY`, and the `gemini` backend above for `GEMINI_API_KEY`, each with a route by model, and optionally Claude models on Gemini ([setup](setup.md#routing-and-the-gateway-from-what-is-present)).
 
 A key is named, never written: `key` names an entry of `[secrets]`, whose value says the variable (`"VAR"`) or file (`"@path"`) that holds it; without such an entry it is a variable of that name. Keys are read when a turn's gateway starts, in the process that runs the turn, so a rotated key is used from the next turn. `by config validate` checks `[models]`; `by` checks the rest (a backend named in a route that does not exist, a weight of 0, a bad URL) when it opens the repository.
 

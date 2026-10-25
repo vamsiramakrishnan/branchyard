@@ -402,6 +402,8 @@ mod tests {
             stalled: false,
             superseded_by: None,
             model: None,
+            provider: "local".into(),
+            isolated: false,
         };
         let value = branch(&info);
         assert_eq!(value["status"], json!({ "state": "failed", "reason": "r" }));
@@ -411,6 +413,8 @@ mod tests {
         assert_eq!(value["worktree"], "/w");
         assert_eq!(value["children"], json!(["kid"]));
         assert_eq!(value["depth"], 0);
+        assert_eq!(value["provider"], "local");
+        assert_eq!(value["isolated"], false);
         // The order `by --json` has always printed.
         let keys: Vec<&str> = value
             .as_object()
@@ -438,7 +442,9 @@ mod tests {
                 "cost_usd",
                 "created_at",
                 "stalled",
-                "superseded_by"
+                "superseded_by",
+                "provider",
+                "isolated"
             ]
         );
         let harness = harness(&HarnessInfo {

@@ -239,6 +239,23 @@ fn a_task_runs_through_merge_over_http() {
     );
     let unknown = client.repo("nope").branches().unwrap_err();
     assert_eq!(unknown.code(), Some("unknown_repo"));
+    // The error says which repositories this server does serve, and how to
+    // serve another.
+    let branchyard_client::Error::Api { error: body, .. } = &unknown else {
+        panic!("not an API error: {unknown:?}")
+    };
+    let served = body.detail.as_ref().unwrap()["served"].as_array().unwrap();
+    assert!(!served.is_empty(), "{body:?}");
+    assert_eq!(body.detail.as_ref().unwrap()["repo"], "nope");
+    assert!(
+        body.message
+            .starts_with("no repository named nope; this server serves ")
+            && body
+                .message
+                .ends_with("serve it with `by serve --repo NAME=PATH`"),
+        "{}",
+        body.message
+    );
     assert_eq!(
         client.operation("op_nope").unwrap_err().code(),
         Some("unknown_operation")

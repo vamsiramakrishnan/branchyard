@@ -142,8 +142,9 @@ fn detection_reads_versions_and_logins_and_times_out_slow_commands() {
     assert_eq!(qwen.version, None);
     assert_eq!(
         qwen.version_note.as_deref(),
-        Some("its version command timed out")
+        Some("slow to start (took >0.5 s)")
     );
+    assert_eq!(qwen.version_text(), "slow to start");
     assert!(found
         .ready("opencode")
         .unwrap_err()
@@ -156,13 +157,15 @@ fn detection_reads_versions_and_logins_and_times_out_slow_commands() {
     assert!(!serde_json::to_string(&found)
         .unwrap()
         .contains("sk-never-printed"));
-    // Each version command ran once, and the status command once.
+    // Each version command ran once, and each status command once (Claude
+    // Code's and Codex's own).
     let mut calls = m.calls();
     calls.sort();
     assert_eq!(
         calls,
         [
             "claude --version",
+            "claude auth status",
             "codex --version",
             "codex login status",
             "goose --version",
@@ -211,8 +214,11 @@ fn antigravity_deepseek_and_gemini_logins_are_read_from_their_configuration() {
         agy.login.detail,
         "GEMINI_API_KEY is set but ~/.gemini/antigravity-cli/settings.json does not set \
          modelProvider gemini: agy will ask for a Google sign-in; Branchyard sets it in \
-         isolated runs"
+         isolated runs, and `by harnesses login antigravity` sets it for your own"
     );
+    assert_eq!(agy.login.key.as_deref(), Some("GEMINI_API_KEY"));
+    assert_eq!(agy.login.label(), "key set, unused");
+    assert!(agy.login.key_unused());
     let gemini = found.get("gemini-cli").unwrap();
     assert_eq!(gemini.version.as_deref(), Some("0.63.0"));
     assert!(gemini
@@ -304,12 +310,15 @@ fn antigravity_deepseek_and_gemini_logins_are_read_from_their_configuration() {
          apiKeyEnv: PROXY_KEY\n          api: openai-completions\n",
     )
     .unwrap();
+    // The provider names PROXY_KEY and it is unset: dsh stops with
+    // MISSING_CREDENTIAL, so this is not a login (seen on dsh 0.2.1-rc.2).
     assert_eq!(
         detail(&m, &[]),
         (
-            LoginState::LoggedIn,
-            "~/.dsh/profiles/acp/cordis.patch.yml configures a provider (its key variable \
-             is not checked)"
+            LoginState::LoggedOut,
+            "~/.dsh/profiles/acp/cordis.patch.yml configures a provider, but the variable its \
+             apiKeyEnv names (PROXY_KEY) is not set, and dsh stops with MISSING_CREDENTIAL; \
+             export it"
                 .to_owned()
         )
     );
@@ -358,6 +367,68 @@ fn antigravity_deepseek_and_gemini_logins_are_read_from_their_configuration() {
     assert_eq!(
         detail(&m, &[("DSH_HOME", elsewhere), ("MOVED_KEY", secret)]).1,
         "MOVED_KEY is set (an API key; not checked)"
+    );
+}
+
+/// Hermes Agent 0.19.0 loads `~/.hermes/.env` for its providers' keys
+/// (`HERMES_HOME` moves it): a `NAME_API_KEY=value` line is a login, by
+/// name only, and an empty value, a comment and a name that is no key are
+/// not. Checked against a Hermes configured for Z.ai's `zai` provider on
+/// 25 October 2026.
+#[test]
+fn hermes_is_logged_in_by_a_key_in_its_env_file_never_printing_the_value() {
+    let m = Machine::new();
+    m.fake("hermes", "echo 'Hermes Agent v0.19.0 (2026.7.20)'\n");
+    let only = DetectOptions {
+        only: Some(vec!["hermes".into()]),
+        ..options()
+    };
+    let secret = "h-never-printed";
+    let login = |m: &Machine, vars: &[(&str, &str)]| {
+        let found = m.detect(&only, vars);
+        let hermes = found.get("hermes").unwrap().clone();
+        let text = serde_json::to_string(&found).unwrap();
+        assert!(!text.contains(secret), "a key value reached the report");
+        (hermes.login.state, hermes.login.detail)
+    };
+    assert_eq!(
+        login(&m, &[]).0,
+        LoginState::Unknown,
+        "no file, no variable"
+    );
+    let env_file = m.home.join(".hermes");
+    fs::create_dir_all(&env_file).unwrap();
+    fs::write(
+        env_file.join(".env"),
+        format!("# GLM_API_KEY={secret}\nTERMINAL_ENV=local\nOPENROUTER_API_KEY=\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        login(&m, &[]).0,
+        LoginState::Unknown,
+        "a comment, an empty key and a name that is no key configure nothing"
+    );
+    fs::write(
+        env_file.join(".env"),
+        format!("TERMINAL_ENV=local\nexport GLM_API_KEY={secret}\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        login(&m, &[]),
+        (
+            LoginState::LoggedIn,
+            "GLM_API_KEY is set in ~/.hermes/.env, which Hermes loads (an API key; not checked)"
+                .to_owned()
+        )
+    );
+    // HERMES_HOME moves the file.
+    let elsewhere = m.home.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let elsewhere = elsewhere.to_str().unwrap();
+    assert_eq!(
+        login(&m, &[("HERMES_HOME", elsewhere)]).0,
+        LoginState::Unknown,
+        "HERMES_HOME moves the configuration"
     );
 }
 

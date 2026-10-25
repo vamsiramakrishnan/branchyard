@@ -8,7 +8,7 @@
 
 #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
-use std::net::TcpListener;
+use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -107,7 +107,6 @@ except urllib.error.HTTPError as e:
 /// The kit's repository, plus what this file adds.
 struct Repo {
     kit: branchyard_testkit::Repo,
-    url: String,
 }
 
 impl std::ops::Deref for Repo {
@@ -118,18 +117,20 @@ impl std::ops::Deref for Repo {
 }
 
 impl Repo {
+    /// A repository whose `[connectors]` pins no gateway URL, so that `by
+    /// gateway start` chooses the port and the tests read it back from `by`.
+    /// A number picked here and handed to the gateway could be taken by
+    /// another test between the pick and the bind.
     fn new() -> Repo {
-        // A free port for the gateway.
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        Repo::pinned(None)
+    }
+
+    /// The same, with `gateway = url` pinned. Use an address nothing is
+    /// started at (`http://127.0.0.1:1/mcp`: port 1 is privileged, so it is
+    /// always refused), never a port freed after a bind.
+    fn pinned(gateway: Option<&str>) -> Repo {
         let kit = branchyard_testkit::repo!();
-        let repo = Repo {
-            url: format!("http://127.0.0.1:{port}/mcp"),
-            kit,
-        };
+        let repo = Repo { kit };
         let anvil = repo.dir.join("fake-anvil");
         fs::write(&anvil, FAKE_ANVIL).unwrap();
         fs::set_permissions(&anvil, fs::Permissions::from_mode(0o755)).unwrap();
@@ -143,12 +144,12 @@ impl Repo {
             )
             .unwrap();
         }
+        let pin = gateway.map_or_else(String::new, |url| format!("gateway = \"{url}\"\n"));
         // Outside the repository, so the bundles are not part of it.
         fs::write(
             repo.root.join("branchyard.toml"),
             format!(
-                "[connectors]\ngateway = \"{}\"\nbundles = \"{}\"\nanvil = \"{}\"\n",
-                repo.url,
+                "[connectors]\n{pin}bundles = \"{}\"\nanvil = \"{}\"\n",
                 bundles.display(),
                 anvil.display()
             ),
@@ -180,20 +181,27 @@ fn the_gateway_runs_supervised_a_granted_turn_calls_it_and_by_log_shows_the_call
         return;
     }
     let repo = Repo::new();
-    let status = repo.json(&["gateway", "status", "--json"]);
-    assert_eq!(status["listening"], false);
-    assert_eq!(
-        status["connectors"],
-        serde_json::json!(["github", "linear"])
+    // Nothing is pinned and nothing runs yet: there is no gateway to ask.
+    let out = repo.by(&["gateway", "status"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("by gateway start"),
+        "{}",
+        stderr(&out)
     );
 
     let started = repo.json(&["gateway", "start", "--json"]);
     assert_eq!(started["started"], true, "{started}");
     assert_eq!(started["listening"], true, "{started}");
+    let url = started["url"].as_str().unwrap().to_owned();
     let again = repo.json(&["gateway", "start", "--json"]);
     assert_eq!(again["started"], false, "one gateway per repository");
     let status = repo.json(&["gateway", "status", "--json"]);
     assert_eq!(status["listening"], true);
+    assert_eq!(
+        status["connectors"],
+        serde_json::json!(["github", "linear"])
+    );
     assert!(status["running"]["pid"].is_u64());
     let issuer = status["issuer"].as_str().unwrap().to_owned();
     assert!(issuer.starts_with("branchyard:local:"), "{status}");
@@ -302,14 +310,24 @@ fn the_gateway_runs_supervised_a_granted_turn_calls_it_and_by_log_shows_the_call
 
     let stopped = repo.json(&["gateway", "stop", "--json"]);
     assert_eq!(stopped["stopped"], true);
-    wait::until("the gateway to stop listening", || {
-        repo.json(&["gateway", "status", "--json"])["listening"] != true
-    });
+    // Its record is reclaimed with it, so `by gateway status` has nothing to
+    // say any more: ask the port.
+    wait::until("the gateway to stop listening", || !listening(&url));
+}
+
+/// Whether anything accepts connections at the host and port of `url`.
+fn listening(url: &str) -> bool {
+    let authority = url
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    TcpStream::connect(authority).is_ok()
 }
 
 #[test]
 fn connectors_without_a_private_home_are_refused_before_a_branch_exists() {
-    let repo = Repo::new();
+    let repo = Repo::pinned(Some("http://127.0.0.1:1/mcp"));
     let out = repo.by(&[
         "run",
         "say hi",

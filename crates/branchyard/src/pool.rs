@@ -546,15 +546,17 @@ pub(crate) fn reclaim(yard: &Yard) -> Vec<(String, String)> {
     done
 }
 
-/// Environments slots link into, by key: never pruned while they do.
-pub(crate) fn linking(yard: &Yard) -> BTreeMap<String, Vec<String>> {
+/// Environments slots link into, by key: never pruned while they do. Slots
+/// that cannot be read are an error: read as none, they would let a prune
+/// remove an environment a slot links into.
+pub(crate) fn linking(yard: &Yard) -> Result<BTreeMap<String, Vec<String>>, Error> {
     let mut using: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for row in yard
+    let slots = yard
         .store()
         .pool()
         .slots(Some(&place(&yard.root)))
-        .unwrap_or_default()
-    {
+        .map_err(|e| e.could_not("read the warm pool's slots"))?;
+    for row in slots {
         let detail = Detail::of(&row);
         if let (Some(key), false) = (detail.key, detail.shared.is_empty()) {
             using
@@ -563,7 +565,7 @@ pub(crate) fn linking(yard: &Yard) -> BTreeMap<String, Vec<String>> {
                 .push(format!("pool slot {}", row.id));
         }
     }
-    using
+    Ok(using)
 }
 
 /// The commit `rev` names, in the checkout at `root`.

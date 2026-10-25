@@ -202,6 +202,29 @@ impl World {
         path
     }
 
+    /// A fake `gemini` that prints a version and otherwise speaks ACP, as
+    /// the fake agent: a harness that is installed, with no login file.
+    fn fake_gemini(&self) {
+        let agent = fake_agent!().display().to_string();
+        self.script(
+            "gemini",
+            &format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 0.65.0; exit 0; fi\nexec {agent}\n"),
+        );
+    }
+
+    /// The names of the branches here.
+    fn branches(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .json(&["ls", "--json"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["name"].as_str().unwrap().to_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// A fake `npm` whose `install -g PACKAGE[@VERSION]` records the call
     /// and installs a fake harness for the package into
     /// `$HOME/.local/bin`; version `9.9.9` is "installed" without changing
@@ -346,7 +369,7 @@ fn the_full_listing_says_how_to_install_log_in_and_key_the_harnesses_that_were_r
 fn detection_reads_versions_and_logins_without_reading_secrets() {
     let w = World::new();
     // Codex: its own status command says logged in (verified).
-    w.fake_codex(&w.bin, "0.157.1");
+    w.fake_codex(&w.bin, "0.164.0");
     fs::write(w.bin.join("codex.status"), "Logged in using ChatGPT\n").unwrap();
     // Claude Code: a credential file (likely logged in).
     w.script("claude", "#!/bin/sh\necho '2.1.283 (Claude Code)'\n");
@@ -386,7 +409,7 @@ fn detection_reads_versions_and_logins_without_reading_secrets() {
     assert!(harness(&inventory, "opencode").is_none());
 
     let codex = harness(&inventory, "codex").unwrap();
-    assert_eq!(codex["version"], "0.157.1");
+    assert_eq!(codex["version"], "0.164.0");
     assert_eq!(codex["login"]["state"], "logged_in");
     assert_eq!(codex["login"]["evidence"], "verified");
     assert!(codex["login"]["detail"]
@@ -419,24 +442,58 @@ fn detection_reads_versions_and_logins_without_reading_secrets() {
         "its version command printed no version"
     );
     let qwen = harness(&inventory, "qwen-code").unwrap();
-    assert_eq!(qwen["version_note"], "its version command timed out");
+    assert_eq!(qwen["version_note"], "slow to start (took >1 s)");
     assert_eq!(qwen["on_path"], true);
 
     // The table says the same, and why a harness cannot run.
-    let out = w.ok(&["harnesses", "--refresh"]);
+    let out = w.by_env(&["harnesses", "--refresh"], &[("GOOGLE_API_KEY", secret)]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
     let table = text(&out.stdout);
     assert!(table.contains("codex"), "{table}");
-    assert!(table.contains("logged in (verified)"), "{table}");
-    assert!(table.contains("logged out (likely)"), "{table}");
+    // Words for what is known: `logged in` only from the harness's own
+    // status command, a key by name, a file found, and an unconfirmed login
+    // is not called logged out.
+    let cell = |id: &str| -> String {
+        table
+            .lines()
+            .find(|l| l.starts_with(id))
+            .unwrap_or_else(|| panic!("{id} is in the table:\n{table}"))
+            .to_owned()
+    };
+    assert!(cell("codex").contains("logged in "), "{table}");
+    assert!(cell("claude-code").contains("credentials found"), "{table}");
     assert!(
-        table.contains("grok-build: cannot run: grok-build is likely logged out"),
+        cell("gemini-cli").contains("key set (GOOGLE_API_KEY)"),
+        "{table}"
+    );
+    assert!(cell("grok-build").contains("login not verified"), "{table}");
+    assert!(cell("goose").contains("unknown"), "{table}");
+    assert!(
+        !table.contains("(likely)") && !table.contains("(verified)"),
         "{table}"
     );
     assert!(
-        table.contains("qwen-code: no version: its version command timed out"),
+        table.contains("grok-build: login not verified: no ~/.grok/auth.json and no XAI_API_KEY"),
         "{table}"
+    );
+    assert!(!table.contains("cannot run: grok-build"), "{table}");
+    assert!(cell("qwen-code").contains("slow to start"), "{table}");
+    assert!(
+        table.contains("qwen-code: version: slow to start (took >1 s); `by harnesses --refresh`"),
+        "{table}"
+    );
+    assert!(table.contains("BRANCHYARD_HARNESS_TIMEOUT"), "{table}");
+    // Three honest levels of a live run, and the installed version named
+    // beside the one that was run.
+    assert!(cell("codex").contains("live 9/9"), "{table}");
+    assert!(cell("goose").contains("no live run"), "{table}");
+    assert!(
+        !table.contains("codex: installed"),
+        "no drift for codex: {table}"
     );
     assert!(table.contains("6 of the"), "{table}");
+    // This machine is called "this machine", not its hostname.
+    assert!(table.contains("are installed on this machine."), "{table}");
 
     // Off PATH, in a known install directory: found, but cannot run.
     let other = w.base.join("other-home");
@@ -553,6 +610,15 @@ fn installs_follow_the_policy_and_are_verified_and_logged() {
         never.contains("[harnesses] install is \"never\" here"),
         "{never}"
     );
+    // It names the file to edit and the key to set, and what to run after.
+    assert!(
+        never.contains(&format!(
+            "put this in {}:\n  [harnesses]\n  install = \"ask\"\nThen run `by harnesses install \
+             codex --yes`",
+            w.user.display()
+        )),
+        "{never}"
+    );
     assert!(w.calls("npm ").is_empty());
     // A repository cannot allow installs.
     fs::write(
@@ -585,7 +651,7 @@ fn installs_follow_the_policy_and_are_verified_and_logged() {
     // With it: the catalog's npm command, pinned to the profile's version.
     let out = w.ok(&["harnesses", "install", "codex", "--yes"]);
     assert!(
-        text(&out.stdout).contains("installed codex 0.157.1 on local"),
+        text(&out.stdout).contains("installed codex 0.157.1 on this machine"),
         "{}",
         text(&out.stdout)
     );
@@ -624,6 +690,13 @@ fn installs_follow_the_policy_and_are_verified_and_logged() {
     let allow = w.fails(&["harnesses", "update", "codex"]);
     assert!(
         allow.contains("codex is not in [harnesses] allow (goose)"),
+        "{allow}"
+    );
+    assert!(
+        allow.contains(&format!(
+            "add \"codex\" to `allow` under [harnesses] in {}",
+            w.user.display()
+        )),
         "{allow}"
     );
     // Never from a harness's own `by`.
@@ -691,10 +764,11 @@ fn installs_and_logins_reach_another_machine_over_ssh() {
     assert_eq!(out["on"], "ssh://dev@vm.test");
     assert!(w.vm_home.join(".local/bin/codex").is_file());
     assert!(!w.home.join(".local/bin/codex").exists());
-    // No terminal: the login is reported, with where to run it.
-    let out = w.ok(&["harnesses", "login", "codex", "--on", "ssh://dev@vm.test"]);
+    // No terminal: the login is not done (exit 2), with where to run it.
+    let out = w.by(&["harnesses", "login", "codex", "--on", "ssh://dev@vm.test"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     // Codex is off PATH there, so the login names the executable found.
-    let said = text(&out.stdout);
+    let said = text(&out.stderr);
     assert!(said.contains("run `ssh -t dev@vm.test /"), "{said}");
     assert!(
         said.contains(".local/bin/codex login --device-auth`"),
@@ -732,23 +806,419 @@ fn in_pty(w: &World, args: &[&str]) -> String {
     all
 }
 
+/// A fake harness that answers `--version` only once its peer has started:
+/// a harness asked alone never sees the peer and prints `-alone`.
+fn peer_script(me: &str, other: &str) -> String {
+    format!(
+        r#"#!/bin/sh
+[ "$1" = --version ] || exit 3
+touch "$FAKE_PEERS/{me}"
+i=0
+while [ ! -f "$FAKE_PEERS/{other}" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
+if [ -f "$FAKE_PEERS/{other}" ]; then echo "{me} 1.2.3-together"; else echo "{me} 1.2.3-alone"; fi
+"#
+    )
+}
+
+#[test]
+fn every_installed_harness_is_asked_its_version_at_once() {
+    let w = World::new();
+    w.script("goose", &peer_script("goose", "pi"));
+    w.script("pi", &peer_script("pi", "goose"));
+    let peers = w.base.join("peers");
+    fs::create_dir_all(&peers).unwrap();
+    // Asked one after the other, the first would wait for a peer that has
+    // not started and print `-alone`; asked together, both see each other.
+    let out = w.by_env(
+        &["harnesses", "--json"],
+        &[
+            ("FAKE_PEERS", &peers.display().to_string()),
+            ("BRANCHYARD_HARNESS_TIMEOUT", "60"),
+        ],
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let inventory: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        harness(&inventory, "goose").unwrap()["version"],
+        "1.2.3-together"
+    );
+    assert_eq!(
+        harness(&inventory, "pi").unwrap()["version"],
+        "1.2.3-together"
+    );
+}
+
+#[test]
+fn a_cli_that_takes_four_seconds_to_start_still_shows_its_version() {
+    let w = World::new();
+    // A cold Node harness: four seconds to print a version.
+    w.script("goose", "#!/bin/sh\nsleep 4\necho 'goose 1.9.0'\n");
+    // The default bound, not the one the test world sets for hanging
+    // commands (the bound is part of what the cache is keyed by).
+    let by_default = |args: &[&str]| -> Output {
+        let mut command = w.command(BY);
+        command
+            .env_remove("BRANCHYARD_HARNESS_TIMEOUT")
+            .args(args)
+            .stdin(Stdio::null());
+        let out = command.output().unwrap();
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        out
+    };
+    let inventory: Value =
+        serde_json::from_slice(&by_default(&["harnesses", "--json"]).stdout).unwrap();
+    let goose = harness(&inventory, "goose").unwrap();
+    assert_eq!(goose["version"], "1.9.0", "{goose}");
+    assert!(goose.get("version_note").is_none());
+    // Kept: the second call is read from the cache, not asked again.
+    let again: Value =
+        serde_json::from_slice(&by_default(&["harnesses", "--json"]).stdout).unwrap();
+    assert_eq!(again["detected_at_ms"], inventory["detected_at_ms"]);
+    let table = text(&by_default(&["harnesses"]).stdout);
+    assert!(table.contains("1.9.0") && !table.contains(" ? "), "{table}");
+}
+
+#[test]
+fn a_harness_that_answered_once_is_not_shown_as_unknown_when_it_is_slow_later() {
+    let w = World::new();
+    let pi = w.script("pi", "#!/bin/sh\necho 'pi 0.87.1'\n");
+    let first = w.json(&["harnesses", "--json"]);
+    assert_eq!(harness(&first, "pi").unwrap()["version"], "0.87.1");
+    // Now it hangs past the bound (one second in this world).
+    write_exec(&pi, "#!/bin/sh\nexec sleep 30\n");
+    let slow = w.json(&["harnesses", "--json", "--refresh"]);
+    let pi = harness(&slow, "pi").unwrap();
+    assert_eq!(pi["version"], "0.87.1", "kept from the last answer: {pi}");
+    let note = pi["version_note"].as_str().unwrap();
+    assert!(
+        note.starts_with("slow to start (took >1 s)") && note.contains("last time it answered"),
+        "{note}"
+    );
+    let table = text(&w.ok(&["harnesses"]).stdout);
+    assert!(
+        table.contains("0.87.1") && !table.contains(" ? "),
+        "{table}"
+    );
+    assert!(table.contains("pi: version: slow to start"), "{table}");
+    // One that never answered says why and what to do, never a bare `?`.
+    w.script("qwen", "#!/bin/sh\nexec sleep 30\n");
+    let out = text(&w.ok(&["harnesses", "--refresh"]).stdout);
+    let qwen = out.lines().find(|l| l.starts_with("qwen-code")).unwrap();
+    assert!(
+        qwen.contains("slow to start") && !qwen.contains(" ? "),
+        "{out}"
+    );
+    assert!(out.contains("`by harnesses --refresh` asks again"), "{out}");
+}
+
+#[test]
+fn an_unreadable_login_says_what_would_tell() {
+    let w = World::new();
+    w.script("pi", "#!/bin/sh\necho 'pi 0.87.1'\n");
+    w.script("qwen", "#!/bin/sh\necho '0.26.0'\n");
+    let out = text(&w.ok(&["harnesses"]).stdout);
+    // Qwen Code records no key variable: only signing in inside it tells.
+    assert!(
+        out.contains("qwen-code: Branchyard cannot read qwen's login")
+            && out.contains("sign in inside qwen itself"),
+        "{out}"
+    );
+    // Pi's provider keys are known (`ZAI_API_KEY` and the rest), so a
+    // missing one is named, not "sign in inside pi itself".
+    assert!(
+        out.contains("pi: Branchyard cannot read pi's login; a key in ANTHROPIC_API_KEY")
+            && out.contains("ZAI_API_KEY would tell"),
+        "{out}"
+    );
+    assert!(!out.contains("knows no way to tell"), "{out}");
+}
+
+#[test]
+fn a_pi_provider_key_in_the_environment_is_a_login() {
+    let w = World::new();
+    w.script("pi", "#!/bin/sh\necho 'pi 0.87.1'\n");
+    let out = w.by_env(
+        &["harnesses", "--json"],
+        &[("ZAI_API_KEY", "not-a-real-key")],
+    );
+    let keyed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let pi = harness(&keyed, "pi").unwrap();
+    assert_eq!(pi["login"]["state"], "logged_in", "{pi}");
+    assert_eq!(pi["login"]["key"], "ZAI_API_KEY", "{pi}");
+}
+
+#[test]
+fn a_pi_older_than_the_driver_can_follow_is_refused_before_a_branch_exists() {
+    let w = World::new();
+    w.script("pi", "#!/bin/sh\necho '0.73.1'\n");
+    let listed = text(&w.ok(&["harnesses"]).stdout);
+    assert!(
+        listed.contains("0.73.1 (too old)")
+            && listed.contains("pi: cannot run: 0.73.1 is older than 0.80.4")
+            && listed.contains("npm install -g @earendil-works/pi-coding-agent"),
+        "{listed}"
+    );
+    let err = w.fails(&["run", "say hello", "--harness", "pi", "-n", "old"]);
+    assert!(
+        err.contains("by: pi 0.73.1 is older than 0.80.4")
+            && err.contains("Nothing was started.")
+            && err.contains("next: npm install -g @earendil-works/pi-coding-agent"),
+        "{err}"
+    );
+    assert!(w.branches().is_empty());
+}
+
+#[test]
+fn a_key_branchyard_stored_counts_as_a_login_by_name_only() {
+    let w = World::new();
+    w.script("dsh", "#!/bin/sh\necho '0.2.1-rc.2'\n");
+    let before = w.json(&["harnesses", "--json"]);
+    assert_eq!(
+        harness(&before, "deepseek-harness").unwrap()["login"]["state"],
+        "logged_out"
+    );
+    let key = "dsh-test-0123456789";
+    let mut child = w
+        .command(BY)
+        .args(["harnesses", "login", "deepseek-harness", "--api-key"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(key.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let after = w.by(&["harnesses", "--json", "--refresh"]);
+    assert!(after.status.success(), "{}", text(&after.stderr));
+    assert!(!text(&after.stdout).contains(key));
+    let after: Value = serde_json::from_slice(&after.stdout).unwrap();
+    let login = &harness(&after, "deepseek-harness").unwrap()["login"];
+    assert_eq!(login["state"], "logged_in");
+    assert_eq!(login["evidence"], "likely");
+    assert_eq!(login["key"], "DEEPSEEK_API_KEY");
+    assert_eq!(login["stored"], true);
+    let table = w.ok(&["harnesses"]);
+    let table = text(&table.stdout);
+    assert!(table.contains("key stored (DEEPSEEK_API_KEY)"), "{table}");
+    assert!(!table.contains(key));
+}
+
+/// Antigravity's `agy` reads `GEMINI_API_KEY` only with `modelProvider` set
+/// to `gemini` in its settings; `by harnesses login antigravity` writes
+/// that one key, after showing the change.
+#[test]
+fn login_antigravity_writes_the_model_provider_when_a_gemini_key_is_set() {
+    let w = World::new();
+    w.script("agy", "#!/bin/sh\necho '1.4.7'\n");
+    let settings = w.home.join(".gemini/antigravity-cli/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let original =
+        "{\n    \"theme\": \"dark\",\n    \"toolPermissions\": {\"allow\": [\"read\"]}\n}\n";
+    fs::write(&settings, original).unwrap();
+    let key = [("GEMINI_API_KEY", "gem-test-0123456789")];
+
+    // The listing says the key is set and agy will not use it yet.
+    let out = w.by_env(&["harnesses"], &key);
+    let table = text(&out.stdout);
+    assert!(table.contains("key set, unused"), "{table}");
+    assert!(!table.contains("key set (GEMINI_API_KEY)"), "{table}");
+    assert!(
+        table.contains("`by harnesses login antigravity` writes modelProvider gemini"),
+        "{table}"
+    );
+
+    // `by doctor` and `by setup` name the step; `by run` is refused before
+    // a branch exists (agy would ask for a Google sign-in and fail), and
+    // goes on once the setting is there or with --no-preflight.
+    let doctor = text(&w.by_env(&["doctor"], &key).stdout);
+    assert!(
+        doctor
+            .lines()
+            .any(|l| l.starts_with("todo") && l.contains("harnesses.antigravity")),
+        "{doctor}"
+    );
+    assert!(
+        doctor.contains("run `by harnesses login antigravity`"),
+        "{doctor}"
+    );
+    let setup = w.by_env(&["setup", "--dry-run"], &key);
+    let setup = text(&setup.stdout);
+    assert!(
+        setup.contains("reads it only with modelProvider gemini")
+            && setup.contains("shows the change and writes it"),
+        "{setup}"
+    );
+    let out = w.by_env(
+        &[
+            "run",
+            "say hi",
+            "--harness",
+            "antigravity",
+            "--allow-unapproved-tools",
+            "--yes",
+            "-n",
+            "agy1",
+        ],
+        &key,
+    );
+    assert!(!out.status.success());
+    let why = text(&out.stderr);
+    assert!(why.contains("does not set modelProvider gemini"), "{why}");
+    assert!(
+        why.contains("next: by harnesses login antigravity"),
+        "{why}"
+    );
+    assert!(why.contains("Nothing was started"), "{why}");
+    assert!(w.branches().is_empty());
+
+    // No terminal and no --yes: the change is shown, nothing is written.
+    let out = w.by_env(&["harnesses", "login", "antigravity"], &key);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("+    \"modelProvider\": \"gemini\""),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("harnesses login antigravity --yes"),
+        "{shown}"
+    );
+    assert!(!shown.contains("gem-test-0123456789"));
+    assert_eq!(fs::read_to_string(&settings).unwrap(), original);
+
+    // --yes: merged, everything else kept, indentation kept.
+    let out = w.by_env(&["harnesses", "login", "antigravity", "--yes"], &key);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("wrote ~/.gemini/antigravity-cli/settings.json"));
+    let written = fs::read_to_string(&settings).unwrap();
+    let value: Value = serde_json::from_str(&written).unwrap();
+    assert_eq!(value["modelProvider"], "gemini");
+    assert_eq!(value["theme"], "dark");
+    assert_eq!(value["toolPermissions"]["allow"][0], "read");
+    assert!(written.contains("\n    \"theme\""), "{written}");
+
+    // Detection now agrees; a second login has nothing to do.
+    let table = text(&w.by_env(&["harnesses", "--refresh"], &key).stdout);
+    assert!(table.contains("key set (GEMINI_API_KEY)"), "{table}");
+    let inventory: Value =
+        serde_json::from_slice(&w.by_env(&["harnesses", "--json", "--refresh"], &key).stdout)
+            .unwrap();
+    let login = &harness(&inventory, "antigravity").unwrap()["login"];
+    assert_eq!(login["key"], "GEMINI_API_KEY");
+    assert!(login["detail"]
+        .as_str()
+        .unwrap()
+        .contains("selects the gemini provider"));
+    let out = w.by_env(&["harnesses", "login", "antigravity", "--yes"], &key);
+    assert!(out.status.success());
+    assert!(text(&out.stdout).contains("already reads GEMINI_API_KEY"));
+    assert_eq!(fs::read_to_string(&settings).unwrap(), written);
+
+    // A provider already chosen is never replaced.
+    fs::write(
+        &settings,
+        "{\"modelProvider\": \"vertex\", \"theme\": \"dark\"}\n",
+    )
+    .unwrap();
+    let out = w.by_env(&["harnesses", "login", "antigravity", "--yes"], &key);
+    assert!(!out.status.success());
+    let why = text(&out.stderr);
+    assert!(
+        why.contains("modelProvider") && why.contains("different value"),
+        "{why}"
+    );
+    assert!(fs::read_to_string(&settings).unwrap().contains("vertex"));
+
+    // No settings file at all: created, with just that key.
+    fs::remove_file(&settings).unwrap();
+    let out = w.by_env(
+        &["harnesses", "login", "antigravity", "--yes", "--json"],
+        &key,
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["wrote"], true);
+    assert_eq!(
+        serde_json::from_str::<Value>(&fs::read_to_string(&settings).unwrap()).unwrap(),
+        serde_json::json!({"modelProvider": "gemini"})
+    );
+}
+
+#[test]
+fn login_prints_the_exact_command_for_a_harness_it_cannot_log_in_itself() {
+    let w = World::new();
+    w.script("qwen", "#!/bin/sh\necho '0.26.0'\n");
+    w.script("pi", "#!/bin/sh\necho 'pi 0.87.1'\n");
+    w.script("claude", "#!/bin/sh\necho '2.1.283'\n");
+    // No login command, no key variable: what to do, not a dead end.
+    let why = w.fails(&["harnesses", "login", "qwen-code"]);
+    assert!(
+        why.contains("start `qwen` and sign in inside it, then `by harnesses --refresh`"),
+        "{why}"
+    );
+    // No login command but key variables (Pi reads ZAI_API_KEY and the
+    // rest): the key, or signing in inside it.
+    let why = w.fails(&["harnesses", "login", "pi"]);
+    assert!(
+        why.contains(
+            "give it an API key with `by harnesses login pi --api-key` (ANTHROPIC_API_KEY"
+        ) && why.contains("or sign in inside `pi` itself"),
+        "{why}"
+    );
+    // A catalog login command: the exact command, without a terminal.
+    let out = w.by(&["harnesses", "login", "claude-code"]);
+    let said = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    assert!(
+        said.contains("run `claude auth login` in a terminal"),
+        "{said}"
+    );
+}
+
 #[test]
 fn login_runs_the_harness_own_flow_or_stores_a_key_and_says_what_to_run() {
     let w = World::new();
     w.fake_codex(&w.bin, "0.157.1");
-    // No terminal: say what to run.
-    let out = w.ok(&["harnesses", "login", "codex"]);
+    // No terminal: nothing ran, so it says what to run and exits 2, not 0,
+    // and `by harnesses login codex && by run ...` stops here.
+    let out = w.by(&["harnesses", "login", "codex"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     assert!(
-        text(&out.stdout).contains("no terminal here; run `codex login --device-auth`"),
+        text(&out.stderr).contains("no terminal here; run `codex login --device-auth`"),
         "{}",
-        text(&out.stdout)
+        text(&out.stderr)
     );
+    assert!(text(&out.stdout).is_empty(), "{}", text(&out.stdout));
     assert!(w.calls("codex login --device-auth").is_empty());
+    // With --json: the same exit, and the status on stdout.
+    let out = w.by(&["harnesses", "login", "codex", "--json"]);
+    assert_eq!(out.status.code(), Some(2));
+    let said: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(said["status"], "manual", "{said}");
+    assert!(said["run"]
+        .as_str()
+        .unwrap()
+        .contains("codex login --device-auth"));
     // A terminal: the harness's own flow, passed through.
     let out = in_pty(&w, &["harnesses", "login", "codex"]);
     assert!(out.contains("https://auth.example/device"), "{out}");
-    assert!(out.contains("codex on local: logged in (verified"), "{out}");
+    assert!(
+        out.contains("codex on this machine: logged in (verified"),
+        "{out}"
+    );
     assert_eq!(w.calls("codex login --device-auth").len(), 1);
+    // Done, as --json says it.
+    let out = in_pty(&w, &["harnesses", "login", "codex", "--json"]);
+    let start = out.find('{').unwrap();
+    let done: Value = serde_json::from_str(&out[start..]).unwrap();
+    assert_eq!(done["status"], "done", "{out}");
+    assert_eq!(done["login"]["state"], "logged_in", "{out}");
     let inventory = w.json(&["harnesses", "--json"]);
     assert_eq!(
         harness(&inventory, "codex").unwrap()["login"]["state"],
@@ -775,6 +1245,27 @@ fn login_runs_the_harness_own_flow_or_stores_a_key_and_says_what_to_run() {
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(!text(&out.stdout).contains(key) && !text(&out.stderr).contains(key));
+    // Stored, as --json says it (the same key again: nothing new is named).
+    let mut again = w
+        .command(BY)
+        .args(["harnesses", "login", "claude-code", "--api-key", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    again
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(key.as_bytes())
+        .unwrap();
+    let again = again.wait_with_output().unwrap();
+    assert!(again.status.success(), "{}", text(&again.stderr));
+    let stored: Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert_eq!(stored["status"], "stored", "{stored}");
+    assert_eq!(stored["secrets_entry_added"], false);
+    assert!(!text(&again.stdout).contains(key));
     let file = w.user.parent().unwrap().join("secrets/ANTHROPIC_API_KEY");
     assert_eq!(fs::read_to_string(&file).unwrap(), key);
     assert_eq!(
@@ -808,8 +1299,21 @@ fn login_runs_the_harness_own_flow_or_stores_a_key_and_says_what_to_run() {
         .iter()
         .map(|e| e["outcome"].as_str().unwrap())
         .collect();
-    assert_eq!(outcomes, ["reported", "ran", "stored_key"]);
+    assert_eq!(
+        outcomes,
+        ["manual", "manual", "ran", "ran", "stored_key", "stored_key"]
+    );
     assert!(!serde_json::to_string(&log).unwrap().contains(key));
+    // No login command in the catalog but a key variable: nothing ran either,
+    // and it says which form works.
+    let out = w.by(&["harnesses", "login", "deepseek-harness"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr)
+            .contains("give it an API key with `by harnesses login deepseek-harness --api-key`"),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 #[test]
@@ -888,6 +1392,333 @@ fn the_router_skips_what_cannot_run_and_installs_on_demand_under_auto() {
     assert_eq!(log[0]["version_after"], "0.5.0");
 }
 
+/// Before `by run`, `by fan` and `by send` create a branch: a harness
+/// that is not installed, or is verified logged out, is refused with the
+/// command to run; a guess, a named executable and `--no-preflight` go on.
+#[test]
+fn a_run_is_refused_before_a_branch_when_its_harness_cannot_start() {
+    let w = World::new();
+    // Installed, and its own status command says it is logged out.
+    w.fake_codex(&w.bin, "0.157.1");
+    let why = w.fails(&["run", "say hi", "--harness", "codex", "-n", "cx"]);
+    assert!(
+        why.contains(
+            "by: codex is verified logged out (codex login status: Not logged in). Nothing was \
+             started."
+        ),
+        "{why}"
+    );
+    assert!(
+        why.contains("next: run `by harnesses login codex`"),
+        "{why}"
+    );
+    assert!(why.contains("--no-preflight"), "{why}");
+    assert!(w.branches().is_empty());
+    assert!(w.calls("app-server").is_empty());
+    // With --json the refusal is the error envelope on stdout, with its next.
+    let out = w.by(&["run", "say hi", "--harness", "codex", "-n", "cx", "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "harness_unavailable", "{error}");
+    assert!(
+        error["error"]["next"][0]
+            .as_str()
+            .unwrap_or_default()
+            .contains("by harnesses login codex"),
+        "{error}"
+    );
+    // A key named by --secret reaches the harness only in a private home:
+    // the refusal says to add --isolated.
+    let why = w.fails(&[
+        "run",
+        "say hi",
+        "--harness",
+        "codex",
+        "-n",
+        "cx",
+        "--secret",
+        "OPENAI_API_KEY=MY_KEY",
+    ]);
+    assert!(
+        why.contains("add --isolated, so the run gets OPENAI_API_KEY"),
+        "{why}"
+    );
+    // A fan refuses the same, whichever harness is among the list.
+    let why = w.fails(&["fan", "say hi", "--harness", "gemini-cli,codex"]);
+    assert!(why.contains("gemini-cli is not installed"), "{why}");
+    assert!(w.branches().is_empty());
+    let why = w.fails(&["fan", "say hi", "--harness", "codex"]);
+    assert!(why.contains("codex is verified logged out"), "{why}");
+    assert!(w.branches().is_empty());
+    // --no-preflight tries anyway: Codex is started (the fake cannot speak
+    // its protocol, so the branch fails, after it exists).
+    w.by(&[
+        "run",
+        "say hi",
+        "--harness",
+        "codex",
+        "-n",
+        "cx",
+        "--no-preflight",
+        "--yes",
+    ]);
+    assert_eq!(w.branches(), ["cx"]);
+    assert!(!w.calls("app-server").is_empty());
+    // Logged in: nothing is said, and the harness starts.
+    fs::write(w.bin.join("codex.status"), "Logged in using ChatGPT\n").unwrap();
+    let out = w.by(&["run", "again", "--harness", "codex", "-n", "cx2", "--yes"]);
+    assert!(
+        !text(&out.stderr).contains("Nothing was started"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(w.branches(), ["cx", "cx2"]);
+}
+
+/// A key the isolated run will get (`--secret`, `[secrets]`, or one `by
+/// harnesses login --api-key` stored) is a login the host's status command
+/// cannot see: the run goes on with a note instead of being refused.
+#[test]
+fn a_provisioned_key_lets_an_isolated_run_past_a_verified_logout() {
+    let w = World::new();
+    w.fake_codex(&w.bin, "0.157.1");
+    // The fake cannot speak Codex's protocol, so the branch fails after it
+    // exists; that it exists is the point.
+    let out = w.by_env(
+        &[
+            "run",
+            "say hi",
+            "--harness",
+            "codex",
+            "-n",
+            "cx",
+            "--isolated",
+            "--secret",
+            "OPENAI_API_KEY=MY_KEY",
+            "--yes",
+        ],
+        &[("MY_KEY", "sk-test-0123456789")],
+    );
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("by: note: codex is logged out here; the isolated run gets OPENAI_API_KEY"),
+        "{err}"
+    );
+    assert!(!err.contains("Nothing was started"), "{err}");
+    assert_eq!(w.branches(), ["cx"]);
+    // A key Branchyard stored counts too, whether or not the listing's cache
+    // is fresh.
+    let mut child = w
+        .command(BY)
+        .args(["harnesses", "login", "codex", "--api-key"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"sk-test-9876543210")
+        .unwrap();
+    let stored = child.wait_with_output().unwrap();
+    assert!(stored.status.success(), "{}", text(&stored.stderr));
+    let out = w.by(&[
+        "run",
+        "say hi",
+        "--harness",
+        "codex",
+        "-n",
+        "cx2",
+        "--isolated",
+        "--yes",
+    ]);
+    assert!(
+        !text(&out.stderr).contains("Nothing was started"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(w.branches(), ["cx", "cx2"]);
+}
+
+#[test]
+fn a_harness_that_is_not_installed_is_refused_with_how_to_install_it() {
+    let w = World::new();
+    // No terminal and no setting: installs are off, so the catalog's own
+    // command, and the file and key that would turn them on.
+    let why = w.fails(&["run", "x", "--harness", "qwen-code"]);
+    assert!(
+        why.contains("qwen-code is not installed on this machine."),
+        "{why}"
+    );
+    assert!(
+        why.contains("next: npm install -g @qwen-code/qwen-code"),
+        "{why}"
+    );
+    assert!(
+        why.contains(&format!(
+            "set install = \"ask\" under [harnesses] in {}",
+            w.user.display()
+        )),
+        "{why}"
+    );
+    // Allowed to ask, with no terminal to ask on: --yes.
+    w.user_config("[harnesses]\ninstall = \"ask\"\n");
+    let why = w.fails(&["run", "x", "--harness", "qwen-code"]);
+    assert!(
+        why.contains("next: by harnesses install qwen-code --yes"),
+        "{why}"
+    );
+    // Allowed without asking: the command itself.
+    w.user_config("[harnesses]\ninstall = \"auto\"\n");
+    let why = w.fails(&["run", "x", "--harness", "qwen-code"]);
+    assert!(
+        why.contains("next: by harnesses install qwen-code\n"),
+        "{why}"
+    );
+    // Without a harness named, the built-in default is the one refused, and
+    // the way to name another is said.
+    let why = w.fails(&["run", "x"]);
+    assert!(why.contains("claude-code is not installed"), "{why}");
+    assert!(
+        why.contains("`by run` uses claude-code unless --harness"),
+        "{why}"
+    );
+    // A branch keeps its harness: a send checks that one (here a gemini that
+    // has gone since the branch was made), and --json says so as the error
+    // it is.
+    w.fake_gemini();
+    w.ok(&[
+        "run",
+        "WRITE a.txt=1",
+        "-n",
+        "keep",
+        "--harness",
+        "gemini-cli",
+        "--yes",
+    ]);
+    fs::remove_file(w.bin.join("gemini")).unwrap();
+    let why = w.fails(&["send", "keep", "more"]);
+    assert!(why.contains("gemini-cli is not installed"), "{why}");
+    let out = w.by(&["send", "keep", "more", "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "harness_unavailable", "{error}");
+    // The executable named on the command line is the person's business.
+    let agent = fake_agent!().display().to_string();
+    w.ok(&["send", "keep", "more", "--command", &agent, "--yes"]);
+    assert_eq!(w.branches(), ["keep"]);
+}
+
+#[test]
+fn a_guess_that_a_harness_is_logged_out_is_a_note_not_a_refusal() {
+    let w = World::new();
+    // Installed, no login file and no key: "likely" logged out.
+    w.fake_gemini();
+    let out = w.ok(&[
+        "run",
+        "WRITE g.txt=1",
+        "-n",
+        "g",
+        "--harness",
+        "gemini-cli",
+        "--yes",
+    ]);
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("by: note: gemini-cli is likely logged out"),
+        "{err}"
+    );
+    assert!(err.contains("Going on, since that is a guess"), "{err}");
+    let show = w.json(&["show", "g", "--json"]);
+    assert_eq!(show["status"]["state"], "ready", "{show}");
+    // A key variable is a login: nothing is said.
+    let out = w.by_env(
+        &[
+            "run",
+            "WRITE h.txt=1",
+            "-n",
+            "h",
+            "--harness",
+            "gemini-cli",
+            "--yes",
+        ],
+        &[("GEMINI_API_KEY", "not-a-key")],
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        !text(&out.stderr).contains("note:"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[test]
+fn a_named_executable_or_a_harness_nothing_drives_skips_or_explains_the_check() {
+    let w = World::new();
+    let agent = fake_agent!().display().to_string();
+    // Not installed, but --command names the executable: no check.
+    w.ok(&[
+        "run",
+        "WRITE a.txt=1",
+        "-n",
+        "named",
+        "--harness",
+        "qwen-code",
+        "--command",
+        &agent,
+        "--yes",
+    ]);
+    // A branch started that way keeps the executable for its later turns.
+    w.ok(&["send", "named", "more", "--yes"]);
+    // Known to Branchyard, not drivable: not "no harness named".
+    let why = w.fails(&["run", "x", "--harness", "droid"]);
+    assert!(
+        why.contains("droid is known to Branchyard but not drivable"),
+        "{why}"
+    );
+    assert!(why.contains("drivable: claude-code, codex, "), "{why}");
+    assert!(!why.contains("no harness or profile named droid"), "{why}");
+    // Not known at all: the name, and what would have worked.
+    let why = w.fails(&["run", "x", "--harness", "nope"]);
+    assert!(
+        why.contains("no harness or profile named nope; drivable: claude-code, "),
+        "{why}"
+    );
+    assert_eq!(w.branches(), ["named"]);
+}
+
+/// `by harnesses --profiles` is a static table: it needs no repository.
+#[test]
+fn the_profile_table_works_outside_a_repository() {
+    let w = World::new();
+    let outside = w.base.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let run = |args: &[&str]| {
+        let out = w
+            .command(BY)
+            .current_dir(&outside)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        text(&out.stdout)
+    };
+    let table = run(&["harnesses", "--profiles"]);
+    assert!(table.contains("claude-code-stream-json"), "{table}");
+    assert!(table.contains("cursor-acp"), "{table}");
+    let profiles: Value =
+        serde_json::from_str(&run(&["harnesses", "--profiles", "--json"])).unwrap();
+    assert!(profiles
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["profile"] == "codex-app-server"));
+}
+
 #[test]
 fn a_server_shows_its_workers_harnesses_and_says_where_to_log_in() {
     use std::io::{BufRead, BufReader};
@@ -950,11 +1781,18 @@ fn a_server_shows_its_workers_harnesses_and_says_where_to_log_in() {
     assert!(table.contains("(this server), serving app"), "{table}");
     assert!(table.contains("codex: cannot run"), "{table}");
     // A worker has no terminal: login says what to run there.
-    let said = text(&remote(&["harnesses", "login", "codex"]).stdout);
+    let out = remote(&["harnesses", "login", "codex"]);
+    let said = text(&out.stdout);
     assert!(
         said.contains("run `codex login --device-auth` there, in a terminal"),
         "{said}"
     );
+    // Nothing was logged in: exit 2, as without a terminal here.
+    assert_eq!(out.status.code(), Some(2), "{said}");
+    let out = remote(&["harnesses", "login", "codex", "--json"]);
+    assert_eq!(out.status.code(), Some(2));
+    let said: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(said["status"], "manual", "{said}");
     // Workers never install.
     let out = remote(&["harnesses", "install", "codex"]);
     assert!(!out.status.success());
@@ -969,4 +1807,60 @@ fn a_server_shows_its_workers_harnesses_and_says_where_to_log_in() {
             .status(),
     );
     branchyard_support::best_effort("reap the server process", child.wait());
+}
+
+/// A Codex with a `model_providers` entry of its own and no OpenAI login:
+/// its status command says "Not logged in", and the run is fine on the
+/// provider's key. Detection reads the selected provider's `env_key` out of
+/// `config.toml` (by name), so the listing and the pre-flight agree with it.
+#[test]
+fn a_codex_model_providers_key_is_a_login_the_preflight_accepts() {
+    let w = World::new();
+    w.fake_codex(&w.bin, "0.164.0");
+    fs::create_dir_all(w.home.join(".codex")).unwrap();
+    fs::write(
+        w.home.join(".codex/config.toml"),
+        "model = \"glm-4.6\"\nmodel_provider = \"zai\"\n\n[model_providers.other]\nenv_key = \"OTHER_KEY\"\n\n\
+         [model_providers.zai]\nname = \"Z.ai\"\nbase_url = \"https://example.invalid/v1\"\n\
+         wire_api = \"responses\"\nenv_key = \"ZAI_KEY\"\n\n[profiles.p]\nmodel_provider = \"nope\"\n",
+    )
+    .unwrap();
+    // The provider is selected, its key is not set: logged out, and the
+    // listing says what the configuration lacks.
+    let inventory = w.json(&["harnesses", "--json", "--refresh"]);
+    let codex = harness(&inventory, "codex").unwrap();
+    assert_eq!(codex["login"]["state"], "logged_out", "{codex}");
+    let detail = codex["login"]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains(
+            "selects the model provider zai, which reads ZAI_KEY, and ZAI_KEY is not set"
+        ),
+        "{detail}"
+    );
+    let why = w.fails(&["run", "say hi", "--harness", "codex", "-n", "cx"]);
+    assert!(why.contains("ZAI_KEY is not set"), "{why}");
+    assert!(why.contains("--no-preflight"), "{why}");
+    assert!(w.branches().is_empty());
+    // With the provider's key set, Codex is logged in by it, and the
+    // pre-flight lets the run start (the fake cannot speak the protocol, so
+    // the branch fails after it exists).
+    let out = w.by_env(
+        &["harnesses", "--json", "--refresh"],
+        &[("ZAI_KEY", "sk-test-0123456789")],
+    );
+    let inventory: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let codex = harness(&inventory, "codex").unwrap();
+    assert_eq!(codex["login"]["state"], "logged_in", "{codex}");
+    assert_eq!(codex["login"]["key"], "ZAI_KEY");
+    assert!(!text(&out.stdout).contains("sk-test-0123456789"));
+    let out = w.by_env(
+        &["run", "say hi", "--harness", "codex", "-n", "cx", "--yes"],
+        &[("ZAI_KEY", "sk-test-0123456789")],
+    );
+    assert!(
+        !text(&out.stderr).contains("Nothing was started"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(w.branches(), ["cx"]);
 }

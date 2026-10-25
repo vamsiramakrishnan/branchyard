@@ -17,8 +17,24 @@ use crate::state::{Fence, Record};
 use crate::{Error, RecipeOptions, Yard};
 
 impl ProviderKind for RecipeOptions {
+    fn banner(&self, _isolated: bool, server: bool) -> (&'static str, String) {
+        let what = match server {
+            false => format!(
+                "harnesses run on machines recipe {} makes; the worktree is copied there and back",
+                self.name
+            ),
+            // Refused before anything is sent.
+            true => format!("recipe {} is not run by a server", self.name),
+        };
+        ("sandbox", what)
+    }
+
     fn name(&self) -> &'static str {
         "recipe"
+    }
+
+    fn label(&self) -> String {
+        format!("recipe:{}", self.name)
     }
 
     fn key(&self) -> String {

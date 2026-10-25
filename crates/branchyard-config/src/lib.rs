@@ -1708,7 +1708,7 @@ impl PermissionsMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
     /// A local process in its own worktree (the default).
@@ -1719,6 +1719,34 @@ pub enum ProviderKind {
     /// The machine an environment recipe makes (`--provider recipe:NAME`);
     /// `defaults.recipe` names it.
     Recipe,
+}
+
+impl<'de> Deserialize<'de> for ProviderKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let text = String::deserialize(deserializer)?;
+        match text.as_str() {
+            "local" => Ok(ProviderKind::Local),
+            "microsandbox" => Ok(ProviderKind::Microsandbox),
+            "recipe" => Ok(ProviderKind::Recipe),
+            other => Err(D::Error::custom(unknown_provider(other))),
+        }
+    }
+}
+
+/// Why a `provider` value is refused, with the spelling the file takes when
+/// the value is one the flag takes.
+fn unknown_provider(text: &str) -> String {
+    match text.strip_prefix("recipe:") {
+        Some(name) => format!(
+            "{text:?} is the flag's spelling (--provider recipe:NAME); in the file write \
+             provider = \"recipe\" and recipe = {name:?}"
+        ),
+        None if text == "substrate" => "substrate is chosen per run with --provider substrate \
+             (and its --substrate-* flags); the file takes local, microsandbox or recipe"
+            .to_owned(),
+        None => format!("unknown variant `{text}`, expected one of local, microsandbox, recipe"),
+    }
 }
 
 /// A Branchyard server to run commands against.
@@ -1769,7 +1797,8 @@ pub struct Microsandbox {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub cpus: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Sandbox memory in MiB. Also written `memory`, as the `--memory` flag is.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "memory")]
     #[schemars(range(min = 1))]
     pub memory_mib: Option<u32>,
     /// Variables to copy into the sandbox, by name.
@@ -1778,11 +1807,21 @@ pub struct Microsandbox {
     /// Between turns: `"destroy"` the microVM (the default) or `"pause"`
     /// it for the next turn. Pausing needs `live_branch`. See
     /// docs/sandbox-snapshots.md.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Also written `keep_sandbox`, as the `--keep-sandbox` flag is.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "keep_sandbox"
+    )]
     #[schemars(regex(pattern = r"^(pause|destroy)$"))]
     pub keep: Option<String>,
     /// With a kept sandbox, checkpoints that also keep a snapshot (default 3).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Also written `sandbox_snapshots`, as the `--sandbox-snapshots` flag is.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "sandbox_snapshots"
+    )]
     pub snapshots: Option<u32>,
     /// Kept sandboxes per repository before the least recently used is
     /// destroyed (default 4).
@@ -1862,6 +1901,9 @@ pub fn parse(text: &str) -> Result<ProjectConfig, ConfigError> {
             .span()
             .map(|span| text[..span.start.min(text.len())].matches('\n').count() + 1);
         let message = e.message().trim_end().to_owned();
+        let message = line
+            .and_then(|line| type_sentence(text, line, &message))
+            .unwrap_or(message);
         ConfigError(match line {
             Some(line) => format!("line {line}: {message}"),
             None => message,
@@ -1869,6 +1911,55 @@ pub fn parse(text: &str) -> Result<ProjectConfig, ConfigError> {
     })?;
     config.check()?;
     Ok(config)
+}
+
+/// A value of the wrong type, said as a sentence instead of with serde's
+/// Rust types: `defaults.budget_usd needs a number, not "five"`, for
+/// `invalid type: string "five", expected f64` at `line` of `text`. `None`
+/// for any other message.
+fn type_sentence(text: &str, line: usize, message: &str) -> Option<String> {
+    let rest = message
+        .strip_prefix("invalid type: ")
+        .or_else(|| message.strip_prefix("invalid value: "))?;
+    let (found, expected) = rest.split_once(", expected ")?;
+    let source = text.lines().nth(line.checked_sub(1)?)?;
+    let name = source.split_once('=')?.0.trim().trim_matches('"');
+    let table = text
+        .lines()
+        .take(line)
+        .filter_map(|l| {
+            let l = l.trim();
+            l.strip_prefix('[')
+                .filter(|_| !l.starts_with("[["))
+                .and_then(|l| l.strip_suffix(']'))
+        })
+        .last();
+    let key = match table {
+        Some(table) => format!("{table}.{name}"),
+        None => name.to_owned(),
+    };
+    let wanted = match expected {
+        "f64" | "f32" => "a number",
+        "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" => "a whole number",
+        "a boolean" => "true or false",
+        "a string" => "text in quotes",
+        "a sequence" => "a list",
+        "a map" => "a table",
+        other => other,
+    };
+    let got = match found.split_once(' ') {
+        Some(("string" | "integer" | "floating", value)) => value
+            .trim_start_matches("point ")
+            .trim_matches('`')
+            .to_owned(),
+        Some(("boolean", value)) => value.trim_matches('`').to_owned(),
+        _ => match found {
+            "sequence" => "a list".to_owned(),
+            "map" => "a table".to_owned(),
+            other => other.to_owned(),
+        },
+    };
+    Some(format!("{key} needs {wanted}, not {got}"))
 }
 
 impl ProjectConfig {
@@ -3106,7 +3197,7 @@ classes = { compensable = "allow" }
                 "[[models.routes]]\nmodel = \"*\"\nbackends = [\"x\"]\n",
                 "no backend x",
             ),
-            ("[models]\nlisten = 1\n", "expected a string"),
+            ("[models]\nlisten = 1\n", "needs text in quotes, not 1"),
             ("[models]\nkeys = 1\n", "keys"),
         ] {
             let error = parse(text).unwrap_err().to_string();
@@ -3205,6 +3296,32 @@ classes = { compensable = "allow" }
         }
     }
 
+    /// A value of the wrong type is a sentence naming the key and what it
+    /// needs, not serde's Rust types.
+    #[test]
+    fn a_value_of_the_wrong_type_is_a_sentence() {
+        for (text, expected) in [
+            (
+                "[defaults]\nbudget_usd = \"five\"",
+                "line 2: defaults.budget_usd needs a number, not \"five\"",
+            ),
+            (
+                "[defaults]\nmax_turns = 2.5",
+                "line 2: defaults.max_turns needs a whole number, not 2.5",
+            ),
+            (
+                "[defaults]\nisolated = \"yes\"",
+                "line 2: defaults.isolated needs true or false, not \"yes\"",
+            ),
+            (
+                "[defaults]\nharness = 3",
+                "line 2: defaults.harness needs text in quotes, not 3",
+            ),
+        ] {
+            assert_eq!(parse(text).unwrap_err().to_string(), expected, "{text}");
+        }
+    }
+
     #[test]
     fn unknown_keys_and_bad_values_are_refused_by_name() {
         for (text, needle) in [
@@ -3291,6 +3408,54 @@ classes = { compensable = "allow" }
             let error = parse(text).unwrap_err().to_string();
             assert!(error.contains(needle), "{text}: {error}");
         }
+    }
+
+    /// The flag's spellings are refused with the file's own, and the
+    /// microsandbox keys answer to the flags' names as well as theirs.
+    #[test]
+    fn the_file_points_from_the_flags_spelling_to_its_own() {
+        let error = parse("[defaults]\nprovider = \"recipe:devbox\"")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("line 2"), "{error}");
+        assert!(
+            error.contains("provider = \"recipe\"") && error.contains("recipe = \"devbox\""),
+            "{error}"
+        );
+        let error = parse("[defaults]\nprovider = \"substrate\"")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--provider substrate"), "{error}");
+        let error = parse("[defaults]\nprovider = \"docker\"")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("expected one of local, microsandbox, recipe"),
+            "{error}"
+        );
+        assert!(parse("[defaults]\nprovider = \"local\"").is_ok());
+
+        let own = parse(
+            "[microsandbox]\nimage = \"a\"\nmemory_mib = 512\nkeep = \"destroy\"\nsnapshots = 2",
+        )
+        .unwrap();
+        let flags = parse(
+            "[microsandbox]\nimage = \"a\"\nmemory = 512\nkeep_sandbox = \"destroy\"\n\
+             sandbox_snapshots = 2",
+        )
+        .unwrap();
+        assert_eq!(own.microsandbox, flags.microsandbox);
+        let sandbox = flags.microsandbox.unwrap();
+        assert_eq!(
+            (
+                sandbox.memory_mib,
+                sandbox.keep.as_deref(),
+                sandbox.snapshots
+            ),
+            (Some(512), Some("destroy"), Some(2))
+        );
+        // Both spellings at once is a duplicate, as two of one key would be.
+        assert!(parse("[microsandbox]\nimage = \"a\"\nmemory = 1\nmemory_mib = 2").is_err());
     }
 
     #[test]
@@ -3598,7 +3763,10 @@ command = ["pnpm build", "pnpm worker"]
                 "[workspace]\n[workspace.env]\nBRANCHYARD_PORT = \"1\"\n",
                 "Branchyard's own",
             ),
-            ("[workspace]\n[workspace.env]\nA = 1\n", "expected a string"),
+            (
+                "[workspace]\n[workspace.env]\nA = 1\n",
+                "needs text in quotes, not 1",
+            ),
         ] {
             let error = parse(bad).map(|_| ()).unwrap_err().to_string();
             assert!(error.contains(why), "{bad}: {error}");

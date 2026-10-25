@@ -230,8 +230,7 @@ fn approve(
     if let Err(error) = yard.plan(branch) {
         return commands::fail(json, &error);
     }
-    let provider = yard.branch(branch)?.provider()?;
-    let live = Live::start_to(env, task, false, json, provider);
+    let live = Live::start_for(env, task, false, json, &yard.branch(branch)?)?;
     let options = live.options(task)?;
     let result = yard.approve_plan(branch, edited, &person(), &options);
     finish(env, live, result, json)
@@ -273,8 +272,7 @@ fn reject(
             )
         });
     }
-    let provider = yard.branch(branch)?.provider()?;
-    let live = Live::start_to(env, task, false, json, provider);
+    let live = Live::start_for(env, task, false, json, &yard.branch(branch)?)?;
     let options = live.options(task)?;
     let result = yard.reject_plan(branch, reason, true, &person(), &options);
     finish(env, live, result, json)

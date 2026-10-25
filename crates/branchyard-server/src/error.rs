@@ -99,6 +99,7 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
         E::AlreadyMerged { .. } => (S::CONFLICT, "already_merged"),
         E::InvalidCandidate(_) => (S::UNPROCESSABLE_ENTITY, "invalid_candidate"),
         E::Denied(_) => (S::FORBIDDEN, "denied"),
+        E::Usage(_) => (S::BAD_REQUEST, "usage"),
         E::Running(_) => (S::CONFLICT, "running"),
         E::NotRunning(_) => (S::CONFLICT, "not_running"),
         E::Fenced(_) => (S::CONFLICT, "fenced"),
@@ -127,11 +128,20 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
         E::Remote { kind, .. } => error_out.detail(json!({ "kind": kind })),
         E::CheckFailed {
             output_tail,
+            ran,
             checks,
             shared,
             own_work,
         } => {
             let mut detail = json!({ "output_tail": output_tail });
+            if let Some(ran) = ran {
+                if !ran.status.is_empty() {
+                    detail["status"] = json!(ran.status);
+                }
+                if !ran.command.is_empty() {
+                    detail["command"] = json!(ran.command);
+                }
+            }
             if !checks.is_empty() {
                 detail["checks"] = json!(checks);
             }
@@ -187,6 +197,7 @@ mod tests {
     fn a_failed_check_names_every_check_in_its_detail() {
         let e = sdk(&branchyard::Error::CheckFailed {
             output_tail: "boom".into(),
+            ran: None,
             checks: vec![
                 branchyard::IntegrationCheck {
                     check: vec!["make".into(), "lint".into()],

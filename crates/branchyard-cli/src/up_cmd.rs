@@ -119,7 +119,13 @@ pub fn main(env: &Env, globals: &Globals, plan_only: bool, yes: bool, as_json: b
              a person's command, run outside any branch"
         )));
     }
-    let yard = commands::open()?;
+    let yard = commands::open().map_err(|failure| match failure {
+        // The fix, and where: not "`.` is not inside a git work tree".
+        Failure::Sdk(branchyard::Error::NotARepository(_)) => Failure::Message(
+            crate::init::not_a_repository(&std::env::current_dir().unwrap_or_default()),
+        ),
+        other => other,
+    })?;
     let config = yard.configured().unwrap_or_default();
     let interactive = env.stdin_tty && env.stderr_tty;
     let options = Options { yes, interactive };

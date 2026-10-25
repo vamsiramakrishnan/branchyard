@@ -314,10 +314,14 @@ fn without_a_terminal_an_unset_policy_leaves_the_install_to_the_person() {
     w.project_file("[defaults]\nharness = \"codex\"\n[harnesses]\ninstall = \"auto\"\n");
     let out = w.by(&["up", "--json"]);
     assert_eq!(out.status.code(), Some(1));
+    // With `--json` the refusal is the error envelope on stdout.
+    let error: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(
-        text(&out.stderr).contains("harnesses"),
-        "{}",
-        text(&out.stderr)
+        error["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("harnesses"),
+        "{error}"
     );
     assert!(w.calls("npm").is_empty());
     // The text report lists what to do.

@@ -47,12 +47,26 @@ pub(crate) trait ProviderKind {
     /// serialized `kind`, as recorded in events and sandbox rows.
     fn name(&self) -> &'static str;
 
+    /// How the provider is named to a person and recorded on a branch
+    /// (`BranchInfo::provider`): the name, with a recipe's own. Defaults to
+    /// [`ProviderKind::name`].
+    fn label(&self) -> String {
+        self.name().to_owned()
+    }
+
     /// Which provider, and where, holds a sandbox or snapshot row:
     /// sandboxes and snapshots are only ever used through the same one.
     /// Defaults to [`ProviderKind::name`].
     fn key(&self) -> String {
         self.name().to_owned()
     }
+
+    /// `by`'s banner for a run under this provider: the mode word (`local`,
+    /// `isolated` or `sandbox`) and what the mode does and does not give,
+    /// said as plainly as what it does. `isolated`: the branch has a private
+    /// home, which only a local run minds. `server`: the harness runs on a
+    /// server, as the server's user.
+    fn banner(&self, isolated: bool, server: bool) -> (&'static str, String);
 
     /// What these options ask of the sandbox's lifecycle; `None` when
     /// there is no sandbox (a local harness).
@@ -119,6 +133,11 @@ pub(crate) trait ProviderKind {
     fn destroy(&self, yard: &Yard, sandbox: &str) -> Result<String, String>;
 }
 
+/// A branch's provider as [`Provider::label`] names it; `None` is local.
+pub(crate) fn label_of(provider: Option<&Provider>) -> String {
+    of(provider).label()
+}
+
 /// The implementation for a branch's provider; `None` is local.
 pub(crate) fn of(provider: Option<&Provider>) -> &dyn ProviderKind {
     match provider {
@@ -137,6 +156,30 @@ impl Provider {
             Provider::Substrate(options) => options,
             Provider::Recipe(options) => options,
         }
+    }
+
+    /// How this provider is named in a branch's record and to a person:
+    /// `local`, `microsandbox`, `substrate` or `recipe:NAME`; the same
+    /// spelling `--provider` takes.
+    pub fn label(&self) -> String {
+        self.kind().label()
+    }
+
+    /// `by`'s banner for a run under `provider` (`None` is local): the mode
+    /// word and what the mode gives, as the provider's `ProviderKind::banner`
+    /// says them.
+    pub fn banner_of(
+        provider: Option<&Provider>,
+        isolated: bool,
+        server: bool,
+    ) -> (&'static str, String) {
+        of(provider).banner(isolated, server)
+    }
+
+    /// Whether `provider` (`None` is local) runs the harness on this host,
+    /// in no sandbox.
+    pub fn is_local(provider: Option<&Provider>) -> bool {
+        !of(provider).sandboxed()
     }
 
     /// A Microsandbox provider with `options`: how a caller outside this

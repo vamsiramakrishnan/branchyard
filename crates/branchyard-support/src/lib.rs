@@ -8,7 +8,9 @@
 //! - [`best_effort()`] and [`best_effort!`] run a fallible step whose failure
 //!   the caller survives. The failure is logged at `warn` through `tracing`
 //!   with a context string naming the step, and handed to the installed
-//!   [`set_failure_sink`], so a process can put it in an event log.
+//!   [`set_failure_sink`], so a process can put it in an event log, and to
+//!   the innermost [`collect_failures`] running on its thread, so one piece
+//!   of work can report what it survived.
 //! - [`best_effort_once()`] is the same for a step a loop repeats: a
 //!   persistent failure is logged once, and its recovery is logged too.
 //! - [`cleanup_dir`], [`cleanup_file`], [`kill_process`] and [`kill_group`]
@@ -17,7 +19,9 @@
 //!   panicked, log the poisoning with the lock's name, and go on.
 //! - [`spawn_named`] runs a thread that reports a panic through a sink the
 //!   caller supplies instead of leaving it on stderr, and [`join_reporting`]
-//!   waits for one without dropping a panic that ended it.
+//!   waits for one without dropping a panic that ended it. [`survive_panic`]
+//!   runs a callback that is not ours and reports a panic in it instead of
+//!   being ended by it.
 //!
 //! - [`time`] is the one clock and the one set of date formats (on `jiff`),
 //!   [`rng`] the one seedable generator and the system entropy (on
@@ -39,13 +43,13 @@ pub mod time;
 pub mod testing;
 
 pub use best_effort::{
-    best_effort, best_effort_once, cleanup_dir, cleanup_file, set_failure_sink, Failure,
-    FailureSink,
+    best_effort, best_effort_once, cleanup_dir, cleanup_file, collect_failures, set_failure_sink,
+    Failure, FailureSink,
 };
 pub use id::{new_ulid, ulid_from_parts};
 pub use locks::{CondvarExt, LockExt, RwLockExt};
 pub use process::{kill_group, kill_process, terminate_group};
-pub use threads::{join_reporting, spawn_named, PanicReport};
+pub use threads::{join_reporting, spawn_named, survive_panic, PanicReport};
 
 /// Run a fallible step that may fail without failing the caller, logging the
 /// failure under `$context` and yielding `Some(value)` on success.

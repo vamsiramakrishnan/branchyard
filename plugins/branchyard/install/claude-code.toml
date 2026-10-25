@@ -1,9 +1,10 @@
 # Claude Code without the marketplace plugin: the two skills and the
-# commands into your user directory, and the plugin's two hooks merged into
-# ~/.claude/settings.json (the same commands as hooks/hooks.json).
+# commands into your user directory, the plugin's two hooks merged into
+# ~/.claude/settings.json (the same commands as hooks/hooks.json), and the
+# status line, merged only when you have none (a plugin cannot set one).
 harness = "claude-code"
 binaries = ["claude"]
-provides = ["hooks", "commands", "skills"]
+provides = ["hooks", "commands", "skills", "statusline"]
 
 [[file]]
 from = "skills/setup"
@@ -26,11 +27,17 @@ to = "~/.claude/settings.json"
 how = "merge-json"
 at = ""
 
-[[note]]
-text = "If the Branchyard plugin is also installed from the marketplace (/plugin install branchyard@branchyard), its hooks run too: keep one of the two."
+# A status line you already have is yours: left as it is, with the line to
+# choose in the plan's notes, instead of the whole install being refused.
+[[file]]
+from = "harnesses/claude-code/settings-statusline.json"
+to = "~/.claude/settings.json"
+how = "merge-json"
+at = ""
+unless_set = "statusLine"
 
 [[note]]
-text = "Status line (not merged, as it would replace yours): set \"statusLine\": {\"type\": \"command\", \"command\": \"by statusline\"} in ~/.claude/settings.json."
+text = "If the Branchyard plugin is also installed from the marketplace (/plugin install branchyard@branchyard), its hooks run too: keep one of the two."
 
 [[note]]
 text = "Restart Claude Code; /hooks lists the two Branchyard hooks."

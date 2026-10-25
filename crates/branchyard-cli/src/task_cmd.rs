@@ -104,7 +104,7 @@ fn new(
             ));
         }
         // A task in this repository is a run: its first attempt is a branch.
-        return commands::run(env, &Target::Local, prompt, task);
+        return commands::run(env, &Target::Local, prompt, task, false);
     }
     let (created, yard) = tasks::create(&NewTask {
         prompt: prompt.to_owned(),

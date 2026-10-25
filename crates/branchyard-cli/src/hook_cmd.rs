@@ -23,7 +23,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use branchyard::glance::{self, Glance};
-use branchyard::{BranchInfo, BranchStatus, Message};
+use branchyard::{BranchInfo, BranchStatus, Message, MessageKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -263,6 +263,12 @@ fn first_str<'a>(input: &'a Value, paths: &[&str]) -> Option<&'a str> {
 }
 
 impl Dialect {
+    /// Whether this harness drops what `event` (`session-start` or
+    /// `user-prompt-submit`) prints, so `by` says nothing there.
+    pub(crate) fn drops(&self, event: &str) -> bool {
+        Event::parse(event).is_ok_and(|event| self.deaf.contains(&event))
+    }
+
     /// The hook's stdout for `lines` of context at `event`.
     fn render(&self, event: Event, lines: &[String]) -> String {
         let text = lines.join("\n");
@@ -468,11 +474,11 @@ fn look(source: &Source, inbox_of: Option<&str>) -> Result<Option<Glance>, Strin
             .map(Some)
             .map_err(|e| e.to_string()),
         #[cfg(not(feature = "postgres"))]
-        Source::Postgres { .. } => Err(
+        Source::Postgres { .. } => Err(format!(
             "the repository's state is in PostgreSQL, and this by is built without the \
-             postgres feature"
-                .into(),
-        ),
+             postgres feature; rebuild with `{}`",
+            branchyard_setup::probe::REBUILD_POSTGRES
+        )),
     }
 }
 
@@ -659,6 +665,14 @@ fn session_file_name(id: &str) -> String {
     }
 }
 
+/// What every call that says anything opens with: what the lines are, and
+/// what to do with them.
+const HEADER: &str = "Branchyard, this repository. Tell the person in one line about any \
+                      question or failure below; act on nothing unless they ask:";
+/// At most this many ready, and this many failed, branches are named on a
+/// session's first call.
+const NAMED_AT_START: usize = 3;
+
 /// `branch`'s unread messages not shown to this session yet.
 fn inbox_lines(glance: &Glance, branch: &str, cursor: Option<&Cursor>) -> (Vec<String>, Cursor) {
     let seen = cursor.map_or(0, |c| c.message);
@@ -677,8 +691,8 @@ fn inbox_lines(glance: &Glance, branch: &str, cursor: Option<&Cursor>) -> (Vec<S
         return (Vec::new(), next);
     }
     let mut lines = vec![format!(
-        "Branchyard: {} unread message{} for {branch} \
-         (by inbox --as {branch} --unread; by answer --as {branch} ID TEXT):",
+        "Branchyard, {} unread message{} for {branch}. Answer your children's questions with \
+         by answer --as {branch} ID \"TEXT\"; ask your parent with by ask \"TEXT\".",
         new.len(),
         plural(new.len())
     )];
@@ -696,71 +710,131 @@ fn inbox_lines(glance: &Glance, branch: &str, cursor: Option<&Cursor>) -> (Vec<S
 }
 
 /// Branches whose state a person acts on and that changed since this
-/// session's last hook call. On a session's first call, only what needs an
-/// answer now (asking, blocked, a plan to approve) and a count of what is
-/// running, ready or failed: older endings are not news one by one.
+/// session's last hook call, each with the command that deals with it. On a
+/// session's first call, only what needs an answer now (asking, blocked, a
+/// plan to approve); then up to [`NAMED_AT_START`] ready and as many failed
+/// branches by name (older endings are not news one by one, but each still
+/// waits on a decision), and a count of what is running.
 fn change_lines(glance: &Glance, cursor: Option<&Cursor>) -> (Vec<String>, Cursor) {
     let mut next = Cursor::default();
     let mut changed = Vec::new();
+    let mut ready = Vec::new();
+    let mut failed = Vec::new();
     for info in &glance.branches {
         let asking = glance.asking.iter().rev().find(|m| m.from == info.name);
         let Some(label) = notable(info, asking) else {
             continue;
         };
-        let key = format!("{}|{}", info.turns, label.text);
+        let key = format!("{}|{}", info.turns, label.state);
         let new = match cursor {
             Some(cursor) => cursor.branches.get(&info.name) != Some(&key),
             None => label.urgent,
         };
-        if new {
-            changed.push(line(&format!("- {}: {}", info.name, label.text)));
+        match (new, label.group) {
+            (true, _) => changed.push(label.line),
+            (false, Group::Ready) if cursor.is_none() => ready.push(label.line),
+            (false, Group::Failed) if cursor.is_none() => failed.push(label.line),
+            (false, _) => {}
         }
         next.branches.insert(info.name.clone(), key);
     }
+    if cursor.is_none() {
+        changed.extend(newest(ready, "ready"));
+        changed.extend(newest(failed, "failed"));
+        let running = glance.counts().running;
+        if running > 0 {
+            changed.push(format!("- {running} running: by ls"));
+        }
+    }
     let mut lines = Vec::new();
     if !changed.is_empty() {
-        lines.push(
-            "Branchyard: branches changed (by ls; by show NAME; by inbox --as PARENT):".to_owned(),
-        );
+        lines.push(HEADER.to_owned());
         lines.extend(changed);
-    }
-    if cursor.is_none() {
-        let counts = glance.counts();
-        let mut parts = Vec::new();
-        if counts.running > 0 {
-            parts.push(format!("{} running", counts.running));
-        }
-        if counts.ready > 0 {
-            parts.push(format!("{} ready to integrate", counts.ready));
-        }
-        // Counted as the status line counts them, since each still waits on
-        // a decision (retry or discard), though its ending is old news.
-        if counts.failed > 0 {
-            parts.push(format!("{} failed", counts.failed));
-        }
-        if !parts.is_empty() {
-            lines.push(format!("Branchyard: {} (by ls).", parts.join(", ")));
-        }
     }
     (lines, next)
 }
 
+/// The last [`NAMED_AT_START`] of `lines`, oldest first, then a line
+/// saying how many older ones there are.
+fn newest(mut lines: Vec<String>, what: &str) -> Vec<String> {
+    let older = lines.len().saturating_sub(NAMED_AT_START);
+    lines.drain(..older);
+    if older > 0 {
+        lines.push(format!("- ... and {older} more {what}: by ls"));
+    }
+    lines
+}
+
+/// What a branch's state is to a session that has to act on it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Group {
+    /// A candidate waits to be integrated.
+    Ready,
+    /// Failed, interrupted or stopped at a limit.
+    Failed,
+    /// Everything else a session is told about.
+    Other,
+}
+
 /// A branch state worth telling a session about.
 struct Label {
-    text: String,
+    /// The state, as the session's cursor remembers it.
+    state: String,
     /// Needs an answer or a decision, not only news.
     urgent: bool,
+    group: Group,
+    /// The line a session is given: the branch, its state and the command
+    /// that deals with it.
+    line: String,
+}
+
+/// `head`, `variable` and `tail` as one line of at most [`MAX_LINE`]
+/// characters, where only `variable` (a reason or a question, which may be
+/// long) gives way, so the command in `tail` is never cut off.
+fn fitted(head: &str, variable: &str, tail: &str) -> String {
+    let variable = variable.replace(['\n', '\r'], " ");
+    let room = MAX_LINE.saturating_sub(head.chars().count() + tail.chars().count());
+    let shown = match variable.chars().count() > room {
+        true => format!(
+            "{}...",
+            variable
+                .chars()
+                .take(room.saturating_sub(3))
+                .collect::<String>()
+        ),
+        false => variable,
+    };
+    line(&format!("{head}{shown}{tail}"))
 }
 
 fn notable(info: &BranchInfo, asking: Option<&Message>) -> Option<Label> {
-    let label = |text: String, urgent: bool| Some(Label { text, urgent });
+    let name = &info.name;
+    let label = |state: String, urgent: bool, group: Group, line: String| {
+        Some(Label {
+            state,
+            urgent,
+            group,
+            line,
+        })
+    };
     if let Some(message) = asking {
+        let verb = match message.kind {
+            MessageKind::Escalation => "escalates",
+            _ => "asks",
+        };
+        let (id, to) = (message.id, &message.to);
         return label(
             format!(
                 "asking (#{} {}): {}",
                 message.id, message.kind, message.text
             ),
             true,
+            Group::Other,
+            fitted(
+                &format!("- {name} (under {to}): {verb} #{id}: \""),
+                &message.text,
+                &format!("\". Answer: by answer --as {to} {id} \"TEXT\""),
+            ),
         );
     }
     match &info.status {
@@ -771,24 +845,72 @@ fn notable(info: &BranchInfo, asking: Option<&Message>) -> Option<Label> {
         | BranchStatus::Discarded { .. } => None,
         BranchStatus::Ready => {
             let files = info.candidate.as_ref().map_or(0, |c| c.files_changed);
-            label(
-                format!(
-                    "finished, ready to integrate ({files} file{} changed)",
-                    plural(files as usize)
+            let s = plural(files as usize);
+            let text = match &info.parent {
+                Some(parent) => {
+                    format!("- {name} (under {parent}): ready; {parent} integrates it: by show {name}")
+                }
+                None => format!(
+                    "- {name}: ready to merge, {files} file{s} changed: by diff {name}, then by merge {name}"
                 ),
+            };
+            label(
+                format!("finished, ready to integrate ({files} file{s} changed)"),
                 false,
+                Group::Ready,
+                line(&text),
             )
         }
-        BranchStatus::NoChanges => label("finished with no changes".into(), false),
-        BranchStatus::Failed { reason } => label(format!("failed: {reason}"), false),
-        BranchStatus::BudgetExceeded { limit } => {
-            label(format!("stopped at its {limit} limit"), false)
-        }
-        BranchStatus::Interrupted => label("interrupted".into(), false),
-        BranchStatus::Blocked { reason } => label(format!("blocked: {reason}"), true),
-        BranchStatus::AwaitingPlanApproval => {
-            label("waiting for its plan to be approved".into(), true)
-        }
+        BranchStatus::NoChanges => label(
+            "finished with no changes".into(),
+            false,
+            Group::Other,
+            line(&format!("- {name}: finished with no changes. by show {name}")),
+        ),
+        BranchStatus::Failed { reason } => label(
+            format!("failed: {reason}"),
+            false,
+            Group::Failed,
+            fitted(
+                &format!("- {name}: failed: "),
+                reason,
+                &format!(". by log {name} shows why"),
+            ),
+        ),
+        BranchStatus::BudgetExceeded { limit } => label(
+            format!("stopped at its {limit} limit"),
+            false,
+            Group::Failed,
+            fitted(
+                &format!("- {name}: stopped at its "),
+                limit,
+                &format!(" limit. by log {name} shows why"),
+            ),
+        ),
+        BranchStatus::Interrupted => label(
+            "interrupted".into(),
+            false,
+            Group::Failed,
+            line(&format!("- {name}: interrupted. by log {name} shows why")),
+        ),
+        BranchStatus::Blocked { reason } => label(
+            format!("blocked: {reason}"),
+            true,
+            Group::Other,
+            fitted(
+                &format!("- {name}: blocked: "),
+                reason,
+                &format!(". by show {name}"),
+            ),
+        ),
+        BranchStatus::AwaitingPlanApproval => label(
+            "waiting for its plan to be approved".into(),
+            true,
+            Group::Other,
+            line(&format!(
+                "- {name}: waiting for plan approval: by plan show {name}, then by plan approve {name}"
+            )),
+        ),
     }
 }
 
@@ -797,7 +919,7 @@ fn capped(mut lines: Vec<String>) -> Vec<String> {
     if lines.len() > MAX_LINES {
         let more = lines.len() - (MAX_LINES - 1);
         lines.truncate(MAX_LINES - 1);
-        lines.push(format!("- ... and {more} more (by ls)"));
+        lines.push(format!("- ... and {more} more: by ls"));
     }
     lines
 }
@@ -891,9 +1013,351 @@ mod tests {
         let many: Vec<String> = (0..20).map(|n| n.to_string()).collect();
         let shown = capped(many);
         assert_eq!(shown.len(), MAX_LINES);
-        assert_eq!(shown[MAX_LINES - 1], "- ... and 9 more (by ls)");
+        assert_eq!(shown[MAX_LINES - 1], "- ... and 9 more: by ls");
         assert_eq!(line("a\nb"), "a b");
         assert_eq!(line(&"x".repeat(500)).chars().count(), MAX_LINE);
+    }
+
+    fn branch(name: &str, parent: Option<&str>, status: BranchStatus, files: u32) -> BranchInfo {
+        BranchInfo {
+            name: name.into(),
+            git_branch: format!("by/{name}"),
+            worktree: PathBuf::from(format!("/repo/.branchyard/worktrees/{name}")),
+            prompt: "Fix the flaky test".into(),
+            harness: "claude-code".into(),
+            profile: "claude-code-stream-json".into(),
+            session: None,
+            parent: parent.map(str::to_owned),
+            provider: "local".into(),
+            isolated: false,
+            children: Vec::new(),
+            depth: u32::from(parent.is_some()),
+            base: "0123456789abcdef".into(),
+            candidate: (files > 0).then(|| branchyard::CandidateInfo {
+                commit: "fedcba9876543210".into(),
+                files_changed: files,
+                insertions: 3,
+                deletions: 1,
+            }),
+            status,
+            turns: 1,
+            cost_usd: None,
+            created_at: 10_000,
+            stalled: false,
+            superseded_by: None,
+            model: None,
+        }
+    }
+
+    fn question(id: u64, from: &str, to: &str, kind: MessageKind, text: &str) -> Message {
+        Message {
+            id,
+            from: from.into(),
+            to: to.into(),
+            kind,
+            text: text.into(),
+            in_reply_to: None,
+            at_ms: 1,
+            delivered: false,
+        }
+    }
+
+    fn glance_of(branches: Vec<BranchInfo>, asking: Vec<Message>) -> Glance {
+        Glance {
+            root: PathBuf::from("/repo"),
+            branches,
+            asking,
+            unread: Vec::new(),
+        }
+    }
+
+    /// Every `by ...` command in `text`, as the words a shell would give
+    /// `by`, with the placeholder `ID` made a number. A command ends at a
+    /// comma, a semicolon, a sentence's full stop or `shows why`.
+    fn commands_in(text: &str) -> Vec<Vec<String>> {
+        let mut found = Vec::new();
+        let mut rest = text;
+        while let Some(at) = rest.find("by ") {
+            let before_is_word = rest[..at].chars().last().is_some_and(char::is_alphanumeric);
+            let tail = &rest[at..];
+            rest = &rest[at + 3..];
+            let next_is_command = tail[3..].chars().next().is_some_and(char::is_lowercase);
+            if before_is_word || !next_is_command {
+                continue;
+            }
+            let end = [", then ", ";", " shows why"]
+                .iter()
+                .filter_map(|stop| tail.find(stop))
+                .min()
+                .unwrap_or(tail.len());
+            let command = tail[..end].trim_end_matches('.');
+            let words = crate::args::split_words(command).unwrap();
+            found.push(
+                words
+                    .into_iter()
+                    .map(|w| if w == "ID" { "7".to_owned() } else { w })
+                    .collect(),
+            );
+        }
+        found
+    }
+
+    /// Each command `text` names must be one `by` accepts, so a hook line
+    /// cannot send a session to a subcommand or flag that is gone.
+    fn assert_commands_parse(text: &str, expected: &[&str]) {
+        let commands = commands_in(text);
+        let shown: Vec<String> = commands.iter().map(|words| words.join(" ")).collect();
+        assert_eq!(shown, expected, "{text}");
+        for words in commands {
+            let argv = std::iter::once("by".to_owned()).chain(words.iter().skip(1).cloned());
+            match crate::args::parse_from(argv) {
+                Ok(cli) => assert!(cli.command.is_some(), "{words:?}: {text}"),
+                Err(error) => panic!("{text}\n{words:?} does not parse: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_changed_branch_is_named_with_the_command_that_deals_with_it() {
+        let seen = Cursor::default();
+        let infos = vec![
+            branch("hello", None, BranchStatus::Ready, 2),
+            branch("kid", Some("lead"), BranchStatus::Ready, 1),
+            branch(
+                "bad",
+                None,
+                BranchStatus::Failed {
+                    reason: "check failed".into(),
+                },
+                0,
+            ),
+            branch("slow", None, BranchStatus::Interrupted, 0),
+            branch(
+                "big",
+                None,
+                BranchStatus::BudgetExceeded { limit: "$2".into() },
+                0,
+            ),
+            branch("idle", None, BranchStatus::NoChanges, 0),
+            branch("wait", None, BranchStatus::AwaitingPlanApproval, 0),
+            branch(
+                "stuck",
+                None,
+                BranchStatus::Blocked {
+                    reason: "no tool".into(),
+                },
+                0,
+            ),
+            branch("asker", Some("lead"), BranchStatus::Running, 0),
+        ];
+        let asking = vec![question(
+            9,
+            "asker",
+            "lead",
+            MessageKind::Question,
+            "Which parser?",
+        )];
+        let here = glance_of(infos, asking);
+        let (lines, next) = change_lines(&here, Some(&seen));
+        assert_eq!(next.branches.len(), 9);
+        assert_eq!(
+            lines,
+            [
+                HEADER,
+                "- hello: ready to merge, 2 files changed: by diff hello, then by merge hello",
+                "- kid (under lead): ready; lead integrates it: by show kid",
+                "- bad: failed: check failed. by log bad shows why",
+                "- slow: interrupted. by log slow shows why",
+                "- big: stopped at its $2 limit. by log big shows why",
+                "- idle: finished with no changes. by show idle",
+                "- wait: waiting for plan approval: by plan show wait, then by plan approve wait",
+                "- stuck: blocked: no tool. by show stuck",
+                "- asker (under lead): asks #9: \"Which parser?\". Answer: by answer --as lead 9 \"TEXT\"",
+            ]
+        );
+        assert!(lines.len() <= MAX_LINES);
+        assert_commands_parse(&lines[1], &["by diff hello", "by merge hello"]);
+        assert_commands_parse(&lines[2], &["by show kid"]);
+        assert_commands_parse(&lines[3], &["by log bad"]);
+        assert_commands_parse(&lines[4], &["by log slow"]);
+        assert_commands_parse(&lines[5], &["by log big"]);
+        assert_commands_parse(&lines[6], &["by show idle"]);
+        assert_commands_parse(&lines[7], &["by plan show wait", "by plan approve wait"]);
+        assert_commands_parse(&lines[8], &["by show stuck"]);
+        assert_commands_parse(&lines[9], &["by answer --as lead 9 TEXT"]);
+        // docs/harness-hooks.md shows these lines; it keeps showing what is said.
+        let doc = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/harness-hooks.md"),
+        )
+        .unwrap();
+        for shown in [0, 1, 2, 3, 7, 8, 9] {
+            assert!(doc.contains(lines[shown].as_str()), "{}", lines[shown]);
+        }
+        // Told once: the cursor those lines left says nothing more.
+        assert_eq!(change_lines(&here, Some(&next)).0, Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_escalation_is_answered_by_whoever_it_went_to() {
+        let infos = vec![branch("kid", Some("lead"), BranchStatus::Running, 0)];
+        let asking = vec![question(
+            4,
+            "kid",
+            "root",
+            MessageKind::Escalation,
+            "May I drop the table?",
+        )];
+        let (lines, _) = change_lines(&glance_of(infos, asking), None);
+        assert_eq!(
+            lines[1],
+            "- kid (under root): escalates #4: \"May I drop the table?\". \
+             Answer: by answer --as root 4 \"TEXT\""
+        );
+        assert_commands_parse(&lines[1], &["by answer --as root 4 TEXT"]);
+    }
+
+    #[test]
+    fn a_first_call_names_what_waits_and_counts_what_runs() {
+        let mut infos = vec![
+            branch("r1", None, BranchStatus::Ready, 1),
+            branch("r2", None, BranchStatus::Ready, 1),
+            branch("r3", None, BranchStatus::Ready, 3),
+            branch("r4", None, BranchStatus::Ready, 4),
+            branch(
+                "f1",
+                None,
+                BranchStatus::Failed {
+                    reason: "boom".into(),
+                },
+                0,
+            ),
+            branch("w", None, BranchStatus::Waiting, 0),
+            branch(
+                "merged",
+                None,
+                BranchStatus::Merged {
+                    target: "main".into(),
+                    commit: "c".into(),
+                },
+                0,
+            ),
+        ];
+        infos.push(branch("run1", None, BranchStatus::Running, 0));
+        infos.push(branch("run2", None, BranchStatus::WaitingOnChildren, 0));
+        let (lines, next) = change_lines(&glance_of(infos, Vec::new()), None);
+        assert_eq!(
+            lines,
+            [
+                HEADER,
+                "- r2: ready to merge, 1 file changed: by diff r2, then by merge r2",
+                "- r3: ready to merge, 3 files changed: by diff r3, then by merge r3",
+                "- r4: ready to merge, 4 files changed: by diff r4, then by merge r4",
+                "- ... and 1 more ready: by ls",
+                "- f1: failed: boom. by log f1 shows why",
+                "- 2 running: by ls",
+            ]
+        );
+        assert_commands_parse(lines.last().unwrap(), &["by ls"]);
+        assert_commands_parse(&lines[4], &["by ls"]);
+        // The cursor still remembers every ready and failed branch, so a
+        // later call is told only of what changes.
+        assert_eq!(next.branches.len(), 5);
+        // A session already told nothing new hears nothing.
+        let infos = vec![branch("r1", None, BranchStatus::Ready, 1)];
+        let (_, cursor) = change_lines(&glance_of(infos.clone(), Vec::new()), None);
+        assert_eq!(
+            change_lines(&glance_of(infos, Vec::new()), Some(&cursor)).0,
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn nothing_to_name_or_count_is_nothing_to_say() {
+        let infos = vec![branch(
+            "done",
+            None,
+            BranchStatus::Merged {
+                target: "main".into(),
+                commit: "c".into(),
+            },
+            0,
+        )];
+        assert_eq!(
+            change_lines(&glance_of(infos, Vec::new()), None).0,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            change_lines(&glance_of(Vec::new(), Vec::new()), None).0,
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_long_reason_gives_way_to_the_command_that_follows_it() {
+        let reason = format!("check failed\n{}", "because ".repeat(100));
+        let infos = vec![branch("bad", None, BranchStatus::Failed { reason }, 0)];
+        let (lines, _) = change_lines(&glance_of(infos, Vec::new()), None);
+        let said = &lines[1];
+        assert_eq!(said.chars().count(), MAX_LINE, "{said}");
+        assert!(
+            said.starts_with("- bad: failed: check failed because"),
+            "{said}"
+        );
+        assert!(
+            said.contains("...") && said.ends_with(". by log bad shows why"),
+            "{said}"
+        );
+        assert_commands_parse(said, &["by log bad"]);
+
+        let ask = "Should the retry be per request or per batch? ".repeat(20);
+        let infos = vec![branch("kid", Some("lead"), BranchStatus::Running, 0)];
+        let asking = vec![question(3, "kid", "lead", MessageKind::Question, &ask)];
+        let (lines, _) = change_lines(&glance_of(infos, asking), None);
+        let said = &lines[1];
+        assert!(said.chars().count() <= MAX_LINE, "{said}");
+        assert!(
+            said.ends_with("\". Answer: by answer --as lead 3 \"TEXT\""),
+            "{said}"
+        );
+        assert_commands_parse(said, &["by answer --as lead 3 TEXT"]);
+    }
+
+    #[test]
+    fn a_branch_session_is_told_what_to_do_with_its_messages() {
+        let mut here = glance_of(Vec::new(), Vec::new());
+        here.unread = vec![
+            question(5, "kid", "root", MessageKind::Question, "Which parser?"),
+            question(6, "kid", "root", MessageKind::Report, "tests-pass"),
+        ];
+        let (lines, next) = inbox_lines(&here, "root", None);
+        assert_eq!(next.message, 6);
+        assert_eq!(
+            lines,
+            [
+                "Branchyard, 2 unread messages for root. Answer your children's questions with \
+                 by answer --as root ID \"TEXT\"; ask your parent with by ask \"TEXT\".",
+                "- #5 question from kid: Which parser?",
+                "- #6 report from kid: tests-pass",
+            ]
+        );
+        assert_commands_parse(&lines[0], &["by answer --as root 7 TEXT", "by ask TEXT"]);
+        assert_eq!(
+            inbox_lines(&here, "root", Some(&next)).0,
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn the_header_tells_the_session_what_to_do_with_the_lines() {
+        assert!(
+            HEADER.starts_with("Branchyard, this repository."),
+            "{HEADER}"
+        );
+        assert!(
+            HEADER.contains("act on nothing unless they ask"),
+            "{HEADER}"
+        );
+        assert!(HEADER.chars().count() <= MAX_LINE);
     }
 
     #[test]

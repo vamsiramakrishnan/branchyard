@@ -2474,6 +2474,7 @@ mod tests {
                 state,
                 evidence,
                 detail: detail.into(),
+                ..Default::default()
             },
             ..Default::default()
         }

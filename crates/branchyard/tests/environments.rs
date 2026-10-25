@@ -221,7 +221,8 @@ fn shared_directories_are_links_kept_out_of_candidates_and_unlinked_on_removal()
     // An environment a branch links into is never pruned.
     let pruned = f
         .yard
-        .prune_environments(0, Duration::ZERO, std::slice::from_ref(&key));
+        .prune_environments(0, Duration::ZERO, std::slice::from_ref(&key))
+        .unwrap();
     assert!(pruned.removed.is_empty(), "{pruned:?}");
     assert!(pruned.kept[0].1.contains("linked by a, b"), "{pruned:?}");
 
@@ -458,14 +459,51 @@ fn pruning_keeps_the_newest_of_each_recipe() {
     }
     assert_eq!(f.yard.environments().len(), 3);
     let newest = f.yard.environments()[0].key.clone();
-    let pruned = f.yard.prune_environments(1, Duration::from_secs(3600), &[]);
+    let pruned = f
+        .yard
+        .prune_environments(1, Duration::from_secs(3600), &[])
+        .unwrap();
     assert_eq!(pruned.removed.len(), 2, "{pruned:?}");
     let left = f.yard.environments();
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].key, newest);
     // Even when it is old, the newest of a recipe is its last good build.
-    let pruned = f.yard.prune_environments(1, Duration::ZERO, &[]);
+    let pruned = f.yard.prune_environments(1, Duration::ZERO, &[]).unwrap();
     assert!(pruned.removed.is_empty(), "{pruned:?}");
+}
+
+/// What links an environment is read from the branches. When they cannot be
+/// read, "none link it" is the wrong answer: it removed environments that a
+/// branch's worktree was using. Nothing is removed, and the error says why.
+#[test]
+fn pruning_removes_nothing_when_the_branches_that_may_link_cannot_be_read() {
+    let f = fixture("v1");
+    for (n, lock) in ["v1", "v2"].iter().enumerate() {
+        if n > 0 {
+            commit_lock(&f, lock);
+        }
+        f.yard
+            .task("WRITE a.txt=1")
+            .options(with(&f, spec()))
+            .name(format!("b{n}"))
+            .run()
+            .unwrap();
+    }
+    assert_eq!(f.yard.environments().len(), 2);
+    common::edit_record(&f.root, "b0", |record| {
+        *record = serde_json::json!("not a record");
+    });
+    let error = f
+        .yard
+        .prune_environments(0, Duration::ZERO, &[])
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("could not list the branches that link an environment"),
+        "{error}"
+    );
+    assert_eq!(f.yard.environments().len(), 2, "nothing was removed");
 }
 
 /// Run a turn with `prepare` whose setup is in `BY_ENV_SETUP` on a branch

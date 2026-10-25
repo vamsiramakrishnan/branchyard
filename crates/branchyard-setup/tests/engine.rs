@@ -331,6 +331,11 @@ fn the_workspace_batch_matches_its_golden_file() {
     ] {
         probe.files.insert(file.into(), String::new());
     }
+    // A development server to run: package.json says it has one.
+    probe.files.insert(
+        "package.json".into(),
+        r#"{"scripts": {"dev": "vite"}}"#.into(),
+    );
     let mut answers = BTreeMap::new();
     for _ in 0..20 {
         let response = step(Topic::Project, &probe, &answers);

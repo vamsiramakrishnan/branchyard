@@ -325,6 +325,7 @@ fn every_secret_says_how_it_reaches_the_harness() {
             &["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"],
         ),
         ("opencode", Protocol::Acp, &["OPENAI_API_KEY"]),
+        ("opencode", Protocol::Acp, &["GOOGLE_GENERATIVE_AI_API_KEY"]),
         ("opencode", Protocol::Acp, &["OPENCODE_AUTH"]),
         ("github-copilot", Protocol::Acp, &["GITHUB_TOKEN"]),
         ("github-copilot", Protocol::Acp, &["COPILOT_CONFIG"]),
@@ -771,8 +772,71 @@ fn opencode_auth_file() {
     context.secrets = secrets(&[("OPENCODE_AUTH", r#"{"anthropic": {"type": "api"}}"#)]);
     let plan = provision(&temp, &context);
     golden("opencode-auth-file", &temp, &plan);
-    context.model = Some("x".into());
+    context.effort = Some(Effort::Low);
     assert!(branchyard_provision::plan(&context).is_err());
+}
+
+#[test]
+fn opencode_asks_branchyard_about_its_tools_and_takes_a_model_in_a_private_home() {
+    // OpenCode 1.19.4 allows every tool by default (`opencode debug agent
+    // build`: `"*": allow`) and so never asks its client: the qualification
+    // of 25 October 2026 got 6 of 9 until `permission` said `ask`, then
+    // 9 of 9. `model` in the same opencode.json chose the model of
+    // `opencode acp`.
+    let temp = Temp::new();
+    let mut context = context("opencode", Protocol::Acp);
+    context.model = Some("google/gemini-flash-lite-latest".into());
+    let plan = provision(&temp, &context);
+    golden("opencode-model-and-asks", &temp, &plan);
+    assert_eq!(
+        plan.session.model, None,
+        "the model is in opencode.json, not the session"
+    );
+    let config: serde_json::Value =
+        serde_json::from_str(&temp.read(".config/opencode/opencode.json")).unwrap();
+    assert_eq!(config["model"], "google/gemini-flash-lite-latest");
+    for tool in ["bash", "edit", "webfetch"] {
+        assert_eq!(config["permission"][tool], "ask", "{tool}");
+    }
+
+    // A later send without a model takes the model back, keeps the asks
+    // and everything else in the file.
+    temp.seed(
+        ".config/opencode/opencode.json",
+        &serde_json::to_string_pretty(&serde_json::json!({
+            "model": "google/gemini-flash-lite-latest",
+            "permission": {"bash": "ask", "edit": "ask", "webfetch": "ask", "read": "allow"},
+            "theme": "dark"
+        }))
+        .unwrap(),
+    );
+    context.installed = installed(&temp.home());
+    context.model = None;
+    provision(&temp, &context);
+    let config: serde_json::Value =
+        serde_json::from_str(&temp.read(".config/opencode/opencode.json")).unwrap();
+    assert_eq!(
+        config,
+        serde_json::json!({
+            "permission": {"bash": "ask", "edit": "ask", "webfetch": "ask", "read": "allow"},
+            "theme": "dark"
+        })
+    );
+
+    // A home that is yours keeps its own settings: nothing is written, and
+    // a model is refused with the reason.
+    let yours = Temp::new();
+    let mut local = self::context("opencode", Protocol::Acp);
+    local.private_home = false;
+    let plan = provision(&yours, &local);
+    assert!(plan.files.is_empty());
+    local.model = Some("google/gemini-flash-lite-latest".into());
+    let refused = branchyard_provision::plan(&local).unwrap_err();
+    assert!(
+        refused.0.contains("opencode.json") && refused.0.contains("--isolated"),
+        "{}",
+        refused.0
+    );
 }
 
 fn server(name: &str) -> McpServer {
@@ -898,10 +962,11 @@ fn antigravity_rules_follow_the_policy_and_never_touch_a_home_that_is_yours() {
     let settings = |temp: &Temp| -> serde_json::Value {
         serde_json::from_str(&temp.read(".gemini/antigravity-cli/settings.json")).unwrap()
     };
-    // `full` allows the shell, so every command, which covers `by`.
+    // `full` allows the shell, so every command, which covers `by`, and
+    // the file writes agy 1.4.7 headless soft-denies unless a rule allows.
     assert_eq!(
         settings(&temp)["permissions"]["allow"],
-        serde_json::json!(["command(*)", "mcp(branchyard/*)"])
+        serde_json::json!(["command(*)", "write_file(*)", "mcp(branchyard/*)"])
     );
 
     // `read-only`: nothing allowed, writes denied.

@@ -835,10 +835,35 @@ fn by_init_plugin_lists_previews_and_installs_a_harness_once() {
     let preview = by(&["init", "plugin", "--all-detected"]);
     assert!(preview.status.success(), "{}", text(&preview));
     assert!(text(&preview).contains("merge-json"), "{}", text(&preview));
-    assert!(text(&preview).contains("Nothing was written"));
+    // What each gets, diffs named under the home, and the command that writes them.
+    let shown = text(&preview);
+    assert!(
+        shown.contains(
+            "Claude Code: 2 skills, 3 commands, 2 hooks, status line in ~/.claude/settings.json"
+        ),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("+++ b/.claude/skills/setup/SKILL.md") && !shown.contains("b//"),
+        "{shown}"
+    );
+    assert!(
+        shown.trim_end().ends_with(
+            "by init plugin --all-detected --apply\n      Write these files; nothing has been written yet."
+        ),
+        "{shown}"
+    );
     assert_eq!(
         fs::read_to_string(&settings).unwrap(),
         "{\n    \"model\": \"opus\"\n}\n"
+    );
+    // The preview of the named harness ends with its own write command.
+    let named = by(&["init", "plugin", "claude-code", "--dry-run"]);
+    assert!(named.status.success(), "{}", text(&named));
+    assert!(
+        text(&named).contains("by init plugin claude-code --apply\n"),
+        "{}",
+        text(&named)
     );
     // --apply writes, keeps the person's settings and prints the notes.
     let applied = by(&["init", "plugin", "claude-code", "--apply"]);
@@ -848,9 +873,16 @@ fn by_init_plugin_lists_previews_and_installs_a_harness_once() {
         "{}",
         text(&applied)
     );
+    // After writing: the repository next.
+    assert!(
+        text(&applied).trim_end().contains("Next:\n  by setup\n"),
+        "{}",
+        text(&applied)
+    );
     let merged: Value = serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
     assert_eq!(merged["model"], "opus");
     assert_eq!(merged["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+    assert_eq!(merged["statusLine"]["type"], "command");
     assert!(home.join(".claude/skills/setup/SKILL.md").exists());
     // A second run has nothing to do.
     let again = by(&["init", "plugin", "claude-code"]);
@@ -871,4 +903,356 @@ fn by_init_plugin_lists_previews_and_installs_a_harness_once() {
     assert_eq!(fs::read_to_string(&settings).unwrap(), "{\"hooks\": []}\n");
     let unknown = by(&["init", "plugin", "nope"]);
     assert!(text(&unknown).contains("no install for harness \"nope\""));
+}
+
+/// An executable `name` that prints `body` in `dir`.
+fn fake_program(dir: &Path, name: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(dir).unwrap();
+    fs::write(dir.join(name), format!("#!/bin/sh\n{body}\n")).unwrap();
+    fs::set_permissions(dir.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+const STALE: &str =
+    "version = 1\nagent = \"claude\"\nbudget = 5\n[workspace]\nsetup = \"npm ci\"\n";
+
+/// A `branchyard.toml` that `by` refuses is named, not quietly replaced by
+/// a diff that deletes its keys; `--apply` says it does not load.
+#[test]
+fn a_configuration_that_does_not_load_is_named_and_force_replaces_it() {
+    let repo = Repo::new();
+    fs::write(repo.root.join("branchyard.toml"), STALE).unwrap();
+
+    // The facts and the plan both say so, with the line and the new name.
+    let next = repo.json(&["init", "project", "--json", "--next"]);
+    let fact = next["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "config_problem")
+        .unwrap_or_else(|| panic!("{next:#}"));
+    assert_eq!(fact["label"], "branchyard.toml");
+    assert!(
+        fact["value"]
+            .as_str()
+            .unwrap()
+            .contains("line 2: unknown field `agent` (did you mean `harness`, under [defaults]?)"),
+        "{fact:#}"
+    );
+    let dry = repo.by(&["init", "project", "--defaults", "--dry-run"]);
+    assert!(dry.status.success(), "{}", text(&dry));
+    let shown = text(&dry);
+    assert!(
+        shown.contains("note: branchyard.toml does not load: line 2: unknown field `agent`"),
+        "{shown}"
+    );
+    assert!(shown.contains("its values are not used here"), "{shown}");
+
+    // --apply: not "different content".
+    let refused = repo.by(&["init", "project", "--defaults", "--apply"]);
+    assert_eq!(refused.status.code(), Some(1));
+    let message = text(&refused);
+    assert!(
+        message.contains("branchyard.toml does not load (line 2); --force replaces it"),
+        "{message}"
+    );
+    assert!(!message.contains("different content"), "{message}");
+    assert_eq!(
+        fs::read_to_string(repo.root.join("branchyard.toml")).unwrap(),
+        STALE,
+        "nothing was written"
+    );
+    let json = repo.by(&["init", "project", "--defaults", "--apply", "--json"]);
+    assert_eq!(json.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "would_overwrite");
+    assert_eq!(error["error"]["paths"], json!(["branchyard.toml"]));
+
+    let forced = repo.by(&["init", "project", "--defaults", "--apply", "--force"]);
+    assert!(forced.status.success(), "{}", text(&forced));
+    let check = repo.by(&["config", "validate"]);
+    assert!(check.status.success(), "{}", text(&check));
+}
+
+/// A run script is proposed only for a script `package.json` has, and the
+/// question is not asked otherwise.
+#[test]
+fn a_run_script_is_proposed_only_for_a_package_json_script() {
+    let without = Repo::new();
+    // Only the package: Cargo.toml would add `cargo fetch` to its setup.
+    fs::remove_file(without.root.join("Cargo.toml")).unwrap();
+    fs::write(
+        without.root.join("package.json"),
+        r#"{"name": "app", "scripts": {"test": "node --test"}}"#,
+    )
+    .unwrap();
+    fs::write(without.root.join("package-lock.json"), "{}").unwrap();
+    let (answers, _) = walk(&without, "project");
+    assert!(answers.contains_key("workspace.setup"), "{answers:?}");
+    assert!(!answers.contains_key("workspace.run"), "{answers:?}");
+    let out = without.by(&["init", "project", "--defaults", "--apply"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let written = fs::read_to_string(without.root.join("branchyard.toml")).unwrap();
+    assert!(written.contains("setup = \"npm ci\""), "{written}");
+    assert!(!written.contains("workspace.run"), "{written}");
+    assert!(!written.contains("npm run dev"), "{written}");
+
+    let with = Repo::new();
+    fs::remove_file(with.root.join("Cargo.toml")).unwrap();
+    fs::write(
+        with.root.join("package.json"),
+        r#"{"name": "app", "scripts": {"start": "node server.js"}}"#,
+    )
+    .unwrap();
+    fs::write(with.root.join("pnpm-lock.yaml"), "").unwrap();
+    let out = with.by(&["init", "project", "--defaults", "--apply"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let written = fs::read_to_string(with.root.join("branchyard.toml")).unwrap();
+    assert!(
+        written.contains("command = \"PORT=$BRANCHYARD_PORT pnpm start\""),
+        "{written}"
+    );
+
+    // Scripts that are new lead the closing list with the trust they need.
+    let shown = text(&out);
+    let trust = shown.find("by workspace trust").unwrap_or(usize::MAX);
+    let validate = shown.find("by config validate").unwrap_or(0);
+    assert!(trust < validate, "{shown}");
+    assert!(shown.contains("Your first `by run` needs this"), "{shown}");
+}
+
+/// `by init project` and `by up` need a repository, and say how to get one;
+/// from a subdirectory they find the root.
+#[test]
+fn project_setup_and_up_refuse_outside_a_repository() {
+    let repo = Repo::new();
+    let plain = repo.root.parent().unwrap().join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    let at = |args: &[&str]| {
+        let out = repo
+            .command()
+            .current_dir(&plain)
+            .args(args)
+            .output()
+            .unwrap();
+        repo.record(&out);
+        out
+    };
+    let wanted = format!(
+        "not a git repository: {}. Run `git init` here, or cd into one",
+        fs::canonicalize(&plain).unwrap().display()
+    );
+    for args in [
+        &["init", "project", "--defaults", "--apply"][..],
+        &["init", "project", "--json", "--next"][..],
+    ] {
+        let out = at(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", text(&out));
+        assert!(text(&out).contains(&wanted), "{args:?}: {}", text(&out));
+    }
+    assert!(!plain.join("branchyard.toml").exists());
+    let json = at(&["init", "project", "--json", "--dry-run"]);
+    let error: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "not_a_repository");
+    assert_eq!(error["error"]["message"], json!(wanted));
+    // Topics that write nothing a repository owns are not refused.
+    let listing = at(&["init", "plugin"]);
+    assert!(listing.status.success(), "{}", text(&listing));
+
+    let up = at(&["up", "--plan"]);
+    assert_eq!(up.status.code(), Some(1));
+    assert!(text(&up).contains(&wanted), "{}", text(&up));
+    assert!(
+        !text(&up).contains("is not inside a git work tree"),
+        "{}",
+        text(&up)
+    );
+
+    // From a subdirectory of a repository, the file lands at its root.
+    let deep = repo.root.join("src/deep");
+    fs::create_dir_all(&deep).unwrap();
+    let out = repo
+        .command()
+        .current_dir(&deep)
+        .args(["init", "project", "--defaults", "--apply"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(repo.root.join("branchyard.toml").exists());
+    assert!(!deep.join("branchyard.toml").exists());
+}
+
+/// `by init plugin` with nothing named, outside the protocol, says what to
+/// name instead of listing a question's internal id.
+#[test]
+fn by_init_plugin_with_no_names_says_what_to_name() {
+    let repo = Repo::new();
+    for step in ["--dry-run", "--apply"] {
+        let out = repo.by(&["init", "plugin", step]);
+        assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+        let said = text(&out);
+        assert!(
+            said.contains("name harness IDs or --all-detected; `by init plugin` lists them"),
+            "{said}"
+        );
+        assert!(
+            !said.contains("unanswered") && !said.contains("host"),
+            "{said}"
+        );
+    }
+    let json = repo.by(&["init", "plugin", "--dry-run", "--json"]);
+    assert_eq!(json.status.code(), Some(2));
+    let error: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "usage");
+    // Answers or --defaults carry the choice, as the protocol does.
+    let defaults = repo.json(&["init", "plugin", "--defaults", "--dry-run", "--json"]);
+    assert_eq!(defaults["done"], true, "{defaults:#}");
+    let first = repo.json(&["init", "plugin", "--json", "--next"]);
+    let ids: Vec<&str> = first["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|q| q["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["harnesses"]);
+}
+
+/// Claude Code's status line is merged when there is none; one you have is
+/// kept, with the line to choose, and the install still goes through.
+#[test]
+fn claude_codes_status_line_is_merged_when_absent_and_kept_when_present() {
+    let repo = Repo::new();
+    let base = repo.root.parent().unwrap().to_path_buf();
+    let bin = base.join("bin");
+    fake_program(&bin, "claude", "echo 2.1.0");
+    let home = base.join("home");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    let settings = home.join(".claude/settings.json");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let by = |args: &[&str]| {
+        let out = repo
+            .command()
+            .env("PATH", &path)
+            .args(args)
+            .output()
+            .unwrap();
+        repo.record(&out);
+        out
+    };
+    let settings_json =
+        || -> Value { serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap() };
+
+    // None yet: merged beside the hooks, and no note about it.
+    fs::write(&settings, "{\n  \"model\": \"opus\"\n}\n").unwrap();
+    // A dry run with --defaults (the detected harnesses) ends with the command that writes it.
+    let dry = by(&["init", "plugin", "--defaults", "--dry-run"]);
+    assert!(dry.status.success(), "{}", text(&dry));
+    assert!(
+        text(&dry).trim_end().ends_with(
+            "by init plugin --defaults --apply\n      Write these files; nothing has been written yet."
+        ),
+        "{}",
+        text(&dry)
+    );
+    let applied = by(&["init", "plugin", "claude-code", "--apply"]);
+    assert!(applied.status.success(), "{}", text(&applied));
+    let merged = settings_json();
+    assert_eq!(
+        merged["statusLine"]["command"],
+        "command -v by >/dev/null 2>&1 && by statusline --harness claude-code || true"
+    );
+    assert_eq!(merged["model"], "opus");
+    assert!(!text(&applied).contains("kept the"), "{}", text(&applied));
+
+    // Yours: kept, hooks merged, the note says what to set instead.
+    let mine = "{\n  \"statusLine\": {\"type\": \"command\", \"command\": \"ccstatusline\"}\n}\n";
+    fs::write(&settings, mine).unwrap();
+    let preview = by(&["init", "plugin", "claude-code"]);
+    let shown = text(&preview);
+    assert!(preview.status.success(), "{shown}");
+    assert!(
+        shown.contains("Claude Code: 2 skills, 3 commands, 2 hooks in ~/.claude/settings.json"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("kept the \"statusLine\" already in ~/.claude/settings.json."),
+        "{shown}"
+    );
+    let applied = by(&["init", "plugin", "claude-code", "--apply"]);
+    assert!(applied.status.success(), "{}", text(&applied));
+    let merged = settings_json();
+    assert_eq!(merged["statusLine"]["command"], "ccstatusline");
+    assert_eq!(merged["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+    // And a second run has nothing to do, and offers no command to write it.
+    let again = by(&["init", "plugin", "claude-code"]);
+    assert!(
+        text(&again).contains("nothing to write"),
+        "{}",
+        text(&again)
+    );
+    let dry = by(&["init", "plugin", "claude-code", "--dry-run"]);
+    assert!(dry.status.success(), "{}", text(&dry));
+    assert!(
+        text(&dry).contains("Everything is already installed; nothing to write."),
+        "{}",
+        text(&dry)
+    );
+    assert!(!text(&dry).contains("--apply"), "{}", text(&dry));
+}
+
+/// On a terminal `by init plugin` lists the harnesses, asks which (the ones
+/// found on PATH are chosen), reviews and writes: the files naming them
+/// writes, not a different, skills-only install.
+#[test]
+fn the_plugin_wizard_asks_which_harnesses_and_writes_what_naming_them_would() {
+    if !Path::new("/usr/bin/script").exists() {
+        eprintln!("skipped: no /usr/bin/script for a pseudo-terminal");
+        return;
+    }
+    let repo = Repo::new();
+    let base = repo.root.parent().unwrap().to_path_buf();
+    let bin = base.join("bin");
+    fake_program(&bin, "claude", "echo 2.1.0");
+    let by = env!("CARGO_BIN_EXE_by");
+    let mut run = Command::new("/usr/bin/script");
+    branchyard_testkit::hermetic(&mut run)
+        .args(["-qfc", &format!("{by} init plugin"), "/dev/null"])
+        .current_dir(&repo.root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("HOME", base.join("home"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("TERM", "xterm")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut process = run.spawn().unwrap();
+    process
+        .stdin
+        .take()
+        .unwrap()
+        .write_all("\r".repeat(10).as_bytes())
+        .unwrap();
+    let out = process.wait_with_output().unwrap();
+    let screen = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{screen}");
+    for expected in [
+        "Hooks and skills for your coding harnesses",
+        "Which harnesses should get Branchyard's hooks, commands and skills?",
+        "2 skills, 3 commands, 2 hooks",
+        "wrote",
+        "by setup",
+    ] {
+        assert!(screen.contains(expected), "{expected:?} missing:\n{screen}");
+    }
+    let home = base.join("home");
+    assert!(home.join(".claude/skills/setup/SKILL.md").exists());
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap())
+            .unwrap();
+    assert!(settings["hooks"]["SessionStart"].is_array(), "{settings:#}");
+    assert_eq!(settings["statusLine"]["type"], "command");
+    assert!(
+        !home.join(".codex").exists(),
+        "only the detected harness is chosen"
+    );
 }

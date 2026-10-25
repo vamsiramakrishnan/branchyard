@@ -112,7 +112,7 @@
             {
               "type": "string",
               "const": "plugin",
-              "description": "The Branchyard skills for Claude Code or Codex."
+              "description": "Branchyard's hooks, commands and skills in each chosen harness."
             }
           ],
           "description": "What an interview sets up."
@@ -932,7 +932,7 @@
             {
               "type": "string",
               "const": "plugin",
-              "description": "The Branchyard skills for Claude Code or Codex."
+              "description": "Branchyard's hooks, commands and skills in each chosen harness."
             }
           ],
           "description": "What an interview sets up."
@@ -1136,6 +1136,10 @@
             "from": {
               "type": "string",
               "description": "What it installs, under `plugins/branchyard`."
+            },
+            "unless_set": {
+              "type": "string",
+              "description": "For a merge: the key that, when the file already sets it, leaves\nthis fragment out (the manifest's `unless_set`)."
             }
           },
           "required": [

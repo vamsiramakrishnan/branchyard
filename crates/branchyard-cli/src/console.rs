@@ -56,17 +56,32 @@ pub struct Console {
 struct State {
     renderer: Renderer,
     out: Box<dyn Write + Send>,
+    /// `out` failed (its reader has gone, as in `by run | head -1`, or the
+    /// disk is full): nothing more is written to it.
+    closed: bool,
 }
 
 impl State {
-    /// Output is best effort: a closed stdout must not fail the branch.
+    /// Output is best effort: an unwritable stdout must not fail the branch
+    /// (its own log has all of it) and is not said again for every line.
+    /// A reader that went away is its own choice and is not said at all; any
+    /// other write error is a survived failure, reported once.
     fn write(&mut self, text: &str) {
-        if !text.is_empty() {
-            branchyard_support::best_effort(
-                "write the console output",
-                self.out.write_all(text.as_bytes()),
-            );
-            branchyard_support::best_effort("flush the console output", self.out.flush());
+        if text.is_empty() || self.closed {
+            return;
+        }
+        let written = self
+            .out
+            .write_all(text.as_bytes())
+            .and_then(|()| self.out.flush());
+        if let Err(error) = written {
+            self.closed = true;
+            if error.kind() != io::ErrorKind::BrokenPipe {
+                branchyard_support::best_effort(
+                    "write the console output (it is not written again)",
+                    Err::<(), _>(error),
+                );
+            }
         }
     }
 }
@@ -74,7 +89,11 @@ impl State {
 impl Console {
     pub fn new(renderer: Renderer, out: Box<dyn Write + Send>, prompter: Prompter) -> Self {
         Console {
-            state: Mutex::new(State { renderer, out }),
+            state: Mutex::new(State {
+                renderer,
+                out,
+                closed: false,
+            }),
             prompter,
             notifier: None,
         }

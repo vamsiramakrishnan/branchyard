@@ -1,6 +1,6 @@
 # Contributing
 
-Start with [the implementation plan](docs/implementation-plan.md). The next deliverable is the domain/provider contract and sandbox qualification, followed by one complete remote task. The workspace has <!-- fact:workspace.crate_count -->23<!-- /fact --> crates. The current crates provide the harness identity registry, unqualified harness protocol drivers with per-capability support reasons, sandbox capability admission, and an unqualified Agent Substrate adapter.
+Start with [the roadmap](docs/roadmap.md), the live plan, and [the documentation index](docs/README.md). [Status](docs/status.md) says what is built and what has run; the harness drivers, sandbox providers and server it lists are the code you will change. [The implementation plan](docs/implementation-plan.md) records the original foundation and is not a to-do list. The workspace has <!-- fact:workspace.crate_count -->23<!-- /fact --> crates. Agents working in this repository: read [AGENTS.md](AGENTS.md) first.
 
 ## Before you push
 
@@ -19,7 +19,7 @@ Run `python3 tools/check.py --fast` before you push. It runs the Python gates, r
 
 ## Failures that may be ignored
 
-Never write `let _ = fallible();` or `.lock().unwrap_or_else(|e| e.into_inner())`. When a failure is acceptable (cleanup on an error path, a `Drop`, a process that may already be gone), say so with [`branchyard-support`](crates/branchyard-support/src/lib.rs), which logs it with a name so it is seen. Add `branchyard-support = { path = "../branchyard-support" }` to the crate and use:
+Never write `let _ = fallible();` or `.lock().unwrap_or_else(|e| e.into_inner())`. When a failure is acceptable (cleanup on an error path, a `Drop`, a process that may already be gone), say so with [`branchyard-support`](crates/branchyard-support/src/lib.rs). It logs the failure at `warn` with the name you gave it, and every `by` command prints that log on standard error as `by: warning: <name>: <error>`; during a turn the engine also records it in the branch's log, where `by log` and `by show` list it (see [survived failures](docs/observability.md#survived-failures)). Add `branchyard-support = { path = "../branchyard-support" }` to the crate and use:
 
 | You want | Use |
 | --- | --- |
@@ -30,12 +30,15 @@ Never write `let _ = fallible();` or `.lock().unwrap_or_else(|e| e.into_inner())
 | to take a `Mutex` | `use branchyard_support::LockExt as _;` then `lock.lock_recovering("name")`; likewise `RwLockExt` (`read_recovering`, `write_recovering`) and `CondvarExt` (`wait_timeout_recovering`, ...) |
 | to wait for a thread you do not need a result from | `join_reporting("what the thread did", handle)` |
 | a thread whose panic should reach a log | `spawn_named(name, |panic| record(panic), body)`; the sink gets the panic message (the delegation engine writes it to the branch's event log) |
+| to call code that is not yours and must not end you (an observer, a callback) | `survive_panic("what it does", closure)`; a panic in it is reported as a survived failure |
+| to know what a piece of work survived | `let (value, survived) = collect_failures(closure);` returns the `Failure`s survived on this thread meanwhile |
+| to read the store, a log or a file and fall back | do not write `.ok()` or `.unwrap_or_default()` on it: a locked or damaged store then reads as "no such branch" or "an empty log". Return the error (`error.could_not(format_args!("read the record for {name}"))` in the engine), or wrap the read in `best_effort` and say in a comment why the fallback is safe |
 
 Name the lock after what it guards (`"claims"`, `"conn"`), not its type. Nothing in the crate panics, so all of it is safe in a `Drop`. A test that must show a failure was logged uses `branchyard_support::testing::capture` (feature `testing`, as a dev-dependency): see `a_failed_release_on_drop_is_logged_not_lost` in `crates/branchyard/src/state.rs`.
 
 Two checks enforce this, in CI and locally:
 
-- `cargo test -p branchyard-support` scans every crate and fails on the poison idiom; `python3 tools/check_silent_failures.py` does the same. A bare `let _ =` on a fallible value is denied by Clippy (`let_underscore_must_use`): see [Lints and the ratchet](#lints-and-the-ratchet).
+- `cargo test -p branchyard-support` scans every crate and fails on the poison idiom; `python3 tools/check_silent_failures.py` does the same, and also fails on `.ok()` or `.unwrap_or_default()` on a read of the store (`store()`, `store.`), the effect ledger (`ledger.`), a branch's event log (`record::read(`) or a file (`fs::read*(`). The reads that predate the check are counted per file, each with what an error does there, in `tools/silent_failures_ratchet.json`; a count may only fall (`python3 tools/check_silent_failures.py --update` lowers it, `--list` shows every site), and a file that is not listed has none allowed. A bare `let _ =` on a fallible value is denied by Clippy (`let_underscore_must_use`): see [Lints and the ratchet](#lints-and-the-ratchet).
 
 ## Lints and the ratchet
 
@@ -93,6 +96,14 @@ Shared test infrastructure lives in one crate, `crates/branchyard-testkit`, a de
 
 The hygiene check also keeps three counted ratchets in `tools/test_hygiene_ratchet.json`: calls to `wait::settle`, hand-rolled `std::env::temp_dir()` directories and hand-rolled `TcpListener::bind` servers, per file. A count above the file fails; a count below it fails until the file is lowered (`python3 tools/check_test_hygiene.py --lower`). They can only fall: when you touch one of the listed files, move it onto the kit and lower its count.
 
+The check reads `#[cfg(test)]` code in `crates/*/src` as well as `crates/*/tests`, and fails, with no count to hide behind, on the shapes that made tests fail on a slow machine:
+
+- **A port freed and then used.** `TcpListener::bind("127.0.0.1:0")` whose listener is dropped after its port is read hands out a number another test's `bind(0)` can be given first. Keep the listener (`MockHttp`), have the child bind port 0 and print its address, or refuse on a privileged port (`http://127.0.0.1:1` is always refused). A `[connectors] gateway` URL you must pin is a port you must choose: leave it unpinned and read the URL back from `by`, or pin an address nothing starts at.
+- **A sleep that is a wait.** `thread::sleep`, `tokio::time::sleep` and a bare `sleep(` fail; so does a `wait::settle` of 500 ms or more, unless `tools/test_hygiene_allow.json` names it (the file and the settle's text) with the reason time itself has to pass. If an event marks the moment, wait for the event.
+- **A budget that is a guess.** A bound on how long something took (`elapsed < ...`) is the product's contract plus a margin you measured under load, said in a comment, and passed through `wait::scaled` where the product's clock is not the thing being timed. A bound near a product timeout stays unscaled and sits below the timeout it guards.
+- **The whole process's environment.** `env::set_var` and `remove_var` in a test body change every test in the binary, so they fail unless they run once (`Once`, `OnceLock`), sit in a fixture, set a `BY_TEST_*` input, or the file is a test binary of one test. Prefer `Command::env`; when the code under test reads the variable in this process, give the test a file of its own.
+- **A `/tmp` path.** A fixed path is shared by every run on the machine: use `Scratch`. A guest path in a sandbox, or a product contract about `/tmp`, says so in a `hygiene-allow: tmp <why>` comment on that line or the one above.
+
 ## Storing values in a state store
 
 Anything a store keeps in a column (SQLite, PostgreSQL, the server's operation, trigger and companion stores) converts through [`crates/branchyard/src/store_codec.rs`](crates/branchyard/src/store_codec.rs), re-exported to the server as `branchyard::store_codec`. Both databases hold signed 64-bit integers; the code holds unsigned ones. Do not write `as i64`, `as u64`, `as u32`, `as u16`, `as i32`, `as usize`, `i64::try_from(x).unwrap_or(i64::MAX)` or `u32::try_from(x).unwrap_or(0)`: they turn a value the column cannot hold into a different value (a saturated timestamp, PID `0`, a negative stored PID wrapped into someone else's). Instead:
@@ -145,6 +156,21 @@ A branch's provider is the closed enum `Provider` (`crates/branchyard/src/lib.rs
 
 `crates/branchyard/tests/provider_seam.rs` fails when a variant is named outside `providers/`. The few surfaces that still match (the CLI and server) are a ratchet in that file: lower a count when you remove a site, never raise one. See [Adding a provider](docs/providers.md#adding-a-provider).
 
+## CLI style
+
+**An error says what failed, why when that is not obvious, and what to run next.** Name the object (the branch, the absolute path, the harness), keep Rust and OS words out (no `state:` or `denied:` prefixes, no `os error 2`, no `invalid float literal`), and end with the exact command:
+
+```text
+by: stuck is still running its turn
+  next: by wait stuck (blocks until it settles), or by cancel stuck (stops it)
+```
+
+`by: <what failed, naming the object>`, then `  why: <only when it is not obvious>`, then `  next: <the command>`; more labelled lines (`check:`, `output:`) go between them. Up to three fixes, joined with `, or `. The engine's `Error` texts in `crates/branchyard` stay plain statements of fact, because the server, the MCP tools and the Python module share them; the CLI adds the next command in `crates/branchyard-cli/src/errors.rs`, which also renders `--json`. A new message gets a test that asserts its text and exit code, in `crates/branchyard-cli/tests/cli.rs` or beside the code.
+
+**`--json` is a contract.** With `--json` anywhere on the command line, standard output holds JSON and nothing else, success or failure; activity and warnings go to standard error. A failure is `{"error": {"kind", "message", "next", "detail"}}` (`next` and `detail` only when there is something to say), for an engine error, a server's, a configuration file, a refused command line (`kind` is `usage`, exit 2) and a server that did not answer (`remote_unreachable`). A command that takes `--json` takes it on every path; [surfaces](docs/surfaces.md#the---json-contract) lists the kinds. A change that adds a command adds its `--json` error path to the test that walks them.
+
+**Help text is read on a terminal.** A command's first doc-comment paragraph is its summary in `by help all`: under 80 characters, no full stop, and the detail in a second paragraph (`--help` shows it). Every argument has a doc comment, positionals included; a number takes a placeholder that says what it is (`<DOLLARS>`, `<SECONDS>`), not `<X>`. `--yes` says what it grants or confirms in that command. The commands a person uses in a first hour are in `args::FRONT`; a command a harness runs for itself, or plumbing, is `#[command(hide = true)]` and listed by `by help agents` or `by help all`. `args.rs` has tests for all of this.
+
 ## Validation
 
 Run the commands in [validation](docs/validation.md). Add regression tests for behavioral changes and contract failures. Keep external provider smoke tests opt-in and document the exact profile they qualify. Use immutable fixtures for protocol parsing; a fake driver cannot establish sandbox isolation.
@@ -185,7 +211,7 @@ A count, list, matrix or date that the code already knows is not typed into the 
 
 - **Fact regions.** `tools/docs_facts.py` derives facts from files (`vendor.lock.json`, the workspace manifests, the `#[test]` attributes, the derivative manifests in `patches/`, the server's routes, the runtime's stripped environment prefixes) and writes them to `docs/facts.json` and into any Markdown region marked `<!-- fact:NAME -->...<!-- /fact -->`. To show a fact in a page, put the marker around a placeholder and run `python3 tools/docs_facts.py --write`; the kinds of fact are the keys of `regions()` in the script. To add a kind, derive it in `compute()`, render it in `regions()`, and extend `tests/test_docs_facts.py`. Never edit text inside a region: `python3 tools/docs_facts.py --check` fails on any difference, and after you change the code (add a vendored file, a crate, a test) it fails until you rerun `--write` and commit the result. The test count is every `#[test]` attribute in the source, feature-gated files included, so write it as what is in the source, never as what `cargo test --workspace` runs. A hand-typed copy of a generated list (the stripped prefixes, the derivative counts) is a bug: wrap it in a region instead. Run-by-run results (a dated "N tests passed" row) are records of a run, not facts, and stay prose.
 - **Routes.** The same `--check` fails when a server route is mentioned in neither [the server reference](docs/server.md) nor [surfaces](docs/surfaces.md). Document the route; `tools/docs_facts_allow.txt` is only for a route you cannot document yet, and `--check` fails once an entry becomes documented, so the list only shrinks.
-- **Tables generated by Rust** keep their own freshness tests: `docs/compatibility.md` (`cargo run -p branchyard-harness --example compat_matrix > docs/compatibility.md`, tested by `cargo test -p branchyard-harness --test compatibility`) and `catalog/*.toml` (`BRANCHYARD_BLESS=1 cargo test -p branchyard-controls catalog`, then review the diff). Do not set `BRANCHYARD_BLESS` outside that command; it makes the test write instead of compare.
+- **Tables generated by Rust** keep their own freshness tests: `docs/compatibility.md` (`cargo run -p branchyard-harness --example compat_matrix > docs/compatibility.md`, tested by `cargo test -p branchyard-harness --test compatibility`) and `catalog/*.toml` (`BRANCHYARD_BLESS=1 cargo test -p branchyard-controls catalog`, then review the diff). Do not set `BRANCHYARD_BLESS` outside that command; it makes the test write instead of compare. The harness table in `docs/status.md` (`profiles.table`, `profiles.summary`) is a fact region read from `docs/compatibility.md`'s table, so regenerate that page first, then run `python3 tools/docs_facts.py --write`. `tests/test_docs_index.py` fails when a page under `docs/` is not linked from `docs/README.md`.
 - **Dates.** A page that opens with "Written ..." or "Prepared ..." must name a date no earlier than any `**Status, DATE.**` paragraph or dated table row below it (`tools/check_docs.py`). Update the opening line when you add a newer section.
 - **Rustdoc.** Public items need docs. `tools/check_missing_docs.py` counts undocumented public items per crate against `tools/missing_docs_ratchet.json`: a crate over its count fails, and one under it fails until you lower the file with `python3 tools/check_missing_docs.py --write`, so the counts only fall. A crate at zero also carries `#![warn(missing_docs)]`; add it when you bring a crate to zero.
 ## CI gates

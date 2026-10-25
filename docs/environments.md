@@ -83,7 +83,7 @@ All take `--json`, and all act on a local repository (`--remote` is refused: a s
 | `Yard::environments()` | `Vec<EnvironmentInfo>`: key, recipe, place, state (`good` or `failed`), inputs with digests, setup, produced, built by and when, last used, reason, snapshot |
 | `Yard::environment_key(&spec)` | The key a branch created now from the repository's checkout would have |
 | `Yard::rebuild_environment(&spec)` | `EnvironmentBuild`: the environment, or `None` with setup's report |
-| `Yard::prune_environments(keep, max_age, only)` | `EnvironmentsPruned`: removed and kept, each with why |
+| `Yard::prune_environments(keep, max_age, only)` | `EnvironmentsPruned`: removed and kept, each with why; an error, with nothing removed, when the branches and pool slots that may link an environment cannot be read |
 | `WorkspaceReport::environment` | `EnvironmentUse`: key, `origin` (`built`, `restored`, `last_good`, `not_kept`), `used`, `method`, `built_by`, `shared`, `reason`; in `schema/contract.json` |
 | `SandboxOrigin::Environment` | `key`, `used`, `method`, `reason` |
 

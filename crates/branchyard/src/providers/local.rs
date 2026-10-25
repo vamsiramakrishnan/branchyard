@@ -18,6 +18,26 @@ pub(crate) struct Local;
 pub(crate) static LOCAL: Local = Local;
 
 impl ProviderKind for Local {
+    fn banner(&self, isolated: bool, server: bool) -> (&'static str, String) {
+        let (who, whose) = match server {
+            false => ("your user", "your"),
+            true => ("the server's user", "the server's"),
+        };
+        match isolated {
+            true => (
+                "isolated",
+                format!(
+                    "harnesses run as {who} with a private HOME under .branchyard/homes/; not a \
+                     sandbox, so they can still read {whose} files and reach the network"
+                ),
+            ),
+            false => (
+                "local",
+                format!("harnesses run as {who}, in {whose} own HOME; no sandbox"),
+            ),
+        }
+    }
+
     fn name(&self) -> &'static str {
         "local"
     }

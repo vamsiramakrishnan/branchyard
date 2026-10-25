@@ -13,7 +13,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use branchyard::doctor::{self, HeldKind, HeldSandbox, SchemaState};
-use branchyard::inventory::HarnessState;
+use branchyard::inventory::{self, HarnessState, LoginState, Standing};
 use branchyard::models::Api;
 use branchyard::services::{Service, ServiceState, ServiceStore};
 use branchyard::{HarnessInfo, SandboxKeep, SandboxOptions, Yard};
@@ -43,6 +43,78 @@ fn skipped(name: &'static str, because: &str, first: &str) -> Check {
         format!("{NOT_CHECKED}{because}"),
         format!("fix {first} first"),
     )
+}
+
+// Mode.
+
+/// The mode this repository runs in, for the line above the report: where
+/// harnesses run, where the state is, and whether a server is involved.
+/// Read from the same effective configuration the checks use.
+pub(super) fn mode(ctx: &Context) -> String {
+    let Some(config) = ctx.config() else {
+        return "not known: the configuration does not load (see config.merged)".to_owned();
+    };
+    if let Some(url) = ctx.globals.remote.as_deref() {
+        return format!(
+            "server: {} · state is kept by the server",
+            without_userinfo(url)
+        );
+    }
+    let run = match config
+        .defaults
+        .provider
+        .unwrap_or(ConfiguredProvider::Local)
+    {
+        ConfiguredProvider::Local => match config.defaults.isolated {
+            Some(true) => "local, isolated (private HOME, no sandbox)".to_owned(),
+            _ => "local, no isolation".to_owned(),
+        },
+        ConfiguredProvider::Microsandbox => "sandbox: microsandbox".to_owned(),
+        ConfiguredProvider::Recipe => format!(
+            "sandbox: recipe {}",
+            config.defaults.recipe.as_deref().unwrap_or("(none named)")
+        ),
+    };
+    let mut mode = format!("{run} · SQLite (.branchyard/state.db) · no server");
+    if serve_uses_postgres(ctx, config) {
+        mode.push_str(" · by serve here uses PostgreSQL");
+    }
+    mode
+}
+
+/// `[serve] config` names a server file whose `database` is a PostgreSQL URL.
+/// The URL is not shown: it may hold a password.
+fn serve_uses_postgres(ctx: &Context, config: &ProjectConfig) -> bool {
+    let Some(file) = config.serve.config.as_deref() else {
+        return false;
+    };
+    let root = ctx.root().unwrap_or(&ctx.base);
+    // An unreadable file is the `serve.config` row's finding; the Mode line
+    // then says SQLite.
+    branchyard_support::best_effort(
+        "read the [serve] config file for the Mode line",
+        std::fs::read_to_string(crate::setup_io::resolve(root, file)),
+    )
+    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    .and_then(|v| v["database"].as_str().map(str::to_owned))
+    .is_some_and(|url| url.starts_with("postgres://") || url.starts_with("postgresql://"))
+}
+
+/// `url` without the `user:password@` of its authority.
+fn without_userinfo(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let (authority, path) = rest
+                .split_once('/')
+                .map_or((rest, None), |(a, p)| (a, Some(p)));
+            let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+            match path {
+                Some(path) => format!("{scheme}://{host}/{path}"),
+                None => format!("{scheme}://{host}"),
+            }
+        }
+        None => url.to_owned(),
+    }
 }
 
 // Repository.
@@ -101,15 +173,16 @@ pub(super) fn repository_state(ctx: &Context) -> Vec<Check> {
             ),
         },
         Store::NoRepository => skipped(NAME, "there is no repository", "repository.git"),
-        Store::Absent => Check::fail(
+        // Where everyone starts: nothing is broken, a step is not taken.
+        Store::Absent => Check::todo(
             NAME,
             format!(
-                "{}/.branchyard does not exist: Branchyard has not been used in this repository",
+                "not set up yet (no .branchyard/ in {})",
                 ctx.root()
                     .map(|r| r.display().to_string())
                     .unwrap_or_default()
             ),
-            "run `by init` to write its configuration; any `by` command in the repository, such as `by ls`, then creates .branchyard/",
+            "run `by setup`",
         ),
         Store::Withheld(why) => {
             Check::warn(NAME, format!("not opened: {why}"), "see repository.schema")
@@ -371,25 +444,31 @@ fn trust_row(resolved: &workspace_cmd::Resolved) -> Check {
 
 // Harnesses.
 
-/// What `by harnesses` detects: installed, version, qualification.
-pub(super) fn harnesses_installed(_: &Context) -> Vec<Check> {
-    const NAME: &str = "harnesses.installed";
-    let inventory = match crate::harness_cmd::detected_here() {
-        Ok(inventory) => inventory,
-        Err(error) => {
-            return vec![Check::warn(
-                NAME,
-                format!("detection failed: {error}"),
-                "run `by harnesses --refresh` to see it",
-            )]
-        }
-    };
-    vec![harness_row(&inventory.harnesses, &branchyard::harnesses())]
+/// What `by harnesses` detects, as a summary and one row for each installed
+/// harness: version, login and live run in one short line each.
+pub(super) fn harnesses_installed(ctx: &Context) -> Vec<Check> {
+    match ctx.inventory() {
+        Ok(inventory) => harness_rows(&inventory.harnesses, &branchyard::harnesses()),
+        Err(error) => vec![Check::warn(
+            "harnesses.summary",
+            format!("detection failed: {error}"),
+            "run `by harnesses --refresh` to see it",
+        )],
+    }
 }
 
-/// The installed harnesses as one row: ok when at least one can run.
-fn harness_row(installed: &[HarnessState], known: &[HarnessInfo]) -> Check {
-    const NAME: &str = "harnesses.installed";
+/// `harnesses.summary`, then `harnesses.ID` for each installed harness, in
+/// catalog order.
+fn harness_rows(installed: &[HarnessState], known: &[HarnessInfo]) -> Vec<Check> {
+    let mut rows = vec![harness_summary(installed)];
+    rows.extend(installed.iter().map(|state| harness_row(state, known)));
+    rows
+}
+
+/// How many are installed, and how many can be used: ok when at least one
+/// can run.
+fn harness_summary(installed: &[HarnessState]) -> Check {
+    const NAME: &str = "harnesses.summary";
     if installed.is_empty() {
         return Check::warn(
             NAME,
@@ -398,30 +477,84 @@ fn harness_row(installed: &[HarnessState], known: &[HarnessInfo]) -> Check {
              installs one",
         );
     }
-    let mut parts = Vec::new();
-    let mut ready = 0;
+    let (mut logged_in, mut unknown, mut unverified, mut logged_out, mut blocked) = (0, 0, 0, 0, 0);
     for state in installed {
-        let version = state.version.as_deref().unwrap_or("version unknown");
-        let qualified = known
-            .iter()
-            .filter(|k| k.harness == state.id || k.profile == state.id)
-            .find_map(|k| k.qualification.clone())
-            .map_or_else(|| "unqualified".to_owned(), |q| format!("qualified {q}"));
-        let mut part = format!("{} {version} [{qualified}]", state.id);
-        match state.ready() {
-            Ok(()) => ready += 1,
-            Err(why) => part.push_str(&format!(" - cannot run: {why}")),
+        match (state.standing(), state.login.state) {
+            (Standing::Ready, LoginState::Unknown) => unknown += 1,
+            (Standing::Ready, _) => logged_in += 1,
+            (Standing::NotVerified(_), _) => unverified += 1,
+            (Standing::CannotRun(_), LoginState::LoggedOut) => logged_out += 1,
+            (Standing::CannotRun(_), _) => blocked += 1,
         }
-        parts.push(part);
     }
-    let detail = parts.join("; ");
-    match ready {
-        0 => Check::warn(
+    let parts: Vec<String> = [
+        (logged_in, "logged in"),
+        (unknown, "login unknown"),
+        (unverified, "login not verified"),
+        (logged_out, "logged out"),
+        (blocked, "cannot run"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, what)| format!("{n} {what}"))
+    .collect();
+    let detail = format!("{} installed: {}", installed.len(), parts.join(", "));
+    match logged_in + unknown {
+        // Where everyone starts: log in to one.
+        0 => Check::todo(
             NAME,
             detail,
-            "fix what each says: `by harnesses login ID` for a logged-out harness",
+            "log in to one: see the harnesses.* rows, or `by harnesses` for the table",
         ),
         _ => Check::ok(NAME, detail),
+    }
+}
+
+/// One installed harness: `VERSION · LOGIN · LIVE RUN` in a line of at most
+/// 120 characters. The version is named `installed X` beside the version
+/// its live run was on when the two differ: a live run says nothing about
+/// another version.
+fn harness_row(state: &HarnessState, known: &[HarnessInfo]) -> Check {
+    let name = format!("harnesses.{}", state.id);
+    let qualification = crate::harness_cmd::qualification_of(known, &state.id);
+    let q = qualification.as_deref();
+    let drift = inventory::live_drift(state.version.as_deref(), q).is_some();
+    let version = match (&state.version, drift) {
+        (Some(v), true) => format!("installed {v}"),
+        (Some(v), false) => v.clone(),
+        (None, _) => match state.version_text().as_str() {
+            "?" => "version unknown".to_owned(),
+            slow => slow.to_owned(),
+        },
+    };
+    let login = match state.standing() {
+        Standing::NotVerified(_) => "login not verified".to_owned(),
+        _ => state.login.label(),
+    };
+    let live = match (q.and_then(inventory::live_score), drift) {
+        (Some(score), true) => format!(
+            "live-tested {} ({score})",
+            q.and_then(inventory::live_version).unwrap_or_default()
+        ),
+        (Some(score), false) => format!("live {score}"),
+        (None, _) => "no live run".to_owned(),
+    };
+    let detail = format!("{version} · {login} · {live}");
+    match state.standing() {
+        // The key is set but agy will not read it: a step to take.
+        Standing::Ready if state.login.key_unused() => Check::todo(
+            name,
+            detail,
+            "run `by harnesses login antigravity`: GEMINI_API_KEY is set but agy reads it only \
+             with modelProvider gemini in its settings",
+        ),
+        Standing::Ready => Check::ok(name, detail),
+        // A login not made yet is a step to take, not a fault.
+        Standing::NotVerified(_) => Check::todo(name, detail, state.login_hint()),
+        Standing::CannotRun(_) if state.login.state == LoginState::LoggedOut => {
+            Check::todo(name, detail, state.login_hint())
+        }
+        Standing::CannotRun(why) => Check::warn(name, detail, why),
     }
 }
 
@@ -436,17 +569,70 @@ pub(super) fn harnesses_default(ctx: &Context) -> Vec<Check> {
         )];
     };
     let set = config.defaults.harness.as_deref();
-    vec![default_harness_row(set, &branchyard::harnesses())]
+    let installed = ctx
+        .inventory()
+        .as_ref()
+        .ok()
+        .map(|i| i.harnesses.as_slice());
+    vec![default_harness_row(
+        set,
+        &branchyard::harnesses(),
+        installed,
+    )]
 }
 
-fn default_harness_row(set: Option<&str>, known: &[HarnessInfo]) -> Check {
+/// `[defaults] harness`: known, installed, and, where the inventory says,
+/// not known to be logged out. `installed` is what detection found, if it
+/// ran.
+fn default_harness_row(
+    set: Option<&str>,
+    known: &[HarnessInfo],
+    installed: Option<&[HarnessState]>,
+) -> Check {
     const NAME: &str = "harnesses.default";
     let id = set.unwrap_or(BUILT_IN_HARNESS);
     let matching: Vec<&HarnessInfo> = known
         .iter()
         .filter(|k| k.harness == id || k.profile == id)
         .collect();
-    let installed = matching.iter().any(|k| k.available);
+    let on_path = matching.iter().any(|k| k.available);
+    // Installed, but nothing says it can be used: the same words
+    // `harnesses.ID` uses for it.
+    let standing = matching
+        .first()
+        .and_then(|k| installed?.iter().find(|s| s.id == k.harness))
+        .map(|state| (state.standing(), state.login_hint()));
+    match (&standing, on_path) {
+        (Some((Standing::NotVerified(_), hint)), true) => {
+            return Check::warn(
+                NAME,
+                format!(
+                    "{} {id}, which is installed, but its login is not verified",
+                    match set {
+                        Some(_) => "[defaults] harness =",
+                        None => "not set: `by run` without --harness uses",
+                    }
+                ),
+                hint.clone(),
+            )
+        }
+        (Some((Standing::CannotRun(why), hint)), true) => {
+            return Check::warn(
+                NAME,
+                format!(
+                    "{} {id}, which is installed, but cannot run: {}",
+                    match set {
+                        Some(_) => "[defaults] harness =",
+                        None => "not set: `by run` without --harness uses",
+                    },
+                    first_line(why)
+                ),
+                hint.clone(),
+            )
+        }
+        _ => {}
+    }
+    let installed = on_path;
     match (set, matching.is_empty(), installed) {
         (Some(id), true, _) => Check::fail(
             NAME,
@@ -575,8 +761,11 @@ fn microsandbox_row(ctx: &Context, config: &ProjectConfig) -> Check {
             Err(error) => Check::fail(
                 NAME,
                 error.to_string(),
-                "build with --features microsandbox and give [microsandbox] an image \
-                 (docs/providers.md)",
+                format!(
+                    "rebuild with `{}` (needs KVM and libcap-ng) and give [microsandbox] an \
+                     image (docs/modes.md#sandbox)",
+                    branchyard::MICROSANDBOX_REBUILD
+                ),
             ),
         },
         _ => skipped(
@@ -795,16 +984,18 @@ pub(super) fn server_reachable(ctx: &Context) -> Vec<Check> {
             "not configured: no --remote, BRANCHYARD_REMOTE or [remote] url; commands run here",
         )];
     };
+    // A URL may carry `user:password@`: shown without it.
+    let shown = without_userinfo(url);
     if crate::ssh_remote::is_ssh(url) {
         return vec![Check::ok(
             NAME,
-            format!("{url} is an ssh remote: not checked here; `by remote ssh status` shows it"),
+            format!("{shown} is an ssh remote: not checked here; `by remote ssh status` shows it"),
         )];
     }
     let Some(token_file) = globals.token_file.as_deref() else {
         return vec![Check::fail(
             NAME,
-            format!("{url} is configured but no token file is"),
+            format!("{shown} is configured but no token file is"),
             "set token_file under [remote], or pass --token-file / BRANCHYARD_TOKEN_FILE",
         )];
     };
@@ -819,7 +1010,7 @@ pub(super) fn server_reachable(ctx: &Context) -> Vec<Check> {
         Err(error) => {
             return vec![Check::fail(
                 NAME,
-                error.to_string(),
+                error.to_string().replace(url, &shown),
                 "check the token file and CA file the remote names",
             )]
         }
@@ -827,16 +1018,22 @@ pub(super) fn server_reachable(ctx: &Context) -> Vec<Check> {
     vec![match served_repositories(client, SERVER_DEADLINE) {
         Err(why) => Check::fail(
             NAME,
-            format!("{url} did not answer GET /v1/repos: {why}"),
-            "start the server (`by serve`), or fix the URL, token or CA file",
+            format!(
+                "{shown} did not answer GET /v1/repos: {}",
+                why.replace(url, &shown)
+            ),
+            crate::remote::UNREACHABLE_FIX,
         ),
         Ok(names) => match globals.repo.as_deref() {
             Some(wanted) if !names.iter().any(|n| n == wanted) => Check::fail(
                 NAME,
-                format!("{url} answers, but serves {}, not {wanted:?}", list(&names)),
+                format!(
+                    "{shown} answers, but serves {}, not {wanted:?}",
+                    list(&names)
+                ),
                 "fix repo under [remote] (or --repo / BRANCHYARD_REPO), or serve it",
             ),
-            _ => Check::ok(NAME, format!("{url} answers; it serves {}", list(&names))),
+            _ => Check::ok(NAME, format!("{shown} answers; it serves {}", list(&names))),
         },
     }]
 }
@@ -957,7 +1154,7 @@ fn keys_row(rows: &[KeyRow]) -> Check {
     }
     let detail = parts.join("; ");
     match status {
-        Status::Ok => Check::ok(NAME, detail),
+        Status::Ok | Status::Todo => Check::ok(NAME, detail),
         Status::Warn => Check::warn(
             NAME,
             detail,
@@ -1119,9 +1316,13 @@ mod tests {
             version: version.map(str::to_owned),
             ..HarnessState::default()
         };
-        if logged_out {
-            state.login.state = branchyard::inventory::LoginState::LoggedOut;
-            state.login.detail = "no credentials".into();
+        state.login.evidence = branchyard::inventory::Evidence::Likely;
+        match logged_out {
+            true => {
+                state.login.state = LoginState::LoggedOut;
+                state.login.detail = "no credentials".into();
+            }
+            false => state.login.state = LoginState::LoggedIn,
         }
         state
     }
@@ -1137,36 +1338,90 @@ mod tests {
     }
 
     #[test]
-    fn harnesses_are_ok_when_one_can_run_and_named_with_version_and_qualification() {
-        let none = harness_row(&[], &[]);
-        assert_eq!(none.status, Status::Warn);
-        assert!(none.fix.unwrap().contains("by harnesses install"));
+    fn a_server_url_is_shown_without_its_credentials() {
+        assert_eq!(
+            without_userinfo("https://me:secret@by.example:8421/api"),
+            "https://by.example:8421/api"
+        );
+        assert_eq!(
+            without_userinfo("http://127.0.0.1:8421"),
+            "http://127.0.0.1:8421"
+        );
+        assert_eq!(without_userinfo("ssh://me@host"), "ssh://host");
+    }
+
+    #[test]
+    fn harnesses_are_a_summary_and_one_short_row_each() {
+        let none = harness_rows(&[], &[]);
+        assert_eq!(none.len(), 1);
+        assert_eq!(none[0].status, Status::Warn);
+        assert!(none[0]
+            .fix
+            .clone()
+            .unwrap()
+            .contains("by harnesses install"));
 
         let catalog = [
-            profile("codex", true, Some("9/9 on 0.5")),
+            profile("codex", true, Some("9/9 on codex-cli 0.5.1")),
             profile("gemini-cli", true, None),
         ];
         let installed = [
             harness("codex", Some("0.5.1"), false),
             harness("gemini-cli", None, true),
         ];
-        let row = harness_row(&installed, &catalog);
-        assert_eq!(row.status, Status::Ok, "{row:?}");
-        assert!(
-            row.detail.contains("codex 0.5.1 [qualified 9/9 on 0.5]"),
-            "{}",
-            row.detail
+        let rows = harness_rows(&installed, &catalog);
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "harnesses.summary",
+                "harnesses.codex",
+                "harnesses.gemini-cli"
+            ]
         );
-        assert!(
-            row.detail
-                .contains("gemini-cli version unknown [unqualified] - cannot run:"),
-            "{}",
-            row.detail
+        assert_eq!(rows[0].status, Status::Ok, "one can run: {rows:?}");
+        assert_eq!(
+            rows[0].detail,
+            "2 installed: 1 logged in, 1 login not verified"
         );
+        // The version, the login and the live run, matching versions.
+        assert_eq!(rows[1].status, Status::Ok);
+        assert_eq!(rows[1].detail, "0.5.1 · credentials found · live 9/9");
+        // An unconfirmed login is a to-do that says so, never "cannot run".
+        assert_eq!(rows[2].status, Status::Todo);
+        assert_eq!(
+            rows[2].detail,
+            "version unknown · login not verified · no live run"
+        );
+        assert!(!rows[2].detail.contains("cannot run"));
+        assert!(rows[2]
+            .fix
+            .clone()
+            .unwrap()
+            .contains("by harnesses login gemini-cli"));
+        for row in &rows {
+            assert!(row.detail.chars().count() <= 120, "{row:?}");
+        }
 
-        let row = harness_row(&installed[1..], &catalog);
-        assert_eq!(row.status, Status::Warn, "none can run");
-        assert!(row.fix.unwrap().contains("by harnesses login"));
+        let rows = harness_rows(&installed[1..], &catalog);
+        assert_eq!(rows[0].status, Status::Todo, "none can be used yet");
+        assert!(rows[0].fix.clone().unwrap().contains("harnesses.*"));
+    }
+
+    #[test]
+    fn a_live_run_on_another_version_is_named_beside_the_installed_one() {
+        let catalog = [profile("codex", true, Some("9/9 on codex-cli 0.157.1"))];
+        let installed = [harness("codex", Some("0.164.0"), false)];
+        let row = harness_row(&installed[0], &catalog);
+        assert_eq!(
+            row.detail,
+            "installed 0.164.0 · credentials found · live-tested 0.157.1 (9/9)"
+        );
+        // A harness whose version command was too slow says so.
+        let mut slow = harness("codex", None, false);
+        slow.version_note = Some("slow to start (took >10 s)".into());
+        let row = harness_row(&slow, &catalog);
+        assert!(row.detail.starts_with("slow to start · "), "{}", row.detail);
     }
 
     #[test]
@@ -1175,27 +1430,27 @@ mod tests {
             profile("codex", true, None),
             profile("claude-code", false, None),
         ];
-        let row = default_harness_row(Some("codex"), &catalog);
+        let row = default_harness_row(Some("codex"), &catalog, None);
         assert_eq!((row.status, row.fix), (Status::Ok, None));
-        let row = default_harness_row(Some("claude-code"), &catalog);
+        let row = default_harness_row(Some("claude-code"), &catalog, None);
         assert_eq!(row.status, Status::Fail);
         assert!(row.detail.contains("is not installed"));
         assert!(row
             .fix
             .unwrap()
             .contains("by harnesses install claude-code"));
-        let row = default_harness_row(Some("nope"), &catalog);
+        let row = default_harness_row(Some("nope"), &catalog, None);
         assert_eq!(row.status, Status::Fail);
         assert!(row
             .detail
             .contains("not a harness or profile Branchyard knows"));
         // Unset: the built-in default, which must be installed.
-        let row = default_harness_row(None, &catalog);
+        let row = default_harness_row(None, &catalog, None);
         assert_eq!(row.status, Status::Warn);
         assert!(row
             .detail
             .contains("built-in default claude-code is not installed"));
-        let row = default_harness_row(None, &[profile("claude-code", true, None)]);
+        let row = default_harness_row(None, &[profile("claude-code", true, None)], None);
         assert_eq!(row.status, Status::Ok);
     }
 
@@ -1207,6 +1462,25 @@ mod tests {
             turn: None,
             used_ms,
         }
+    }
+
+    #[test]
+    fn a_default_harness_whose_login_is_not_verified_is_a_warning_with_the_login_command() {
+        let catalog = [profile("claude-code", true, None)];
+        let out = harness("claude-code", Some("2.1.310"), true);
+        let row = default_harness_row(None, &catalog, Some(std::slice::from_ref(&out)));
+        assert_eq!(row.status, Status::Warn, "{row:?}");
+        assert!(
+            row.detail
+                .contains("uses claude-code, which is installed, but its login is not verified"),
+            "{}",
+            row.detail
+        );
+        assert!(row.fix.unwrap().contains("by harnesses login claude-code"));
+        // Logged in: as before.
+        let ok = harness("claude-code", Some("2.1.310"), false);
+        let row = default_harness_row(Some("claude-code"), &catalog, Some(&[ok]));
+        assert_eq!(row.status, Status::Ok, "{row:?}");
     }
 
     #[test]

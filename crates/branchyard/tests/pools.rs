@@ -241,7 +241,8 @@ fn shared_directories_in_a_slot_stay_links_for_the_branch() {
     let key = slot.environment.clone().unwrap();
     let pruned = f
         .yard
-        .prune_environments(0, Duration::ZERO, std::slice::from_ref(&key));
+        .prune_environments(0, Duration::ZERO, std::slice::from_ref(&key))
+        .unwrap();
     assert!(pruned.removed.is_empty(), "{pruned:?}");
     assert!(pruned.kept[0].1.contains("pool slot"), "{pruned:?}");
 

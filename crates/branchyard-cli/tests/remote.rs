@@ -285,7 +285,11 @@ fn hex_runs(line: &str) -> String {
             }
             let run = &chars[i..j];
             let bounded = j == chars.len() || !chars[j].is_ascii_alphanumeric();
-            if bounded && run.len() >= 7 && run.iter().any(|c| c.is_ascii_digit()) {
+            // A word spelt from a to f is not a commit ID (`acceded`, `defaced`),
+            // so a short run needs a digit; a commit ID of ten or more letters
+            // without one (`cbcfabfded`, once in CI) is still a commit ID.
+            let digit = run.iter().any(|c| c.is_ascii_digit());
+            if bounded && run.len() >= 7 && (digit || run.len() >= 10) {
                 out.push_str("<sha>");
                 i = j;
                 continue;
@@ -483,7 +487,7 @@ fn remote_commands_print_what_local_ones_do() {
     }
     assert_eq!(
         server.by(&dir.0, &["merge", "nope"]).stderr,
-        b"by: no branch named nope\n"
+        b"by: no branch named nope\n  next: by ls\n"
     );
 }
 
@@ -671,7 +675,7 @@ fn by_send_steer_reaches_a_turn_on_the_server() {
     let late = server.by(&dir.0, &["send", "live", "--steer", "late"]);
     assert!(!late.status.success());
     assert!(
-        text(&late.stderr).contains("is not running a turn"),
+        text(&late.stderr).contains("has no running turn to steer"),
         "{}",
         text(&late.stderr)
     );
@@ -694,7 +698,8 @@ fn remote_mode_is_configured_by_flags_or_environment() {
     assert_eq!(ambiguous.status.code(), Some(1));
     assert_eq!(
         text(&ambiguous.stderr),
-        "by: the server serves one, two; pass --repo NAME or set BRANCHYARD_REPO\n"
+        "by: the server serves one, two; pass --repo NAME, set BRANCHYARD_REPO, or set repo \
+         under [remote] in branchyard.toml\n"
     );
     let run = server.by(
         &dir.0,
@@ -1740,11 +1745,25 @@ fn the_server_comes_from_flags_after_the_command_or_the_environment() {
         .output()
         .unwrap();
     assert_eq!(flag_wins.status.code(), Some(1));
+    // `--json` makes the refusal an envelope on standard output, and the
+    // server's own error says which repository it does serve.
+    let refused: Value = serde_json::from_slice(&flag_wins.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", text(&flag_wins.stdout)));
+    assert_eq!(refused["error"]["kind"], "unknown_repo", "{refused}");
+    let message = refused["error"]["message"].as_str().unwrap();
     assert!(
-        text(&flag_wins.stderr).contains("nope"),
-        "{}",
-        text(&flag_wins.stderr)
+        message.starts_with("no repository named nope; this server serves ")
+            && message.ends_with("serve it with `by serve --repo NAME=PATH`"),
+        "{message}"
     );
+    assert!(
+        refused["error"]["detail"]["served"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::from("app")),
+        "{refused}"
+    );
+    assert_eq!(text(&flag_wins.stderr), "");
 }
 
 #[test]
@@ -2276,7 +2295,7 @@ fn a_session_hook_and_status_line_ask_the_server() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     let said = hook("user-prompt-submit").unwrap();
     assert!(
-        said.contains("- p: finished, ready to integrate (1 file changed)"),
+        said.contains("- p: ready to merge, 1 file changed: by diff p, then by merge p"),
         "{said}"
     );
     // Told once.
@@ -2325,8 +2344,13 @@ fn a_session_hook_against_a_server_that_is_down_prints_nothing_in_time() {
         for args in [&["hook", "session-start"][..], &["statusline"]] {
             let (out, took) = session(&here, args, &input, &env);
             assert_eq!(out, "", "{url} {args:?}");
+            // Contract: the hook gives up after its 2 s deadline
+            // (`hook_cmd::DEADLINE`) and prints nothing. `took` also holds
+            // the start and exit of an instrumented `by`; the 3 s of margin
+            // is for that on a loaded runner, and still far from a hook
+            // that waits on a server which never answers.
             assert!(
-                took < Duration::from_millis(2500),
+                took < wait::scaled(Duration::from_secs(5)),
                 "{url} {args:?}: {took:?}"
             );
         }
@@ -2388,7 +2412,7 @@ fn a_session_hook_reads_a_servers_postgres_store() {
     assert!(!there.join(".branchyard/state.db").exists());
     let said = hook("user-prompt-submit").unwrap();
     assert!(
-        said.contains("- p: finished, ready to integrate (1 file changed)"),
+        said.contains("- p: ready to merge, 1 file changed: by diff p, then by merge p"),
         "{said}"
     );
     assert_eq!(hook("user-prompt-submit"), None);

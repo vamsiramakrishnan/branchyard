@@ -169,7 +169,8 @@ pub fn review_text(plan: &Plan, color: bool) -> String {
     out
 }
 
-fn cancelled(error: io::Error) -> Failure {
+/// A prompt that ended: Ctrl-C is a cancel, said once and not an error.
+pub(crate) fn cancelled(error: io::Error) -> Failure {
     if error.kind() == io::ErrorKind::Interrupted {
         branchyard_support::best_effort(
             "print the cancel message",
@@ -181,7 +182,7 @@ fn cancelled(error: io::Error) -> Failure {
 }
 
 /// Ask one question; the answer as the engine takes it.
-fn ask(q: &Question) -> io::Result<Value> {
+pub(crate) fn ask(q: &Question) -> io::Result<Value> {
     let prompt = format!("{}\n{}", q.prompt, paint(true, "2", &q.why));
     let text_input = |q: &Question| -> io::Result<Value> {
         let checker = q.clone();
@@ -270,9 +271,18 @@ pub fn run(topic: Option<Topic>, defaults: bool) -> Outcome {
         }
     };
     let cwd = std::env::current_dir()?;
+    if topic == Topic::Project && !crate::init::in_work_tree(&cwd) {
+        cliclack::outro_cancel(crate::init::not_a_repository(&cwd)).map_err(Failure::Io)?;
+        return Err(Failure::Reported);
+    }
     let spinner = cliclack::spinner();
     spinner.start("Looking at this machine and repository…");
-    let host = HostProbe::new(&cwd);
+    // Installing hooks needs no harness versions, and running some
+    // harnesses writes their directories into the home.
+    let host = match topic {
+        Topic::Plugin => HostProbe::without_versions(&cwd),
+        _ => HostProbe::new(&cwd),
+    };
     let root = host.root_path().to_path_buf();
     let probe = CachedProbe::new(host);
     let facts = Facts::gather(&probe);

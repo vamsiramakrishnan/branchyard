@@ -24,9 +24,10 @@ fn loopback(listen: &str) -> bool {
 pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
     let listen = text(answers, "listen").unwrap_or_else(|| "127.0.0.1:8421".into());
     let postgres_hint = match (facts.tools.contains_key("psql") || facts.tools.contains_key("pg_isready"), facts.tools.contains_key("docker")) {
+        _ if !facts.build.postgres => "needs a build with --features postgres; several servers and by worker can then share it",
         (true, _) => "PostgreSQL client tools found; several servers and by worker can share it",
         (false, true) => "docker found (the deploy topic runs PostgreSQL in compose); several servers can share it",
-        (false, false) => "several servers and by worker can share it; needs the postgres build feature",
+        (false, false) => "several servers and by worker can share it",
     };
     let mut qs = vec![
         Question::new(
@@ -61,7 +62,13 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
             Kind::Select,
             "Database",
             "Where should branch state and operations be kept?",
-            "SQLite needs nothing; PostgreSQL lets several servers and workers share the queue.",
+            &match facts.build.postgres {
+                true => "SQLite needs nothing; PostgreSQL lets several servers and workers share the queue.".to_owned(),
+                false => format!(
+                    "SQLite needs nothing; PostgreSQL lets several servers and workers share the queue, but this build cannot open it: `by serve` would refuse. Rebuild with `{}`, or serve from a build that has it (the release binaries do).",
+                    crate::probe::REBUILD_POSTGRES
+                ),
+            },
         )
         .default("sqlite")
         .choices(vec![
@@ -219,9 +226,10 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
             Choice::new(
                 "microsandbox",
                 "Microsandbox",
-                match facts.platform.kvm {
-                    true => "microVMs; KVM is available here",
-                    false => "microVMs; no KVM here",
+                match (facts.build.microsandbox, facts.platform.kvm) {
+                    (false, _) => "microVMs; needs a build with --features microsandbox",
+                    (true, true) => "microVMs; KVM is available here",
+                    (true, false) => "microVMs; no KVM here",
                 },
             ),
             Choice::new("substrate", "Agent Substrate", "actors on Kubernetes"),
@@ -498,7 +506,7 @@ pub fn plan(
         }
     ));
     plan.summary.push(format!(
-        "Token files (0600, printed nowhere): {}",
+        "Token files (0600, printed nowhere; a client passes one with --token-file): {}",
         token_paths.join(", ")
     ));
     plan.notes.push(
@@ -506,6 +514,18 @@ pub fn plan(
          an existing token file is kept, so re-running does not lock out a client."
             .into(),
     );
+    plan.notes.push(
+        "A client passes one of these files with --token-file (or [remote] token_file). \
+         `by serve` without --config makes its own token at .branchyard/server/token instead."
+            .into(),
+    );
+    if text(answers, "database").as_deref() == Some("postgres") && !facts.build.postgres {
+        plan.notes.push(format!(
+            "This build cannot open PostgreSQL, so `by serve --config {path}` will refuse until it \
+             runs on a build that can: `{}` (the release binaries have it).",
+            crate::probe::REBUILD_POSTGRES
+        ));
+    }
     if !flag(answers, "tls") && !loopback(&text(answers, "listen").unwrap_or_default()) {
         plan.notes.push("Off loopback without TLS the server refuses to start unless given --insecure-bind behind a TLS proxy.".into());
     }

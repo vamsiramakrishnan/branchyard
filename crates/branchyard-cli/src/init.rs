@@ -9,7 +9,7 @@ use std::io::Read;
 
 use branchyard_setup::install::{self, HarnessList};
 use branchyard_setup::protocol::{ErrorBody, ErrorResponse, TopicList};
-use branchyard_setup::{Facts, Probe, Response, Topic};
+use branchyard_setup::{ArtifactKind, Facts, Plan, Probe, Response, Topic};
 use serde_json::Value;
 
 use crate::args::{InitArgs, InitStep};
@@ -39,6 +39,40 @@ fn refuse(json: bool, kind: &str, message: String, paths: Vec<String>) -> Outcom
     Err(Failure::Message(text))
 }
 
+/// A usage error, as clap's are: the message, exit 2. With `--json`, the
+/// refusal document on stdout.
+fn usage(json: bool, message: String) -> Outcome {
+    if json {
+        let body = ErrorResponse {
+            error: ErrorBody {
+                kind: "usage".into(),
+                message,
+                paths: Vec::new(),
+            },
+        };
+        print(&format!(
+            "{}\n",
+            serde_json::to_string_pretty(&body).unwrap_or_default()
+        ))?;
+    } else {
+        eprintln!("by: {message}");
+    }
+    std::process::exit(2);
+}
+
+/// Whether `cwd` is inside a repository, as setup finds the root.
+pub(crate) fn in_work_tree(cwd: &std::path::Path) -> bool {
+    setup_io::project_root(cwd).join(".git").exists()
+}
+
+/// What `by init project` and `by up` say outside a repository.
+pub(crate) fn not_a_repository(cwd: &std::path::Path) -> String {
+    format!(
+        "not a git repository: {}. Run `git init` here, or cd into one",
+        cwd.display()
+    )
+}
+
 fn read_answers(source: &str) -> Result<BTreeMap<String, Value>, String> {
     let text = match source {
         "-" => {
@@ -64,9 +98,25 @@ fn read_answers(source: &str) -> Result<BTreeMap<String, Value>, String> {
 /// ordinary interview takes over (a protocol step with no harness named,
 /// or the wizard on a terminal after the listing).
 fn plugin(env: &Env, init: &InitArgs) -> Option<Outcome> {
+    if init.status {
+        return Some(crate::setup_cmd::plugin_status(
+            env,
+            &init.harnesses,
+            init.json,
+        ));
+    }
     let named = !init.harnesses.is_empty() || init.all_detected;
-    if !named && init.step.is_some() {
-        return None;
+    match init.step {
+        // The protocol asks which harnesses, or takes them from answers.
+        Some(InitStep::Next) => return None,
+        Some(_) if !named && (init.answers.is_some() || init.defaults) => return None,
+        Some(_) if !named => {
+            return Some(usage(
+                init.json,
+                "name harness IDs or --all-detected; `by init plugin` lists them".into(),
+            ))
+        }
+        _ => {}
     }
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
@@ -93,7 +143,7 @@ fn plugin(env: &Env, init: &InitArgs) -> Option<Outcome> {
             return Some(Err(e));
         }
         return match env.stdin_tty && env.stdout_tty {
-            // Then the interview, which offers the skills too.
+            // Then the interview: which of them, the detected ones chosen.
             true => None,
             false => Some(Ok(())),
         };
@@ -117,32 +167,43 @@ fn plugin(env: &Env, init: &InitArgs) -> Option<Outcome> {
             "No harness Branchyard installs for is on PATH; nothing to do.\nby init plugin lists them all; name one to install for it anyway.\n",
         ));
     }
-    let mut raw = match &init.answers {
+    let raw = match &init.answers {
         Some(source) => match read_answers(source) {
             Ok(raw) => raw,
             Err(message) => return Some(refuse(init.json, "invalid_answers", message, Vec::new())),
         },
         None => BTreeMap::new(),
     };
-    raw.insert("host".into(), Value::String("harnesses".into()));
-    raw.insert(
-        "harnesses".into(),
-        Value::Array(ids.into_iter().map(Value::String).collect()),
-    );
-    let response = branchyard_setup::next(
-        Topic::Plugin,
-        &probe,
-        &raw,
-        true,
-        &mut RandomEntropy,
-        &HostValidator,
-    );
+    let response = plugin_response(&probe, ids, raw);
     Some(match init.step {
         Some(InitStep::Next) => print(&format!("{}\n", to_json(&response))),
         Some(step) => finish(&probe, init, step, response),
         None if init.json => finish(&probe, init, InitStep::DryRun, response),
-        None => review_then_ask(env, &probe, response),
+        None => review_then_ask(env, &probe, init, response),
     })
+}
+
+/// The plan that installs hooks, commands and skills for the harnesses
+/// `ids` (the plugin topic with `host = harnesses`), over `answers`. `by
+/// init plugin` and `by setup` both install through it.
+pub(crate) fn plugin_response(
+    probe: &dyn Probe,
+    ids: Vec<String>,
+    mut answers: BTreeMap<String, Value>,
+) -> Response {
+    answers.insert("host".into(), Value::String("harnesses".into()));
+    answers.insert(
+        "harnesses".into(),
+        Value::Array(ids.into_iter().map(Value::String).collect()),
+    );
+    branchyard_setup::next(
+        Topic::Plugin,
+        probe,
+        &answers,
+        true,
+        &mut RandomEntropy,
+        &HostValidator,
+    )
 }
 
 /// `by init plugin`'s listing as text.
@@ -167,7 +228,11 @@ fn listing_text(list: &HarnessList) -> String {
                 "" => String::new(),
                 at => format!(" at {at}"),
             };
-            out.push_str(&format!("    {} {}{at}\n", f.how.label(), f.path));
+            let unless = match f.unless_set.as_str() {
+                "" => String::new(),
+                key => format!(", only if it sets no \"{key}\""),
+            };
+            out.push_str(&format!("    {} {}{at}{unless}\n", f.how.label(), f.path));
         }
     }
     out.push_str(
@@ -178,13 +243,23 @@ fn listing_text(list: &HarnessList) -> String {
 
 /// Show the plan's diffs and ask, on a terminal; elsewhere, say how to
 /// write it.
-fn review_then_ask(env: &Env, probe: &HostProbe, response: Response) -> Outcome {
+fn review_then_ask(env: &Env, probe: &HostProbe, init: &InitArgs, response: Response) -> Outcome {
     let Some(plan) = &response.plan else {
         return Err(Failure::Message(
             "the install finished without a plan".into(),
         ));
     };
-    print(&crate::wizard::review_text(plan, env.color))?;
+    let terminal = env.stdin_tty && env.stdout_tty;
+    // On a terminal it asks next, and says what follows once written;
+    // elsewhere the next thing is writing it.
+    let shown = match terminal {
+        true => Plan {
+            commands: Vec::new(),
+            ..plan.clone()
+        },
+        false => before_writing(plan, init),
+    };
+    print(&crate::wizard::review_text(&shown, env.color))?;
     if !plan.valid {
         return Err(Failure::Message(
             "a file cannot be installed (above); nothing was written".into(),
@@ -194,10 +269,8 @@ fn review_then_ask(env: &Env, probe: &HostProbe, response: Response) -> Outcome 
     if writes == 0 {
         return print("\nEverything is already installed; nothing to write.\n");
     }
-    if !(env.stdin_tty && env.stdout_tty) {
-        return print(
-            "\nNothing was written. Run again with --apply to write these files (and --force to replace the ones marked update that are not merges).\n",
-        );
+    if !terminal {
+        return Ok(());
     }
     let overwrites = plan.overwrites();
     let mut force = false;
@@ -228,12 +301,24 @@ fn review_then_ask(env: &Env, probe: &HostProbe, response: Response) -> Outcome 
         force,
         harnesses: Vec::new(),
         all_detected: false,
+        status: false,
     };
     finish(probe, &flags, InitStep::Apply, response)
 }
 
 /// `by init`, its flags already checked by clap (`crate::args::InitFlags`).
 pub fn main(env: &Env, init: &InitArgs) -> Outcome {
+    if init.topic == Some(Topic::Project) {
+        let cwd = std::env::current_dir()?;
+        if !in_work_tree(&cwd) {
+            return refuse(
+                init.json,
+                "not_a_repository",
+                not_a_repository(&cwd),
+                Vec::new(),
+            );
+        }
+    }
     if init.topic == Some(Topic::Plugin) {
         if let Some(outcome) = plugin(env, init) {
             return outcome;
@@ -290,6 +375,53 @@ fn to_json<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string_pretty(value).unwrap_or_default()
 }
 
+/// The command that writes what `init` asked for: `by init plugin codex
+/// --apply`, or the same with the answers file or `--defaults` it was given
+/// (not stdin, which cannot be read twice).
+fn apply_command(init: &InitArgs) -> Option<String> {
+    let mut command = String::from("by init plugin");
+    match (init.all_detected, init.harnesses.is_empty()) {
+        (true, _) => command.push_str(" --all-detected"),
+        (false, false) => {
+            for id in &init.harnesses {
+                command.push(' ');
+                command.push_str(id);
+            }
+        }
+        (false, true) => match (&init.answers, init.defaults) {
+            (Some(file), _) if file != "-" => command.push_str(&format!(" --answers {file}")),
+            (None, true) => command.push_str(" --defaults"),
+            _ => return None,
+        },
+    }
+    command.push_str(" --apply");
+    Some(command)
+}
+
+/// `plan` as shown when nothing is written yet: a harness install is
+/// followed by the command that writes it, and nothing else (what comes
+/// after is printed by `--apply`). A plan that cannot be written, or has
+/// nothing to write, offers no command.
+fn before_writing(plan: &Plan, init: &InitArgs) -> Plan {
+    let mut shown = plan.clone();
+    if plan.topic != Topic::Plugin {
+        return shown;
+    }
+    shown.commands.clear();
+    let writes = plan.files.iter().any(|f| f.writes());
+    if let Some(command) = apply_command(init).filter(|_| plan.valid && writes) {
+        let force = match plan.overwrites().is_empty() {
+            true => "",
+            false => " (--force also replaces the files marked update that are not merges)",
+        };
+        shown.command(
+            command,
+            format!("Write these files; nothing has been written yet{force}."),
+        );
+    }
+    shown
+}
+
 /// `--dry-run` or `--apply` once the answers are in.
 fn finish(probe: &HostProbe, flags: &InitArgs, step: InitStep, response: Response) -> Outcome {
     let Some(plan) = &response.plan else {
@@ -319,7 +451,16 @@ fn finish(probe: &HostProbe, flags: &InitArgs, step: InitStep, response: Respons
     if step == InitStep::DryRun {
         return match flags.json {
             true => print(&format!("{}\n", to_json(&response))),
-            false => print(&crate::wizard::review_text(plan, false)),
+            false => {
+                let mut text = crate::wizard::review_text(&before_writing(plan, flags), false);
+                if plan.topic == Topic::Plugin
+                    && plan.valid
+                    && !plan.files.iter().any(|f| f.writes())
+                {
+                    text.push_str("\nEverything is already installed; nothing to write.\n");
+                }
+                print(&text)
+            }
         };
     }
     match setup_io::apply(plan, probe.root_path(), flags.force) {
@@ -355,12 +496,42 @@ fn finish(probe: &HostProbe, flags: &InitArgs, step: InitStep, response: Respons
             "the plan failed validation; nothing was written".into(),
             problems,
         ),
-        Err(Refusal::WouldOverwrite(paths)) => refuse(
-            flags.json,
-            "would_overwrite",
-            "these files exist with different content; review the diffs (--dry-run) and pass --force to replace them; nothing was written".into(),
-            paths,
-        ),
+        Err(Refusal::WouldOverwrite(paths)) => {
+            // A configuration file `by` itself refuses is not "different
+            // content": say it does not load, and that --force replaces it.
+            let unloadable = paths.iter().find_map(|path| {
+                let file = plan
+                    .files
+                    .iter()
+                    .find(|f| f.path == *path && f.kind == ArtifactKind::ProjectConfig)?;
+                // Unreadable here means the plain refusal below, which still
+                // names the file.
+                let text = branchyard_support::best_effort(
+                    "read the configuration file by refuses to overwrite",
+                    std::fs::read_to_string(probe.resolve(&file.path)),
+                )?;
+                let problem = branchyard_setup::hint::unreadable(&text)?;
+                let line = problem.line.map(|n| format!(" (line {n})")).unwrap_or_default();
+                Some(format!(
+                    "{path} does not load{line}; --force replaces it. See what is wrong with `by config validate`; nothing was written"
+                ))
+            });
+            match (unloadable, paths.len()) {
+                // The message names the file; the text needs no list under it.
+                (Some(message), 1) => refuse(
+                    flags.json,
+                    "would_overwrite",
+                    message,
+                    if flags.json { paths } else { Vec::new() },
+                ),
+                _ => refuse(
+                    flags.json,
+                    "would_overwrite",
+                    "these files exist with different content; review the diffs (--dry-run) and pass --force to replace them; nothing was written".into(),
+                    paths,
+                ),
+            }
+        }
         Err(Refusal::Io(message)) => refuse(flags.json, "io", message, Vec::new()),
     }
 }

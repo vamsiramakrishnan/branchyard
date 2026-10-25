@@ -73,6 +73,7 @@ HOOK_FILES = {
 }
 # Each status-line settings fragment: (harness id, the path to the statusLine object).
 STATUS_FILES = {
+    "claude-code/settings-statusline.json": ("claude-code", ("statusLine",)),
     "qwen-code/settings.json": ("qwen-code", ("ui", "statusLine")),
     "github-copilot/settings.json": ("github-copilot", ("statusLine",)),
     "droid/settings.json": ("droid", ("statusLine",)),
@@ -327,8 +328,38 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(row["config"]["configPath"]["__js"], "dshHomePath('branchyard-hooks.json')")
         # The bridge has to be added to a profile before the row loads.
         notes = " ".join(n["text"] for n in install["note"])
-        self.assertIn("@deepseek-ai/dsh-hooks-claude-code@<version>", notes)
-        self.assertIn("@deepseek-ai/dsh-hook-protocol@<version>", notes)
+        self.assertIn("@deepseek-ai/dsh-hooks-claude-code@$(dsh --version)", notes)
+        self.assertIn("@deepseek-ai/dsh-hook-protocol@$(dsh --version)", notes)
+
+    def test_the_deepseek_note_prints_a_line_that_pastes_as_it_is(self):
+        # On 25 October 2026 the note printed `--profile <name>` and `@<version>`,
+        # which a shell reads as redirections (`syntax error near unexpected
+        # token 'newline'`). The line it prints now runs, for each profile.
+        install = tomllib.loads((INSTALL / "deepseek-harness.toml").read_text())
+        notes = " ".join(n["text"] for n in install["note"])
+        line = re.search(r"for p in [\w ]+; do dsh plugin .*?; done", notes)
+        self.assertIsNotNone(line, notes)
+        self.assertNotIn("<", line.group(0))
+        with tempfile.TemporaryDirectory() as tmp:
+            dsh = Path(tmp) / "dsh"
+            dsh.write_text('#!/bin/sh\nif [ "$1" = --version ]; then echo 9.9.9-test; exit 0; fi\necho "dsh $*"\n')
+            dsh.chmod(0o755)
+            done = subprocess.run(
+                ["bash", "-c", line.group(0)],
+                capture_output=True,
+                text=True,
+                env={"PATH": f"{tmp}:/usr/bin:/bin"},
+            )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(
+            done.stdout.splitlines(),
+            [
+                "dsh plugin --profile acp add @deepseek-ai/dsh-hooks-claude-code@9.9.9-test "
+                "@deepseek-ai/dsh-hook-protocol@9.9.9-test",
+                "dsh plugin --profile headless add @deepseek-ai/dsh-hooks-claude-code@9.9.9-test "
+                "@deepseek-ai/dsh-hook-protocol@9.9.9-test",
+            ],
+        )
 
     def test_the_package_checks_every_host_manifest_version(self):
         sys.path.insert(0, str(ROOT / "tools"))
@@ -388,6 +419,38 @@ class InstallManifestTests(unittest.TestCase):
             for path in sorted((HARNESSES / harness).rglob("*")):
                 if path.is_file():
                     self.assertIn(path.relative_to(PLUGIN).as_posix(), named)
+
+
+class ClaudeCodeStatusLineTests(unittest.TestCase):
+    """Claude Code's status line: `by init plugin` merges it when the settings
+    have none, and leaves yours (the setup crate's tests/install.rs plans both)."""
+
+    def manifest(self):
+        return tomllib.loads((INSTALL / "claude-code.toml").read_text())
+
+    def test_the_manifest_merges_the_status_line_only_when_there_is_none(self):
+        manifest = self.manifest()
+        self.assertIn("statusline", manifest["provides"])
+        (entry,) = [f for f in manifest["file"] if f["from"].endswith("settings-statusline.json")]
+        self.assertEqual(
+            (entry["to"], entry["how"], entry["at"], entry["unless_set"]),
+            ("~/.claude/settings.json", "merge-json", "", "statusLine"),
+        )
+        # The hooks fragment sets no status line, so a user's own does not clash with it.
+        hooks = json.loads((HARNESSES / "claude-code/settings-hooks.json").read_text())
+        self.assertEqual(set(hooks), {"hooks"})
+        # The old note ("not merged, as it would replace yours") is no longer true.
+        self.assertFalse(any("Status line (not merged" in n["text"] for n in manifest["note"]))
+
+    def test_the_status_line_is_the_guarded_command_for_claude_code(self):
+        fragment = json.loads((HARNESSES / "claude-code/settings-statusline.json").read_text())
+        self.assertEqual(set(fragment), {"statusLine"})
+        self.assertEqual(fragment["statusLine"]["type"], "command")
+        with tempfile.TemporaryDirectory() as root:
+            empty = Path(root) / "empty"
+            empty.mkdir()
+            result = run_without_by(fragment["statusLine"]["command"], empty)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
 
 
 class DocsTests(unittest.TestCase):

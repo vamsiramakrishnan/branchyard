@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
 
 use branchyard_bridge::{Claims, ClientTls, Endpoint, Signer};
 use branchyard_sandbox::{ExecSpec, Process, ProviderError};
@@ -423,6 +422,27 @@ fn children_of(parent: u32) -> Vec<u32> {
     children
 }
 
+/// The program name of `pid`, from `/proc`.
+fn comm_of(pid: u32) -> Option<String> {
+    Some(
+        fs::read_to_string(format!("/proc/{pid}/comm"))
+            .ok()?
+            .trim_end()
+            .to_owned(),
+    )
+}
+
+/// The bytes `pid` has passed to `write` so far (`wchar` in `/proc/<pid>/io`).
+fn bytes_written_by(pid: u32) -> Option<u64> {
+    fs::read_to_string(format!("/proc/{pid}/io"))
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("wchar:"))?
+        .trim()
+        .parse()
+        .ok()
+}
+
 fn zombies_of(parent: u32) -> Vec<u32> {
     children_of(parent)
         .into_iter()
@@ -650,8 +670,21 @@ fn sigterm_delivers_an_execs_last_output_and_status_before_the_bridge_exits() {
     stdin.write_all(b"go\n").unwrap();
     // Nothing reads stderr yet: the client's pipe, both sockets and the
     // bridge's pipe fill, and the bridge's stderr pump blocks holding the
-    // connection's writer.
-    wait::settle("the pipes fill", Duration::from_millis(500));
+    // connection's writer. That is the state the test is about, so wait for
+    // it: `head` has been writing at full speed, and is full when it has
+    // written nothing between two looks and sleeps in the write.
+    let head = wait::until("the writer to start", || {
+        children_of(shell)
+            .into_iter()
+            .find(|pid| comm_of(*pid).as_deref() == Some("head"))
+    });
+    let mut last = None;
+    wait::until("the pipes to fill and the writer to block", || {
+        let now = bytes_written_by(head)?;
+        let stalled = last == Some(now) && now > 0 && stat_of(head).is_some_and(|(_, s)| s == "S");
+        last = Some(now);
+        stalled.then_some(())
+    });
     // SAFETY: plain syscall.
     assert_eq!(unsafe { libc::kill(bridge.pid() as i32, libc::SIGTERM) }, 0);
     // The trap has run and the shell has exited before stderr is read. A

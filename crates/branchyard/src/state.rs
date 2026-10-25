@@ -1154,7 +1154,7 @@ impl Store {
     /// a stopped engine is reported as [`Taken::Stale`] for recovery first.
     pub fn acquire(&self, record: &Record) -> Result<Taken, Error> {
         match self.backend.acquire(record, &self.owner, LEASE_TTL)? {
-            Acquired::Granted(fence) => Ok(Taken::Granted(Lease::new(self.clone(), fence))),
+            Acquired::Granted(fence) => Ok(Taken::Granted(Lease::new(self.clone(), fence)?)),
             Acquired::Held(row) => match row.stale(now_ms()) {
                 Some(_) => Ok(Taken::Stale),
                 None => Err(Error::Running(record.info.name.clone())),
@@ -1245,14 +1245,26 @@ impl fmt::Debug for Lease {
 }
 
 impl Lease {
-    pub fn new(store: Store, fence: Fence) -> Lease {
-        let heartbeat = Heartbeat::start(&store, &fence);
-        Lease {
+    /// Hold `fence`'s lease, renewing it until it is finished or dropped.
+    /// An error when the renewal cannot be started, in which case the lease
+    /// is released, not left to expire.
+    pub fn new(store: Store, fence: Fence) -> Result<Lease, Error> {
+        // Built first: if the heartbeat cannot start, dropping this
+        // releases the lease.
+        let mut lease = Lease {
             store,
             fence,
-            heartbeat: Some(heartbeat),
+            heartbeat: None,
             done: false,
-        }
+        };
+        let heartbeat = Heartbeat::start(&lease.store, &lease.fence).map_err(|e| {
+            Error::State(format!(
+                "could not start the heartbeat that renews the lease on branch {}: {e}",
+                lease.fence.branch
+            ))
+        })?;
+        lease.heartbeat = Some(heartbeat);
+        Ok(lease)
     }
 
     pub fn fence(&self) -> &Fence {
@@ -1298,26 +1310,116 @@ impl Drop for Lease {
 }
 
 /// Renews a lease every [`HEARTBEAT`] until dropped. `lost` turns true
-/// once a renewal is refused because the lease moved on.
+/// once a renewal is refused because the lease moved on, or once renewals
+/// have failed for so long that it is about to expire (see [`Renewals`]).
 pub(crate) struct Heartbeat {
     stop: Arc<(Mutex<bool>, Condvar)>,
     lost: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// What the heartbeat does after one renewal attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Beat {
+    /// Renewed: the lease runs a full lifetime more from the attempt.
+    Held,
+    /// Not renewed, and the lease still has time: try again next beat.
+    Retry,
+    /// The lease is no longer this engine's, or will not be by the next
+    /// beat: the turn must stop writing.
+    Lost,
+}
+
+/// The heartbeat's record of its lease: when it was last renewed, and what
+/// each attempt's result means. A store that is busy or unreadable for a
+/// beat or two is waited out; one that stays so until less than a beat of
+/// the lease is left makes the lease lost, said so, rather than found out
+/// when another engine takes the branch.
+struct Renewals {
+    branch: String,
+    beat: Duration,
+    ttl: Duration,
+    /// When the lease was last known to be renewed (or acquired).
+    renewed: Instant,
+}
+
+impl Renewals {
+    fn new(branch: &str, beat: Duration, ttl: Duration, now: Instant) -> Renewals {
+        Renewals {
+            branch: branch.to_owned(),
+            beat,
+            ttl,
+            renewed: now,
+        }
+    }
+
+    /// Take the result of a renewal that was `attempted` and answered at
+    /// `finished`. A renewal that succeeds counts from when it was
+    /// attempted (the store's clock started after that, so the lease runs
+    /// at least that long); one that fails is weighed at `finished`, since
+    /// a store that was busy for 30 seconds before it refused has used them.
+    fn after(&mut self, attempted: Instant, finished: Instant, result: Result<(), Error>) -> Beat {
+        let step = format!("renew the lease on branch {}", self.branch);
+        match result {
+            Ok(()) => {
+                // Says so, once, if it had been failing.
+                branchyard_support::best_effort_once(&step, Ok::<(), Error>(()));
+                self.renewed = attempted;
+                Beat::Held
+            }
+            // Another engine took it; the turn's own writes report that.
+            Err(Error::Fenced(_)) => Beat::Lost,
+            Err(error) => {
+                // Once per outage, not once per beat.
+                branchyard_support::best_effort_once(&step, Err::<(), _>(&error));
+                let silent = finished.saturating_duration_since(self.renewed);
+                if self.ttl.saturating_sub(silent) > self.beat {
+                    return Beat::Retry;
+                }
+                branchyard_support::best_effort(
+                    &format!("keep the lease on branch {}", self.branch),
+                    Err::<(), _>(format!(
+                        "it was not renewed for {}s and expires within one beat; treating it \
+                         as lost",
+                        silent.as_secs()
+                    )),
+                );
+                Beat::Lost
+            }
+        }
+    }
+}
+
 impl Heartbeat {
-    pub fn start(store: &Store, fence: &Fence) -> Heartbeat {
+    /// Start renewing `fence`'s lease. A thread that cannot be started is an
+    /// error for the caller: a lease nothing renews expires under the turn.
+    pub fn start(store: &Store, fence: &Fence) -> std::io::Result<Heartbeat> {
+        let (renewing, fence) = (store.clone(), fence.clone());
+        let branch = fence.branch.clone();
+        Heartbeat::start_with(&branch, HEARTBEAT, LEASE_TTL, move || {
+            renewing.backend.renew(&fence, LEASE_TTL)
+        })
+    }
+
+    /// [`Heartbeat::start`] with the beat, the lease's lifetime and the
+    /// renewal given, so a test can run the real thread in milliseconds.
+    fn start_with(
+        branch: &str,
+        beat: Duration,
+        ttl: Duration,
+        mut renew: impl FnMut() -> Result<(), Error> + Send + 'static,
+    ) -> std::io::Result<Heartbeat> {
         let stop = Arc::new((Mutex::new(false), Condvar::new()));
         let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (store, fence) = (store.clone(), fence.clone());
         let (stopping, losing) = (stop.clone(), lost.clone());
+        let mut renewals = Renewals::new(branch, beat, ttl, Instant::now());
         let thread = std::thread::Builder::new()
-            .name(format!("by-lease-{}", fence.branch))
+            .name(format!("by-lease-{branch}"))
             .spawn(move || {
                 let (flag, wake) = &*stopping;
                 let mut stopped = flag.lock_recovering("heartbeat stop flag");
                 loop {
-                    let deadline = Instant::now() + HEARTBEAT;
+                    let deadline = Instant::now() + beat;
                     while !*stopped && Instant::now() < deadline {
                         let left = deadline.saturating_duration_since(Instant::now());
                         stopped = wake.wait_timeout_recovering(stopped, left, "wake").0;
@@ -1325,20 +1427,19 @@ impl Heartbeat {
                     if *stopped {
                         return;
                     }
-                    match store.backend.renew(&fence, LEASE_TTL) {
-                        Ok(()) => {}
-                        Err(Error::Fenced(_)) => {
-                            losing.store(true, Ordering::Release);
-                            return;
-                        }
-                        // A busy or unreadable store: try again next beat,
-                        // while the lease still has time.
-                        Err(_) => {}
+                    let attempted = Instant::now();
+                    let result = renew();
+                    if renewals.after(attempted, Instant::now(), result) == Beat::Lost {
+                        losing.store(true, Ordering::Release);
+                        return;
                     }
                 }
-            })
-            .ok();
-        Heartbeat { stop, lost, thread }
+            })?;
+        Ok(Heartbeat {
+            stop,
+            lost,
+            thread: Some(thread),
+        })
     }
 
     pub fn lost(&self) -> bool {
@@ -1417,5 +1518,121 @@ mod drop_tests {
             "{}",
             warnings[0].text
         );
+    }
+
+    fn locked() -> Error {
+        Error::State("database is locked".into())
+    }
+
+    /// A store that stays unreadable is said so once, not once a beat, and
+    /// the lease is reported lost while it still has a beat to run, not
+    /// found out when another engine takes the branch.
+    #[test]
+    fn renewals_that_keep_failing_are_logged_once_and_then_the_lease_is_lost() {
+        let (beat, ttl) = (Duration::from_secs(5), Duration::from_secs(30));
+        let start = Instant::now();
+        let mut renewals = Renewals::new("flaky-store", beat, ttl, start);
+        let (beats, events) = capture(|| {
+            (1..=5)
+                .map(|n| renewals.after(start + beat * n, start + beat * n, Err(locked())))
+                .collect::<Vec<_>>()
+        });
+        // At 25s of 30 one beat is left: the next attempt may come too late.
+        assert_eq!(
+            beats,
+            [
+                Beat::Retry,
+                Beat::Retry,
+                Beat::Retry,
+                Beat::Retry,
+                Beat::Lost
+            ]
+        );
+        let warnings: Vec<_> = events.iter().filter(|e| e.level == Level::WARN).collect();
+        assert_eq!(warnings.len(), 2, "{events:?}");
+        assert!(
+            warnings[0]
+                .text
+                .contains("renew the lease on branch flaky-store")
+                && warnings[0].text.contains("database is locked"),
+            "{}",
+            warnings[0].text
+        );
+        assert!(
+            warnings[1]
+                .text
+                .contains("keep the lease on branch flaky-store")
+                && warnings[1].text.contains("treating it as lost"),
+            "{}",
+            warnings[1].text
+        );
+    }
+
+    #[test]
+    fn a_renewal_that_recovers_resets_the_clock_and_says_so() {
+        let (beat, ttl) = (Duration::from_secs(5), Duration::from_secs(30));
+        let start = Instant::now();
+        let mut renewals = Renewals::new("recovering-store", beat, ttl, start);
+        let at = |n: u32| start + beat * n;
+        let (beats, events) = capture(|| {
+            vec![
+                renewals.after(at(1), at(1), Err(locked())),
+                renewals.after(at(2), at(2), Ok(())),
+                // 20s after the start, but only 10s after the last renewal.
+                renewals.after(at(4), at(4), Err(locked())),
+            ]
+        });
+        assert_eq!(beats, [Beat::Retry, Beat::Held, Beat::Retry]);
+        let recovered = events
+            .iter()
+            .filter(|e| e.level == Level::INFO && e.text.contains("recovered"))
+            .count();
+        assert_eq!(recovered, 1, "{events:?}");
+    }
+
+    #[test]
+    fn a_lease_another_engine_took_is_lost_without_a_log_line() {
+        let start = Instant::now();
+        let mut renewals = Renewals::new("taken", HEARTBEAT, LEASE_TTL, start);
+        let (beat, events) =
+            capture(|| renewals.after(start, start, Err(Error::Fenced("moved".into()))));
+        assert_eq!(beat, Beat::Lost);
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    /// SQLite makes a writer wait up to 30 seconds for the lock before it
+    /// gives up: a renewal attempted at 5s that is refused at 35s says the
+    /// lease expired in the meantime, though only one beat had passed since
+    /// the attempt began.
+    #[test]
+    fn a_renewal_that_waited_out_the_lease_before_failing_is_a_lost_lease() {
+        let (beat, ttl) = (Duration::from_secs(5), Duration::from_secs(30));
+        let start = Instant::now();
+        let mut renewals = Renewals::new("long-wait", beat, ttl, start);
+        let (lost, _) = capture(|| renewals.after(start + beat, start + beat + ttl, Err(locked())));
+        assert_eq!(lost, Beat::Lost);
+    }
+
+    /// The thread itself: a store that never renews makes `lost` true, and
+    /// one that does keeps renewing and never does.
+    #[test]
+    fn the_heartbeat_thread_reports_a_lease_it_cannot_renew_as_lost() {
+        use std::sync::atomic::AtomicUsize;
+        let (beat, ttl) = (Duration::from_millis(5), Duration::from_millis(100));
+        let failing = Heartbeat::start_with("unrenewable", beat, ttl, || Err(locked())).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counting = calls.clone();
+        let healthy = Heartbeat::start_with("renewable", beat, ttl, move || {
+            counting.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+        branchyard_testkit::wait::until("the unrenewable lease is reported lost", || {
+            failing.lost()
+        });
+        branchyard_testkit::wait::until("the healthy lease was renewed repeatedly", || {
+            calls.load(Ordering::SeqCst) >= 5
+        });
+        assert!(!healthy.lost());
     }
 }

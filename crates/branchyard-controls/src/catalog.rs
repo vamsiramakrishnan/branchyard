@@ -20,7 +20,7 @@
 //!   claude-model-pricing.ts`, `vendor/orca/src/main/codex-usage/
 //!   codex-model-pricing.ts`).
 //!
-//! Three harness entries are corrected after generation (`curated`, in the
+//! A few harness entries are corrected after generation (`curated`, in the
 //! tests that generate the file) where the CLIs themselves were checked and
 //! the upstream sources describe them differently or not at all.
 //!
@@ -293,6 +293,46 @@ pub(crate) mod tests {
                     "ZAI_API_KEY",
                 ]);
                 e.resume_flag = Some("--resume".into());
+            }
+            // OpenCode 1.19.4: `opencode providers list` shows a Google
+            // provider for `GEMINI_API_KEY`, but its Google SDK does not
+            // get it: `opencode run` and `opencode acp` fail with "Google
+            // Generative AI API key is missing" until the key is in
+            // `GOOGLE_GENERATIVE_AI_API_KEY` (checked 25 October 2026), so
+            // the vendored list's `GEMINI_API_KEY` is replaced. The
+            // Anthropic and OpenAI SDKs read their variables themselves.
+            "opencode" => {
+                e.auth_env = strings(&[
+                    "ANTHROPIC_API_KEY",
+                    "OPENAI_API_KEY",
+                    "GOOGLE_GENERATIVE_AI_API_KEY",
+                    "ORCAROUTER_API_KEY",
+                ]);
+            }
+            // Pi 0.73.1: no login command (`/login` inside pi stores a key
+            // or an OAuth login in `~/.pi/agent/auth.json`, which pi
+            // creates as `{}` on its first start), and a provider key is
+            // read from the environment (`docs/providers.md` of the
+            // package lists about twenty; `pi --list-models` showed the
+            // google and zai providers for `GEMINI_API_KEY` and
+            // `ZAI_API_KEY`). The vendored sources record none.
+            "pi" => {
+                e.auth_env = strings(&[
+                    "ANTHROPIC_API_KEY",
+                    "OPENAI_API_KEY",
+                    "GEMINI_API_KEY",
+                    "OPENROUTER_API_KEY",
+                    "ZAI_API_KEY",
+                ]);
+            }
+            // Cursor CLI: its driver profile launches `agent` (`cursor-acp`
+            // runs `agent acp`), the name the Cursor CLI installs; Orca and
+            // emdash know only the older `cursor-agent`. Detection looks for
+            // both, so a machine with only `agent` has Cursor.
+            "cursor" => {
+                if !e.binaries.iter().any(|b| b == "agent") {
+                    e.binaries.push("agent".into());
+                }
             }
             _ => {}
         }

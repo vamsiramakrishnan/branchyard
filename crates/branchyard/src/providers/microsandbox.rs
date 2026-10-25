@@ -18,6 +18,21 @@ use crate::{git, Error, SandboxOptions, Yard};
 use branchyard_support::time::now_ms;
 
 impl ProviderKind for SandboxOptions {
+    fn banner(&self, _isolated: bool, server: bool) -> (&'static str, String) {
+        let what = match server {
+            false => format!(
+                "harnesses run in Microsandbox microVMs from {}; the worktree is mounted at {}",
+                self.image,
+                crate::SANDBOX_WORKSPACE
+            ),
+            true => format!(
+                "harnesses run in Microsandbox microVMs on the server, from {}",
+                self.image
+            ),
+        };
+        ("sandbox", what)
+    }
+
     fn name(&self) -> &'static str {
         "microsandbox"
     }
@@ -36,11 +51,10 @@ impl ProviderKind for SandboxOptions {
     fn check(&self, yard: &Yard) -> Result<(), Error> {
         let own = crate::projection::lock(&yard.hub.sandbox_provider).is_some();
         if !own && !branchyard_microsandbox::ENABLED {
-            return Err(Error::Unsupported(
-                "this build has no Microsandbox support; rebuild with \
-                 --features microsandbox (Rust 1.94 or newer), see docs/providers.md"
-                    .into(),
-            ));
+            return Err(Error::Unsupported(format!(
+                "this build has no Microsandbox support; {}",
+                branchyard_microsandbox::REBUILD_HELP
+            )));
         }
         if self.image.trim().is_empty() {
             return Err(Error::Unsupported(

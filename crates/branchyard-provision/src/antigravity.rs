@@ -125,12 +125,19 @@ pub fn remote_entry(server: &RemoteMcpServer) -> Value {
 ///   program on (`command(regex:by .*)`), never a bare program prefix, which
 ///   agy 1.3.3 did not match against a line with a redirection; a `by` path
 ///   holding whitespace gets no rule of its own.
+/// - File writes, when the policy allows file edits (`WRITE_TOOL`): the
+///   workspace's absolute path as `write_file(<workspace>)`, which the CLI
+///   reads as the directory and everything under it, or `write_file(*)`
+///   where the policy also allows the shell, which can write anywhere
+///   anyway. agy 1.4.7 headless soft-denies a `write_file` that no rule
+///   allows (checked on 25 October 2026: "no permissions.allow rule in its
+///   settings lets it run", and the turn ended with no changes), whatever
+///   its documentation says about the workspace.
 /// - Each MCP server the turn gives the harness: `mcp(<server>/*)` when the
 ///   policy allows all its tools (`mcp__<server>__*`, `mcp__*`, the
 ///   fallback; for Branchyard's own server, also its delegation-command
 ///   rule), and `mcp(<server>/<tool>)` for a rule naming one tool.
-/// - `write_file(*)` denied when the policy denies file edits: the CLI
-///   allows writes in the workspace by default.
+/// - `write_file(*)` denied when the policy denies file edits.
 pub fn rules(context: &Context, permissions: &Permissions) -> PermissionsWritten {
     let mut allow: Vec<String> = Vec::new();
     let mut deny: Vec<String> = Vec::new();
@@ -155,6 +162,16 @@ pub fn rules(context: &Context, permissions: &Permissions) -> PermissionsWritten
         allow.extend(command("by"));
         allow.extend(command(by));
         allow.extend(delegation.and_then(command));
+    }
+    if permissions.decide(WRITE_TOOL) == Some(true) {
+        if shell {
+            allow.push("write_file(*)".into());
+        } else if !context.workspace.is_empty() && !context.workspace.contains(char::is_whitespace)
+        {
+            // The CLI splits a rule's pattern on whitespace: a workspace
+            // path holding any gets no rule of its own.
+            allow.push(format!("write_file({})", context.workspace));
+        }
     }
     let servers = context
         .mcp_servers
@@ -426,7 +443,12 @@ mod tests {
         let written = rules(&context(&[DELEGATION_SERVER, "docs"]), &permissions);
         assert_eq!(
             written.allow,
-            ["command(*)", "mcp(branchyard/*)", "mcp(docs/*)"]
+            [
+                "command(*)",
+                "write_file(*)",
+                "mcp(branchyard/*)",
+                "mcp(docs/*)"
+            ]
         );
         assert!(written.deny.is_empty());
     }
@@ -482,7 +504,9 @@ mod tests {
     }
 
     /// `read-only` and `edit-worktree`, as Branchyard's presets name their
-    /// tools: no command, and writes denied only by the first.
+    /// tools: no command, and writes denied by the first and allowed, in the
+    /// workspace and nowhere else, by the second (agy 1.4.7 headless
+    /// soft-denies a write no rule allows).
     #[test]
     fn the_presets_that_deny_the_shell_allow_no_command() {
         let shell = ["Bash", "run_command", "shell"];
@@ -507,6 +531,13 @@ mod tests {
                 .collect(),
             ..read_only
         };
-        assert!(rules(&context(&[]), &edit_worktree).is_empty());
+        let written = rules(&context(&[]), &edit_worktree);
+        assert_eq!(written.allow, ["write_file(/work)"]);
+        assert!(written.deny.is_empty());
+        // The CLI splits a rule's pattern on whitespace: no rule rather
+        // than a wrong one.
+        let mut spaced = context(&[]);
+        spaced.workspace = "/my work".into();
+        assert!(rules(&spaced, &edit_worktree).is_empty());
     }
 }

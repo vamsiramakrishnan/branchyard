@@ -2886,6 +2886,7 @@ pub fn test_inventory(id: &str) -> branchyard::inventory::Inventory {
                 state: LoginState::LoggedIn,
                 evidence: Evidence::Verified,
                 detail: "logged in".into(),
+                ..Login::default()
             },
             quota: None,
         }],
@@ -3768,7 +3769,11 @@ mod tests {
             .claim(&one, &repos, &[], Duration::from_millis(1))
             .unwrap()
             .unwrap();
-        std::thread::sleep(Duration::from_millis(20));
+        // The store's clock is the wall clock: the 1 ms lease lapses by time passing.
+        branchyard_testkit::wait::settle(
+            "a one-millisecond lease lapses",
+            Duration::from_millis(20),
+        );
         let second = store.claim(&two, &repos, &[], LEASE).unwrap().unwrap();
         assert_eq!(second.fence, first.fence + 1);
         assert!(!first.took_over);

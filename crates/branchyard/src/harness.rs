@@ -67,8 +67,24 @@ pub(crate) const REPORTS: &[(&str, &str)] = &[
         include_str!("../../../docs/qualification/gemini-cli-acp.json"),
     ),
     (
+        "hermes-acp",
+        include_str!("../../../docs/qualification/hermes-acp.json"),
+    ),
+    (
         "oh-my-pi-acp",
         include_str!("../../../docs/qualification/oh-my-pi-acp.json"),
+    ),
+    (
+        "opencode-acp",
+        include_str!("../../../docs/qualification/opencode-acp.json"),
+    ),
+    (
+        "pi-rpc",
+        include_str!("../../../docs/qualification/pi-rpc.json"),
+    ),
+    (
+        "qwen-code-acp",
+        include_str!("../../../docs/qualification/qwen-code-acp.json"),
     ),
 ];
 
@@ -78,6 +94,48 @@ pub(crate) fn select(id: Option<&str>) -> Result<&'static Profile, Error> {
     profiles::default_for(id)
         .or_else(|| profiles::by_id(id))
         .ok_or_else(|| Error::UnknownHarness(id.to_owned()))
+}
+
+/// What `--harness NAME` was refused for, when no profile answers to `NAME`.
+/// A harness the catalog knows but no profile drives (`droid`, `kiro`) is
+/// not "no harness named": it says so, why when there is a recorded reason,
+/// and what can be driven.
+pub(crate) fn unknown_message(name: &str) -> String {
+    let mut drivable: Vec<&str> = Vec::new();
+    for profile in PROFILES {
+        if !drivable.contains(&profile.harness) {
+            drivable.push(profile.harness);
+        }
+    }
+    if branchyard_controls::catalog::harness(name).is_none() {
+        // `qwen` for `qwen-code`, `gemini` for `gemini-cli`: a name that is
+        // the start of one drivable harness is offered as that one.
+        let meant: Vec<&str> = drivable
+            .iter()
+            .copied()
+            .filter(|id| id.starts_with(name) || name.starts_with(id))
+            .collect();
+        let drivable = drivable.join(", ");
+        return match meant.as_slice() {
+            [] => format!(
+                "no harness or profile named {name}; drivable: {drivable} (by harnesses \
+                 --profiles lists the profiles)"
+            ),
+            _ => format!(
+                "no harness or profile named {name}; did you mean {}? drivable: {drivable} (by \
+                 harnesses --profiles lists the profiles)",
+                meant.join(" or ")
+            ),
+        };
+    }
+    let drivable = drivable.join(", ");
+    let why = profiles::NOT_IMPLEMENTED
+        .iter()
+        .find(|(id, _)| *id == name)
+        .map_or("it has no driver profile".to_owned(), |(_, why)| {
+            (*why).to_owned()
+        });
+    format!("{name} is known to Branchyard but not drivable ({why}); drivable: {drivable}")
 }
 
 /// The command to launch: the override, else the profile's own.
@@ -252,6 +310,21 @@ pub(crate) fn qualification(profile: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// A name that begins one drivable harness's ID is offered as that one;
+    /// a name that begins none lists what is drivable, as before.
+    #[test]
+    fn an_unknown_harness_name_that_starts_a_known_one_gets_a_did_you_mean() {
+        let qwen = unknown_message("qwen");
+        assert!(qwen.contains("did you mean qwen-code?"), "{qwen}");
+        assert!(
+            qwen.starts_with("no harness or profile named qwen;"),
+            "{qwen}"
+        );
+        let nope = unknown_message("nope");
+        assert!(!nope.contains("did you mean"), "{nope}");
+        assert!(nope.contains("drivable: "), "{nope}");
+    }
+
     #[test]
     fn harness_ids_pick_default_profiles_and_profile_ids_work_too() {
         assert_eq!(select(None).unwrap().id, "claude-code-stream-json");
@@ -261,6 +334,27 @@ mod tests {
             select(Some("nope")),
             Err(Error::UnknownHarness(id)) if id == "nope"
         ));
+    }
+
+    #[test]
+    fn a_harness_the_catalog_knows_but_no_profile_drives_is_not_called_unknown() {
+        let droid = Error::UnknownHarness("droid".into()).to_string();
+        assert!(
+            droid.starts_with("droid is known to Branchyard but not drivable"),
+            "{droid}"
+        );
+        assert!(droid.contains("drivable: claude-code, codex, "), "{droid}");
+        // A recorded reason is quoted.
+        let aider = Error::UnknownHarness("aider".into()).to_string();
+        assert!(aider.contains("batch process"), "{aider}");
+        // A name the catalog does not have is still "no harness named".
+        let nope = Error::UnknownHarness("nope".into()).to_string();
+        assert!(
+            nope.starts_with("no harness or profile named nope; drivable: claude-code, "),
+            "{nope}"
+        );
+        // Each harness is listed once, though it has two profiles.
+        assert_eq!(nope.matches("claude-code").count(), 1, "{nope}");
     }
 
     #[test]
@@ -274,6 +368,7 @@ mod tests {
             "codex-acp",
             "gemini-cli-acp",
             "hermes-acp",
+            "opencode-acp",
         ] {
             assert!(check(id, true).is_ok(), "{id}: {:?}", check(id, true));
         }
@@ -281,7 +376,7 @@ mod tests {
         assert!(check("claude-code-acp", false).is_ok());
         assert!(check("hermes-acp", false).is_ok());
         // A setting written into the home needs one of its own.
-        for id in ["codex-acp", "gemini-cli-acp"] {
+        for id in ["codex-acp", "gemini-cli-acp", "opencode-acp"] {
             let refused = check(id, false);
             assert!(
                 matches!(&refused, Err(Error::Unsupported(why))
@@ -290,13 +385,7 @@ mod tests {
                 "{refused:?}"
             );
         }
-        // A provisioner that refuses it, and a driver left to choose it
-        // that cannot.
-        let refused = check("opencode-acp", true);
-        assert!(
-            matches!(&refused, Err(Error::Unsupported(why)) if why.contains("a model cannot be provisioned for opencode")),
-            "{refused:?}"
-        );
+        // A driver left to choose it that cannot.
         let refused = check("goose-acp", true);
         assert!(
             matches!(&refused, Err(Error::Unsupported(why))
@@ -335,16 +424,30 @@ mod tests {
             assert!(profiles::by_id(id).is_some(), "{id} is not a profile");
         }
         assert_eq!(qualification("claude-code-acp").unwrap(), "9/9 on 0.81.2");
-        assert_eq!(qualification("gemini-cli-acp").unwrap(), "8/9 on 0.63.0");
+        assert_eq!(qualification("gemini-cli-acp").unwrap(), "9/9 on 0.65.0");
         assert_eq!(
             qualification("antigravity-stream-json").unwrap(),
-            "9/9 on 1.4.0"
+            "9/9 on 1.4.7"
         );
         assert_eq!(
             qualification("codex-app-server").unwrap(),
-            "9/9 on codex-cli 0.157.1"
+            "9/9 on codex-cli 0.164.0"
         );
-        assert_eq!(qualification("oh-my-pi-acp").unwrap(), "9/9 on omp/18.10.3");
+        assert_eq!(qualification("oh-my-pi-acp").unwrap(), "9/9 on omp/18.12.6");
+        // 25 October 2026, GLM-4.6 through Z.ai: the three permission
+        // scenarios fail on both, since neither asks before a shell command
+        // that writes inside its workspace.
+        assert_eq!(
+            qualification("deepseek-harness-acp").unwrap(),
+            "6/9 on 0.2.1-rc.2"
+        );
+        assert_eq!(
+            qualification("hermes-acp").unwrap(),
+            "6/9 on Hermes Agent v0.19.0 (2026.7.20)"
+        );
+        assert_eq!(qualification("qwen-code-acp").unwrap(), "9/9 on 0.26.0");
+        assert_eq!(qualification("opencode-acp").unwrap(), "9/9 on 1.19.4");
+        assert_eq!(qualification("pi-rpc").unwrap(), "9/9 on 1.4.0");
     }
 
     #[test]

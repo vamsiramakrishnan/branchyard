@@ -329,6 +329,17 @@ pub(crate) fn start_background(yard: &Yard, config: &Connectors) -> Result<Start
     background(yard, &dir, config)
 }
 
+/// The refusal when the pinned URL's port is held by something that is not
+/// a gateway: what it is, and the two ways out.
+fn not_a_gateway(url: &str, why: &str) -> Failure {
+    let port = gateway::host_port(url).map_or_else(|| url.to_owned(), |(_, port)| port.to_string());
+    Failure::Message(format!(
+        "port {port} is held by something that is not a Branchyard gateway: {why}.\n\
+         Next: free the port, or set `[connectors] gateway` in branchyard.toml to another URL \
+         (or remove it to have a free port chosen)."
+    ))
+}
+
 /// `by gateway start` without `--foreground`.
 fn background(yard: &Yard, dir: &Path, config: &Connectors) -> Result<Started, Failure> {
     if let Some(running) = Background::running(dir) {
@@ -341,14 +352,22 @@ fn background(yard: &Yard, dir: &Path, config: &Connectors) -> Result<Started, F
         ToRun::Already(started) => return Ok(started),
         ToRun::At(gw, found) => (*gw, found),
     };
-    // Something already listens at the pinned URL, not started here:
-    // adopt it, so that it is found by what it is, but never reclaim it.
-    if config.gateway.is_some() && gateway::listening(&gw.url) {
-        let service = adopt(yard, config, &gw)?;
-        return Ok(Started::Adopted {
-            url: gw.url,
-            service: service.id,
-        });
+    // Something already holds the pinned URL's port, not started here. A
+    // gateway is adopted, so that it is found by what it is, but never
+    // reclaimed; anything else is refused, as the gateway cannot run there
+    // and what holds the port is not ours to stop.
+    if config.gateway.is_some() {
+        match gateway::probe(&gw.url) {
+            gateway::Held::Nothing => {}
+            gateway::Held::Gateway => {
+                let service = adopt(yard, config, &gw)?;
+                return Ok(Started::Adopted {
+                    url: gw.url,
+                    service: service.id,
+                });
+            }
+            gateway::Held::Other(why) => return Err(not_a_gateway(&gw.url, &why)),
+        }
     }
     // The keys and the vault key are made here, so a problem with them is
     // reported here and not in the log.

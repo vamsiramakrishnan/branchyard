@@ -1,12 +1,15 @@
 //! `by doctor` through the built `by`, against temporary repositories: a
-//! repository without `.branchyard/` fails with the init hint and is not
-//! changed by the report, an initialized one has no failure, a refused
+//! repository without `.branchyard/` is a `todo` with `by setup` (not a
+//! failure, exit 0) and is not changed by the report, an initialized one has
+//! no failure, the `Mode:` line says where branches run, each installed
+//! harness has a row of its own, a refused
 //! `branchyard.toml` is shown with its line, untrusted `[workspace]` scripts
 //! warn until trusted and again after a change, a store written by another
 //! `by` is reported and left as it is, a configured server is asked once,
 //! the model gateway's keys are named and never shown, and the exit status
-//! is 0 without a failure, 1 with one, and 2 for a usage error. Hermetic;
-//! requires `git`, `sh` and `python3`.
+//! is 0 without a failure (a to-do and a warning are not failures), 1 with
+//! one, and 2 for a usage error. Hermetic; requires `git`, `sh` and
+//! `python3`.
 
 #![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
@@ -63,6 +66,31 @@ impl Report {
 impl Repo {
     fn new() -> Repo {
         Repo(branchyard_testkit::repo!())
+    }
+
+    /// No harness key variable of the host's reaches a command: the tests
+    /// that look at logins decide them with fake files and commands alone.
+    fn without_keys(mut self) -> Repo {
+        for var in [
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "XAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "ZAI_API_KEY",
+            "AGY_TOKEN",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+        ] {
+            self.0.remove_env(var);
+        }
+        self
     }
 
     /// A repository `by` has been used in.
@@ -157,18 +185,19 @@ fn set_schema(db: &Path, version: &str) {
 }
 
 #[test]
-fn a_repository_without_branchyard_fails_with_the_init_hint_and_is_left_alone() {
+fn a_repository_that_has_never_used_branchyard_is_a_todo_not_a_failure_and_is_left_alone() {
     let repo = Repo::new();
     let report = repo.doctor(&[]);
-    assert_eq!(report.code, Some(1), "{}", report.stdout);
-    assert_eq!(report.overall(), "fail");
+    // Nothing is broken: exit 0, and the one row that is not ok says what to run.
+    assert_eq!(report.code, Some(0), "{}", report.stdout);
+    assert_ne!(report.overall(), "fail", "{}", report.stdout);
     assert_eq!(report.status("repository.git"), "ok");
     assert!(report.detail("repository.git").contains("on branch main"));
-    assert_eq!(report.status("repository.state"), "fail");
+    assert_eq!(report.status("repository.state"), "todo");
     assert!(report
         .detail("repository.state")
-        .contains(".branchyard does not exist"));
-    assert!(report.fix("repository.state").contains("by init"));
+        .starts_with("not set up yet"));
+    assert_eq!(report.fix("repository.state"), "run `by setup`");
     // Nothing to read yet is not a failure of the checks that read it.
     assert_eq!(report.status("repository.schema"), "ok");
     assert_eq!(report.status("repository.services"), "ok");
@@ -178,15 +207,23 @@ fn a_repository_without_branchyard_fails_with_the_init_hint_and_is_left_alone() 
     assert!(!fs::read_to_string(exclude)
         .unwrap_or_default()
         .contains(".branchyard"));
-    // The text carries the same, with what to do.
+    // The text carries the same, with what to do, and the mode above the table.
     let text = repo.doctor_text(&[]);
-    assert_eq!(text.status.code(), Some(1));
+    assert_eq!(text.status.code(), Some(0));
     let text = String::from_utf8_lossy(&text.stdout);
-    assert!(text.contains("fail    repository.state"), "{text}");
+    assert!(
+        text.starts_with(
+            "Mode: local, no isolation · SQLite (.branchyard/state.db) · no server\n\nSTATUS"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("todo    repository.state"), "{text}");
     assert!(text.contains("To do:\n"), "{text}");
-    assert!(text.contains("repository.state: run `by init`"), "{text}");
+    assert!(text.contains("repository.state: run `by setup`"), "{text}");
+    assert!(!text.contains("fail    "), "{text}");
     let last = text.lines().last().unwrap();
-    assert!(last.starts_with("fail: 1 failed"), "{text}");
+    assert!(!last.starts_with("fail"), "{text}");
+    assert!(last.contains("1 to do"), "{text}");
 }
 
 #[test]
@@ -287,8 +324,13 @@ fn the_json_has_the_documented_shape_and_every_row_that_is_not_ok_says_what_to_d
     let repo = Repo::new();
     let report = repo.doctor(&[]);
     let object = report.value.as_object().unwrap();
-    assert_eq!(object.len(), 2, "{object:?}");
-    assert!(["ok", "warn", "fail"].contains(&report.overall()));
+    // `format` 2: the `todo` status, `mode`, and a row for each harness.
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["checks", "format", "mode", "status"], "{object:?}");
+    assert_eq!(report.value["format"], 2);
+    assert!(report.value["mode"].as_str().unwrap().contains(" · "));
+    assert!(["ok", "todo", "warn", "fail"].contains(&report.overall()));
     let rows = report.value["checks"].as_array().unwrap();
     assert!(rows.len() >= 15, "{} checks", rows.len());
     let mut names = Vec::new();
@@ -299,7 +341,7 @@ fn the_json_has_the_documented_shape_and_every_row_that_is_not_ok_says_what_to_d
         assert!(name.contains('.') && !name.contains(' '), "{name}");
         names.push(name);
         let status = row["status"].as_str().unwrap();
-        assert!(["ok", "warn", "fail"].contains(&status), "{status}");
+        assert!(["ok", "todo", "warn", "fail"].contains(&status), "{status}");
         let detail = row["detail"].as_str().unwrap();
         assert!(
             !detail.is_empty() && !detail.contains('\n'),
@@ -317,11 +359,11 @@ fn the_json_has_the_documented_shape_and_every_row_that_is_not_ok_says_what_to_d
     unique.dedup();
     assert_eq!(unique.len(), names.len(), "check names repeat: {names:?}");
     // The overall status is the worst row.
-    let worst = ["ok", "warn", "fail"]
+    let worst = ["ok", "todo", "warn", "fail"]
         .iter()
         .rposition(|s| rows.iter().any(|r| r["status"] == *s))
         .unwrap();
-    assert_eq!(report.overall(), ["ok", "warn", "fail"][worst]);
+    assert_eq!(report.overall(), ["ok", "todo", "warn", "fail"][worst]);
     // Report order: the repository first, the model gateway last.
     assert_eq!(names.first(), Some(&"repository.git"));
     assert_eq!(names.last(), Some(&"models.prices"));
@@ -463,6 +505,196 @@ fn credentials_are_named_and_their_values_never_shown() {
         .contains("DEPLOY_KEY (from $DOCTOR_TEST_DEPLOY_VAR)"));
     let report = repo.doctor_in(&repo.root, &[], &[("DOCTOR_TEST_DEPLOY_VAR", "v")]);
     assert_eq!(report.status("harnesses.credentials"), "ok");
+}
+
+/// The environment for a machine whose only harnesses are the fakes in
+/// `bin`: nothing else on `PATH`, a home of its own.
+fn machine(repo: &Repo, bin: &Path) -> Vec<(String, String)> {
+    let home = repo.dir.join("home");
+    fs::create_dir_all(&home).unwrap();
+    vec![
+        ("PATH".into(), format!("{}:/usr/bin:/bin", bin.display())),
+        ("BRANCHYARD_HARNESS_DIRS".into(), String::new()),
+        ("HOME".into(), home.display().to_string()),
+    ]
+}
+
+fn fake(bin: &Path, name: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(bin).unwrap();
+    let path = bin.join(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn doctor_on(repo: &Repo, bin: &Path, args: &[&str]) -> Report {
+    let envs = machine(repo, bin);
+    let envs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    repo.doctor_in(&repo.root, args, &envs)
+}
+
+#[test]
+fn each_installed_harness_has_a_short_row_of_its_own_and_a_summary_says_how_many_can_be_used() {
+    let repo = Repo::used().without_keys();
+    let bin = repo.dir.join("bin");
+    // Codex: its own status command says logged in; live-tested on 0.164.0.
+    fake(
+        &bin,
+        "codex",
+        "case \"$1 $2\" in\n  \"login status\") echo 'Logged in using ChatGPT';;\n  *) echo 'codex-cli 0.157.1';;\nesac\n",
+    );
+    // Claude Code: no credential file and no key, so the login is not verified.
+    fake(&bin, "claude", "echo '2.1.310 (Claude Code)'\n");
+    // Goose: no way for Branchyard to tell.
+    fake(&bin, "goose", "echo 'goose 1.9.0'\n");
+    let report = doctor_on(&repo, &bin, &[]);
+    assert_eq!(report.code, Some(0), "{}", report.stdout);
+    let names: Vec<&str> = report.value["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .filter(|n| n.starts_with("harnesses."))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "harnesses.summary",
+            "harnesses.claude-code",
+            "harnesses.codex",
+            "harnesses.goose",
+            "harnesses.default",
+            "harnesses.credentials"
+        ],
+        "the one long row is gone: {names:?}"
+    );
+    for name in &names[1..4] {
+        let detail = report.detail(name);
+        assert!(detail.chars().count() <= 120, "{name}: {detail}");
+    }
+    assert_eq!(
+        report.detail("harnesses.summary"),
+        "3 installed: 1 logged in, 1 login unknown, 1 login not verified"
+    );
+    assert_eq!(report.status("harnesses.summary"), "ok");
+    // Version, login, live run; the version it was live-tested on beside the installed one.
+    assert_eq!(report.status("harnesses.codex"), "ok");
+    assert_eq!(
+        report.detail("harnesses.codex"),
+        "installed 0.157.1 · logged in · live-tested 0.164.0 (9/9)"
+    );
+    assert_eq!(report.status("harnesses.goose"), "ok");
+    assert_eq!(
+        report.detail("harnesses.goose"),
+        "1.9.0 · unknown · no live run"
+    );
+    // An unconfirmed login is a step to take, in the same words everywhere.
+    assert_eq!(report.status("harnesses.claude-code"), "todo");
+    assert!(report
+        .detail("harnesses.claude-code")
+        .contains("login not verified"));
+    assert!(!report.stdout.contains("cannot run"), "{}", report.stdout);
+    assert!(report
+        .fix("harnesses.claude-code")
+        .starts_with("run `by harnesses login claude-code`"));
+    // The default harness agrees with its row instead of saying everything is fine.
+    assert_eq!(report.status("harnesses.default"), "warn");
+    assert!(report
+        .detail("harnesses.default")
+        .contains("claude-code, which is installed, but its login is not verified"));
+    assert!(report
+        .fix("harnesses.default")
+        .contains("by harnesses login claude-code"));
+    // The table shows the same rows, one line each.
+    let out = repo
+        .command(repo.by_path())
+        .args(["doctor"])
+        .envs(machine(&repo, &bin))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines().filter(|l| l.contains(" harnesses.")) {
+        assert!(line.len() < 250, "{line}");
+    }
+    assert!(text.contains("todo    harnesses.claude-code"), "{text}");
+}
+
+#[test]
+fn a_harness_whose_own_command_says_logged_out_is_a_todo_and_the_default_warns() {
+    let repo = Repo::used().without_keys();
+    let bin = repo.dir.join("bin");
+    fake(
+        &bin,
+        "codex",
+        "case \"$1 $2\" in\n  \"login status\") echo 'Not logged in';;\n  *) echo 'codex-cli 0.164.0';;\nesac\n",
+    );
+    repo.project_file("[defaults]\nharness = \"codex\"\n");
+    let report = doctor_on(&repo, &bin, &[]);
+    assert_eq!(report.code, Some(0));
+    assert_eq!(report.status("harnesses.codex"), "todo");
+    assert_eq!(
+        report.detail("harnesses.codex"),
+        "0.164.0 · logged out · live 9/9"
+    );
+    assert_eq!(report.status("harnesses.summary"), "todo");
+    assert_eq!(report.status("harnesses.default"), "warn");
+    assert!(report.detail("harnesses.default").contains("codex"));
+    assert!(report
+        .fix("harnesses.default")
+        .contains("by harnesses login codex"));
+}
+
+#[test]
+fn the_mode_line_says_where_branches_run_where_the_state_is_and_which_server() {
+    let repo = Repo::used();
+    let mode = |repo: &Repo| repo.doctor(&[]).value["mode"].as_str().unwrap().to_owned();
+    assert_eq!(
+        mode(&repo),
+        "local, no isolation · SQLite (.branchyard/state.db) · no server"
+    );
+    repo.project_file("[defaults]\nisolated = true\n");
+    assert_eq!(
+        mode(&repo),
+        "local, isolated (private HOME, no sandbox) · SQLite (.branchyard/state.db) · no server"
+    );
+    repo.project_file(
+        "[defaults]\nprovider = \"microsandbox\"\n[microsandbox]\nimage = \"alpine:3.20\"\n",
+    );
+    assert_eq!(
+        mode(&repo),
+        "sandbox: microsandbox · SQLite (.branchyard/state.db) · no server"
+    );
+    repo.project_file(
+        "[defaults]\nprovider = \"recipe\"\nrecipe = \"box\"\n[recipes.box]\ncreate = \"true\"\n",
+    );
+    assert!(mode(&repo).starts_with("sandbox: recipe box · SQLite"));
+    // A server named by --remote: its address, without any credentials in it,
+    // and the state is the server's.
+    repo.project_file("");
+    let report = repo.doctor(&["--remote", "http://me:hunter2@127.0.0.1:9"]);
+    assert_eq!(
+        report.value["mode"],
+        "server: http://127.0.0.1:9 · state is kept by the server"
+    );
+    assert!(!report.stdout.contains("hunter2"));
+    // `by serve` configured for PostgreSQL: named, the URL (and its password) never.
+    fs::write(
+        repo.root.join("server.json"),
+        r#"{"database": "postgres://by:pg-secret@db/branchyard"}"#,
+    )
+    .unwrap();
+    repo.project_file("[serve]\nconfig = \"server.json\"\n");
+    let report = repo.doctor(&[]);
+    assert_eq!(
+        report.value["mode"],
+        "local, no isolation · SQLite (.branchyard/state.db) · no server · by serve here uses PostgreSQL"
+    );
+    assert!(!report.stdout.contains("pg-secret"));
+    // A configuration that does not load has no mode to report.
+    repo.project_file("not toml [");
+    assert!(mode(&repo).starts_with("not known"));
+    assert!(repo.doctor_text(&[]).stdout.starts_with(b"Mode: not known"));
 }
 
 #[test]

@@ -49,6 +49,10 @@ pub struct Profile {
     pub checked_against: Option<&'static str>,
     /// ACP `_meta` for session requests, as JSON.
     pub acp_session_meta: Option<&'static str>,
+    /// The ACP auth method (an `authMethods` id from the agent's `initialize`
+    /// response) to authenticate with when resuming a session fails with
+    /// `auth_required`; see [`Acp::with_auth_method`].
+    pub acp_auth_method: Option<&'static str>,
 }
 
 impl Profile {
@@ -68,12 +72,15 @@ impl Profile {
             Protocol::PiRpc => Box::new(Pi::new(command)),
             Protocol::AmpStreamJson => Box::new(Amp::new(command)),
             Protocol::Acp => {
-                let driver = Acp::new(command);
-                Box::new(match self.acp_session_meta {
-                    Some(meta) => driver
-                        .with_session_meta(serde_json::from_str(meta).expect("valid profile meta")),
-                    None => driver,
-                })
+                let mut driver = Acp::new(command);
+                if let Some(meta) = self.acp_session_meta {
+                    driver = driver
+                        .with_session_meta(serde_json::from_str(meta).expect("valid profile meta"));
+                }
+                if let Some(method) = self.acp_auth_method {
+                    driver = driver.with_auth_method(method);
+                }
+                Box::new(driver)
             }
         }
     }
@@ -87,6 +94,7 @@ const fn acp(id: &'static str, harness: &'static str, command: &'static [&'stati
         command,
         checked_against: None,
         acp_session_meta: None,
+        acp_auth_method: None,
     }
 }
 
@@ -105,6 +113,7 @@ pub const PROFILES: &[Profile] = &[
         command: &["claude"],
         checked_against: Some("Claude Code 2.1.283"),
         acp_session_meta: None,
+        acp_auth_method: None,
     },
     Profile {
         checked_against: Some("claude-agent-acp 0.81.2"),
@@ -118,6 +127,7 @@ pub const PROFILES: &[Profile] = &[
         command: &["codex"],
         checked_against: Some("codex-cli 0.157.1"),
         acp_session_meta: None,
+        acp_auth_method: None,
     },
     acp("codex-acp", "codex", &["codex-acp"]),
     Profile {
@@ -127,6 +137,7 @@ pub const PROFILES: &[Profile] = &[
         command: &["agy"],
         checked_against: Some("Antigravity CLI 1.2.11"),
         acp_session_meta: None,
+        acp_auth_method: None,
     },
     acp("oh-my-pi-acp", "oh-my-pi", &["omp", "acp"]),
     acp(
@@ -134,11 +145,17 @@ pub const PROFILES: &[Profile] = &[
         "deepseek-harness",
         &["dsh", "--profile", "acp"],
     ),
-    acp(
-        "gemini-cli-acp",
-        "gemini-cli",
-        &["gemini", "--experimental-acp"],
-    ),
+    Profile {
+        // Gemini CLI's `session/new` falls back to `GEMINI_API_KEY` when its
+        // settings choose no auth type; `session/load` does not, and answers
+        // `auth_required` until `authenticate` has chosen one.
+        acp_auth_method: Some("gemini-api-key"),
+        ..acp(
+            "gemini-cli-acp",
+            "gemini-cli",
+            &["gemini", "--experimental-acp"],
+        )
+    },
     acp("opencode-acp", "opencode", &["opencode", "acp"]),
     Profile {
         id: "pi-rpc",
@@ -147,6 +164,7 @@ pub const PROFILES: &[Profile] = &[
         command: &["pi"],
         checked_against: Some("pi 0.87.1"),
         acp_session_meta: None,
+        acp_auth_method: None,
     },
     acp("goose-acp", "goose", &["goose", "acp"]),
     acp("cursor-acp", "cursor", &["agent", "acp"]),
@@ -162,6 +180,7 @@ pub const PROFILES: &[Profile] = &[
         command: &["amp"],
         checked_against: Some("documentation only, not recorded"),
         acp_session_meta: None,
+        acp_auth_method: None,
     },
     acp("qwen-code-acp", "qwen-code", &["qwen", "--acp"]),
     acp("kimi-cli-acp", "kimi-cli", &["kimi", "acp"]),

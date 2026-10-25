@@ -7,6 +7,37 @@
 // reader (`[fleet]`, `HOST:PORT`, `<commit>`), not as rustdoc links or HTML.
 #![allow(rustdoc::broken_intra_doc_links, rustdoc::invalid_html_tags)]
 
+// `eprintln!` and `eprint!` for the whole crate, defined before the modules
+// so that they are the ones the modules see. The standard ones panic when
+// standard error cannot be written (`by run 2>&1 | head -1`, a full disk),
+// which ended the command and, with it, a turn that had completed. What
+// `by` says on standard error is for whoever is reading; once nobody is,
+// there is nobody to tell, so a write that fails is dropped. (ripgrep does
+// the same.) Output a command exists to produce goes through
+// [`commands::print`], which returns its error.
+macro_rules! eprintln {
+    () => {
+        $crate::write_stderr(format_args!("\n"))
+    };
+    ($($arg:tt)*) => {
+        $crate::write_stderr(format_args!("{}\n", format_args!($($arg)*)))
+    };
+}
+
+macro_rules! eprint {
+    ($($arg:tt)*) => {
+        $crate::write_stderr(format_args!($($arg)*))
+    };
+}
+
+/// Write to standard error, ignoring a failure: see the `eprintln!` above.
+fn write_stderr(args: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+    match io::stderr().write_fmt(args) {
+        Ok(()) | Err(_) => {}
+    }
+}
+
 mod adf;
 mod adopt;
 mod args;
@@ -20,6 +51,7 @@ mod detach;
 mod doctor_cmd;
 mod effects_cmd;
 mod env_cmd;
+mod errors;
 mod fleet_cmd;
 mod gateway_cmd;
 mod gh;
@@ -40,6 +72,7 @@ mod plan_cmd;
 mod ports;
 mod pr;
 mod pr_threads;
+mod preflight;
 mod recipe_cmd;
 mod remote;
 mod render;
@@ -47,6 +80,7 @@ mod review;
 mod review_format;
 mod rig;
 mod services_cmd;
+mod setup_cmd;
 mod setup_io;
 mod ssh_remote;
 mod stats_cmd;
@@ -56,6 +90,7 @@ mod trackers;
 mod trigger_cmd;
 mod up_cmd;
 mod usage;
+mod user_config;
 mod watch;
 mod wizard;
 mod workspace_cmd;
@@ -76,18 +111,40 @@ fn main() -> ExitCode {
     if let Some(call) = args::server_call(&argv[1..]) {
         return serve(&argv[..=call.prefix], call);
     }
+    // `by help all` and `by help agents` list commands; they are not commands.
+    if let Some(listing) = args::help_listing(&argv[1..]) {
+        return match commands::print(&args::listing_text(listing, Env::detect().color)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
     let cli = match args::parse_from(&argv) {
         Ok(cli) => cli,
         // Help and --version come this way too, to stdout with exit 0;
         // usage errors go to stderr with exit 2.
         Err(error) => {
-            branchyard_support::best_effort("print the usage error", error.print());
+            // A refused command line is JSON too, when the line asks for it.
+            if error.use_stderr() && errors::wants_json(&argv) {
+                errors::print(&errors::usage(&error), true);
+            } else {
+                print_or_warn("print the help or usage message", error.print());
+            }
             return ExitCode::from(error.exit_code() as u8);
         }
     };
+    // No command: where this repository stands and the one next step, not
+    // the sixty commands (`by --help` lists them).
     let Some(command) = cli.command else {
-        branchyard_support::best_effort("print the help", args::command().print_help());
-        return ExitCode::SUCCESS;
+        return match setup_cmd::card() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(Failure::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe => {
+                ExitCode::SUCCESS
+            }
+            Err(failure) => {
+                eprintln!("by: {failure}");
+                ExitCode::FAILURE
+            }
+        };
     };
     // Run by a Claude Code session on every prompt and redraw: the
     // configuration only to find the yard, no logging, and never a failure, whatever the
@@ -103,7 +160,10 @@ fn main() -> ExitCode {
     let (globals, command) = match defaults::apply(&cwd, &env, cli.globals, command) {
         Ok(applied) => applied,
         Err(error) => {
-            eprintln!("by: {error}");
+            errors::print(
+                &errors::config(&error.to_string()),
+                errors::wants_json(&argv),
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -122,9 +182,33 @@ fn main() -> ExitCode {
         // A closed pipe, as in `by ls | head`, is the reader's choice.
         Err(Failure::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(Failure::Reported) => ExitCode::FAILURE,
+        // Something only the person can do remains: not a failure, not done.
+        Err(Failure::Manual(message)) => {
+            if !message.is_empty() {
+                eprintln!("by: {message}");
+            }
+            ExitCode::from(2)
+        }
         Err(failure) => {
-            eprintln!("by: {failure}");
+            if let Some(report) = errors::failure(&failure, None) {
+                errors::print(&report, errors::wants_json(&argv));
+            }
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Print what `by` was asked to print (help, a usage error) and, when that
+/// fails, say so on standard error: `by --help > /dev/full` once failed
+/// without a word, because the subscriber that shows a survived failure was
+/// not installed yet on this path. A closed pipe (`by --help | head -1`) is
+/// the reader's choice and is not a failure.
+fn print_or_warn(context: &str, result: io::Result<()>) {
+    branchyard_server::logging::init_for_commands();
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+        other => {
+            branchyard_support::best_effort(context, other);
         }
     }
 }
@@ -135,7 +219,7 @@ fn serve(prefix: &[OsString], call: args::ServerCall) -> ExitCode {
     let globals = match args::parse_from(prefix) {
         Ok(cli) => cli.globals,
         Err(error) => {
-            branchyard_support::best_effort("print the server usage error", error.print());
+            print_or_warn("print the help or usage message", error.print());
             return ExitCode::from(error.exit_code() as u8);
         }
     };
@@ -172,7 +256,14 @@ fn serve(prefix: &[OsString], call: args::ServerCall) -> ExitCode {
 fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
     match command {
         // Started by the engine for one branch, always beside it.
-        Command::Mcp { root, branch } => return commands::mcp(&root, &branch),
+        Command::Mcp {
+            list_tools: true, ..
+        } => return commands::mcp_tools(),
+        Command::Mcp {
+            root: Some(root),
+            branch: Some(branch),
+            ..
+        } => return commands::mcp(&root, &branch),
         Command::Completions { shell } => {
             let mut out = Vec::new();
             clap_complete::generate(shell, &mut args::command(), "by", &mut out);
@@ -180,11 +271,12 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         }
         Command::Man => {
             let mut out = Vec::new();
-            clap_mangen::Man::new(args::command()).render(&mut out)?;
+            clap_mangen::Man::new(args::command_with_hidden()).render(&mut out)?;
             return commands::print(&String::from_utf8_lossy(&out));
         }
         // Setup needs no repository or server: it may be what creates them.
         Command::Init { init } => return init::main(env, &init),
+        Command::Setup { setup } => return setup_cmd::main(env, &setup),
         Command::Config { json, action } => return config_cmd::main(&action, json),
         // Doctor reports a broken configuration, a missing store or an
         // unreachable server rather than stopping at it.
@@ -252,16 +344,21 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
     }
     match command {
         Command::Run {
-            prompt, mut task, ..
+            prompt,
+            detached,
+            mut task,
         } => {
             inventory_default(&mut task)?;
-            commands::run(env, target, &prompt, &task)
+            // The background command of a `--detach` writes its log as text.
+            let json = detached.json && !detached.detach;
+            commands::run(env, target, &prompt, &task, json)
         }
         Command::Fan {
             prompt,
             harnesses,
             attempts,
             judge,
+            json,
             mut task,
         } => {
             if harnesses.is_none() {
@@ -273,7 +370,11 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
                 &prompt,
                 harnesses.as_ref().map(|h| h.0.as_slice()),
                 &task,
-                &commands::FanRoute { attempts, judge },
+                &commands::FanRoute {
+                    attempts,
+                    judge,
+                    json,
+                },
             )
         }
         Command::Map {
@@ -409,16 +510,23 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             prompt,
             fresh_session,
             at: None,
+            detached,
             task,
-            ..
-        } => commands::fork(env, target, &branch, &prompt, fresh_session, &task),
+        } => {
+            let json = detached.json && !detached.detach;
+            commands::fork(env, target, &branch, &prompt, fresh_session, &task, json)
+        }
         Command::Fork {
             branch,
             prompt,
             at: Some(turn),
+            detached,
             task,
             ..
-        } => commands::fork_at(env, target, &branch, turn, &prompt, &task),
+        } => {
+            let json = detached.json && !detached.detach;
+            commands::fork_at(env, target, &branch, turn, &prompt, &task, json)
+        }
         Command::Task(task) => task_cmd::main(env, target, &task.action, task.json),
         Command::Rewind {
             branch,
@@ -464,6 +572,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             editor,
             file,
             detach,
+            json,
             task,
         } => review::main(
             env,
@@ -474,6 +583,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
                 editor: editor.as_deref(),
                 file: file.as_deref(),
                 detach,
+                json,
                 task: &task,
             },
         ),
@@ -496,11 +606,12 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             into,
             rm,
             promote_effects,
+            json,
         } => {
             if promote_effects {
                 effects_cmd::promote_before_merge(target, &branch)?;
             }
-            commands::merge(target, &branch, into.as_deref(), rm)
+            commands::merge_as(target, &branch, into.as_deref(), rm, json)
         }
         Command::Approvals(a) => effects_cmd::approvals(target, a.action.as_ref(), a.json),
         Command::Effects(e) => {
@@ -514,7 +625,8 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         Command::Rm {
             branch,
             keep_credentials,
-        } => commands::rm(target, &branch, keep_credentials),
+            json,
+        } => commands::rm(target, &branch, keep_credentials, json),
         Command::Harnesses {
             json,
             all,
@@ -704,6 +816,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Completions { .. }
         | Command::Man
         | Command::Init { .. }
+        | Command::Setup { .. }
         | Command::Config { .. }
         | Command::Doctor { .. }
         | Command::Up { .. }

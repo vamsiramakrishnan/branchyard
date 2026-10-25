@@ -1,6 +1,6 @@
 # Workspace lifecycle
 
-A new branch is a fresh git worktree: no `.env`, no `node_modules`, no running database. `[workspace]` in `branchyard.toml` makes each new worktree ready before the harness's first turn, and cleans up when the branch is removed. It is Branchyard's answer to emdash's `.emdash.json`, Superset's `.superset/config.json` and Conductor's scripts ([devex](devex.md#2-one-committed-file-makes-every-new-worktree-ready-to-work)), with two differences: a repository's scripts never run until you trust them, and setup is a journaled step, so a crash mid-install is recovered rather than forgotten.
+A new branch is a fresh git worktree: no `.env`, no `node_modules`, no running database. `[workspace]` in `branchyard.toml` makes each new worktree ready before the harness's first turn, and cleans up when the branch is removed. It is Branchyard's answer to emdash's `.emdash.json`, Superset's `.superset/config.json` and Conductor's scripts ([devex](competitive-notes.md#2-one-committed-file-makes-every-new-worktree-ready-to-work)), with two differences: a repository's scripts never run until you trust them, and setup is a journaled step, so a crash mid-install is recovered rather than forgotten.
 
 ## The file
 

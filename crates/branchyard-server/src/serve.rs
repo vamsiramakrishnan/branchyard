@@ -700,8 +700,7 @@ fn open_yard(config: &Config, name: &str, path: &std::path::Path) -> Result<Yard
 }
 
 #[cfg(not(feature = "postgres"))]
-const NO_POSTGRES: &str = "this build has no PostgreSQL support; build by or \
-     branchyard-server with the postgres feature to use --database";
+use crate::config::NO_POSTGRES;
 
 type Store = Box<dyn crate::store::OperationStore>;
 

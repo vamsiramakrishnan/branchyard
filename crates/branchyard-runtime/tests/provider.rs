@@ -146,7 +146,7 @@ fn the_local_provider_declares_exec_only() {
 #[test]
 fn the_local_provider_refuses_what_it_cannot_honor() {
     let provider = LocalProvider::new();
-    let dir = PathBuf::from("/tmp/by-local");
+    let dir = PathBuf::from("/srv/by-local");
     let refused = [
         SandboxSpec::new("image").image("alpine:3"),
         SandboxSpec::new("limits").resources(Resources {

@@ -298,7 +298,13 @@ fn by_remote_ssh_starts_a_server_forwards_its_socket_and_runs_commands() {
 #[test]
 fn ssh_remotes_refuse_what_they_cannot_use_and_say_why() {
     let world = World::new();
-    let out = world.by(&["--remote", &world.url(), "--token-file", "/tmp/t", "ls"]);
+    let out = world.by(&[
+        "--remote",
+        &world.url(),
+        "--token-file",
+        "/nonexistent/t",
+        "ls",
+    ]);
     assert!(!out.status.success());
     assert!(
         text(&out.stderr).contains("fetches its own token"),

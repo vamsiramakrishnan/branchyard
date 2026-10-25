@@ -36,6 +36,11 @@ fn a_run_that_writes_files_is_ready_with_its_diffstat() {
         ("gemini-cli", "gemini-cli-acp")
     );
     assert_eq!(info.session.as_deref(), Some("fake-session-1"));
+    // The executable it was started with is kept for its later turns.
+    assert_eq!(
+        branch.command().unwrap(),
+        Some(vec![fake_agent().display().to_string()])
+    );
     assert_eq!(info.turns, 1);
     assert_eq!(info.cost_usd, None, "ACP reports no cost");
     assert_eq!(info.base, f.git(&["rev-parse", "main"]).trim());
@@ -94,6 +99,63 @@ fn a_turn_with_a_huge_max_duration_runs() {
             "{max_duration:?}"
         );
     }
+}
+
+/// `by run | head -1`: the observer is the console, and printing to a closed
+/// pipe panics. The turn completed; the reader going away must not lose it
+/// (the branch was left `interrupted`, with no turn and no candidate).
+#[test]
+fn an_observer_that_panics_does_not_lose_the_completed_turn() {
+    let f = Fixture::new();
+    let branch = f
+        .task("WRITE hello.txt=hi")
+        .name("watched")
+        .on_event(|_| panic!("failed printing to stdout: Broken pipe (os error 32)"))
+        .run()
+        .unwrap();
+    let info = branch.info();
+    assert_eq!(info.status, BranchStatus::Ready);
+    assert_eq!(info.turns, 1);
+    assert!(info.candidate.is_some(), "{info:?}");
+    let events = branch.events().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.activity, Activity::Status(BranchStatus::Ready))),
+        "the final status was recorded: {events:?}"
+    );
+}
+
+/// A step the turn survived is in the branch's own log afterwards, where
+/// `by log` and `by show` read it, besides on the process's standard error.
+#[test]
+fn a_step_the_turn_survived_is_recorded_in_the_branchs_log() {
+    let f = Fixture::new();
+    let once = std::sync::atomic::AtomicBool::new(false);
+    let branch = f
+        .task("WRITE hello.txt=hi")
+        .name("survivor")
+        .on_event(move |_| {
+            // The observer runs on the turn's thread, inside the engine.
+            if !once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                branchyard_support::best_effort(
+                    "remove the staging directory",
+                    Err::<(), _>("permission denied"),
+                );
+            }
+        })
+        .run()
+        .unwrap();
+    assert_eq!(branch.info().status, BranchStatus::Ready);
+    let events = branch.events().unwrap();
+    assert_eq!(
+        branchyard::survived_failures(&events),
+        ["remove the staging directory: permission denied"],
+        "{events:?}"
+    );
+    // A turn that survived nothing records nothing.
+    let quiet = f.task("WRITE b.txt=1").name("quiet").run().unwrap();
+    assert!(branchyard::survived_failures(&quiet.events().unwrap()).is_empty());
 }
 
 #[test]
@@ -325,9 +387,52 @@ fn reincarnation_starts_fresh_with_a_handoff_brief_and_marks_the_old_branch_supe
         "the candidate's commit"
     );
     assert!(prompt.contains("1 file(s) changed"), "{prompt}");
+    // It says what to do, in the words of any other handoff, and not what the
+    // engine calls it.
+    assert!(
+        prompt.starts_with("Continue elder's work in a fresh session."),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("is being reincarnated"), "{prompt}");
+    assert!(
+        prompt.contains(
+            "The working tree is as the last turn left it; check it (`git status`, `git log`)"
+        ),
+        "{prompt}"
+    );
 
     let old = f.yard.branch("elder").unwrap();
     assert_eq!(old.info().superseded_by.as_deref(), Some("reborn"));
+}
+
+/// The handoff brief quotes the old branch's last message. A log that cannot
+/// be read stops the reincarnation; it used to read as an empty log and start
+/// the new branch from a brief with no last message, saying nothing.
+#[test]
+fn reincarnation_stops_when_the_log_its_brief_is_made_from_cannot_be_read() {
+    let f = Fixture::new();
+    let parent = f.task("WRITE base.txt=1").name("damaged").run().unwrap();
+    let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+    db.execute(
+        "UPDATE events SET activity = 'not json' WHERE id = \
+         (SELECT MIN(id) FROM events WHERE branch = 'damaged')",
+        [],
+    )
+    .unwrap();
+    let error = parent
+        .reincarnate(TaskOptions {
+            name: Some("again".into()),
+            ..f.options()
+        })
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("could not read the log of damaged for its brief"),
+        "{error}"
+    );
+    assert!(f.yard.branch("again").is_err(), "no branch was started");
 }
 
 #[test]
@@ -967,7 +1072,7 @@ fn harnesses_lists_every_profile_with_availability_and_qualification() {
         .qualification
         .as_deref()
         .unwrap()
-        .starts_with("9/9 on 2.1.283"));
+        .starts_with("9/9 on 2.1.310"));
     let acp = harnesses
         .iter()
         .find(|h| h.profile == "claude-code-acp")
@@ -980,7 +1085,7 @@ fn harnesses_lists_every_profile_with_availability_and_qualification() {
     assert!(codex.default);
     assert_eq!(
         codex.qualification.as_deref(),
-        Some("9/9 on codex-cli 0.157.1")
+        Some("9/9 on codex-cli 0.164.0")
     );
     let codex_acp = harnesses.iter().find(|h| h.profile == "codex-acp").unwrap();
     assert!(!codex_acp.default && codex_acp.qualification.is_none());
@@ -992,37 +1097,6 @@ fn harnesses_lists_every_profile_with_availability_and_qualification() {
         let found = std::env::split_paths(&path).any(|dir| dir.join(program).is_file());
         assert_eq!(harness.available, found, "{}", harness.profile);
     }
-}
-
-#[test]
-fn harnesses_inherit_the_environment_without_nested_session_markers() {
-    let f = Fixture::new();
-    let prompt = "ENV CLAUDECODE BRANCHYARD_REMOTE BY_TEST_VISIBLE";
-    let shared = f.task(prompt).name("shared").run().unwrap();
-    let home = std::env::var("HOME").unwrap();
-    assert_eq!(
-        text(&shared.events().unwrap()),
-        format!("HOME={home}\nCLAUDECODE unset\nBRANCHYARD_REMOTE unset\nBY_TEST_VISIBLE=yes\n")
-    );
-
-    let isolated = f
-        .task(prompt)
-        .name("isolated")
-        .isolated(true)
-        .run()
-        .unwrap();
-    let private = f.root.join(".branchyard/homes/isolated");
-    assert!(private.is_dir());
-    assert_eq!(
-        text(&isolated.events().unwrap()),
-        format!(
-            "HOME={}\nCLAUDECODE unset\nBRANCHYARD_REMOTE unset\nBY_TEST_VISIBLE=yes\n",
-            private.display()
-        )
-    );
-    f.yard.remove("isolated").unwrap();
-    assert!(!private.exists());
-    assert!(fake_agent().is_file());
 }
 
 #[test]

@@ -19,8 +19,8 @@ The server registers <!-- fact:http.route_count -->90<!-- /fact --> routes; each
 
 | Operation | SDK | by | by --remote | HTTP | client | delegation |
 |---|---|---|---|---|---|---|
-| Run a task on one branch | `TaskBuilder::run` | `run` | yes | `POST …/tasks` | `submit_task` | `spawn` creates a child instead |
-| Fan out to several harnesses | `run_on` | `fan` | yes | `harnesses` in the task | yes | no: a child has one harness; spawn one per harness |
+| Run a task on one branch | `TaskBuilder::run` | `run [--json]` | yes | `POST …/tasks` | `submit_task` | `spawn` creates a child instead |
+| Fan out to several harnesses | `run_on` | `fan [--json]` | yes | `harnesses` in the task | yes | no: a child has one harness; spawn one per harness |
 | Check a [rig](rigs.md) and print its plan | no: the planner is the CLI's (`rig::plan`); build `Seats` yourself | `rig check` | the same, locally: nothing is sent | n/a | n/a | n/a |
 | Run a rig's root seat | `TaskOptions::seats` with `delegation` | `rig run` | server opt-in `--allow-delegation` | `seats` in the task | yes | no: a child's seats come from its parent's rig |
 | Continue a branch | `Branch::send` | `send` | yes, `--retry` too | `POST …/send`, `retry` for `--retry` | `send` | `send`, to a descendant, returning once its turn started |
@@ -31,8 +31,8 @@ The server registers <!-- fact:http.route_count -->90<!-- /fact --> routes; each
 | Diff | `Branch::diff` | `diff` | yes | yes | yes | no: `inspect` reports the candidate |
 | Event log | `events`, `events_since` | `log` | yes | `GET …/events?cursor` | `events` | `events` |
 | Activity across branches from a cursor | `Yard::events_since`, `wait_for_events` | `watch` | `watch` | SSE stream | `stream` | no |
-| Validated merge | `Yard::merge` | `merge` | yes | `POST …/merge` | `merge` | `integrate`, into the acting branch only |
-| Remove | `Yard::remove` | `rm` | yes | `DELETE …` | `remove` | no |
+| Validated merge | `Yard::merge` | `merge [--rm] [--json]` | yes | `POST …/merge` | `merge` | `integrate`, into the acting branch only |
+| Remove | `Yard::remove` | `rm [--json]` | yes | `DELETE …` | `remove` | no |
 | Cancel a turn and its subtree | `Yard::cancel` | `cancel` | yes, with the server's authority | `POST …/cancel` | `cancel` | `cancel`, descendants only |
 | Steer a running turn ([harness support](harness-integration.md#steering-a-running-turn)) | `Branch::steer`, `Yard::steer_as`; `steer_state`, `wait_steer` follow it | `send --steer` | yes, as the server's caller | `POST …/steer` | `steer` | `steer` (`by send --steer`, `branchyard.steer`, `Delegate::steer`, MCP), descendants only |
 | Harness profiles | `Yard::harnesses` | `harnesses` | yes, the server's `PATH` | `GET /v1/harnesses` | `harnesses` | no |
@@ -59,6 +59,7 @@ The server registers <!-- fact:http.route_count -->90<!-- /fact --> routes; each
 | Rig seats ([rigs](rigs.md)) | `TaskOptions::seats` | `rig run` | server opt-in `--allow-delegation`; each seat's provisioning under the same rules as provisioning below | `seats`, on task requests only | yes | a child gets the seats below its own |
 | Allow delegation commands | `Policy::allow_delegation_commands` | `--allow-delegation` | server opt-in `--allow-delegation` | `allow_delegation` | yes | inherited |
 | Unapproved tools | `TaskOptions::unapproved_tools` | `--allow-unapproved-tools` | server opt-in `--allow-unapproved-tools` | `unapproved_tools` | yes | inherited |
+| Check the harness first ([before a run](harness-lifecycle.md#before-a-run)) | n/a | on by default for `run`, `fan` and `send`; `--no-preflight` skips | no: the server's router and workers decide | n/a | n/a | no |
 | Provisioning: secrets ([provisioning](provisioning.md)) | `Provisioning::secrets`, with `isolated` or a sandbox provider | `--secret NAME[=VAR\|=@FILE]`, read from your environment or files | `--secret NAME` only: the server reads each from the source its operator defined with `by serve --secret`; a named source is refused | `provision.secrets`, names only; `403 secret_not_allowed` for one the server does not define | yes | inherited, with the parent's sources |
 | Provisioning: MCP servers | `Provisioning::mcp_servers` | `--mcp NAME=COMMAND` | server opt-in `--allow-client-commands`: the server runs them | `provision.mcp_servers`, same opt-in | yes | inherited |
 | Provisioning: instructions, model, effort, telemetry, auth method | `Provisioning` | `--instructions FILE`, `--model`, `--effort`, `--telemetry URL\|off`, `--auth` | yes; `by` reads the instructions file and sends its text | `provision` | yes | inherited |
@@ -92,7 +93,7 @@ A person acts with their own authority, or the server's, bounded by the branch's
 | Answer a descendant's message | `Delegate::answer` | `answer <message-id> "<text>"` | yes | `POST …/answer` | `answer` |
 | The branch's own inbox | `Delegate::inbox` | `inbox [--unread]` | yes | `GET …/inbox` | `inbox` |
 
-`by --remote` prints the same JSON as `by` for each, and the same `{"error": {"kind", "message"}}` for refusals; tests compare them. Outside a harness every messaging command needs `--as <branch>`, since there is no other way to say who is asking; see [delegation](delegation.md#inbox). A message to a branch with a running turn is steered into it on every surface (`SteerDelivery`, the default `DeliveryHook` of every `Yard`), and otherwise delivered at its next turn's start; `Activity::MessagesDelivered` (`messages_delivered` in `by log --json`) records which ([delegation](delegation.md#delivery)).
+`by --remote` prints the same JSON as `by` for each, and the same `{"error": {"kind", "message", "next", "detail"}}` for refusals; tests compare them. [The `--json` contract](#the---json-contract) below says what every command does with it. Outside a harness every messaging command needs `--as <branch>`, since there is no other way to say who is asking; see [delegation](delegation.md#inbox). A message to a branch with a running turn is steered into it on every surface (`SteerDelivery`, the default `DeliveryHook` of every `Yard`), and otherwise delivered at its next turn's start; `Activity::MessagesDelivered` (`messages_delivered` in `by log --json`) records which ([delegation](delegation.md#delivery)).
 
 A harness reaches the same waits and integrations: `by wait`, `branchyard.wait_any`/`wait_all`, `Delegate::wait_for` and the MCP `wait` tool; `by integrate a b`, `branchyard.integrate("a", "b")`, `Delegate::integrate_all` and the MCP `propose_integration` with `branches`. A harness whose turn ends while its children run is woken when they settle, on every surface ([delegation](delegation.md#waiting-on-children)); `by run --no-wake` and `Envelope::no_wake` opt out.
 
@@ -131,6 +132,19 @@ A remote caller reaches the scratch area's directory only through `lock`/`unlock
 ## Output types
 
 Every result a surface returns is the SDK's serde form: `BranchInfo`, `RecordedEvent`, `Activity`, `Merged`, `HarnessInfo`, `Inspection`, `Spawned`, `Sent`, `Steer`, `EventPage`, `Children`, `Cancelled`, `Recovery`, `FeedPage`, `ArtifactRef`, `ScratchArea`, `ScratchLock`, `Graph`, `GraphApplied`. `by --json` prints them through serde, except `by log --json`, whose flattened event shape is the CLI's own.
+
+## The `--json` contract
+
+`--json` anywhere on the command line makes `by` print JSON on standard output and nothing else there; activity, warnings and notes go to standard error. That holds for a failure too, whichever layer failed:
+
+```json
+{"error": {"kind": "unknown_branch", "message": "no branch named brokn; did you mean broken?",
+           "next": ["by ls"]}}
+```
+
+`kind` is `Error::kind` for the engine's errors (`unknown_branch`, `running`, `check_failed`, `usage`, ...) and the server's `code` for a server's, as `by --remote` reports it (the server's `git_error` is `git`, and so on). The layers above the engine add `usage` (a command line or an argument `by` refused, including clap's own usage errors, which exit 2), `config` (a configuration file that cannot be applied), `remote_unreachable` (a server that did not answer), `remote_protocol` and `io`. `message` is the text `by` prints after `by: `, with the lines under it (`check:`, `output:`); `next` lists what to run next, each a command or a short sentence around one; `detail` is what the error carries beyond its message (a failed check's `status` and `command`, the `checks` of an integration). The exit status is 1, or 2 for a command line clap refused.
+
+Every command that takes a branch or prints a result takes `--json`. This round added it to `merge` (the `Merged` fields, `check`: `{"command", "result"}` or `null`, and `removed`), `fan` (`branches`, as `ls --json` prints them, and `judgement` with `--judge`), `rm` (`{"removed": NAME}`) and `review` (`send`'s `Sent`, or with `--print` the prompt), and let `run --json` and `fork --json` wait for the turn and print what `show --json` prints; before, `--json` without `--detach` was refused. `crates/branchyard-cli/tests/cli.rs` runs the error path of each of these commands with `--json` and parses standard output.
 
 ## Added with steering
 
@@ -193,7 +207,7 @@ A server-only addition: identity, scopes and quotas are meaningful only where mo
 
 ## Changed with the clap command line
 
-Every `by` command, flag and JSON output is unchanged; the parsing around them is stricter and the help is generated. See the [README](../README.md#command-line).
+Every `by` command, flag and JSON output is unchanged; the parsing around them is stricter and the help is generated. See [command line](cli.md).
 
 | Surface | Before | Now |
 |---|---|---|
@@ -202,6 +216,9 @@ Every `by` command, flag and JSON output is unchanged; the parsing around them i
 | Usage errors | `by: MESSAGE` and `Try 'by help CMD'.`, exit 2 | clap's `error: MESSAGE`, a `tip:` where one helps (a similar command or flag, quoting a prompt), the command's usage line, exit 2 |
 | `--help` | anywhere on the command line, it won over any other mistake | it wins over missing arguments and everything after it; an unknown flag before it is reported instead |
 | `--check`, `--command` and `PAGER` splitting | own POSIX-like splitter | `shlex`, which also drops a `#` comment starting a word |
+| `by --help` | every command, in six groups, 112 lines | the commands of a first hour in Start, Work, Look and Clean up, and the names of the rest; `by help all` lists every command, hidden ones included, under the old groups; `by help agents` lists what a harness runs for itself. The commands a harness runs (`ask`, `answer`, `inbox`, `escalate`, `report`, `report-status`, `brief`, `delegate`, `spawn`, `children`, `graph`, `integrate`, `inspect`, `events`, `discard`) and the plumbing (`mcp`, `hook`, `statusline`, `completions`, `man`, `worker`, `serve`) are `hide = true`: they work as before, and `by help NAME` and `NAME --help` still show them |
+| `by mcp --list-tools` | `--root` and `--branch` were required | prints the MCP `tools/list` result as JSON with each tool's input schema, with no repository, branch or token |
+| Command summaries | up to 227 characters | under 80, with the detail in the second paragraph of `--help`; every argument has help text, numbers say `<DOLLARS>` or `<SECONDS>`, and `--yes` says what it grants or confirms in each command |
 | New | none | `by completions <bash\|zsh\|fish\|powershell\|elvish>`, `by man`, short flags, durations with units, `$` in `--budget-usd` |
 
 ## Added with setup
@@ -212,6 +229,9 @@ Setup and configuration are the CLI's: they write files for `by` and the server 
 |---|---|---|
 | `by init [TOPIC]` | none: server JSON, rig TOML, token files and secrets tables were written by hand | a terminal wizard (`cliclack`) over one interview per topic: `project`, `server`, `rig`, `deploy`, `plugin`; refuses without a terminal |
 | `by init TOPIC --json --next`, `--dry-run`, `--apply [--force]` | none | the same interview as a JSON protocol (`schema/setup.protocol.json`): batches of at most four questions, a plan of files with diffs and validator verdicts, writes only valid plans and replaces a differing file only with `--force`; clap subcommand flags, so two steps at once, `--force` without `--apply`, `--answers` without a step or a step without a topic is a usage error (exit 2), and the topic completes in every shell |
+| `by setup [--yes] [--dry-run] [--json] [--harness ID...] [--no-hooks] [--no-config]` | `by init` (the interview), `by init plugin --all-detected` (hooks), `by harnesses login` (logins) and `by workspace trust`, run by hand in that order | one idempotent command over the same engines: detect, `branchyard.toml` from the project defaults (a terminal is asked only what cannot be detected), the `[workspace]` scripts it wrote shown and trusted (asked on a terminal, taken with `--yes`), each detected harness's hooks, commands and skills planned alone, a model-free `by hook` check per harness (`hooks: verified` or `silent` with the reason), and the login command for each harness whose login is not verified (never started); a card ending in what only you can do and the next command. Without a terminal and without `--yes` it is `--dry-run`; a second run writes nothing; exit 1 only on a real error; `--json` prints `detected`, `written`, `installed`, `todo`, `next`. A CLI command: no SDK, HTTP or delegation counterpart, and refused inside a harness's branch ([setup](setup.md#one-command)) |
+| `by` with no command | the full help, 60 commands, exit 0 | a status card of under twelve lines: whether the repository is set up (`branchyard.toml`, `.branchyard/`), its branches by state (the counts a status line shows, read-only from `.branchyard/state.db`) and one `Next:` line (`by setup`, `by run …`, `by show BRANCH`, `by ls`); outside a git repository it points at `cd <repo> && by setup`. `by --help` is the full list, with a *Start here* group |
+| `by init plugin --status [ID...] [--json]` | none: `--dry-run` printing "already installed" was the only way to tell | per harness: install `current`, `stale` or `missing`, detected on `PATH` or not, whether `by` is on `PATH` for its hooks, and the install notes still on your list; writes nothing |
 | `branchyard.toml`, `~/.config/branchyard/config.toml` | none: every default came from flags and `BRANCHYARD_*` variables | defaults under flags and variables (`schema/branchyard.config.json`): `run` and `fan` take every default, `send`, `fork`, `reincarnate` and `spawn` only `permissions`, `serve` its `--config`, remote commands `[remote]`; not read inside a harness's branch |
 | `by config show`, `path`, `validate`, `schema` | none | the effective configuration with each value's source, where the files are, a strict check, the schema; clap subcommands, `--json` before or after the action |
 | `by serve --check`, `branchyard-server --check` | none | load and validate a configuration as serving would, without serving or writing anything; a flag of the server's clap parser, which `by serve` forwards like the rest; `branchyard.toml`'s `[serve] config` is added as `--config` only when the server's parser reports no `--config`/`-c` on the command line |
@@ -268,7 +288,7 @@ The cockpit branch made `by watch` act on the selected branch; integrating it wi
 | Surface | Before | Now |
 |---|---|---|
 | `by watch`'s detail pane | status, cost, inbox, children, prompt, events | also the checkpoint the branch is at, its merge readiness once it has pull-request steps, and whether it is being tried |
-| `--no-notify`, `[notify]` in `branchyard.toml` | none | notices from `by watch` and waiting commands ([README](../README.md#watching-branches)); `schema/branchyard.config.json` regenerated |
+| `--no-notify`, `[notify]` in `branchyard.toml` | none | notices from `by watch` and waiting commands ([watching branches](watch.md)); `schema/branchyard.config.json` regenerated |
 | `--log-format` (server, `by serve`, `by worker`, `branchyard-herdr`) | human-readable only | `pretty` (the default) or `json`, one object per line |
 | `branchyard_workspace::git`, `Git` | private | public: the one place that starts `git` on the host; `Git::stdin` and `Git::run_bytes` added at integration for `by try`'s patches and blobs, and `by pr` uses it too |
 | `Yard::try_recorded` | none | the recorded try, read without the try lock (what `by watch` polls) |
@@ -366,7 +386,7 @@ Ports from emdash and Orca ([roadmap](roadmap.md), Wave 1). The review and catal
 | Operation | SDK | by | by --remote | HTTP | client | delegation |
 |---|---|---|---|---|---|---|
 | Comment on a diff and send the comments as one prompt | no: `Branch::diff` and `send`; the editor and format are the CLI's | `review [--print] [--file F] [--detach]` | yes: the diff comes from the server, the editor runs here, the prompt is a `send` | `GET` the diff, then a send | `diff`, then a send | no: `by review` refuses inside a harness (it needs a person and an editor); send a prompt with `by send` |
-| Run a local turn detached from the terminal | no: the CLI starts itself again in its own process group | `run`, `send`, `fork` with `--detach [--json]`: returns once the turn has started, prints the branch, its log under `.branchyard/detached/` and `log -f`/`watch`/`wait`/`cancel` to follow it; `--ask` is a usage error, and an `ask` from the configuration, `--prompt-file -` and a call inside a harness are refused; `fan` has none | no: refused, since a server's turn already outlives the command | no | no | no: inside a harness, `spawn` and `send` already return |
+| Run a local turn detached from the terminal | no: the CLI starts itself again in its own process group | `run`, `send`, `fork` with `--detach [--json]`: returns once the turn has started, prints the branch, its log under `.branchyard/detached/` and `log -f`/`watch`/`wait`/`cancel` to follow it (`run --json` and `fork --json` without `--detach` wait for the turn, activity on stderr, and print what `show --json` prints); `--ask` is a usage error, and an `ask` from the configuration, `--prompt-file -` and a call inside a harness are refused; `fan` has none | no: refused, since a server's turn already outlives the command | no | no | no: inside a harness, `spawn` and `send` already return |
 | Answer and resolve the review threads a push addressed | `PullRequestActivity::ThreadsResolved` records it | inside `pr --watch` (`--no-resolve` to leave them) | no: `pr` is local only | no | no | no |
 | Harness CLIs Branchyard knows of | `branchyard_controls::catalog::harnesses` | `harnesses --all [--json]` | yes: the catalog is built in; profiles are listed, `PATH` is not checked | no | no | the `by` command |
 | Connector catalog | `branchyard_controls::catalog::connectors` | `connectors catalog [--json]` | yes, built in (no server is contacted) | no | no | the `by` command |
@@ -386,14 +406,16 @@ Ports from emdash and Orca ([roadmap](roadmap.md), Wave 1). The review and catal
 
 ## Changed from 4609ca1
 
+The Before column is the state at that commit (September 2026); the Now column is current.
+
 | Gap | Before | Now |
 |---|---|---|
 | `by --remote --provider`, `--delegate`, `--allow-delegation`, `--allow-unapproved-tools` | refused by the CLI | sent in the request; the server's operator opts in |
-| `by --remote spawn`, `inspect`, `events`, `integrate`, `children`, `send --json` | refused: "does not run with --remote yet" | server endpoints, the same JSON as local |
+| `by --remote spawn`, `inspect`, `events`, `integrate`, `children`, `send --json` | refused: "does not run with --remote yet" | server endpoints, the same JSON as local; spawn, integrate and the rest of delegation need a server started with `--allow-delegation` |
 | Providers on the server | local only | `--allow-provider microsandbox,substrate` |
 | Delegation for the server's harnesses | none | `--allow-delegation`, `--by-path` |
 | Unapproved tools on the server | refused | `--allow-unapproved-tools` |
-| PostgreSQL | design only | `Yard::open_postgres`, `by serve --database` |
+| PostgreSQL | design only | `Yard::open_postgres`, `by serve --database` (built behind the `postgres` cargo feature) |
 | Several servers, and execute-only workers, on one database | one server per data directory | `by serve --database` on each, `by worker --database`; operations looked up by key with `GET /v1/operations?idempotency_key=` (`Client::operation_by_key`) ([server](server.md#several-servers-on-one-database)) |
 | `HarnessInfo` | not `Serialize`; copied field by field | serde |
 | `by --remote artifact`/`scratch`, the server's HTTP API, `branchyard-client` for storage | refused: "does not yet reach a server over --remote" | server endpoints, the same JSON as local; `--max-artifact-bytes` |
@@ -610,11 +632,11 @@ See [harness lifecycle](harness-lifecycle.md).
 
 | Surface | Before | Now |
 |---|---|---|
-| `by harnesses` | the profiles and whether each is on `PATH` | this machine's inventory: installed harnesses with version, login (`verified`, `likely`, `unknown`) and quota, cached a minute (`--refresh`); `--json` prints `Inventory`; the old view is `--profiles`; `--all` unchanged |
+| `by harnesses` | the profiles and whether each is on `PATH` | this machine's inventory: installed harnesses with version (asked all at once, ten seconds each; `slow to start` when one does not answer), login (`logged in`, `key set (VAR)`, `key stored (VAR)`, `credentials found`, `logged out`, `login not verified`, `unknown`), live run (`live 9/9` or `no live run`) and quota, cached a minute (`--refresh`); `--json` prints `Inventory`; the old view is `--profiles`; `--all` unchanged |
 | `by harnesses --on TARGET` | none | `ssh://[user@]host[:port]` or `recipe:NAME` (a fresh machine, destroyed after) |
 | `by harnesses --remote URL` | the server's profiles | its live workers and their inventories (`GET /v1/inventory`; the profiles are `--profiles`) |
 | `by harnesses install\|update ID` | none | the catalog's command, pinned where it can be (`--version`), under `[harnesses] install` and `allow` (`--yes` answers an ask), verified by detecting again; here or `--on ssh://`; refused on a recipe and with `--remote` |
-| `by harnesses login ID` | none | the harness's own login with the terminal (also over `ssh -t`); without one, what to run and where; `--api-key` stores a key 0600 and names it in `[secrets]` |
+| `by harnesses login ID` | none | the harness's own login with the terminal (also over `ssh -t`); without one, the exact command to run and where, and exit 2 (`--json` `status` `manual`; `done`, `stored` and `failed` otherwise); `--api-key` stores a key 0600 and names it in `[secrets]`; for Antigravity with `GEMINI_API_KEY` set, shows and (with `--yes`, or a yes on a terminal) merges `modelProvider: "gemini"` into its settings |
 | `by harnesses log` | none | every install, update and login, from `harness-events.jsonl` beside the user configuration |
 | `[harnesses]` in `branchyard.toml` | none | `install` (`never`, `ask`, `auto`) and `allow`; a repository may only set `install = "never"`; in `schema/branchyard.config.json` |
 | SDK | none | `branchyard::inventory`: `Inventory`, `HarnessState`, `Login`, `LoginState`, `Evidence`, `Quota`, `DetectOptions`, `detect_local`, `detect_with`, `script`, `parse`, `InventoryCache`, `InstallPolicy`, `InstallMode`, `Permission`, `InstallPlan`, `plan`, `install`, `Installed`, `HarnessLog`, `HarnessEvent`, `HarnessGate`, `LocalGate`, `harness_of`, `key_variables` |
@@ -747,6 +769,7 @@ Every connector call that changes the world is decided, written to a ledger befo
 | `by spawn --model M`, `Spawn::model`, `SpawnSpec::model` (the MCP `spawn` tool and graph proposals' `model`), `SpawnRequest::model`, Python `spawn(model=)` | none: a child ran its seat's or parent's model | every surface; stored in the child's provisioning, like `by run --model` |
 | `branchyard_harness::Capabilities::model`, `Requirements::model` | none | whether a driver passes `Open::model`; a spawn naming a model for a driver without it (ACP, Amp) is refused `unsupported` with the driver's reason |
 | `BranchInfo::model`, `Inspection::model`, `Spawned::model` | none | the model a branch runs, omitted for its harness's default; a `model` line in `by inspect`, `model` in `by ls --json` |
+| `BranchInfo::provider`, `BranchInfo::isolated`, `Inspection::provider`, `Inspection::isolated` | none | where a branch's harness ran (`local`, `microsandbox`, `substrate`, `recipe:NAME`) and whether it had a private home on the host; both serde-default, so records and servers from before them read `local` and `false`; a `provider` line in `by show` and `by inspect`, and the same keys in `by ls --json` ([modes](modes.md)) |
 | Claude Code stream-json provisioning of a model | `ANTHROPIC_MODEL` only | `ANTHROPIC_MODEL` and `--model` (`Plan::session.model`) |
 
 ## Added with by check
@@ -870,7 +893,7 @@ See [harness integration](harness-integration.md#claude-code) and [distribution]
 
 | Surface | Before | Now |
 |---|---|---|
-| `by hook session-start\|user-prompt-submit` | none: a Claude Code session a person started learned a branch finished by polling `by ls` or blocking in `by wait` | reads the hook's JSON on stdin and prints `hookSpecificOutput.additionalContext`: with `BRANCHYARD_BRANCH`, that branch's unread messages; otherwise branches that finished, failed, are blocked or ask since the session's last call (`.branchyard/hooks/<session_id>.json`); at most twelve lines; read-only, two seconds at most, always exit 0; reads the server `[remote]`/`BRANCHYARD_REMOTE` names (600 ms a request), else `state.db`, else the PostgreSQL store `[serve] config` names (`postgres` feature) ([harness integration](harness-integration.md)) |
+| `by hook session-start\|user-prompt-submit` | none: a Claude Code session a person started learned a branch finished by polling `by ls` or blocking in `by wait` | reads the hook's JSON on stdin and prints `hookSpecificOutput.additionalContext`: with `BRANCHYARD_BRANCH`, that branch's unread messages; otherwise branches that finished, failed, are blocked or ask since the session's last call (`.branchyard/hooks/<session_id>.json`); at most twelve lines, each naming the command that deals with it ([harness hooks](harness-hooks.md)); read-only, two seconds at most, always exit 0; reads the server `[remote]`/`BRANCHYARD_REMOTE` names (600 ms a request), else `state.db`, else the PostgreSQL store `[serve] config` names (`postgres` feature) ([harness integration](harness-integration.md)) |
 | `by hook --harness ID <event>` | none: only Claude Code's hook JSON and reply | the same, in another harness's dialect: where its stdin keeps the session id and directory, and its reply's shape (`hookSpecificOutput` for Codex, Gemini CLI's `BeforeAgent`, Qwen Code, Droid and DeepSeek Harness; `additionalContext` for GitHub Copilot; `additional_context` for Cursor; `injectSteps` for Antigravity; plain text for Kiro; `{"context"}` for Hermes and `generic`); nothing at an event the harness drops; an unknown `ID` prints nothing, one stderr line, exit 0 ([harness hooks](harness-hooks.md)) |
 | `by statusline [--harness ID]` | none | one line for Claude Code's `statusLine` command, `by: feat-x · 2 running · 1 asking · 3 ready`; nothing outside a repository Branchyard uses; read from the same place as `by hook`; `--harness` reads the directory from that harness's status-line field, else the process's |
 | `branchyard::glance` (`read`, `read_postgres` with the `postgres` feature, `find_root`, `state_dir`, `unanswered`, `Glance` with `Glance::from_parts`, `Counts`, `READ_WAIT`, `CONNECT_WAIT`, `QUESTIONS_MAX`) | none; `Yard::open` creates, upgrades and recovers | a read-only look at `.branchyard/state.db`, or at a server's PostgreSQL store in a read-only transaction: branches, unanswered questions from running branches, a branch's unread messages; `from_parts` and `unanswered` build the same `Glance` from a server's answers |

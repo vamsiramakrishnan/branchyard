@@ -384,7 +384,7 @@ fn prune(
             Duration::from_secs(days * 86400)
         }),
         &only,
-    );
+    )?;
     if json {
         return print(&to_json(&serde_json::to_value(&pruned).unwrap_or_default()));
     }

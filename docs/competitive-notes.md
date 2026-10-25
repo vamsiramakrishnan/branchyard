@@ -1,4 +1,4 @@
-# Developer experience: emdash, Superset and Conductor
+# Competitive notes: emdash, Superset and Conductor
 
 emdash, Superset and Conductor are desktop workbenches for running several coding agents side by side, each in its own git worktree. Branchyard is a different kind of thing: an SDK, CLI and server that a meta-harness (or a person) drives. The engine underneath is comparable, though: branches as worktrees, parallel agents, review and merge. And these three have put far more care into the moments a person actually lives through. This page records the mechanisms that make them pleasant to use, where Branchyard stands on each, and what to take.
 

@@ -155,7 +155,11 @@ mod tests {
         let dir = temp.path();
         let first = DirLock::acquire(dir, "the first").unwrap();
         let releaser = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(200));
+            // The first holder keeps the lock while the second waits for it.
+            branchyard_testkit::wait::settle(
+                "the second caller waits on a held lock",
+                Duration::from_millis(200),
+            );
             drop(first);
         });
         let started = Instant::now();

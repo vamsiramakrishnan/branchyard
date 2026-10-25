@@ -324,6 +324,10 @@ pub struct Config {
     /// Name and path of each served repository.
     pub repos: Vec<(String, PathBuf)>,
     pub tokens: Vec<Token>,
+    /// The token file serving made or used because the configuration and
+    /// the flags gave no credential (`<data_dir>/token`): what a client
+    /// passes as `--token-file`. `None` when credentials were configured.
+    pub default_token_file: Option<PathBuf>,
     /// A `tokens` entry's principal (tenant, scopes, repository
     /// allowlist), keyed by its `name`. An entry missing here gets
     /// [`Principal::default_for`]: every scope, every repository, in
@@ -580,6 +584,15 @@ pub struct ConnectorsConfig {
     pub effects_sandbox_host: Option<String>,
 }
 
+/// What a build without the `postgres` feature says to a configuration that
+/// names a `database`: where to get a build that can serve it. `by serve
+/// --check` says it too, so the first start is not the first a person hears
+/// of it.
+pub const NO_POSTGRES: &str = "this build has no PostgreSQL support; use a prebuilt release, \
+     which has it, or rebuild from a checkout with `cargo install --locked --path \
+     crates/branchyard-cli --features postgres` (`--path crates/branchyard-server` for \
+     branchyard-server); see docs/modes.md#postgres";
+
 impl Config {
     /// Defaults for everything but repositories, tokens and data directory.
     #[allow(clippy::expect_used)] // ratchet: branchyard-server
@@ -589,6 +602,7 @@ impl Config {
             data_dir,
             repos: Vec::new(),
             tokens: Vec::new(),
+            default_token_file: None,
             principals: BTreeMap::new(),
             credentials: Vec::new(),
             tenants: BTreeMap::new(),
@@ -1843,7 +1857,7 @@ mod tests {
     use super::*;
 
     fn config(listen: &str) -> Config {
-        let mut c = Config::new(PathBuf::from("/tmp/x"));
+        let mut c = Config::new(PathBuf::from("/nonexistent/x"));
         c.listen = listen.parse().unwrap();
         c.repos.push(("app".into(), PathBuf::from("/srv/app")));
         c.tokens.push(Token {

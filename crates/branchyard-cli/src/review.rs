@@ -287,6 +287,8 @@ pub struct ReviewArgs<'a> {
     /// An edited review file to read instead of opening an editor.
     pub file: Option<&'a str>,
     pub detach: bool,
+    /// `--json`: what `by send --json` prints, or with `--print` the prompt.
+    pub json: bool,
     pub task: &'a TaskArgs,
 }
 
@@ -385,6 +387,14 @@ pub fn main(env: &Env, target: &Target, args: &ReviewArgs) -> Outcome {
             branchyard_support::cleanup_file(&path);
         }
         eprintln!("by: no comments, so nothing was sent to {branch}");
+        if args.json {
+            return print(&format!(
+                "{}\n",
+                commands::to_json(
+                    &serde_json::json!({"branch": branch, "sent": false, "comments": 0})
+                )
+            ));
+        }
         return Ok(());
     }
     let text = message(&comments);
@@ -394,6 +404,17 @@ pub fn main(env: &Env, target: &Target, args: &ReviewArgs) -> Outcome {
                 "by: not sent; your comments are kept in {} for the next by review {branch}",
                 path.display()
             );
+        }
+        if args.json {
+            return print(&format!(
+                "{}\n",
+                commands::to_json(&serde_json::json!({
+                    "branch": branch,
+                    "sent": false,
+                    "comments": comments.len(),
+                    "prompt": text,
+                }))
+            ));
         }
         return print(&text);
     }
@@ -428,7 +449,7 @@ pub fn main(env: &Env, target: &Target, args: &ReviewArgs) -> Outcome {
             commands::Prompt::Text(&text),
             args.task,
             false,
-            false,
+            args.json,
         )?;
     }
     if args.file.is_none() {

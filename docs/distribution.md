@@ -1,6 +1,40 @@
 # Distribution
 
-Two canonical skills: [`plugins/branchyard/skills/setup`](../plugins/branchyard/skills/setup/SKILL.md) teaches a harness to set Branchyard up by interviewing the user through `by init --json` ([setup](setup.md)), and [`plugins/branchyard/skills/delegate`](../plugins/branchyard/skills/delegate/SKILL.md) teaches it to use `by`'s delegation commands (`docs/delegation.md`). The Claude plugin also has three slash commands, `/branchyard:setup` ([`commands/setup.md`](../plugins/branchyard/commands/setup.md)), which starts the setup skill, `/branchyard:status` and `/branchyard:wait`, and two hooks ([`hooks/hooks.json`](../plugins/branchyard/hooks/hooks.json)) that tell a session when its branches finish ([harness integration](harness-integration.md#claude-code)). Two plugin manifests, [`.claude-plugin/plugin.json`](../plugins/branchyard/.claude-plugin/plugin.json) and [`.codex-plugin/plugin.json`](../plugins/branchyard/.codex-plugin/plugin.json), point at the same `./skills/` directory, so Claude Code and Codex load an identical skill; a host with neither plugin loader installs an exact standalone copy with the shipped installer. The skills call the `by` CLI by name; install it from a [prebuilt release](#prebuilt-binaries) or with `cargo install --locked --path crates/branchyard-cli`.
+Two canonical skills: [`plugins/branchyard/skills/setup`](../plugins/branchyard/skills/setup/SKILL.md) teaches a harness to set Branchyard up by interviewing the user through `by init --json` ([setup](setup.md)), and [`plugins/branchyard/skills/delegate`](../plugins/branchyard/skills/delegate/SKILL.md) teaches it to use `by`'s delegation commands (`docs/delegation.md`). The Claude plugin also has three slash commands, `/branchyard:setup` ([`commands/setup.md`](../plugins/branchyard/commands/setup.md)), which starts the setup skill, `/branchyard:status` and `/branchyard:wait`, and two hooks ([`hooks/hooks.json`](../plugins/branchyard/hooks/hooks.json)) that tell a session when its branches finish ([harness integration](harness-integration.md#claude-code)). Two plugin manifests, [`.claude-plugin/plugin.json`](../plugins/branchyard/.claude-plugin/plugin.json) and [`.codex-plugin/plugin.json`](../plugins/branchyard/.codex-plugin/plugin.json), point at the same `./skills/` directory, so Claude Code and Codex load an identical skill; a host with neither plugin loader installs an exact standalone copy with the shipped installer. The skills call the `by` CLI by name; [build it from source](#install-by) (no prebuilt release exists yet).
+
+## Install `by`
+
+Build from source. It is the only path until the first release.
+
+```sh
+git clone https://github.com/vamsiramakrishnan/branchyard && cd branchyard
+cargo install --locked --path crates/branchyard-cli    # installs `by` into ~/.cargo/bin
+by --version
+```
+
+`rust-toolchain.toml` pins Rust 1.94.0. Prebuilt binaries, `install.sh` and a Homebrew formula are [written but not published](#prebuilt-binaries).
+
+## Install into a harness
+
+`by setup` does this for every harness it detects ([setup](setup.md#one-command)). By hand, one harness at a time, each row is what to run, what it writes and what only you can do next. Every `by init plugin ID` plans first: on a terminal it shows the diff and asks, and elsewhere it prints the plan and writes nothing until `--apply` (`--dry-run` never writes); [harness hooks](harness-hooks.md) has a section per harness, and [below](#install-per-harness) is how the manifests work. Where a row offers a plugin and `by init plugin`, install one, not both, or each session hears the news twice.
+
+| Harness | Command | What lands | Next step |
+|---|---|---|---|
+| Claude Code | `by init plugin claude-code`, or `/plugin marketplace add vamsiramakrishnan/branchyard` then `/plugin install branchyard@branchyard` | The `setup` and `delegate` skills, three commands and the `SessionStart` and `UserPromptSubmit` hooks | Restart Claude Code; `/hooks` lists the two hooks. The status line is not written: add `"statusLine": {"type": "command", "command": "by statusline"}` yourself |
+| Codex | `by init plugin codex`, or `codex plugin marketplace add vamsiramakrishnan/branchyard` then `codex plugin add branchyard@branchyard` | `by init plugin`: the same two hooks, merged into `~/.codex/hooks.json`, and no skills. The plugin: the `setup` and `delegate` skills and the hooks | **Trust the hooks.** Codex runs none until you do: start `codex` once and choose "Trust all and continue" at "Hooks need review", or run `/hooks` and press `t`. `codex exec` skips an untrusted hook silently; for an unattended run pass `--dangerously-bypass-hook-trust` |
+| Gemini CLI | `by init plugin gemini-cli`, or `gemini extensions install <clone>/plugins/branchyard/harnesses/gemini-cli` | The `BeforeAgent` hook merged into `~/.gemini/settings.json`, and the commands `/branchyard:setup`, `/branchyard:status`, `/branchyard:wait` (the extension names them `/setup`, `/status`, `/wait`) | Hooks run only in a trusted folder; `gemini -p` needs `--skip-trust` or `GEMINI_CLI_TRUST_WORKSPACE=true`. `/hooks panel` lists `branchyard-before-agent` |
+| Qwen Code | `by init plugin qwen-code` | The hooks and status line, merged into `~/.qwen/settings.json` | Nothing to enable. For the commands: `qwen extensions install <clone>/plugins/branchyard/harnesses/gemini-cli` |
+| Antigravity | `by init plugin antigravity`, or `agy plugin install <clone>/plugins/branchyard/harnesses/antigravity` | Hooks in `~/.gemini/config/hooks.json` and the status line in `~/.gemini/antigravity-cli/settings.json` | None |
+| GitHub Copilot CLI | `by init plugin github-copilot` | Hooks in `~/.copilot/hooks/branchyard.json`, the status line in `~/.copilot/settings.json` | Copilot drops what a prompt-submit hook prints from a file, so a session hears at its start; run `by ls` for news after |
+| Cursor | `by init plugin cursor` | Hooks in `~/.cursor/hooks.json`, the status line in `~/.cursor/cli-config.json` | Skills and commands come with the Cursor plugin (`.cursor-plugin/marketplace.json`). Cursor hears at session start only |
+| Droid | `by init plugin droid` | Hooks in `~/.factory/hooks.json`, the status line in `~/.factory/settings.json` | Move any `hooks` you keep in `settings.json` to `hooks.json`; review them with `/hooks` |
+| Kiro | `by init plugin kiro` | `~/.kiro/hooks/branchyard.json` | Kiro CLI V3 reads global hooks; for the IDE copy the file to `.kiro/hooks/branchyard.json` in the repository |
+| DeepSeek Harness | `by init plugin deepseek-harness` | `~/.dsh/branchyard-hooks.json` and an insert in `~/.dsh/cordis.patch.yml` | Add the hook bridge to each profile: `dsh plugin --profile NAME add @deepseek-ai/dsh-hooks-claude-code@VERSION @deepseek-ai/dsh-hook-protocol@VERSION`, at your `dsh --version` |
+| Hermes | `by init plugin hermes` | A `hooks:` block in `~/.hermes/config.yaml` | Answer `y` once for the `pre_llm_call` hook in `hermes chat` at a terminal; without one Hermes skips the hook |
+| Pi | `by init plugin pi` | `~/.pi/agent/extensions/branchyard.ts` | `/reload` in Pi, or start a new session |
+| Oh My Pi | `by init plugin oh-my-pi` | `~/.omp/agent/extensions/branchyard.ts` | Restart Oh My Pi |
+| OpenCode | `by init plugin opencode` | `~/.config/opencode/plugins/branchyard.js` | Restart OpenCode (written for `@opencode-ai/plugin` 1.19) |
+| Amp | `by init plugin amp` | `~/.config/amp/plugins/branchyard.ts` | "plugins: reload" in Amp's command palette, or restart it |
 
 ## Install for Claude Code
 
@@ -11,7 +45,7 @@ The repository is a Claude Code plugin marketplace: [`.claude-plugin/marketplace
 /plugin install branchyard@branchyard
 ```
 
-That gives the two skills, the `/branchyard:setup`, `/branchyard:status` and `/branchyard:wait` commands, and the `SessionStart` and `UserPromptSubmit` hooks, which run `by hook` when `by` is on `PATH` and do nothing otherwise; in a repository driven through a server (`[remote]` or `BRANCHYARD_REMOTE`) they ask that server, and a server's PostgreSQL store is read only by a `by` built with the `postgres` feature ([harness integration](harness-integration.md)). The status line is not part of a plugin; to show one, add `"statusLine": {"type": "command", "command": "by statusline"}` to your Claude Code settings yourself (nothing edits them for you).
+That gives the two skills, the `/branchyard:setup`, `/branchyard:status` and `/branchyard:wait` commands, and the `SessionStart` and `UserPromptSubmit` hooks, which run `by hook` when `by` is on `PATH` and do nothing otherwise; in a repository driven through a server (`[remote]` or `BRANCHYARD_REMOTE`) they ask that server, and a server's PostgreSQL store is read only by a `by` built with the `postgres` feature ([harness integration](harness-integration.md)). The status line is not part of a plugin (a plugin cannot set one); `by init plugin claude-code` adds it to your Claude Code settings when you have none ([below](#install-per-harness)), or add `"statusLine": {"type": "command", "command": "by statusline"}` yourself.
 
 Or point Claude Code's plugin loader at a checkout or an extracted archive for one session:
 
@@ -21,11 +55,11 @@ claude --plugin-dir plugins/branchyard
 
 ## Install for Codex
 
-Register the packaged directory (`plugins/branchyard`, containing `.codex-plugin/plugin.json`) through Codex's own plugin mechanism. Both manifests are validated against real installed `.codex-plugin/plugin.json` and `.claude-plugin/plugin.json` files (this account's own plugins, and public plugins such as Superpowers and OpenRig Core) for their field shapes; there is no vendored schema to check them against mechanically, so a live install is the final confirmation, same as PR #1 left it.
+`codex plugin marketplace add vamsiramakrishnan/branchyard` (or the path of a clone), then `codex plugin add branchyard@branchyard`. Codex reads [`.agents/plugins/marketplace.json`](../.agents/plugins/marketplace.json), which lists the packaged directory (`plugins/branchyard`, containing `.codex-plugin/plugin.json`). The plugin gives the skills and the two hooks; `by init plugin codex` gives the hooks alone, so use one or the other. Codex runs no hook until you trust it ([the table above](#install-into-a-harness), [harness hooks](harness-hooks.md#codex)). Both manifests are validated against real installed `.codex-plugin/plugin.json` and `.claude-plugin/plugin.json` files (this account's own plugins, and public plugins such as Superpowers and OpenRig Core) for their field shapes; there is no vendored schema to check them against mechanically, so a live install is the final confirmation, same as PR #1 left it.
 
 ## Install with `by`
 
-`by init plugin` installs the skills `by` was built with (embedded byte for byte from `plugins/branchyard/skills/`, so no checkout is needed) into a project's `.claude/skills`, `~/.claude/skills`, or `~/.codex/skills`, as a diffed plan like every `by init` topic, or prints the `claude --plugin-dir` command for the whole plugin. It also installs each harness's hooks, commands and skills ([below](#install-per-harness)).
+`by init plugin` installs Branchyard into the harnesses you use: for each one, the files its install manifest lists ([below](#install-per-harness)), embedded in `by` byte for byte so no checkout is needed. On a terminal it lists the harnesses, asks which (the ones found on `PATH` are chosen), shows every diff and asks before writing; `by init plugin ID...` or `--all-detected` skips the question. For Claude Code that is the `setup` and `delegate` skills, the commands, the two hooks and a status line, into `~/.claude`. To put the skills in a project's `.claude/skills` or another host's skills directory, or to load the whole plugin for one session, see [below](#install-anywhere-else-with-a-skill-directory) and `claude --plugin-dir`.
 
 ## Install per harness
 
@@ -39,9 +73,10 @@ by init plugin --all-detected --dry-run # the plan for every harness on PATH; wr
 by init plugin cursor --apply           # writes without asking; --force also replaces differing written files
 ```
 
-The plan is an ordinary `by init` plan (also `by init plugin --json --next` with `{"host": "harnesses", "harnesses": [...]}`), so a harness driving the setup skill gets the same diffs. On a terminal it asks before writing, and asks separately before replacing a file that exists with different content; elsewhere it prints the plan and writes nothing until `--apply`. The notes are printed with the plan and again after writing.
+The plan is an ordinary `by init` plan (also `by init plugin --json --next` with `{"harnesses": [...]}`; a `host` answer from the retired skills-only interview is ignored), so a harness driving the setup skill gets the same diffs. Each harness gets a line of what it gets and where (`Claude Code: 2 skills, 3 commands, 2 hooks, status line in ~/.claude/settings.json`), and a diff names a file under your home relative to it (`+++ b/.claude/settings.json`). The plan ends with the command that writes it (`by init plugin --all-detected --apply`); after `--apply` it ends with `by setup`. With no harness named and no answers, `--dry-run` and `--apply` refuse (exit 2): ``name harness IDs or --all-detected; `by init plugin` lists them``. On a terminal it asks before writing, and asks separately before replacing a file that exists with different content; elsewhere it prints the plan and writes nothing until `--apply`. The notes are printed with the plan and again after writing.
 
 - **`write`** writes the packaged file, or every file under a packaged directory, as it is (0755 when it starts with `#!`). A file you have that differs is shown as a diff and replaced only with your consent (`--force`, or yes to the question).
+- **`unless_set = "KEY"`** (`merge-json` at the top level) leaves a fragment out when your file already sets that key, instead of refusing the install for the clash, and the plan's notes say what to set to take Branchyard's instead. Claude Code's `statusLine` is merged this way: added when you have none, kept when you do (``kept the "statusLine" already in ~/.claude/settings.json. To use Branchyard's instead, set "statusLine": {...}``).
 - **`merge-json`, `merge-toml`, `merge-yaml`** merge a packaged fragment, in the target's own format, into your file (under the dotted key `at`, or the top level): objects merge key by key, deeply; a list gains the entries it does not already hold, equal by value; nothing is removed or replaced. A key that holds another kind of value, or another scalar, is refused with its name, and then nothing at all is written. Run twice, the second run changes nothing. A merge keeps the file's mode, and writes through a symbolic link rather than over it.
 - JSON is re-printed with the file's own indentation and key order; JSON with comments (JSONC) is refused. TOML is merged with `toml_edit`, so comments and formatting stay. YAML has no library in the build: `merge-yaml` reads block mappings and sequences by indentation and only inserts lines, so every existing line and comment stays; sequence items are compared by their text. It refuses tabs, several documents, flow collections (`{}`, `[]`) or a value with an anchor, alias or tag where it would have to enter them; a tag inside an item it copies (DeepSeek Harness's `!!js`) is kept as it is.
 
@@ -98,6 +133,8 @@ python3 tests/test_distribution.py
 ```
 
 ## Prebuilt binaries
+
+> **Not published yet.** No GitHub release or tag exists, so there is nothing to download: `install.sh` has no release to fetch, and no tap carries the Homebrew formula. The workflow, script and formula below are written and tested against fixtures (see [Verified here](#verified-here)); the workflow has never run. The version in the examples, 0.1.0, is a placeholder: the workspace is 0.0.1. [Build from source](#install-by) until the first release.
 
 `.github/workflows/release.yml` runs only when a `v*` tag is pushed. It builds `by` and `branchyard-server` (with the `postgres` feature, as the container image does) for four targets, packs each with `LICENSE`, `THIRD_PARTY.md`, `README.md` and the Orca and emdash license texts their ported code requires, and attaches them to a **draft** release for a person to publish:
 

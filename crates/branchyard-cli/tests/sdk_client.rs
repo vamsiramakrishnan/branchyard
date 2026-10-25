@@ -8,7 +8,8 @@
 //! family of the rest of the API (discovery, services and inventory,
 //! knowledge, scratch locks, the effect ledger and undo, task records, a
 //! map, a trigger's secret, Web Push without the companion). Hermetic;
-//! skipped without `python3`.
+//! skipped without `python3`. The examples in `examples/python/` run here
+//! too, through `tests/test_sdk_examples.py`.
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -232,5 +233,32 @@ print("ok")
     assert!(
         out.status.success() && stdout.trim_end().ends_with("ok"),
         "python local mode failed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// The examples in `examples/python/` (a first run, a stream, a delegation),
+/// run by `tests/test_sdk_examples.py` against this build's `by` and the fake
+/// ACP agent in a temporary repository: no model, no network. The Python
+/// file skips when it finds no binaries, so this passes them, and fails if
+/// it skipped.
+#[test]
+fn the_python_examples_run_against_the_built_by_and_the_fake_agent() {
+    let Some(python) = python() else {
+        eprintln!("skipped: no python3");
+        return;
+    };
+    let mut command = Command::new(python);
+    branchyard_testkit::hermetic(&mut command)
+        .arg("-I")
+        .arg(repo_root().join("tests/test_sdk_examples.py"))
+        .env("BRANCHYARD_BY", BY)
+        .env("BRANCHYARD_FAKE_AGENT", fake_agent!())
+        .stdin(Stdio::null());
+    let out = command.output().unwrap();
+    let report = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && !report.contains("skipped"),
+        "the Python examples failed\nstdout: {}\nunittest said:\n{report}",
+        String::from_utf8_lossy(&out.stdout)
     );
 }

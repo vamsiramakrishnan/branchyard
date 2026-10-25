@@ -1,0 +1,157 @@
+{
+  "_about": "What tools/check_silent_failures.py still tolerates: `.ok()` or `.unwrap_or_default()` on a read of the store, the ledger, an event log or a file, per file, with what an error does there. A count may only fall: lower an entry when the code shrinks (python3 tools/check_silent_failures.py --update), never raise one or add a file. New code returns the error (Error::could_not) or uses branchyard_support::best_effort. See CONTRIBUTING.md, 'Failures that may be ignored'.",
+  "reads": {
+    "crates/branchyard/src/capacity.rs": {
+      "count": 2,
+      "why": "capacity accounting: an unreadable parent ends the walk up the tree, and an unreadable list finds no waiting branch to start. Not told apart from 'none'."
+    },
+    "crates/branchyard/src/connectors/gateway.rs": {
+      "count": 1,
+      "why": "the background gateway's state file: absent or unreadable means no gateway is recorded as running."
+    },
+    "crates/branchyard/src/connectors/keys.rs": {
+      "count": 1,
+      "why": "the published JWKS: a file that cannot be read compares unequal to the keys' and is written again."
+    },
+    "crates/branchyard/src/connectors/mod.rs": {
+      "count": 2,
+      "why": "the audit log's cursor: absent or unreadable gives the default cursor. Not told apart."
+    },
+    "crates/branchyard/src/delegation.rs": {
+      "count": 10,
+      "why": "children's and siblings' records read with .ok(): a record that is gone is skipped (right), and a store error is skipped the same way (wrong). The live-children count, the spend of a tree and the integration checks inherit that. Follow-up: a Store::find returning Option, and an error otherwise."
+    },
+    "crates/branchyard/src/effects/audit.rs": {
+      "count": 1,
+      "why": "an audit line whose ledger entry cannot be read is treated as not yet recorded."
+    },
+    "crates/branchyard/src/effects/proxy.rs": {
+      "count": 1,
+      "why": "walks a branch's ancestry to its root; an unreadable parent ends the walk at the last one read."
+    },
+    "crates/branchyard/src/egress.rs": {
+      "count": 1,
+      "why": "the first readable system CA bundle is used; an unreadable one is skipped."
+    },
+    "crates/branchyard/src/engine.rs": {
+      "count": 1,
+      "why": "the turn's poll for a cancel request: an unreadable store shows none on that poll."
+    },
+    "crates/branchyard/src/environments.rs": {
+      "count": 1,
+      "why": "an environment's description file: unreadable or damaged means that environment is not listed or reused."
+    },
+    "crates/branchyard/src/graph.rs": {
+      "count": 3,
+      "why": "a branch's dependents and its parent, and its children, read with the fallback of 'none'. Not told apart from an absent record."
+    },
+    "crates/branchyard/src/land.rs": {
+      "count": 2,
+      "why": "children's records while landing: an unreadable child is skipped, as one that is gone is."
+    },
+    "crates/branchyard/src/map.rs": {
+      "count": 1,
+      "why": "a map's reduce file: absent or unreadable means no reduce result is recorded."
+    },
+    "crates/branchyard/src/pool.rs": {
+      "count": 1,
+      "why": "lists a pool directory's entries to find leftovers: an unreadable directory has none."
+    },
+    "crates/branchyard/src/proc.rs": {
+      "count": 5,
+      "why": "/proc and uname reads for the host's identity and a process's start: absent on other systems (with a fallback command), and a process that is gone has no entry."
+    },
+    "crates/branchyard/src/projection.rs": {
+      "count": 3,
+      "why": "token files under .branchyard/delegation: an unreadable file is not a token that matches (a lookup finds nothing: it refuses), and one that cannot be read on drop is left in place."
+    },
+    "crates/branchyard/src/recover.rs": {
+      "count": 3,
+      "why": "recovery's reads of a turn's log for its cost, its metering and its last session: unreadable gives none of them."
+    },
+    "crates/branchyard/src/run.rs": {
+      "count": 1,
+      "why": "a parent's provisioning when narrowing a child's: an unreadable parent narrows nothing. Follow-up: this should refuse."
+    },
+    "crates/branchyard/src/snapshots.rs": {
+      "count": 2,
+      "why": "an owner's provider policy while expiring kept sandboxes, and the source branch of a sandbox seed: unreadable means no expiry this pass, and no seed."
+    },
+    "crates/branchyard/src/steer.rs": {
+      "count": 1,
+      "why": "the steering boundary of a branch's profile: an unreadable record leaves it unset."
+    },
+    "crates/branchyard/src/tasks/folder.rs": {
+      "count": 1,
+      "why": "a folder's .branchyardignore: absent or unreadable adds no patterns."
+    },
+    "crates/branchyard/src/wake.rs": {
+      "count": 2,
+      "why": "parked branches, and children's names in a wake: an unreadable record is left out of the list. Follow-up: say so in the wake prompt, as its log reads do."
+    },
+    "crates/branchyard/src/workspace.rs": {
+      "count": 3,
+      "why": "the cancel poll, and a hash over a worktree's symlinks and files: an unreadable one hashes as absent."
+    },
+    "crates/branchyard-cli/src/detach.rs": {
+      "count": 1,
+      "why": "the tail of a failed background command's log, printed in its error: an unreadable log prints an empty tail."
+    },
+    "crates/branchyard-cli/src/hook_cmd.rs": {
+      "count": 1,
+      "why": "a hook's cursor file; hooks never fail a harness (docs/harness-integration.md): unreadable means start over."
+    },
+    "crates/branchyard-cli/src/inherited.rs": {
+      "count": 1,
+      "why": "a worktree's .git file: unreadable gives no git directory for it."
+    },
+    "crates/branchyard-cli/src/ports.rs": {
+      "count": 3,
+      "why": "/proc/<pid> files for by ports: a process that exited has none, and one owned by another user has no readable environ."
+    },
+    "crates/branchyard-cli/src/review.rs": {
+      "count": 1,
+      "why": "a review draft left by an earlier review: an unreadable one is replaced by a fresh draft."
+    },
+    "crates/branchyard-cli/src/setup_io.rs": {
+      "count": 3,
+      "why": "by init's probes of files that may not exist (a label, a token's hash): unreadable is reported as not found."
+    },
+    "crates/branchyard-cli/src/ssh_remote.rs": {
+      "count": 1,
+      "why": "the log of a failed ssh, appended to its error message: an unreadable log appends nothing."
+    },
+    "crates/branchyard-cli/src/watch.rs": {
+      "count": 1,
+      "why": "the tail of a finished command's log shown in the cockpit: an unreadable log shows an empty tail."
+    },
+    "crates/branchyard-herdr/src/bridge.rs": {
+      "count": 2,
+      "why": "the pane map file: absent or unreadable starts with no panes."
+    },
+    "crates/branchyard-recipe/src/provider.rs": {
+      "count": 1,
+      "why": "a machine's state file: absent or unreadable means the machine is unknown to this provider."
+    },
+    "crates/branchyard-runtime/src/local.rs": {
+      "count": 1,
+      "why": "/proc/<pid>/stat while scanning descendants: a process that exited has none."
+    },
+    "crates/branchyard-server/src/companion/mod.rs": {
+      "count": 2,
+      "why": "a companion token lookup and its recheck: a lookup that fails finds no token, which refuses the request."
+    },
+    "crates/branchyard-server/src/companion/push.rs": {
+      "count": 3,
+      "why": "a push token lookup (finds no token: refuses), and the webhook follower's stored cursor (unreadable is taken as none)."
+    },
+    "crates/branchyard-sync/src/auth/aws.rs": {
+      "count": 1,
+      "why": "the shared AWS credentials file: unreadable falls through to the next credential source."
+    },
+    "crates/branchyard-sync/src/engine.rs": {
+      "count": 2,
+      "why": "the host name, and a segment file compared with the manifest: an unreadable one compares as different."
+    }
+  }
+}

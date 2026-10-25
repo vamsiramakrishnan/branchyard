@@ -1203,7 +1203,7 @@ pub fn harness_table(harnesses: &[HarnessInfo], style: Style) -> String {
             right: false,
         },
         Column {
-            header: "QUALIFICATION",
+            header: "LIVE RUN",
             max: 48,
             right: false,
         },
@@ -1219,9 +1219,16 @@ pub fn harness_table(harnesses: &[HarnessInfo], style: Style) -> String {
                     true => Cell::toned("yes", Tone::Green),
                     false => Cell::toned("no", Tone::Dim),
                 },
-                match &h.qualification {
-                    Some(q) => Cell::plain(q),
-                    None => Cell::toned("unqualified", Tone::Dim),
+                // Three honest levels: a recorded session on a version, or none.
+                match h
+                    .qualification
+                    .as_deref()
+                    .and_then(branchyard::inventory::live_score)
+                {
+                    Some(_) => Cell::plain(branchyard::inventory::live_level(
+                        h.qualification.as_deref(),
+                    )),
+                    None => Cell::toned("no live run", Tone::Dim),
                 },
             ]
         })
@@ -1236,6 +1243,19 @@ fn children_words(info: &BranchInfo) -> String {
         .map(|child| shell_quote(child))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// [`next_commands`] for a branch that has a check: `by check X`, which runs
+/// it without merging, comes before `by merge X`.
+pub fn next_commands_checked(info: &BranchInfo, has_check: bool) -> Vec<String> {
+    let mut next = next_commands(info);
+    if has_check {
+        let merge = format!("by merge {}", shell_quote(&info.name));
+        if let Some(at) = next.iter().position(|command| *command == merge) {
+            next.insert(at, format!("by check {}", shell_quote(&info.name)));
+        }
+    }
+    next
 }
 
 /// Commands that make sense after a branch reaches its status.
@@ -1309,8 +1329,10 @@ fn cost_detail(info: &BranchInfo) -> String {
     }
 }
 
-/// The summary closing `by run`, `by send` and `by fork`.
-pub fn summary(info: &BranchInfo, style: Style) -> String {
+/// The summary closing `by run`, `by send` and `by fork`; for a branch whose
+/// merge must pass `check`, a check line says so, and the next commands run
+/// it before they merge.
+pub fn summary_with_check(info: &BranchInfo, check: Option<&[String]>, style: Style) -> String {
     let (status, tone) = status_text(&info.status);
     let mut pairs = vec![
         ("branch", format!("{} ({})", info.name, info.git_branch)),
@@ -1318,7 +1340,10 @@ pub fn summary(info: &BranchInfo, style: Style) -> String {
         ("candidate", candidate_detail(info)),
         ("cost", cost_detail(info)),
     ];
-    let next = next_commands(info);
+    if let Some(check) = check {
+        pairs.push(("check", check_line(&info.name, check)));
+    }
+    let next = next_commands_checked(info, check.is_some());
     if !next.is_empty() {
         pairs.push(("next", next.join("\n")));
     }
@@ -1390,6 +1415,23 @@ pub fn harness_label(harness: &str, profile: &str) -> String {
     branchyard_harness::profiles::label(harness, profile)
 }
 
+/// Where a branch's harness runs, as `provider` and `isolated` record it,
+/// in words that say what that does and does not give: `local: as your
+/// user, no sandbox`, `local, isolated: private HOME, not a sandbox`,
+/// `microsandbox: a microVM per turn`. Shared by `by show` and `by inspect`.
+pub fn runs_text(provider: &str, isolated: bool) -> String {
+    match (provider, isolated) {
+        ("local", false) => "local: as your user, no sandbox".into(),
+        ("local", true) => "local, isolated: private HOME, not a sandbox".into(),
+        ("microsandbox", _) => "microsandbox: a microVM per turn".into(),
+        ("substrate", _) => "substrate: an Agent Substrate actor per turn".into(),
+        (other, _) => match other.strip_prefix("recipe:") {
+            Some(_) => format!("{other}: a machine its recipe makes"),
+            None => other.to_owned(),
+        },
+    }
+}
+
 /// `by inspect`.
 pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     let (status, tone) = status_text(&i.status);
@@ -1397,7 +1439,7 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
         true => (format!("{status} (stalled)"), Tone::Yellow),
         false => (status, tone),
     };
-    let money = |v: Option<f64>| v.map_or("unknown".into(), usd);
+    let money = |v: Option<f64>| v.map_or("not reported".into(), usd);
     let mut pairs = vec![
         ("branch", i.name.clone()),
         ("status", style.paint(tone, &status)),
@@ -1408,6 +1450,7 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
                 .clone()
                 .unwrap_or_else(|| "the harness's default".into()),
         ),
+        ("provider", runs_text(&i.provider, i.isolated)),
         ("parent", i.parent.clone().unwrap_or_else(|| "none".into())),
         (
             "children",
@@ -1619,13 +1662,30 @@ fn owns_text(owns: &[String], within: &[Vec<String>]) -> String {
     text
 }
 
+/// A check as `by show` and the summary after a turn say it: the command,
+/// and that it runs at merge, or now with `by check`.
+fn check_line(branch: &str, check: &[String]) -> String {
+    format!(
+        "{} (runs at merge; `by check {}` runs it now)",
+        command_text(check),
+        shell_quote(branch)
+    )
+}
+
+/// A command's words as a shell would need them quoted, so that
+/// `sh -c 'echo hi'` reads as one command and not as four words.
+fn command_text(argv: &[String]) -> String {
+    let words: Vec<String> = argv.iter().map(|word| shell_quote(word)).collect();
+    words.join(" ")
+}
+
 /// The check a branch's merge must pass, where it came from, and the
 /// siblings that share it, which are integrated together.
 fn check_text(i: &branchyard::Inspection) -> String {
     let Some(check) = &i.check else {
         return "none".into();
     };
-    let command = check.join(" ");
+    let command = command_text(check);
     let source = match (i.check_inherited, &i.parent) {
         (true, Some(parent)) => format!("inherited from {parent}"),
         _ => "its own".into(),
@@ -1639,6 +1699,19 @@ fn check_text(i: &branchyard::Inspection) -> String {
             i.name,
             i.check_shared_with.join(" ")
         ),
+    }
+}
+
+/// `by show`'s check line: [`check_text`], and that it runs at merge unless
+/// the siblings sharing it have already said how it is run.
+fn show_check_text(i: &branchyard::Inspection) -> String {
+    match (&i.check, i.check_shared_with.is_empty()) {
+        (Some(_), true) => format!(
+            "{}; runs at merge, or now with `by check {}`",
+            check_text(i),
+            shell_quote(&i.name)
+        ),
+        _ => check_text(i),
     }
 }
 
@@ -1818,6 +1891,7 @@ pub fn details(
         ("branch", info.name.clone()),
         ("git branch", info.git_branch.clone()),
         ("harness", harness_label(&info.harness, &info.profile)),
+        ("provider", runs_text(&info.provider, info.isolated)),
         ("status", style.paint(tone, &status)),
         ("prompt", info.prompt.clone()),
     ];
@@ -1834,6 +1908,9 @@ pub fn details(
     ]);
     if let Some(inspection) = budget {
         pairs.extend(budget_lines(inspection, false));
+        if inspection.check.is_some() {
+            pairs.push(("check", show_check_text(inspection)));
+        }
     }
     pairs.extend([
         (
@@ -1843,7 +1920,10 @@ pub fn details(
         ("worktree", info.worktree.display().to_string()),
         (
             "created",
-            format!("{} ago", age_text(now.saturating_sub(info.created_at))),
+            match age_text(now.saturating_sub(info.created_at)).as_str() {
+                "now" => "just now".to_owned(),
+                age => format!("{age} ago"),
+            },
         ),
     ]);
     if let BranchStatus::Merged { commit, .. } = &info.status {
@@ -2043,6 +2123,8 @@ mod tests {
             stalled: false,
             superseded_by: None,
             model: None,
+            provider: "local".into(),
+            isolated: false,
         }
     }
 
@@ -2549,6 +2631,68 @@ mod tests {
         assert!(inspection(&i, Style::PLAIN).contains("subtree cost  $0.07\n"));
     }
 
+    /// `by show` and `by inspect` say where a branch ran and what that
+    /// does not give: a private HOME is not a sandbox.
+    #[test]
+    fn show_and_inspect_say_where_the_branch_ran() {
+        let line = |text: String| {
+            text.lines()
+                .find(|l| l.starts_with("provider"))
+                .map(|l| l.split_whitespace().skip(1).collect::<Vec<_>>().join(" "))
+        };
+        let mut b = info("b", None);
+        let shown = |b: &BranchInfo| details(b, None, 100, Style::PLAIN, Vec::new());
+        assert_eq!(
+            line(shown(&b)).as_deref(),
+            Some("local: as your user, no sandbox")
+        );
+        b.isolated = true;
+        assert_eq!(
+            line(shown(&b)).as_deref(),
+            Some("local, isolated: private HOME, not a sandbox")
+        );
+        b.provider = "recipe:devbox".into();
+        b.isolated = false;
+        assert_eq!(
+            line(shown(&b)).as_deref(),
+            Some("recipe:devbox: a machine its recipe makes")
+        );
+        assert_eq!(
+            runs_text("microsandbox", false),
+            "microsandbox: a microVM per turn"
+        );
+        assert_eq!(
+            runs_text("substrate", false),
+            "substrate: an Agent Substrate actor per turn"
+        );
+
+        let mut i: branchyard::Inspection = serde_json::from_value(serde_json::json!({
+            "name": "kid", "status": {"state": "ready"}, "harness": "claude-code",
+            "profile": "claude-code-stream-json", "parent": null, "children": [],
+            "depth": 0, "turns": 1, "candidate": null, "cost_usd": null,
+            "subtree_cost_usd": 0.0, "max_usd": null, "remaining_usd": null,
+            "envelope": null, "last_message": "", "provider": "local", "isolated": true,
+        }))
+        .unwrap();
+        assert_eq!(
+            line(inspection(&i, Style::PLAIN)).as_deref(),
+            Some("local, isolated: private HOME, not a sandbox")
+        );
+        // An answer from a server that does not say reads as a plain local run.
+        i = serde_json::from_value(serde_json::json!({
+            "name": "kid", "status": {"state": "ready"}, "harness": "claude-code",
+            "profile": "claude-code-stream-json", "parent": null, "children": [],
+            "depth": 0, "turns": 1, "candidate": null, "cost_usd": null,
+            "subtree_cost_usd": 0.0, "max_usd": null, "remaining_usd": null,
+            "envelope": null, "last_message": "",
+        }))
+        .unwrap();
+        assert_eq!(
+            line(inspection(&i, Style::PLAIN)).as_deref(),
+            Some("local: as your user, no sandbox")
+        );
+    }
+
     /// The model line names the model a branch was given, or says it runs
     /// its harness's default.
     #[test]
@@ -2586,7 +2730,9 @@ mod tests {
             "envelope": null, "last_message": "",
         }))
         .unwrap();
-        assert!(!inspection(&i, Style::PLAIN).contains("reported"));
+        assert!(!inspection(&i, Style::PLAIN)
+            .lines()
+            .any(|line| line.starts_with("reported")));
         i.reported = Some(branchyard::StatusReport::new(
             branchyard::ReportedState::Blocked,
             "needs the\nAPI key".into(),
@@ -2820,9 +2966,9 @@ mod tests {
         ];
         assert_eq!(
             harness_table(&harnesses, PLAIN),
-            "HARNESS      PROFILE                  DEFAULT  ON PATH  QUALIFICATION\n\
-             claude-code  claude-code-stream-json  *        yes      9/9 on Claude Code 2.1.283\n\
-             codex        codex-app-server                  no       unqualified\n"
+            "HARNESS      PROFILE                  DEFAULT  ON PATH  LIVE RUN\n\
+             claude-code  claude-code-stream-json  *        yes      live 9/9 (2.1.283)\n\
+             codex        codex-app-server                  no       no live run\n"
         );
     }
 
@@ -2838,7 +2984,7 @@ mod tests {
         ready.cost_usd = Some(0.5);
         ready.turns = 2;
         assert_eq!(
-            summary(&ready, PLAIN),
+            summary_with_check(&ready, None, PLAIN),
             "branch     fix it (by/fix it)\n\
              status     ready\n\
              candidate  2 files +5 -1 at 0123456789\n\
@@ -2846,9 +2992,28 @@ mod tests {
              next       by diff 'fix it'\n\
              \x20          by merge 'fix it'\n"
         );
+        // A configured check is said, and offered before the merge it gates.
+        let check = ["cargo".to_owned(), "test".to_owned()];
+        let checked = summary_with_check(&ready, Some(&check), PLAIN);
+        assert!(
+            checked.contains(
+                "check      cargo test (runs at merge; `by check 'fix it'` runs it now)\n"
+            ),
+            "{checked}"
+        );
+        assert!(
+            checked.contains(
+                "next       by diff 'fix it'\n\x20          by check 'fix it'\n\x20          by merge 'fix it'\n"
+            ),
+            "{checked}"
+        );
         let mut failed = info("f", None);
         failed.status = BranchStatus::Failed { reason: "x".into() };
         assert_eq!(next_commands(&failed), ["by log f", "by rm f"]);
+        assert_eq!(
+            next_commands_checked(&failed, true),
+            ["by log f", "by rm f"]
+        );
         let mut none = info("n", None);
         none.status = BranchStatus::NoChanges;
         assert_eq!(next_commands(&none), ["by send n \"<prompt>\"", "by rm n"]);

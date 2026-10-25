@@ -40,6 +40,21 @@ impl Delivery {
     }
 }
 
+/// Retries the way a test needs them: the server reads its knobs once per
+/// process (`BY_TEST_WEBHOOK_*`, a `OnceLock` in `webhook.rs`), so whichever
+/// test delivers first fixes them for every test in this binary. They are set
+/// once, to one value, before any test's server starts: each test calls this
+/// when it builds its receiver. Three attempts a few milliseconds apart
+/// reach a delivery after two failures and exhaust on a receiver that never
+/// succeeds, without the production backoff (6 attempts, 0.5 s doubling).
+fn fast_retries() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::env::set_var("BY_TEST_WEBHOOK_RETRY_MS", "5");
+        std::env::set_var("BY_TEST_WEBHOOK_MAX_ATTEMPTS", "3");
+    });
+}
+
 /// A local HTTP receiver: answers `500` for its first `fail_next`
 /// deliveries, then `200`, recording every one it accepts. A connection
 /// that errs fails the test.
@@ -50,6 +65,7 @@ struct Receiver {
 
 impl Receiver {
     fn start() -> Receiver {
+        fast_retries();
         let fail_next = Arc::new(AtomicU32::new(0));
         let failing = fail_next.clone();
         let mock = MockHttp::start(move |_| {
@@ -161,8 +177,6 @@ fn an_event_filter_narrows_what_is_delivered() {
 
 #[test]
 fn a_failing_receiver_is_retried_and_still_delivers() {
-    std::env::set_var("BY_TEST_WEBHOOK_RETRY_MS", "20");
-    std::env::set_var("BY_TEST_WEBHOOK_MAX_ATTEMPTS", "5");
     let f = Fixture::new();
     let receiver = Receiver::start();
     receiver.fail_next(2);
@@ -188,8 +202,6 @@ fn a_failing_receiver_is_retried_and_still_delivers() {
 
 #[test]
 fn a_receiver_that_never_succeeds_is_dead_lettered_and_the_cursor_still_advances() {
-    std::env::set_var("BY_TEST_WEBHOOK_RETRY_MS", "5");
-    std::env::set_var("BY_TEST_WEBHOOK_MAX_ATTEMPTS", "3");
     let f = Fixture::new();
     let receiver = Receiver::start();
     receiver.fail_next(u32::MAX);
@@ -323,12 +335,14 @@ struct Adversary {
 
 impl Adversary {
     fn hanging() -> Adversary {
+        fast_retries();
         Adversary {
             mock: MockHttp::start(|_| Response::hang()),
         }
     }
 
     fn closing() -> Adversary {
+        fast_retries();
         Adversary {
             mock: MockHttp::start(|_| Response::close()),
         }
@@ -343,6 +357,16 @@ impl Adversary {
         self.mock.requests().len()
     }
 }
+
+/// Contract: an operation never waits on a webhook delivery. A delivery
+/// stuck on a receiver that never answers holds its request for the
+/// server's 10 s request timeout (`REQUEST_TIMEOUT` in `webhook.rs`), so an
+/// operation that waited on it takes at least that long; one that does not
+/// takes a fraction of a second. 8 s sits two seconds under the regression
+/// and far over a slow instrumented run. It is not scaled: the timeout is the
+/// server's own clock, and scaling the bound past it would make the check
+/// vacuous.
+const NEVER_WAITS_ON_A_WEBHOOK: Duration = Duration::from_secs(8);
 
 /// Failure-direction: a webhook target that accepts the connection, reads
 /// the whole delivery and then never answers must never delay or fail the
@@ -361,7 +385,7 @@ fn a_hanging_receiver_never_delays_the_operation_or_the_feed() {
     let op = run(&client, &task("WRITE a.txt=1", "one"));
     assert_eq!(op.state, branchyard_client::api::OperationState::Succeeded);
     assert!(
-        start.elapsed() < Duration::from_secs(5),
+        start.elapsed() < NEVER_WAITS_ON_A_WEBHOOK,
         "the operation waited on the stuck webhook: {:?}",
         start.elapsed()
     );
@@ -376,7 +400,7 @@ fn a_hanging_receiver_never_delays_the_operation_or_the_feed() {
     let op = run(&client, &task("WRITE b.txt=1", "two"));
     assert_eq!(op.state, branchyard_client::api::OperationState::Succeeded);
     assert!(
-        start.elapsed() < Duration::from_secs(5),
+        start.elapsed() < NEVER_WAITS_ON_A_WEBHOOK,
         "a second operation also waited on the stuck webhook: {:?}",
         start.elapsed()
     );
@@ -388,8 +412,6 @@ fn a_hanging_receiver_never_delays_the_operation_or_the_feed() {
 /// server keeps retrying without blocking anything else.
 #[test]
 fn a_receiver_that_resets_the_connection_never_delays_the_operation() {
-    std::env::set_var("BY_TEST_WEBHOOK_RETRY_MS", "5");
-    std::env::set_var("BY_TEST_WEBHOOK_MAX_ATTEMPTS", "3");
     let f = Fixture::new();
     let receiver = Adversary::closing();
     let mut config = f.config();
@@ -401,7 +423,7 @@ fn a_receiver_that_resets_the_connection_never_delays_the_operation() {
     let op = run(&client, &task("WRITE a.txt=1", "one"));
     assert_eq!(op.state, branchyard_client::api::OperationState::Succeeded);
     assert!(
-        start.elapsed() < Duration::from_secs(5),
+        start.elapsed() < NEVER_WAITS_ON_A_WEBHOOK,
         "the operation waited on the resetting webhook: {:?}",
         start.elapsed()
     );

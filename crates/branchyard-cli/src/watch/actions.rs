@@ -706,6 +706,8 @@ mod tests {
             stalled: false,
             superseded_by: None,
             model: None,
+            provider: "local".into(),
+            isolated: false,
         }
     }
 
@@ -801,6 +803,7 @@ mod tests {
                         into: None,
                         rm: false,
                         promote_effects: false,
+                        json: false,
                     },
                 ) => {
                     assert_eq!(branch, "impl")

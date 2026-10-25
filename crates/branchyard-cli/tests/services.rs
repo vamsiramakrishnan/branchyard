@@ -356,9 +356,18 @@ fn an_unpinned_gateway_is_registered_found_and_reclaimed_after_its_supervisor_di
 #[test]
 fn a_pinned_gateway_started_elsewhere_is_adopted_and_never_reclaimed() {
     let repo = Repo::new();
-    // Something this repository did not start listens at the pinned URL.
-    let elsewhere = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/mcp", elsewhere.local_addr().unwrap());
+    // A gateway this repository did not start answers at the pinned URL: an
+    // MCP server, which replies to an `initialize`.
+    let elsewhere = branchyard_testkit::MockHttp::start(|_| {
+        branchyard_testkit::Response::json(
+            200,
+            &serde_json::json!({"jsonrpc": "2.0", "id": 0, "result": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "serverInfo": {"name": "anvil", "version": "1"}
+            }}),
+        )
+    });
+    let url = format!("{}/mcp", elsewhere.url());
     repo.configure(Some(&url));
     let adopted = repo.json(&["gateway", "start", "--json"]);
     assert_eq!(adopted["started"], false, "{adopted}");
@@ -372,7 +381,36 @@ fn a_pinned_gateway_started_elsewhere_is_adopted_and_never_reclaimed() {
     // Nothing to reclaim, whatever a reaper does.
     let reaped = repo.json(&["services", "gc", "--json"]);
     assert_eq!(reaped["reaped"], serde_json::json!([]));
-    assert!(std::net::TcpStream::connect(elsewhere.local_addr().unwrap()).is_ok());
+    assert!(std::net::TcpStream::connect(elsewhere.addr()).is_ok());
+}
+
+/// A listener that accepts connections is not thereby a gateway: a pinned
+/// port held by something that does not speak MCP is refused, with what it
+/// answered, and nothing is registered or started.
+#[test]
+fn a_pinned_port_held_by_something_else_is_refused_not_adopted() {
+    let repo = Repo::new();
+    let web = branchyard_testkit::MockHttp::start(|_| {
+        branchyard_testkit::Response::new(404, "<html>not found</html>")
+    });
+    let url = format!("{}/mcp", web.url());
+    repo.configure(Some(&url));
+    let out = repo.by(&["gateway", "start", "--json"]);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    // With `--json` the refusal is the error envelope on stdout.
+    let error: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let text = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        text.contains(&format!(
+            "port {} is held by something that is not a Branchyard gateway",
+            web.port()
+        )),
+        "{error}"
+    );
+    assert!(text.contains("404"), "what it answered: {error}");
+    assert!(text.contains("Next:"), "{error}");
+    let listed = repo.json(&["services", "--kind", "connector_gateway", "--json"]);
+    assert_eq!(listed["services"], serde_json::json!([]), "{listed}");
 }
 
 /// The mock registry, its port, and the log of what it was asked.

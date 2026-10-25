@@ -10,6 +10,7 @@ use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
 
 use branchyard::doctor::{store_schema, SchemaState};
+use branchyard::inventory::Inventory;
 use branchyard::Yard;
 use branchyard_setup::config::ProjectConfig;
 use branchyard_workspace::{GitError, Repository};
@@ -82,6 +83,7 @@ pub(crate) struct Context {
     /// Variables, by name.
     pub vars: Vars,
     store: OnceCell<Store>,
+    inventory: OnceCell<Result<Inventory, String>>,
 }
 
 impl Context {
@@ -129,6 +131,7 @@ impl Context {
             globals,
             vars,
             store: OnceCell::new(),
+            inventory: OnceCell::new(),
         }
     }
 
@@ -148,6 +151,13 @@ impl Context {
     /// Whether the variable `name` is set to something.
     pub(crate) fn var_set(&self, name: &str) -> bool {
         (self.vars)(name).is_some_and(|v| !v.is_empty())
+    }
+
+    /// The harnesses this machine has, as `by harnesses` shows them (from
+    /// its cache), detected the first time it is asked for.
+    pub(crate) fn inventory(&self) -> &Result<Inventory, String> {
+        self.inventory
+            .get_or_init(crate::harness_cmd::detected_here)
     }
 
     /// The repository's store, opened the first time it is asked for.

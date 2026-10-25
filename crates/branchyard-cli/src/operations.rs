@@ -366,18 +366,37 @@ mod tests {
         std::fs::read_to_string(root.join(path)).unwrap()
     }
 
-    /// The skill and the leaf's note are what a harness reads to use `by`:
-    /// a command or flag they name that does not exist is one a model will
-    /// try (`by inspect --wait` was, in six runs out of ten).
+    /// The skills, the leaf's note, the slash commands, the generic
+    /// instructions file and the repository's AGENTS.md are what a harness
+    /// reads to use `by`: a command or flag they name that does not exist is
+    /// one a model will try (`by inspect --wait` was, in six runs out of
+    /// ten).
     #[test]
     fn the_skill_names_only_commands_and_flags_that_exist() {
-        let mut problems = Vec::new();
-        for path in [
+        let mut paths: Vec<String> = [
             "plugins/branchyard/skills/delegate/SKILL.md",
+            "plugins/branchyard/skills/setup/SKILL.md",
             "plugins/branchyard/leaf.md",
+            "plugins/branchyard/harnesses/generic/AGENTS.md",
+            "AGENTS.md",
             "docs/delegation.md",
             "docs/storage.md",
-        ] {
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let commands = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/branchyard/commands");
+        let mut slash: Vec<String> = std::fs::read_dir(commands)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".md"))
+            .map(|name| format!("plugins/branchyard/commands/{name}"))
+            .collect();
+        slash.sort();
+        assert!(slash.len() >= 3, "{slash:?}");
+        paths.extend(slash);
+        let mut problems = Vec::new();
+        for path in &paths {
             problems.extend(check_commands(path, &read(path)));
         }
         assert!(problems.is_empty(), "{}", problems.join("\n"));
