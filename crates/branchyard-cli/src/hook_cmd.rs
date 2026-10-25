@@ -1028,6 +1028,8 @@ mod tests {
             profile: "claude-code-stream-json".into(),
             session: None,
             parent: parent.map(str::to_owned),
+            provider: "local".into(),
+            isolated: false,
             children: Vec::new(),
             depth: u32::from(parent.is_some()),
             base: "0123456789abcdef".into(),
