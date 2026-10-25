@@ -193,7 +193,7 @@ After a run, send or fork, `next` lists the commands that fit the branch's state
 - [Setup](setup.md): `branchyard.toml`, `by config show`, the interview behind `by init`.
 - [Harness hooks](harness-hooks.md): how a Claude Code or Codex session hears about your branches.
 - [The Python SDK](sdk.md): the same operations from a script.
-- `docs/adding-a-harness.md`: a driver for a CLI Branchyard does not know yet.
+- [`docs/adding-a-harness.md`](adding-a-harness.md): a driver for a CLI Branchyard does not know yet.
 - [Troubleshooting](troubleshooting.md) and [upgrading](upgrade.md).
 
 Not done: `by setup` and the status card of a bare `by` are described from the specification and the command's help text as they stood while the command was being built; they were not run, and step 3 shows no output for them. The real-harness command in step 4 and the `by harnesses` rows were not run against a model here. The install command was run in debug mode, offline, into a scratch directory. Everything was run on Linux; macOS and Windows were not.
