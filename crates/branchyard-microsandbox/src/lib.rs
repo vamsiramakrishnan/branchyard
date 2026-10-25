@@ -59,3 +59,15 @@ pub const SDK_VERSION: &str = "0.7.3";
 
 /// Whether this build includes the SDK.
 pub const ENABLED: bool = cfg!(feature = "microsandbox");
+
+/// What a build without the SDK tells a person to run to get one, from a
+/// checkout. Building it needs Rust 1.94 or newer and `libcap-ng`'s
+/// development files; running a microVM needs KVM.
+pub const REBUILD: &str =
+    "cargo install --locked --path crates/branchyard-cli --features microsandbox";
+
+/// The sentence every refusal of a build without the SDK ends with, so a
+/// person is never left with only the name of a cargo feature.
+pub const REBUILD_HELP: &str = "rebuild from a checkout with `cargo install --locked --path \
+     crates/branchyard-cli --features microsandbox` (it needs Rust 1.94 or newer and \
+     libcap-ng-dev to build, and KVM to run a microVM); see docs/modes.md#sandbox";

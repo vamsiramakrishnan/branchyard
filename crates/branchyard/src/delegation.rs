@@ -739,6 +739,15 @@ pub struct Inspection {
     /// own or its seat's or parent's; omitted for the harness's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Where its harness runs, as `--provider` names it: `local`,
+    /// `microsandbox`, `substrate` or `recipe:NAME`; the branch's
+    /// `provider`.
+    #[serde(default = "crate::local_provider")]
+    pub provider: String,
+    /// It runs on this host with a private `HOME` of its own, not in a
+    /// sandbox; the branch's `isolated`.
+    #[serde(default)]
+    pub isolated: bool,
     pub parent: Option<String>,
     pub children: Vec<String>,
     pub depth: u32,
@@ -3915,6 +3924,8 @@ impl Local {
             harness: info.harness,
             profile: info.profile,
             model: record.provision.as_ref().and_then(|p| p.model.clone()),
+            provider: info.provider,
+            isolated: info.isolated,
             parent: info.parent,
             children: info.children,
             depth: info.depth,
@@ -5511,6 +5522,8 @@ Checks on the merged result: \
                 stalled: false,
                 superseded_by: None,
                 model: None,
+                provider: "local".into(),
+                isolated: false,
             },
             created_ms: 0,
             check: None,

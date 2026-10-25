@@ -208,17 +208,20 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
             Kind::Confirm,
             "Isolation",
             "Should harnesses run isolated, with a private HOME and a scrubbed environment?",
-            "--isolated keeps your credentials and dotfiles from the harness; it is then not logged in, so it needs a secret.",
+            "--isolated keeps your credentials and dotfiles from the harness; it is then not logged in, so it needs a secret. It is not a sandbox: the harness still runs as your user.",
         )
         .default(d.isolated.unwrap_or(false))
         .choices(vec![
             Choice::new(false, "No", "use your own HOME and login (no isolation beyond your user)"),
-            Choice::new(true, "Yes", "private HOME; give the harness a secret next"),
+            Choice::new(true, "Yes", "private HOME, not a sandbox; give the harness a secret next"),
         ]),
     ];
     // A recipe chosen by hand is kept: this question offers only local and
-    // Microsandbox.
-    if (facts.platform.kvm || d.provider == Some(ProviderKind::Microsandbox))
+    // Microsandbox. Microsandbox is offered where this build can run it and
+    // the host has KVM; a file that already names it keeps the choice, and
+    // says what the build lacks.
+    if ((facts.platform.kvm && facts.build.microsandbox)
+        || d.provider == Some(ProviderKind::Microsandbox))
         && d.provider != Some(ProviderKind::Recipe)
     {
         qs.push(
@@ -227,7 +230,13 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
                 Kind::Select,
                 "Provider",
                 "Where should harnesses run?",
-                "KVM is available, so Microsandbox can run each turn in a microVM (a build with the microsandbox feature).",
+                &match facts.build.microsandbox {
+                    true => "KVM is available, so Microsandbox can run each turn in a microVM.".to_owned(),
+                    false => format!(
+                        "This build has no Microsandbox support: rebuild with `{}` (needs KVM and libcap-ng).",
+                        crate::probe::REBUILD_MICROSANDBOX
+                    ),
+                },
             )
             .default(match d.provider {
                 Some(ProviderKind::Microsandbox) => "microsandbox",
@@ -235,7 +244,14 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
             })
             .choices(vec![
                 Choice::new("local", "Local process", "in its own worktree, as your user"),
-                Choice::new("microsandbox", "Microsandbox", "a microVM per turn from an OCI image"),
+                Choice::new(
+                    "microsandbox",
+                    "Microsandbox",
+                    match facts.build.microsandbox {
+                        true => "a microVM per turn from an OCI image",
+                        false => "needs a build with --features microsandbox",
+                    },
+                ),
             ]),
         );
         qs.push(
@@ -1101,6 +1117,13 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
             "Keys the interview does not ask about are kept; comments in the old file are not."
                 .into(),
         );
+    }
+    if facts.platform.kvm && !facts.build.microsandbox {
+        plan.notes.push(format!(
+            "This host has KVM, but this build has no Microsandbox support, so harnesses run \
+             locally. For a microVM per turn, rebuild with `{}` (needs libcap-ng; docs/modes.md#sandbox).",
+            crate::probe::REBUILD_MICROSANDBOX
+        ));
     }
     let mut secret_note = list(answers, "secrets");
     for login in list(answers, "logins") {

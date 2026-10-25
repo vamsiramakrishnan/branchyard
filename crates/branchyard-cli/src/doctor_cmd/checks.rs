@@ -575,8 +575,11 @@ fn microsandbox_row(ctx: &Context, config: &ProjectConfig) -> Check {
             Err(error) => Check::fail(
                 NAME,
                 error.to_string(),
-                "build with --features microsandbox and give [microsandbox] an image \
-                 (docs/providers.md)",
+                format!(
+                    "rebuild with `{}` (needs KVM and libcap-ng) and give [microsandbox] an \
+                     image (docs/modes.md#sandbox)",
+                    branchyard::MICROSANDBOX_REBUILD
+                ),
             ),
         },
         _ => skipped(
@@ -828,7 +831,7 @@ pub(super) fn server_reachable(ctx: &Context) -> Vec<Check> {
         Err(why) => Check::fail(
             NAME,
             format!("{url} did not answer GET /v1/repos: {why}"),
-            "start the server (`by serve`), or fix the URL, token or CA file",
+            crate::remote::UNREACHABLE_FIX,
         ),
         Ok(names) => match globals.repo.as_deref() {
             Some(wanted) if !names.iter().any(|n| n == wanted) => Check::fail(

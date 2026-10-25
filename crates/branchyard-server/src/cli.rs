@@ -663,6 +663,7 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     };
     let mut tokens = partial.tokens;
     let mut token_files = flags.token_files;
+    let mut default_token_file = None;
     // A worker serves no requests, so it needs no credential: it runs each
     // operation as the principal that admitted it.
     if tokens.is_empty()
@@ -671,14 +672,12 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
         && !flags.worker
     {
         let path = data_dir.join("token");
+        default_token_file = Some(path.clone());
         if flags.check {
             // A check writes nothing: note the token serving would create,
             // and check the rest as if it existed.
             if !path.exists() {
-                warnings.push(format!(
-                    "serving would create a token in {}",
-                    path.display()
-                ));
+                warnings.push(format!("{WOULD_CREATE_TOKEN} {}", path.display()));
                 tokens.push(Token {
                     name: "default".into(),
                     secret: new_token(),
@@ -708,6 +707,7 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     }
     config.repos = repos;
     config.tokens = tokens;
+    config.default_token_file = default_token_file;
     config.principals = partial.principals;
     config.credentials = partial.credentials;
     config.tenants = partial.tenants;
@@ -851,6 +851,10 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     Ok((config, warnings))
 }
 
+/// How the warning begins that says serving would make the token it has none
+/// of: routine for a server never started, not a fault in the configuration.
+pub const WOULD_CREATE_TOKEN: &str = "serving would create a token in";
+
 /// `--check`: build and validate the configuration `args` describe as
 /// serving would, without writing anything. Returns its warnings, or why
 /// it would not serve. `by init server` checks every configuration it
@@ -875,12 +879,37 @@ pub fn resolve(args: &[String]) -> Result<Config, String> {
     Ok(config)
 }
 
+/// What `--check` can say about the configuration `flags` describe: why it
+/// would not serve (a database on a build without PostgreSQL support
+/// included), or its warnings. It opens no store and connects to no
+/// database; a reachable server and a working database are `by serve`'s to
+/// find out.
 fn check_flags(flags: Flags) -> Result<Vec<String>, String> {
     let (config, mut warnings) = build(flags)?;
     if let Some(warning) = config.validate()? {
         warnings.push(warning);
     }
+    // What serving would refuse when it opens its stores, found without
+    // opening them.
+    if config.database.is_some() && !cfg!(feature = "postgres") {
+        return Err(config::NO_POSTGRES.into());
+    }
+    warnings.extend(build_warnings(&config));
     Ok(warnings)
+}
+
+/// Warnings about what this build cannot do for `config`, which serving
+/// would only find out on a request.
+fn build_warnings(config: &Config) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if config.allow_providers.contains("microsandbox") && !branchyard::MICROSANDBOX_BUILT {
+        warnings.push(format!(
+            "allow_providers names microsandbox, but this build has no Microsandbox support, so \
+             a request for it is refused; rebuild with `{}` (needs KVM and libcap-ng)",
+            branchyard::MICROSANDBOX_REBUILD
+        ));
+    }
+    warnings
 }
 
 /// SIGINT and SIGTERM, which both shut the server down the same way.
@@ -992,7 +1021,7 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    for warning in warnings {
+    for warning in warnings.into_iter().chain(build_warnings(&config)) {
         tracing::warn!(%warning, "configuration warning");
     }
     match config.validate() {
@@ -1016,6 +1045,7 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
         }
     };
     let repos: Vec<String> = config.repos.iter().map(|(n, _)| n.clone()).collect();
+    let token_file = config.default_token_file.clone();
     let code = runtime.block_on(async move {
         let mut signals = Signals::new();
         let running = match serve::start(config).await {
@@ -1041,6 +1071,13 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
                 url = %running.url(),
                 "serving; harnesses run as this user, with no isolation beyond it"
             );
+            if let Some(path) = &token_file {
+                tracing::info!(
+                    token_file = %path.display(),
+                    "no credentials are configured, so clients pass this token with --token-file \
+                     (or [remote] token_file)"
+                );
+            }
         }
         let handle = running.handle();
         tokio::spawn(async move {
@@ -1312,6 +1349,118 @@ mod tests {
             .iter()
             .any(|w| w.contains("WARNING")));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `--check` says what serving would: a database on a build without the
+    /// `postgres` feature fails with the way to get one; on a build with it,
+    /// the check passes without connecting to anything.
+    #[test]
+    fn check_fails_for_a_database_this_build_cannot_open() {
+        let dir = std::env::temp_dir().join(format!("branchyard-cli-pg-{}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        let file = dir.join("config.json");
+        // Nothing listens at this address: a pass means no connection.
+        std::fs::write(
+            &file,
+            serde_json::json!({
+                "data_dir": "data",
+                "repos": { "app": "app" },
+                "database": "postgres://nobody@127.0.0.1:1/none"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let line = format!("--config {}", file.display());
+        let checked = check(&args(&line));
+        if cfg!(feature = "postgres") {
+            assert!(checked.is_ok(), "{checked:?}");
+        } else {
+            let error = checked.unwrap_err();
+            assert!(error.contains("no PostgreSQL support"), "{error}");
+            assert!(
+                error.contains(
+                    "cargo install --locked --path crates/branchyard-cli --features postgres"
+                ),
+                "{error}"
+            );
+            assert_eq!(error, config::NO_POSTGRES);
+        }
+        // The same through the flag.
+        std::fs::write(
+            &file,
+            serde_json::json!({ "data_dir": "data", "repos": { "app": "app" } }).to_string(),
+        )
+        .unwrap();
+        let flagged = check(&args(&format!(
+            "{line} --database postgres://nobody@127.0.0.1:1/none"
+        )));
+        assert_eq!(flagged.is_ok(), cfg!(feature = "postgres"), "{flagged:?}");
+        assert!(!dir.join("data").exists(), "a check writes nothing");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A server given no credential makes a token and says where: the path
+    /// is on the resolved configuration for the start log.
+    #[test]
+    fn the_token_file_serving_makes_is_named() {
+        let dir = std::env::temp_dir().join(format!("branchyard-cli-tok-{}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        let file = dir.join("config.json");
+        std::fs::write(
+            &file,
+            serde_json::json!({ "data_dir": "data", "repos": { "app": "app" } }).to_string(),
+        )
+        .unwrap();
+        let line = format!("--config {} --check", file.display());
+        let (config, _) = build(parse(&args(&line)).unwrap()).unwrap();
+        assert_eq!(
+            config.default_token_file,
+            Some(dir.join("data").join("token"))
+        );
+
+        std::fs::write(
+            &file,
+            serde_json::json!({
+                "data_dir": "data",
+                "repos": { "app": "app" },
+                "tokens": [{ "name": "ops", "token": "ops-token-0123456789" }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (config, _) = build(parse(&args(&line)).unwrap()).unwrap();
+        assert_eq!(
+            config.default_token_file, None,
+            "a configured token is not the default"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Allowing a provider the build cannot run is a warning, with the command.
+    #[test]
+    fn check_warns_for_a_provider_this_build_cannot_run() {
+        let mut config = Config::new(PathBuf::from("/tmp/x"));
+        assert!(build_warnings(&config).is_empty());
+        config.allow_providers.insert("microsandbox".into());
+        let warnings = build_warnings(&config);
+        if branchyard::MICROSANDBOX_BUILT {
+            assert!(warnings.is_empty(), "{warnings:?}");
+        } else {
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(
+                warnings[0].contains("--features microsandbox"),
+                "{warnings:?}"
+            );
+        }
+        config.allow_providers.clear();
+        config.allow_providers.insert("substrate".into());
+        assert!(build_warnings(&config).is_empty());
     }
 
     #[test]

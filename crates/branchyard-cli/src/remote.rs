@@ -38,6 +38,18 @@ pub struct Remote {
     pub args: Vec<String>,
 }
 
+/// What a remote command with no token says: all three places one can be
+/// given, and where `by serve` writes one.
+pub(crate) const NEEDS_TOKEN: &str = "remote mode needs a token: pass --token-file, set \
+     BRANCHYARD_TOKEN_FILE, or set token_file under [remote] in branchyard.toml (`by serve` \
+     writes one at .branchyard/server/token on the server's host)";
+
+/// What to do when a server does not answer; `by doctor`'s `server.reachable`
+/// row says the same.
+pub(crate) const UNREACHABLE_FIX: &str =
+    "start a server with `by serve` on that host, or fix the URL, token or CA file ([remote] \
+     url, token_file, ca_file)";
+
 impl Remote {
     /// Connect as `globals` say, choosing the server's only repository when
     /// none is named.
@@ -64,12 +76,10 @@ impl Remote {
         let url = tunnel.as_ref().map_or(url, |t| t.url.as_str());
         let token_file = match &tunnel_token {
             Some(file) => file.as_str(),
-            None => globals.token_file.as_deref().ok_or_else(|| {
-                Failure::Message(
-                    "remote mode needs a token: pass --token-file or set BRANCHYARD_TOKEN_FILE"
-                        .into(),
-                )
-            })?,
+            None => globals
+                .token_file
+                .as_deref()
+                .ok_or_else(|| Failure::Message(NEEDS_TOKEN.into()))?,
         };
         let mut client = Client::from_token_file(url, token_file)?;
         if let Some(ca) = &globals.ca_file {
@@ -85,7 +95,8 @@ impl Remote {
                     several => {
                         let names: Vec<&str> = several.iter().map(|r| r.name.as_str()).collect();
                         return Err(Failure::Message(format!(
-                            "the server serves {}; pass --repo NAME or set BRANCHYARD_REPO",
+                            "the server serves {}; pass --repo NAME, set BRANCHYARD_REPO, or set \
+                             repo under [remote] in branchyard.toml",
                             names.join(", ")
                         )));
                     }
@@ -166,31 +177,14 @@ fn budget(task: &TaskArgs) -> BudgetSpec {
     }
 }
 
-fn announce(remote: &Remote, notice: Option<&str>, provider: Option<&Provider>) {
-    match provider {
-        None | Some(Provider::Local) => eprintln!(
-            "by: remote mode on {}: harnesses run as the server's user, with no isolation \
-             beyond it",
-            remote.label()
-        ),
-        Some(Provider::Microsandbox(sandbox)) => eprintln!(
-            "by: remote mode on {}: harnesses run in Microsandbox microVMs on the server, from {}",
-            remote.label(),
-            sandbox.image
-        ),
-        Some(Provider::Substrate(options)) => eprintln!(
-            "by: remote mode on {}: harnesses run in Agent Substrate actors from template {} \
-             (unqualified), reached from the server",
-            remote.label(),
-            options.template
-        ),
-        // Refused before anything is sent (see `provider`).
-        Some(Provider::Recipe(options)) => eprintln!(
-            "by: remote mode on {}: recipe {} is not run by a server",
-            remote.label(),
-            options.name
-        ),
-    }
+/// Say where the server will run the work (`commands::banner`), then the
+/// notice, if any. `isolated`: the request asks for a private HOME on the
+/// server.
+fn announce(remote: &Remote, notice: Option<&str>, provider: Option<&Provider>, isolated: bool) {
+    eprintln!(
+        "{}",
+        commands::banner(provider, isolated, Some(&remote.label()))
+    );
     if let Some(notice) = notice {
         eprintln!("by: {notice}");
     }
@@ -618,7 +612,7 @@ pub fn run(env: &Env, remote: &Remote, prompt: &str, task: &TaskArgs) -> Outcome
         deny: task.deny.clone(),
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
-    announce(remote, notice, provider.as_ref());
+    announce(remote, notice, provider.as_ref(), task.isolated);
     finish_one(env, remote, &op, task.delegate.is_some())
 }
 
@@ -650,7 +644,7 @@ pub fn plan_approve(
         send,
     };
     let op = remote.repo.approve_plan(branch, &request, &new_key())?;
-    announce(remote, notice, None);
+    announce(remote, notice, None, false);
     plan_finish(env, remote, &op, json)
 }
 
@@ -671,7 +665,7 @@ pub fn plan_reject(
         send,
     };
     let op = remote.repo.reject_plan(branch, &request, &new_key())?;
-    announce(remote, notice, None);
+    announce(remote, notice, None, false);
     plan_finish(env, remote, &op, json)
 }
 
@@ -755,7 +749,7 @@ pub fn fan(
         deny: task.deny.clone(),
     };
     let op = remote.repo.submit_task(&request, &new_key())?;
-    announce(remote, notice, provider.as_ref());
+    announce(remote, notice, provider.as_ref(), task.isolated);
     let console = live_console(env, true, false);
     console.reserve(&op.branches);
     let done = follow(remote, &op, &console);
@@ -822,7 +816,7 @@ pub fn map(env: &Env, remote: &Remote, args: &crate::args::MapArgs, json: bool) 
         .clone()
         .unwrap_or_else(|| branchyard::map_default_name(&prompt));
     let op = remote.repo.submit_map(&request, &new_key())?;
-    announce(remote, notice, provider.as_ref());
+    announce(remote, notice, provider.as_ref(), task.isolated);
     eprintln!(
         "by: map {name}: {} item(s), running on the server as {}",
         request.items.len(),
@@ -936,7 +930,7 @@ pub fn send(
     let op = remote.repo.send(branch, &request, &new_key())?;
     // A `by review --detach` launcher waits for the server to accept it.
     crate::detach::accepted(branch);
-    announce(remote, notice, None);
+    announce(remote, notice, None, false);
     let delegating = task.delegate.is_some() || !remote.repo.branch(branch)?.children.is_empty();
     finish_one(env, remote, &op, delegating)
 }
@@ -954,7 +948,7 @@ pub fn send_feedback(
     let (mut request, notice) = send_request(task, Prompt::Text(prompt))?;
     request.feedback = Some(feedback);
     let op = remote.repo.send(branch, &request, &new_key())?;
-    announce(remote, notice, None);
+    announce(remote, notice, None, false);
     let delegating = task.delegate.is_some() || !remote.repo.branch(branch)?.children.is_empty();
     finish_one(env, remote, &op, delegating)
 }
@@ -974,7 +968,7 @@ pub fn send_json(
         .send(branch, &request, &new_key())
         .map_err(sdk_error)?;
     crate::detach::accepted(branch);
-    announce(remote, notice, None);
+    announce(remote, notice, None, false);
     let info = follow_result(env, remote, &op)?
         .branches
         .into_iter()
@@ -1009,7 +1003,7 @@ pub fn fork(
 ) -> Outcome {
     let (request, notice) = fork_request(prompt, fresh_session, None, task)?;
     let op = remote.repo.fork(branch, &request, &new_key())?;
-    announce(remote, notice, request.provider.as_ref());
+    announce(remote, notice, request.provider.as_ref(), task.isolated);
     finish_one(env, remote, &op, task.delegate.is_some())
 }
 
@@ -1026,7 +1020,7 @@ pub fn fork_at(
 ) -> Outcome {
     let (request, notice) = fork_request(prompt, false, Some(turn), task)?;
     let op = remote.repo.fork(branch, &request, &new_key())?;
-    announce(remote, notice, request.provider.as_ref());
+    announce(remote, notice, request.provider.as_ref(), task.isolated);
     let console = live_console(env, task.delegate.is_some(), false);
     let done = follow(remote, &op, &console);
     console.finish();
@@ -1090,7 +1084,7 @@ pub fn reincarnate(env: &Env, remote: &Remote, branch: &str, task: &TaskArgs) ->
         priority: task.priority,
     };
     let op = remote.repo.reincarnate(branch, &request, &new_key())?;
-    announce(remote, notice, provider.as_ref());
+    announce(remote, notice, provider.as_ref(), task.isolated);
     finish_one(env, remote, &op, task.delegate.is_some())
 }
 
@@ -1139,7 +1133,7 @@ pub fn spawn(
         .repo
         .spawn(parent, &request, &new_key())
         .map_err(sdk_error)?;
-    announce(remote, notice, None);
+    announce(remote, notice, None, false);
     let console = live_console(env, true, args.json);
     let done = follow(remote, &op, &console);
     console.finish();
@@ -1167,7 +1161,7 @@ pub fn apply_graph(
         .repo
         .apply_graph(parent, &request)
         .map_err(sdk_error)?;
-    announce(remote, notice, None);
+    announce(remote, notice, None, false);
     Ok(applied)
 }
 
@@ -1322,7 +1316,7 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
         Err(error) if args.json => return rig_failed(true, sdk_error(error)),
         Err(error) => return Err(error.into()),
     };
-    announce(remote, notice, None);
+    announce(remote, notice, None, false);
     if !args.json {
         return finish_one(env, remote, &op, true);
     }

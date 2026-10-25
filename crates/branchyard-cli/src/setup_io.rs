@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 use branchyard_setup::plan::{
     ArtifactKind, BuiltinValidator, FileAction, Plan, PlannedFile, Validation, Validator,
 };
-use branchyard_setup::probe::{Entropy, GitFact, HarnessFact, HarnessLogin, Platform, Probe};
+use branchyard_setup::probe::{
+    BuildFacts, Entropy, GitFact, HarnessFact, HarnessLogin, Platform, Probe,
+};
 use branchyard_setup::protocol::Applied;
 
 pub use branchyard_config::{
@@ -236,6 +238,13 @@ impl Probe for HostProbe {
                 .map(|v| short_version(&v))
                 .unwrap_or_default(),
         )
+    }
+
+    fn build(&self) -> BuildFacts {
+        BuildFacts {
+            microsandbox: cfg!(feature = "microsandbox"),
+            postgres: cfg!(feature = "postgres"),
+        }
     }
 
     fn platform(&self) -> Platform {
@@ -536,6 +545,9 @@ impl<P: Probe> Probe for CachedProbe<P> {
     }
     fn platform(&self) -> Platform {
         self.platform.get_or_init(|| self.inner.platform()).clone()
+    }
+    fn build(&self) -> BuildFacts {
+        self.inner.build()
     }
     fn read(&self, path: &str) -> Option<String> {
         self.inner.read(path)

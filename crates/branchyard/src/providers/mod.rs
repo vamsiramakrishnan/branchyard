@@ -47,6 +47,13 @@ pub(crate) trait ProviderKind {
     /// serialized `kind`, as recorded in events and sandbox rows.
     fn name(&self) -> &'static str;
 
+    /// How the provider is named to a person and recorded on a branch
+    /// (`BranchInfo::provider`): the name, with a recipe's own. Defaults to
+    /// [`ProviderKind::name`].
+    fn label(&self) -> String {
+        self.name().to_owned()
+    }
+
     /// Which provider, and where, holds a sandbox or snapshot row:
     /// sandboxes and snapshots are only ever used through the same one.
     /// Defaults to [`ProviderKind::name`].
@@ -119,6 +126,11 @@ pub(crate) trait ProviderKind {
     fn destroy(&self, yard: &Yard, sandbox: &str) -> Result<String, String>;
 }
 
+/// A branch's provider as [`Provider::label`] names it; `None` is local.
+pub(crate) fn label_of(provider: Option<&Provider>) -> String {
+    of(provider).label()
+}
+
 /// The implementation for a branch's provider; `None` is local.
 pub(crate) fn of(provider: Option<&Provider>) -> &dyn ProviderKind {
     match provider {
@@ -137,6 +149,13 @@ impl Provider {
             Provider::Substrate(options) => options,
             Provider::Recipe(options) => options,
         }
+    }
+
+    /// How this provider is named in a branch's record and to a person:
+    /// `local`, `microsandbox`, `substrate` or `recipe:NAME`; the same
+    /// spelling `--provider` takes.
+    pub fn label(&self) -> String {
+        self.kind().label()
     }
 
     /// A Microsandbox provider with `options`: how a caller outside this

@@ -122,11 +122,7 @@ pub fn open(config: &crate::Config) -> Result<std::sync::Arc<dyn CompanionStore>
     }
     #[cfg(not(feature = "postgres"))]
     if config.database.is_some() {
-        return Err(
-            "this build has no PostgreSQL support; build with the postgres feature \
-                    to use --database"
-                .into(),
-        );
+        return Err(crate::config::NO_POSTGRES.into());
     }
     let path = SqliteCompanion::path_in(&config.data_dir);
     SqliteCompanion::open(&path)

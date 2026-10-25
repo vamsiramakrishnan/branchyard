@@ -2156,6 +2156,8 @@ mod tests {
             stalled: false,
             superseded_by: None,
             model: None,
+            provider: "local".into(),
+            isolated: false,
         }
     }
 

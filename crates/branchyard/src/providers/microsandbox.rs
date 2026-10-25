@@ -36,11 +36,10 @@ impl ProviderKind for SandboxOptions {
     fn check(&self, yard: &Yard) -> Result<(), Error> {
         let own = crate::projection::lock(&yard.hub.sandbox_provider).is_some();
         if !own && !branchyard_microsandbox::ENABLED {
-            return Err(Error::Unsupported(
-                "this build has no Microsandbox support; rebuild with \
-                 --features microsandbox (Rust 1.94 or newer), see docs/providers.md"
-                    .into(),
-            ));
+            return Err(Error::Unsupported(format!(
+                "this build has no Microsandbox support; {}",
+                branchyard_microsandbox::REBUILD_HELP
+            )));
         }
         if self.image.trim().is_empty() {
             return Err(Error::Unsupported(
