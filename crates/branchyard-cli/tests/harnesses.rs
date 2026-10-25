@@ -369,7 +369,7 @@ fn the_full_listing_says_how_to_install_log_in_and_key_the_harnesses_that_were_r
 fn detection_reads_versions_and_logins_without_reading_secrets() {
     let w = World::new();
     // Codex: its own status command says logged in (verified).
-    w.fake_codex(&w.bin, "0.157.1");
+    w.fake_codex(&w.bin, "0.164.0");
     fs::write(w.bin.join("codex.status"), "Logged in using ChatGPT\n").unwrap();
     // Claude Code: a credential file (likely logged in).
     w.script("claude", "#!/bin/sh\necho '2.1.283 (Claude Code)'\n");
@@ -409,7 +409,7 @@ fn detection_reads_versions_and_logins_without_reading_secrets() {
     assert!(harness(&inventory, "opencode").is_none());
 
     let codex = harness(&inventory, "codex").unwrap();
-    assert_eq!(codex["version"], "0.157.1");
+    assert_eq!(codex["version"], "0.164.0");
     assert_eq!(codex["login"]["state"], "logged_in");
     assert_eq!(codex["login"]["evidence"], "verified");
     assert!(codex["login"]["detail"]
@@ -1676,4 +1676,60 @@ fn a_server_shows_its_workers_harnesses_and_says_where_to_log_in() {
             .status(),
     );
     branchyard_support::best_effort("reap the server process", child.wait());
+}
+
+/// A Codex with a `model_providers` entry of its own and no OpenAI login:
+/// its status command says "Not logged in", and the run is fine on the
+/// provider's key. Detection reads the selected provider's `env_key` out of
+/// `config.toml` (by name), so the listing and the pre-flight agree with it.
+#[test]
+fn a_codex_model_providers_key_is_a_login_the_preflight_accepts() {
+    let w = World::new();
+    w.fake_codex(&w.bin, "0.164.0");
+    fs::create_dir_all(w.home.join(".codex")).unwrap();
+    fs::write(
+        w.home.join(".codex/config.toml"),
+        "model = \"glm-4.6\"\nmodel_provider = \"zai\"\n\n[model_providers.other]\nenv_key = \"OTHER_KEY\"\n\n\
+         [model_providers.zai]\nname = \"Z.ai\"\nbase_url = \"https://example.invalid/v1\"\n\
+         wire_api = \"responses\"\nenv_key = \"ZAI_KEY\"\n\n[profiles.p]\nmodel_provider = \"nope\"\n",
+    )
+    .unwrap();
+    // The provider is selected, its key is not set: logged out, and the
+    // listing says what the configuration lacks.
+    let inventory = w.json(&["harnesses", "--json", "--refresh"]);
+    let codex = harness(&inventory, "codex").unwrap();
+    assert_eq!(codex["login"]["state"], "logged_out", "{codex}");
+    let detail = codex["login"]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains(
+            "selects the model provider zai, which reads ZAI_KEY, and ZAI_KEY is not set"
+        ),
+        "{detail}"
+    );
+    let why = w.fails(&["run", "say hi", "--harness", "codex", "-n", "cx"]);
+    assert!(why.contains("ZAI_KEY is not set"), "{why}");
+    assert!(why.contains("--no-preflight"), "{why}");
+    assert!(w.branches().is_empty());
+    // With the provider's key set, Codex is logged in by it, and the
+    // pre-flight lets the run start (the fake cannot speak the protocol, so
+    // the branch fails after it exists).
+    let out = w.by_env(
+        &["harnesses", "--json", "--refresh"],
+        &[("ZAI_KEY", "sk-test-0123456789")],
+    );
+    let inventory: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let codex = harness(&inventory, "codex").unwrap();
+    assert_eq!(codex["login"]["state"], "logged_in", "{codex}");
+    assert_eq!(codex["login"]["key"], "ZAI_KEY");
+    assert!(!text(&out.stdout).contains("sk-test-0123456789"));
+    let out = w.by_env(
+        &["run", "say hi", "--harness", "codex", "-n", "cx", "--yes"],
+        &[("ZAI_KEY", "sk-test-0123456789")],
+    );
+    assert!(
+        !text(&out.stderr).contains("Nothing was started"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(w.branches(), ["cx"]);
 }

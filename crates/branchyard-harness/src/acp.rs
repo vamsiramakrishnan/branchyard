@@ -403,14 +403,27 @@ impl Acp {
             "id": id,
             "error": {"code": -32601, "message": format!("branchyard does not handle {method}")},
         });
-        Output {
-            events: vec![Event::UnsupportedRequest {
+        // An optional extension is declined without a word.
+        let events = match OPTIONAL_REQUESTS.contains(&method) {
+            true => Vec::new(),
+            false => vec![Event::UnsupportedRequest {
                 method: method.to_owned(),
             }],
+        };
+        Output {
+            events,
             frames: vec![frame(&reply)],
         }
     }
 }
+
+/// Requests an agent may make of its client that are optional extensions of
+/// the agent, answered "method not found" like any other but not reported:
+/// the agent carries on without them, so a line saying so on every branch is
+/// noise. Qwen Code 0.26.0 asks `craft/drainMidTurnQueue` ("is there input
+/// the user queued while the turn runs?") once per session, and stops asking
+/// at the first "method not found".
+const OPTIONAL_REQUESTS: [&str; 1] = ["craft/drainMidTurnQueue"];
 
 /// A tool call's kind as a name the permission presets know
 /// (`docs/egress.md#permission-presets`): `acp:edit`, `acp:execute`, ...

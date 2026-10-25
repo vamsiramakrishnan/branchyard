@@ -323,6 +323,22 @@ fn client_filesystem_and_terminal_requests_are_refused() {
     }
 }
 
+/// Qwen Code 0.26.0 asks for input queued mid-turn once per session and
+/// carries on at "method not found": declined as any request, but not
+/// reported as an unsupported one on every branch.
+#[test]
+fn an_optional_agent_extension_is_declined_without_an_event() {
+    let mut driver = ready();
+    let (events, frames) = feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "id": 61, "method": "craft/drainMidTurnQueue",
+                "params": {"sessionId": "s1", "promptId": "p1"}}),
+    );
+    assert!(events.is_empty(), "{events:?}");
+    assert_eq!(frames[0]["id"], 61);
+    assert_eq!(frames[0]["error"]["code"], -32601);
+}
+
 #[test]
 fn protocol_mismatches_fail_the_open() {
     let (mut driver, initialize) = open(SessionMode::Fresh);

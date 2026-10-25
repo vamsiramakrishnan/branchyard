@@ -66,6 +66,24 @@ const APPROVALS: [(&str, &str); 2] = [
     ("item/fileChange/requestApproval", "fileChange"),
 ];
 
+/// Notifications Branchyard shows nothing of, ignored on purpose rather than
+/// reported as unrecognized: the model's reasoning as it streams (hundreds
+/// of `item/reasoning/textDelta` per turn on a reasoning model), a command's
+/// or a patch's output as it streams, Codex's running diff (the candidate
+/// has its own), the lifecycle of Codex's own hooks, and the account's rate
+/// limits. Recorded against codex-cli 0.164.0 (`tests/fixtures/codex-0.164.0-file-change-approval.jsonl`).
+const QUIET: [&str; 9] = [
+    "item/reasoning/textDelta",
+    "item/reasoning/summaryTextDelta",
+    "item/reasoning/summaryPartAdded",
+    "item/commandExecution/outputDelta",
+    "item/fileChange/outputDelta",
+    "turn/diff/updated",
+    "hook/started",
+    "hook/completed",
+    "account/rateLimits/updated",
+];
+
 /// Item types reported as tool starts.
 const TOOL_ITEMS: [&str; 6] = [
     "commandExecution",
@@ -105,6 +123,9 @@ pub struct Codex {
     pending: HashMap<u64, Pending>,
     /// Outstanding approvals: key to the JSON-RPC request ID to answer.
     approvals: HashMap<String, Value>,
+    /// The files of each `fileChange` item in flight, by item ID: Codex's
+    /// approval request for a patch names the item, not the files.
+    file_changes: HashMap<String, Vec<String>>,
     turns: Turns,
     native_turn: Option<String>,
     /// Steers of the turn in flight that Codex has not yet recorded as a
@@ -128,6 +149,7 @@ impl Codex {
             next_id: 0,
             pending: HashMap::new(),
             approvals: HashMap::new(),
+            file_changes: HashMap::new(),
             turns: Turns::default(),
             native_turn: None,
             steers: Vec::new(),
@@ -161,12 +183,17 @@ impl Codex {
         }
         let method = match &open.mode {
             SessionMode::Fresh => "thread/start",
+            // `excludeTurns`: the answer is read for the thread's ID alone, and
+            // codex-cli 0.164.0 warns on each resume and fork that hydrating
+            // the full history "is deprecated for paginated threads".
             SessionMode::Resume(thread) => {
                 params["threadId"] = json!(thread.as_str());
+                params["excludeTurns"] = json!(true);
                 "thread/resume"
             }
             SessionMode::Fork(thread) => {
                 params["threadId"] = json!(thread.as_str());
+                params["excludeTurns"] = json!(true);
                 "thread/fork"
             }
         };
@@ -276,7 +303,7 @@ impl Codex {
                 request: PermissionRequest {
                     key: PermissionKey(key),
                     tool: (*tool).to_owned(),
-                    input: message["params"].clone(),
+                    input: self.approval_input(&message["params"]),
                 },
             });
         }
@@ -292,8 +319,45 @@ impl Codex {
         }
     }
 
+    /// An approval request's parameters, as the person asked sees them. A
+    /// command's carry `command`; a patch's name only the item, so the files
+    /// its `item/started` listed are added as `path` (relative to the
+    /// thread's working directory), which is what the permission line shows.
+    fn approval_input(&self, params: &Value) -> Value {
+        let mut input = params.clone();
+        let files = params["itemId"]
+            .as_str()
+            .and_then(|item| self.file_changes.get(item));
+        if let (Some(files), Some(map)) = (files, input.as_object_mut()) {
+            if !files.is_empty() {
+                map.insert("path".into(), json!(files.join(", ")));
+            }
+        }
+        input
+    }
+
+    /// The files a `fileChange` item changes, as the thread's working
+    /// directory names them.
+    fn changed_files(&self, item: &Value) -> Vec<String> {
+        let cwd = self.open.as_ref().map(|open| open.cwd.as_str());
+        item["changes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|change| change["path"].as_str())
+            .map(|path| {
+                cwd.and_then(|cwd| path.strip_prefix(cwd))
+                    .map_or(path, |rest| rest.trim_start_matches('/'))
+                    .to_owned()
+            })
+            .collect()
+    }
+
     fn notification(&mut self, message: &Value, method: &str) -> Output {
         let params = &message["params"];
+        if QUIET.contains(&method) {
+            return Output::default();
+        }
         match method {
             "configWarning" | "warning" | "deprecationNotice" => return warning(params),
             "error" => return warning(&params["error"]),
@@ -320,6 +384,10 @@ impl Codex {
                 if let ("userMessage", Some(client)) = (kind, item["clientId"].as_str()) {
                     // A steer Codex has now put into the conversation.
                     self.steers.retain(|(_, id)| id != client);
+                }
+                if let ("fileChange", Some(id)) = (kind, item["id"].as_str()) {
+                    let files = self.changed_files(item);
+                    self.file_changes.insert(id.to_owned(), files);
                 }
                 if TOOL_ITEMS.contains(&kind) {
                     Output::event(Event::ToolStarted {
@@ -356,7 +424,12 @@ impl Codex {
                 }
             }
             "turn/completed" => self.turn_completed(turn, params),
-            "item/completed" => Output::default(),
+            "item/completed" => {
+                if let Some(id) = params["item"]["id"].as_str() {
+                    self.file_changes.remove(id);
+                }
+                Output::default()
+            }
             other => Output::event(Event::Unrecognized {
                 kind: other.to_owned(),
             }),
@@ -375,6 +448,7 @@ impl Codex {
         self.turns.end();
         self.native_turn = None;
         self.approvals.clear();
+        self.file_changes.clear();
         let mut events: Vec<Event> = std::mem::take(&mut self.steers)
             .into_iter()
             .inspect(|(steer, _)| self.dropped.push(*steer))
@@ -564,6 +638,7 @@ impl Driver for Codex {
         self.ready = false;
         self.pending.clear();
         self.approvals.clear();
+        self.file_changes.clear();
         self.native_turn = None;
         self.steers.clear();
         self.turns.closed()

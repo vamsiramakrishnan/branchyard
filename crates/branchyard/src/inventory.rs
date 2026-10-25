@@ -612,6 +612,18 @@ const OMP_MIN_BUN: &str = "1.3.14";
 ///
 /// - Antigravity 1.3.3 reads `GEMINI_API_KEY` only when its `settings.json`
 ///   has `"modelProvider": "gemini"`: `model-provider-gemini`.
+/// - Codex 0.164.0 sends its requests to the `model_provider` its
+///   `config.toml` selects (`$CODEX_HOME`, default `~/.codex`) with the
+///   variable that provider's `env_key` names, and `codex login status`
+///   speaks only of the OpenAI login: a top-level `model_provider` other than
+///   `openai` is `model-provider NAME`, the `env_key` of its
+///   `[model_providers.NAME]` table is `provider-env VAR`, and an `env` line
+///   when that variable is set.
+/// - Qwen Code 0.26.0 has no login command or credential file (`qwen auth`
+///   is removed): it runs on `OPENAI_API_KEY` alone (an `env` line when
+///   set) or on a provider connected inside it, which is a
+///   `security.auth.selectedType` in `~/.qwen/settings.json`:
+///   `auth-selected`.
 /// - Gemini CLI 0.63.0's headless `gemini -p` refuses an untrusted
 ///   directory unless `GEMINI_CLI_TRUST_WORKSPACE` is `true`:
 ///   `trust-workspace`.
@@ -631,6 +643,26 @@ fn probes(id: &str) -> &'static str {
     match id {
         "antigravity" => {
             r##"  grep -Eq '"modelProvider"[[:space:]]*:[[:space:]]*"gemini"' "$HOME/.gemini/antigravity-cli/settings.json" 2>/dev/null && echo 'fact antigravity model-provider-gemini'
+"##
+        }
+        "codex" => {
+            r##"  cx="${CODEX_HOME:-$HOME/.codex}/config.toml"
+  if [ -f "$cx" ]; then
+    mp=$(sed -n -e '/^\[/q' -e 's/^model_provider[[:space:]]*=[[:space:]]*"\([A-Za-z0-9_.-]*\)".*$/\1/p' "$cx" 2>/dev/null | head -n1)
+    if [ -n "$mp" ] && [ "$mp" != openai ]; then
+      echo "fact codex model-provider $mp"
+      ek=$(sed -n "/^\[model_providers\.$mp\]/,/^\[/p" "$cx" 2>/dev/null | sed -n 's/^env_key[[:space:]]*=[[:space:]]*"\([A-Za-z_][A-Za-z0-9_]*\)".*$/\1/p' | head -n1)
+      if [ -n "$ek" ]; then
+        echo "fact codex provider-env $ek"
+        eval "[ -n \"\${$ek:-}\" ]" && echo "env codex $ek"
+      fi
+    fi
+  fi
+"##
+        }
+        "qwen-code" => {
+            r##"  [ -n "${OPENAI_API_KEY:-}" ] && echo 'env qwen-code OPENAI_API_KEY'
+  grep -Eq '"selectedType"[[:space:]]*:' "$HOME/.qwen/settings.json" 2>/dev/null && echo 'fact qwen-code auth-selected'
 "##
         }
         "gemini-cli" => {
@@ -1112,6 +1144,20 @@ fn login(id: &str, found: &Found, os: &str) -> Login {
     login
 }
 
+/// The model provider Codex's `config.toml` selects, as the probe found it:
+/// its name and the variable its `env_key` names, when it names one.
+fn codex_provider(found: &Found) -> Option<(&str, Option<&str>)> {
+    let name = found
+        .facts
+        .iter()
+        .find_map(|f| f.strip_prefix("model-provider "))?;
+    let var = found
+        .facts
+        .iter()
+        .find_map(|f| f.strip_prefix("provider-env "));
+    Some((name, var))
+}
+
 fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
     let check = login_check(id);
     let program = catalog::harness(id)
@@ -1177,6 +1223,23 @@ fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
     let provider = found.facts.iter().any(|f| f == "model-provider-gemini");
     let key_is_used =
         |var: &&String| id != "antigravity" || var.as_str() != "GEMINI_API_KEY" || provider;
+    // The key the model provider Codex's config selects reads: Codex sends
+    // its requests with it, and `codex login status` does not speak of it.
+    let codex_key = codex_provider(found)
+        .filter(|_| id == "codex")
+        .and_then(|(name, var)| {
+            let var = found.env.iter().find(|set| Some(set.as_str()) == var)?;
+            Some((name, var))
+        });
+    if let Some((name, var)) = codex_key {
+        return keyed(
+            var,
+            format!(
+                "{var} is set, and ~/.codex/config.toml selects the model provider {name}, which \
+                 reads it (an API key; not checked)"
+            ),
+        );
+    }
     // A key variable works whatever the login says.
     if let Some(var) = found.env.iter().find(key_is_used) {
         return keyed(
@@ -1189,11 +1252,38 @@ fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
             },
         );
     }
-    if let Some((state, detail)) = said {
+    if let Some((state, mut detail)) = said {
+        // Not logged in to OpenAI is not the same as unable to run: say which
+        // provider the configuration selects, and what it still lacks.
+        if let (true, LoginState::LoggedOut, Some((name, var))) =
+            (id == "codex", state, codex_provider(found))
+        {
+            detail.push_str(&match var {
+                Some(var) => format!(
+                    "; ~/.codex/config.toml selects the model provider {name}, which reads \
+                     {var}, and {var} is not set"
+                ),
+                None => format!(
+                    "; ~/.codex/config.toml selects the model provider {name}, which names no \
+                     key variable (this status command speaks only of the OpenAI login)"
+                ),
+            });
+        }
         return verified(state, detail);
     }
     if let Some(file) = found.files.first() {
         return likely(LoginState::LoggedIn, format!("{file} exists"));
+    }
+    // A provider connected inside Qwen Code (`Connect a Provider`, or by hand)
+    // is `security.auth.selectedType` in its settings; the key is wherever the
+    // provider's `envKey` or the settings' `env` puts it, and is not read.
+    if id == "qwen-code" && found.facts.iter().any(|f| f == "auth-selected") {
+        return likely(
+            LoginState::LoggedIn,
+            "~/.qwen/settings.json selects an auth type (security.auth.selectedType; its key \
+             is not checked)"
+                .to_owned(),
+        );
     }
     if id == "antigravity" && found.env.iter().any(|v| v == "GEMINI_API_KEY") {
         // Still a key Branchyard can use: isolated runs set the provider.
@@ -2335,6 +2425,123 @@ mod tests {
         let login = &codex.get("codex").unwrap().login;
         assert_eq!(login.state, LoginState::LoggedOut);
         assert_eq!(login.detail, "codex login status: Not logged in");
+    }
+
+    /// Codex 0.164.0 with a `model_providers` entry of its own and no OpenAI
+    /// login: `codex login status` says "Not logged in" and Codex runs fine on
+    /// the provider's key. The key is the login.
+    #[test]
+    fn a_model_providers_key_is_a_codex_login() {
+        let base = "by-inventory 1\nhost box\nos Linux\nchecked codex\n\
+            found codex 1 /bin/codex\nversion codex 0\nversion-out codex codex-cli 0.164.0\n\
+            status codex 1\nstatus-out codex Not logged in\n";
+        let with_key = format!(
+            "{base}fact codex model-provider zai\nfact codex provider-env ZAI_KEY\n\
+             env codex ZAI_KEY\nend\n"
+        );
+        let codex = parse(&with_key, 7).unwrap().get("codex").unwrap().clone();
+        assert_eq!(codex.login.state, LoginState::LoggedIn);
+        assert_eq!(codex.login.evidence, Evidence::Likely);
+        assert_eq!(codex.login.key.as_deref(), Some("ZAI_KEY"));
+        assert_eq!(codex.login.label(), "key set (ZAI_KEY)");
+        assert_eq!(
+            codex.login.detail,
+            "ZAI_KEY is set, and ~/.codex/config.toml selects the model provider zai, which \
+             reads it (an API key; not checked)"
+        );
+        assert!(codex.ready().is_ok(), "{:?}", codex.ready());
+
+        // The provider's key wins over an OpenAI one that Codex would not send.
+        let both = with_key.replace(
+            "env codex ZAI_KEY\n",
+            "env codex OPENAI_API_KEY\nenv codex ZAI_KEY\n",
+        );
+        let codex = parse(&both, 7).unwrap().get("codex").unwrap().clone();
+        assert_eq!(codex.login.key.as_deref(), Some("ZAI_KEY"));
+
+        // The provider is selected but its key is not set: still logged out,
+        // and the detail says what is missing.
+        let unset =
+            format!("{base}fact codex model-provider zai\nfact codex provider-env ZAI_KEY\nend\n");
+        let codex = parse(&unset, 7).unwrap().get("codex").unwrap().clone();
+        assert_eq!(codex.login.state, LoginState::LoggedOut);
+        assert_eq!(codex.login.evidence, Evidence::Verified);
+        assert_eq!(
+            codex.login.detail,
+            "codex login status: Not logged in; ~/.codex/config.toml selects the model provider \
+             zai, which reads ZAI_KEY, and ZAI_KEY is not set"
+        );
+        // A provider that names no key variable: logged out as before, the
+        // detail says the status command speaks only of OpenAI.
+        let keyless = format!("{base}fact codex model-provider local\nend\n");
+        let codex = parse(&keyless, 7).unwrap().get("codex").unwrap().clone();
+        assert_eq!(codex.login.state, LoginState::LoggedOut);
+        assert!(
+            codex.login.detail.ends_with(
+                "selects the model provider local, which names no key variable (this status \
+                 command speaks only of the OpenAI login)"
+            ),
+            "{}",
+            codex.login.detail
+        );
+        // No provider selected: the status command alone, as before.
+        let plain = format!("{base}end\n");
+        let codex = parse(&plain, 7).unwrap().get("codex").unwrap().clone();
+        assert_eq!(codex.login.detail, "codex login status: Not logged in");
+    }
+
+    /// Qwen Code 0.26.0 runs on `OPENAI_API_KEY` alone or on a provider
+    /// connected inside it (`security.auth.selectedType`); it has no login
+    /// command or credential file for Branchyard to look for.
+    #[test]
+    fn qwen_code_is_logged_in_by_an_openai_key_or_a_selected_auth_type() {
+        let keyed = found("qwen-code", &["env qwen-code OPENAI_API_KEY"]);
+        assert_eq!(keyed.login.state, LoginState::LoggedIn);
+        assert_eq!(keyed.login.evidence, Evidence::Likely);
+        assert_eq!(keyed.login.label(), "key set (OPENAI_API_KEY)");
+        let selected = found("qwen-code", &["fact qwen-code auth-selected"]);
+        assert_eq!(selected.login.state, LoginState::LoggedIn);
+        assert_eq!(selected.login.label(), "credentials found");
+        assert_eq!(
+            selected.login.detail,
+            "~/.qwen/settings.json selects an auth type (security.auth.selectedType; its key is \
+             not checked)"
+        );
+        // Neither: as before, Branchyard cannot tell, and the guidance stays
+        // "sign in inside qwen".
+        let nothing = found("qwen-code", &[]);
+        assert_eq!(nothing.login.state, LoginState::Unknown);
+        assert!(
+            nothing.login.detail.ends_with("sign in inside qwen itself"),
+            "{}",
+            nothing.login.detail
+        );
+        let text = script(&DetectOptions {
+            only: Some(vec!["qwen-code".into()]),
+            ..DetectOptions::default()
+        });
+        assert!(text.contains("echo 'env qwen-code OPENAI_API_KEY'"));
+        assert!(text.contains("\"$HOME/.qwen/settings.json\""));
+    }
+
+    /// The probe reads only the top-level `model_provider` and that
+    /// provider's own `env_key`, and prints names, never values.
+    #[test]
+    fn the_codex_probe_reads_the_selected_providers_env_key_by_name() {
+        let text = script(&DetectOptions {
+            only: Some(vec!["codex".into()]),
+            ..DetectOptions::default()
+        });
+        assert!(text.contains("${CODEX_HOME:-$HOME/.codex}/config.toml"));
+        assert!(text.contains("echo \"fact codex model-provider $mp\""));
+        assert!(text.contains("[ -n \\\"\\${$ek:-}\\\" ]"), "{text}");
+        assert!(text.contains("echo \"env codex $ek\""));
+        assert!(!text.contains("cat \"$cx\""));
+        let other = script(&DetectOptions {
+            only: Some(vec!["claude-code".into()]),
+            ..DetectOptions::default()
+        });
+        assert!(!other.contains("model_providers"));
     }
 
     #[test]

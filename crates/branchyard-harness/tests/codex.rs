@@ -568,3 +568,149 @@ fn a_steer_waits_for_the_turn_id_and_reports_refusals() {
         "a refused steer is not reported twice"
     );
 }
+
+/// Recorded against codex-cli 0.164.0 on a reasoning model (GLM-4.6 through
+/// Z.ai's Responses endpoint): one patch and one command, each approved. The
+/// stream held 313 reasoning deltas, command and diff updates, hook and rate
+/// limit notices; none of them is "unrecognized", and the patch's approval
+/// names its file, which Codex's own request does not.
+#[test]
+fn a_recorded_file_change_turn_names_its_file_and_reports_nothing_unrecognized() {
+    let recorded = Transcript::load(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/codex-0.164.0-file-change-approval.jsonl"
+    ));
+    let (mut driver, opened) = open(SessionMode::Fresh);
+    let replayed = Replay::new(&recorded)
+        .ignore("/params/clientInfo/version")
+        .prompt("Create a file named rec.txt containing the single word rec and nothing else")
+        .answer_permissions(PermissionDecision::Allow)
+        .run(&mut driver, &opened);
+    assert_eq!(
+        replayed.sent, 6,
+        "initialize, initialized, thread, turn and two approvals"
+    );
+    assert!(replayed.unsent.is_empty());
+    let events = replayed.events;
+    let unrecognized: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, Event::Unrecognized { .. }))
+        .collect();
+    assert!(unrecognized.is_empty(), "{unrecognized:?}");
+    let asked: Vec<(&str, String)> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::PermissionRequested { request, .. } => {
+                Some((request.tool.as_str(), shown(&request.input)))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked[0], ("fileChange", "rec.txt".into()));
+    assert_eq!(asked[1].0, "commandExecution");
+    assert!(asked[1].1.contains("cat rec.txt"), "{asked:?}");
+    assert!(events.contains(&Event::TurnEnded {
+        turn: 1,
+        outcome: TurnOutcome::Completed
+    }));
+}
+
+/// The text a permission line shows for `input`: its `path`, else its `command`.
+fn shown(input: &Value) -> String {
+    ["path", "command"]
+        .iter()
+        .find_map(|key| input[*key].as_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[test]
+fn a_patch_approval_lists_every_file_relative_to_the_working_directory() {
+    let (mut driver, _, _) = ready(SessionMode::Fresh, "t1");
+    driver.submit("two files").unwrap();
+    feed(
+        &mut driver,
+        &json!({"method": "item/started", "params": {"threadId": "t1", "turnId": "u1", "item": {
+        "type": "fileChange", "id": "p1", "status": "inProgress",
+        "changes": [
+            {"path": "/workspace/src/a.rs", "kind": {"type": "add"}, "diff": "x\n"},
+            {"path": "/elsewhere/b.rs", "kind": {"type": "update", "move_path": null}, "diff": "y\n"},
+        ]}}}),
+    );
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"id": 3, "method": "item/fileChange/requestApproval",
+            "params": {"itemId": "p1", "threadId": "t1", "turnId": "u1", "startedAtMs": 0,
+                       "reason": null, "grantRoot": null}}),
+    );
+    let Event::PermissionRequested { request, .. } = &events[0] else {
+        panic!("{events:?}")
+    };
+    assert_eq!(request.tool, "fileChange");
+    assert_eq!(request.input["path"], "src/a.rs, /elsewhere/b.rs");
+    assert_eq!(request.input["itemId"], "p1", "Codex's own fields stay");
+
+    // A patch Codex never announced is asked about as it came.
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"id": 4, "method": "item/fileChange/requestApproval",
+            "params": {"itemId": "unknown", "threadId": "t1", "turnId": "u1", "startedAtMs": 0}}),
+    );
+    let Event::PermissionRequested { request, .. } = &events[0] else {
+        panic!("{events:?}")
+    };
+    assert!(request.input.get("path").is_none());
+}
+
+#[test]
+fn streams_and_bookkeeping_nobody_shows_are_ignored_not_unrecognized() {
+    let (mut driver, _, _) = ready(SessionMode::Fresh, "t1");
+    driver.submit("think").unwrap();
+    for method in [
+        "item/reasoning/textDelta",
+        "item/reasoning/summaryTextDelta",
+        "item/reasoning/summaryPartAdded",
+        "item/commandExecution/outputDelta",
+        "item/fileChange/outputDelta",
+        "turn/diff/updated",
+        "hook/started",
+        "hook/completed",
+        "account/rateLimits/updated",
+    ] {
+        let (events, frames) = feed(&mut driver, &json!({"method": method, "params": {}}));
+        assert!(
+            events.is_empty() && frames.is_empty(),
+            "{method}: {events:?}"
+        );
+    }
+    // Between turns too (the rate limits arrive whenever Codex likes).
+    let (mut idle, _, _) = ready(SessionMode::Fresh, "t2");
+    let (events, _) = feed(
+        &mut idle,
+        &json!({"method": "account/rateLimits/updated", "params": {}}),
+    );
+    assert!(events.is_empty(), "{events:?}");
+    // What nothing here handles is still reported.
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"method": "thread/compacted", "params": {}}),
+    );
+    assert_eq!(
+        events,
+        [Event::Unrecognized {
+            kind: "thread/compacted".into()
+        }]
+    );
+}
+
+#[test]
+fn resume_and_fork_ask_for_the_thread_without_its_history() {
+    // codex-cli 0.164.0 warns on every resume and fork that hydrating the full
+    // history is deprecated; the driver reads only the thread's ID.
+    let (_, _, request) = ready(SessionMode::Resume(session("t-old")), "t-old");
+    assert_eq!(request["params"]["excludeTurns"], true);
+    let (_, _, request) = ready(SessionMode::Fork(session("t-old")), "t-new");
+    assert_eq!(request["params"]["excludeTurns"], true);
+    let (_, _, request) = ready(SessionMode::Fresh, "t1");
+    assert!(request["params"].get("excludeTurns").is_none());
+}
