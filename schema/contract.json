@@ -34158,6 +34158,17 @@
             "detail": {
               "type": "string",
               "description": "What decided it, for people: `codex login status: Logged in using\nChatGPT`, `OPENAI_API_KEY is set`, `~/.codex/auth.json exists`."
+            },
+            "key": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The key variable the login rests on, when it does: `GEMINI_API_KEY`.\nOnly its name is ever recorded."
+            },
+            "stored": {
+              "type": "boolean",
+              "description": "The key is in a file Branchyard stored (`by harnesses login ID\n--api-key`, named in `[secrets]`), not in the environment."
             }
           },
           "required": [
@@ -34418,6 +34429,17 @@
             "detail": {
               "type": "string",
               "description": "What decided it, for people: `codex login status: Logged in using\nChatGPT`, `OPENAI_API_KEY is set`, `~/.codex/auth.json exists`."
+            },
+            "key": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The key variable the login rests on, when it does: `GEMINI_API_KEY`.\nOnly its name is ever recorded."
+            },
+            "stored": {
+              "type": "boolean",
+              "description": "The key is in a file Branchyard stored (`by harnesses login ID\n--api-key`, named in `[secrets]`), not in the environment."
             }
           },
           "required": [

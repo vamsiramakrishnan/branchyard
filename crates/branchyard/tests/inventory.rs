@@ -142,8 +142,9 @@ fn detection_reads_versions_and_logins_and_times_out_slow_commands() {
     assert_eq!(qwen.version, None);
     assert_eq!(
         qwen.version_note.as_deref(),
-        Some("its version command timed out")
+        Some("slow to start (took >0.5 s)")
     );
+    assert_eq!(qwen.version_text(), "slow to start");
     assert!(found
         .ready("opencode")
         .unwrap_err()
@@ -156,13 +157,15 @@ fn detection_reads_versions_and_logins_and_times_out_slow_commands() {
     assert!(!serde_json::to_string(&found)
         .unwrap()
         .contains("sk-never-printed"));
-    // Each version command ran once, and the status command once.
+    // Each version command ran once, and each status command once (Claude
+    // Code's and Codex's own).
     let mut calls = m.calls();
     calls.sort();
     assert_eq!(
         calls,
         [
             "claude --version",
+            "claude auth status",
             "codex --version",
             "codex login status",
             "goose --version",
@@ -211,8 +214,10 @@ fn antigravity_deepseek_and_gemini_logins_are_read_from_their_configuration() {
         agy.login.detail,
         "GEMINI_API_KEY is set but ~/.gemini/antigravity-cli/settings.json does not set \
          modelProvider gemini: agy will ask for a Google sign-in; Branchyard sets it in \
-         isolated runs"
+         isolated runs, and `by harnesses login antigravity` sets it for your own"
     );
+    assert_eq!(agy.login.key.as_deref(), Some("GEMINI_API_KEY"));
+    assert_eq!(agy.login.label(), "key set (GEMINI_API_KEY)");
     let gemini = found.get("gemini-cli").unwrap();
     assert_eq!(gemini.version.as_deref(), Some("0.63.0"));
     assert!(gemini

@@ -45,8 +45,15 @@ use serde::{Deserialize, Serialize};
 /// Labels derived from an inventory: `harness:<id>` for each harness that
 /// can run on the machine.
 pub const LABEL_PREFIX: &str = "harness:";
-/// How long a version or status command may run.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a version or status command may run. Node-based harnesses take
+/// three to six seconds to start cold, so the bound is generous: a probe
+/// that still has not answered is reported as slow to start, not as
+/// missing. Every installed harness is asked at once, so the total is the
+/// slowest one, not their sum.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+/// What a version probe that did not answer in time is called, in the
+/// note and in the table (`slow to start (took >10 s)`).
+pub const SLOW_START: &str = "slow to start";
 /// How long a cached inventory is used before it is detected again.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(60);
 /// Where harness installers usually put executables, besides `PATH`.
@@ -125,6 +132,44 @@ pub struct Login {
     /// What decided it, for people: `codex login status: Logged in using
     /// ChatGPT`, `OPENAI_API_KEY is set`, `~/.codex/auth.json exists`.
     pub detail: String,
+    /// The key variable the login rests on, when it does: `GEMINI_API_KEY`.
+    /// Only its name is ever recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// The key is in a file Branchyard stored (`by harnesses login ID
+    /// --api-key`, named in `[secrets]`), not in the environment.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stored: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl Login {
+    /// The login in the fewest honest words, for a table cell:
+    ///
+    /// - `logged in`: the harness's own status command said so;
+    /// - `key set (GEMINI_API_KEY)`: a key variable is in the environment;
+    /// - `key stored (GEMINI_API_KEY)`: Branchyard keeps the key in a file;
+    /// - `credentials found`: a credential file exists (its contents are
+    ///   never read, so this is not a verified login);
+    /// - `logged out`: the harness's own status command said so;
+    /// - `login not verified`: no credential file or key variable Branchyard
+    ///   knows of is there, which is not the same as being logged out (a
+    ///   login it does not look for may work);
+    /// - `unknown`: there is nothing to go on.
+    pub fn label(&self) -> String {
+        match (self.state, self.evidence, &self.key) {
+            (LoginState::LoggedIn, Evidence::Verified, _) => "logged in".to_owned(),
+            (LoginState::LoggedIn, _, Some(key)) if self.stored => format!("key stored ({key})"),
+            (LoginState::LoggedIn, _, Some(key)) => format!("key set ({key})"),
+            (LoginState::LoggedIn, _, None) => "credentials found".to_owned(),
+            (LoginState::LoggedOut, Evidence::Verified, _) => "logged out".to_owned(),
+            (LoginState::LoggedOut, ..) => "login not verified".to_owned(),
+            (LoginState::Unknown, ..) => "unknown".to_owned(),
+        }
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -239,8 +284,57 @@ impl Inventory {
     }
 }
 
+/// Where a harness stands: the words `by harnesses`, `by doctor` and
+/// `by up` all use, so they never disagree about one harness.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Standing {
+    /// It can run: on `PATH`, under its limit, and logged in or with a login
+    /// Branchyard cannot read.
+    Ready,
+    /// Nothing says it is logged in, and nothing says it is not: the
+    /// credential files and key variables Branchyard knows are all absent.
+    /// It may still work (a login Branchyard does not look for). The text
+    /// says why and what would settle it.
+    NotVerified(String),
+    /// It cannot run: not on `PATH`, at its limit, or its own status command
+    /// said it is logged out. The text says why and what to do.
+    CannotRun(String),
+}
+
 impl HarnessState {
-    /// Why it cannot run, if it cannot.
+    /// Where it stands, with the reason and the next step.
+    pub fn standing(&self) -> Standing {
+        let id = &self.id;
+        if !self.on_path {
+            return Standing::CannotRun(format!(
+                "at {} but not on PATH; add its directory to PATH",
+                self.path
+            ));
+        }
+        if self.quota.as_ref().is_some_and(|q| q.limit_reached) {
+            return Standing::CannotRun(
+                "its login has reached its usage limit (`by usage`)".into(),
+            );
+        }
+        if self.login.state == LoginState::LoggedOut {
+            let hint = login_hint(id);
+            return match self.login.evidence {
+                Evidence::Verified => {
+                    Standing::CannotRun(format!("logged out ({}); {hint}", self.login.detail))
+                }
+                _ => Standing::NotVerified(format!(
+                    "login not verified: {}; {hint}",
+                    self.login.detail
+                )),
+            };
+        }
+        Standing::Ready
+    }
+
+    /// Why it cannot run, if it cannot: what the router needs. A login that
+    /// is only likely missing counts, as it always has: the router leaves
+    /// the harness out rather than start a task that would stop at a login
+    /// prompt.
     pub fn ready(&self) -> Result<(), String> {
         let id = &self.id;
         if !self.on_path {
@@ -251,12 +345,13 @@ impl HarnessState {
         }
         if self.login.state == LoginState::LoggedOut {
             return Err(format!(
-                "{id} is {} logged out ({}); run by harnesses login {id}",
+                "{id} is {} logged out ({}); {}",
                 match self.login.evidence {
                     Evidence::Verified => "verified",
                     _ => "likely",
                 },
-                self.login.detail
+                self.login.detail,
+                login_hint(id)
             ));
         }
         if self.quota.as_ref().is_some_and(|q| q.limit_reached) {
@@ -265,6 +360,75 @@ impl HarnessState {
             ));
         }
         Ok(())
+    }
+
+    /// The version for a table cell: the version, else `slow to start`
+    /// when its version command timed out, else `?`.
+    pub fn version_text(&self) -> String {
+        match (&self.version, &self.version_note) {
+            (Some(v), _) => v.clone(),
+            (None, Some(note)) if note.starts_with(SLOW_START) => SLOW_START.to_owned(),
+            (None, _) => "?".to_owned(),
+        }
+    }
+}
+
+/// The score in a qualification summary (`9/9 on 2.1.283`): `9/9`.
+pub fn live_score(qualification: &str) -> Option<&str> {
+    let (score, _) = qualification.split_once(" on ")?;
+    let (passed, total) = score.split_once('/')?;
+    (passed.parse::<u32>().is_ok() && total.parse::<u32>().is_ok()).then_some(score)
+}
+
+/// The version the live run was on (`9/9 on codex-cli 0.157.1`: `0.157.1`).
+pub fn live_version(qualification: &str) -> Option<String> {
+    let (_, rest) = qualification.split_once(" on ")?;
+    let rest = rest.split(';').next().unwrap_or(rest).trim();
+    Some(parse_version(rest).unwrap_or_else(|| rest.to_owned()))
+}
+
+/// What a harness's qualification says, as one of three honest levels:
+/// `live 9/9 (2.1.283)`, `live 5/9 (0.2.0-rc.2)` or `no live run`. A live
+/// run is a recorded session of the harness itself, on the version named;
+/// it says nothing about any other version.
+pub fn live_level(qualification: Option<&str>) -> String {
+    match qualification.and_then(|q| live_score(q).map(|score| (score, live_version(q)))) {
+        Some((score, Some(version))) => format!("live {score} ({version})"),
+        Some((score, None)) => format!("live {score}"),
+        None => "no live run".to_owned(),
+    }
+}
+
+/// `installed 2.1.310 · live-tested 2.1.283`: when the version that has a
+/// live run is not the one installed. `None` when they match, or when
+/// either is unknown.
+pub fn live_drift(installed: Option<&str>, qualification: Option<&str>) -> Option<String> {
+    let installed = installed?;
+    let tested = live_version(qualification?)?;
+    (parse_version(installed).as_deref().unwrap_or(installed) != tested)
+        .then(|| format!("installed {installed} · live-tested {tested}"))
+}
+
+/// How to get `id` logged in, in the one wording every surface uses: the
+/// Branchyard command, and the key variables that would do instead.
+/// `by harnesses login ID` runs the harness's own login with this
+/// terminal (it prints the command it runs); for a harness whose catalog
+/// records no login command, only a key can be given.
+pub fn login_hint(id: &str) -> String {
+    let vars = key_variables(id);
+    let keys = match vars.as_slice() {
+        [a, b, c, _, ..] => format!("{a}, {b}, {c} or another provider key"),
+        all => all.join(" or "),
+    };
+    let program = catalog::harness(id)
+        .and_then(|e| e.binaries.first().cloned())
+        .unwrap_or_else(|| id.to_owned());
+    let has_login = catalog::harness(id).is_some_and(|e| e.login.is_some());
+    match (has_login, vars.is_empty()) {
+        (true, true) => format!("run `by harnesses login {id}`"),
+        (true, false) => format!("run `by harnesses login {id}`, or set {keys}"),
+        (false, false) => format!("run `by harnesses login {id} --api-key`, or set {keys}"),
+        (false, true) => format!("sign in inside {program} itself, then `by harnesses --refresh`"),
     }
 }
 
@@ -295,12 +459,20 @@ struct StatusCommand {
 /// From emdash's agent plugins (`checkStatus`: Codex runs `codex login
 /// status` and reads it with these patterns) and Scion's harness configs
 /// (`auth.types.*.required_files` and `autodetect.env`). Claude Code's
-/// emdash status check (`claude/auth.ts`) is not in the vendored sources,
-/// so its login is read from files and variables only.
+/// emdash status check (`claude/auth.ts`) is not in the vendored sources;
+/// Branchyard asks `claude auth status` itself (run on Claude Code 2.1.310,
+/// which prints JSON with `loggedIn`), and reads files and variables when
+/// that says nothing.
 const LOGIN_CHECKS: &[LoginCheck] = &[
     LoginCheck {
         harness: "claude-code",
-        status: None,
+        // `claude auth status` prints JSON with a `loggedIn` flag. It sees
+        // logins the credential file does not (a token the host provides).
+        status: Some(StatusCommand {
+            args: &["auth", "status"],
+            logged_out: &["\"loggedin\": false", "\"loggedin\":false"],
+            logged_in: &["\"loggedin\": true", "\"loggedin\":true"],
+        }),
         files: &[(
             "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json",
             "~/.claude/.credentials.json",
@@ -633,6 +805,7 @@ pub fn script(options: &DetectOptions) -> String {
          D=$(mktemp -d 2>/dev/null) || {{ D=/tmp/by-inventory.$$; mkdir -p \"$D\" || exit 1; }}\n\
          trap 'rm -rf \"$D\"' EXIT\n\
          echo '{FORMAT}'\n\
+         echo \"limit $T\"\n\
          echo \"host $(hostname 2>/dev/null || uname -n 2>/dev/null)\"\n\
          echo \"os $(uname -s 2>/dev/null)\"\n"
     ));
@@ -675,21 +848,27 @@ pub fn script(options: &DetectOptions) -> String {
             "f=$(command -v {tool} 2>/dev/null) && case $f in /*) echo \"tool {tool} $f\";; esac\n"
         ));
     }
-    for entry in options.ids() {
+    // Each installed harness is asked in a background subshell of its own,
+    // its records in `$D/h.N`, so a slow start costs the slowest harness's
+    // time and not the sum of them all (Node harnesses start in three to six
+    // seconds cold). `look` runs here, so the `found` lines come in catalog
+    // order; the rest are read back after `wait`.
+    for (index, entry) in options.ids().into_iter().enumerate() {
         let id = &entry.id;
         let bins: Vec<String> = entry.binaries.iter().map(|b| quote(b)).collect();
         s.push_str(&format!("echo 'checked {id}'\n"));
         s.push_str(&format!("if look {id} {}; then\n", bins.join(" ")));
+        s.push_str("  (\n  trap - EXIT\n");
         let version: Vec<String> = version_args(id).iter().map(|a| quote(a)).collect();
         s.push_str(&format!(
-            "  run \"$D/out\" version {id} \"$f\" {}\n",
+            "  run \"$D/o.{index}\" version {id} \"$f\" {}\n",
             version.join(" ")
         ));
         let check = login_check(id);
         if let Some(status) = check.and_then(|c| c.status.as_ref()) {
             let args: Vec<String> = status.args.iter().map(|a| quote(a)).collect();
             s.push_str(&format!(
-                "  run \"$D/out\" status {id} \"$f\" {}\n",
+                "  run \"$D/o.{index}\" status {id} \"$f\" {}\n",
                 args.join(" ")
             ));
         }
@@ -705,8 +884,9 @@ pub fn script(options: &DetectOptions) -> String {
             ));
         }
         s.push_str(probes(id));
-        s.push_str("fi\n");
+        s.push_str(&format!("  ) >\"$D/h.{index}\" 2>/dev/null &\nfi\n"));
     }
+    s.push_str("wait\ncat \"$D\"/h.* 2>/dev/null\n");
     s.push_str("echo end\n");
     s
 }
@@ -745,11 +925,14 @@ pub fn parse(output: &str, now_ms: u64) -> Result<Inventory, String> {
     };
     let mut found: BTreeMap<String, Found> = BTreeMap::new();
     let mut ended = false;
+    // The longest a command was allowed, in tenths of a second.
+    let mut limit: Option<u64> = None;
     for line in lines {
         let (tag, rest) = line.split_once(' ').unwrap_or((line, ""));
         let mut words = rest.splitn(2, ' ');
         let mut word = || words.next().unwrap_or("").to_owned();
         match tag {
+            "limit" => limit = rest.trim().parse().ok(),
             "host" => inventory.host = rest.trim().to_owned(),
             "os" => inventory.os = rest.trim().to_owned(),
             "tool" => {
@@ -805,16 +988,26 @@ pub fn parse(output: &str, now_ms: u64) -> Result<Inventory, String> {
     let order = |id: &str| catalog::harnesses().iter().position(|e| e.id == id);
     let mut states: Vec<HarnessState> = found
         .into_iter()
-        .map(|(id, f)| state(&id, f, &inventory.os))
+        .map(|(id, f)| state(&id, f, &inventory.os, limit))
         .collect();
     states.sort_by_key(|s| order(&s.id));
     inventory.harnesses = states;
     Ok(inventory)
 }
 
-fn state(id: &str, found: Found, os: &str) -> HarnessState {
+/// `slow to start (took >10 s)`: what a version command that did not answer
+/// within `limit` tenths of a second is called.
+fn slow_start(limit: Option<u64>) -> String {
+    match limit {
+        Some(tenths) if tenths % 10 == 0 => format!("{SLOW_START} (took >{} s)", tenths / 10),
+        Some(tenths) => format!("{SLOW_START} (took >{:.1} s)", tenths as f64 / 10.0),
+        None => SLOW_START.to_owned(),
+    }
+}
+
+fn state(id: &str, found: Found, os: &str, limit: Option<u64>) -> HarnessState {
     let (version, version_note) = match found.version.status.as_deref() {
-        Some("timeout") => (None, Some("its version command timed out".to_owned())),
+        Some("timeout") => (None, Some(slow_start(limit))),
         Some(status) => match found.version.lines.iter().find_map(|l| parse_version(l)) {
             Some(v) => (Some(v), None),
             None if status == "0" => (None, Some("its version command printed no version".into())),
@@ -858,6 +1051,47 @@ fn state(id: &str, found: Found, os: &str) -> HarnessState {
     }
 }
 
+/// What a status command printed, as one short phrase for the line that
+/// decided the login. Claude Code prints JSON; the rest print a sentence.
+fn status_summary(id: &str, lines: &[String], decided: &str) -> String {
+    if id == "claude-code" {
+        let method = lines.iter().find_map(|l| {
+            let (_, rest) = l.split_once("\"authMethod\"")?;
+            let value = rest.trim_start_matches([' ', ':']).trim_start_matches('"');
+            let value = value.split('"').next()?;
+            (!value.is_empty()).then(|| value.to_owned())
+        });
+        let state = match decided.to_lowercase().contains("true") {
+            true => "logged in",
+            false => "not logged in",
+        };
+        return match method {
+            Some(method) => format!("{state} ({method})"),
+            None => state.to_owned(),
+        };
+    }
+    decided.trim().to_owned()
+}
+
+/// Why a login cannot be told, with what would tell: the key variables the
+/// catalog records, or that nothing is recorded.
+fn unknown_detail(id: &str) -> String {
+    let vars = key_variables(id);
+    let program = catalog::harness(id)
+        .and_then(|e| e.binaries.first().cloned())
+        .unwrap_or_else(|| id.to_owned());
+    match vars.is_empty() {
+        true => format!(
+            "Branchyard cannot read {program}'s login: the catalog records no status command, \
+             credential file or key variable for it; sign in inside {program} itself"
+        ),
+        false => format!(
+            "Branchyard cannot read {program}'s login; a key in {} would tell",
+            vars.join(" or ")
+        ),
+    }
+}
+
 fn login(id: &str, found: &Found, os: &str) -> Login {
     let mut login = login_from_evidence(id, found, os);
     // Gemini CLI's headless `gemini -p` refuses an untrusted directory
@@ -887,23 +1121,40 @@ fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
         state,
         evidence: Evidence::Verified,
         detail,
+        ..Login::default()
     };
     let likely = |state, detail: String| Login {
         state,
         evidence: Evidence::Likely,
         detail,
+        ..Login::default()
     };
-    // The harness's own answer, when it gave one.
+    // A login that rests on a key variable.
+    let keyed = |var: &str, detail: String| Login {
+        key: Some(var.to_owned()),
+        ..likely(LoginState::LoggedIn, detail)
+    };
+    // The harness's own answer, when it gave one. Only the line that
+    // decided it is shown: a status command may print warnings before it.
     let mut said: Option<(LoginState, String)> = None;
     if let (Some(command), Some(ran)) = (check.and_then(|c| c.status.as_ref()), &found.status) {
-        let text = ran.lines.join(" ");
-        let lower = text.to_lowercase();
-        let shown = format!("{program} {}: {}", command.args.join(" "), text.trim());
         if ran.status.as_deref() != Some("timeout") {
-            if command.logged_out.iter().any(|p| lower.contains(p)) {
-                said = Some((LoginState::LoggedOut, shown));
-            } else if command.logged_in.iter().any(|p| lower.contains(p)) {
-                said = Some((LoginState::LoggedIn, shown));
+            let decided = |phrases: &[&str]| -> Option<&String> {
+                ran.lines
+                    .iter()
+                    .find(|l| phrases.iter().any(|p| l.to_lowercase().contains(p)))
+            };
+            let shown = |line: &str| {
+                format!(
+                    "{program} {}: {}",
+                    command.args.join(" "),
+                    status_summary(id, &ran.lines, line)
+                )
+            };
+            if let Some(line) = decided(command.logged_out) {
+                said = Some((LoginState::LoggedOut, shown(line)));
+            } else if let Some(line) = decided(command.logged_in) {
+                said = Some((LoginState::LoggedIn, shown(line)));
             }
         }
     }
@@ -928,8 +1179,8 @@ fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
         |var: &&String| id != "antigravity" || var.as_str() != "GEMINI_API_KEY" || provider;
     // A key variable works whatever the login says.
     if let Some(var) = found.env.iter().find(key_is_used) {
-        return likely(
-            LoginState::LoggedIn,
+        return keyed(
+            var,
             match (id, var.as_str()) {
                 ("antigravity", "GEMINI_API_KEY") => "GEMINI_API_KEY is set and settings.json \
                     selects the gemini provider (an API key; not checked)"
@@ -946,11 +1197,11 @@ fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
     }
     if id == "antigravity" && found.env.iter().any(|v| v == "GEMINI_API_KEY") {
         // Still a key Branchyard can use: isolated runs set the provider.
-        return likely(
-            LoginState::LoggedIn,
+        return keyed(
+            "GEMINI_API_KEY",
             "GEMINI_API_KEY is set but ~/.gemini/antigravity-cli/settings.json does not set \
              modelProvider gemini: agy will ask for a Google sign-in; Branchyard sets it in \
-             isolated runs"
+             isolated runs, and `by harnesses login antigravity` sets it for your own"
                 .to_owned(),
         );
     }
@@ -1009,6 +1260,7 @@ fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
                     "{OMP_LOGINS} may hold a login, which needs sqlite3 or python3 on the \
                      machine to read, and none of {vars} is set"
                 ),
+                ..Login::default()
             };
         }
         return likely(
@@ -1042,8 +1294,65 @@ fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
         _ => Login {
             state: LoginState::Unknown,
             evidence: Evidence::None,
-            detail: "Branchyard knows no way to tell for this harness".into(),
+            detail: unknown_detail(id),
+            ..Login::default()
         },
+    }
+}
+
+/// The `[secrets]` whose source is a file that exists (`@path`, as `by
+/// harnesses login ID --api-key` names it), as variable name to the file's
+/// path, shown with `~` for the home. Nothing is read from the files.
+pub fn stored_keys(root: &Path, secrets: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    use crate::configure::key_source;
+    use crate::models::KeySource;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    secrets
+        .keys()
+        .filter_map(|name| match key_source(root, secrets, name) {
+            KeySource::File(path) if path.is_file() => {
+                let shown = match home
+                    .as_deref()
+                    .and_then(|h: &Path| path.strip_prefix(h).ok())
+                {
+                    Some(rest) => format!("~/{}", rest.display()),
+                    None => path.display().to_string(),
+                };
+                Some((name.clone(), shown))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Count the keys Branchyard stored (`by harnesses login ID --api-key`,
+/// named in `[secrets]`) as logins, by name only: `stored` maps a key
+/// variable to the file that holds it, for the variables whose files
+/// exist. A harness whose login is already logged in is left alone; one
+/// that is logged out or unknown becomes logged in with the key as the
+/// reason. The key is not checked, and the harness only sees it when it
+/// runs isolated or in a sandbox, or when the person exports it.
+pub fn count_stored_keys(inventory: &mut Inventory, stored: &BTreeMap<String, String>) {
+    for state in &mut inventory.harnesses {
+        if state.login.state == LoginState::LoggedIn {
+            continue;
+        }
+        let Some((var, file)) = key_variables(&state.id)
+            .into_iter()
+            .find_map(|var| stored.get(&var).map(|file| (var, file.clone())))
+        else {
+            continue;
+        };
+        state.login = Login {
+            state: LoginState::LoggedIn,
+            evidence: Evidence::Likely,
+            detail: format!(
+                "{var} is stored in {file} and named in [secrets] (an API key; not checked); \
+                 isolated and sandboxed branches get it, export it for your own sessions"
+            ),
+            key: Some(var),
+            stored: true,
+        };
     }
 }
 
@@ -1150,6 +1459,33 @@ fn tail(text: &str, max: usize) -> String {
 
 // Caching.
 
+/// A version command that was too slow this time keeps the version it gave
+/// the last time it answered, when it is the same executable: a harness that
+/// answered once is never shown as `?`. The note says which it is.
+pub fn keep_known_versions(inventory: &mut Inventory, last: &Inventory) {
+    for state in &mut inventory.harnesses {
+        let slow = state.version.is_none()
+            && state
+                .version_note
+                .as_deref()
+                .is_some_and(|n| n.starts_with(SLOW_START));
+        if !slow {
+            continue;
+        }
+        let known = last
+            .get(&state.id)
+            .filter(|before| before.path == state.path)
+            .and_then(|before| before.version.clone());
+        if let Some(version) = known {
+            let note = state.version_note.take().unwrap_or_default();
+            state.version = Some(version);
+            state.version_note = Some(format!(
+                "{note}; the version is from the last time it answered"
+            ));
+        }
+    }
+}
+
 /// An inventory kept in a file for a while, so commands that run often do
 /// not run every version command each time. Keyed by what detection
 /// depends on: `PATH`, `HOME` and the install directories.
@@ -1197,6 +1533,15 @@ impl InventoryCache {
             .then_some(cached.inventory)
     }
 
+    /// The inventory last kept, however old and whatever machine state it
+    /// was taken under.
+    fn last(&self) -> Option<Inventory> {
+        let text = std::fs::read_to_string(&self.path).ok()?;
+        serde_json::from_str::<Cached>(&text)
+            .ok()
+            .map(|cached| cached.inventory)
+    }
+
     /// Keep `inventory`.
     pub fn put(&self, options: &DetectOptions, inventory: &Inventory) -> io::Result<()> {
         if let Some(dir) = self.path.parent() {
@@ -1226,8 +1571,11 @@ impl InventoryCache {
                 return Ok(inventory);
             }
         }
-        let inventory = detect_local(options)?;
+        let mut inventory = detect_local(options)?;
         if options.only.is_none() {
+            if let Some(last) = self.last() {
+                keep_known_versions(&mut inventory, &last);
+            }
             best_effort("store the inventory", self.put(options, &inventory));
         }
         Ok(inventory)
@@ -1980,10 +2328,7 @@ mod tests {
         assert_eq!(codex.login.evidence, Evidence::Verified);
         let claude = inventory.get("claude-code").unwrap();
         assert!(!claude.on_path);
-        assert_eq!(
-            claude.version_note.as_deref(),
-            Some("its version command timed out")
-        );
+        assert_eq!(claude.version_note.as_deref(), Some("slow to start"));
         assert_eq!(claude.login.state, LoginState::LoggedIn);
         assert_eq!(claude.login.evidence, Evidence::Likely);
         assert!(inventory
@@ -2052,9 +2397,11 @@ mod tests {
             without.login.detail,
             format!(
                 "GEMINI_API_KEY is set but {AGY_SETTINGS} does not set modelProvider gemini: \
-                 agy will ask for a Google sign-in; Branchyard sets it in isolated runs"
+                 agy will ask for a Google sign-in; Branchyard sets it in isolated runs, and \
+                 `by harnesses login antigravity` sets it for your own"
             )
         );
+        assert_eq!(without.login.key.as_deref(), Some("GEMINI_API_KEY"));
         assert!(without.ready().is_ok());
         // A Google sign-in works whatever the key and the setting say.
         let token = found(
@@ -2292,7 +2639,11 @@ mod tests {
             let relative = file.trim_start_matches("~/.dsh/");
             assert!(text.contains(relative), "{relative}");
         }
-        assert!(!text.contains("cat "), "a config file must not be printed");
+        // The only `cat` reads back what the harnesses' own subshells wrote.
+        assert!(
+            !text.replace("cat \"$D\"/h.*", "").contains("cat "),
+            "a config file must not be printed"
+        );
     }
 
     #[test]
@@ -2342,5 +2693,379 @@ mod tests {
         assert_eq!(harness_of("nope"), None);
         assert_eq!(checked_version("codex").as_deref(), Some("0.157.1"));
         assert_eq!(checked_version("amp"), None);
+    }
+
+    #[test]
+    fn a_version_command_that_did_not_answer_is_slow_to_start_and_names_the_bound() {
+        let output = "by-inventory 1\nlimit 100\nhost box\nos Linux\nchecked codex\n\
+            found codex 1 /bin/codex\nversion codex timeout\nend\n";
+        let codex = parse(output, 0).unwrap().get("codex").unwrap().clone();
+        assert_eq!(codex.version, None);
+        assert_eq!(
+            codex.version_note.as_deref(),
+            Some("slow to start (took >10 s)")
+        );
+        assert_eq!(codex.version_text(), "slow to start");
+        // A bound that is not whole seconds.
+        let output = output.replace("limit 100", "limit 5");
+        let codex = parse(&output, 0).unwrap().get("codex").unwrap().clone();
+        assert_eq!(
+            codex.version_note.as_deref(),
+            Some("slow to start (took >0.5 s)")
+        );
+        // A command that ran and printed none is `?`, not slow.
+        let output =
+            "by-inventory 1\nhost box\nos Linux\nchecked goose\nfound goose 1 /bin/goose\n\
+            version goose 0\nversion-out goose build 7\nend\n";
+        let goose = parse(output, 0).unwrap().get("goose").unwrap().clone();
+        assert_eq!(goose.version_text(), "?");
+    }
+
+    #[test]
+    fn the_script_asks_every_harness_at_once_and_reads_them_back_in_order() {
+        let text = script(&DetectOptions::default());
+        // `limit` first, one background subshell per harness, one wait.
+        assert!(text.contains("echo \"limit $T\"\n"), "{text}");
+        assert!(text.contains(") >\"$D/h.0\" 2>/dev/null &\n"), "{text}");
+        assert_eq!(text.matches("\nwait\n").count(), 1);
+        let wait = text.find("\nwait\n").unwrap();
+        let cat = text.find("cat \"$D\"/h.*").unwrap();
+        assert!(wait < cat && cat < text.find("echo end").unwrap());
+        // No harness shares a scratch file with another.
+        assert!(!text.contains("\"$D/out\""), "{text}");
+        assert_eq!(DEFAULT_TIMEOUT, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_harness_that_answered_once_keeps_its_version_when_it_is_slow_later() {
+        let ran = |id: &str, version: Option<&str>, note: Option<&str>| HarnessState {
+            id: id.into(),
+            path: format!("/bin/{id}"),
+            on_path: true,
+            version: version.map(str::to_owned),
+            version_note: note.map(str::to_owned),
+            ..HarnessState::default()
+        };
+        let before = Inventory {
+            harnesses: vec![
+                ran("codex", Some("0.157.1"), None),
+                ran("pi", Some("0.73.1"), None),
+                ran("opencode", Some("1.19.4"), None),
+            ],
+            ..Inventory::default()
+        };
+        let mut now = Inventory {
+            harnesses: vec![
+                ran("codex", None, Some("slow to start (took >10 s)")),
+                // A different executable: not the same harness's answer.
+                HarnessState {
+                    path: "/elsewhere/pi".into(),
+                    ..ran("pi", None, Some("slow to start (took >10 s)"))
+                },
+                // Failed for another reason: not a slow start.
+                ran(
+                    "opencode",
+                    None,
+                    Some("its version command exited with status 1"),
+                ),
+            ],
+            ..Inventory::default()
+        };
+        keep_known_versions(&mut now, &before);
+        let codex = now.get("codex").unwrap();
+        assert_eq!(codex.version.as_deref(), Some("0.157.1"));
+        assert_eq!(
+            codex.version_note.as_deref(),
+            Some("slow to start (took >10 s); the version is from the last time it answered")
+        );
+        assert_eq!(now.get("pi").unwrap().version, None);
+        assert_eq!(now.get("opencode").unwrap().version, None);
+    }
+
+    fn login_of(state: LoginState, evidence: Evidence, key: Option<&str>, stored: bool) -> Login {
+        Login {
+            state,
+            evidence,
+            key: key.map(str::to_owned),
+            stored,
+            ..Login::default()
+        }
+    }
+
+    #[test]
+    fn a_login_is_named_by_what_is_known_of_it() {
+        use Evidence::{Likely, Verified};
+        use LoginState::{LoggedIn, LoggedOut, Unknown};
+        for (login, want) in [
+            (login_of(LoggedIn, Verified, None, false), "logged in"),
+            (
+                login_of(LoggedIn, Likely, Some("GEMINI_API_KEY"), false),
+                "key set (GEMINI_API_KEY)",
+            ),
+            (
+                login_of(LoggedIn, Likely, Some("DEEPSEEK_API_KEY"), true),
+                "key stored (DEEPSEEK_API_KEY)",
+            ),
+            (login_of(LoggedIn, Likely, None, false), "credentials found"),
+            (login_of(LoggedOut, Verified, None, false), "logged out"),
+            (
+                login_of(LoggedOut, Likely, None, false),
+                "login not verified",
+            ),
+            (login_of(Unknown, Evidence::None, None, false), "unknown"),
+        ] {
+            assert_eq!(login.label(), want, "{login:?}");
+        }
+        // Only the evidence a harness's own command gave is called logged in.
+        let verified = found(
+            "codex",
+            &["status codex 0", "status-out codex Logged in using ChatGPT"],
+        );
+        assert_eq!(verified.login.label(), "logged in");
+        let file = found(
+            "claude-code",
+            &["file claude-code ~/.claude/.credentials.json"],
+        );
+        assert_eq!(file.login.label(), "credentials found");
+        let key = found("gemini-cli", &["env gemini-cli GOOGLE_API_KEY"]);
+        assert_eq!(key.login.label(), "key set (GOOGLE_API_KEY)");
+        assert_eq!(key.login.key.as_deref(), Some("GOOGLE_API_KEY"));
+        let out = found("grok-build", &[]);
+        assert_eq!(out.login.label(), "login not verified");
+    }
+
+    #[test]
+    fn claude_code_is_asked_its_own_status_and_only_the_deciding_line_is_shown() {
+        let said = |json: &[&str]| {
+            let mut lines: Vec<String> = vec!["status claude-code 0".into()];
+            lines.extend(json.iter().map(|l| format!("status-out claude-code {l}")));
+            let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+            found("claude-code", &refs)
+        };
+        let out = said(&["{", "\"loggedIn\": false,", "\"authMethod\": \"none\""]);
+        assert_eq!(out.login.state, LoginState::LoggedOut);
+        assert_eq!(out.login.evidence, Evidence::Verified);
+        assert_eq!(out.login.label(), "logged out");
+        assert_eq!(out.login.detail, "claude auth status: not logged in (none)");
+        let on = said(&[
+            "{",
+            "\"loggedIn\": true,",
+            "\"authMethod\": \"oauth_token\",",
+        ]);
+        assert_eq!(on.login.state, LoginState::LoggedIn);
+        assert_eq!(on.login.evidence, Evidence::Verified);
+        assert_eq!(
+            on.login.detail,
+            "claude auth status: logged in (oauth_token)"
+        );
+        // Its answer beats a missing credential file: the host may provide
+        // the token some other way.
+        assert_eq!(on.login.label(), "logged in");
+        // An older claude with no `auth status` says nothing usable: the
+        // files and variables decide, as before.
+        let old = said(&["error: unknown command 'auth'"]);
+        assert_eq!(old.login.evidence, Evidence::Likely);
+        assert_eq!(old.login.state, LoginState::LoggedOut);
+        let text = script(&DetectOptions {
+            only: Some(vec!["claude-code".into()]),
+            ..DetectOptions::default()
+        });
+        assert!(
+            text.contains("status claude-code \"$f\" auth status"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_status_command_that_warns_first_shows_only_the_line_that_decided() {
+        let out = found(
+            "codex",
+            &[
+                "status codex 0",
+                "status-out codex WARNING: proceeding, even though we could not create PATH aliases",
+                "status-out codex Not logged in",
+            ],
+        );
+        assert_eq!(out.login.state, LoginState::LoggedOut);
+        assert_eq!(out.login.detail, "codex login status: Not logged in");
+    }
+
+    #[test]
+    fn the_login_hint_is_one_wording_from_the_catalog() {
+        // A login command the catalog records: the Branchyard command that runs it.
+        assert_eq!(
+            login_hint("claude-code"),
+            "run `by harnesses login claude-code`, or set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN"
+        );
+        // No login command, a key variable: only a key can be given.
+        assert_eq!(
+            login_hint("deepseek-harness"),
+            "run `by harnesses login deepseek-harness --api-key`, or set DEEPSEEK_API_KEY"
+        );
+        // Neither: sign in inside the harness, then look again.
+        assert_eq!(
+            login_hint("qwen-code"),
+            "sign in inside qwen itself, then `by harnesses --refresh`"
+        );
+        // The unreadable login says what would tell.
+        let pi = found("pi", &[]);
+        assert_eq!(pi.login.state, LoginState::Unknown);
+        assert!(pi
+            .login
+            .detail
+            .contains("the catalog records no status command"));
+        assert!(pi.login.detail.contains("sign in inside pi itself"));
+    }
+
+    #[test]
+    fn a_harness_stands_ready_unverified_or_unable_in_the_words_every_surface_uses() {
+        let state = |login: Login| HarnessState {
+            id: "claude-code".into(),
+            path: "/bin/claude".into(),
+            on_path: true,
+            login,
+            ..HarnessState::default()
+        };
+        let ready = state(login_of(
+            LoginState::LoggedIn,
+            Evidence::Verified,
+            None,
+            false,
+        ));
+        assert_eq!(ready.standing(), Standing::Ready);
+        let guess = state(login_of(
+            LoginState::LoggedOut,
+            Evidence::Likely,
+            None,
+            false,
+        ));
+        match guess.standing() {
+            Standing::NotVerified(why) => {
+                assert!(why.starts_with("login not verified: "), "{why}");
+                assert!(why.contains("by harnesses login claude-code"), "{why}");
+                assert!(!why.contains("cannot run"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let said = state(login_of(
+            LoginState::LoggedOut,
+            Evidence::Verified,
+            None,
+            false,
+        ));
+        assert!(
+            matches!(said.standing(), Standing::CannotRun(why) if why.starts_with("logged out"))
+        );
+        let off = HarnessState {
+            on_path: false,
+            ..ready.clone()
+        };
+        assert!(matches!(off.standing(), Standing::CannotRun(why) if why.contains("not on PATH")));
+        // The router still leaves out a harness that is only likely logged out.
+        assert!(guess.ready().unwrap_err().contains("likely logged out"));
+    }
+
+    #[test]
+    fn a_key_branchyard_stored_counts_as_a_login_and_nothing_else_does() {
+        let mut inventory = Inventory {
+            harnesses: vec![
+                HarnessState {
+                    id: "deepseek-harness".into(),
+                    on_path: true,
+                    login: login_of(LoginState::LoggedOut, Evidence::Likely, None, false),
+                    ..HarnessState::default()
+                },
+                HarnessState {
+                    id: "codex".into(),
+                    on_path: true,
+                    login: login_of(LoginState::LoggedIn, Evidence::Verified, None, false),
+                    ..HarnessState::default()
+                },
+                HarnessState {
+                    id: "grok-build".into(),
+                    on_path: true,
+                    login: login_of(LoginState::LoggedOut, Evidence::Likely, None, false),
+                    ..HarnessState::default()
+                },
+            ],
+            ..Inventory::default()
+        };
+        let stored: BTreeMap<String, String> = [
+            (
+                "DEEPSEEK_API_KEY".to_owned(),
+                "~/.config/branchyard/secrets/DEEPSEEK_API_KEY".to_owned(),
+            ),
+            ("OPENAI_API_KEY".to_owned(), "~/k".to_owned()),
+        ]
+        .into();
+        count_stored_keys(&mut inventory, &stored);
+        let dsh = inventory.get("deepseek-harness").unwrap();
+        assert_eq!(dsh.login.state, LoginState::LoggedIn);
+        assert_eq!(dsh.login.label(), "key stored (DEEPSEEK_API_KEY)");
+        assert!(dsh.login.detail.contains("not checked"));
+        // Only the variable's name and where the file is.
+        assert!(!dsh.login.detail.contains("=\""));
+        assert!(dsh.ready().is_ok());
+        // A verified login stays; a harness with no stored key stays as it was.
+        assert_eq!(inventory.get("codex").unwrap().login.label(), "logged in");
+        assert_eq!(
+            inventory.get("grok-build").unwrap().login.label(),
+            "login not verified"
+        );
+    }
+
+    #[test]
+    fn stored_keys_are_the_secrets_whose_files_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("DEEPSEEK_API_KEY");
+        std::fs::write(&file, "never read").unwrap();
+        let secrets: BTreeMap<String, String> = [
+            (
+                "DEEPSEEK_API_KEY".to_owned(),
+                format!("@{}", file.display()),
+            ),
+            (
+                "XAI_API_KEY".to_owned(),
+                format!("@{}/missing", dir.path().display()),
+            ),
+            ("GEMINI_API_KEY".to_owned(), "SOME_VARIABLE".to_owned()),
+        ]
+        .into();
+        let stored = stored_keys(dir.path(), &secrets);
+        assert_eq!(stored.keys().collect::<Vec<_>>(), ["DEEPSEEK_API_KEY"]);
+    }
+
+    #[test]
+    fn a_live_run_is_one_of_three_levels_and_a_different_version_is_named() {
+        assert_eq!(
+            live_level(Some("9/9 on 2.1.283 (Claude Code)")),
+            "live 9/9 (2.1.283)"
+        );
+        assert_eq!(
+            live_level(Some("5/9 on 0.2.0-rc.2")),
+            "live 5/9 (0.2.0-rc.2)"
+        );
+        assert_eq!(
+            live_level(Some("9/9 on codex-cli 0.157.1")),
+            "live 9/9 (0.157.1)"
+        );
+        assert_eq!(
+            live_level(Some("9/9 on omp/18.10.3; corrected since, see docs/x.json")),
+            "live 9/9 (18.10.3)"
+        );
+        assert_eq!(live_level(None), "no live run");
+        assert_eq!(live_level(Some("unqualified")), "no live run");
+        assert_eq!(live_score("9/9 on 2.1.283"), Some("9/9"));
+        // Installed 2.1.310, live run on 2.1.283.
+        assert_eq!(
+            live_drift(Some("2.1.310"), Some("9/9 on 2.1.283 (Claude Code)")).as_deref(),
+            Some("installed 2.1.310 · live-tested 2.1.283")
+        );
+        assert_eq!(
+            live_drift(Some("0.157.1"), Some("9/9 on codex-cli 0.157.1")),
+            None
+        );
+        assert_eq!(live_drift(None, Some("9/9 on 1.0.0")), None);
+        assert_eq!(live_drift(Some("1.0.0"), None), None);
     }
 }

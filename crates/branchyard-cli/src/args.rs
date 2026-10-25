@@ -1024,16 +1024,20 @@ Examples:
   by harnesses install codex                    # the catalog's command, under [harnesses] install
   by harnesses update codex --version 0.200.0 --yes
   by harnesses login codex                      # its own login flow, once
+  by harnesses login antigravity --yes          # with GEMINI_API_KEY set: select the gemini provider
   printf %s \"$KEY\" | by harnesses login claude-code --api-key
   by harnesses --profiles                       # the profiles Branchyard drives
   by harnesses --all --json | jq '.[] | select(.id == \"codex\") | .install'
 
-Detection never reads a secret: a login is verified only by the harness's own
-status command, otherwise it is likely from credential files and key variables
-by name. Installs run only as [harnesses] install allows (ask on a terminal,
-never elsewhere, unless your user file says otherwise) and are logged. --all
-reads catalog/harnesses.toml, generated from emdash's and Orca's agent
-registries. See docs/harness-lifecycle.md.";
+Detection never reads a secret. LOGIN says what is known: logged in (the harness's
+own status command said so), key set (VAR) or key stored (VAR) (a key, by name, not
+checked), credentials found (a file exists, not read), logged out, login not
+verified (nothing Branchyard looks for is there), unknown. Every installed harness
+is asked its version at once, ten seconds at most (BRANCHYARD_HARNESS_TIMEOUT sets
+the seconds); one that is slower is slow to start, not unknown. Installs run only
+as [harnesses] install allows (ask on a terminal, never elsewhere, unless your user
+file says otherwise) and are logged. --all reads catalog/harnesses.toml, generated
+from emdash's and Orca's agent registries. See docs/harness-lifecycle.md.";
 
 const USAGE_EXAMPLES: &str = "\
 Examples:
@@ -1153,13 +1157,16 @@ See docs/harness-integration.md.
 ";
 
 const DOCTOR_EXAMPLES: &str = "\
-Checks, each ok, warn or fail with a line on what to do:
-  repository       a repository; .branchyard/ and its store; the store's schema
+Checks, each ok, todo, warn or fail with a line on what to do; a Mode: line above the
+table says where branches run:
+  repository       a repository; .branchyard/ and its store (none yet is a todo: by
+                   setup); the store's schema
                    against this binary's; services whose lease ran out
   configuration    branchyard.toml and the user file load and validate (a refusal is
                    shown with its line); [workspace] scripts trusted, as they are now
-  harnesses        what `by harnesses` detects (installed, version, qualification);
-                   [defaults] harness installed; credential variables, by name only
+  harnesses        what `by harnesses` detects, a row for each installed harness
+                   (version, login, live run); [defaults] harness installed;
+                   credential variables, by name only
   provider         the configured provider as the engine checks it; kept sandboxes
                    and snapshots against max_kept_minutes
   host             unprivileged user namespaces (egress confinement), a loopback
@@ -1167,8 +1174,8 @@ Checks, each ok, warn or fail with a line on what to do:
   server           a configured [remote] answers GET /v1/repos with its token
   model gateway    [models] backends' key variables set; routed models priced
 
-Exit status: 0 when nothing failed (warnings do not fail), 1 when something did.
-Offline apart from a configured server, which gets 5 seconds. It opens an existing
+Exit status: 0 when nothing failed (a todo and a warning do not fail), 1 when something
+did. Offline apart from a configured server, which gets 5 seconds. It opens an existing
 .branchyard/ as every command does, creates none, and prints no secret.
 
 Examples:
@@ -2459,6 +2466,10 @@ pub enum HarnessesAction {
         /// (in a 0600 file beside your user configuration, named in its [secrets])
         #[arg(long)]
         api_key: bool,
+        /// Answer yes to writing a setting the login needs (Antigravity's modelProvider, when
+        /// GEMINI_API_KEY is set)
+        #[arg(long)]
+        yes: bool,
     },
     /// Every install, update and login recorded on this machine
     Log,
@@ -6208,6 +6219,7 @@ mod tests {
                 action: Some(HarnessesAction::Login {
                     id: "codex".into(),
                     api_key: true,
+                    yes: false,
                 }),
             }
         );

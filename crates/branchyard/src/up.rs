@@ -529,7 +529,12 @@ fn plan(
         format!("{}", root.join(".branchyard").display()),
     )];
     match machine.inventory() {
-        Ok(inventory) => {
+        Ok(mut inventory) => {
+            // A key `by harnesses login ID --api-key` stored counts.
+            inventory::count_stored_keys(
+                &mut inventory,
+                &inventory::stored_keys(root, &config.secrets),
+            );
             let policy = install_policy(config, options);
             for harness in needed_harnesses(config) {
                 steps.extend(harness_steps(&harness, &inventory, &policy, options));
@@ -618,20 +623,21 @@ fn login_step(harness: &str, state: &HarnessState) -> Step {
     let name = format!("login.{harness}");
     let detail = &state.login.detail;
     match state.login.state {
-        LoginState::LoggedIn => Step::ready(name, format!("logged in ({detail})")),
+        LoginState::LoggedIn => Step::ready(name, format!("{} ({detail})", state.login.label())),
+        // The words `by harnesses` and `by doctor` use: logged out only when
+        // the harness's own status command said so; otherwise the login is
+        // not verified, and the fix is the same one command.
         LoginState::LoggedOut => {
-            let entry = catalog::harness(harness);
-            let command = entry
-                .and_then(|e| e.login.as_deref())
-                .map(|c| format!("log in: `{c}`"));
-            let keys = entry.map(|e| e.auth_env.join(" or ")).unwrap_or_default();
-            let todo = match (command, keys.is_empty()) {
-                (Some(command), false) => format!("{command}, or set {keys}"),
-                (Some(command), true) => command,
-                (None, false) => format!("set {keys}"),
-                (None, true) => format!("log in to {harness} as its documentation says"),
+            let what = match state.login.evidence {
+                inventory::Evidence::Verified => "logged out",
+                _ => "login not verified",
             };
-            Step::needs_person(name, format!("not logged in ({detail})"), todo, None)
+            Step::needs_person(
+                name,
+                format!("{what} ({detail})"),
+                inventory::login_hint(harness),
+                None,
+            )
         }
         LoginState::Unknown => Step::ready(
             name,
@@ -1060,6 +1066,7 @@ mod tests {
                     LoginState::LoggedOut => "status: not logged in".to_owned(),
                     LoginState::Unknown => String::new(),
                 },
+                ..Login::default()
             },
             quota: None,
         }
