@@ -19,7 +19,7 @@ Branchyard, this repository. Tell the person in one line about any question or f
 
 A branch that has a parent is integrated by that parent, so its line says `by show` and names the parent; a root branch is merged by the person (`by diff`, then `by merge`). A long reason or question is cut to keep the line within 240 characters, never the command after it. More than twelve lines end with `- ... and K more: by ls`; more than three ready or failed branches on a first call say `- ... and K more ready: by ls`. In a branch's own session (`BRANCHYARD_BRANCH` set) the header is `Branchyard, N unread message(s) for BRANCH. Answer your children's questions with by answer --as BRANCH ID "TEXT"; ask your parent with by ask "TEXT".`, then one line per message. `cargo test -p branchyard-cli --bin by hook_cmd` parses every `by` command these lines name with `by`'s own parser, so a line cannot send a session to a command that is gone.
 
-The dated runs below quote the wording of 24 October 2026 (`Branchyard: 1 ready to integrate (by ls).`), which they record. The lines were reworded on 25 October 2026 to the ones above; the fixtures' expected output was regenerated from `by` itself, and no real CLI has repeated the new wording yet.
+The dated runs below quote the wording of 24 October 2026 (`Branchyard: 1 ready to integrate (by ls).`), which they record. The lines were reworded on 25 October 2026 to the ones above; the fixtures' expected output was regenerated from `by` itself, and the same day's runs below (Claude Code, Codex, Gemini CLI, Qwen Code, DeepSeek Harness, Hermes, Antigravity) show real models repeating the new wording.
 
 ## `--harness`
 
