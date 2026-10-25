@@ -26,7 +26,7 @@ from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
-TARGETS = ("tools", "tests", "sdk/python/branchyard_client.py")
+TARGETS = ("tools", "tests", "sdk/python/branchyard_client.py", "examples/python")
 TAIL_LINES = 20
 # A check only reads. These make the schema generators and the catalog rewrite what they compare.
 REWRITE_VARIABLES = ("BY_UPDATE_SCHEMA", "BRANCHYARD_BLESS")
@@ -176,6 +176,10 @@ STEPS = (
     Step("test_distribution", "controls", (PY, "tests/test_distribution.py")),
     Step("test_schema_validation", "controls", (PY, "tests/test_schema_validation.py")),
     Step("test_sdk_client", "controls", (PY, "tests/test_sdk_client.py")),
+    # examples/python/ against a built `by` and the fake agent. This job has no cargo build when it
+    # runs, so the file skips here; `cargo test --workspace` runs it for real
+    # (crates/branchyard-cli/tests/sdk_client.rs), and so does a local run once `by` is built.
+    Step("test_sdk_examples", "controls", (PY, "tests/test_sdk_examples.py")),
     Step("test_check", "controls", (PY, "tests/test_check.py")),
     Step("test_install_hooks", "controls", (PY, "tests/test_install_hooks.py")),
     # The packaging for Codex, Gemini CLI, Qwen Code, Copilot CLI, Droid and DeepSeek Harness.

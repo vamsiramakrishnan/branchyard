@@ -8,3 +8,4 @@ select = ["E", "F", "W", "I", "B", "UP", "C4", "SIM", "RUF"]
 # there while tools/ and tests/ use 3.11's syntax.
 [per-file-target-version]
 "sdk/python/*.py" = "py39"
+"examples/python/*.py" = "py39"

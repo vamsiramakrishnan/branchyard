@@ -2,7 +2,8 @@
 # or the same from the extracted `branchyard-sdk-<version>.zip`. Two
 # top-level modules, standard library only. The version is the workspace's
 # (`Cargo.toml`); `tools/package.py` refuses to build when they differ.
-# See docs/sdk.md#install.
+# Not published to PyPI yet: install from a checkout or the release archive.
+# See README.md here and docs/sdk.md#install.
 
 [build-system]
 requires = ["setuptools>=61"]
@@ -12,9 +13,31 @@ build-backend = "setuptools.build_meta"
 name = "branchyard"
 version = "0.0.1"
 description = "Branchyard from Python: branchyard inside a harness (by --json), branchyard_client over by serve's HTTP API"
+readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
+keywords = ["branchyard", "coding agents", "git", "harness", "sdk"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Version Control :: Git",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/vamsiramakrishnan/branchyard"
+Documentation = "https://github.com/vamsiramakrishnan/branchyard/blob/main/docs/sdk.md"
+Source = "https://github.com/vamsiramakrishnan/branchyard/tree/main/sdk/python"
+Issues = "https://github.com/vamsiramakrishnan/branchyard/issues"
 
 [tool.setuptools]
 py-modules = ["branchyard", "branchyard_client"]

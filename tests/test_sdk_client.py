@@ -8,6 +8,7 @@ Run: `python tests/test_sdk_client.py`.
 """
 
 import contextlib
+import inspect
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 from collections import deque
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -572,6 +574,52 @@ class Requests(ServerCase):
         self.assertNotIn("authorization", headers)
 
 
+class Artifacts(ServerCase):
+    def test_publish_sends_the_query_names_the_server_reads(self):
+        self.fake.answer("POST", f"{REPO}/branches/b/artifacts", (201, {"id": "a1"}), (201, {"id": "a2"}))
+        self.app.publish_artifact("b", b"data", "x.txt", "text/plain", labels={"team": "core", "run": "7"})
+        self.app.publish_artifact("b", b"more", "y.csv", kind="text/csv")  # `kind`, the old name of media_type
+        first, second = self.requests("POST", f"{REPO}/branches/b/artifacts")
+        query = parse_qs(urlsplit(first[1]).query)
+        self.assertEqual(query, {"name": ["x.txt"], "media_type": ["text/plain"], "label": ["team=core", "run=7"]})
+        self.assertEqual(first[3], b"data")
+        self.assertEqual(parse_qs(urlsplit(second[1]).query), {"name": ["y.csv"], "media_type": ["text/csv"]})
+        self.assertEqual(second[2]["content-type"], "application/octet-stream")
+
+
+class Records(unittest.TestCase):
+    def test_a_missing_key_reads_none_and_dir_lists_the_keys_a_record_holds(self):
+        op = bc.Operation({"id": "op1", "state": "running", "not-a-name": 1, 7: "x"})
+        self.assertIsNone(op.stat)  # a typo reads None: documented, and what dir() is for
+        names = dir(op)
+        self.assertEqual([n for n in names if n.startswith("sta")], ["state"])
+        self.assertIn("id", names)
+        self.assertIn("done", names)  # its properties are still there
+        self.assertIn("raw", names)
+        self.assertNotIn("not-a-name", names)
+        self.assertNotIn("stat", names)
+        self.assertEqual(op.raw, dict(op))
+        with self.assertRaises(AttributeError):
+            op.__nope__  # noqa: B018
+
+    def test_every_public_name_the_module_exports_is_documented(self):
+        undocumented = []
+        for name in bc.__all__:
+            item = getattr(bc, name)
+            if not (item.__doc__ or "").strip():
+                undocumented.append(name)
+            if not isinstance(item, type):
+                continue
+            for attr, value in vars(item).items():
+                if attr.startswith("_"):
+                    continue
+                function = value.fget if isinstance(value, property) else value
+                if callable(function) and not (function.__doc__ or "").strip():
+                    undocumented.append(f"{name}.{attr}")
+        # `BranchyardError.kind` has its docstring on the getter and none on the setter.
+        self.assertEqual(undocumented, [])
+
+
 class Errors(ServerCase):
     def test_errors_map_to_exceptions_by_their_stable_code(self):
         cases = [
@@ -631,6 +679,49 @@ class Errors(ServerCase):
         with self.assertRaises(bc.DeniedError):
             self.app.exists("b")
 
+    def test_a_refused_connection_says_what_to_start(self):
+        # What urllib raises when nothing listens at the address; no port is freed to get it.
+        refused = urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+        with mock.patch("urllib.request.urlopen", side_effect=refused):
+            with self.assertRaises(bc.TransportError) as raised:
+                self.app.branches()
+            message = raised.exception.message
+            self.assertIn(f"GET {self.url}/v1/repos/app/branches", message)
+            self.assertIn("Nothing is listening there. to fix: start a server with `by serve --repo app=.`", message)
+            self.assertIn('Client.local(".")', message)
+            # The stream says the same when it cannot connect.
+            with self.assertRaises(bc.TransportError) as streamed:
+                for _ in self.app.stream(0, read_timeout=1.0, max_failures=0):
+                    pass
+            self.assertIn("to fix: start a server", streamed.exception.message)
+        # Other failures to connect keep their own words, with no advice that does not apply.
+        timed_out = urllib.error.URLError(TimeoutError("timed out"))
+        with mock.patch("urllib.request.urlopen", side_effect=timed_out), self.assertRaises(bc.TransportError) as other:
+            self.app.branches()
+        self.assertNotIn("to fix", other.exception.message)
+
+    def test_an_unknown_repository_names_the_fix(self):
+        self.fake.answer("GET", "/v1/repos/nope/branches", (404, _error("unknown_repo", "no repository named nope")))
+        with self.assertRaises(bc.NotFoundError) as raised:
+            self.client.repo("nope").branches()
+        self.assertEqual(raised.exception.code, "unknown_repo")
+        self.assertEqual(
+            raised.exception.message,
+            "no repository named nope. to fix: name a served repository (`client.repos()` lists them); "
+            "`by serve --repo NAME=.` serves one",
+        )
+        # A server that says which it serves, or says the fix itself, is not told twice.
+        served = _error("unknown_repo", "no repository named nope", {"served": ["a", "b"]})
+        self.fake.answer("GET", "/v1/repos/nope/branches", (404, served))
+        with self.assertRaises(bc.NotFoundError) as raised:
+            self.client.repo("nope").branches()
+        self.assertIn("This server serves: a, b. to fix:", raised.exception.message)
+        said = _error("unknown_repo", "no repository named nope. to fix: use `by serve --repo nope=.`")
+        self.fake.answer("GET", "/v1/repos/nope/branches", (404, said))
+        with self.assertRaises(bc.NotFoundError) as raised:
+            self.client.repo("nope").branches()
+        self.assertEqual(raised.exception.message, "no repository named nope. to fix: use `by serve --repo nope=.`")
+
     def test_the_client_refuses_a_bad_url_or_no_token(self):
         with self.assertRaises(ValueError):
             bc.Client("ftp://x", "t")
@@ -677,6 +768,97 @@ class Waiting(ServerCase):
         finished = bc.Operation(self.op("op3", "succeeded"))
         self.assertIs(self.client.wait(finished), finished)
         self.assertEqual(self.requests("GET", "/v1/operations/op3"), [])
+
+    def branch_ended(self, id: str, status: dict, name: str = "b", **extra: Any) -> dict:
+        """A succeeded operation whose one result branch has `status`: the operation is
+        the request, and the branch is the harness's turn."""
+        return self.op(id, "succeeded", name, end=4, result={"branches": [{"name": name, "status": status}]}, **extra)
+
+    def test_check_raises_when_the_branch_the_operation_made_ended_failed(self):
+        # The run failed ("no handshake within 120s"); the operation still succeeded.
+        failed = self.branch_ended("op1", {"state": "failed", "reason": "no handshake within 120s"}, "fix-parser")
+        self.fake.answer("GET", "/v1/operations/op1", (200, failed), (200, failed))
+        with self.assertRaises(bc.BranchFailedError) as raised:
+            self.client.wait("op1", check=True)
+        error = raised.exception
+        self.assertIsInstance(error, bc.OperationFailedError)
+        self.assertEqual((error.branch, error.state, error.code), ("fix-parser", "failed", "failed"))
+        self.assertEqual(error.reason, "no handshake within 120s")
+        self.assertIsNone(error.limit)
+        self.assertEqual(error.branch_info.status, "failed")
+        self.assertEqual(error.branch_status, {"state": "failed", "reason": "no handshake within 120s"})
+        self.assertEqual(error.branch_status, "failed")  # a Status compares equal to its state's name
+        self.assertEqual(error.operation.id, "op1")
+        self.assertEqual(error.detail["branch"], "fix-parser")
+        self.assertEqual(error.detail["status"], {"state": "failed", "reason": "no handshake within 120s"})
+        self.assertIn("branch fix-parser ended failed: no handshake within 120s", error.message)
+        self.assertIn("to fix: ", error.message)
+        self.assertIn("by log fix-parser", error.message)
+        # Without `check` the operation comes back, and says which branch to look at.
+        op = self.client.wait("op1")
+        self.assertEqual([b.name for b in op.failed_branches], ["fix-parser"])
+
+    def test_check_raises_for_a_branch_over_its_budget_or_interrupted(self):
+        over = self.branch_ended("op1", {"state": "budget_exceeded", "limit": "max_usd"})
+        cut = self.branch_ended("op2", {"state": "interrupted"})
+        self.fake.answer("GET", "/v1/operations/op1", (200, over))
+        self.fake.answer("GET", "/v1/operations/op2", (200, cut))
+        with self.assertRaises(bc.BranchFailedError) as raised:
+            self.client.wait("op1", check=True)
+        self.assertEqual((raised.exception.code, raised.exception.limit), ("budget_exceeded", "max_usd"))
+        self.assertIsNone(raised.exception.reason)
+        self.assertIn("ended budget_exceeded: max_usd", raised.exception.message)
+        self.assertIn("budget_usd", raised.exception.message)
+        with self.assertRaises(bc.BranchFailedError) as raised:
+            self.client.wait(bc.Operation(cut), check=True)
+        error = raised.exception
+        self.assertEqual((error.code, error.reason, error.limit), ("interrupted", None, None))
+        self.assertIn("to fix: ", raised.exception.message)
+
+    def test_check_passes_a_branch_that_finished_its_work(self):
+        for state in ("ready", "no_changes", "merged", "awaiting_plan_approval", "waiting_on_children"):
+            done = bc.Operation(self.branch_ended("op1", {"state": state}))
+            self.assertIs(self.client.wait(done, check=True), done, state)
+            self.assertEqual(done.failed_branches, [])
+        # An operation with no branches in its result has none to fail.
+        bare = bc.Operation(self.op("op2", "succeeded"))
+        self.assertIs(self.client.wait(bare, check=True), bare)
+
+    def test_check_names_every_branch_of_a_map_that_ended_badly(self):
+        branches = [
+            {"name": "m-a", "status": {"state": "ready"}},
+            {"name": "m-b", "status": {"state": "failed", "reason": "boom"}},
+            {"name": "m-c", "status": {"state": "budget_exceeded", "limit": "max_turns"}},
+        ]
+        mapped = bc.Operation(self.op("op1", "succeeded", "m-a", kind="map", result={"branches": branches}))
+        with self.assertRaises(bc.BranchFailedError) as raised:
+            self.client.wait(mapped, check=True)
+        self.assertEqual(raised.exception.branch, "m-b")
+        self.assertEqual([b.name for b in raised.exception.branches], ["m-b", "m-c"])
+        self.assertIn("(and 1 more: m-c)", raised.exception.message)
+
+    def test_a_failed_operation_still_raises_the_operation_error_not_the_branch_one(self):
+        both = self.op(
+            "op1",
+            "failed",
+            error={"code": "unknown_harness", "message": "no such harness x"},
+            result={"branches": [{"name": "b", "status": {"state": "failed", "reason": "x"}}]},
+        )
+        with self.assertRaises(bc.OperationFailedError) as raised:
+            self.client.wait(bc.Operation(both), check=True)
+        self.assertNotIsInstance(raised.exception, bc.BranchFailedError)
+        self.assertEqual(raised.exception.code, "unknown_harness")
+
+    def test_a_reply_whose_branch_failed_raises_and_still_reads_what_was_said(self):
+        self.fake.feed = [_prompt(3, "b", "go"), _delta(4, "b", "I tried"), _ended(5, "b")]
+        failed = self.branch_ended("op1", {"state": "failed", "reason": "crashed"}, cursor=2)
+        self.fake.answer("GET", "/v1/operations/op1", (200, failed))
+        reply = bc.Reply(self.app, "b", bc.Operation(self.op("op1", "running", cursor=2)))
+        with self.assertRaises(bc.BranchFailedError) as raised:
+            reply.wait()
+        self.assertEqual(raised.exception.branch, "b")
+        self.assertEqual(reply.text, "I tried")
+        self.assertEqual(reply.branch_info.state, "failed")  # type: ignore[union-attr]
 
     def test_wait_times_out(self):
         self.fake.always("GET", "/v1/operations/op1", 200, self.op("op1", "running"))
@@ -1582,6 +1764,36 @@ class LocalMode(ServerCase):
             bc.Client.local(str(self.root), by=str(self.root / "no-such-by"))
         self.assertIn("could not run", str(raised.exception))
 
+    def test_a_missing_by_says_how_to_get_one(self):
+        # `by` is neither given nor in BRANCHYARD_BY, and no directory of PATH has it.
+        empty = str(self.root / "empty-path")
+        os.mkdir(empty)
+        with mock.patch.dict(os.environ, {"PATH": empty}):
+            os.environ.pop("BRANCHYARD_BY", None)
+            for attempt in (
+                lambda: bc.Client.local(str(self.root)),
+                lambda: bc.Local(str(self.root)).doctor(),
+            ):
+                with self.assertRaises(bc.LocalError) as raised:
+                    attempt()
+                message = raised.exception.message
+                self.assertIn("could not run by", message)
+                self.assertIn("`by` is not on PATH (or set BRANCHYARD_BY)", message)
+                self.assertIn("to fix: install it with `cargo install --locked --path crates/branchyard-cli`", message)
+                self.assertIn("no release is published yet", message)
+                self.assertTrue(message.endswith("(no release is published yet)"), message)
+        # A path that does not exist is not a `by` that is missing from PATH.
+        with self.assertRaises(bc.LocalError) as raised:
+            bc.Local(str(self.root), by=str(self.root / "no-such-by")).doctor()
+        self.assertNotIn("not on PATH", raised.exception.message)
+        self.assertIn("to fix: point BRANCHYARD_BY", raised.exception.message)
+        # One that cannot be executed says to make it so.
+        plain = self.root / "plain-file"
+        plain.write_text("not a program")
+        with self.assertRaises(bc.LocalError) as raised:
+            bc.Local(str(self.root), by=str(plain)).doctor()
+        self.assertIn("to fix: make it executable", raised.exception.message)
+
     def test_local_runs_up_doctor_and_harnesses_with_json(self):
         plan = {
             "steps": [
@@ -1804,6 +2016,163 @@ class OneApi(ServerCase):
         self.assertEqual((body["check"], body["name"], body["budget"]), (["cargo", "test"], "kid", {"max_usd": 0.5}))
         ((_, _, _, report),) = [r for r in self.fake.requests if r[1] == f"{REPO}/branches/lead/report"]
         self.assertEqual(report, {"text": "done", "result": {"files": ["parser.rs"]}})
+
+    def test_every_delegation_call_has_branchyard_pys_signature(self):
+        calls = [
+            "spawn",
+            "send",
+            "steer",
+            "integrate",
+            "check",
+            "wait",
+            "wait_any",
+            "wait_all",
+            "inspect",
+            "events",
+            "report",
+            "report_status",
+        ]
+        for name in calls:
+            theirs = inspect.signature(getattr(bm, name)).parameters.values()
+            ours = list(inspect.signature(getattr(bc.Delegator, name)).parameters.values())[1:]
+            # `**options` is the backend's own spawn: not part of the portable signature.
+            ours = [p for p in ours if p.kind is not inspect.Parameter.VAR_KEYWORD]
+            self.assertEqual(
+                [(p.name, p.kind, p.default) for p in ours], [(p.name, p.kind, p.default) for p in theirs], name
+            )
+        # A new call on one side must be on the other, or named here as not portable.
+        shared = {n for n in vars(bc.Delegator) if not n.startswith("_") and hasattr(bm, n)}
+        self.assertEqual(shared - set(calls), set(), "a Delegator call with a branchyard.py twin the test skips")
+
+    # Every keyword `spawn` takes, with a value each side must carry.
+    SPAWN_ALL: ClassVar[dict[str, Any]] = {
+        "harness": "codex",
+        "name": "parser",
+        "base": "main",
+        "budget_usd": 0.5,
+        "max_turns": 7,
+        "max_minutes": 2.5,
+        "check": "cargo test --lib",
+        "max_depth": 2,
+        "max_children": 3,
+        "harnesses": ["codex", "gemini-cli"],
+        "deny": ["Bash(rm:*)"],
+        "seat": "builder",
+        "depends_on": ["lint"],
+        "after": "integrated",
+        "bindings": {"cache": "read_only", "out": "rw"},
+        "connectors": ["github:read:issues.list", bc.Grant.parse("linear:read")],
+        "plan": True,
+        "model": "small",
+        "result": {"schema": {"type": "object"}, "required": True},
+        "why": "mechanical",
+        "owns": ["src/parser/**", "tests/parser_*.rs"],
+        "land": True,
+        "review": {"harness": "codex", "rubric": "be strict", "budget_usd": 0.1},
+    }
+
+    def test_spawn_carries_every_portable_keyword_inside(self):
+        answers = {"spawn": {"body": KID_INFO}}
+        env = {
+            "BRANCHYARD_BY": str(self.by),
+            "BRANCHYARD_DELEGATION": "token",
+            "FAKE_BY_LOG": str(self.log),
+            "FAKE_BY_ANSWERS": json.dumps(answers),
+        }
+        with mock.patch.dict(os.environ, env):
+            os.environ.pop("BRANCHYARD_REMOTE", None)
+            kid = bc.connect().spawn("Fix the parser", **self.SPAWN_ALL)
+        self.assertEqual(kid.name, "kid")
+        (call,) = [json.loads(line) for line in self.log.read_text().splitlines()]
+
+        def values(flag: str) -> list[str]:
+            return [call[i + 1] for i, word in enumerate(call) if word == flag]
+
+        self.assertEqual(call[:2], ["spawn", "--json"])
+        expected = {
+            "--harness": ["codex"],
+            "--name": ["parser"],
+            "--base": ["main"],
+            "--budget-usd": ["0.5"],
+            "--max-turns": ["7"],
+            "--max-minutes": ["2.5"],
+            "--check": ["cargo test --lib"],
+            "--max-depth": ["2"],
+            "--max-children": ["3"],
+            "--harnesses": ["codex,gemini-cli"],
+            "--deny": ["Bash(rm:*)"],
+            "--seat": ["builder"],
+            "--depends-on": ["lint"],
+            "--after": ["integrated"],
+            "--bind": ["cache:read_only", "out:rw"],
+            "--connector": ["github:read:issues.list", "linear:read"],
+            "--model": ["small"],
+            "--why": ["mechanical"],
+            "--owns": ["src/parser/**", "tests/parser_*.rs"],
+            "--review": ["codex"],
+            "--review-rubric": ["be strict"],
+            "--review-budget-usd": ["0.1"],
+        }
+        for flag, want in expected.items():
+            self.assertEqual(values(flag), want, flag)
+        self.assertIn("--plan", call)
+        self.assertIn("--land", call)
+        self.assertEqual(json.loads(values("--result-schema")[0]), {"type": "object"})
+        self.assertIn("--result-required", call)
+
+    def test_spawn_carries_every_portable_keyword_outside(self):
+        spawned = self.op("op1", "queued", "parser", kind="spawn")
+        self.fake.answer("POST", f"{REPO}/branches/lead/spawn", (202, spawned))
+        result = {"branches": [KID_INFO]}
+        self.fake.answer("GET", "/v1/operations/op1", (200, {**spawned, "state": "succeeded", "result": result}))
+        kid = bc.connect(self.app, branch="lead").spawn("Fix the parser", **self.SPAWN_ALL)
+        self.assertEqual(kid.name, "kid")
+        ((_, _, _, body),) = self.requests("POST", f"{REPO}/branches/lead/spawn")
+        self.assertEqual(
+            body,
+            {
+                "prompt": "Fix the parser",
+                "harness": "codex",
+                "name": "parser",
+                "base": "main",
+                "budget": {"max_usd": 0.5, "max_turns": 7, "max_seconds": 150.0},
+                "check": ["cargo", "test", "--lib"],
+                "connectors": [
+                    {"connector": "github", "operations": ["issues.list"], "mode": "read"},
+                    {"connector": "linear", "operations": ["*"], "mode": "read"},
+                ],
+                "max_depth": 2,
+                "max_children": 3,
+                "deny": ["Bash(rm:*)"],
+                "seat": "builder",
+                "depends_on": ["lint"],
+                "after": "integrated",
+                "bindings": [
+                    {"scratch": "cache", "access": "read_only"},
+                    {"scratch": "out", "access": "exclusive_write"},
+                ],
+                "harnesses": ["codex", "gemini-cli"],
+                "plan": True,
+                "model": "small",
+                "result": {"schema": {"type": "object"}, "required": True},
+                "why": "mechanical",
+                "owns": ["src/parser/**", "tests/parser_*.rs"],
+                "land": True,
+                "review": {"harness": "codex", "rubric": "be strict", "budget_usd": 0.1},
+            },
+        )
+
+    def test_a_reviewer_is_a_harness_or_a_dict_on_both_sides_and_anything_else_is_refused(self):
+        self.assertEqual(bc._reviewer("codex"), {"harness": "codex"})
+        self.assertEqual(bc._reviewer(None), None)
+        for bad in ({"model": "x"}, {"harness": "codex", "color": "red"}):
+            with self.assertRaises(ValueError):
+                bc._reviewer(bad)
+            with self.assertRaises(ValueError):
+                bm._review(bad)
+        self.assertEqual(
+            bc._reviewer({"harness": "codex", "model": "m"}), bm._review({"harness": "codex", "model": "m"})
+        )
 
     def test_a_failed_operation_keeps_the_operation_on_its_error(self):
         failing = self.op("op3", "queued", "flaky", kind="integrate")
