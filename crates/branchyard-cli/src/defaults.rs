@@ -237,7 +237,7 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
             .max_minutes
             .and_then(|minutes| Duration::try_from_secs_f64(minutes * 60.0).ok());
     }
-    if d.isolated == Some(true) {
+    if d.isolated == Some(true) && !task.isolation_off {
         task.isolated = true;
     }
     let chose_provider =
@@ -436,6 +436,26 @@ config = "/srv/server.json"
         assert_eq!(spec.secrets.len(), 1);
         assert_eq!(spec.secrets[0].name, "OPENAI_API_KEY");
         assert_eq!(spec.mcp_servers[0].name, "docs");
+    }
+
+    /// `--isolated=false` turns off what `[defaults] isolated = true` turned
+    /// on, for that run: the secrets the file names are then not placed
+    /// either, since the branch has no private home to put them in.
+    #[test]
+    fn isolated_false_beats_the_file() {
+        let config = config(FILE);
+        let mut task = TaskArgs {
+            isolation_off: true,
+            ..TaskArgs::default()
+        };
+        apply_task(&config, &mut task, Scope::NewBranch).unwrap();
+        assert!(!task.isolated);
+        let spec = task.provision.unwrap();
+        assert!(spec.secrets.is_empty(), "{:?}", spec.secrets);
+        // Neither flag: the file decides.
+        let mut task = TaskArgs::default();
+        apply_task(&config, &mut task, Scope::NewBranch).unwrap();
+        assert!(task.isolated);
     }
 
     #[test]

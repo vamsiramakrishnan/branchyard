@@ -468,11 +468,11 @@ fn look(source: &Source, inbox_of: Option<&str>) -> Result<Option<Glance>, Strin
             .map(Some)
             .map_err(|e| e.to_string()),
         #[cfg(not(feature = "postgres"))]
-        Source::Postgres { .. } => Err(
+        Source::Postgres { .. } => Err(format!(
             "the repository's state is in PostgreSQL, and this by is built without the \
-             postgres feature"
-                .into(),
-        ),
+             postgres feature; rebuild with `{}`",
+            branchyard_setup::probe::REBUILD_POSTGRES
+        )),
     }
 }
 

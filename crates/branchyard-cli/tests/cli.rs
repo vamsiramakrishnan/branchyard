@@ -39,7 +39,7 @@ fn run_ls_diff_log_merge_and_rm() {
     let repo = Repo::new();
     let out = repo.by_agent(&["run", "WRITE hello.txt=hi", "--name", "hello"]);
     assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
-    assert!(stderr(&out).contains("no isolation"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("no sandbox"), "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("wrote hello.txt"), "{text}");
     assert!(

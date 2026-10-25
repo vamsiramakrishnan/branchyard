@@ -776,8 +776,11 @@ fn provider_step(yard: &Yard, config: &ProjectConfig, machine: &dyn Machine) -> 
                     Err(error) => Step::blocked(
                         NAME,
                         error.to_string(),
-                        "build with --features microsandbox and give [microsandbox] an image \
-                         (docs/providers.md)",
+                        format!(
+                            "rebuild with `{}` (needs KVM and libcap-ng) and give \
+                             [microsandbox] an image (docs/modes.md#sandbox)",
+                            branchyard_microsandbox::REBUILD
+                        ),
                     ),
                 }
             }

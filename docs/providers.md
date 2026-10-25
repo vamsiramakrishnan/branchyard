@@ -93,6 +93,20 @@ by run "Fix the flaky parser test" --provider microsandbox \
   --pass-env ANTHROPIC_API_KEY --check "cargo test" --yes
 ```
 
+The same settings in `branchyard.toml` (`[defaults] provider = "microsandbox"` and a `[microsandbox]` section) have a key for each flag. The three whose names differ answer to either spelling in the file, and `by config show` prints the file's own:
+
+| Flag | `[microsandbox]` key | Also accepted in the file |
+|---|---|---|
+| `--image REF` | `image` | |
+| `--cpus N` | `cpus` | |
+| `--memory MIB` | `memory_mib` | `memory` |
+| `--pass-env NAME,...` | `pass_env` | |
+| `--keep-sandbox pause\|destroy` | `keep` | `keep_sandbox` |
+| `--sandbox-snapshots N` | `snapshots` | `sandbox_snapshots` |
+| `--max-paused N`, `--max-kept-minutes N`, `--live-branch` | `max_paused`, `max_kept_minutes`, `live_branch` | |
+
+The flags do not take the file's spellings (`--memory-mib` is not a flag). A recipe is chosen with `--provider recipe:NAME` or, in the file, `provider = "recipe"` with `recipe = "NAME"`; the file refuses `provider = "recipe:NAME"` and says so, and Substrate has no file form. Which of these a given `by` can run depends on how it was built: [where harnesses run](modes.md#which-build-reaches-which-rung).
+
 Each turn gets a fresh microVM, destroyed when the turn ends, unless the branch keeps it (`--keep-sandbox pause` with `--live-branch`; see [sandbox snapshots](sandbox-snapshots.md)):
 
 - The branch's worktree is mounted read-write at `/workspace`, and the harness runs there; the driver's `cwd` is `/workspace`.

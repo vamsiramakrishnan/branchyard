@@ -750,6 +750,7 @@ Every connector call that changes the world is decided, written to a ledger befo
 | `by spawn --model M`, `Spawn::model`, `SpawnSpec::model` (the MCP `spawn` tool and graph proposals' `model`), `SpawnRequest::model`, Python `spawn(model=)` | none: a child ran its seat's or parent's model | every surface; stored in the child's provisioning, like `by run --model` |
 | `branchyard_harness::Capabilities::model`, `Requirements::model` | none | whether a driver passes `Open::model`; a spawn naming a model for a driver without it (ACP, Amp) is refused `unsupported` with the driver's reason |
 | `BranchInfo::model`, `Inspection::model`, `Spawned::model` | none | the model a branch runs, omitted for its harness's default; a `model` line in `by inspect`, `model` in `by ls --json` |
+| `BranchInfo::provider`, `BranchInfo::isolated`, `Inspection::provider`, `Inspection::isolated` | none | where a branch's harness ran (`local`, `microsandbox`, `substrate`, `recipe:NAME`) and whether it had a private home on the host; both serde-default, so records and servers from before them read `local` and `false`; a `provider` line in `by show` and `by inspect`, and the same keys in `by ls --json` ([modes](modes.md)) |
 | Claude Code stream-json provisioning of a model | `ANTHROPIC_MODEL` only | `ANTHROPIC_MODEL` and `--model` (`Plan::session.model`) |
 
 ## Added with by check

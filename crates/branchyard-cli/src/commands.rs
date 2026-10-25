@@ -90,6 +90,10 @@ impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Failure::Sdk(error) => write!(f, "{error}"),
+            // A server that does not answer ends with the way out.
+            Failure::Remote(error @ branchyard_client::Error::Transport { .. }) => {
+                write!(f, "{error}\nNext: {}", remote::UNREACHABLE_FIX)
+            }
             Failure::Remote(error) => write!(f, "{error}"),
             Failure::Io(error) => write!(f, "{error}"),
             Failure::Message(message) => f.write_str(message),
@@ -165,6 +169,79 @@ pub(crate) fn configure(yard: Yard) -> Result<Yard, branchyard::Error> {
     Ok(yard)
 }
 
+/// The line `by` prints before it runs a harness, one for each way it can
+/// run: `local` (your user, your `HOME`, no sandbox), `isolated` (your
+/// user, a private `HOME`, still no sandbox), a sandbox provider, or, with
+/// `server` (its label), a server doing either on its host. It says what
+/// the mode does not give as plainly as what it does.
+pub(crate) fn banner(provider: Option<&Provider>, isolated: bool, server: Option<&str>) -> String {
+    let (who, whose) = match server {
+        None => ("your user", "your"),
+        Some(_) => ("the server's user", "the server's"),
+    };
+    let (mode, what) = match (provider, server) {
+        (None | Some(Provider::Local), _) if isolated => (
+            "isolated",
+            format!(
+                "harnesses run as {who} with a private HOME under .branchyard/homes/; not a \
+                 sandbox, so they can still read {whose} files and reach the network"
+            ),
+        ),
+        (None | Some(Provider::Local), _) => (
+            "local",
+            format!("harnesses run as {who}, in {whose} own HOME; no sandbox"),
+        ),
+        (Some(Provider::Microsandbox(sandbox)), None) => (
+            "sandbox",
+            format!(
+                "harnesses run in Microsandbox microVMs from {}; the worktree is mounted at {}",
+                sandbox.image,
+                branchyard::SANDBOX_WORKSPACE
+            ),
+        ),
+        (Some(Provider::Microsandbox(sandbox)), Some(_)) => (
+            "sandbox",
+            format!(
+                "harnesses run in Microsandbox microVMs on the server, from {}",
+                sandbox.image
+            ),
+        ),
+        (Some(Provider::Substrate(options)), None) => (
+            "sandbox",
+            format!(
+                "harnesses run in Agent Substrate actors from template {} (unqualified); the \
+                 worktree is copied to {} and back",
+                options.template,
+                options.workdir()
+            ),
+        ),
+        (Some(Provider::Substrate(options)), Some(_)) => (
+            "sandbox",
+            format!(
+                "harnesses run in Agent Substrate actors from template {} (unqualified), \
+                 reached from the server",
+                options.template
+            ),
+        ),
+        (Some(Provider::Recipe(options)), None) => (
+            "sandbox",
+            format!(
+                "harnesses run on machines recipe {} makes; the worktree is copied there and back",
+                options.name
+            ),
+        ),
+        // Refused before anything is sent.
+        (Some(Provider::Recipe(options)), Some(_)) => (
+            "sandbox",
+            format!("recipe {} is not run by a server", options.name),
+        ),
+    };
+    match server {
+        None => format!("by: {mode} mode: {what}"),
+        Some(label) => format!("by: remote mode on {label}: {what}"),
+    }
+}
+
 /// Console and policy for commands that run a harness.
 pub(crate) struct Live {
     pub(crate) console: Arc<Console>,
@@ -191,6 +268,40 @@ impl Live {
         json: bool,
         branch: Option<Provider>,
     ) -> Live {
+        Live::begin(env, task, prefixed, json, branch, false)
+    }
+
+    /// A send, fork, reincarnation or plan decision on `branch`: where it
+    /// runs, and whether it has a private home, is what the banner says
+    /// when the flags name no other provider.
+    pub(crate) fn start_for(
+        env: &Env,
+        task: &TaskArgs,
+        prefixed: bool,
+        json: bool,
+        branch: &branchyard::Branch,
+    ) -> Result<Live, Failure> {
+        let provider = branch.provider()?;
+        Ok(Live::begin(
+            env,
+            task,
+            prefixed,
+            json,
+            provider,
+            branch.info().isolated,
+        ))
+    }
+
+    /// `isolated`: the branch the work continues has a private home, whether
+    /// or not `task` asks for one.
+    fn begin(
+        env: &Env,
+        task: &TaskArgs,
+        prefixed: bool,
+        json: bool,
+        branch: Option<Provider>,
+        isolated: bool,
+    ) -> Live {
         let out: Box<dyn Write + Send> = match json {
             true => Box::new(io::stderr()),
             false => Box::new(io::stdout()),
@@ -205,27 +316,11 @@ impl Live {
         );
         let choice = console::choose(task.permissions, env.stdin_tty, env.stderr_tty);
         // A recipe that cannot be used is refused by `options`, below.
-        match provider(task).ok().flatten().or(branch) {
-            None | Some(Provider::Local) => {
-                eprintln!("by: local mode: harnesses run as your user, with no isolation beyond it")
-            }
-            Some(Provider::Microsandbox(sandbox)) => eprintln!(
-                "by: harnesses run in Microsandbox microVMs from {}; the worktree is mounted at {}",
-                sandbox.image,
-                branchyard::SANDBOX_WORKSPACE
-            ),
-            Some(Provider::Substrate(options)) => eprintln!(
-                "by: harnesses run in Agent Substrate actors from template {} (unqualified); \
-                 the worktree is copied to {} and back",
-                options.template,
-                options.workdir()
-            ),
-            Some(Provider::Recipe(options)) => eprintln!(
-                "by: harnesses run on machines recipe {} makes; the worktree is copied there and \
-                 back",
-                options.name
-            ),
-        }
+        let provider = provider(task).ok().flatten().or(branch);
+        eprintln!(
+            "{}",
+            banner(provider.as_ref(), isolated || task.isolated, None)
+        );
         if choice == (Choice::DenyAll { notice: true }) {
             eprintln!("by: {}", console::DENY_NOTICE);
         }
@@ -661,7 +756,7 @@ pub fn send(
         }
     }
     if json {
-        let live = Live::start_to(env, task, true, true, branch.provider()?);
+        let live = Live::start_for(env, task, true, true, &branch)?;
         let options = live.options(task)?;
         let result = failed_over(branch.send(prompt, options.clone()), &options);
         live.console.finish();
@@ -678,7 +773,7 @@ pub fn send(
         return print(&format!("{}\n", to_json(&sent)));
     }
     let delegating = task.delegate.is_some() || !branch.info().children.is_empty();
-    let live = Live::start(env, task, delegating, branch.provider()?);
+    let live = Live::start_for(env, task, delegating, false, &branch)?;
     let options = live.options(task)?;
     let result = failed_over(branch.send(prompt, options.clone()), &options);
     live.finish(env, result)
@@ -800,7 +895,7 @@ pub fn fork(
     let yard = open()?;
     let workspace = workspace(env, &yard)?;
     let branch = yard.branch(branch)?;
-    let live = Live::start(env, task, task.delegate.is_some(), branch.provider()?);
+    let live = Live::start_for(env, task, task.delegate.is_some(), false, &branch)?;
     let options = TaskOptions {
         workspace,
         ..live.options(task)?
@@ -823,7 +918,7 @@ pub fn fork_at(
         return remote::fork_at(env, remote, branch, turn, prompt, task);
     }
     let branch = open()?.branch(branch)?;
-    let live = Live::start(env, task, task.delegate.is_some(), branch.provider()?);
+    let live = Live::start_for(env, task, task.delegate.is_some(), false, &branch)?;
     let result = branch.fork_at(turn, prompt, live.options(task)?);
     if let Ok(forked) = &result {
         crate::attempts::announce_fork(forked);
@@ -838,7 +933,7 @@ pub fn reincarnate(env: &Env, target: &Target, branch: &str, task: &TaskArgs) ->
     let yard = open()?;
     let workspace = workspace(env, &yard)?;
     let branch = yard.branch(branch)?;
-    let live = Live::start(env, task, task.delegate.is_some(), branch.provider()?);
+    let live = Live::start_for(env, task, task.delegate.is_some(), false, &branch)?;
     let options = TaskOptions {
         workspace,
         ..live.options(task)?
@@ -3115,4 +3210,80 @@ fn rig_refused(args: &args::RigArgs, error: &rig::RigError) -> Outcome {
     }
     eprintln!("by: {message}");
     Err(Failure::Reported)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use branchyard::{RecipeOptions, SandboxOptions, SubstrateOptions};
+
+    /// Each way a harness can run says so, and says what that does not
+    /// give: the lines differ, and only a sandbox provider says "sandbox".
+    #[test]
+    fn each_mode_has_its_own_banner() {
+        let local = banner(None, false, None);
+        assert_eq!(
+            local,
+            "by: local mode: harnesses run as your user, in your own HOME; no sandbox"
+        );
+        assert_eq!(banner(Some(&Provider::Local), false, None), local);
+
+        let isolated = banner(None, true, None);
+        assert!(isolated.starts_with("by: isolated mode:"), "{isolated}");
+        assert!(isolated.contains("private HOME"), "{isolated}");
+        assert!(isolated.contains("not a sandbox"), "{isolated}");
+        assert!(isolated.contains("read your files"), "{isolated}");
+        assert_ne!(isolated, local);
+
+        let microsandbox = Provider::Microsandbox(SandboxOptions {
+            image: "alpine:3.20".into(),
+            ..SandboxOptions::default()
+        });
+        let sandbox = banner(Some(&microsandbox), false, None);
+        assert!(sandbox.starts_with("by: sandbox mode:"), "{sandbox}");
+        assert!(sandbox.contains("microVMs from alpine:3.20"), "{sandbox}");
+        // A private home asked for beside a sandbox changes nothing: the
+        // sandbox is what the harness runs in.
+        assert_eq!(banner(Some(&microsandbox), true, None), sandbox);
+
+        let substrate = Provider::Substrate(SubstrateOptions {
+            template: "by".into(),
+            ..SubstrateOptions::default()
+        });
+        assert!(banner(Some(&substrate), false, None)
+            .contains("Agent Substrate actors from template by"));
+        let recipe = Provider::Recipe(RecipeOptions {
+            name: "devbox".into(),
+            ..RecipeOptions::default()
+        });
+        assert!(banner(Some(&recipe), false, None).contains("recipe devbox"));
+    }
+
+    /// Against a server the line names it, whose user the harness runs as,
+    /// and whether the server gives the branch a private home.
+    #[test]
+    fn a_server_banner_names_the_server_and_its_user() {
+        let label = "http://127.0.0.1:8421 (app)";
+        let local = banner(None, false, Some(label));
+        assert_eq!(
+            local,
+            "by: remote mode on http://127.0.0.1:8421 (app): harnesses run as the server's user, \
+             in the server's own HOME; no sandbox"
+        );
+        let isolated = banner(None, true, Some(label));
+        assert!(
+            isolated.contains("the server's user with a private HOME"),
+            "{isolated}"
+        );
+        assert!(isolated.contains("not a sandbox"), "{isolated}");
+        let microsandbox = Provider::Microsandbox(SandboxOptions {
+            image: "alpine:3.20".into(),
+            ..SandboxOptions::default()
+        });
+        assert_eq!(
+            banner(Some(&microsandbox), false, Some(label)),
+            "by: remote mode on http://127.0.0.1:8421 (app): harnesses run in Microsandbox \
+             microVMs on the server, from alpine:3.20"
+        );
+    }
 }

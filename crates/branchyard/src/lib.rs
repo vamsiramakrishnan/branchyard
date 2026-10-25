@@ -181,6 +181,9 @@ use std::time::Duration;
 /// The configuration file, `branchyard.toml` and the user file: its types,
 /// strict parser, layering and loader. See `docs/setup.md#configuration`.
 pub use branchyard_config as config;
+/// Whether this build includes the Microsandbox SDK, and the command that
+/// builds one that does.
+pub use branchyard_microsandbox::{ENABLED as MICROSANDBOX_BUILT, REBUILD as MICROSANDBOX_REBUILD};
 pub use git::current_branch;
 pub use lock::DirLock;
 pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
@@ -2144,6 +2147,23 @@ pub struct BranchInfo {
     /// one was; unset, the harness's own default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Where its harness runs, as `--provider` names it: `local`,
+    /// `microsandbox`, `substrate` or `recipe:NAME`. A record from before
+    /// this was kept reads `local`.
+    #[serde(default = "local_provider")]
+    pub provider: String,
+    /// Its harness runs on this host with a private `HOME` of its own
+    /// (`--isolated`, or inherited from the branch it was forked or
+    /// delegated from). Not a sandbox: it still runs as your user and can
+    /// read your files and reach your network. `false` for a sandbox
+    /// provider, whose private home is the sandbox's.
+    #[serde(default)]
+    pub isolated: bool,
+}
+
+/// The `provider` of a record that predates the field.
+fn local_provider() -> String {
+    "local".to_owned()
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

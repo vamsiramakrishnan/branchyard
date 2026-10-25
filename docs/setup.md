@@ -11,7 +11,7 @@ Both front-ends call the same engine, [`branchyard-setup`](../crates/branchyard-
 
 | Topic | Writes | Checked by |
 |---|---|---|
-| `project` | `branchyard.toml` at the repository root, or the user's `~/.config/branchyard/config.toml`: default harness, model, effort, budget, turns, duration, permissions, isolation, check, provider, secrets by name, harness logins by where their files are, the [inventory default](fleet.md#the-inventory-default) as an explicit `[fleet.default]`, [model gateway](model-gateway.md) backends and routes for the provider keys set ([below](#routing-and-the-gateway-from-what-is-present)), a server to use, and (project only) a [`[workspace]`](workspace.md) suggested from the repository's lockfiles, `Cargo.toml`, `pyproject.toml`, `go.mod`, Compose file and `.env` files, or imported from another tool's committed configuration ([below](#importing-another-tools-workspace-configuration)) | the configuration parser `by` uses ([below](#configuration)) |
+| `project` | `branchyard.toml` at the repository root, or the user's `~/.config/branchyard/config.toml`: default harness, model, effort, budget, turns, duration, permissions, isolation (a private HOME, not a sandbox: [modes](modes.md#isolated)), check, provider, secrets by name, harness logins by where their files are, the [inventory default](fleet.md#the-inventory-default) as an explicit `[fleet.default]`, [model gateway](model-gateway.md) backends and routes for the provider keys set ([below](#routing-and-the-gateway-from-what-is-present)), a server to use, and (project only) a [`[workspace]`](workspace.md) suggested from the repository's lockfiles, `Cargo.toml`, `pyproject.toml`, `go.mod`, Compose file and `.env` files, or imported from another tool's committed configuration ([below](#importing-another-tools-workspace-configuration)) | the configuration parser `by` uses ([below](#configuration)) |
 | `server` | A server configuration (default `.branchyard/server.json`): listen address and TLS, SQLite or PostgreSQL, one credential per tenant (hash only) with its token in a 0600 file under `tokens/`, tenant quotas, allowed providers, delegation, secrets by reference, a signed webhook | `branchyard-server`'s own loader and `Config::validate`, as `by serve --check` runs them |
 | `rig` | A [rig](rigs.md) spec: a lead seat and, by shape, an implementer (two may run), a reviewer denied every editing tool, or two implementers on different harnesses; budgets split so the children fit | `by rig check`'s parser and planner |
 | `deploy` | `compose.yaml` (PostgreSQL 16 and the server), `server.json`, and `secrets/` (client token, database password, both 0600, and a `.gitignore`) | the server's loader with `--insecure-bind`; `docker compose config` when docker is installed |
@@ -29,7 +29,7 @@ by init server --defaults    # every question at its default, still reviewed bef
 
 The topic completes in every shell `by completions` supports, and an unknown one is a usage error listing the five (exit 2).
 
-It detects the repository and its default branch, the installed harnesses and their versions (`--version`, three seconds at most each), each installed harness's login as `by harnesses` reads it ([harness lifecycle](harness-lifecycle.md): its own status command, or credential files and key variables by name), the logins harnesses keep in files under the home directory ([below](#persisting-a-harness-login)), which credential variables are set (by name only), docker and the PostgreSQL client tools, the platform and KVM, a check command from the files at the root (`Cargo.toml` → `cargo test`, `package.json` → `npm test`, …), and existing configuration files, whose values become the defaults. Then it asks, reviews every file with its diff and its validator's verdict, asks before replacing a file that differs, and asks once more before writing. Ctrl-C at any point writes nothing.
+It detects the repository and its default branch, the installed harnesses and their versions (`--version`, three seconds at most each), each installed harness's login as `by harnesses` reads it ([harness lifecycle](harness-lifecycle.md): its own status command, or credential files and key variables by name), the logins harnesses keep in files under the home directory ([below](#persisting-a-harness-login)), which credential variables are set (by name only), docker and the PostgreSQL client tools, the platform and KVM, which optional features this build of `by` has (`build.microsandbox`, `build.postgres`), a check command from the files at the root (`Cargo.toml` → `cargo test`, `package.json` → `npm test`, …), and existing configuration files, whose values become the defaults. A choice the build cannot serve is not offered (the provider question needs the Microsandbox SDK as well as KVM, and says what to run when only that is missing) or is labelled with the command that adds it (`needs a build with --features postgres`): [which build reaches which rung](modes.md#which-build-reaches-which-rung). Then it asks, reviews every file with its diff and its validator's verdict, asks before replacing a file that differs, and asks once more before writing. Ctrl-C at any point writes nothing.
 
 Once a provider's key is set (`GEMINI_API_KEY`, `OPENAI_API_KEY` or `CODEX_API_KEY`, `ANTHROPIC_API_KEY`, or the key a `[models.backends]` entry names), `by models list` asks that provider which models the key can call, caches the answer, and marks the models no price covers, so a model name need not come from the static `models` lists of the harness catalog; `--harness ID` sets a harness's catalog list beside the live one ([model gateway](model-gateway.md#listing-models)). It prints the variable's name, never the key.
 
@@ -260,7 +260,7 @@ budget_usd = 5
 max_turns = 25
 max_minutes = 30
 permissions = "ask"         # or "yes"; unset: ask on a terminal, else deny
-isolated = true
+isolated = true            # a private HOME, not a sandbox (docs/modes.md#isolated); --isolated=false for one run
 check = "cargo test"
 provider = "local"          # or "microsandbox", with [microsandbox]
 instructions = "docs/agents.md"
@@ -317,7 +317,7 @@ What each command takes, in `crates/branchyard-cli/src/defaults.rs` (`defaults::
 
 | Command | Takes |
 |---|---|
-| `run`, `fan` | every `[defaults]` key the flags left unset, `[mcp]`, and `[secrets]` and `[connectors] grants` (unless `--connector` names any) when the branch has a private home; `isolated = true` cannot be turned off by a flag. With `fork`, `reincarnate` and `rig run`, the effective `[workspace]`, once trusted ([workspace](workspace.md#trust)) |
+| `run`, `fan` | every `[defaults]` key the flags left unset, `[mcp]`, and `[secrets]` and `[connectors] grants` (unless `--connector` names any) when the branch has a private home; `isolated = true` is turned off for one run by `--isolated=false`. With `fork`, `reincarnate` and `rig run`, the effective `[workspace]`, once trusted ([workspace](workspace.md#trust)) |
 | `send`, `fork`, `reincarnate`, `spawn` | `permissions` only: the rest would override what the branch, its fork parent or its seat already has |
 | `serve`, `worker` | `[serve] config` as `--config`, unless the arguments give one (`--config FILE`, `--config=FILE`, `-c FILE`), ask for help or the version, or are `token new` |
 | `watch`, and `run`, `fan`, `send`, `fork` while they wait | `[notify]`, unless `--no-notify` is given |
@@ -341,7 +341,7 @@ by config schema                     # the JSON Schema
 
 ## `by serve --check`
 
-`by serve --config FILE --check` (also `branchyard-server --check`) builds and validates the configuration exactly as serving would, prints its warnings, and exits without binding, serving, or writing a file: where serving would create a default token it only says so. `by init server` and `by init deploy` check every server configuration they propose with the same function, on a private staging copy of the plan's files.
+`by serve --config FILE --check` (also `branchyard-server --check`) builds and validates the configuration as serving would and prints its warnings, then exits without binding, serving or writing a file: where serving would create a default token it only says so. It refuses what the build cannot serve (a `database` on a build without the `postgres` feature fails with the command that adds it), but it opens no store and connects to no database, so a wrong host or password shows only when `by serve` starts. `by init server` and `by init deploy` check every server configuration they propose with the same function, on a private staging copy of the plan's files.
 
 ## What is tested
 

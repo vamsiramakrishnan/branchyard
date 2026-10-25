@@ -1708,7 +1708,7 @@ impl PermissionsMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
     /// A local process in its own worktree (the default).
@@ -1719,6 +1719,34 @@ pub enum ProviderKind {
     /// The machine an environment recipe makes (`--provider recipe:NAME`);
     /// `defaults.recipe` names it.
     Recipe,
+}
+
+impl<'de> Deserialize<'de> for ProviderKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let text = String::deserialize(deserializer)?;
+        match text.as_str() {
+            "local" => Ok(ProviderKind::Local),
+            "microsandbox" => Ok(ProviderKind::Microsandbox),
+            "recipe" => Ok(ProviderKind::Recipe),
+            other => Err(D::Error::custom(unknown_provider(other))),
+        }
+    }
+}
+
+/// Why a `provider` value is refused, with the spelling the file takes when
+/// the value is one the flag takes.
+fn unknown_provider(text: &str) -> String {
+    match text.strip_prefix("recipe:") {
+        Some(name) => format!(
+            "{text:?} is the flag's spelling (--provider recipe:NAME); in the file write \
+             provider = \"recipe\" and recipe = {name:?}"
+        ),
+        None if text == "substrate" => "substrate is chosen per run with --provider substrate \
+             (and its --substrate-* flags); the file takes local, microsandbox or recipe"
+            .to_owned(),
+        None => format!("unknown variant `{text}`, expected one of local, microsandbox, recipe"),
+    }
 }
 
 /// A Branchyard server to run commands against.
@@ -1769,7 +1797,8 @@ pub struct Microsandbox {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub cpus: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Sandbox memory in MiB. Also written `memory`, as the `--memory` flag is.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "memory")]
     #[schemars(range(min = 1))]
     pub memory_mib: Option<u32>,
     /// Variables to copy into the sandbox, by name.
@@ -1778,11 +1807,21 @@ pub struct Microsandbox {
     /// Between turns: `"destroy"` the microVM (the default) or `"pause"`
     /// it for the next turn. Pausing needs `live_branch`. See
     /// docs/sandbox-snapshots.md.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Also written `keep_sandbox`, as the `--keep-sandbox` flag is.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "keep_sandbox"
+    )]
     #[schemars(regex(pattern = r"^(pause|destroy)$"))]
     pub keep: Option<String>,
     /// With a kept sandbox, checkpoints that also keep a snapshot (default 3).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Also written `sandbox_snapshots`, as the `--sandbox-snapshots` flag is.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "sandbox_snapshots"
+    )]
     pub snapshots: Option<u32>,
     /// Kept sandboxes per repository before the least recently used is
     /// destroyed (default 4).
@@ -3291,6 +3330,54 @@ classes = { compensable = "allow" }
             let error = parse(text).unwrap_err().to_string();
             assert!(error.contains(needle), "{text}: {error}");
         }
+    }
+
+    /// The flag's spellings are refused with the file's own, and the
+    /// microsandbox keys answer to the flags' names as well as theirs.
+    #[test]
+    fn the_file_points_from_the_flags_spelling_to_its_own() {
+        let error = parse("[defaults]\nprovider = \"recipe:devbox\"")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("line 2"), "{error}");
+        assert!(
+            error.contains("provider = \"recipe\"") && error.contains("recipe = \"devbox\""),
+            "{error}"
+        );
+        let error = parse("[defaults]\nprovider = \"substrate\"")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--provider substrate"), "{error}");
+        let error = parse("[defaults]\nprovider = \"docker\"")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("expected one of local, microsandbox, recipe"),
+            "{error}"
+        );
+        assert!(parse("[defaults]\nprovider = \"local\"").is_ok());
+
+        let own = parse(
+            "[microsandbox]\nimage = \"a\"\nmemory_mib = 512\nkeep = \"destroy\"\nsnapshots = 2",
+        )
+        .unwrap();
+        let flags = parse(
+            "[microsandbox]\nimage = \"a\"\nmemory = 512\nkeep_sandbox = \"destroy\"\n\
+             sandbox_snapshots = 2",
+        )
+        .unwrap();
+        assert_eq!(own.microsandbox, flags.microsandbox);
+        let sandbox = flags.microsandbox.unwrap();
+        assert_eq!(
+            (
+                sandbox.memory_mib,
+                sandbox.keep.as_deref(),
+                sandbox.snapshots
+            ),
+            (Some(512), Some("destroy"), Some(2))
+        );
+        // Both spellings at once is a duplicate, as two of one key would be.
+        assert!(parse("[microsandbox]\nimage = \"a\"\nmemory = 1\nmemory_mib = 2").is_err());
     }
 
     #[test]

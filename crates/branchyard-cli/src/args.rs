@@ -87,6 +87,9 @@ pub struct TaskArgs {
     pub stall_action: branchyard::StallAction,
     pub permissions: Permissions,
     pub isolated: bool,
+    /// `--isolated=false`: no private home for this run, whatever
+    /// `[defaults] isolated` says.
+    pub isolation_off: bool,
     /// Executable and fixed arguments replacing the profile's.
     pub command: Option<Vec<String>>,
     /// `--provider microsandbox` and its options; `None` keeps the default.
@@ -773,7 +776,10 @@ Examples:
 Run 'by help <command>' or 'by <command> --help' for its options.
 Local mode: harnesses run as your operating-system user, with no other
 isolation. State lives in .branchyard/ at the repository root. Remote mode:
-harnesses run as the server's user, with no other isolation.";
+harnesses run as the server's user, with no other isolation.
+To isolate: --isolated (a private HOME, not a sandbox) or --provider
+microsandbox (a microVM; needs a build with that feature). Where harnesses run
+and where state lives, rung by rung: docs/modes.md.";
 
 const RUN_EXAMPLES: &str = "\
 Examples:
@@ -3310,9 +3316,21 @@ impl Preflight {
 #[derive(Args, Clone, Debug, Default, PartialEq)]
 #[command(next_help_heading = "Launch")]
 pub struct Launch {
-    /// Scrubbed environment and a private HOME; the harness is then usually not logged in
-    #[arg(long)]
-    isolated: bool,
+    /// Private HOME, not a sandbox; the harness is then usually not logged in
+    ///
+    /// A private HOME at .branchyard/homes/BRANCH, without the ANTHROPIC*, CLAUDE*, OPENAI*
+    /// and CODEX* variables. It is not a sandbox: the harness still runs as your user and can
+    /// read your files and reach the network (--provider chooses a sandbox; see
+    /// docs/modes.md). --isolated=false turns off [defaults] isolated = true for this run.
+    #[arg(
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    isolated: Option<bool>,
     /// Launch this instead of the profile's executable, for development and testing
     #[arg(long, value_name = "CMD", value_parser = command_argv)]
     command: Option<Argv>,
@@ -3493,7 +3511,8 @@ impl SubstrateFlags {
 
 impl Launch {
     fn apply(self, task: &mut TaskArgs) -> Result<(), String> {
-        task.isolated = self.isolated;
+        task.isolated = self.isolated == Some(true);
+        task.isolation_off = self.isolated == Some(false);
         task.require_labels = self.require_label.clone();
         task.priority = self.priority;
         task.command = self.command.map(|argv| argv.0);
@@ -5274,6 +5293,7 @@ mod tests {
                 stall_action: branchyard::StallAction::Notify,
                 permissions: Permissions::Yes,
                 isolated: true,
+                isolation_off: false,
                 command: Some(vec!["/opt/codex/bin/codex".into(), "--flag".into()]),
                 sandbox: None,
                 substrate: None,
@@ -5304,6 +5324,25 @@ mod tests {
                 no_preflight: false,
             }
         );
+    }
+
+    /// `--isolated` alone means yes; `--isolated=false` says no, and says
+    /// it was said, so `[defaults] isolated = true` does not win.
+    #[test]
+    fn isolated_takes_an_optional_value() {
+        let isolated = |line: &str| {
+            let task = task(line);
+            (task.isolated, task.isolation_off)
+        };
+        assert_eq!(isolated("run go"), (false, false));
+        assert_eq!(isolated("run go --isolated"), (true, false));
+        assert_eq!(isolated("run go --isolated=true"), (true, false));
+        assert_eq!(isolated("run go --isolated=yes"), (true, false));
+        assert_eq!(isolated("run go --isolated=false"), (false, true));
+        assert_eq!(isolated("run go --isolated=no"), (false, true));
+        // Without the `=`, the next word is still the prompt.
+        assert_eq!(isolated("run --isolated go"), (true, false));
+        assert!(err("run go --isolated=maybe").contains("--isolated"));
     }
 
     #[test]

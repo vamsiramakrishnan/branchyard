@@ -356,7 +356,8 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 1
+          "minimum": 1,
+          "description": "Sandbox memory in MiB. Also written `memory`, as the `--memory` flag is."
         },
         "pass_env": {
           "type": "array",
@@ -370,7 +371,7 @@
             "string",
             "null"
           ],
-          "description": "Between turns: `\"destroy\"` the microVM (the default) or `\"pause\"`\nit for the next turn. Pausing needs `live_branch`. See\ndocs/sandbox-snapshots.md.",
+          "description": "Between turns: `\"destroy\"` the microVM (the default) or `\"pause\"`\nit for the next turn. Pausing needs `live_branch`. See\ndocs/sandbox-snapshots.md.\nAlso written `keep_sandbox`, as the `--keep-sandbox` flag is.",
           "pattern": "^(pause|destroy)$"
         },
         "snapshots": {
@@ -380,7 +381,7 @@
           ],
           "format": "uint32",
           "minimum": 0,
-          "description": "With a kept sandbox, checkpoints that also keep a snapshot (default 3)."
+          "description": "With a kept sandbox, checkpoints that also keep a snapshot (default 3).\nAlso written `sandbox_snapshots`, as the `--sandbox-snapshots` flag is."
         },
         "max_paused": {
           "type": [

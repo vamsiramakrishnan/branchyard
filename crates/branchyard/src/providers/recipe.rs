@@ -21,6 +21,10 @@ impl ProviderKind for RecipeOptions {
         "recipe"
     }
 
+    fn label(&self) -> String {
+        format!("recipe:{}", self.name)
+    }
+
     fn key(&self) -> String {
         format!("recipe:{}", self.name)
     }

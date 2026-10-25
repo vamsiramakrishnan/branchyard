@@ -16,6 +16,7 @@
 
 mod checks;
 mod context;
+mod serve;
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -143,6 +144,8 @@ const CHECKS: &[CheckFn] = &[
     checks::host_loopback,
     checks::host_kvm,
     checks::server_reachable,
+    serve::config,
+    serve::database,
     checks::models_keys,
     checks::models_prices,
 ];

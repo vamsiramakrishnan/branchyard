@@ -419,6 +419,38 @@ pub struct Platform {
     pub kvm: bool,
 }
 
+/// What the `by` running setup was built with. A choice that needs a
+/// feature the build lacks is hidden or labelled with the command that adds
+/// it, so the interview never offers what the next command would refuse.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BuildFacts {
+    /// The build includes the Microsandbox SDK (`--features microsandbox`):
+    /// `--provider microsandbox` can start a microVM, given KVM.
+    pub microsandbox: bool,
+    /// The build can open a PostgreSQL store (`--features postgres`):
+    /// `by serve --database postgres://...`.
+    pub postgres: bool,
+}
+
+impl BuildFacts {
+    /// A build with every optional feature, as the tests' typical machine has.
+    pub fn full() -> BuildFacts {
+        BuildFacts {
+            microsandbox: true,
+            postgres: true,
+        }
+    }
+}
+
+/// The command that builds `by` with the Microsandbox SDK, from a checkout.
+pub const REBUILD_MICROSANDBOX: &str =
+    "cargo install --locked --path crates/branchyard-cli --features microsandbox";
+
+/// The command that builds `by` able to open PostgreSQL stores, from a
+/// checkout.
+pub const REBUILD_POSTGRES: &str =
+    "cargo install --locked --path crates/branchyard-cli --features postgres";
+
 /// The machine and repository, as far as setup is concerned.
 pub trait Probe {
     /// The project root: the git work tree's, or the current directory.
@@ -435,6 +467,8 @@ pub trait Probe {
         self.tool(program).is_some()
     }
     fn platform(&self) -> Platform;
+    /// The features this build of `by` has.
+    fn build(&self) -> BuildFacts;
     /// A file's text, relative to [`Probe::root`] unless absolute; `None`
     /// when missing. Only files setup may write are asked for.
     fn read(&self, path: &str) -> Option<String>;
@@ -474,6 +508,10 @@ pub struct Facts {
     /// Which of [`KNOWN_TOOLS`] are installed, with their version.
     pub tools: BTreeMap<String, String>,
     pub platform: Platform,
+    /// What this build of `by` can serve: the Microsandbox SDK and
+    /// PostgreSQL stores.
+    #[serde(default)]
+    pub build: BuildFacts,
     /// The check suggested by the files at the root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggested_check: Option<String>,
@@ -525,6 +563,7 @@ impl Facts {
                 })
                 .collect(),
             platform: probe.platform(),
+            build: probe.build(),
             suggested_check: CHECK_MARKERS
                 .iter()
                 .find(|(file, _)| probe.exists(file))
@@ -797,13 +836,16 @@ pub struct FakeProbe {
     pub variables: BTreeSet<String>,
     pub tools: BTreeMap<String, String>,
     pub platform: Platform,
+    /// The features of the build; [`FakeProbe::typical`] has them all.
+    pub build: BuildFacts,
     /// Files by path as [`Probe::read`] is asked for them.
     pub files: BTreeMap<String, String>,
 }
 
 impl FakeProbe {
     /// A repository at `/src/app` with Claude Code and Codex installed,
-    /// `ANTHROPIC_API_KEY` set, git and docker, on Linux without KVM.
+    /// `ANTHROPIC_API_KEY` set, git and docker, on Linux without KVM, from a
+    /// build with every optional feature.
     pub fn typical() -> FakeProbe {
         let harness =
             |harness: &str, profile: &str, installed: bool, version: Option<&str>| HarnessFact {
@@ -843,6 +885,7 @@ impl FakeProbe {
                 os: "linux".into(),
                 kvm: false,
             },
+            build: BuildFacts::full(),
             files: [("Cargo.toml".to_owned(), "[package]\n".to_owned())].into(),
         }
     }
@@ -869,6 +912,9 @@ impl Probe for FakeProbe {
     }
     fn platform(&self) -> Platform {
         self.platform.clone()
+    }
+    fn build(&self) -> BuildFacts {
+        self.build
     }
     fn read(&self, path: &str) -> Option<String> {
         self.files.get(path).cloned()

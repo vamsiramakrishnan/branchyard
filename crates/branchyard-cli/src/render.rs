@@ -1390,6 +1390,23 @@ pub fn harness_label(harness: &str, profile: &str) -> String {
     branchyard_harness::profiles::label(harness, profile)
 }
 
+/// Where a branch's harness runs, as `provider` and `isolated` record it,
+/// in words that say what that does and does not give: `local: as your
+/// user, no sandbox`, `local, isolated: private HOME, not a sandbox`,
+/// `microsandbox: a microVM per turn`. Shared by `by show` and `by inspect`.
+pub fn runs_text(provider: &str, isolated: bool) -> String {
+    match (provider, isolated) {
+        ("local", false) => "local: as your user, no sandbox".into(),
+        ("local", true) => "local, isolated: private HOME, not a sandbox".into(),
+        ("microsandbox", _) => "microsandbox: a microVM per turn".into(),
+        ("substrate", _) => "substrate: an Agent Substrate actor per turn".into(),
+        (other, _) => match other.strip_prefix("recipe:") {
+            Some(_) => format!("{other}: a machine its recipe makes"),
+            None => other.to_owned(),
+        },
+    }
+}
+
 /// `by inspect`.
 pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
     let (status, tone) = status_text(&i.status);
@@ -1408,6 +1425,7 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
                 .clone()
                 .unwrap_or_else(|| "the harness's default".into()),
         ),
+        ("provider", runs_text(&i.provider, i.isolated)),
         ("parent", i.parent.clone().unwrap_or_else(|| "none".into())),
         (
             "children",
@@ -1818,6 +1836,7 @@ pub fn details(
         ("branch", info.name.clone()),
         ("git branch", info.git_branch.clone()),
         ("harness", harness_label(&info.harness, &info.profile)),
+        ("provider", runs_text(&info.provider, info.isolated)),
         ("status", style.paint(tone, &status)),
         ("prompt", info.prompt.clone()),
     ];
@@ -2043,6 +2062,8 @@ mod tests {
             stalled: false,
             superseded_by: None,
             model: None,
+            provider: "local".into(),
+            isolated: false,
         }
     }
 
@@ -2547,6 +2568,68 @@ mod tests {
         let shown = details(&info("kid", None), Some(&i), 10_000, PLAIN, Vec::new());
         assert!(!shown.contains("budget"), "{shown}");
         assert!(inspection(&i, Style::PLAIN).contains("subtree cost  $0.07\n"));
+    }
+
+    /// `by show` and `by inspect` say where a branch ran and what that
+    /// does not give: a private HOME is not a sandbox.
+    #[test]
+    fn show_and_inspect_say_where_the_branch_ran() {
+        let line = |text: String| {
+            text.lines()
+                .find(|l| l.starts_with("provider"))
+                .map(|l| l.split_whitespace().skip(1).collect::<Vec<_>>().join(" "))
+        };
+        let mut b = info("b", None);
+        let shown = |b: &BranchInfo| details(b, None, 100, Style::PLAIN, Vec::new());
+        assert_eq!(
+            line(shown(&b)).as_deref(),
+            Some("local: as your user, no sandbox")
+        );
+        b.isolated = true;
+        assert_eq!(
+            line(shown(&b)).as_deref(),
+            Some("local, isolated: private HOME, not a sandbox")
+        );
+        b.provider = "recipe:devbox".into();
+        b.isolated = false;
+        assert_eq!(
+            line(shown(&b)).as_deref(),
+            Some("recipe:devbox: a machine its recipe makes")
+        );
+        assert_eq!(
+            runs_text("microsandbox", false),
+            "microsandbox: a microVM per turn"
+        );
+        assert_eq!(
+            runs_text("substrate", false),
+            "substrate: an Agent Substrate actor per turn"
+        );
+
+        let mut i: branchyard::Inspection = serde_json::from_value(serde_json::json!({
+            "name": "kid", "status": {"state": "ready"}, "harness": "claude-code",
+            "profile": "claude-code-stream-json", "parent": null, "children": [],
+            "depth": 0, "turns": 1, "candidate": null, "cost_usd": null,
+            "subtree_cost_usd": 0.0, "max_usd": null, "remaining_usd": null,
+            "envelope": null, "last_message": "", "provider": "local", "isolated": true,
+        }))
+        .unwrap();
+        assert_eq!(
+            line(inspection(&i, Style::PLAIN)).as_deref(),
+            Some("local, isolated: private HOME, not a sandbox")
+        );
+        // An answer from a server that does not say reads as a plain local run.
+        i = serde_json::from_value(serde_json::json!({
+            "name": "kid", "status": {"state": "ready"}, "harness": "claude-code",
+            "profile": "claude-code-stream-json", "parent": null, "children": [],
+            "depth": 0, "turns": 1, "candidate": null, "cost_usd": null,
+            "subtree_cost_usd": 0.0, "max_usd": null, "remaining_usd": null,
+            "envelope": null, "last_message": "",
+        }))
+        .unwrap();
+        assert_eq!(
+            line(inspection(&i, Style::PLAIN)).as_deref(),
+            Some("local: as your user, no sandbox")
+        );
     }
 
     /// The model line names the model a branch was given, or says it runs

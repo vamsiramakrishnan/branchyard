@@ -694,7 +694,8 @@ fn remote_mode_is_configured_by_flags_or_environment() {
     assert_eq!(ambiguous.status.code(), Some(1));
     assert_eq!(
         text(&ambiguous.stderr),
-        "by: the server serves one, two; pass --repo NAME or set BRANCHYARD_REPO\n"
+        "by: the server serves one, two; pass --repo NAME, set BRANCHYARD_REPO, or set repo \
+         under [remote] in branchyard.toml\n"
     );
     let run = server.by(
         &dir.0,
