@@ -88,6 +88,10 @@ Both are cargo features that are off by default. `by serve --database` needs a b
 
 `cargo install` puts `by` in `~/.cargo/bin`. Add that directory to `PATH`, then open a new shell. A harness started from an editor or a desktop launcher may have a shorter `PATH` than your shell; see the hooks entry below.
 
+### Claude Code says it has no Bash or Write tool
+
+Behind `ANTHROPIC_BASE_URL` on another provider's model (GLM-4.6 through Z.ai, Claude Code 2.1.310, 25 October 2026), the model can go looking for its tools instead of using them. `by log BRANCH` shows several `▸ ToolSearch` lines and then a reply such as `No Write or Bash tool is available in this session`, though `Bash`, `Edit`, `Read` and `Write` were in the request (the session transcript under `~/.claude/projects/` lists them): Claude Code's system prompt tells the model that some tools are deferred and must be found with `ToolSearch`, and this model took the empty search result for the whole tool set. The branch still ends `ready` when it finds another way (the first run wrote the file through the `Monitor` tool), but it costs turns, and `branchyard-qualify` fails `permission_denied`, `permission_allowed`, `interrupt_during_permission` and `interrupt_during_tool` (5 of 9; no permission request ever reaches the driver). Set `ENABLE_TOOL_SEARCH=false` where Claude Code starts (the environment of `by`, or `env` in `~/.claude/settings.json`; for an `--isolated` run, in the private home's `.claude/settings.json`, where the isolated run that worked had it beside the base URL): the same model then called `Write` first, and qualification passed 9 of 9. One run each way, one model; an Anthropic model was not tried.
+
 ## Hooks are silent in my harness session
 
 A harness hook says nothing when `by` has nothing new to say, and nothing when it cannot run. Test the command by hand, from the repository, with a branch ready or failed:
@@ -96,10 +100,11 @@ A harness hook says nothing when `by` has nothing new to say, and nothing when i
 echo '{"session_id":"s1","cwd":"'"$PWD"'"}' | by hook --harness codex session-start
 ```
 
-Printing `{"hookSpecificOutput":…"Branchyard: 1 ready to integrate (by ls)."}` means `by` works and the harness is not running the hook. Printing nothing with no branches in the repository is correct. The cause is then one of:
+Printing `{"hookSpecificOutput":…"Branchyard, this repository. Tell the person in one line about any question or failure below; act on nothing unless they ask:\n- NAME: ready to merge, 1 file changed: by diff NAME, then by merge NAME"}` means `by` works and the harness is not running the hook. Printing nothing with no branches in the repository is correct. The cause is then one of:
 
 - **`by` is not on the harness's `PATH`.** Every hook is `command -v by >/dev/null 2>&1 && by hook … || true`, so a missing `by` is silent. Check from the harness's own environment, then link `by` into a directory it has (`ln -s ~/.cargo/bin/by ~/.local/bin/by`).
 - **The hook is not installed.** `by init plugin ID --dry-run` shows what would be written; `by setup` installs for every harness it finds and changes nothing the second time. Start a new session afterwards; one already open may not have read them.
+- **Claude Code has not restarted.** It reads `~/.claude/settings.json` when a session starts; `/hooks` lists the two Branchyard hooks (`2 hooks on 2 events`). A plugin and `by setup` together run them twice: keep one. `claude -p` needs no trust step; the interactive `claude` asks about the folder first.
 - **Codex has not trusted it.** It runs no hook until you review it: choose "Trust all and continue" at the start, or run `/hooks` and press `t`. `codex exec` never asks and skips an untrusted hook; `codex exec --dangerously-bypass-hook-trust` runs it for that one run.
 - **Gemini CLI is in an untrusted folder.** Its hooks run only in a trusted folder, and `gemini -p` refuses to start in an untrusted one; trust the folder when asked, or set `GEMINI_CLI_TRUST_WORKSPACE=true` for automation.
 - **Hermes has not approved it.** It asks once per hook and skips an unapproved one when there is no terminal. Approve it from a terminal first, or run once with `HERMES_ACCEPT_HOOKS=1`.

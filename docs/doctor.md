@@ -83,7 +83,7 @@ Rows come in this order, and their names are stable: a script may match on them.
 
 A repository with no `.branchyard/` is a `todo` (`not set up yet`, with `by setup` as the fix), not a `fail`: nothing is broken, it has not been set up. Any other `by` command in the repository, such as `by ls`, also creates `.branchyard/`.
 
-**The harness rows.** A harness row reads like `installed 2.1.310 · login not verified · live-tested 2.1.283 (9/9)`, three parts:
+**The harness rows.** A harness row reads like `2.1.310 · login not verified · live 9/9`, three parts:
 
 - the version, or `slow to start` when its version command did not answer in time ([harness lifecycle](harness-lifecycle.md#how-detection-works)); it reads `installed X` when the version a live run was on is a different one, since a run says nothing about another version;
 - the login, in the words `by harnesses` uses (`logged in`, `key set (VARIABLE)`, `key stored (VARIABLE)`, `credentials found`, `logged out`, `login not verified`, `unknown`; [login states](harness-lifecycle.md#login-states));
@@ -110,7 +110,7 @@ ok      config.project          /home/me/app/branchyard.toml loads and validates
 ok      config.merged           the files merge with the BRANCHYARD_* variables
 warn    config.workspace_trust  [workspace] in /home/me/app/branchyard.toml has scripts you have not trusted (digest 3f9a1c07b2e4); new branches are refused until you do
 ok      harnesses.summary       2 installed: 1 logged in, 1 login not verified
-todo    harnesses.claude-code   installed 2.1.310 · login not verified · live-tested 2.1.283 (9/9)
+todo    harnesses.claude-code   2.1.310 · login not verified · live 9/9
 ok      harnesses.codex         installed 0.164.0 · logged in · live-tested 0.157.1 (9/9)
 warn    harnesses.default       not set: `by run` without --harness uses claude-code, which is installed, but its login is not verified
 ok      harnesses.credentials   set: GH_TOKEN (names only)

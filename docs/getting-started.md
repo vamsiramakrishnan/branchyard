@@ -33,7 +33,6 @@ claude-code  2.1.310  logged in                live 9/9     5h - · wk -  /opt/n
 codex        0.164.0  key set (CODEX_API_KEY)  live 9/9     -            ~/.npm-global/bin/codex
 qwen-code    0.26.0   unknown                  no live run  -            ~/.npm-global/bin/qwen
   claude-code: claude auth status: logged in (oauth_token)
-  claude-code: installed 2.1.310 · live-tested 2.1.283
   codex: CODEX_API_KEY is set (an API key; not checked)
   codex: installed 0.164.0 · live-tested 0.157.1
   qwen-code: Branchyard cannot read qwen's login: the catalog records no status command, credential file or key variable for it; sign in inside qwen itself
