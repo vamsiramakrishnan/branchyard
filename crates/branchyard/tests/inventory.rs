@@ -217,7 +217,8 @@ fn antigravity_deepseek_and_gemini_logins_are_read_from_their_configuration() {
          isolated runs, and `by harnesses login antigravity` sets it for your own"
     );
     assert_eq!(agy.login.key.as_deref(), Some("GEMINI_API_KEY"));
-    assert_eq!(agy.login.label(), "key set (GEMINI_API_KEY)");
+    assert_eq!(agy.login.label(), "key set, unused");
+    assert!(agy.login.key_unused());
     let gemini = found.get("gemini-cli").unwrap();
     assert_eq!(gemini.version.as_deref(), Some("0.63.0"));
     assert!(gemini

@@ -541,6 +541,13 @@ fn harness_row(state: &HarnessState, known: &[HarnessInfo]) -> Check {
     };
     let detail = format!("{version} · {login} · {live}");
     match state.standing() {
+        // The key is set but agy will not read it: a step to take.
+        Standing::Ready if state.login.key_unused() => Check::todo(
+            name,
+            detail,
+            "run `by harnesses login antigravity`: GEMINI_API_KEY is set but agy reads it only \
+             with modelProvider gemini in its settings",
+        ),
         Standing::Ready => Check::ok(name, detail),
         // A login not made yet is a step to take, not a fault.
         Standing::NotVerified(_) => Check::todo(name, detail, state.login_hint()),

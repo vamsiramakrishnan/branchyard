@@ -13,8 +13,12 @@
 //!
 //! Resume uses `session/resume` when the agent advertises it, else
 //! `session/load`; updates that `session/load` replays are not reported as a
-//! new turn. Fork is rejected: `session/fork` is an unstable ACP method, and a
-//! driver that cannot fork must say so rather than start a fresh session.
+//! new turn. A profile may pin an auth method ([`Acp::with_auth_method`]):
+//! when the agent answers a resume with `auth_required` and advertises that
+//! method, the driver calls `authenticate` once and sends the resume again
+//! (Gemini CLI's `session/load` needs this where its `session/new` does not).
+//! Fork is rejected: `session/fork` is an unstable ACP method, and a driver
+//! that cannot fork must say so rather than start a fresh session.
 //! Cancellation is the `session/cancel` notification; per the protocol, the
 //! client also answers every outstanding permission request as cancelled. The
 //! turn's terminal state arrives as the prompt response's `cancelled` stop
@@ -53,10 +57,15 @@ use crate::{
 /// The ACP protocol version this client speaks.
 const PROTOCOL_VERSION: u64 = 1;
 
+/// JSON-RPC error code the ACP schema gives `auth_required`.
+const AUTH_REQUIRED: i64 = -32000;
+
 #[derive(Debug)]
 enum Pending {
     Initialize,
     Session,
+    /// An `authenticate` request sent after a resume answered `auth_required`.
+    Authenticate,
     Prompt(u64),
     /// A `_session/steering` request: the turn and the steer's number.
     Steer(u64, u64),
@@ -112,6 +121,13 @@ pub struct Acp {
     /// The agent advertised `_meta.steering.supported`.
     steering: bool,
     next_steer: u64,
+    /// The auth method a profile pins, tried once if a resume is refused.
+    auth_method: Option<String>,
+    /// Whether the agent's `initialize` response advertised `auth_method`.
+    auth_advertised: bool,
+    /// The session request in flight, kept to send again after `authenticate`.
+    session_request: Option<(String, Value)>,
+    authenticated: bool,
 }
 
 impl Acp {
@@ -132,7 +148,23 @@ impl Acp {
             preamble: None,
             steering: false,
             next_steer: 0,
+            auth_method: None,
+            auth_advertised: false,
+            session_request: None,
+            authenticated: false,
         }
+    }
+
+    /// Authenticate with the `authMethods` entry `id` when a resume is
+    /// refused with `auth_required`, then send the resume once more. Only
+    /// resumes: Gemini CLI's `session/new` picks `GEMINI_API_KEY` up by
+    /// itself when its settings choose no auth type, and a fresh session
+    /// that is refused is left refused rather than switching the person's
+    /// login behind their back. The agent may remember the choice in its own
+    /// settings, as it does for any client that authenticates it.
+    pub fn with_auth_method(mut self, id: &str) -> Self {
+        self.auth_method = Some(id.to_owned());
+        self
     }
 
     /// Send `meta` as `_meta` on `session/new`, `session/resume` and
@@ -169,6 +201,11 @@ impl Acp {
         let open = self.open.clone().expect("initialize follows open()");
         // A top-level `_meta` extension, beside `agentCapabilities`.
         self.steering = result["_meta"]["steering"]["supported"] == true;
+        self.auth_advertised = self.auth_method.as_deref().is_some_and(|wanted| {
+            result["authMethods"]
+                .as_array()
+                .is_some_and(|methods| methods.iter().any(|m| m["id"] == wanted))
+        });
         let capabilities = response.agent_capabilities;
         let accepted = |transport: RemoteTransport| match transport {
             RemoteTransport::Http => capabilities.mcp_capabilities.http,
@@ -214,10 +251,37 @@ impl Acp {
         if let Some(meta) = &self.session_meta {
             params["_meta"] = meta.clone();
         }
+        self.session_request = Some((method.to_owned(), params.clone()));
         Output {
             events: Vec::new(),
             frames: vec![self.request(Pending::Session, method, params)],
         }
+    }
+
+    /// The resume was refused for want of authentication: authenticate with
+    /// the profile's method, once, if the agent offers it.
+    fn authenticate_to_resume(&mut self, message: &Value) -> Option<Output> {
+        let resuming = matches!(
+            self.open.as_ref().map(|open| &open.mode),
+            Some(SessionMode::Resume(_))
+        );
+        let method = self.auth_method.clone()?;
+        if !resuming
+            || self.authenticated
+            || !self.auth_advertised
+            || message["error"]["code"].as_i64() != Some(AUTH_REQUIRED)
+        {
+            return None;
+        }
+        self.authenticated = true;
+        Some(Output {
+            events: Vec::new(),
+            frames: vec![self.request(
+                Pending::Authenticate,
+                "authenticate",
+                json!({"methodId": method}),
+            )],
+        })
     }
 
     fn session_opened(&mut self, result: &Value) -> Output {
@@ -258,9 +322,30 @@ impl Acp {
             });
         };
         let error = message.get("error").map(rpc_error);
+        if matches!(pending, Pending::Session) && error.is_some() {
+            if let Some(output) = self.authenticate_to_resume(message) {
+                return output;
+            }
+        }
         match (pending, error) {
             (Pending::Initialize, None) => self.initialized(&message["result"]),
             (Pending::Session, None) => self.session_opened(&message["result"]),
+            (Pending::Authenticate, None) => match self.session_request.clone() {
+                Some((method, params)) => Output {
+                    events: Vec::new(),
+                    frames: vec![self.request(Pending::Session, &method, params)],
+                },
+                None => Output::event(Event::OpenFailed {
+                    reason: "authenticated with no session request to send again".into(),
+                }),
+            },
+            (Pending::Authenticate, Some(error)) => {
+                self.loading = false;
+                let method = self.auth_method.clone().unwrap_or_default();
+                Output::event(Event::OpenFailed {
+                    reason: format!("authenticate with {method} failed: {error}"),
+                })
+            }
             (Pending::Initialize | Pending::Session, Some(error)) => {
                 self.loading = false;
                 Output::event(Event::OpenFailed { reason: error })

@@ -4,8 +4,9 @@
 
 #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 use agent_client_protocol_schema::v1::{
-    CancelNotification, InitializeRequest, LoadSessionRequest, McpServer as AcpMcpServer,
-    NewSessionRequest, PromptRequest, RequestPermissionResponse, ResumeSessionRequest,
+    AuthenticateRequest, CancelNotification, InitializeRequest, LoadSessionRequest,
+    McpServer as AcpMcpServer, NewSessionRequest, PromptRequest, RequestPermissionResponse,
+    ResumeSessionRequest,
 };
 use branchyard_harness::acp::Acp;
 use branchyard_harness::conformance::{
@@ -757,4 +758,155 @@ fn permission_requests_name_the_tool_by_name_kind_or_title() {
     assert_eq!(tool_of(&mut driver, &announced), "replace");
     let only_title = request(53, json!({"toolCallId": "c-4", "title": "Edit src/lib.rs"}));
     assert_eq!(tool_of(&mut driver, &only_title), "Edit src/lib.rs");
+}
+
+/// A resume of Gemini CLI's profile, up to the agent's `initialize` answer
+/// with `auth_methods`; returns the driver and the `session/load` it sends.
+fn gemini_resume(mode: SessionMode, auth_methods: Value) -> (Box<dyn Driver>, Value) {
+    use branchyard_harness::profiles;
+    let mut driver = profiles::by_id("gemini-cli-acp").unwrap().driver();
+    let opened = driver.open(Open { mode, ..fresh() }).unwrap();
+    let initialize = decode(&opened.frames[0]);
+    let (_, frames) = feed(
+        driver.as_mut(),
+        &json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 1,
+            "agentCapabilities": {"loadSession": true}, "authMethods": auth_methods}}),
+    );
+    (driver, frames.into_iter().next().unwrap())
+}
+
+fn gemini_auth_methods() -> Value {
+    json!([
+        {"id": "oauth-personal", "name": "Log in with Google"},
+        {"id": "gemini-api-key", "name": "Gemini API key"},
+        {"id": "vertex-ai", "name": "Vertex AI"}
+    ])
+}
+
+fn auth_required(request: &Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32000, "message": "Authentication required"}})
+}
+
+#[test]
+fn a_resume_refused_for_authentication_authenticates_once_and_asks_again() {
+    let (mut driver, load) =
+        gemini_resume(SessionMode::Resume(session("old")), gemini_auth_methods());
+    assert_eq!(load["method"], "session/load");
+    let (events, frames) = feed(driver.as_mut(), &auth_required(&load));
+    assert_eq!(events, vec![]);
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["method"], "authenticate");
+    assert_eq!(frames[0]["params"], json!({"methodId": "gemini-api-key"}));
+    assert_conforms::<AuthenticateRequest>(&frames[0], "/params");
+
+    let (events, frames) = feed(
+        driver.as_mut(),
+        &json!({"jsonrpc": "2.0", "id": frames[0]["id"], "result": {}}),
+    );
+    assert_eq!(events, vec![]);
+    assert_eq!(frames[0]["method"], "session/load");
+    assert_eq!(frames[0]["params"], load["params"]);
+    assert_ne!(frames[0]["id"], load["id"]);
+
+    let (events, _) = feed(
+        driver.as_mut(),
+        &json!({"jsonrpc": "2.0", "id": frames[0]["id"], "result": {}}),
+    );
+    assert_eq!(events[0], Event::Ready);
+    assert_eq!(
+        events[1],
+        Event::SessionStarted {
+            session: session("old"),
+            forked_from: None
+        }
+    );
+}
+
+#[test]
+fn a_resume_refused_again_after_authenticating_fails_the_open() {
+    let (mut driver, load) =
+        gemini_resume(SessionMode::Resume(session("old")), gemini_auth_methods());
+    let (_, frames) = feed(driver.as_mut(), &auth_required(&load));
+    let (_, frames) = feed(
+        driver.as_mut(),
+        &json!({"jsonrpc": "2.0", "id": frames[0]["id"], "result": {}}),
+    );
+    let (events, frames) = feed(driver.as_mut(), &auth_required(&frames[0]));
+    assert!(frames.is_empty());
+    assert_eq!(
+        events,
+        vec![Event::OpenFailed {
+            reason: "Authentication required".into()
+        }]
+    );
+}
+
+#[test]
+fn a_failed_authenticate_says_which_method_and_why() {
+    let (mut driver, load) =
+        gemini_resume(SessionMode::Resume(session("old")), gemini_auth_methods());
+    let (_, frames) = feed(driver.as_mut(), &auth_required(&load));
+    let (events, frames) = feed(
+        driver.as_mut(),
+        &json!({"jsonrpc": "2.0", "id": frames[0]["id"], "error": {"code": -32000,
+            "message": "Gemini API key is missing or not configured."}}),
+    );
+    assert!(frames.is_empty());
+    assert_eq!(
+        events,
+        vec![Event::OpenFailed {
+            reason: "authenticate with gemini-api-key failed: Gemini API key is missing or not configured."
+                .into()
+        }]
+    );
+}
+
+#[test]
+fn authentication_is_tried_only_for_a_resume_the_agent_offers_a_method_for() {
+    // A fresh session that is refused stays refused: no switching the login.
+    let (mut driver, new) = gemini_resume(SessionMode::Fresh, gemini_auth_methods());
+    assert_eq!(new["method"], "session/new");
+    let (events, frames) = feed(driver.as_mut(), &auth_required(&new));
+    assert!(frames.is_empty());
+    assert!(
+        matches!(&events[0], Event::OpenFailed { reason } if reason == "Authentication required")
+    );
+
+    // The agent does not advertise the pinned method.
+    let (mut driver, load) = gemini_resume(
+        SessionMode::Resume(session("old")),
+        json!([{"id": "oauth-personal", "name": "Log in with Google"}]),
+    );
+    let (events, frames) = feed(driver.as_mut(), &auth_required(&load));
+    assert!(frames.is_empty());
+    assert!(matches!(&events[0], Event::OpenFailed { .. }));
+
+    // Another error code is not about authentication.
+    let (mut driver, load) =
+        gemini_resume(SessionMode::Resume(session("old")), gemini_auth_methods());
+    let (events, frames) = feed(
+        driver.as_mut(),
+        &json!({"jsonrpc": "2.0", "id": load["id"], "error": {"code": -32603, "message": "Internal error"}}),
+    );
+    assert!(frames.is_empty());
+    assert!(matches!(&events[0], Event::OpenFailed { reason } if reason == "Internal error"));
+
+    // A profile that pins no method never authenticates.
+    use branchyard_harness::profiles;
+    let mut driver = profiles::by_id("claude-code-acp").unwrap().driver();
+    let opened = driver
+        .open(Open {
+            mode: SessionMode::Resume(session("old")),
+            ..fresh()
+        })
+        .unwrap();
+    let initialize = decode(&opened.frames[0]);
+    let (_, frames) = feed(
+        driver.as_mut(),
+        &json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 1,
+            "agentCapabilities": {"loadSession": true}, "authMethods": gemini_auth_methods()}}),
+    );
+    let (events, frames) = feed(driver.as_mut(), &auth_required(&frames[0]));
+    assert!(frames.is_empty());
+    assert!(matches!(&events[0], Event::OpenFailed { .. }));
 }

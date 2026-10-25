@@ -207,7 +207,9 @@ impl Antigravity {
             events.push(Event::Warning {
                 message: format!(
                     "the CLI soft-denied a {action} ({name}): no permissions.allow rule in its \
-                     settings lets it run; the turn went on without it"
+                     settings lets it run; the turn went on without it. --isolated writes the \
+                     rules from --yes or --permissions into a private home; in your own home, \
+                     add one under permissions.allow in ~/.gemini/antigravity-cli/settings.json"
                 ),
             });
         }

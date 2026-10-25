@@ -148,11 +148,26 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// What Antigravity's login detail says when `GEMINI_API_KEY` is set and
+/// its settings do not select the provider that reads it.
+pub const AGY_KEY_UNUSED: &str = "does not set modelProvider gemini";
+
 impl Login {
+    /// Antigravity has `GEMINI_API_KEY`, but its settings do not select the
+    /// provider that reads it ([`AGY_KEY_UNUSED`]): `agy` asks for a Google
+    /// sign-in, and a headless run fails, unless a private home gets the
+    /// setting from Branchyard.
+    pub fn key_unused(&self) -> bool {
+        self.key.as_deref() == Some("GEMINI_API_KEY") && self.detail.contains(AGY_KEY_UNUSED)
+    }
+
     /// The login in the fewest honest words, for a table cell:
     ///
     /// - `logged in`: the harness's own status command said so;
     /// - `key set (GEMINI_API_KEY)`: a key variable is in the environment;
+    /// - `key set, unused`: Antigravity's `GEMINI_API_KEY` is set but its
+    ///   settings do not select the provider that reads it, so `agy` asks
+    ///   for a Google sign-in (`by harnesses login antigravity` fixes it);
     /// - `key stored (GEMINI_API_KEY)`: Branchyard keeps the key in a file;
     /// - `credentials found`: a credential file exists (its contents are
     ///   never read, so this is not a verified login);
@@ -164,6 +179,7 @@ impl Login {
     pub fn label(&self) -> String {
         match (self.state, self.evidence, &self.key) {
             (LoginState::LoggedIn, Evidence::Verified, _) => "logged in".to_owned(),
+            (LoginState::LoggedIn, _, Some(_)) if self.key_unused() => "key set, unused".to_owned(),
             (LoginState::LoggedIn, _, Some(key)) if self.stored => format!("key stored ({key})"),
             (LoginState::LoggedIn, _, Some(key)) => format!("key set ({key})"),
             (LoginState::LoggedIn, _, None) => "credentials found".to_owned(),
@@ -1342,10 +1358,11 @@ fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
         // Still a key Branchyard can use: isolated runs set the provider.
         return keyed(
             "GEMINI_API_KEY",
-            "GEMINI_API_KEY is set but ~/.gemini/antigravity-cli/settings.json does not set \
-             modelProvider gemini: agy will ask for a Google sign-in; Branchyard sets it in \
-             isolated runs, and `by harnesses login antigravity` sets it for your own"
-                .to_owned(),
+            format!(
+                "GEMINI_API_KEY is set but ~/.gemini/antigravity-cli/settings.json \
+                 {AGY_KEY_UNUSED}: agy will ask for a Google sign-in; Branchyard sets it in \
+                 isolated runs, and `by harnesses login antigravity` sets it for your own"
+            ),
         );
     }
     if let Some(file) = found
@@ -2739,6 +2756,11 @@ mod tests {
         );
         assert_eq!(without.login.key.as_deref(), Some("GEMINI_API_KEY"));
         assert!(without.ready().is_ok());
+        // The cell says the key is not used yet; with the setting it does.
+        assert!(without.login.key_unused());
+        assert_eq!(without.login.label(), "key set, unused");
+        assert!(!with.login.key_unused());
+        assert_eq!(with.login.label(), "key set (GEMINI_API_KEY)");
         // A Google sign-in works whatever the key and the setting say.
         let token = found(
             "antigravity",

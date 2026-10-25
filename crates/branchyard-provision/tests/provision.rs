@@ -898,10 +898,11 @@ fn antigravity_rules_follow_the_policy_and_never_touch_a_home_that_is_yours() {
     let settings = |temp: &Temp| -> serde_json::Value {
         serde_json::from_str(&temp.read(".gemini/antigravity-cli/settings.json")).unwrap()
     };
-    // `full` allows the shell, so every command, which covers `by`.
+    // `full` allows the shell, so every command, which covers `by`, and
+    // the file writes agy 1.4.7 headless soft-denies unless a rule allows.
     assert_eq!(
         settings(&temp)["permissions"]["allow"],
-        serde_json::json!(["command(*)", "mcp(branchyard/*)"])
+        serde_json::json!(["command(*)", "write_file(*)", "mcp(branchyard/*)"])
     );
 
     // `read-only`: nothing allowed, writes denied.

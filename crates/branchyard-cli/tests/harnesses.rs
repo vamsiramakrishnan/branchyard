@@ -984,11 +984,56 @@ fn login_antigravity_writes_the_model_provider_when_a_gemini_key_is_set() {
     // The listing says the key is set and agy will not use it yet.
     let out = w.by_env(&["harnesses"], &key);
     let table = text(&out.stdout);
-    assert!(table.contains("key set (GEMINI_API_KEY)"), "{table}");
+    assert!(table.contains("key set, unused"), "{table}");
+    assert!(!table.contains("key set (GEMINI_API_KEY)"), "{table}");
     assert!(
         table.contains("`by harnesses login antigravity` writes modelProvider gemini"),
         "{table}"
     );
+
+    // `by doctor` and `by setup` name the step; `by run` is refused before
+    // a branch exists (agy would ask for a Google sign-in and fail), and
+    // goes on once the setting is there or with --no-preflight.
+    let doctor = text(&w.by_env(&["doctor"], &key).stdout);
+    assert!(
+        doctor
+            .lines()
+            .any(|l| l.starts_with("todo") && l.contains("harnesses.antigravity")),
+        "{doctor}"
+    );
+    assert!(
+        doctor.contains("run `by harnesses login antigravity`"),
+        "{doctor}"
+    );
+    let setup = w.by_env(&["setup", "--dry-run"], &key);
+    let setup = text(&setup.stdout);
+    assert!(
+        setup.contains("reads it only with modelProvider gemini")
+            && setup.contains("shows the change and writes it"),
+        "{setup}"
+    );
+    let out = w.by_env(
+        &[
+            "run",
+            "say hi",
+            "--harness",
+            "antigravity",
+            "--allow-unapproved-tools",
+            "--yes",
+            "-n",
+            "agy1",
+        ],
+        &key,
+    );
+    assert!(!out.status.success());
+    let why = text(&out.stderr);
+    assert!(why.contains("does not set modelProvider gemini"), "{why}");
+    assert!(
+        why.contains("next: by harnesses login antigravity"),
+        "{why}"
+    );
+    assert!(why.contains("Nothing was started"), "{why}");
+    assert!(w.branches().is_empty());
 
     // No terminal and no --yes: the change is shown, nothing is written.
     let out = w.by_env(&["harnesses", "login", "antigravity"], &key);
@@ -1017,6 +1062,8 @@ fn login_antigravity_writes_the_model_provider_when_a_gemini_key_is_set() {
     assert!(written.contains("\n    \"theme\""), "{written}");
 
     // Detection now agrees; a second login has nothing to do.
+    let table = text(&w.by_env(&["harnesses", "--refresh"], &key).stdout);
+    assert!(table.contains("key set (GEMINI_API_KEY)"), "{table}");
     let inventory: Value =
         serde_json::from_slice(&w.by_env(&["harnesses", "--json", "--refresh"], &key).stdout)
             .unwrap();

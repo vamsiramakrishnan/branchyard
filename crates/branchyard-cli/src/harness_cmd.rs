@@ -447,6 +447,8 @@ fn quota_text(quota: Option<&Quota>) -> String {
 /// The login cell: `Login::label`, green when logged in, red when logged out.
 fn login_text(state: &HarnessState) -> (String, Tone) {
     let tone = match state.login.state {
+        // A key the harness will not use is not a login to be pleased by.
+        LoginState::LoggedIn if state.login.key_unused() => Tone::Yellow,
         LoginState::LoggedIn => Tone::Green,
         LoginState::LoggedOut => Tone::Red,
         LoginState::Unknown => Tone::Dim,
@@ -546,7 +548,7 @@ fn inventory_text(found: &Inventory, local: bool, style: Style) -> String {
             Standing::NotVerified(why) => text.push_str(&format!("  {}: {why}\n", h.id)),
             Standing::CannotRun(why) => text.push_str(&format!("  {}: cannot run: {why}\n", h.id)),
         }
-        if h.id == "antigravity" && antigravity_key_unused(h) {
+        if h.login.key_unused() {
             text.push_str(
                 "  antigravity: `by harnesses login antigravity` writes modelProvider gemini \
                  into its settings, after showing you the change\n",
@@ -582,16 +584,6 @@ fn inventory_text(found: &Inventory, local: bool, style: Style) -> String {
         }
     ));
     text
-}
-
-/// Antigravity has `GEMINI_API_KEY` but its settings do not select the
-/// provider that reads it: its login detail says so.
-fn antigravity_key_unused(state: &HarnessState) -> bool {
-    state.login.key.as_deref() == Some("GEMINI_API_KEY")
-        && state
-            .login
-            .detail
-            .contains("does not set modelProvider gemini")
 }
 
 #[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-cli
