@@ -1,5 +1,7 @@
 # Implementation plan
 
+> **History.** This is the plan written with the first commit, in September 2026. It is kept for the record and is out of date: the live plan is the [roadmap](roadmap.md), and what has been built and run is in [status](status.md).
+
 The first commit captures the architecture and reusable controls. Build the next slices in dependency order. Ship a complete remote task before expanding the harness roster.
 
 ## Current foundation

@@ -193,7 +193,7 @@ A server-only addition: identity, scopes and quotas are meaningful only where mo
 
 ## Changed with the clap command line
 
-Every `by` command, flag and JSON output is unchanged; the parsing around them is stricter and the help is generated. See the [README](../README.md#command-line).
+Every `by` command, flag and JSON output is unchanged; the parsing around them is stricter and the help is generated. See [command line](cli.md).
 
 | Surface | Before | Now |
 |---|---|---|
@@ -268,7 +268,7 @@ The cockpit branch made `by watch` act on the selected branch; integrating it wi
 | Surface | Before | Now |
 |---|---|---|
 | `by watch`'s detail pane | status, cost, inbox, children, prompt, events | also the checkpoint the branch is at, its merge readiness once it has pull-request steps, and whether it is being tried |
-| `--no-notify`, `[notify]` in `branchyard.toml` | none | notices from `by watch` and waiting commands ([README](../README.md#watching-branches)); `schema/branchyard.config.json` regenerated |
+| `--no-notify`, `[notify]` in `branchyard.toml` | none | notices from `by watch` and waiting commands ([watching branches](watch.md)); `schema/branchyard.config.json` regenerated |
 | `--log-format` (server, `by serve`, `by worker`, `branchyard-herdr`) | human-readable only | `pretty` (the default) or `json`, one object per line |
 | `branchyard_workspace::git`, `Git` | private | public: the one place that starts `git` on the host; `Git::stdin` and `Git::run_bytes` added at integration for `by try`'s patches and blobs, and `by pr` uses it too |
 | `Yard::try_recorded` | none | the recorded try, read without the try lock (what `by watch` polls) |
@@ -386,14 +386,16 @@ Ports from emdash and Orca ([roadmap](roadmap.md), Wave 1). The review and catal
 
 ## Changed from 4609ca1
 
+The Before column is the state at that commit (September 2026); the Now column is current.
+
 | Gap | Before | Now |
 |---|---|---|
 | `by --remote --provider`, `--delegate`, `--allow-delegation`, `--allow-unapproved-tools` | refused by the CLI | sent in the request; the server's operator opts in |
-| `by --remote spawn`, `inspect`, `events`, `integrate`, `children`, `send --json` | refused: "does not run with --remote yet" | server endpoints, the same JSON as local |
+| `by --remote spawn`, `inspect`, `events`, `integrate`, `children`, `send --json` | refused: "does not run with --remote yet" | server endpoints, the same JSON as local; spawn, integrate and the rest of delegation need a server started with `--allow-delegation` |
 | Providers on the server | local only | `--allow-provider microsandbox,substrate` |
 | Delegation for the server's harnesses | none | `--allow-delegation`, `--by-path` |
 | Unapproved tools on the server | refused | `--allow-unapproved-tools` |
-| PostgreSQL | design only | `Yard::open_postgres`, `by serve --database` |
+| PostgreSQL | design only | `Yard::open_postgres`, `by serve --database` (built behind the `postgres` cargo feature) |
 | Several servers, and execute-only workers, on one database | one server per data directory | `by serve --database` on each, `by worker --database`; operations looked up by key with `GET /v1/operations?idempotency_key=` (`Client::operation_by_key`) ([server](server.md#several-servers-on-one-database)) |
 | `HarnessInfo` | not `Serialize`; copied field by field | serde |
 | `by --remote artifact`/`scratch`, the server's HTTP API, `branchyard-client` for storage | refused: "does not yet reach a server over --remote" | server endpoints, the same JSON as local; `--max-artifact-bytes` |

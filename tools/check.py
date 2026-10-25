@@ -158,6 +158,8 @@ STEPS = (
     Step("test_check_wire", "controls", (PY, "tests/test_check_wire.py")),
     Step("docs_facts", "controls", (PY, "tools/docs_facts.py", "--check")),
     Step("test_docs_facts", "controls", (PY, "tests/test_docs_facts.py")),
+    # docs/README.md lists every page under docs/.
+    Step("test_docs_index", "controls", (PY, "tests/test_docs_index.py")),
     # Dependency versions are declared once, in [workspace.dependencies].
     Step("check_workspace_deps", "controls", (PY, "tools/check_workspace_deps.py")),
     Step("test_check_workspace_deps", "controls", (PY, "tests/test_check_workspace_deps.py")),

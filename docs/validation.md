@@ -1,6 +1,6 @@
 # Validation record
 
-Prepared 16 September 2026 and updated 29 September 2026 (the checkpoints, pull-request, cockpit and workspace-lifecycle branches integrated) and 1 October 2026 (prepared environments and worker labels; warm pools; the judge-and-router branch; connectors; ports from Orca and emdash; queue scheduling and observability) and 3 October 2026 (sync; task repositories; approvals, effects and undo; the model gateway) and 18 October 2026 (the SDK-first round: the configuration in the engine, `by up`, the Python client's local mode). Everything here ran on one Linux host or in CI; nothing ran against a Substrate cluster, KVM, or a real harness beyond the live rows. It is not a claim of production harness support.
+Prepared 16 September 2026 and updated 29 September 2026 (the checkpoints, pull-request, cockpit and workspace-lifecycle branches integrated) and 1 October 2026 (prepared environments and worker labels; warm pools; the judge-and-router branch; connectors; ports from Orca and emdash; queue scheduling and observability) and 3 October 2026 (sync; task repositories; approvals, effects and undo; the model gateway) and 18 October 2026 (the SDK-first round: the configuration in the engine, `by up`, the Python client's local mode) and 25 October 2026 (the list of what is not validated brought in line with the qualification reports; [status](status.md) now holds the status). Everything here ran on one Linux host or in CI; nothing ran against a Substrate cluster, KVM, or a real harness beyond the live rows. It is not a claim of production harness support.
 
 ## Passed locally
 
@@ -86,16 +86,16 @@ Passing its own tests does not qualify Scion's Claude provisioner, or Branchyard
 
 - The workspace lifecycle with a real package manager, Docker stack or harness, on macOS, inside a sandbox provider, or with separate SQLite stores reserving ports on one host at once.
 
-- Codex and every ACP harness other than claude-agent-acp against a live binary with credentials. The Codex recording ran without credentials. Claude recordings and qualification runs made real model calls: under about $1 in total by the harnesses' own estimates.
+- Every profile that [status](status.md#harness-drivers) lists as unqualified, against a live binary with credentials. The first Claude recordings and qualification runs made real model calls: under about $1 in total by the harnesses' own estimates.
 - Any profile inside a Branchyard sandbox: isolation, egress, credential projection and node recovery.
 - Connectors with a real harness, a real upstream or OAuth provider, from a sandbox (the sandbox gateway address on a KVM host or Substrate cluster), or with the rule that a sandboxed branch reaches only the gateway, which is not enforced ([connectors](connectors.md#what-is-not-done)).
 - Provisioning against any real harness beyond the Claude Code checks above: no other native file, variable or setting it writes has been checked against the harness it targets, nor whether Gemini CLI, OpenCode, Copilot, Hermes or Antigravity pass a secret variable to their tools (recorded as yes). The paths are Scion's; see [live testing](testing-live.md#7-provisioning-model-calls).
-- The ten ACP harnesses other than the Claude adapter, and the Codex ACP adapter. Their profiles use launch commands from the integration matrix and are protocol-tested only.
+- The ACP profiles that [status](status.md#harness-drivers) lists as unqualified. They use launch commands from the integration matrix and are protocol-tested only.
 - Sandbox snapshots on any real provider: Microsandbox pause, resume, live branch and full snapshots (declared only behind `live_branch`), and Substrate pause, suspend from a pause, tags and actors created from them. Tested against `branchyard_sandbox::fake` and Substrate's fake cluster only; the ignored KVM probe (children keeping the source's PIDs, private writes, a paused source staying paused, a persisted sandbox resumed by another process) has not run.
 - Any Agent Substrate cluster. The fake `Control` service and router model documented behavior only; the router's addressing and WebSocket forwarding, identity projection on restore, TLS, authentication, tag readiness and real snapshot semantics are untested.
 - Runtime isolation, KVM deployment, storage cloning, network enforcement, or startup latency.
-- Any live harness session, provider credential path, ACP exchange, or native driver.
-- The SDK engine and `by` against any real harness, including with the developer's own login, and whether Claude Code or Codex can resume or fork a session from another worktree.
+- Any harness session inside a Branchyard sandbox: provider credential paths, ACP exchanges and native drivers have run only as local processes.
+- The SDK engine and `by` against most real harnesses (a Claude Code run on 27 September 2026 and the fleet runs of 16 October 2026 are the ones recorded), including with the developer's own login, and whether Claude Code or Codex can resume or fork a session from another worktree.
 - The sixteen-profile matrix as deployed support.
 - OpenRig's application-dependent TypeScript contract or Warp's application-dependent AGPL modules as standalone binaries.
 - PGMQ delivery (the dispatch queue is plain tables), servers sharing a database on more than one host, recursive budgets, dynamic graph mutation, failover, or Git promotion.
