@@ -67,6 +67,10 @@ pub(crate) const REPORTS: &[(&str, &str)] = &[
         include_str!("../../../docs/qualification/gemini-cli-acp.json"),
     ),
     (
+        "hermes-acp",
+        include_str!("../../../docs/qualification/hermes-acp.json"),
+    ),
+    (
         "oh-my-pi-acp",
         include_str!("../../../docs/qualification/oh-my-pi-acp.json"),
     ),
@@ -393,6 +397,17 @@ mod tests {
             "9/9 on codex-cli 0.157.1"
         );
         assert_eq!(qualification("oh-my-pi-acp").unwrap(), "9/9 on omp/18.10.3");
+        // 25 October 2026, GLM-4.6 through Z.ai: the three permission
+        // scenarios fail on both, since neither asks before a shell command
+        // that writes inside its workspace.
+        assert_eq!(
+            qualification("deepseek-harness-acp").unwrap(),
+            "6/9 on 0.2.1-rc.2"
+        );
+        assert_eq!(
+            qualification("hermes-acp").unwrap(),
+            "6/9 on Hermes Agent v0.19.0 (2026.7.20)"
+        );
     }
 
     #[test]

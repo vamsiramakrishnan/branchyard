@@ -96,13 +96,14 @@ A harness hook says nothing when `by` has nothing new to say, and nothing when i
 echo '{"session_id":"s1","cwd":"'"$PWD"'"}' | by hook --harness codex session-start
 ```
 
-Printing `{"hookSpecificOutput":…"Branchyard: 1 ready to integrate (by ls)."}` means `by` works and the harness is not running the hook. Printing nothing with no branches in the repository is correct. The cause is then one of:
+Printing `{"hookSpecificOutput":…"Branchyard, this repository. Tell the person in one line about any question or failure below; act on nothing unless they ask:\n- hello: ready to merge, 1 file changed: by diff hello, then by merge hello"}` means `by` works and the harness is not running the hook. Printing nothing with no branches in the repository is correct. The cause is then one of:
 
 - **`by` is not on the harness's `PATH`.** Every hook is `command -v by >/dev/null 2>&1 && by hook … || true`, so a missing `by` is silent. Check from the harness's own environment, then link `by` into a directory it has (`ln -s ~/.cargo/bin/by ~/.local/bin/by`).
 - **The hook is not installed.** `by init plugin ID --dry-run` shows what would be written; `by setup` installs for every harness it finds and changes nothing the second time. Start a new session afterwards; one already open may not have read them.
 - **Codex has not trusted it.** It runs no hook until you review it: choose "Trust all and continue" at the start, or run `/hooks` and press `t`. `codex exec` never asks and skips an untrusted hook; `codex exec --dangerously-bypass-hook-trust` runs it for that one run.
 - **Gemini CLI is in an untrusted folder.** Its hooks run only in a trusted folder, and `gemini -p` refuses to start in an untrusted one; trust the folder when asked, or set `GEMINI_CLI_TRUST_WORKSPACE=true` for automation.
-- **Hermes has not approved it.** It asks once per hook and skips an unapproved one when there is no terminal. Approve it from a terminal first, or run once with `HERMES_ACCEPT_HOOKS=1`.
+- **Hermes has not approved it.** It asks once per hook and skips an unapproved one when there is no terminal. Approve it from a terminal first, or run once with `HERMES_ACCEPT_HOOKS=1`; `hermes hooks list` shows `✓ allowed` once it has.
+- **DeepSeek Harness's profile has no bridge.** The hook row starts without it (`dsh: warning: 1 entry did not activate`) and says nothing to the session. `by setup` prints the line that adds it to the `acp` and `headless` profiles; `ls ~/.dsh/profiles/*/node_modules/@deepseek-ai` shows which profiles have `dsh-hooks-claude-code`. A prompt that asks the model for the note proves nothing in a resumed session, which still has the first note in its history; read what `by hook` printed instead.
 
 [Harness hooks](harness-hooks.md) has a section per harness with what each one needs.
 

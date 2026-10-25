@@ -328,8 +328,38 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(row["config"]["configPath"]["__js"], "dshHomePath('branchyard-hooks.json')")
         # The bridge has to be added to a profile before the row loads.
         notes = " ".join(n["text"] for n in install["note"])
-        self.assertIn("@deepseek-ai/dsh-hooks-claude-code@<version>", notes)
-        self.assertIn("@deepseek-ai/dsh-hook-protocol@<version>", notes)
+        self.assertIn("@deepseek-ai/dsh-hooks-claude-code@$(dsh --version)", notes)
+        self.assertIn("@deepseek-ai/dsh-hook-protocol@$(dsh --version)", notes)
+
+    def test_the_deepseek_note_prints_a_line_that_pastes_as_it_is(self):
+        # On 25 October 2026 the note printed `--profile <name>` and `@<version>`,
+        # which a shell reads as redirections (`syntax error near unexpected
+        # token 'newline'`). The line it prints now runs, for each profile.
+        install = tomllib.loads((INSTALL / "deepseek-harness.toml").read_text())
+        notes = " ".join(n["text"] for n in install["note"])
+        line = re.search(r"for p in [\w ]+; do dsh plugin .*?; done", notes)
+        self.assertIsNotNone(line, notes)
+        self.assertNotIn("<", line.group(0))
+        with tempfile.TemporaryDirectory() as tmp:
+            dsh = Path(tmp) / "dsh"
+            dsh.write_text('#!/bin/sh\nif [ "$1" = --version ]; then echo 9.9.9-test; exit 0; fi\necho "dsh $*"\n')
+            dsh.chmod(0o755)
+            done = subprocess.run(
+                ["bash", "-c", line.group(0)],
+                capture_output=True,
+                text=True,
+                env={"PATH": f"{tmp}:/usr/bin:/bin"},
+            )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(
+            done.stdout.splitlines(),
+            [
+                "dsh plugin --profile acp add @deepseek-ai/dsh-hooks-claude-code@9.9.9-test "
+                "@deepseek-ai/dsh-hook-protocol@9.9.9-test",
+                "dsh plugin --profile headless add @deepseek-ai/dsh-hooks-claude-code@9.9.9-test "
+                "@deepseek-ai/dsh-hook-protocol@9.9.9-test",
+            ],
+        )
 
     def test_the_package_checks_every_host_manifest_version(self):
         sys.path.insert(0, str(ROOT / "tools"))

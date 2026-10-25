@@ -133,7 +133,9 @@ pub struct Login {
     /// ChatGPT`, `OPENAI_API_KEY is set`, `~/.codex/auth.json exists`.
     pub detail: String,
     /// The key variable the login rests on, when it does: `GEMINI_API_KEY`.
-    /// Only its name is ever recorded.
+    /// For a login that is not there, the variable it is waiting for, when
+    /// the configuration names one (a DeepSeek Harness provider's
+    /// `apiKeyEnv`). Only its name is ever recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     /// The key is in a file Branchyard stored (`by harnesses login ID
@@ -302,9 +304,23 @@ pub enum Standing {
 }
 
 impl HarnessState {
+    /// The next step for a login that is not there: the variable a
+    /// configured provider is waiting for when it is not the catalog's,
+    /// else [`login_hint`].
+    pub fn login_hint(&self) -> String {
+        match &self.login.key {
+            Some(var)
+                if self.login.state == LoginState::LoggedOut
+                    && !key_variables(&self.id).contains(var) =>
+            {
+                format!("export {var}, the key variable of the provider it is configured with")
+            }
+            _ => login_hint(&self.id),
+        }
+    }
+
     /// Where it stands, with the reason and the next step.
     pub fn standing(&self) -> Standing {
-        let id = &self.id;
         if !self.on_path {
             return Standing::CannotRun(format!(
                 "at {} but not on PATH; add its directory to PATH",
@@ -317,7 +333,7 @@ impl HarnessState {
             );
         }
         if self.login.state == LoginState::LoggedOut {
-            let hint = login_hint(id);
+            let hint = self.login_hint();
             return match self.login.evidence {
                 Evidence::Verified => {
                     Standing::CannotRun(format!("logged out ({}); {hint}", self.login.detail))
@@ -351,7 +367,7 @@ impl HarnessState {
                     _ => "likely",
                 },
                 self.login.detail,
-                login_hint(id)
+                self.login_hint()
             ));
         }
         if self.quota.as_ref().is_some_and(|q| q.limit_reached) {
@@ -617,8 +633,13 @@ const OMP_MIN_BUN: &str = "1.3.14";
 ///   `trust-workspace`.
 /// - DeepSeek Harness 0.2.0-rc.2 composes its `llm-pi-ai` providers from
 ///   `cordis.patch.yml` under `$DSH_HOME` and the profile's: a `providers:`
-///   key is `providers FILE`, and each `apiKeyEnv:` variable that is set is
-///   an `env` line.
+///   key is `providers FILE`, an `apiKey:` line with a value is `inline-key
+///   FILE`, and each `apiKeyEnv:` variable is an `env` line when it is set
+///   and `key-unset NAME` when it is not (dsh stops with
+///   `MISSING_CREDENTIAL` on a provider whose variable is unset).
+/// - Hermes Agent 0.19.0 loads `$HERMES_HOME/.env` (default `~/.hermes/.env`)
+///   for its providers' keys: each `NAME_API_KEY=` line with a value is
+///   `env-file NAME FILE`, the name alone.
 /// - Oh My Pi 18.10.3 is a Bun script: `runs-on-bun` when its executable's
 ///   first bytes name `bun`, and `bun VERSION` or `bun missing` for the Bun
 ///   on `PATH`. Its `omp login` logins are rows of `~/.omp/agent/agent.db`:
@@ -642,10 +663,20 @@ fn probes(id: &str) -> &'static str {
   for pf in cordis.patch.yml profiles/acp/cordis.patch.yml; do
     [ -f "$ph/$pf" ] || continue
     grep -Eq '^[[:space:]-]*providers:' "$ph/$pf" 2>/dev/null && echo "fact deepseek-harness providers $pf"
+    grep -Eq '^[[:space:]-]*apiKey:[[:space:]]*[^[:space:]#]' "$ph/$pf" 2>/dev/null && echo "fact deepseek-harness inline-key $pf"
     for pv in $(sed -n 's/^[[:space:]-]*apiKeyEnv:[^A-Za-z_]*\([A-Za-z_][A-Za-z0-9_]*\).*$/\1/p' "$ph/$pf" 2>/dev/null); do
-      eval "[ -n \"\${$pv:-}\" ]" && echo "env deepseek-harness $pv"
+      if eval "[ -n \"\${$pv:-}\" ]"; then echo "env deepseek-harness $pv"; else echo "fact deepseek-harness key-unset $pv"; fi
     done
   done
+"##
+        }
+        "hermes" => {
+            r##"  hh=${HERMES_HOME:-$HOME/.hermes}
+  ef="$hh/.env"
+  if [ -f "$ef" ]; then
+    case "$ef" in "$HOME"/*) shown="~/${ef#"$HOME"/}" ;; *) shown="$ef" ;; esac
+    for pv in $(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*_API_KEY\)[[:space:]]*=[[:space:]]*[^[:space:]#].*$/\2/p' "$ef" 2>/dev/null); do echo "fact hermes env-file $pv $shown"; done
+  fi
 "##
         }
         "oh-my-pi" => {
@@ -1085,10 +1116,19 @@ fn unknown_detail(id: &str) -> String {
             "Branchyard cannot read {program}'s login: the catalog records no status command, \
              credential file or key variable for it; sign in inside {program} itself"
         ),
-        false => format!(
-            "Branchyard cannot read {program}'s login; a key in {} would tell",
-            vars.join(" or ")
-        ),
+        false => {
+            let mut detail = format!(
+                "Branchyard cannot read {program}'s login; a key in {} would tell",
+                vars.join(" or ")
+            );
+            if id == "hermes" {
+                detail.push_str(
+                    ", and so would a NAME_API_KEY= line in ~/.hermes/.env; `hermes status` \
+                     shows what Hermes itself sees",
+                );
+            }
+            detail
+        }
     }
 }
 
@@ -1211,9 +1251,44 @@ fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
         .find_map(|f| f.strip_prefix("providers "))
         .filter(|_| id == "deepseek-harness")
     {
+        // A provider whose key variable is unset is a login dsh refuses
+        // (`MISSING_CREDENTIAL`), unless a key sits in the file itself.
+        let inline = found.facts.iter().any(|f| f.starts_with("inline-key "));
+        let mut unset: Vec<&str> = found
+            .facts
+            .iter()
+            .filter_map(|f| f.strip_prefix("key-unset "))
+            .collect();
+        unset.sort_unstable();
+        unset.dedup();
+        if let (false, Some(first)) = (inline, unset.first()) {
+            return Login {
+                key: Some((*first).to_owned()),
+                ..likely(
+                    LoginState::LoggedOut,
+                    format!(
+                        "~/.dsh/{file} configures a provider, but the variable its apiKeyEnv \
+                         names ({}) is not set, and dsh stops with MISSING_CREDENTIAL; export it",
+                        unset.join(", ")
+                    ),
+                )
+            };
+        }
         return likely(
             LoginState::LoggedIn,
             format!("~/.dsh/{file} configures a provider (its key variable is not checked)"),
+        );
+    }
+    if let Some(rest) = found
+        .facts
+        .iter()
+        .find_map(|f| f.strip_prefix("env-file "))
+        .filter(|_| id == "hermes")
+    {
+        let (var, file) = rest.split_once(' ').unwrap_or((rest, "~/.hermes/.env"));
+        return likely(
+            LoginState::LoggedIn,
+            format!("{var} is set in {file}, which Hermes loads (an API key; not checked)"),
         );
     }
     if id == "deepseek-harness" {
@@ -1343,6 +1418,16 @@ pub fn count_stored_keys(inventory: &mut Inventory, stored: &BTreeMap<String, St
         else {
             continue;
         };
+        // A login waiting for one named variable (a provider's `apiKeyEnv`)
+        // is not helped by a stored key for another.
+        if state
+            .login
+            .key
+            .as_ref()
+            .is_some_and(|waiting| *waiting != var)
+        {
+            continue;
+        }
         state.login = Login {
             state: LoginState::LoggedIn,
             evidence: Evidence::Likely,
@@ -2634,6 +2719,65 @@ mod tests {
                 format!("{var} is set (an API key; not checked)")
             );
         }
+        // A provider whose key variable is unset is not a login: dsh stops
+        // with MISSING_CREDENTIAL (seen on dsh 0.2.1-rc.2 on 25 October 2026).
+        let unset = found(
+            "deepseek-harness",
+            &[
+                "fact deepseek-harness providers cordis.patch.yml",
+                "fact deepseek-harness key-unset Z_AI",
+                "fact deepseek-harness key-unset Z_AI",
+            ],
+        );
+        assert_eq!(unset.login.state, LoginState::LoggedOut);
+        assert_eq!(unset.login.evidence, Evidence::Likely);
+        assert_eq!(unset.login.label(), "login not verified");
+        // It names the variable it waits for, and so does the next step:
+        // `login --api-key` would store DEEPSEEK_API_KEY, which this provider
+        // does not read.
+        assert_eq!(unset.login.key.as_deref(), Some("Z_AI"));
+        assert_eq!(
+            unset.login_hint(),
+            "export Z_AI, the key variable of the provider it is configured with"
+        );
+        let why = unset.ready().unwrap_err();
+        assert!(
+            why.ends_with("export Z_AI, the key variable of the provider it is configured with"),
+            "{why}"
+        );
+        let shipped = found(
+            "deepseek-harness",
+            &[
+                "fact deepseek-harness providers cordis.patch.yml",
+                "fact deepseek-harness key-unset DEEPSEEK_API_KEY",
+            ],
+        );
+        assert_eq!(shipped.login_hint(), login_hint("deepseek-harness"));
+        assert_eq!(
+            unset.login.detail,
+            "~/.dsh/cordis.patch.yml configures a provider, but the variable its apiKeyEnv \
+             names (Z_AI) is not set, and dsh stops with MISSING_CREDENTIAL; export it"
+        );
+        // A key written in the file itself needs no variable.
+        let inline = found(
+            "deepseek-harness",
+            &[
+                "fact deepseek-harness providers cordis.patch.yml",
+                "fact deepseek-harness inline-key cordis.patch.yml",
+                "fact deepseek-harness key-unset Z_AI",
+            ],
+        );
+        assert_eq!(inline.login.state, LoginState::LoggedIn);
+        // The variable set beats the same provider's unset sibling.
+        let both = found(
+            "deepseek-harness",
+            &[
+                "fact deepseek-harness providers cordis.patch.yml",
+                "fact deepseek-harness key-unset OTHER_KEY",
+                "env deepseek-harness Z_AI",
+            ],
+        );
+        assert_eq!(both.login.label(), "key set (Z_AI)");
         // Neither: logged out, and the detail says how to configure it.
         let none = found("deepseek-harness", &[]);
         assert_eq!(none.login.state, LoginState::LoggedOut);
@@ -2663,11 +2807,72 @@ mod tests {
         });
         assert!(text.contains("echo 'env deepseek-harness DEEPSEEK_API_KEY'"));
         assert!(text.contains("${DSH_HOME:-$HOME/.dsh}"));
+        assert!(
+            text.contains("echo \"fact deepseek-harness key-unset $pv\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("echo \"fact deepseek-harness inline-key $pf\""),
+            "{text}"
+        );
+
         for file in DSH_CONFIGS {
             let relative = file.trim_start_matches("~/.dsh/");
             assert!(text.contains(relative), "{relative}");
         }
         // The only `cat` reads back what the harnesses' own subshells wrote.
+        assert!(
+            !text.replace("cat \"$D\"/h.*", "").contains("cat "),
+            "a config file must not be printed"
+        );
+    }
+
+    #[test]
+    fn hermes_is_logged_in_by_a_key_in_its_env_file() {
+        // Nothing found: unknown, and the detail says what would tell,
+        // including Hermes's own `.env` and `hermes status`.
+        let none = found("hermes", &[]);
+        assert_eq!(none.login.state, LoginState::Unknown);
+        for want in [
+            "GOOGLE_API_KEY",
+            "~/.hermes/.env",
+            "NAME_API_KEY=",
+            "`hermes status`",
+        ] {
+            assert!(
+                none.login.detail.contains(want),
+                "{want}: {}",
+                none.login.detail
+            );
+        }
+        // A key line in the file Hermes loads is a login by name only.
+        let keyed = found(
+            "hermes",
+            &["fact hermes env-file GLM_API_KEY ~/.hermes/.env"],
+        );
+        assert_eq!(keyed.login.state, LoginState::LoggedIn);
+        assert_eq!(keyed.login.evidence, Evidence::Likely);
+        assert_eq!(keyed.login.label(), "credentials found");
+        assert_eq!(
+            keyed.login.detail,
+            "GLM_API_KEY is set in ~/.hermes/.env, which Hermes loads (an API key; not checked)"
+        );
+        // A key variable in the environment still wins, by name.
+        let env = found(
+            "hermes",
+            &[
+                "env hermes OPENAI_API_KEY",
+                "fact hermes env-file GLM_API_KEY ~/.hermes/.env",
+            ],
+        );
+        assert_eq!(env.login.label(), "key set (OPENAI_API_KEY)");
+        // The probe reads names, never values, and honours HERMES_HOME.
+        let text = script(&DetectOptions {
+            only: Some(vec!["hermes".into()]),
+            ..DetectOptions::default()
+        });
+        assert!(text.contains("${HERMES_HOME:-$HOME/.hermes}"), "{text}");
+        assert!(text.contains("fact hermes env-file $pv $shown"), "{text}");
         assert!(
             !text.replace("cat \"$D\"/h.*", "").contains("cat "),
             "a config file must not be printed"
@@ -2938,10 +3143,13 @@ mod tests {
         // The unreadable login says what would tell.
         let pi = found("pi", &[]);
         assert_eq!(pi.login.state, LoginState::Unknown);
-        assert!(pi
-            .login
-            .detail
-            .contains("the catalog records no status command"));
+        assert!(
+            pi.login
+                .detail
+                .contains("the catalog records no status command"),
+            "{:?}",
+            pi.login
+        );
         assert!(pi.login.detail.contains("sign in inside pi itself"));
     }
 
@@ -3034,6 +3242,32 @@ mod tests {
         // Only the variable's name and where the file is.
         assert!(!dsh.login.detail.contains("=\""));
         assert!(dsh.ready().is_ok());
+        // A login waiting for another variable (a provider's `apiKeyEnv`) is
+        // not helped by a stored DEEPSEEK_API_KEY; one waiting for it is.
+        let waiting = |var: &str| HarnessState {
+            id: "deepseek-harness".into(),
+            on_path: true,
+            login: Login {
+                key: Some(var.to_owned()),
+                ..login_of(LoginState::LoggedOut, Evidence::Likely, None, false)
+            },
+            ..HarnessState::default()
+        };
+        let mut other = Inventory {
+            harnesses: vec![waiting("Z_AI")],
+            ..Inventory::default()
+        };
+        count_stored_keys(&mut other, &stored);
+        assert_eq!(other.harnesses[0].login.label(), "login not verified");
+        let mut same = Inventory {
+            harnesses: vec![waiting("DEEPSEEK_API_KEY")],
+            ..Inventory::default()
+        };
+        count_stored_keys(&mut same, &stored);
+        assert_eq!(
+            same.harnesses[0].login.label(),
+            "key stored (DEEPSEEK_API_KEY)"
+        );
         // A verified login stays; a harness with no stored key stays as it was.
         assert_eq!(inventory.get("codex").unwrap().login.label(), "logged in");
         assert_eq!(
