@@ -146,6 +146,12 @@ STEPS = (
     Step("check_handrolled", "controls", (PY, "tools/check_handrolled.py")),
     Step("test_check_handrolled", "controls", (PY, "tests/test_check_handrolled.py")),
     Step("check_docs", "controls", (PY, "tools/check_docs.py")),
+    Step("test_check_docs", "controls", (PY, "tests/test_check_docs.py")),
+    # The branch-state table in docs/concepts.md against the BranchStatus enum and `by ls`'s words.
+    Step("test_concepts_states", "controls", (PY, "tests/test_concepts_states.py")),
+    # The new guides' messages and build commands against the code. The walkthrough and the command checks
+    # need a build, so they wait for test_getting_started_built below.
+    Step("test_getting_started", "controls", (PY, "tests/test_getting_started.py")),
     Step("check_test_hygiene", "controls", (PY, "tools/check_test_hygiene.py")),
     Step("test_check_test_hygiene", "controls", (PY, "tests/test_check_test_hygiene.py")),
     Step("check_silent_failures", "controls", (PY, "tools/check_silent_failures.py")),
@@ -249,6 +255,35 @@ STEPS = (
             "rig_json",
         ),
         cargo=True,
+    ),
+    # docs/getting-started.md run for real: `by` and the fake ACP agent built, then every tested block run
+    # in a temporary repository with a private HOME, and every `by` command the new guides show checked
+    # against the built `by --help`. CI runs the same test after its `cargo test --workspace` built them.
+    Step(
+        "build_by",
+        "controls",
+        (
+            "cargo",
+            "build",
+            "--locked",
+            "--offline",
+            "-p",
+            "branchyard-cli",
+            "-p",
+            "branchyard-runtime",
+            "--bin",
+            "by",
+            "--bin",
+            "fake-acp-agent",
+        ),
+        cargo=True,
+    ),
+    Step(
+        "test_getting_started_built",
+        "controls",
+        (PY, "tests/test_getting_started.py"),
+        cargo=True,
+        env=(("REQUIRE_BINARIES", "1"),),
     ),
 )
 
