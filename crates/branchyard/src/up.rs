@@ -632,12 +632,7 @@ fn login_step(harness: &str, state: &HarnessState) -> Step {
                 inventory::Evidence::Verified => "logged out",
                 _ => "login not verified",
             };
-            Step::needs_person(
-                name,
-                format!("{what} ({detail})"),
-                inventory::login_hint(harness),
-                None,
-            )
+            Step::needs_person(name, format!("{what} ({detail})"), state.login_hint(), None)
         }
         LoginState::Unknown => Step::ready(
             name,

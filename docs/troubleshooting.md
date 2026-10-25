@@ -107,7 +107,8 @@ Printing `{"hookSpecificOutput":…"Branchyard, this repository. Tell the person
 - **Claude Code has not restarted.** It reads `~/.claude/settings.json` when a session starts; `/hooks` lists the two Branchyard hooks (`2 hooks on 2 events`). A plugin and `by setup` together run them twice: keep one. `claude -p` needs no trust step; the interactive `claude` asks about the folder first.
 - **Codex has not trusted it.** It runs no hook until you review it: choose "Trust all and continue" at the start, or run `/hooks` and press `t`. `codex exec` never asks and skips an untrusted hook; `codex exec --dangerously-bypass-hook-trust` runs it for that one run.
 - **Gemini CLI is in an untrusted folder.** Its hooks run only in a trusted folder, and `gemini -p` refuses to start in an untrusted one; trust the folder when asked, or set `GEMINI_CLI_TRUST_WORKSPACE=true` for automation.
-- **Hermes has not approved it.** It asks once per hook and skips an unapproved one when there is no terminal. Approve it from a terminal first, or run once with `HERMES_ACCEPT_HOOKS=1`.
+- **Hermes has not approved it.** It asks once per hook and skips an unapproved one when there is no terminal. Approve it from a terminal first, or run once with `HERMES_ACCEPT_HOOKS=1`; `hermes hooks list` shows `✓ allowed` once it has.
+- **DeepSeek Harness's profile has no bridge.** The hook row starts without it (`dsh: warning: 1 entry did not activate`) and says nothing to the session. `by setup` prints the line that adds it to the `acp` and `headless` profiles; `ls ~/.dsh/profiles/*/node_modules/@deepseek-ai` shows which profiles have `dsh-hooks-claude-code`. A prompt that asks the model for the note proves nothing in a resumed session, which still has the first note in its history; read what `by hook` printed instead.
 
 [Harness hooks](harness-hooks.md) has a section per harness with what each one needs.
 

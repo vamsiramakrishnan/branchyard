@@ -1,9 +1,13 @@
 //! DeepSeek Harness: `deepseek-harness-acp` (`dsh --profile acp`, dsh
-//! 0.2.0-rc.2). Over ACP it takes MCP servers and instructions on the
-//! session channel and asks its client before commands, which the ACP
-//! driver answers from the branch's policy. It has no model parameter: the
-//! model, and the provider that serves it, come from its configuration,
-//! composed from `cordis.patch.yml` under `$DSH_HOME` (default `~/.dsh`), a
+//! 0.2.0-rc.2, run live on 0.2.1-rc.2). Over ACP it takes MCP servers and
+//! instructions on the session channel. It confines its own shell
+//! (`workspace-write` unless `DSH_PERMISSION_MODE` says otherwise) and asks
+//! its client only when a command has to leave that confinement, so a
+//! command that writes inside the workspace reaches the branch's policy as
+//! no request at all: on 25 October 2026 the qualification's denied `echo
+//! qualified > deny-marker.txt` ran, with the policy set to deny. It has no
+//! model parameter: the model, and the provider that serves it, come from
+//! its configuration, composed from `cordis.patch.yml` under `$DSH_HOME` (default `~/.dsh`), a
 //! YAML list of plugin patches (`dsh --profile acp --dump-config` shows the
 //! composed result). Provider keys are read from its environment, by the
 //! variable each provider's `apiKeyEnv` names (`DEEPSEEK_API_KEY` for its

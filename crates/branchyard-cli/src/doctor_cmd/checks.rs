@@ -543,9 +543,9 @@ fn harness_row(state: &HarnessState, known: &[HarnessInfo]) -> Check {
     match state.standing() {
         Standing::Ready => Check::ok(name, detail),
         // A login not made yet is a step to take, not a fault.
-        Standing::NotVerified(_) => Check::todo(name, detail, inventory::login_hint(&state.id)),
+        Standing::NotVerified(_) => Check::todo(name, detail, state.login_hint()),
         Standing::CannotRun(_) if state.login.state == LoginState::LoggedOut => {
-            Check::todo(name, detail, inventory::login_hint(&state.id))
+            Check::todo(name, detail, state.login_hint())
         }
         Standing::CannotRun(why) => Check::warn(name, detail, why),
     }
@@ -594,7 +594,7 @@ fn default_harness_row(
     let standing = matching
         .first()
         .and_then(|k| installed?.iter().find(|s| s.id == k.harness))
-        .map(|state| (state.standing(), inventory::login_hint(&state.id)));
+        .map(|state| (state.standing(), state.login_hint()));
     match (&standing, on_path) {
         (Some((Standing::NotVerified(_), hint)), true) => {
             return Check::warn(
