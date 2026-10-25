@@ -584,3 +584,48 @@ fn mcp_lists_its_tools_without_a_branch_or_a_token() {
     assert!(tools.len() >= 10, "{}", tools.len());
     assert!(repo.by(&["mcp", "--root", "/r"]).status.code() == Some(2));
 }
+
+#[test]
+fn a_profile_that_cannot_route_approvals_says_how_to_allow_it() {
+    let repo = Repo::new();
+    // A PATH with git, sh and a `pi` that only knows its version: the
+    // refusal comes before Pi is started.
+    let bin = repo.dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    for tool in ["git", "sh"] {
+        let found = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|dir| dir.join(tool))
+            .find(|path| path.is_file())
+            .unwrap();
+        std::os::unix::fs::symlink(found, bin.join(tool)).unwrap();
+    }
+    fs::write(bin.join("pi"), "#!/bin/sh\necho 1.4.0\n").unwrap();
+    fs::set_permissions(
+        bin.join("pi"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let run = |extra: &[&str]| {
+        repo.command(env!("CARGO_BIN_EXE_by"))
+            .args(["run", "x", "--harness", "pi"])
+            .args(extra)
+            .env("PATH", &bin)
+            .output()
+            .unwrap()
+    };
+    let out = run(&[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let text = stderr(&out);
+    assert!(
+        text.contains(
+            "by: unsupported: pi-rpc does not route tool permission requests to Branchyard, so \
+             its tools would run without your policy\n  next: add --allow-unapproved-tools (its \
+             tools then run under the harness's own permissions, not your policy), or pick \
+             another profile: by harnesses --profiles\n"
+        ) && !text.contains("TaskOptions"),
+        "{text}"
+    );
+    let json = envelope(&run(&["--json"]));
+    assert_eq!(json["kind"], "unsupported", "{json}");
+    assert_eq!(json["next"].as_array().map(Vec::len), Some(2), "{json}");
+}

@@ -365,9 +365,22 @@ fn a_remote_dead_end_ends_with_the_fix() {
     let out = repo.by(&["--remote", "http://127.0.0.1:9", "ls"]);
     assert_eq!(out.status.code(), Some(1));
     let text = stderr(&out);
+    assert!(
+        text.starts_with("by: remote mode needs a token\n  next: "),
+        "{text}"
+    );
     assert!(text.contains("--token-file"), "{text}");
     assert!(text.contains("BRANCHYARD_TOKEN_FILE"), "{text}");
     assert!(text.contains("token_file under [remote]"), "{text}");
+    let json = repo.by(&["--remote", "http://127.0.0.1:9", "ls", "--json"]);
+    assert_eq!(json.status.code(), Some(1));
+    let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(envelope["error"]["kind"], "usage", "{envelope}");
+    assert_eq!(
+        envelope["error"]["next"].as_array().map(Vec::len),
+        Some(2),
+        "{envelope}"
+    );
 
     // A token and no server: the reason, then the way out.
     let token = repo.dir.join("token");

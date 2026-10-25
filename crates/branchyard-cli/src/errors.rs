@@ -186,6 +186,16 @@ pub(crate) fn sdk(error: &Error, branch: Option<&str>) -> Report {
             message,
             detail,
         } => by_kind(kind, message, detail.as_deref(), branch),
+        // The engine names the SDK option too; here only the flag matters.
+        Error::Unsupported(what) if what.contains("does not route tool permission requests") => {
+            let what = what.split("; allow that explicitly").next().unwrap_or(what);
+            Report::new(error.kind(), format!("unsupported: {what}"))
+                .next(
+                    "add --allow-unapproved-tools (its tools then run under the harness's own \
+                     permissions, not your policy)",
+                )
+                .next("pick another profile: by harnesses --profiles")
+        }
         other => Report::new(other.kind(), other.to_string()),
     };
     report.detail = error.detail();

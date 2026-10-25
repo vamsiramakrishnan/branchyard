@@ -38,11 +38,21 @@ pub struct Remote {
     pub args: Vec<String>,
 }
 
-/// What a remote command with no token says: all three places one can be
-/// given, and where `by serve` writes one.
-pub(crate) const NEEDS_TOKEN: &str = "remote mode needs a token: pass --token-file, set \
-     BRANCHYARD_TOKEN_FILE, or set token_file under [remote] in branchyard.toml (`by serve` \
-     writes one at .branchyard/server/token on the server's host)";
+/// What a remote command with no token says, in the error style: the three
+/// places one can be given, and where `by serve` writes one. Printed here
+/// (as JSON when `--json` is on the line), since the command has not been
+/// dispatched yet.
+fn needs_token() -> Failure {
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let report = crate::errors::Report::new("usage", "remote mode needs a token")
+        .next("pass --token-file FILE, or set BRANCHYARD_TOKEN_FILE")
+        .next(
+            "set token_file under [remote] in branchyard.toml (`by serve` writes one at \
+             .branchyard/server/token on the server's host)",
+        );
+    crate::errors::print(&report, crate::errors::wants_json(&argv));
+    Failure::Reported
+}
 
 /// What to do when a server does not answer; `by doctor`'s `server.reachable`
 /// row says the same.
@@ -76,10 +86,7 @@ impl Remote {
         let url = tunnel.as_ref().map_or(url, |t| t.url.as_str());
         let token_file = match &tunnel_token {
             Some(file) => file.as_str(),
-            None => globals
-                .token_file
-                .as_deref()
-                .ok_or_else(|| Failure::Message(NEEDS_TOKEN.into()))?,
+            None => globals.token_file.as_deref().ok_or_else(needs_token)?,
         };
         let mut client = Client::from_token_file(url, token_file)?;
         if let Some(ca) = &globals.ca_file {

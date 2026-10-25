@@ -82,10 +82,11 @@ An Antigravity turn ended `no changes` with `warning: the CLI soft-denied a writ
 ```text
 by: cannot reach http://host:8421: Connection refused (os error 111)
   next: start a server with `by serve` on that host, or fix the URL, token or CA file ([remote] url, token_file, ca_file)
-by: remote mode needs a token: pass --token-file, set BRANCHYARD_TOKEN_FILE, or set token_file under [remote] in branchyard.toml (`by serve` writes one at .branchyard/server/token on the server's host)
+by: remote mode needs a token
+  next: pass --token-file FILE, or set BRANCHYARD_TOKEN_FILE, or set token_file under [remote] in branchyard.toml (`by serve` writes one at .branchyard/server/token on the server's host)
 ```
 
-The first comes from `--remote` (or `BRANCHYARD_REMOTE`, or `[remote] url`) when nothing answers; the second when no token file is given. `by doctor` shows the first as `server.reachable` with the same next step, and with `--json` the failure is `{"error": {"kind": "remote_unreachable", …}}`. Check the scheme and port, start `by serve` on the host, and pass `--ca-file` for an https server with a private CA. Without `--remote`, commands run here and need no server.
+The first comes from `--remote` (or `BRANCHYARD_REMOTE`, or `[remote] url`) when nothing answers; the second when no token file is given. `by doctor` shows the first as `server.reachable` with the same next step, and with `--json` the failures are `{"error": {"kind": "remote_unreachable", …}}` and `{"error": {"kind": "usage", …}}`, each with its `next` list. Check the scheme and port, start `by serve` on the host, and pass `--ca-file` for an https server with a private CA. Without `--remote`, commands run here and need no server.
 
 ### `this build has no PostgreSQL support` and `this build has no Microsandbox support`
 
