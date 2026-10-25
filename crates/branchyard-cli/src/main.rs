@@ -47,6 +47,7 @@ mod review;
 mod review_format;
 mod rig;
 mod services_cmd;
+mod setup_cmd;
 mod setup_io;
 mod ssh_remote;
 mod stats_cmd;
@@ -85,9 +86,19 @@ fn main() -> ExitCode {
             return ExitCode::from(error.exit_code() as u8);
         }
     };
+    // No command: where this repository stands and the one next step, not
+    // the sixty commands (`by --help` lists them).
     let Some(command) = cli.command else {
-        branchyard_support::best_effort("print the help", args::command().print_help());
-        return ExitCode::SUCCESS;
+        return match setup_cmd::card() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(Failure::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe => {
+                ExitCode::SUCCESS
+            }
+            Err(failure) => {
+                eprintln!("by: {failure}");
+                ExitCode::FAILURE
+            }
+        };
     };
     // Run by a Claude Code session on every prompt and redraw: the
     // configuration only to find the yard, no logging, and never a failure, whatever the
@@ -185,6 +196,7 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         }
         // Setup needs no repository or server: it may be what creates them.
         Command::Init { init } => return init::main(env, &init),
+        Command::Setup { setup } => return setup_cmd::main(env, &setup),
         Command::Config { json, action } => return config_cmd::main(&action, json),
         // Doctor reports a broken configuration, a missing store or an
         // unreachable server rather than stopping at it.
@@ -704,6 +716,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Completions { .. }
         | Command::Man
         | Command::Init { .. }
+        | Command::Setup { .. }
         | Command::Config { .. }
         | Command::Doctor { .. }
         | Command::Up { .. }

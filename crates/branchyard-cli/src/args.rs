@@ -745,13 +745,14 @@ pub fn unset_blank_env() {
 pub struct Cli {
     #[command(flatten)]
     pub globals: Globals,
-    /// `None` prints the general help.
+    /// `None` prints the status card (`crate::setup_cmd::card`); `--help` is the general help.
     #[command(subcommand)]
     pub command: Option<Command>,
 }
 
 /// The groups of `by --help`'s command list, by `display_order / 100`.
 pub const GROUPS: &[(usize, &str)] = &[
+    (0, "Start here"),
     (1, "Work on branches"),
     (2, "Inspect"),
     (3, "Delegate and coordinate (usually from inside a harness)"),
@@ -1067,6 +1068,33 @@ Examples:
   by watch
   by watch --interval 250ms
   by watch --once | less";
+
+const SETUP_EXAMPLES: &str = "\
+Steps, in order, each skipped when there is nothing to do:
+  detect     the repository, the harnesses on PATH with their versions, whether each is
+             logged in, and the check command the repository's files suggest
+  config     branchyard.toml with the detected defaults, when there is none; on a terminal
+             it asks only what cannot be detected (the default harness when several are
+             logged in, a check when none is found, isolation)
+  hooks      each harness on PATH that has an install (by init plugin): its hooks,
+             commands and skills, with every file listed first; then a model-free check
+             that its hook command answers
+  logins     for each harness that is logged out or whose login cannot be told, the
+             command to run; setup never starts a login flow
+Prints a short card: what was detected, written and installed, \"Only you can do:\" lines,
+and the next command. A second run writes nothing and says so. Exit 0 when done, even with
+things left for you; 1 only on a real error. Without a terminal and without --yes it
+behaves as --dry-run.
+
+Examples:
+  by setup                       # asks once before writing, on a terminal
+  by setup --yes                 # take the defaults, ask nothing
+  by setup --dry-run             # show everything, write nothing
+  by setup --yes --harness claude-code,codex
+  by setup --yes --no-hooks      # branchyard.toml only
+  by setup --json --dry-run      # detected, written, installed, todo, next
+
+See docs/setup.md#one-command.";
 
 const INIT_EXAMPLES: &str = "\
 Examples:
@@ -2135,6 +2163,12 @@ pub enum Command {
     /// Print by's man page (roff), for `man -l -` or a man directory
     #[command(display_order = 601)]
     Man,
+    /// Set this repository up in one command: project defaults, hooks for the harnesses on PATH, and what only you can do
+    #[command(display_order = 1, after_help = SETUP_EXAMPLES)]
+    Setup {
+        #[command(flatten)]
+        setup: SetupFlags,
+    },
     /// Set up Branchyard by interview: project defaults, a server, a rig, a deployment, skills
     #[command(display_order = 602, after_help = INIT_EXAMPLES)]
     Init {
@@ -2620,6 +2654,8 @@ pub struct InitArgs {
     pub harnesses: Vec<String>,
     /// `by init plugin --all-detected`.
     pub all_detected: bool,
+    /// `by init plugin --status`: what is installed, and what is left to do.
+    pub status: bool,
 }
 
 /// `by init`'s options. At most one step; a step needs a topic; `--answers`
@@ -2637,6 +2673,10 @@ pub struct InitFlags {
     /// With plugin: every harness found on PATH
     #[arg(long, conflicts_with = "harnesses")]
     all_detected: bool,
+    /// With plugin: per harness, whether its install is current, stale or missing, whether `by`
+    /// is on PATH for its hooks, and the one-time steps still left to you; writes nothing
+    #[arg(long, conflicts_with_all = ["all_detected", "next", "dry_run", "apply"])]
+    status: bool,
     /// Print JSON (schema/setup.protocol.json): the topics, or the step's result
     #[arg(long)]
     json: bool,
@@ -2684,8 +2724,8 @@ impl Flags for InitFlags {
             _ => None,
         };
         let plugin = self.topic == Some(branchyard_setup::Topic::Plugin);
-        if (!self.harnesses.is_empty() || self.all_detected) && !plugin {
-            return Err("harnesses and --all-detected go with by init plugin".into());
+        if (!self.harnesses.is_empty() || self.all_detected || self.status) && !plugin {
+            return Err("harnesses, --all-detected and --status go with by init plugin".into());
         }
         if self.json && self.topic.is_some() && step.is_none() && !plugin {
             return Err("with --json and a topic, give --next, --dry-run or --apply".into());
@@ -2699,8 +2739,39 @@ impl Flags for InitFlags {
             force: self.force,
             harnesses: self.harnesses,
             all_detected: self.all_detected,
+            status: self.status,
         })
     }
+}
+
+/// `by setup`'s options.
+#[derive(Args, Clone, Debug, Default, PartialEq, Eq)]
+pub struct SetupFlags {
+    /// Take every default and ask nothing (the only way to write without a terminal)
+    #[arg(long)]
+    pub yes: bool,
+    /// Show what would be detected, written and installed; write nothing
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Print one JSON object: detected, written, installed, todo, next
+    #[arg(long)]
+    pub json: bool,
+    /// Install hooks only for these harnesses, named even if not on PATH (default: every harness
+    /// on PATH that has an install; by init plugin lists them)
+    #[arg(
+        long = "harness",
+        value_name = "ID",
+        num_args = 1..,
+        value_delimiter = ',',
+        conflicts_with = "no_hooks"
+    )]
+    pub harnesses: Vec<String>,
+    /// Do not install hooks, commands or skills into any harness
+    #[arg(long)]
+    pub no_hooks: bool,
+    /// Do not write branchyard.toml
+    #[arg(long)]
+    pub no_config: bool,
 }
 
 /// `by init`'s topics, from [`branchyard_setup::Topic::ALL`]: completed by
@@ -6876,8 +6947,11 @@ mod tests {
                 force: false,
                 harnesses: Vec::new(),
                 all_detected: false,
+                status: false,
             }
         );
+        assert!(init("init plugin --status").status);
+        assert!(init("init plugin --status --json").json);
         let plugin = init("init plugin codex hermes --dry-run");
         assert_eq!(plugin.harnesses, ["codex", "hermes"]);
         assert_eq!(plugin.step, Some(InitStep::DryRun));
@@ -6904,6 +6978,61 @@ mod tests {
         for topic in Topic::ALL {
             assert_eq!(init(&format!("init {}", topic.id())).topic, Some(topic));
         }
+    }
+
+    fn setup(line: &str) -> SetupFlags {
+        match parse_str(line).unwrap() {
+            Command::Setup { setup } => setup,
+            other => panic!("{line}: parsed as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setup_takes_its_flags_and_is_the_first_command_listed() {
+        assert_eq!(setup("setup"), SetupFlags::default());
+        let all = setup("setup --yes --dry-run --json --no-config");
+        assert!(all.yes && all.dry_run && all.json && all.no_config && !all.no_hooks);
+        // Harnesses, comma-separated or as several values.
+        assert_eq!(
+            setup("setup --harness claude-code,codex").harnesses,
+            ["claude-code", "codex"]
+        );
+        assert_eq!(
+            setup("setup --yes --harness claude-code codex --no-config").harnesses,
+            ["claude-code", "codex"]
+        );
+        assert!(setup("setup --no-hooks").no_hooks);
+        // Naming harnesses and installing none contradict.
+        let error = parse_str("setup --harness codex --no-hooks").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{error}");
+        assert_eq!(error.exit_code(), 2);
+        assert_eq!(
+            parse_str("setup --bogus").unwrap_err().kind(),
+            ErrorKind::UnknownArgument
+        );
+        // "Start here" leads the list, with setup in it.
+        let general = command().render_help().to_string();
+        let start = general.find("Start here:").unwrap();
+        assert!(
+            start < general.find("Work on branches:").unwrap(),
+            "{general}"
+        );
+        assert!(
+            general[start..].starts_with("Start here:\n  setup "),
+            "{general}"
+        );
+        let help = help("setup");
+        for word in [
+            "--yes",
+            "--dry-run",
+            "--json",
+            "--harness <ID>",
+            "--no-hooks",
+            "--no-config",
+        ] {
+            assert!(help.contains(word), "{word} missing from:\n{help}");
+        }
+        assert!(help.contains("docs/setup.md#one-command"), "{help}");
     }
 
     #[test]
@@ -6952,12 +7081,22 @@ mod tests {
             (
                 "init project extra",
                 ErrorKind::ArgumentConflict,
-                "harnesses and --all-detected go with by init plugin",
+                "harnesses, --all-detected and --status go with by init plugin",
             ),
             (
                 "init rig --all-detected",
                 ErrorKind::ArgumentConflict,
                 "go with by init plugin",
+            ),
+            (
+                "init rig --status",
+                ErrorKind::ArgumentConflict,
+                "go with by init plugin",
+            ),
+            (
+                "init plugin --status --apply",
+                ErrorKind::ArgumentConflict,
+                "cannot be used with",
             ),
             (
                 "init plugin codex --all-detected",

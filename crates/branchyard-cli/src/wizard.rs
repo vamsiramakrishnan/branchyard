@@ -169,7 +169,8 @@ pub fn review_text(plan: &Plan, color: bool) -> String {
     out
 }
 
-fn cancelled(error: io::Error) -> Failure {
+/// A prompt that ended: Ctrl-C is a cancel, said once and not an error.
+pub(crate) fn cancelled(error: io::Error) -> Failure {
     if error.kind() == io::ErrorKind::Interrupted {
         branchyard_support::best_effort(
             "print the cancel message",
@@ -181,7 +182,7 @@ fn cancelled(error: io::Error) -> Failure {
 }
 
 /// Ask one question; the answer as the engine takes it.
-fn ask(q: &Question) -> io::Result<Value> {
+pub(crate) fn ask(q: &Question) -> io::Result<Value> {
     let prompt = format!("{}\n{}", q.prompt, paint(true, "2", &q.why));
     let text_input = |q: &Question| -> io::Result<Value> {
         let checker = q.clone();
