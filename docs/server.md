@@ -11,7 +11,7 @@ cd path/to/repo
 by serve                      # serves this repository as its directory name on 127.0.0.1:8421
 # branchyard-server: created a token in .branchyard/server/token; clients pass --token-file with it
 
-by --remote http://127.0.0.1:8421 --token-file .branchyard/server/token ls
+by --remote http://127.0.0.1:8421 --token-file .branchyard/server/token ls   # or [remote] token_file in branchyard.toml
 
 branchyard-server token new --tenant acme --scopes read,run --repo app
 # branchyard-server: token (printed once; give it to the client, never store it): <token>
@@ -23,7 +23,9 @@ by init server                # or: an interview that writes the configuration, 
 by serve --config .branchyard/server.json --check   # load and validate it; serve nothing
 ```
 
-[`by init server`](setup.md) asks for the listen address and TLS, SQLite or PostgreSQL, tenants and their quotas, scopes, providers, delegation, secrets by reference and a webhook, and checks what it writes with the same loader and validation `--check` runs. `--check` builds the configuration exactly as serving would and exits: it binds nothing, and where serving would create a default token it only says so.
+[`by init server`](setup.md) asks for the listen address and TLS, SQLite or PostgreSQL, tenants and their quotas, scopes, providers, delegation, secrets by reference and a webhook, and checks what it writes with the same loader and validation `--check` runs. `--check` builds and validates the configuration as serving would and exits: it binds nothing, opens no store and connects to no database, and where serving would create a default token it only says so. It does refuse what the build cannot serve: a `database` on a build without the `postgres` feature fails with the command that adds it ([modes](modes.md#postgres)).
+
+A server given no credential makes a token at `<data dir>/token` the first time, and every start logs that path (`token_file`) so a client knows what to pass; `by init server`'s tokens are in the `tokens/` directory beside its file instead, and its summary lists them.
 
 Flags (`by serve --help`, `by help serve` or `branchyard-server --help`, grouped there under TLS, what requests may do, operations and webhooks; everything after `by serve` is the server's, so its `--repo` and `--token-file` are these, not `by`'s global ones):
 

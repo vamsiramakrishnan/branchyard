@@ -53,6 +53,8 @@ Rows come in this order, and their names are stable: a script may match on them.
 | `host.loopback` | A listener can be opened on `127.0.0.1`, which the egress proxy and the gateways use | it cannot | |
 | `host.kvm` | Read-write access to `/dev/kvm`, which `--provider microsandbox` needs | Linux without it | |
 | `server.reachable` | A server named by `--remote`, `BRANCHYARD_REMOTE` or `[remote] url` answers `GET /v1/repos` with the token in the token file, and serves the `repo` named, if one is | | no token file, an unreadable token or CA file, no answer within 5 seconds, a refusal, or the repository named is not served |
+| `serve.config` | With `[serve] config`: the server file it names (relative to the repository) validates, as `by serve --check` reads it. No row without `[serve]` | it validates with warnings (a TLS file that does not exist yet, plain HTTP beyond loopback, a provider this build cannot run) | the file does not load or validate, or names a `database` on a build without the `postgres` feature |
+| `serve.database` | With `[serve] config`: which store the file names, SQLite in its data directory or PostgreSQL (host and database, never the user or password), and whether this build can open it. A name, not a connection | the file does not load, so the store cannot be named | PostgreSQL on a build without the `postgres` feature: `by serve` would refuse to start |
 | `models.keys` | With `[models]`: each backend's key, as the gateway reads it (an entry of `[secrets]`, else a variable of that name), is set, by name | a backend that needs a key names none, or `[models]` names no backend | a key variable that is unset, or a key file that is missing |
 | `models.prices` | With `[[models.routes]]`: each route that names one model has a price on every backend the gateway may send it to (its weighted backends and fallbacks), as the model that backend is asked for: the route's, or its `backend_model` where the call is translated; from `[models.prices]` or the built-in catalog | a routed model nothing prices on a backend it may reach: those calls are recorded unpriced, and a dollar budget cannot count them | |
 
@@ -137,7 +139,8 @@ The exit status is 0. Where a row would fail, the summary reads `fail: 1 failed,
 
 - It does not repair. Each fix is a command for you to run: `by init`, `by workspace trust`, `by services gc`, `by harnesses login ID`.
 - It does not run a recipe's own doctor (`by recipe check NAME` does, and a smoke test), a harness, a model call or a sandbox. It does not reach a Microsandbox or Substrate provider.
-- It does not look at `[connectors]`, `[sync]`, `[serve]`, `[usage]`, trackers, the `gh` CLI, or the recipes other than the default provider's.
+- It does not look at `[connectors]`, `[sync]`, `[usage]`, trackers, the `gh` CLI, or the recipes other than the default provider's.
+- `serve.config` and `serve.database` read the server file `[serve] config` names. They never start the server, open its stores or connect to its database: a wrong host, user or password shows when `by serve` starts.
 - Nothing is checked on a server beyond `GET /v1/repos`; `by --remote URL harnesses` and `by --remote URL services` show more.
 
 ## Adding a check
