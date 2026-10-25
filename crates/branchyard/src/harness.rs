@@ -75,16 +75,16 @@ pub(crate) const REPORTS: &[(&str, &str)] = &[
         include_str!("../../../docs/qualification/oh-my-pi-acp.json"),
     ),
     (
-        "qwen-code-acp",
-        include_str!("../../../docs/qualification/qwen-code-acp.json"),
-    ),
-    (
         "opencode-acp",
         include_str!("../../../docs/qualification/opencode-acp.json"),
     ),
     (
         "pi-rpc",
         include_str!("../../../docs/qualification/pi-rpc.json"),
+    ),
+    (
+        "qwen-code-acp",
+        include_str!("../../../docs/qualification/qwen-code-acp.json"),
     ),
 ];
 

@@ -27,7 +27,7 @@ See [modes](modes.md) for how to choose between these.
 
 | Subsystem | State | Last evidence | Read |
 |---|---|---|---|
-| Local engine and `by` (run, fan, send, fork, merge, checkpoints, delegation, graphs, rigs) | built; hermetic; a few real runs | 27 September 2026: `by run`, `by diff`, `by merge` with Claude Code 2.1.283. 8 and 9 October 2026: a twelve-scenario delegation battery with real Claude Code children passed 12 of 12 | [validation](validation.md), [dogfood](dogfood/round5/README.md), [delegation](delegation.md) |
+| Local engine and `by` (run, fan, send, fork, merge, checkpoints, delegation, graphs, rigs) | built; hermetic; a few real runs | 27 September 2026: `by run`, `by diff`, `by merge` with Claude Code 2.1.283. 8 and 9 October 2026: a twelve-scenario delegation battery with real Claude Code children passed 12 of 12. 25 October 2026: `by setup`, `by run`, `show`, `diff`, `log`, `merge`, `rm` and `send` in ten harnesses on GLM (Z.ai) and Gemini models, and the `testing-live.md` checks on Gemini CLI ([qualification](qualification/README.md#results-25-october-2026), [roadmap](roadmap.md)) | [validation](validation.md), [dogfood](dogfood/round5/README.md), [delegation](delegation.md) |
 | `by serve` and `by worker` | built; hermetic over HTTP on loopback | None recorded through a real harness; not load-tested; not deployed (the status note in [server](server.md)) | [server](server.md), [surfaces](surfaces.md) |
 | PostgreSQL store | built behind the `postgres` feature (`cargo install --features postgres`) | 29 September 2026: the suites against a throwaway PostgreSQL 16. 11 October 2026: a real PostgreSQL 16.13 run for the feed-lock fix. Not run: servers on more than one host | [durability](durability.md), [deploy](deploy.md) |
 | Sandbox providers: Microsandbox (`microsandbox` feature), Agent Substrate | built; unqualified | None against a real runtime: Microsandbox's KVM tests and a Substrate cluster have not been run. Pause, snapshot and live branching are tested against fakes | [providers](providers.md), [substrate](substrate.md), [live testing](testing-live.md) |
@@ -35,13 +35,13 @@ See [modes](modes.md) for how to choose between these.
 | Fleet routing and judge | built; hermetic; run on real harnesses | 16 October 2026: routed fans on Codex, Oh My Pi and DeepSeek Harness, and a model's verdict (Oh My Pi on GLM-5.3) was used. A failover has not fired in a live run | [fleet](fleet.md) |
 | Connectors, triggers, effects and the web companion | built; hermetic | Connectors and effects: tested against a mock gateway and Anvil's own test gateway, not yet used by a real harness (3 October 2026). Triggers: no delivery from a real GitHub, Slack, Linear or mail provider. Companion: no real push service | [connectors](connectors.md), [triggers](triggers.md), [effects](effects.md), [companion](companion.md) |
 | Sync and task repositories | built; hermetic | 3 October 2026: directory and git backends, in-process stand-ins for S3, Cloud Storage and Azure | [sync](sync.md), [task repositories](task-repos.md) |
-| Hooks and status lines | built for every harness with an install manifest | 24 October 2026: see the table below | [harness hooks](harness-hooks.md) |
-| SDKs | Python `branchyard.py` and `branchyard_client.py`, Rust `branchyard` and `branchyard-client`: built; hermetic. TypeScript client: not built | 24 October 2026: one script run both inside and outside a harness turn. Installed from a checkout or the SDK archive; the Rust crates are not published | [SDKs](sdk.md) |
+| Hooks and status lines | built for every harness with an install manifest | 24 and 25 October 2026: see the table below; on 25 October the reworded lines were repeated by real models in ten harnesses ([harness hooks](harness-hooks.md)) | [harness hooks](harness-hooks.md) |
+| SDKs | Python `branchyard.py` and `branchyard_client.py`, Rust `branchyard` and `branchyard-client`: built; hermetic. TypeScript client: not built | 24 October 2026: one script run both inside and outside a harness turn. 25 October 2026: the two Python examples ran as written against Gemini CLI. Installed from a checkout or the SDK archive; the Rust crates are not published | [SDKs](sdk.md) |
 | Distribution | `cargo install` from a clone works. Prebuilt binaries, `install.sh` and a Homebrew formula: written; the release workflow has never run | No GitHub release or tag exists | [distribution](distribution.md) |
 
 ## Harness drivers
 
-<!-- fact:profiles.summary -->17 driver profiles cover 15 of 16 harness targets: 7 live-qualified, 2 partial and 8 unqualified.<!-- /fact -->
+<!-- fact:profiles.summary -->17 driver profiles cover 15 of 16 harness targets: 9 live-qualified, 2 partial and 6 unqualified.<!-- /fact -->
 
 A live run is protocol qualification against the real binary as a local process. It is not a sandbox run: isolation, credentials and recovery are unqualified for every profile. "Permissions answered" and "Steer" are the two gates Branchyard can intercept mid-turn; [compatibility](compatibility.md) defines their values and lists every capability and the reason for each `no`.
 
@@ -54,11 +54,11 @@ A live run is protocol qualification against the real binary as a local process.
 | Codex | `codex-app-server` (default) | live-qualified | 9 of 9 pass, 2026-10-25, codex-cli 0.164.0 ([report](qualification/codex-app-server.json)) | live-tested | live-tested |
 | Codex | `codex-acp` (alternate) | unqualified | not run | contract-only | not verified |
 | Antigravity | `antigravity-stream-json` (default) | live-qualified | 9 of 9 pass, 2026-10-25, 1.4.7 ([report](qualification/antigravity-stream-json.json)) | — | — |
-| Oh My Pi | `oh-my-pi-acp` (default) | live-qualified | 9 of 9 pass, 2026-10-16, omp/18.10.3 ([report](qualification/oh-my-pi-acp.json)) | live-tested | not verified |
+| Oh My Pi | `oh-my-pi-acp` (default) | live-qualified | 9 of 9 pass, 2026-10-25, omp/18.12.6 ([report](qualification/oh-my-pi-acp.json)) | live-tested | not verified |
 | DeepSeek Harness | `deepseek-harness-acp` (default) | partial | 6 of 9 pass, 2026-10-25, 0.2.1-rc.2 ([report](qualification/deepseek-harness-acp.json)) | live-tested | not verified |
 | Gemini CLI | `gemini-cli-acp` (default) | live-qualified | 9 of 9 pass, 2026-10-25, 0.65.0 ([report](qualification/gemini-cli-acp.json)) | live-tested | not verified |
-| OpenCode | `opencode-acp` (default) | unqualified | not run | contract-only | not verified |
-| Pi | `pi-rpc` (default) | unqualified | not run | — | live-tested |
+| OpenCode | `opencode-acp` (default) | live-qualified | 9 of 9 pass, 2026-10-25, 1.19.4 ([report](qualification/opencode-acp.json)) | live-tested | not verified |
+| Pi | `pi-rpc` (default) | live-qualified | 9 of 9 pass, 2026-10-25, 1.4.0 ([report](qualification/pi-rpc.json)) | — | live-tested |
 | Goose | `goose-acp` (default) | unqualified | not run | contract-only | not verified |
 | Aider | none | not built | — | — | — |
 | Cursor CLI | `cursor-acp` (default) | unqualified | not run | contract-only | not verified |
@@ -72,7 +72,7 @@ A live run is protocol qualification against the real binary as a local process.
 
 ## Hooks per harness
 
-`by hook` and `by statusline` tell a session a person started in a harness what Branchyard's branches did ([harness hooks](harness-hooks.md)). On 24 October 2026 the hooks were run with a model, and the model repeated the note, in Claude Code 2.1.310, Codex 0.164.0, Gemini CLI 0.65.0, Qwen Code 0.26.0, DeepSeek Harness 0.2.1-rc.2, Pi 0.73.1, Oh My Pi 18.12.6, OpenCode 1.19.4, Hermes 0.19.0 and Antigravity 1.4.7. For Copilot CLI, Droid, Cursor and Kiro the payloads are written from documentation and the CLIs have not been run; the Amp plugin was run against a fake host API. Goose documents no way to add context, so it has no dialect.
+`by hook` and `by statusline` tell a session a person started in a harness what Branchyard's branches did ([harness hooks](harness-hooks.md)). On 24 October 2026 the hooks were run with a model, and the model repeated the note, in Claude Code 2.1.310, Codex 0.164.0, Gemini CLI 0.65.0, Qwen Code 0.26.0, DeepSeek Harness 0.2.1-rc.2, Pi 0.73.1, Oh My Pi 18.12.6, OpenCode 1.19.4, Hermes 0.19.0 and Antigravity 1.4.7; on 25 October 2026 the same ten (Pi 1.4.0 as well) repeated the reworded lines after `by setup --yes` alone had installed the hooks, each in a private home. For Copilot CLI, Droid, Cursor and Kiro the payloads are written from documentation and the CLIs have not been run; the Amp plugin was run against a fake host API. Goose documents no way to add context, so it has no dialect.
 
 ## Crates
 

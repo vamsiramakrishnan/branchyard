@@ -133,20 +133,20 @@ class DocsFacts(Tree):
     def test_the_harness_table_follows_the_compatibility_page(self):
         status = self.root / "docs" / "status.md"
         before = status.read_text()
-        self.assertIn("| Gemini CLI | `gemini-cli-acp` (default) | partial | 8 of 9 pass,", before)
+        self.assertIn("| DeepSeek Harness | `deepseek-harness-acp` (default) | partial | 6 of 9 pass,", before)
         self.assertIn("| Aider | none | not built |", before)
-        self.assertIn("| OpenCode | `opencode-acp` (default) | unqualified | not run |", before)
+        self.assertIn("| Goose | `goose-acp` (default) | unqualified | not run |", before)
         self.edit(
             "docs/compatibility.md",
-            "[8 of 9 pass](qualification/gemini-cli-acp.json)",
-            "[9 of 9 pass](qualification/gemini-cli-acp.json)",
+            "[6 of 9 pass](qualification/deepseek-harness-acp.json)",
+            "[9 of 9 pass](qualification/deepseek-harness-acp.json)",
         )
         done = self.facts("--check")
         self.assertNotEqual(done.returncode, 0)
         self.assertIn("docs/status.md", done.stderr)
         self.assertEqual(self.facts("--write").returncode, 0)
         after = status.read_text()
-        self.assertIn("| Gemini CLI | `gemini-cli-acp` (default) | live-qualified | 9 of 9 pass,", after)
+        self.assertIn("| DeepSeek Harness | `deepseek-harness-acp` (default) | live-qualified | 9 of 9 pass,", after)
         counts = re.search(
             r"cover (\d+) of (\d+) harness targets: (\d+) live-qualified, (\d+) partial and (\d+) unqualified", after
         )
