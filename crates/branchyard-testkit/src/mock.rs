@@ -287,6 +287,45 @@ impl MockHttp {
     }
 }
 
+/// A listener that is not an HTTP server: it answers each of the first
+/// `connections` connections with `banner` and closes it, as an SSH daemon
+/// or a database would. For tests of code that must tell such a port from
+/// one of ours.
+pub struct Banner {
+    addr: SocketAddr,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Banner {
+    /// Start listening on a free loopback port.
+    pub fn start(banner: &'static [u8], connections: usize) -> Banner {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind a loopback port");
+        let addr = listener.local_addr().expect("the bound address");
+        let thread = std::thread::spawn(move || {
+            for stream in listener.incoming().take(connections) {
+                let Ok(mut stream) = stream else { return };
+                branchyard_support::best_effort("write a banner", stream.write_all(banner));
+            }
+        });
+        Banner {
+            addr,
+            thread: Some(thread),
+        }
+    }
+
+    /// The address a client connects to.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Wait until the connections have been served.
+    pub fn finish(mut self) {
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("the banner thread");
+        }
+    }
+}
+
 impl Drop for MockHttp {
     fn drop(&mut self) {
         let errors = self.shutdown();

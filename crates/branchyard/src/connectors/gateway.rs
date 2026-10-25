@@ -463,7 +463,7 @@ impl Background {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use branchyard_testkit::{MockHttp, Response};
+    use branchyard_testkit::{Banner, MockHttp, Response};
 
     fn command(anvil: &[&str]) -> GatewayCommand {
         GatewayCommand {
@@ -591,21 +591,12 @@ mod tests {
             Held::Other(_)
         ));
 
-        // Not HTTP at all: a banner, then the connection closes.
-        let raw = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/mcp", raw.local_addr().unwrap());
-        let banner = std::thread::spawn(move || {
-            // The probe's first connection only checks that it connects.
-            for stream in raw.incoming().take(2) {
-                let mut stream = stream.unwrap();
-                branchyard_support::best_effort(
-                    "write a banner",
-                    stream.write_all(b"SSH-2.0-OpenSSH_9.6\r\n"),
-                );
-            }
-        });
+        // Not HTTP at all: a banner, then the connection closes. (The
+        // probe's first connection only checks that it connects.)
+        let banner = Banner::start(b"SSH-2.0-OpenSSH_9.6\r\n", 2);
+        let url = format!("http://{}/mcp", banner.addr());
         assert!(matches!(probe(&url), Held::Other(_)));
-        banner.join().unwrap();
+        banner.finish();
 
         // Accepts and never speaks: not waited on for long.
         let silent = MockHttp::start(|_| Response::hang());

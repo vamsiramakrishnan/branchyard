@@ -1270,11 +1270,8 @@ mod tests {
 
     #[test]
     fn a_configuration_files_tenants_and_credentials_reach_the_server() {
-        let dir =
-            std::env::temp_dir().join(format!("branchyard-cli-tenants-{}", std::process::id()));
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
+        let scratch = branchyard_testkit::Scratch::new("cli-tenants");
+        let dir = scratch.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let hash = crate::config::sha256_hex(b"acme-token-0123456789");
         let file = dir.join("config.json");
@@ -1318,10 +1315,8 @@ mod tests {
 
     #[test]
     fn check_validates_without_writing_anything() {
-        let dir = std::env::temp_dir().join(format!("branchyard-cli-check-{}", std::process::id()));
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
+        let scratch = branchyard_testkit::Scratch::new("cli-check");
+        let dir = scratch.path().to_path_buf();
         std::fs::create_dir_all(dir.join("app")).unwrap();
         let file = dir.join("config.json");
         std::fs::write(
@@ -1356,10 +1351,8 @@ mod tests {
     /// the check passes without connecting to anything.
     #[test]
     fn check_fails_for_a_database_this_build_cannot_open() {
-        let dir = std::env::temp_dir().join(format!("branchyard-cli-pg-{}", std::process::id()));
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
+        let scratch = branchyard_testkit::Scratch::new("cli-pg");
+        let dir = scratch.path().to_path_buf();
         std::fs::create_dir_all(dir.join("app")).unwrap();
         let file = dir.join("config.json");
         // Nothing listens at this address: a pass means no connection.
@@ -1406,10 +1399,8 @@ mod tests {
     /// is on the resolved configuration for the start log.
     #[test]
     fn the_token_file_serving_makes_is_named() {
-        let dir = std::env::temp_dir().join(format!("branchyard-cli-tok-{}", std::process::id()));
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
+        let scratch = branchyard_testkit::Scratch::new("cli-tok");
+        let dir = scratch.path().to_path_buf();
         std::fs::create_dir_all(dir.join("app")).unwrap();
         let file = dir.join("config.json");
         std::fs::write(

@@ -1971,7 +1971,7 @@ mod tests {
         let output = "by-inventory 1\nhost box\nos Linux\nchecked codex\n\
             found codex 1 /bin/codex\nversion codex 0\nversion-out codex codex-cli 0.157.1\n\
             status codex 1\n\
-            status-out codex WARNING: proceeding, even though we could not update PATH: Refusing to create helper binaries under temporary dir \"/tmp/x\" (codex_home: AbsolutePathBuf(\"/tmp/claude-0/-home-user-branchyard/f2a73\n\
+            status-out codex WARNING: proceeding, even though we could not update PATH: Refusing to create helper binaries under temporary dir \"/scratch/x\" (codex_home: AbsolutePathBuf(\"/scratch/claude-0/-home-user-branchyard/f2a73\n\
             status-out codex Not logged in\nend\n";
         let codex = parse(output, 7).unwrap();
         let login = &codex.get("codex").unwrap().login;
