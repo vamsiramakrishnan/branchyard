@@ -767,7 +767,7 @@ fn start(yard: &Yard, mut record: Record, options: &TaskOptions) -> Result<Optio
     let Some(fence) = store.graph().claim(&record, store.owner(), LEASE_TTL)? else {
         return Ok(None);
     };
-    let lease = Lease::new(store.clone(), fence);
+    let lease = Lease::new(store.clone(), fence)?;
     let (record, lease) = run::materialize(yard, record, lease)?;
     let started = record.clone();
     // A child that plans first gets the planning prompt, read-only.

@@ -492,7 +492,23 @@ pub(crate) fn summary(
             None => text.push_str("; cost unknown"),
         }
         text.push('\n');
-        let events = record::read(store, child).unwrap_or_default();
+        // A log that cannot be read does not stop the wake (the parent would
+        // stay parked), and does not read as an empty one (its result would
+        // read as owed and not given): the parent is told what is missing.
+        let events = match record::read(store, child) {
+            Ok(events) => events,
+            Err(error) => {
+                branchyard_support::best_effort(
+                    &format!("read the log of {child} for a wake"),
+                    Err::<(), _>(&error),
+                );
+                text.push_str(&format!(
+                    "  warning: its log could not be read, so its last message and result are \
+                     missing here: {error}\n"
+                ));
+                continue;
+            }
+        };
         let last = delegation::last_message(&events);
         let last = last.trim();
         if !last.is_empty() {

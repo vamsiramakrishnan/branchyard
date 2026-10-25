@@ -142,7 +142,7 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         // Another engine recovered or renewed it first.
         return Ok(None);
     };
-    let lease = Lease::new(store.clone(), fence.clone());
+    let lease = Lease::new(store.clone(), fence.clone())?;
     let mut record = match store.read(&row.branch) {
         Ok(record) => record,
         Err(Error::UnknownBranch(_)) => return Ok(None),

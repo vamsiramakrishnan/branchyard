@@ -297,7 +297,52 @@ fn hold_cut(
 /// become the branch's status; errors are state errors, after which the
 /// record says `Failed` if it could still be written. A lost lease is
 /// [`Error::Fenced`], and nothing more is written.
+///
+/// A step the turn survived (a sandbox that would not tear down, a lease
+/// that would not release) is logged where it happens and, so that it is
+/// still there when the run is over, recorded as a warning in the branch's
+/// own log: see [`crate::SURVIVED_FAILURE`].
 pub(crate) fn execute(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
+    let yard = turn.yard.clone();
+    let branch = lease.fence().branch.clone();
+    let (result, survived) = branchyard_support::collect_failures(|| execute_turn(turn, lease));
+    // Another engine owns the branch now: its log is not this one's to write.
+    if !matches!(result, Err(Error::Fenced(_))) {
+        record_survived(&yard, &branch, &survived);
+    }
+    result
+}
+
+/// How many survived failures one turn writes into its branch's log; the
+/// rest are in the process's log.
+const SURVIVED_RECORDED: usize = 20;
+
+/// Append a warning to `branch`'s log for each of `survived`, once each.
+fn record_survived(yard: &Yard, branch: &str, survived: &[branchyard_support::Failure]) {
+    let store = yard.store();
+    let mut seen = std::collections::HashSet::new();
+    for failure in survived
+        .iter()
+        .filter(|f| seen.insert((f.context.as_str(), f.error.as_str())))
+        .take(SURVIVED_RECORDED)
+    {
+        let event = crate::RecordedEvent {
+            at_ms: branchyard_support::time::now_ms(),
+            activity: Activity::Warning(format!(
+                "{}{}: {}",
+                crate::SURVIVED_FAILURE,
+                failure.context,
+                failure.error
+            )),
+        };
+        branchyard_support::best_effort(
+            "record a survived failure in the branch's log",
+            store.append(branch, &event, None),
+        );
+    }
+}
+
+fn execute_turn(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
     let store = turn.yard.store();
     let fence = lease.fence().clone();
     let mut record = turn.record.clone();

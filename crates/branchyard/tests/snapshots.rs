@@ -960,11 +960,14 @@ fn a_prepared_environment_is_a_snapshot_later_sandboxes_branch_from() {
     assert!(reason.unwrap().contains("by env rebuild"));
 
     // Pruning it releases the snapshot.
-    let pruned = f.yard.prune_environments(
-        1,
-        std::time::Duration::from_secs(3600),
-        std::slice::from_ref(&envs[0].key),
-    );
+    let pruned = f
+        .yard
+        .prune_environments(
+            1,
+            std::time::Duration::from_secs(3600),
+            std::slice::from_ref(&envs[0].key),
+        )
+        .unwrap();
     assert_eq!(pruned.removed.len(), 1, "{pruned:?}");
     assert!(!paused(&fake).contains(&snapshot.handle));
 }

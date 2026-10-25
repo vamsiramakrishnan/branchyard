@@ -9,7 +9,7 @@
 
 use branchyard_support::LockExt as _;
 use std::fs;
-use std::io::Write;
+use std::io::{Read as _, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -19,8 +19,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use super::keys;
+use crate::effects::mcp;
+use crate::models::upstream::{self, Target};
 use crate::Error;
 
 /// What starts one gateway.
@@ -160,6 +163,106 @@ pub fn listening(url: &str) -> bool {
     addrs
         .into_iter()
         .any(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok())
+}
+
+/// What holds the port a gateway is pinned to, as [`probe`] finds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Held {
+    /// Nothing accepts connections there.
+    Nothing,
+    /// An MCP server over HTTP: what a gateway is.
+    Gateway,
+    /// Something else, and what it did instead of answering as an MCP
+    /// server does.
+    Other(String),
+}
+
+/// How long [`probe`] waits for the port to answer. A listener that accepts
+/// and never speaks is not a gateway, and is not waited on for long.
+const PROBE_QUIET: Duration = Duration::from_secs(5);
+
+/// Ask what holds `url`'s port: nothing, an MCP server (a gateway), or
+/// something else. Accepting a TCP connection does not make a gateway (a
+/// database, a dev server, another repository's tools do too), so the port is
+/// asked an MCP `initialize`, sent without a token. A gateway replies with
+/// the initialize result (JSON or an event stream), or refuses it for want
+/// of a token: a `401` with a `WWW-Authenticate` challenge, or a `401` or
+/// `403` carrying a JSON-RPC error. Any other answer is not an MCP server's.
+/// This tells an MCP server from something that is not one; it cannot tell
+/// Anvil from another MCP server.
+pub fn probe(url: &str) -> Held {
+    probe_within(url, PROBE_QUIET)
+}
+
+fn probe_within(url: &str, quiet: Duration) -> Held {
+    if !listening(url) {
+        return Held::Nothing;
+    }
+    let target = match Target::parse(url) {
+        Ok(target) => target,
+        Err(why) => return Held::Other(format!("{url} is not a gateway URL: {why}")),
+    };
+    let headers = [
+        ("Content-Type", "application/json"),
+        ("Accept", "application/json, text/event-stream"),
+        ("Accept-Encoding", "identity"),
+        ("Mcp-Protocol-Version", mcp::PROTOCOL_VERSION),
+    ]
+    .map(|(name, value)| (name.to_owned(), value.to_owned()));
+    let initialize = json!({
+        "jsonrpc": "2.0", "id": 0, "method": "initialize",
+        "params": {
+            "protocolVersion": mcp::PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "branchyard-probe", "version": env!("CARGO_PKG_VERSION")}
+        }
+    });
+    let body = serde_json::to_vec(&initialize).unwrap_or_default();
+    let mut response = match upstream::send_within(&target, "POST", "", &headers, &body, quiet) {
+        Ok(response) => response,
+        Err(why) => {
+            return Held::Other(format!(
+                "it accepts connections but did not answer an MCP initialize over HTTP ({why})"
+            ))
+        }
+    };
+    let mut answer = Vec::new();
+    // A stream a server keeps open ends in a timeout, after what it sent.
+    branchyard_support::best_effort(
+        "read the gateway probe's answer",
+        (&mut response.body)
+            .take(64 * 1024)
+            .read_to_end(&mut answer),
+    );
+    classify(
+        response.status,
+        response.header("www-authenticate").is_some(),
+        response.header("content-type"),
+        &answer,
+    )
+}
+
+/// Whether an HTTP answer to an unauthenticated MCP `initialize` is an MCP
+/// server's: the initialize result, or a refusal for want of a token. A
+/// JSON-RPC error with a `200` is not enough: other JSON-RPC servers (a
+/// blockchain node's) answer an unknown method that way.
+fn classify(status: u16, challenged: bool, content_type: Option<&str>, body: &[u8]) -> Held {
+    let answer = mcp::rpc_answer(content_type, body, &json!(0));
+    let initialized = answer
+        .as_ref()
+        .and_then(|a| a.get("result"))
+        .is_some_and(|r| r.get("protocolVersion").is_some() || r.get("serverInfo").is_some());
+    let in_rpc = answer.is_some()
+        || serde_json::from_slice::<serde_json::Value>(body)
+            .is_ok_and(|v| v.get("jsonrpc").and_then(serde_json::Value::as_str) == Some("2.0"));
+    let refused = (status == 401 && challenged) || (matches!(status, 401 | 403) && in_rpc);
+    if initialized || refused {
+        return Held::Gateway;
+    }
+    Held::Other(match status {
+        200..=299 => "it answers HTTP, but not with an MCP initialize result".to_owned(),
+        status => format!("it answered {status} to an MCP initialize"),
+    })
 }
 
 /// A gateway process, restarted when it exits, with `tick` called about
@@ -360,6 +463,7 @@ impl Background {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use branchyard_testkit::{MockHttp, Response};
 
     fn command(anvil: &[&str]) -> GatewayCommand {
         GatewayCommand {
@@ -403,6 +507,118 @@ mod tests {
             env["ANVIL_VAULT_KEY_FILE"],
             "/r/.branchyard/gateway/vault.key"
         );
+    }
+
+    fn initialize_result() -> serde_json::Value {
+        json!({"jsonrpc": "2.0", "id": 0, "result": {
+            "protocolVersion": mcp::PROTOCOL_VERSION,
+            "capabilities": {}, "serverInfo": {"name": "anvil", "version": "1"}
+        }})
+    }
+
+    /// A port that answers an MCP `initialize` — in JSON, as an event
+    /// stream, or by refusing it with a bearer challenge — is a gateway.
+    #[test]
+    fn a_port_that_speaks_mcp_is_a_gateway() {
+        let json = MockHttp::start(|_| Response::json(200, &initialize_result()));
+        let url = format!("{}/mcp", json.url());
+        assert_eq!(probe(&url), Held::Gateway);
+        let request = json.await_requests(1).remove(0);
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/mcp");
+        assert_eq!(request.json()["method"], "initialize");
+        assert!(
+            request.header("authorization").is_none(),
+            "no token is sent"
+        );
+
+        let stream = MockHttp::start(|_| {
+            Response::new(
+                200,
+                format!("event: message\ndata: {}\n\n", initialize_result()),
+            )
+            .header("Content-Type", "text/event-stream")
+        });
+        assert_eq!(probe(&format!("{}/mcp", stream.url())), Held::Gateway);
+
+        let guarded = MockHttp::start(|_| {
+            Response::new(401, "").header(
+                "WWW-Authenticate",
+                "Bearer resource_metadata=\"/.well-known/x\"",
+            )
+        });
+        assert_eq!(probe(&format!("{}/mcp", guarded.url())), Held::Gateway);
+
+        let refusing = MockHttp::start(|_| {
+            Response::json(
+                401,
+                &json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32001, "message": "no token"}}),
+            )
+        });
+        assert_eq!(probe(&format!("{}/mcp", refusing.url())), Held::Gateway);
+    }
+
+    /// What is not a gateway: an HTTP server that does not speak MCP, a
+    /// listener that is not HTTP, and one that accepts and says nothing.
+    #[test]
+    fn a_port_that_does_not_speak_mcp_is_not_a_gateway() {
+        let web = MockHttp::start(|_| Response::new(404, "<html>not found</html>"));
+        let held = probe(&format!("{}/mcp", web.url()));
+        assert!(
+            matches!(&held, Held::Other(why) if why.contains("404")),
+            "{held:?}"
+        );
+        let page = MockHttp::start(|_| Response::new(200, "<html>hello</html>"));
+        let held = probe(&format!("{}/mcp", page.url()));
+        assert!(
+            matches!(&held, Held::Other(why) if why.contains("not with an MCP initialize result")),
+            "{held:?}"
+        );
+        // Another JSON-RPC server (a blockchain node's) is not an MCP one.
+        let node = MockHttp::start(|_| {
+            Response::json(
+                200,
+                &json!({"jsonrpc": "2.0", "id": 0, "error": {"code": -32601, "message": "Method not found"}}),
+            )
+        });
+        assert!(matches!(
+            probe(&format!("{}/mcp", node.url())),
+            Held::Other(_)
+        ));
+        let plain_auth = MockHttp::start(|_| Response::new(401, "").header("X-Other", "1"));
+        assert!(matches!(
+            probe(&format!("{}/mcp", plain_auth.url())),
+            Held::Other(_)
+        ));
+
+        // Not HTTP at all: a banner, then the connection closes.
+        let raw = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/mcp", raw.local_addr().unwrap());
+        let banner = std::thread::spawn(move || {
+            // The probe's first connection only checks that it connects.
+            for stream in raw.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                branchyard_support::best_effort(
+                    "write a banner",
+                    stream.write_all(b"SSH-2.0-OpenSSH_9.6\r\n"),
+                );
+            }
+        });
+        assert!(matches!(probe(&url), Held::Other(_)));
+        banner.join().unwrap();
+
+        // Accepts and never speaks: not waited on for long.
+        let silent = MockHttp::start(|_| Response::hang());
+        let held = probe_within(&format!("{}/mcp", silent.url()), Duration::from_millis(300));
+        assert!(matches!(held, Held::Other(_)), "{held:?}");
+        silent.finish();
+    }
+
+    #[test]
+    fn a_port_nobody_listens_on_holds_nothing() {
+        // Port 1 (tcpmux) has no listener on any machine this runs on.
+        assert_eq!(probe("http://127.0.0.1:1/mcp"), Held::Nothing);
+        assert_eq!(probe("not a url"), Held::Nothing);
     }
 
     #[test]

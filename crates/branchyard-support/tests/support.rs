@@ -225,3 +225,85 @@ fn failures_of_different_steps_are_told_apart() {
     });
     assert_eq!(events.len(), 2, "{events:?}");
 }
+
+#[test]
+fn collect_failures_returns_what_the_closure_survived() {
+    let scratch = branchyard_testkit::Scratch::new("support-collect");
+    let (value, survived) = branchyard_support::collect_failures(|| {
+        best_effort::<(), _>("collected-one", Err("first"));
+        best_effort_once("collected-two", Err::<(), _>("second"));
+        // A cleanup that fails (a file where a directory is expected) counts.
+        let file = scratch.join("a-file");
+        std::fs::write(&file, "x").unwrap();
+        cleanup_dir(&file);
+        best_effort("fine", Ok::<_, String>(()));
+        7
+    });
+    assert_eq!(value, 7);
+    let steps: Vec<&str> = survived.iter().map(|f| f.context.as_str()).collect();
+    assert_eq!(steps.len(), 3, "{survived:?}");
+    assert_eq!(steps[0], "collected-one");
+    assert_eq!(survived[0].error, "first");
+    assert_eq!(steps[1], "collected-two");
+    assert!(steps[2].starts_with("remove directory "), "{steps:?}");
+    // Outside a collection, nothing is kept.
+    best_effort::<(), _>("not collected", Err("late"));
+    let (_, none) = branchyard_support::collect_failures(|| ());
+    assert!(none.is_empty(), "{none:?}");
+}
+
+#[test]
+fn collect_failures_nests_and_ignores_other_threads() {
+    let (_, outer) = branchyard_support::collect_failures(|| {
+        best_effort::<(), _>("outer-before", Err("a"));
+        let (_, inner) = branchyard_support::collect_failures(|| {
+            best_effort::<(), _>("inner", Err("b"));
+        });
+        assert_eq!(inner.len(), 1, "{inner:?}");
+        std::thread::spawn(|| {
+            best_effort::<(), _>("other-thread", Err("c"));
+        })
+        .join()
+        .unwrap();
+    });
+    let steps: Vec<&str> = outer.iter().map(|f| f.context.as_str()).collect();
+    assert_eq!(
+        steps,
+        ["outer-before", "inner"],
+        "the inner ones reach the outer"
+    );
+}
+
+#[test]
+fn collect_failures_closes_its_scope_when_the_closure_panics() {
+    let panicked = std::panic::catch_unwind(|| {
+        branchyard_support::collect_failures(|| {
+            best_effort::<(), _>("before the panic", Err("x"));
+            panic!("body blew up");
+        })
+    });
+    assert!(panicked.is_err());
+    // This thread has no collection left running.
+    let (_, after) = branchyard_support::collect_failures(|| ());
+    assert!(after.is_empty(), "{after:?}");
+}
+
+#[test]
+fn survive_panic_reports_a_panic_instead_of_unwinding() {
+    let (value, events) = capture(|| {
+        (
+            branchyard_support::survive_panic("tell the fixture observer", || 5),
+            branchyard_support::survive_panic("tell the fixture observer", || -> u8 {
+                panic!("failed printing to stdout")
+            }),
+        )
+    });
+    assert_eq!(value, (Some(5), None));
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert!(
+        events[0].text.contains("tell the fixture observer")
+            && events[0].text.contains("failed printing to stdout"),
+        "{}",
+        events[0].text
+    );
+}

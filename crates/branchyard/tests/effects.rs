@@ -844,6 +844,44 @@ fn undo_plans_by_what_the_upstream_supports_and_undoes_what_was_chosen() {
     let _ = branch;
 }
 
+/// A branch record the store cannot read is an error. It was read as "its
+/// branch is gone, and with it the grant to undo under", which told a person
+/// whose store was locked or damaged that their effects could not be undone.
+#[test]
+fn undo_with_a_branch_record_that_cannot_be_read_is_an_error_not_a_gone_branch() {
+    let f = Fixture::new();
+    let (mock, script) = setup(&f, person(&[("github:*", Approval::Allow)]));
+    mock.set_deadline(4_102_444_800_000);
+    f.task(&calls(
+        &script,
+        &[("slack__chat_post", r#"{"channel": "board"}"#)],
+    ))
+    .options(granted(&f))
+    .name("board")
+    .run()
+    .unwrap();
+    let plan = f.yard.undo_plan_at("board", 0, 1_000_000).unwrap();
+    assert_eq!(plan.reversible.len(), 1, "{plan:?}");
+    let id = plan.reversible[0].entry.id.clone();
+
+    // The record is there but is not one: reading it fails.
+    common::edit_record(&f.root, "board", |record| {
+        *record = serde_json::json!("not a record");
+    });
+    let error = f
+        .yard
+        .undo_effects_at(&plan, std::slice::from_ref(&id), "ana", "cli", 1_000_000)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("could not read the record for board"),
+        "{error}"
+    );
+    assert!(mock.calls_to("slack__chat_delete").is_empty());
+    assert_eq!(f.yard.effect(&id).unwrap().state, EffectState::Confirmed);
+}
+
 #[test]
 fn an_expired_undo_is_not_called_and_a_failed_one_says_why() {
     let f = Fixture::new();

@@ -96,6 +96,63 @@ fn a_turn_with_a_huge_max_duration_runs() {
     }
 }
 
+/// `by run | head -1`: the observer is the console, and printing to a closed
+/// pipe panics. The turn completed; the reader going away must not lose it
+/// (the branch was left `interrupted`, with no turn and no candidate).
+#[test]
+fn an_observer_that_panics_does_not_lose_the_completed_turn() {
+    let f = Fixture::new();
+    let branch = f
+        .task("WRITE hello.txt=hi")
+        .name("watched")
+        .on_event(|_| panic!("failed printing to stdout: Broken pipe (os error 32)"))
+        .run()
+        .unwrap();
+    let info = branch.info();
+    assert_eq!(info.status, BranchStatus::Ready);
+    assert_eq!(info.turns, 1);
+    assert!(info.candidate.is_some(), "{info:?}");
+    let events = branch.events().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.activity, Activity::Status(BranchStatus::Ready))),
+        "the final status was recorded: {events:?}"
+    );
+}
+
+/// A step the turn survived is in the branch's own log afterwards, where
+/// `by log` and `by show` read it, besides on the process's standard error.
+#[test]
+fn a_step_the_turn_survived_is_recorded_in_the_branchs_log() {
+    let f = Fixture::new();
+    let once = std::sync::atomic::AtomicBool::new(false);
+    let branch = f
+        .task("WRITE hello.txt=hi")
+        .name("survivor")
+        .on_event(move |_| {
+            // The observer runs on the turn's thread, inside the engine.
+            if !once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                branchyard_support::best_effort(
+                    "remove the staging directory",
+                    Err::<(), _>("permission denied"),
+                );
+            }
+        })
+        .run()
+        .unwrap();
+    assert_eq!(branch.info().status, BranchStatus::Ready);
+    let events = branch.events().unwrap();
+    assert_eq!(
+        branchyard::survived_failures(&events),
+        ["remove the staging directory: permission denied"],
+        "{events:?}"
+    );
+    // A turn that survived nothing records nothing.
+    let quiet = f.task("WRITE b.txt=1").name("quiet").run().unwrap();
+    assert!(branchyard::survived_failures(&quiet.events().unwrap()).is_empty());
+}
+
 #[test]
 fn a_turn_without_changes_has_no_candidate() {
     let f = Fixture::new();
@@ -328,6 +385,36 @@ fn reincarnation_starts_fresh_with_a_handoff_brief_and_marks_the_old_branch_supe
 
     let old = f.yard.branch("elder").unwrap();
     assert_eq!(old.info().superseded_by.as_deref(), Some("reborn"));
+}
+
+/// The handoff brief quotes the old branch's last message. A log that cannot
+/// be read stops the reincarnation; it used to read as an empty log and start
+/// the new branch from a brief with no last message, saying nothing.
+#[test]
+fn reincarnation_stops_when_the_log_its_brief_is_made_from_cannot_be_read() {
+    let f = Fixture::new();
+    let parent = f.task("WRITE base.txt=1").name("damaged").run().unwrap();
+    let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+    db.execute(
+        "UPDATE events SET activity = 'not json' WHERE id = \
+         (SELECT MIN(id) FROM events WHERE branch = 'damaged')",
+        [],
+    )
+    .unwrap();
+    let error = parent
+        .reincarnate(TaskOptions {
+            name: Some("again".into()),
+            ..f.options()
+        })
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("could not read the log of damaged for its brief"),
+        "{error}"
+    );
+    assert!(f.yard.branch("again").is_err(), "no branch was started");
 }
 
 #[test]

@@ -56,13 +56,26 @@ impl Recorder {
         self.store
             .append(&self.branch, &entry, self.fence.as_ref())?;
         if let Some(observer) = &self.observer {
-            observer(&BranchEvent {
-                branch: self.branch.clone(),
-                activity: entry.activity,
-            });
+            observe(
+                observer,
+                &BranchEvent {
+                    branch: self.branch.clone(),
+                    activity: entry.activity,
+                },
+            );
         }
         Ok(entry.at_ms)
     }
+}
+
+/// Tell `observer` of an event already in the log. The observer is the
+/// caller's code (a console printing the line, a server fanning it out) and
+/// may fail by panicking, as printing to a closed pipe does. The event is
+/// recorded and the turn goes on: a reader that went away must not take the
+/// turn it was watching with it (`by run | head -1` once left the branch
+/// `interrupted` with its completed turn lost).
+fn observe(observer: &Observer, event: &BranchEvent) {
+    branchyard_support::survive_panic("tell the observer of an event", || observer(event));
 }
 
 impl Recorder {
@@ -75,10 +88,13 @@ impl Recorder {
         };
         lease.finish(Some(record), Some(&entry))?;
         if let Some(observer) = &self.observer {
-            observer(&BranchEvent {
-                branch: self.branch.clone(),
-                activity: entry.activity,
-            });
+            observe(
+                observer,
+                &BranchEvent {
+                    branch: self.branch.clone(),
+                    activity: entry.activity,
+                },
+            );
         }
         Ok(())
     }

@@ -40,7 +40,6 @@
     "crates/branchyard-cli/tests/connectors.rs": 1,
     "crates/branchyard-cli/tests/devex.rs": 1,
     "crates/branchyard-cli/tests/egress.rs": 1,
-    "crates/branchyard-cli/tests/services.rs": 1,
     "crates/branchyard-runtime/tests/egress.rs": 2,
     "crates/branchyard-server/tests/companion.rs": 1,
     "crates/branchyard/tests/egress_common/mod.rs": 1,

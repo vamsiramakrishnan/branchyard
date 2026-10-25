@@ -361,7 +361,14 @@ pub(crate) fn settled(yard: &Yard, name: &str) {
     {
         return;
     }
-    let events = crate::record::read(&store, name).unwrap_or_default();
+    // No log read is no escalation: an empty log would say "not escalated
+    // yet" and send the parent the same plan again. The failure is logged.
+    let Some(events) = best_effort(
+        "read the log to escalate a plan to its parent",
+        crate::record::read(&store, name),
+    ) else {
+        return;
+    };
     let round = state.round;
     if escalated_round(&events) == Some(round) {
         return;
