@@ -263,6 +263,12 @@ fn first_str<'a>(input: &'a Value, paths: &[&str]) -> Option<&'a str> {
 }
 
 impl Dialect {
+    /// Whether this harness drops what `event` (`session-start` or
+    /// `user-prompt-submit`) prints, so `by` says nothing there.
+    pub(crate) fn drops(&self, event: &str) -> bool {
+        Event::parse(event).is_ok_and(|event| self.deaf.contains(&event))
+    }
+
     /// The hook's stdout for `lines` of context at `event`.
     fn render(&self, event: Event, lines: &[String]) -> String {
         let text = lines.join("\n");

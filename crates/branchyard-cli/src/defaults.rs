@@ -51,6 +51,7 @@ pub fn apply(
     if matches!(
         command,
         Command::Init { .. }
+            | Command::Setup { .. }
             | Command::Config { .. }
             | Command::Doctor { .. }
             | Command::Up { .. }

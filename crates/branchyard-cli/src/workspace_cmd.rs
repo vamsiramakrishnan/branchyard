@@ -225,12 +225,19 @@ pub(crate) fn in_harness() -> Option<String> {
 
 /// The scripts a trust decision is about, for a person to read.
 fn describe(resolved: &Resolved) -> String {
-    let w = &resolved.workspace;
     let mut text = format!(
         "{}'s [workspace] ({}) will run, as you, in each new branch's worktree:\n",
         resolved.root.display(),
         resolved.file.display()
     );
+    text.push_str(&scripts(&resolved.workspace));
+    text
+}
+
+/// The copies and scripts of `w`, one indented line each: what a trust
+/// decision is about. `by setup` shows them before it writes them.
+pub(crate) fn scripts(w: &WorkspaceConfig) -> String {
+    let mut text = String::new();
     if !w.copy.is_empty() {
         text.push_str(&format!("  copy      {}\n", w.copy.join(", ")));
     }
@@ -285,7 +292,8 @@ fn ask(resolved: &Resolved) -> Result<bool, Failure> {
     Ok(yes)
 }
 
-fn trust(resolved: &Resolved) -> Result<(), Failure> {
+/// Record that the person trusts `resolved`'s scripts as they are now.
+pub(crate) fn trust(resolved: &Resolved) -> Result<(), Failure> {
     let mut file = read_trust()?;
     file.version = TRUST_VERSION;
     file.repositories.insert(

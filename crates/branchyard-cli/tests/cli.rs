@@ -2459,6 +2459,7 @@ fn help_version_typos_and_exit_codes() {
     assert!(help.status.success());
     let text = stdout(&help);
     for heading in [
+        "Start here:",
         "Work on branches:",
         "Inspect:",
         "Servers:",
@@ -2467,7 +2468,11 @@ fn help_version_typos_and_exit_codes() {
     ] {
         assert!(text.contains(heading), "{heading}: {text}");
     }
-    assert_eq!(stdout(&repo.by(&[])), text, "no command prints the help");
+    // No command is a status card with the next step, not the help
+    // (tests/setup_cmd.rs); `help` and `--help` are the full list.
+    let bare = stdout(&repo.by(&[]));
+    assert!(bare.contains("Next: "), "{bare}");
+    assert!(!bare.contains("Work on branches:"), "{bare}");
     assert_eq!(stdout(&repo.by(&["help"])), text);
     assert_eq!(
         stdout(&repo.by(&["-V"])),

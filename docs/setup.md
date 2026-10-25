@@ -1,5 +1,56 @@
 # Setup
 
+## One command
+
+```sh
+cd my-repo
+by setup
+```
+
+`by setup` takes a repository from nothing to a working `by run`. It runs the pieces below in order, each skipped when there is nothing to do, and ends with a short card: what it found, what it wrote, what it installed, what only you can do, and the next command. It composes the interview engine and the harness installer that `by init` drives; it adds no logic of its own to them, and it calls no model.
+
+1. **Detect.** The repository and its default branch, the harnesses on `PATH` with their versions and login, and the check command the files suggest (`Cargo.toml` → `cargo test`, `package.json` → `npm test`, …).
+2. **Config.** Without a `branchyard.toml`, the `project` topic with its defaults ([what it writes](#topics)). On a terminal it asks only what cannot be detected: which harness to use by default when several are logged in, a check command when the files suggest none, and isolation. An existing `branchyard.toml` is left as it is. The model gateway is not part of the defaults: the file ends with a two-line comment that points at [model-gateway.md](model-gateway.md), and `by init project` offers it as a question.
+3. **Scripts.** When the defaults include `[workspace]` scripts (an install, say), `by setup` shows them. On a terminal it asks whether to trust them; with `--yes` it trusts the ones it just wrote and says so in the card (`by workspace untrust` takes it back). Without this the first `by run` is refused until `by workspace trust`.
+4. **Hooks.** For every harness on `PATH` that has an install (`by init plugin` lists them), the same install `by init plugin ID` makes: hooks, and where the harness has them, commands and skills, written or merged into its own files. Each harness is planned alone, so a file of yours that differs from the packaged copy holds back that harness and nothing else (it is named, with the command that shows the diff). The files are listed before they are written, and a merge only adds.
+5. **Hook check.** After installing it runs `by hook --harness ID …` once per harness, with a canned input and no model, the way the harness would. `hooks: verified` means `by` is on `PATH` (every hook starts with `command -v by`), and it answered in that harness's dialect without complaint. `hooks: silent` names why: `by` is not on `PATH`, or it printed a complaint. The check forgets its session, so it leaves nothing in `.branchyard/hooks/`. It cannot see whether the harness itself runs the hook (a trust prompt, a restart): those steps are the checklist below.
+6. **Logins.** For each harness whose login is not known to be good, the command to run (`by harnesses login ID`, which runs the harness's own flow). `by setup` never starts a login. A login Branchyard could not verify is called *not verified*, never *logged out*: it looks for login files and key variables only, and an environment can authenticate a harness without them. The card names, for the default harness, the auth source it found, or `unknown`, and says that `by run` may still use (and spend on) a login it could not see.
+
+The card ends with **Only you can do:** the logins above, the steps each harness's install leaves to you (Codex trusting its hooks, Gemini CLI's trusted folder, a restart, …), the hook problems above, and `by workspace trust` if you declined it; then `Next: by run "fix the flaky test" --check "cargo test"` with the check it detected.
+
+```sh
+by setup                    # on a terminal: shows the files, asks once, then writes
+by setup --yes              # take every default, ask nothing
+by setup --dry-run          # show everything, write nothing
+by setup --json             # one object: detected, written, installed, todo, next
+by setup --yes --harness claude-code,codex   # hooks for these only (named even if not on PATH)
+by setup --yes --no-hooks   # branchyard.toml only
+by setup --yes --no-config  # hooks only
+```
+
+Without a terminal, and without `--yes`, `by setup` behaves as `--dry-run` and says to rerun with `--yes`; `--json` never prompts either. Detecting refreshes the harness inventory cache that `by harnesses` keeps beside the user configuration (a minute old at most); a dry run touches nothing else. A second run writes nothing and says so (`Nothing to write: already set up.`): the config exists, each harness's files are already as packaged, and the hook check still runs. `by setup` exits 0 when it is done, even with things left for you, and 1 only on a real error: outside a git repository (with `--no-config` it installs hooks anywhere), an unreadable install, a harness named with `--harness` whose files cannot be installed, or a write that failed. It does not run inside a harness's branch.
+
+`--json` prints one object (not the `branchyard.setup/v1` protocol; its shape is tested in `crates/branchyard-cli/tests/setup_cmd.rs`):
+
+| Key | Holds |
+|---|---|
+| `dry_run` | nothing was written (asked for, or no terminal and no `--yes`) |
+| `detected` | `repository` (`root`, `git`, `default_branch`), `harnesses` (`harness`, `version`, `login`, `evidence`, `auth_source`), `default_harness` (the same, plus `verified`), `check` |
+| `config` | `path`, `state` (`written`, `would_write`, `exists`, `skipped`), `summary`, `workspace_trusted` |
+| `written`, `unchanged` | the files written, and those already as planned, as the plans name them |
+| `would_write` | in a dry run, the files it would write |
+| `installed` | per harness: `state` (`installed`, `would_install`, `current`, `refused`), `reason`, `files`, `provides`, `hooks` (`verified`, `silent` or `null`) and `hooks_detail` |
+| `todo` | what only you can do: `kind` (`login`, `note`, `hooks`, `workspace`, `install`), `harness`, `text`, `command` |
+| `next` | the next command: `by setup --yes` after a dry run, else `by run …` |
+
+Bare `by` (no command) is the same idea for a repository that already has Branchyard in it: a card of under twelve lines with whether the repository is set up (`branchyard.toml`, `.branchyard/`), its branches by state (running, ready, asking, failed, …) and one `Next:` line: `by setup` when it is not set up, `by run …` when there are no branches, `by show BRANCH` for the first one that needs you, else `by ls`. Outside a git repository it says so and points at `cd <repo> && by setup`. `by --help` lists every command.
+
+`by init plugin --status [ID…] [--json]` is the check on its own, at any time: per harness, whether its install is `current`, `stale` (some files missing or different) or `missing`, whether `by` is on `PATH`, and the one-time steps still on your list. It writes nothing.
+
+Not done: `by setup` is tested with fake harness executables and a private HOME, on a terminal through util-linux `script`; it has not been run against every real harness. "Hooks verified" stops at `by hook`; whether each harness's own hook runner calls it is only as true as the notes it prints.
+
+## The interview
+
 `by init` sets Branchyard up by interview. One declarative interview per topic decides the questions, detects defaults from the machine, and produces a plan of files, each diffed against what exists and checked by the loader that will read it. Two front-ends run it:
 
 - **A person** runs `by init` in a terminal: a wizard shows what it detected, asks, shows every diff, and writes only after a final confirmation.
@@ -168,7 +219,7 @@ The emdash and Orca readers are ports of `emdash-config.ts` (Apache-2.0) and `or
 |---|---|---|---|
 | Logins | a harness keeps a login in a file Branchyard can provision ([below](#persisting-a-harness-login)) | `[secrets] NAME = "@~/path"` for each login chosen | the installed harnesses' logins when new branches get a private home (isolated, or Microsandbox), else none |
 | Fleet | no `[fleet]` in either file, and an installed harness is logged in | `[fleet.default]`: the [inventory default](fleet.md#the-inventory-default) as it is now (candidates, effort where it applies, judge) | no: without it `--auto` routes among what is logged in at that moment; with it `by run` without `--harness` routes too |
-| Gateway | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CODEX_API_KEY` or `GEMINI_API_KEY` is set, and the file has no `[models.backends]` of its own | backends and routes for the keys set, below | yes, so `--defaults` writes them only when a key is present; skippable |
+| Gateway | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CODEX_API_KEY` or `GEMINI_API_KEY` is set, and the file has no `[models.backends]` of its own | backends and routes for the keys set, below | no: the gateway is opt-in. `--defaults` and `by setup` leave it out and the file ends with a two-line comment pointing at [model-gateway.md](model-gateway.md); say yes to write the backends |
 | Claude on Gemini | the gateway step is yes and `GEMINI_API_KEY` is set | a `claude-*` route to the gemini backend with a `backend_model` (default `gemini-3.5-flash`), or, with an Anthropic key, the gemini backend as that route's fallback | no; the question says the trade-off: the answers come from Gemini, not Claude, thinking comes back unsigned, and `count_tokens` is not served |
 
 The default harness it suggests is Claude Code or Codex when installed and not known to be logged out, else the first installed harness that is logged in.
@@ -357,4 +408,5 @@ by config schema                     # the JSON Schema
 - **Command line** (`crates/branchyard-cli/src/args.rs`): `init` parsed into its topic and step for every topic and flag spelling; each conflict and missing requirement a usage error with exit 2 and its message; the help's topics and flags; `config`'s four actions with `--json` before or after them, and its usage errors; completions for five shells and the man page listing `init`, its flags and `config`. `defaults.rs` and the server's `names_config` test that `-c FILE`, `-cFILE`, `--config=FILE`, `--help`, `--version` and `token new` keep their own configuration.
 - **CLI** (`crates/branchyard-cli/tests/setup.rs`): the built `by` in temporary repositories: a scripted harness completing every topic through `--next`, `--dry-run` and `--apply`; applying twice writes nothing; every generated file passes the tool that reads it (`by serve --check`, `by rig check`, `by config validate`); a multi-tenant server with one 0600 token per tenant and only hashes in the configuration; an off-loopback server without TLS refused by the server's loader; refusal to replace a file without `--force`; a pasted secret never echoed; no generated secret in any output; the non-terminal refusal; configuration defaults under flags and variables, and not inside a harness's branch; a Codex auth file holding a refresh token, a fake Gemini CLI and `GEMINI_API_KEY`: the login shown with its `auth_mode`, recorded as `CODEX_AUTH` by path, `[fleet.default]` and the Gemini backend with a Claude route written, the file passing `by config validate`, and the token in no output and no file. The machine's own credential variables are removed from every setup command. The wizard runs on a pseudo-terminal (util-linux `script`) accepting every default and writing after review; its question-to-prompt mapping and review rendering are unit-tested.
 - **Unloadable file, scripts, plugin** (`crates/branchyard-setup/src/hint.rs`, the project topic's tests, `tests/install.rs`, `crates/branchyard-cli/tests/setup.rs`): an unknown key in the project or the user file named with its line and its replacement (`agent`, `budget`, a `[defaults]` key at the top, a typo), the plan's first note, the `--apply` refusal; a run script proposed only for a `package.json` script that exists (`dev`, then `start`, in the lockfile's package manager) and the question absent otherwise, a run script the file already has kept; `by workspace trust` first only for scripts that changed; the default harness missing from `PATH`; `by init project` and `by up` outside a repository, and from a subdirectory; `by init plugin` with nothing named refused with the way out (exit 2), one installer for the interview and for named harnesses, a line per harness of what it gets, diffs headed relative to the home directory, Claude Code's status line merged when absent and kept, with the line to choose, when present.
+- **`by setup`** (`crates/branchyard-cli/tests/setup_cmd.rs`): the built `by` with four fake harness executables first on `PATH` (and `by` itself, to check its hooks), a private HOME and a throwaway repository: `--yes` writes `branchyard.toml` and merges the hooks into all four harnesses' files and prints the card; a second run changes no byte; `--dry-run` and a missing terminal write nothing; the `--json` object; `--harness`, `--no-hooks`, `--no-config`; a guessed login called *not verified* with its auth source, and a credentials file naming its source; the `[workspace]` scripts shown and trusted with `--yes`; hooks `silent` (once, for all four) when `by` is not on `PATH`; a differing file holding back one harness; bare `by` in a set-up, not-set-up and no-git directory and with a finished branch; `by init plugin --status` current, stale, missing; `by init` without a terminal exiting 2; the gateway left out of the generated file; and, on a pseudo-terminal, the questions, the review, the single write confirmation and the declined trust.
 - Not tested: a real harness running the skill (no model call was made), the wizard on macOS, and `docker compose up` of a generated deployment.

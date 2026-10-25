@@ -636,6 +636,10 @@ fn detected_backends(facts: &Facts) -> Vec<(&'static str, &'static str, &'static
     backends
 }
 
+/// What the generated file ends with while it has no `[models]`: where the
+/// gateway is described, nothing more.
+const MODELS_HINT: &str = "\n# Optional: route harness model calls through Branchyard's model gateway.\n# Its models table is described in docs/model-gateway.md.\n";
+
 /// The Gemini model a Claude request is answered by on the `gemini`
 /// backend, unless the person names another.
 const CLAUDE_ON_GEMINI: &str = "gemini-3.5-flash";
@@ -666,10 +670,14 @@ fn models_questions(facts: &Facts, current: &ProjectConfig, qs: &mut Vec<Questio
             ),
         )
         .optional()
-        .default(true)
+        .default(false)
         .choices(vec![
+            Choice::new(
+                false,
+                "No",
+                "no [models]; docs/model-gateway.md has the block to add later",
+            ),
             Choice::new(true, "Yes", format!("backends {}", listed.join(", "))),
-            Choice::new(false, "No", "no [models]"),
         ]),
     );
     if !backends.iter().any(|(name, _, _)| *name == "gemini") {
@@ -1124,7 +1132,12 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
                 }
                 _ => "Branchyard user defaults, written by `by init project`.",
             };
-            config::render(&config, heading)
+            let mut body = config::render(&config, heading);
+            // The gateway is opt-in: say where it is, not what it holds.
+            if config.models.is_empty() {
+                body.push_str(MODELS_HINT);
+            }
+            body
         }
         // Rendered anyway so validation reports the problem by key.
         Err(e) => format!("# by init project could not build this file: {e}\n"),
@@ -1959,10 +1972,33 @@ mod tests {
     fn the_gateway_gets_backends_for_the_keys_set_here() {
         let probe = machine();
         let facts = Facts::gather(&probe);
-        // With a key, --defaults configures it; Claude on Gemini stays off.
+        // With keys set, --defaults still leaves the gateway out: it is
+        // asked, and opt-in. The file says where to read about it.
         let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
-        assert_eq!(state.answers["models"], json!(true));
+        assert_eq!(state.answers["models"], json!(false));
+        assert!(state
+            .answers
+            .get("models.claude")
+            .is_none_or(Value::is_null));
+        let body = plan_body(&facts, &state.answers, &probe);
+        assert!(!body.contains("[models"), "{body}");
+        assert!(body.ends_with(MODELS_HINT), "{body}");
+        assert!(body.contains("docs/model-gateway.md"), "{body}");
+        assert!(config_of(&facts, &state.answers, &probe).models.is_empty());
+
+        // Chosen, it writes backends and routes for the keys; Claude on
+        // Gemini stays off.
+        let state = resolve(
+            &|a| questions(&facts, a),
+            &answers(json!({"models": true})),
+            true,
+        );
         assert_eq!(state.answers["models.claude"], json!(false));
+        let body = plan_body(&facts, &state.answers, &probe);
+        assert!(
+            !body.contains("Optional: route harness model calls"),
+            "{body}"
+        );
         let models = config_of(&facts, &state.answers, &probe).models;
         assert_eq!(
             models.backends.keys().collect::<Vec<_>>(),
@@ -2002,7 +2038,7 @@ mod tests {
         // Claude models on Gemini, translated, with a backend model.
         let claude = resolve(
             &|a| questions(&facts, a),
-            &answers(json!({"models.claude": "yes"})),
+            &answers(json!({"models": true, "models.claude": "yes"})),
             true,
         );
         let models = config_of(&facts, &claude.answers, &probe).models;
@@ -2025,7 +2061,11 @@ mod tests {
         let facts = Facts::gather(&both);
         let state = resolve(
             &|a| questions(&facts, a),
-            &answers(json!({"models.claude": true, "models.claude_model": "gemini-2.5-pro"})),
+            &answers(json!({
+                "models": true,
+                "models.claude": true,
+                "models.claude_model": "gemini-2.5-pro"
+            })),
             true,
         );
         let models = config_of(&facts, &state.answers, &both).models;

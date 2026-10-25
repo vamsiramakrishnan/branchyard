@@ -98,6 +98,13 @@ fn read_answers(source: &str) -> Result<BTreeMap<String, Value>, String> {
 /// ordinary interview takes over (a protocol step with no harness named,
 /// or the wizard on a terminal after the listing).
 fn plugin(env: &Env, init: &InitArgs) -> Option<Outcome> {
+    if init.status {
+        return Some(crate::setup_cmd::plugin_status(
+            env,
+            &init.harnesses,
+            init.json,
+        ));
+    }
     let named = !init.harnesses.is_empty() || init.all_detected;
     match init.step {
         // The protocol asks which harnesses, or takes them from answers.
@@ -160,31 +167,43 @@ fn plugin(env: &Env, init: &InitArgs) -> Option<Outcome> {
             "No harness Branchyard installs for is on PATH; nothing to do.\nby init plugin lists them all; name one to install for it anyway.\n",
         ));
     }
-    let mut raw = match &init.answers {
+    let raw = match &init.answers {
         Some(source) => match read_answers(source) {
             Ok(raw) => raw,
             Err(message) => return Some(refuse(init.json, "invalid_answers", message, Vec::new())),
         },
         None => BTreeMap::new(),
     };
-    raw.insert(
-        "harnesses".into(),
-        Value::Array(ids.into_iter().map(Value::String).collect()),
-    );
-    let response = branchyard_setup::next(
-        Topic::Plugin,
-        &probe,
-        &raw,
-        true,
-        &mut RandomEntropy,
-        &HostValidator,
-    );
+    let response = plugin_response(&probe, ids, raw);
     Some(match init.step {
         Some(InitStep::Next) => print(&format!("{}\n", to_json(&response))),
         Some(step) => finish(&probe, init, step, response),
         None if init.json => finish(&probe, init, InitStep::DryRun, response),
         None => review_then_ask(env, &probe, init, response),
     })
+}
+
+/// The plan that installs hooks, commands and skills for the harnesses
+/// `ids` (the plugin topic with `host = harnesses`), over `answers`. `by
+/// init plugin` and `by setup` both install through it.
+pub(crate) fn plugin_response(
+    probe: &dyn Probe,
+    ids: Vec<String>,
+    mut answers: BTreeMap<String, Value>,
+) -> Response {
+    answers.insert("host".into(), Value::String("harnesses".into()));
+    answers.insert(
+        "harnesses".into(),
+        Value::Array(ids.into_iter().map(Value::String).collect()),
+    );
+    branchyard_setup::next(
+        Topic::Plugin,
+        probe,
+        &answers,
+        true,
+        &mut RandomEntropy,
+        &HostValidator,
+    )
 }
 
 /// `by init plugin`'s listing as text.
@@ -282,6 +301,7 @@ fn review_then_ask(env: &Env, probe: &HostProbe, init: &InitArgs, response: Resp
         force,
         harnesses: Vec::new(),
         all_detected: false,
+        status: false,
     };
     finish(probe, &flags, InitStep::Apply, response)
 }
