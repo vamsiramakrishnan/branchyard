@@ -67,6 +67,7 @@ What exactly is true, and what has run.
 | [Vendoring](vendoring.md) | Which controls have been copied, why, and how are they adapted and upgraded? |
 | [Contributing](../CONTRIBUTING.md) | How do I build, test and check a change before I push it, and which boundaries and ratchets apply? |
 | [Third-party notices](../THIRD_PARTY.md) | Which revisions and licenses apply to the copied sources? |
+| [Adding a harness](adding-a-harness.md) | Which eight files and tables do I touch to add a harness, from its catalog entry to its hooks and qualification report, and which test tells me what I missed? |
 
 ## Design and internals
 

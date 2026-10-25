@@ -40,6 +40,7 @@ mod plan_cmd;
 mod ports;
 mod pr;
 mod pr_threads;
+mod preflight;
 mod recipe_cmd;
 mod remote;
 mod render;
@@ -122,6 +123,13 @@ fn main() -> ExitCode {
         // A closed pipe, as in `by ls | head`, is the reader's choice.
         Err(Failure::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(Failure::Reported) => ExitCode::FAILURE,
+        // Something only the person can do remains: not a failure, not done.
+        Err(Failure::Manual(message)) => {
+            if !message.is_empty() {
+                eprintln!("by: {message}");
+            }
+            ExitCode::from(2)
+        }
         Err(failure) => {
             eprintln!("by: {failure}");
             ExitCode::FAILURE

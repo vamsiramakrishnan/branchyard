@@ -145,7 +145,7 @@ sources = ["orca:aider", "agentapi:aider", "coder:aider"]
 [[harness]]
 id = "cursor"
 name = "Cursor CLI"
-binaries = ["cursor-agent"]
+binaries = ["cursor-agent", "agent"]
 homepage = "https://cursor.com/docs/cli/overview"
 install = ["curl https://cursor.com/install -fsS | bash"]
 auth_env = []

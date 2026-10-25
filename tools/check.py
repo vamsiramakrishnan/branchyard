@@ -191,6 +191,9 @@ STEPS = (
     Step("test_plugin_config", "controls", (PY, "tests/test_plugin_config.py")),
     # What the skills, slash commands and instructions files tell a model about `by` stays true.
     Step("test_agent_text_drift", "controls", (PY, "tests/test_agent_text_drift.py")),
+    # The catalog, the driver profiles, the install manifests, the hook dialects and docs/harness-hooks.md
+    # agree on which harnesses exist (docs/adding-a-harness.md).
+    Step("test_harness_identity", "controls", (PY, "tests/test_harness_identity.py")),
     # Cargo: rustdoc (the docs job), formatting, the undocumented-items ratchet, Clippy, and the
     # schema freshness tests. The Clippy passes CI runs for the feature builds stay in the workflow.
     Step(

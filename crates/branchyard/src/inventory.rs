@@ -898,7 +898,10 @@ fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
     if let (Some(command), Some(ran)) = (check.and_then(|c| c.status.as_ref()), &found.status) {
         let text = ran.lines.join(" ");
         let lower = text.to_lowercase();
-        let shown = format!("{program} {}: {}", command.args.join(" "), text.trim());
+        // Warnings the command prints first (Codex names its home directory)
+        // are not the answer; show its last line.
+        let answer = ran.lines.last().map_or(text.trim(), |l| l.trim());
+        let shown = format!("{program} {}: {answer}", command.args.join(" "));
         if ran.status.as_deref() != Some("timeout") {
             if command.logged_out.iter().any(|p| lower.contains(p)) {
                 said = Some((LoginState::LoggedOut, shown));
@@ -1959,6 +1962,21 @@ mod tests {
             codex.get("codex").unwrap().login.detail,
             "codex login status: Logged in using ChatGPT"
         );
+    }
+
+    /// Codex prints a warning naming its home before the answer; the login
+    /// detail is the answer, not the warning cut mid-path.
+    #[test]
+    fn a_status_command_detail_is_its_last_line() {
+        let output = "by-inventory 1\nhost box\nos Linux\nchecked codex\n\
+            found codex 1 /bin/codex\nversion codex 0\nversion-out codex codex-cli 0.157.1\n\
+            status codex 1\n\
+            status-out codex WARNING: proceeding, even though we could not update PATH: Refusing to create helper binaries under temporary dir \"/tmp/x\" (codex_home: AbsolutePathBuf(\"/tmp/claude-0/-home-user-branchyard/f2a73\n\
+            status-out codex Not logged in\nend\n";
+        let codex = parse(output, 7).unwrap();
+        let login = &codex.get("codex").unwrap().login;
+        assert_eq!(login.state, LoginState::LoggedOut);
+        assert_eq!(login.detail, "codex login status: Not logged in");
     }
 
     #[test]

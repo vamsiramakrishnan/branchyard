@@ -2,6 +2,8 @@
 
 How to add a harness to `crates/branchyard-harness`: implement or reuse a driver, prove it against a recorded transcript and the driver contract, register a profile, and qualify it against the live binary. The [compatibility matrix](compatibility.md) shows where every target stands.
 
+This page is the drive side. A harness also has a catalog entry, an install manifest, a hook dialect and a section in the hooks document: [adding a harness](adding-a-harness.md) lists every surface and the test that checks them.
+
 Most harnesses need only a profile. If the harness speaks ACP v1, add an ACP profile (see [Register the profile](#register-the-profile)) and skip to [Record a fixture](#record-a-fixture). Write a driver only for a protocol no existing driver speaks.
 
 ## The sans-IO model

@@ -36,6 +36,11 @@ fn a_run_that_writes_files_is_ready_with_its_diffstat() {
         ("gemini-cli", "gemini-cli-acp")
     );
     assert_eq!(info.session.as_deref(), Some("fake-session-1"));
+    // The executable it was started with is kept for its later turns.
+    assert_eq!(
+        branch.command().unwrap(),
+        Some(vec![fake_agent().display().to_string()])
+    );
     assert_eq!(info.turns, 1);
     assert_eq!(info.cost_usd, None, "ACP reports no cost");
     assert_eq!(info.base, f.git(&["rev-parse", "main"]).trim());

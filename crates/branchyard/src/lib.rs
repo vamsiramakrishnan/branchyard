@@ -1990,6 +1990,13 @@ impl Branch {
         Ok(self.yard.store().read(&self.info.name)?.provider)
     }
 
+    /// The executable and fixed arguments the branch was started with in
+    /// place of its profile's own (`TaskOptions::command`), which its
+    /// later turns keep; `None` when it runs the profile's.
+    pub fn command(&self) -> Result<Option<Vec<String>>, Error> {
+        Ok(self.yard.store().read(&self.info.name)?.command)
+    }
+
     /// Recorded activity, oldest first.
     pub fn events(&self) -> Result<Vec<RecordedEvent>, Error> {
         record::read(&self.yard.store(), &self.info.name)
@@ -3248,7 +3255,7 @@ impl fmt::Display for Error {
             Error::InvalidName { name, reason } => {
                 write!(f, "{name:?} is not a usable branch name: {reason}")
             }
-            Error::UnknownHarness(name) => write!(f, "no harness or profile named {name}"),
+            Error::UnknownHarness(name) => f.write_str(&harness::unknown_message(name)),
             Error::HarnessUnavailable { harness, reason } => {
                 write!(f, "{harness} is unavailable: {reason}")
             }
