@@ -15,6 +15,7 @@
 //! | logged out, verified by the harness's own status command | refuse, with the login hint; `--no-preflight` runs anyway |
 //! | logged out, but the run is isolated and its secrets (`--secret`, `[secrets]`) name the harness's key variable | one note, and go on: the private home gets a login the host's status command cannot see |
 //! | logged out, likely (a guess from credential files) | one note, and go on |
+//! | Antigravity with `GEMINI_API_KEY` set but not selected in its settings, and the run does not provision the key (`agy` asks for a Google sign-in and fails headless) | refuse, with `by harnesses login antigravity` |
 //! | logged in, or unknown | go on |
 //!
 //! A key `by harnesses login ID --api-key` stored counts as a login here as
@@ -145,6 +146,18 @@ fn decide(
             false => Ok(()),
         };
     };
+    // `agy` reads `GEMINI_API_KEY` only with `modelProvider gemini` in its
+    // settings, which an isolated run with the key as a secret gets from
+    // Branchyard; anywhere else it asks for a Google sign-in and a headless
+    // run fails `authentication failed or timed out`, after a branch exists.
+    if state.login.key_unused() && provisioned_key(task, id).is_none() {
+        return Err(Failure::Message(format!(
+            "{id}: {}\nNext: by harnesses login {id} (shows the change before it writes it), or \
+             pass --isolated --secret GEMINI_API_KEY.\nNothing was started. If agy signs in \
+             another way here, pass --no-preflight.",
+            state.login.detail
+        )));
+    }
     let logged_out = state.login.state == LoginState::LoggedOut;
     let certain = state.login.evidence == Evidence::Verified;
     // `ready` words each case, and its first two are the ones that matter

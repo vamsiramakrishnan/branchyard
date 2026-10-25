@@ -383,10 +383,10 @@ mod tests {
             assert!(profiles::by_id(id).is_some(), "{id} is not a profile");
         }
         assert_eq!(qualification("claude-code-acp").unwrap(), "9/9 on 0.81.2");
-        assert_eq!(qualification("gemini-cli-acp").unwrap(), "8/9 on 0.63.0");
+        assert_eq!(qualification("gemini-cli-acp").unwrap(), "9/9 on 0.65.0");
         assert_eq!(
             qualification("antigravity-stream-json").unwrap(),
-            "9/9 on 1.4.0"
+            "9/9 on 1.4.7"
         );
         assert_eq!(
             qualification("codex-app-server").unwrap(),

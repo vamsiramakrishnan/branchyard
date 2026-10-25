@@ -19,6 +19,8 @@ The turn ended in failure. The reason follows the colon in `by ls` and `by show 
 - `by log NAME` has the last events and the harness's own error.
 - `by harnesses` says whether the harness is installed, on `PATH` and logged in; `by harnesses login ID` signs in.
 - `by send NAME "…"` tries again in the same session; `by rm NAME` throws the branch away.
+- Gemini CLI, `could not resume session …: open failed: Authentication required`: Gemini CLI's `session/load` (what `by send` uses) refuses a session until an auth type is chosen, though its `session/new` takes `GEMINI_API_KEY` without one. Branchyard now authenticates once with the `gemini-api-key` method and asks again, which makes Gemini CLI write `security.auth.selectedType: "gemini-api-key"` into `~/.gemini/settings.json`, as its own `/auth` does. If it still fails, the key is not in the environment the harness sees (`by harnesses` shows `key set (GEMINI_API_KEY)` when it is), and the failure now reads `authenticate with gemini-api-key failed: …`.
+- Antigravity, `open failed: authentication failed or timed out` within a second: `GEMINI_API_KEY` is set, but `~/.gemini/antigravity-cli/settings.json` does not select the gemini provider, so `agy` wants a Google sign-in. `by harnesses` shows `key set, unused`; `by harnesses login antigravity` shows the one-line change and writes it with `--yes` (and `by run` now refuses before a branch exists).
 
 ### `blocked`
 
@@ -66,6 +68,10 @@ A repository's `[workspace]` scripts run as you, so they never run before you sa
 - If the harness works when you start it yourself, ignore the row. `--auto` routing leaves such a harness out (`ID is likely logged out`); name it with `--harness` instead.
 - Otherwise `by harnesses login ID` runs the harness's own sign-in, or stores a key (`printf %s "$KEY" | by harnesses login ID --api-key`). `by up --plan` lists what only you can do.
 
+### `the CLI soft-denied a …`
+
+An Antigravity turn ended `no changes` with `warning: the CLI soft-denied a write_file (WriteFile): no permissions.allow rule in its settings lets it run`. `agy` decides its tools by its own rules and cannot ask in headless mode, and agy 1.4.7 does not allow file writes by default there (its documentation says it does). With `--isolated --secret GEMINI_API_KEY`, Branchyard writes the rules from `--yes` or `--permissions` into the branch's private home (`by log NAME` shows `permission rules: … (allow: …, write_file(…))`). In your own home it writes nothing: add `"permissions": {"allow": ["write_file(/path/to/repository/.branchyard/worktrees)"]}` to `~/.gemini/antigravity-cli/settings.json`, or use `--isolated`.
+
 ### `slow to start`
 
 `by harnesses` shows `slow to start` as the version and `ID: version: slow to start (took >10 s); `by harnesses --refresh` asks again, and BRANCHYARD_HARNESS_TIMEOUT (seconds) sets how long to wait`. Every installed harness is asked for its version at once, with ten seconds for all of them, and a Node-based CLI can take longer than that on its first start after an install or a reboot. A harness that answered before keeps that version, with the note. Run the CLI once yourself, then `by harnesses --refresh`. Without a version the qualification note cannot be matched, but a slow start alone does not stop `by run`.
@@ -106,4 +112,4 @@ Printing `{"hookSpecificOutput":…"Branchyard: 1 ready to integrate (by ls)."}`
 
 [Harness hooks](harness-hooks.md) has a section per harness with what each one needs.
 
-Not done: the recovery, cancel, over-budget, failed and trust messages were reproduced here with the fake agent. `blocked`, `awaiting plan approval` and the hook trust steps of Gemini CLI and Hermes come from the code and from [harness hooks](harness-hooks.md), not from a run on this machine. The `--remote` text is the refused-connection case only.
+Run live on 25 October 2026 (Gemini CLI 0.65.0 with a Gemini API key; Antigravity CLI 1.4.7): the `interrupted` messages for `by cancel` and for a `kill -9` of `by` during a tool call, `over budget: max_turns` after `--max-turns 1` and a `by send`, the `failed` text of a Gemini CLI resume and of an Antigravity run without its provider, and Antigravity's soft-denial warning. Not done: the recovery, cancel, over-budget, failed and trust messages of every other harness were reproduced here with the fake agent. `blocked`, `awaiting plan approval` and the hook trust steps of Gemini CLI and Hermes come from the code and from [harness hooks](harness-hooks.md), not from a run on this machine. The `--remote` text is the refused-connection case only.

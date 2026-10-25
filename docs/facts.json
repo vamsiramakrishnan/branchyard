@@ -65,7 +65,7 @@
     }
   },
   "tests": {
-    "total": 2585,
+    "total": 2589,
     "ignored": 29,
     "by_crate": {
       "branchyard": {
@@ -93,7 +93,7 @@
         "ignored": 0
       },
       "branchyard-harness": {
-        "tests": 140,
+        "tests": 144,
         "ignored": 0
       },
       "branchyard-herdr": {

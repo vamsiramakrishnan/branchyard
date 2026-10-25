@@ -270,7 +270,10 @@ fn streams_text_tools_and_cumulative_usage() {
         vec![
             Event::Warning {
                 message: "the CLI soft-denied a command (RunCommand): no permissions.allow rule \
-                          in its settings lets it run; the turn went on without it"
+                          in its settings lets it run; the turn went on without it. --isolated \
+                          writes the rules from --yes or --permissions into a private home; in \
+                          your own home, add one under permissions.allow in \
+                          ~/.gemini/antigravity-cli/settings.json"
                     .into()
             },
             Event::TurnEnded {

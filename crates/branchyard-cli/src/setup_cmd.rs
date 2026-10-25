@@ -868,7 +868,18 @@ fn finish(report: &mut Report) {
                 vars => format!("`{login} --api-key` stores a key ({vars})."),
             },
         };
+        let key_unused = h
+            .login
+            .as_ref()
+            .is_some_and(|l| l.detail.contains(branchyard::inventory::AGY_KEY_UNUSED));
         let text = match h.login.as_ref().map(|l| l.state.as_str()) {
+            // A key agy will not read: logged in for Branchyard's isolated
+            // runs, but a headless run in your own home asks for a sign-in.
+            Some("logged_in") if key_unused => format!(
+                "{label}: GEMINI_API_KEY is set, but agy reads it only with modelProvider gemini \
+                 in its settings, so a run in your own home asks for a Google sign-in and fails. \
+                 `{login}` shows the change and writes it."
+            ),
             Some("logged_in") => continue,
             Some("logged_out") if login_verified(h) => format!("{label} is logged out. {how}"),
             // Never "logged out" for a guess: an environment can authenticate
