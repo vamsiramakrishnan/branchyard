@@ -363,11 +363,11 @@
       "permissions_answered": "live-tested",
       "steer": "not verified",
       "live": {
-        "passed": 5,
+        "passed": 6,
         "total": 9,
         "report": "qualification/deepseek-harness-acp.json",
-        "date": "2026-10-11",
-        "version": "0.2.0-rc.2"
+        "date": "2026-10-25",
+        "version": "0.2.1-rc.2"
       },
       "status": "partial"
     },
@@ -473,9 +473,16 @@
       "id": "hermes",
       "profile": "hermes-acp",
       "role": "default",
-      "permissions_answered": "contract-only",
+      "permissions_answered": "live-tested",
       "steer": "not verified",
-      "status": "unqualified"
+      "live": {
+        "passed": 6,
+        "total": 9,
+        "report": "qualification/hermes-acp.json",
+        "date": "2026-10-25",
+        "version": "Hermes Agent v0.19.0 (2026.7.20)"
+      },
+      "status": "partial"
     }
   ]
 }

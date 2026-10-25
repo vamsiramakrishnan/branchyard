@@ -41,7 +41,7 @@ See [modes](modes.md) for how to choose between these.
 
 ## Harness drivers
 
-<!-- fact:profiles.summary -->17 driver profiles cover 15 of 16 harness targets: 5 live-qualified, 2 partial and 10 unqualified.<!-- /fact -->
+<!-- fact:profiles.summary -->17 driver profiles cover 15 of 16 harness targets: 5 live-qualified, 3 partial and 9 unqualified.<!-- /fact -->
 
 A live run is protocol qualification against the real binary as a local process. It is not a sandbox run: isolation, credentials and recovery are unqualified for every profile. "Permissions answered" and "Steer" are the two gates Branchyard can intercept mid-turn; [compatibility](compatibility.md) defines their values and lists every capability and the reason for each `no`.
 
@@ -55,7 +55,7 @@ A live run is protocol qualification against the real binary as a local process.
 | Codex | `codex-acp` (alternate) | unqualified | not run | contract-only | not verified |
 | Antigravity | `antigravity-stream-json` (default) | live-qualified | 9 of 9 pass, 2026-10-16, 1.4.0 ([report](qualification/antigravity-stream-json.json)) | — | — |
 | Oh My Pi | `oh-my-pi-acp` (default) | live-qualified | 9 of 9 pass, 2026-10-16, omp/18.10.3 ([report](qualification/oh-my-pi-acp.json)) | live-tested | not verified |
-| DeepSeek Harness | `deepseek-harness-acp` (default) | partial | 5 of 9 pass, 2026-10-11, 0.2.0-rc.2 ([report](qualification/deepseek-harness-acp.json)) | live-tested | not verified |
+| DeepSeek Harness | `deepseek-harness-acp` (default) | partial | 6 of 9 pass, 2026-10-25, 0.2.1-rc.2 ([report](qualification/deepseek-harness-acp.json)) | live-tested | not verified |
 | Gemini CLI | `gemini-cli-acp` (default) | partial | 8 of 9 pass, 2026-10-11, 0.63.0 ([report](qualification/gemini-cli-acp.json)) | live-tested | not verified |
 | OpenCode | `opencode-acp` (default) | unqualified | not run | contract-only | not verified |
 | Pi | `pi-rpc` (default) | unqualified | not run | — | live-tested |
@@ -66,7 +66,7 @@ A live run is protocol qualification against the real binary as a local process.
 | Amp | `amp-stream-json` (default) | unqualified | not run | — | — |
 | Qwen Code | `qwen-code-acp` (default) | unqualified | not run | contract-only | not verified |
 | Kimi CLI | `kimi-cli-acp` (default) | unqualified | not run | contract-only | not verified |
-| Hermes | `hermes-acp` (default) | unqualified | not run | contract-only | not verified |
+| Hermes | `hermes-acp` (default) | partial | 6 of 9 pass, 2026-10-25, Hermes Agent v0.19.0 (2026.7.20) ([report](qualification/hermes-acp.json)) | live-tested | not verified |
 
 <!-- /fact -->
 
