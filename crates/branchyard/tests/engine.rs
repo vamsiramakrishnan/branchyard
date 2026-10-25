@@ -1072,7 +1072,7 @@ fn harnesses_lists_every_profile_with_availability_and_qualification() {
         .qualification
         .as_deref()
         .unwrap()
-        .starts_with("9/9 on 2.1.283"));
+        .starts_with("9/9 on 2.1.310"));
     let acp = harnesses
         .iter()
         .find(|h| h.profile == "claude-code-acp")
