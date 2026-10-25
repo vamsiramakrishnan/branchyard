@@ -3303,6 +3303,7 @@ mod tests {
             "by: remote mode on http://127.0.0.1:8421 (app): harnesses run in Microsandbox \
              microVMs on the server, from alpine:3.20"
         );
+    }
 
     #[test]
     fn steps_the_run_survived_get_one_line_in_show() {
