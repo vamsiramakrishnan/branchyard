@@ -446,7 +446,8 @@ fn detection_reads_versions_and_logins_without_reading_secrets() {
     assert_eq!(qwen["on_path"], true);
 
     // The table says the same, and why a harness cannot run.
-    let out = w.ok(&["harnesses", "--refresh"]);
+    let out = w.by_env(&["harnesses", "--refresh"], &[("GOOGLE_API_KEY", secret)]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
     let table = text(&out.stdout);
     assert!(table.contains("codex"), "{table}");
     // Words for what is known: `logged in` only from the harness's own
@@ -1297,8 +1298,8 @@ fn a_run_is_refused_before_a_branch_when_its_harness_cannot_start() {
     let why = w.fails(&["run", "say hi", "--harness", "codex", "-n", "cx"]);
     assert!(
         why.contains(
-            "codex is verified logged out (codex login status: Not logged in); run by harnesses \
-             login codex"
+            "codex is verified logged out (codex login status: Not logged in); run `by \
+             harnesses login codex`"
         ),
         "{why}"
     );
