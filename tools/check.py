@@ -175,6 +175,9 @@ STEPS = (
     # The Pi/Oh My Pi, Amp and OpenCode plugins under node with a stub `by` (skips without node).
     Step("test_plugin_ts", "controls", (PY, "tests/test_plugin_ts.py")),
     Step("test_plugin_config", "controls", (PY, "tests/test_plugin_config.py")),
+    # The catalog, the driver profiles, the install manifests, the hook dialects and docs/harness-hooks.md
+    # agree on which harnesses exist (docs/adding-a-harness.md).
+    Step("test_harness_identity", "controls", (PY, "tests/test_harness_identity.py")),
     # Cargo: rustdoc (the docs job), formatting, the undocumented-items ratchet, Clippy, and the
     # schema freshness tests. The Clippy passes CI runs for the feature builds stay in the workflow.
     Step(

@@ -45,7 +45,7 @@ What `by harnesses --all` lists for each harness above, from the [harness catalo
 | OpenCode (`opencode`) | `opencode`, `opencode2` | `npm install -g opencode-ai` | `opencode auth login` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ORCAROUTER_API_KEY` |
 | Pi (`pi`) | `pi` | `npm install -g @earendil-works/pi-coding-agent --ignore-scripts` | — | — |
 | Goose (`goose`) | `goose` | `curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh \| bash` | — | — |
-| Cursor CLI (`cursor`) | `cursor-agent` | `curl https://cursor.com/install -fsS \| bash` | — | — |
+| Cursor CLI (`cursor`) | `cursor-agent`, `agent` | `curl https://cursor.com/install -fsS \| bash` | — | — |
 | GitHub Copilot CLI (`github-copilot`) | `copilot` | `npm install -g @github/copilot` | — | — |
 | Amp (`amp`) | `amp` | `npm install -g @ampcode/cli` | — | — |
 | Qwen Code (`qwen-code`) | `qwen` | `npm install -g @qwen-code/qwen-code` | — | — |
