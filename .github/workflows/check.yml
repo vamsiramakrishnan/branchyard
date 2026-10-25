@@ -52,6 +52,12 @@ jobs:
         # would make those tests rewrite what they compare.
         run: test -z "${BRANCHYARD_BLESS+x}" && test -z "${BY_UPDATE_SCHEMA+x}"
       - run: cargo test --workspace --locked --offline
+      - run: cargo build --locked --offline -p branchyard-cli -p branchyard-runtime --bin by --bin fake-acp-agent
+      - name: Run the getting-started guide on the built programs
+        # tests/test_getting_started.py runs the guide's tested blocks and checks every `by` command the
+        # guides show against the built `by --help`. It needs target/debug/by and fake-acp-agent, which
+        # the workspace tests above built; with REQUIRE_BINARIES=1 it fails, not skips, without them.
+        run: REQUIRE_BINARIES=1 python3 tests/test_getting_started.py
       - name: Count undocumented public items against the ratchet
         run: python tools/check_missing_docs.py
       - run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
