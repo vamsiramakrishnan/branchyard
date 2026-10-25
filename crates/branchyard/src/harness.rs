@@ -99,13 +99,28 @@ pub(crate) fn unknown_message(name: &str) -> String {
             drivable.push(profile.harness);
         }
     }
-    let drivable = drivable.join(", ");
     if branchyard_controls::catalog::harness(name).is_none() {
-        return format!(
-            "no harness or profile named {name}; drivable: {drivable} (by harnesses --profiles \
-             lists the profiles)"
-        );
+        // `qwen` for `qwen-code`, `gemini` for `gemini-cli`: a name that is
+        // the start of one drivable harness is offered as that one.
+        let meant: Vec<&str> = drivable
+            .iter()
+            .copied()
+            .filter(|id| id.starts_with(name) || name.starts_with(id))
+            .collect();
+        let drivable = drivable.join(", ");
+        return match meant.as_slice() {
+            [] => format!(
+                "no harness or profile named {name}; drivable: {drivable} (by harnesses \
+                 --profiles lists the profiles)"
+            ),
+            _ => format!(
+                "no harness or profile named {name}; did you mean {}? drivable: {drivable} (by \
+                 harnesses --profiles lists the profiles)",
+                meant.join(" or ")
+            ),
+        };
     }
+    let drivable = drivable.join(", ");
     let why = profiles::NOT_IMPLEMENTED
         .iter()
         .find(|(id, _)| *id == name)
@@ -286,6 +301,21 @@ pub(crate) fn qualification(profile: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name that begins one drivable harness's ID is offered as that one;
+    /// a name that begins none lists what is drivable, as before.
+    #[test]
+    fn an_unknown_harness_name_that_starts_a_known_one_gets_a_did_you_mean() {
+        let qwen = unknown_message("qwen");
+        assert!(qwen.contains("did you mean qwen-code?"), "{qwen}");
+        assert!(
+            qwen.starts_with("no harness or profile named qwen;"),
+            "{qwen}"
+        );
+        let nope = unknown_message("nope");
+        assert!(!nope.contains("did you mean"), "{nope}");
+        assert!(nope.contains("drivable: "), "{nope}");
+    }
 
     #[test]
     fn harness_ids_pick_default_profiles_and_profile_ids_work_too() {

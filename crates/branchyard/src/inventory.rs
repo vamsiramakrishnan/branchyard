@@ -769,6 +769,19 @@ pub fn key_variables(id: &str) -> Vec<String> {
     vars
 }
 
+/// The key variables of every catalog harness that are set in this
+/// process's environment, by name, sorted, each once. Never a value.
+pub fn set_key_variables() -> Vec<String> {
+    let mut names: Vec<String> = catalog::harnesses()
+        .iter()
+        .flat_map(|e| key_variables(&e.id))
+        .filter(|var| std::env::var_os(var).is_some_and(|v| !v.is_empty()))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// The status command `id`'s login is verified with, for people.
 pub fn status_command(id: &str) -> Option<String> {
     let entry = catalog::harness(id)?;
@@ -1704,6 +1717,9 @@ impl InventoryCache {
             std::env::var("HOME").unwrap_or_default(),
             options.dirs.join(":"),
             options.timeout.as_millis().to_string(),
+            // The key variables that are set, by name: exporting one is a
+            // login, so the cache from before it does not answer for after.
+            set_key_variables().join(":"),
         ] {
             hasher.update(part.as_bytes());
             hasher.update(b"\0");

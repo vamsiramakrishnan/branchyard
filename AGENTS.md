@@ -46,7 +46,7 @@ Cargo keys artifacts by package, features and profile, not by worktree, so workt
 
 - Use one `CARGO_TARGET_DIR` per worktree when the disk allows it.
 - When it does not, share one and `touch` the `.rs` files you changed in the same command as the build, so cargo rebuilds them from your tree; take a lock (`flock`) around the touch and the build so two worktrees do not interleave.
-- `crates/branchyard-setup/build.rs` embeds `plugins/branchyard` by absolute path and reruns only when that path changes, so after another worktree built the crate, its install tests read that tree's manifests (`unknown field` on a manifest you did not touch). `touch` the build script with your sources.
+- `crates/branchyard-setup/build.rs` embeds `plugins/branchyard` by absolute path and reruns only when that path changes, so after another worktree built the crate, its install tests read that tree's manifests (`unknown field` on a manifest you did not touch). `touch` the build script with your sources. The same goes for every `include_str!`: `crates/branchyard-controls/src/catalog.rs` embeds `catalog/harnesses.toml` and `crates/branchyard/src/harness.rs` embeds `docs/qualification/*.json`, so touch those sources too when you change what they embed, or a test binary carries another worktree's copy.
 - Build the crates you need (`-p branchyard-cli`), not the workspace. Set `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_PROFILE_TEST_DEBUG=0` to keep the cache small, and delete the test executables you made when you finish.
 - "Blocking waiting for file lock" means another build is using the directory. Wait; do not kill it.
 
