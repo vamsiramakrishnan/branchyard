@@ -44,14 +44,26 @@ pub enum RecipeAction {
     /// Every recipe here: where it is defined, whether it is trusted, whether it can pause
     List,
     /// One recipe's commands, where it is defined, its digest and whether it is trusted
-    Show { name: String },
+    Show {
+        /// The recipe's name, as `by recipe list` shows it
+        name: String,
+    },
     /// Trust a repository recipe's commands as they are now
-    Trust { name: String },
+    Trust {
+        /// The recipe's name, as `by recipe list` shows it
+        name: String,
+    },
     /// Forget the trust decision for a repository recipe
-    Untrust { name: String },
-    /// Run the recipe's doctor, then create a machine, exec in it, suspend and resume it when
-    /// it can, and destroy it
+    Untrust {
+        /// The recipe's name, as `by recipe list` shows it
+        name: String,
+    },
+    /// Check a recipe: its doctor, then a machine made and destroyed
+    ///
+    /// Run the recipe's doctor, then create a machine, exec in it, suspend and resume it
+    /// when it can, and destroy it
     Check {
+        /// The recipe's name, as `by recipe list` shows it
         name: String,
         /// Only the doctor: create nothing
         #[arg(long)]

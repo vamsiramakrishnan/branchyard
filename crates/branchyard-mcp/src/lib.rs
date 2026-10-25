@@ -842,7 +842,16 @@ impl ServerHandler for Server {
 /// A failed call as the model reads it: the error's message, and its
 /// detail, when it has one, as structured content.
 fn tool_error(error: &branchyard::Error) -> CallToolResult {
-    let mut result = CallToolResult::error(vec![ContentBlock::text(error.to_string())]);
+    // The model reads no `kind` in the text, so a refusal says it is one.
+    let text = match error {
+        branchyard::Error::Denied(why) => format!("denied: {why}"),
+        // A refusal the broker returned keeps its word too.
+        branchyard::Error::Remote { kind, message, .. } if kind == "denied" => {
+            format!("denied: {message}")
+        }
+        other => other.to_string(),
+    };
+    let mut result = CallToolResult::error(vec![ContentBlock::text(text)]);
     if let Some(detail) = error.detail() {
         result.structured_content = Some(json!({
             "error": {"kind": error.kind(), "message": error.to_string(), "detail": detail}

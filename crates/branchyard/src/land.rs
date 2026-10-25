@@ -880,6 +880,7 @@ mod tests {
     fn a_long_check_output_is_cut_from_the_front() {
         let error = Error::CheckFailed {
             output_tail: format!("start{}end", "x".repeat(OUTPUT_SHOWN)),
+            ran: None,
             checks: Vec::new(),
             shared: None,
             own_work: Vec::new(),

@@ -309,7 +309,7 @@ fn steer_adds_to_a_running_childs_turn() {
         "{said}"
     );
     assert!(
-        said.contains("mcp steer error: branch kid is not running a turn"),
+        said.contains("mcp steer error: kid has no running turn to steer"),
         "{said}"
     );
     let kid = f.yard.branch("kid").unwrap();

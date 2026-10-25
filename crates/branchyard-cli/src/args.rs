@@ -229,6 +229,7 @@ pub struct EffectsArgs {
 /// `by undo`.
 #[derive(Args, Clone, Debug, PartialEq)]
 pub struct UndoArgs {
+    /// The branch to undo
     pub branch: String,
     /// Go back to this checkpoint (default: the branch's base, 0); effects of later turns are
     /// planned
@@ -240,7 +241,7 @@ pub struct UndoArgs {
     /// Undo only these upstream effects (ids or their ends)
     #[arg(long, value_name = "ID", num_args = 1..)]
     pub only: Vec<String>,
-    /// Undo every reversible effect without asking
+    /// Undo every reversible effect without a confirmation prompt
     #[arg(long, short = 'y')]
     pub yes: bool,
     /// Print JSON
@@ -304,9 +305,13 @@ pub enum EffectsAction {
 #[derive(Subcommand, Clone, Debug, PartialEq)]
 pub enum PlanAction {
     /// Show a branch's plan, its task list and its phase
-    Show { branch: String },
+    Show {
+        /// The branch whose plan to show
+        branch: String,
+    },
     /// Approve the plan and run it as the branch's next turn, with normal permissions
     Approve {
+        /// The branch whose plan to approve
         branch: String,
         /// Edit the plan in your editor first; what you save is what is approved
         #[arg(long, conflicts_with = "file")]
@@ -323,6 +328,7 @@ pub enum PlanAction {
     },
     /// Reject the plan: the branch ends, or with --replan it plans again with your reason
     Reject {
+        /// The branch whose plan to reject
         branch: String,
         /// Why; with --replan, the branch's next planning turn gets it
         #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
@@ -348,7 +354,10 @@ pub enum KnowledgeAction {
         all: bool,
     },
     /// One entry
-    Show { id: u64 },
+    Show {
+        /// The entry's number
+        id: u64,
+    },
     /// Walk the proposed entries one at a time: adopt, reject, edit or skip each
     Review {
         /// The editor for edits (default: $VISUAL, then $EDITOR)
@@ -358,11 +367,13 @@ pub enum KnowledgeAction {
     /// Adopt entries: from now on, matching branches are given them
     Adopt {
         #[arg(required = true, value_name = "ID")]
+        /// Entry numbers, as `by knowledge review` lists them
         ids: Vec<u64>,
     },
     /// Reject entries: they are not used, and the same text is not proposed again
     Reject {
         #[arg(required = true, value_name = "ID")]
+        /// Entry numbers, as `by knowledge review` lists them
         ids: Vec<u64>,
         /// Why
         #[arg(long, value_name = "TEXT")]
@@ -370,6 +381,7 @@ pub enum KnowledgeAction {
     },
     /// Change an entry's text (in your editor without --text) or scope
     Edit {
+        /// The entry's number
         id: u64,
         /// The new text
         #[arg(long, value_name = "TEXT", value_parser = non_blank)]
@@ -387,6 +399,7 @@ pub enum KnowledgeAction {
     /// Add an entry you wrote, adopted (or only proposed, with --propose)
     Add {
         #[arg(value_parser = non_blank)]
+        /// The entry's text
         text: String,
         /// Only for tasks touching files matching this glob, such as crates/parser/**
         #[arg(long, value_name = "GLOB")]
@@ -399,10 +412,16 @@ pub enum KnowledgeAction {
         propose: bool,
     },
     /// Remove an entry
-    Rm { id: u64 },
-    /// Propose entries from a branch now: the corrections sent into it and the review comments
-    /// it addressed, or a distiller harness's proposals
+    Rm {
+        /// The entry's number
+        id: u64,
+    },
+    /// Propose entries from a branch now
+    ///
+    /// Propose entries from a branch now: the corrections sent into it and the review
+    /// comments it addressed, or a distiller harness's proposals
     Distill {
+        /// The branch to propose entries from
         branch: String,
         /// Ask this harness to distill, read-only on a scratch branch (default: [knowledge]
         /// distiller, else the deterministic extractor)
@@ -453,10 +472,12 @@ pub enum FleetAction {
         #[arg(long, value_name = "N")]
         seed: Option<u64>,
     },
-    /// What to know before picking a harness for a task: the candidates with whether they can
-    /// run here, their recorded outcomes for its kind and the router's own pick. Inside a
-    /// harness, as its branch: its task's fleet entry, or the harnesses it may run, and its
-    /// budget left
+    /// What to know before picking a harness for a task
+    ///
+    /// What to know before picking a harness for a task: the candidates with whether they
+    /// can run here, their recorded outcomes for its kind and the router's own pick. Inside
+    /// a harness, as its branch: its task's fleet entry, or the harnesses it may run, and
+    /// its budget left
     Advise {
         /// The task
         prompt: String,
@@ -787,7 +808,7 @@ terminal and returns once the turn has started: follow it with by log -f
 BRANCH or by watch, wait with by wait BRANCH, stop it with by cancel BRANCH.
 Its output goes to a log under .branchyard/detached/. With no terminal, tool
 permission requests are denied unless --yes, --permissions or branchyard.toml
-allows them; --ask is refused. See docs/devex.md.";
+allows them; --ask is refused. See docs/surfaces.md.";
 
 const FAN_EXAMPLES: &str = "\
 Examples:
@@ -1286,7 +1307,7 @@ Examples:
 
 #[derive(Subcommand, Clone, Debug, PartialEq)]
 pub enum Command {
-    /// Run a task on a new branch
+    /// Run a task on a new branch; waits for the turn (--detach returns at once)
     #[command(display_order = 100, after_help = RUN_EXAMPLES)]
     Run {
         /// The task for the harness; quote it (with --issue, added to the issue's text)
@@ -1301,7 +1322,7 @@ pub enum Command {
         #[command(flatten)]
         task: Checked<RunFlags>,
     },
-    /// Run a task on several harnesses in parallel, then compare
+    /// Run a task on several harnesses in parallel; waits, then compares
     #[command(display_order = 101, after_help = FAN_EXAMPLES)]
     Fan {
         /// The task for every harness; quote it (with --issue, added to the issue's text)
@@ -1320,10 +1341,16 @@ pub enum Command {
         /// Then judge the attempts and propose one, as `by judge` does
         #[arg(long)]
         judge: bool,
+        /// Print JSON: the branches, as `by ls --json` prints them (activity goes to standard
+        /// error), and with --judge the judgement
+        #[arg(long)]
+        json: bool,
         #[command(flatten)]
         task: Checked<FanFlags>,
     },
-    /// Run one prompt over every item of a list, each on its own branch, and collect the answers
+    /// Run one prompt over a list of items, a branch for each
+    ///
+    /// Every item of the list gets its own branch, and the answers are collected.
     #[command(
         display_order = 101,
         after_help = MAP_EXAMPLES,
@@ -1339,9 +1366,10 @@ pub enum Command {
         #[command(flatten)]
         map: MapArgs,
     },
-    /// Continue a branch's session with another prompt
+    /// Send a branch another prompt; waits for the turn (--detach returns at once)
     #[command(display_order = 102, after_help = SEND_EXAMPLES)]
     Send {
+        /// The branch to send to; `by ls` lists them
         branch: String,
         /// The next prompt; quote it
         #[arg(
@@ -1368,16 +1396,19 @@ pub enum Command {
         /// Print JSON
         #[arg(long)]
         json: bool,
-        /// Run the turn in the background, detached from this terminal, and return once it has
-        /// started (local mode; see by run --help)
+        /// Return as soon as the turn has started, leaving it running in the background; its
+        /// output goes to a log under .branchyard/detached/ (local mode)
         #[arg(long, conflicts_with_all = ["ask", "steer", "wait"])]
         detach: bool,
         #[command(flatten)]
         task: Checked<SendFlags>,
     },
-    /// Add to a branch's running turn without interrupting it, as `by send --steer` does
+    /// Add to a branch's running turn without interrupting it
+    ///
+    /// The same as `by send --steer`.
     #[command(display_order = 102, after_help = STEER_EXAMPLES)]
     Steer {
+        /// The branch whose running turn to add to
         branch: String,
         /// What to add; quote it
         #[arg(
@@ -1394,9 +1425,12 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Comment on a branch's diff in your editor, then send every comment as one prompt
+    /// Comment on a branch's diff in your editor and send the comments
+    ///
+    /// Opens the diff in your editor, then sends every comment as one prompt.
     #[command(display_order = 111, after_help = REVIEW_EXAMPLES)]
     Review {
+        /// The branch whose diff to review
         branch: String,
         /// Print the prompt the comments make instead of sending it
         #[arg(long)]
@@ -1408,15 +1442,20 @@ pub enum Command {
         /// Read the comments from this edited review file instead of opening an editor
         #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
         file: Option<String>,
-        /// Send in the background (by send, detached, its output in a log file) and return
+        /// Return as soon as the send has started, leaving it running in the background; its
+        /// output goes to a log beside the draft
         #[arg(long, conflicts_with = "print")]
         detach: bool,
+        /// Print JSON: the prompt with --print, else what `by send --json` prints
+        #[arg(long, conflicts_with = "detach")]
+        json: bool,
         #[command(flatten)]
         task: Checked<SendFlags>,
     },
-    /// Start a new branch from a branch's candidate and conversation
+    /// Fork a branch's work and conversation; waits (--detach returns at once)
     #[command(display_order = 103, after_help = FORK_EXAMPLES)]
     Fork {
+        /// The branch to fork
         branch: String,
         /// The new branch's prompt; quote it
         prompt: String,
@@ -1435,6 +1474,7 @@ pub enum Command {
     /// Fork a branch's candidate into a fresh session with a generated handoff brief
     #[command(display_order = 104)]
     Reincarnate {
+        /// The branch to start over from
         branch: String,
         #[command(flatten)]
         task: Checked<ReincarnateFlags>,
@@ -1442,6 +1482,7 @@ pub enum Command {
     /// Merge a branch's candidate after its check passes
     #[command(display_order = 105, after_help = MERGE_EXAMPLES)]
     Merge {
+        /// The branch to merge
         branch: String,
         /// Local branch to merge into (default: the current branch)
         #[arg(long, value_name = "TARGET")]
@@ -1453,6 +1494,10 @@ pub enum Command {
         /// each would
         #[arg(long)]
         promote_effects: bool,
+        /// Print JSON: the branch, what it was merged into, the merge commit and the check's
+        /// result
+        #[arg(long)]
+        json: bool,
     },
     /// A branch's workspace: trust its scripts, show it, or run a named script in it
     #[command(display_order = 110, subcommand_required = true, after_help = WORKSPACE_EXAMPLES)]
@@ -1472,8 +1517,9 @@ pub enum Command {
         #[command(subcommand)]
         action: EnvAction,
     },
-    /// Environment recipes: repository scripts that create a VM; list, check, trust them
-    /// (see docs/recipes.md)
+    /// Environment recipes: repository scripts that create a VM
+    ///
+    /// List, check and trust them (see docs/recipes.md).
     #[command(
         display_order = 112,
         subcommand_required = true,
@@ -1486,30 +1532,39 @@ pub enum Command {
         #[command(subcommand)]
         action: crate::recipe_cmd::RecipeAction,
     },
-    /// Remove a branch's worktree and record, which frees its name. A removed child leaves its
-    /// parent's children, and what its subtree spent still counts in the parent's budget
+    /// Remove a branch and free its name
+    ///
+    /// Removes the branch's worktree and record. A removed child leaves its parent's
+    /// children, and what its subtree spent still counts in the parent's budget.
     #[command(display_order = 106)]
     Rm {
+        /// The branch to remove
         branch: String,
         /// Keep the credential files provisioning wrote in a home a fork still uses
         #[arg(long)]
         keep_credentials: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Reset a branch to one of its per-turn checkpoints
     #[command(display_order = 107, after_help = REWIND_EXAMPLES)]
     Rewind {
+        /// The branch to reset
         branch: String,
         /// The checkpoint to go to: a turn number, or 0 for the branch's base
         #[arg(long, value_name = "N")]
         to: u32,
-        /// Do not ask for confirmation
+        /// Confirm the reset without a prompt
         #[arg(long, short = 'y')]
         yes: bool,
         /// Print JSON
         #[arg(long)]
         json: bool,
     },
-    /// Tasks: what was asked and its attempts, in this repository, a folder you grant, or none
+    /// Tasks: what was asked, and its attempts
+    ///
+    /// In this repository, a folder you grant, or none.
     #[command(display_order = 107, subcommand_required = true, after_help = TASK_EXAMPLES)]
     Task(Box<TaskCommand>),
     /// Apply a branch's changes to this checkout to try them; --off restores it
@@ -1555,14 +1610,16 @@ pub enum Command {
         /// After the pick merges, remove the other attempts
         #[arg(long, requires = "pick")]
         discard_others: bool,
-        /// Do not ask before removing the others
+        /// Confirm removing the other attempts without a prompt
         #[arg(long, short = 'y')]
         yes: bool,
         /// Print JSON
         #[arg(long)]
         json: bool,
     },
-    /// Score attempts at one task, optionally with a judge harness, and propose or merge one
+    /// Score attempts at one task, and propose or merge one
+    ///
+    /// Optionally with a judge harness.
     #[command(display_order = 109, after_help = JUDGE_EXAMPLES)]
     Judge {
         /// A `by fan`'s name, or the branches to judge
@@ -1590,7 +1647,7 @@ pub enum Command {
         /// After the pick merges, remove the other attempts
         #[arg(long, requires = "pick")]
         discard_others: bool,
-        /// Do not ask before removing the others
+        /// Confirm removing the other attempts without a prompt
         #[arg(long, short = 'y')]
         yes: bool,
         /// Print JSON
@@ -1600,12 +1657,15 @@ pub enum Command {
     /// Approvals waiting for an answer: list them, allow or deny one
     #[command(display_order = 114, after_help = APPROVALS_EXAMPLES)]
     Approvals(ApprovalsArgs),
-    /// The effect ledger: what branches did outside the machine; show, promote or reconcile
-    /// an entry
+    /// The effect ledger: what branches did outside the machine
+    ///
+    /// Show, promote or reconcile an entry.
     #[command(display_order = 115, after_help = EFFECTS_EXAMPLES)]
     Effects(EffectsArgs),
-    /// Undo a branch: rewind its files and conversation, and undo what it did upstream where
-    /// the upstream allows
+    /// Rewind a branch and undo what it did upstream
+    ///
+    /// Rewinds its files and conversation, and undoes what it did upstream where the
+    /// upstream allows.
     #[command(display_order = 116, after_help = UNDO_EXAMPLES)]
     Undo(UndoArgs),
     /// A branch's plan: show it, approve it (as proposed or edited) or reject it
@@ -1617,8 +1677,9 @@ pub enum Command {
         #[command(subcommand)]
         action: PlanAction,
     },
-    /// Repository knowledge: review, adopt, reject, edit, add, remove or export what agents are
-    /// told
+    /// Repository knowledge: what agents are told
+    ///
+    /// Review, adopt, reject, edit, add, remove or export it.
     #[command(display_order = 113, subcommand_required = true, after_help = KNOWLEDGE_EXAMPLES)]
     Knowledge {
         /// Print JSON
@@ -1627,7 +1688,9 @@ pub enum Command {
         #[command(subcommand)]
         action: KnowledgeAction,
     },
-    /// The fleet table's routing: outcome statistics, or what a prompt would be routed to
+    /// The fleet table's routing: statistics and where a prompt goes
+    ///
+    /// Outcome statistics, or what a prompt would be routed to.
     #[command(display_order = 207, subcommand_required = true, after_help = FLEET_EXAMPLES)]
     Fleet {
         /// Print JSON
@@ -1636,10 +1699,12 @@ pub enum Command {
         #[command(subcommand)]
         action: FleetAction,
     },
-    /// Push a ready branch and open or update its GitHub pull request; --watch feeds CI and
-    /// reviews back
+    /// Open or update a ready branch's GitHub pull request
+    ///
+    /// Pushes the branch first; --watch feeds CI and reviews back.
     #[command(display_order = 110, after_help = PR_EXAMPLES)]
     Pr {
+        /// The branch to open the pull request for
         branch: String,
         #[command(flatten)]
         pr: Checked<PrFlags>,
@@ -1661,6 +1726,7 @@ pub enum Command {
     /// Show one branch
     #[command(display_order = 201)]
     Show {
+        /// The branch to show; `by ls` lists them
         branch: String,
         /// Print JSON
         #[arg(long)]
@@ -1672,10 +1738,14 @@ pub enum Command {
     },
     /// Show a branch's candidate diff against its base
     #[command(display_order = 202)]
-    Diff { branch: String },
+    Diff {
+        /// The branch whose changes to show
+        branch: String,
+    },
     /// Show a branch's recorded events
     #[command(display_order = 203)]
     Log {
+        /// The branch whose events to show
         branch: String,
         /// Print JSON
         #[arg(long)]
@@ -1689,14 +1759,16 @@ pub enum Command {
     #[command(display_order = 204, after_help = WATCH_EXAMPLES)]
     Watch {
         /// Time between refreshes: seconds, or with a unit such as 250ms or 2s
-        #[arg(long, value_name = "SECS", default_value = "1", value_parser = watch_interval)]
+        #[arg(long, value_name = "SECONDS", default_value = "1", value_parser = watch_interval)]
         interval: Duration,
         /// Print the tree once and exit
         #[arg(long)]
         once: bool,
     },
-    /// Which harnesses are installed here or elsewhere, with version, login and quota; install,
-    /// update or log in to one
+    /// Harnesses installed here or elsewhere; install, update, log in
+    ///
+    /// Shows each harness with its version, login and quota; installs, updates or logs in
+    /// to one.
     #[command(display_order = 205, after_help = HARNESSES_EXAMPLES)]
     Harnesses {
         /// Print JSON
@@ -1719,14 +1791,18 @@ pub enum Command {
         #[command(subcommand)]
         action: Option<HarnessesAction>,
     },
-    /// Each local Claude Code and Codex login's 5-hour and weekly usage, and when it resets
+    /// Each Claude Code and Codex login's usage and when it resets
+    ///
+    /// The 5-hour and weekly usage of each local login.
     #[command(display_order = 208, after_help = USAGE_EXAMPLES)]
     Usage {
         /// Print JSON
         #[arg(long)]
         json: bool,
     },
-    /// Make a Claude Code or Codex session already on this machine a branch; --list shows them
+    /// Make a session already on this machine a branch
+    ///
+    /// A Claude Code or Codex session; --list shows them.
     #[command(display_order = 112, after_help = ADOPT_EXAMPLES)]
     Adopt {
         /// The session's ID, or a unique start of it (default: list them)
@@ -1748,7 +1824,9 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// The catalog of connectors Anvil can adopt (see docs/connectors.md)
+    /// The catalog of connectors the connector gateway (Anvil) can adopt
+    ///
+    /// See docs/connectors.md.
     #[command(display_order = 207, subcommand_required = true)]
     Connectors {
         /// Print JSON
@@ -1760,6 +1838,7 @@ pub enum Command {
     /// Open a branch's worktree in your editor
     #[command(display_order = 206, after_help = OPEN_EXAMPLES)]
     Open {
+        /// The branch whose worktree to open
         branch: String,
         /// The editor: code, cursor, zed, windsurf, subl, idea, nvim, ... or a command line
         /// (default: $VISUAL, then $EDITOR)
@@ -1770,7 +1849,7 @@ pub enum Command {
         print: bool,
     },
     /// Delegate to a new child branch of this branch
-    #[command(display_order = 300, after_help = SPAWN_EXAMPLES)]
+    #[command(hide = true, display_order = 300, after_help = SPAWN_EXAMPLES)]
     Spawn {
         /// The child's task; quote it (with --issue, added to the issue's text)
         #[arg(
@@ -1786,9 +1865,11 @@ pub enum Command {
         #[command(flatten)]
         spawn: Checked<SpawnFlags>,
     },
-    /// Hand the engine a plan: several children at once, with the brief they share; then end
-    /// your turn, and you are woken with a summary when they have settled
-    #[command(display_order = 300, after_help = DELEGATE_EXAMPLES)]
+    /// Hand the engine a plan: several children at once
+    ///
+    /// With the brief they share; then end your turn, and you are woken with a summary when
+    /// they have settled.
+    #[command(hide = true, display_order = 300, after_help = DELEGATE_EXAMPLES)]
     Delegate {
         /// The plan as JSON, `-` for standard input: {"brief": TEXT, "tasks": [TASK, ...]},
         /// each task as the spawn tool takes a child ({"prompt", "name", "owns", "depends_on",
@@ -1812,9 +1893,11 @@ pub enum Command {
         #[command(flatten)]
         perms: Perms,
     },
-    /// Show this branch's shared brief, which every child it delegates to is given each turn;
-    /// with TEXT, add an entry first, sent to the children running now
-    #[command(display_order = 300)]
+    /// Show or add to this branch's brief for its children
+    ///
+    /// The brief every child it delegates to is given each turn; with TEXT, add an entry
+    /// first, sent to the children running now.
+    #[command(hide = true, display_order = 300)]
     Brief {
         /// A new entry: a decision every child must follow, such as an interface you settled
         #[arg(conflicts_with = "file")]
@@ -1830,7 +1913,7 @@ pub enum Command {
         json: bool,
     },
     /// Show a branch's status, candidate, cost, budget and last message
-    #[command(display_order = 301)]
+    #[command(hide = true, display_order = 301)]
     Inspect {
         /// Default: this harness's own branch
         branch: Option<String>,
@@ -1839,7 +1922,7 @@ pub enum Command {
         json: bool,
     },
     /// Show a branch's recorded events from a cursor
-    #[command(display_order = 302)]
+    #[command(hide = true, display_order = 302)]
     Events {
         /// Default: this harness's own branch
         branch: Option<String>,
@@ -1853,18 +1936,23 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Merge delegated children into their parent's branch after their check passes; several
-    /// are merged together, all or none, and checked once on the result
-    #[command(display_order = 303)]
+    /// Merge delegated children into this branch after their check
+    ///
+    /// Merges delegated children into their parent's branch after their check passes;
+    /// several are merged together, all or none, and checked once on the result.
+    #[command(hide = true, display_order = 303)]
     Integrate {
         #[arg(required = true, value_name = "BRANCH")]
+        /// The children to merge, all of one parent
         branches: Vec<String>,
         /// Print JSON
         #[arg(long)]
         json: bool,
     },
-    /// Run a branch's check on its current work, merged into its parent's branch as integrate
-    /// would, without integrating it; run it on yourself before you finish
+    /// Run a branch's check on its current work, without merging
+    ///
+    /// Runs the check on the branch's work merged into its parent's branch, as integrate
+    /// would, without integrating it; run it on yourself before you finish.
     #[command(display_order = 303)]
     Check {
         /// Default: this harness's own branch
@@ -1873,8 +1961,10 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Wait for delegated branches to settle: all of them, or the first with --any. Each is
-    /// printed as it settles (with --json, as a JSON line on stderr), then the result
+    /// Wait for branches to settle
+    ///
+    /// Waits for delegated branches to settle: all of them, or the first with --any. Each
+    /// is printed as it settles (with --json, as a JSON line on stderr), then the result.
     #[command(display_order = 303)]
     Wait {
         /// Default, inside a harness: its children still running
@@ -1886,28 +1976,33 @@ pub enum Command {
         /// Return when all of them have settled (the default)
         #[arg(long)]
         all: bool,
-        /// Give up after S seconds; the result says timed_out, and by exits 1. Keep S under any
-        /// limit of your own (a shell `timeout`, a tool call's time limit): a wait stopped from
-        /// outside prints no result, only the branches that settled before
-        #[arg(long, value_name = "S")]
+        /// Give up after this many seconds; the result says timed_out, and by exits 1. Keep it
+        /// under any limit of your own (a shell `timeout`, a tool call's time limit): a wait
+        /// stopped from outside prints no result, only the branches that settled before
+        #[arg(long, value_name = "SECONDS", value_parser = seconds)]
         timeout: Option<f64>,
         /// Print JSON
         #[arg(long)]
         json: bool,
     },
-    /// Stop a branch's running turn and every turn delegated below it (a settled child: by
-    /// discard)
+    /// Stop a branch's running turn and the turns below it
+    ///
+    /// Stops the turn and every turn delegated below it (a settled child: by discard).
     #[command(display_order = 304)]
     Cancel {
+        /// The branch whose turn to stop
         branch: String,
         /// Print JSON
         #[arg(long)]
         json: bool,
     },
-    /// Set a settled child aside: it ends discarded with your reason, keeps its record and cost,
-    /// is never integrated, and frees its slot in its parent's max_children
-    #[command(display_order = 304, after_help = DISCARD_EXAMPLES)]
+    /// Set a settled child aside; it is never integrated
+    ///
+    /// It ends discarded with your reason, keeps its record and cost, and frees its slot in
+    /// its parent's max_children.
+    #[command(hide = true, display_order = 304, after_help = DISCARD_EXAMPLES)]
     Discard {
+        /// The settled child to set aside
         branch: String,
         /// Why, recorded with it (default: who discarded it)
         #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
@@ -1917,7 +2012,7 @@ pub enum Command {
         json: bool,
     },
     /// List the branches a branch delegated to
-    #[command(display_order = 305)]
+    #[command(hide = true, display_order = 305)]
     Children {
         /// Default: this harness's own branch
         branch: Option<String>,
@@ -1925,9 +2020,10 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show a branch's children and their dependencies, or apply a graph proposal
-    /// (see docs/graph.md)
-    #[command(display_order = 306, subcommand_required = true)]
+    /// Show a branch's children and dependencies, or apply a proposal
+    ///
+    /// See docs/graph.md.
+    #[command(hide = true, display_order = 306, subcommand_required = true)]
     Graph {
         /// Print JSON
         #[arg(long, global = true)]
@@ -1936,14 +2032,15 @@ pub enum Command {
         action: GraphAction,
     },
     /// Ask this branch's parent a question
-    #[command(display_order = 307)]
+    #[command(hide = true, display_order = 307)]
     Ask {
         /// Act as this branch (outside a harness; inside one, it is the harness's own)
         #[arg(long = "as", value_name = "BRANCH")]
         as_branch: Option<String>,
+        /// The question
         text: String,
-        /// Block up to SECS seconds for an answer (default: return once the question is sent)
-        #[arg(long = "wait", value_name = "SECS", value_parser = seconds, allow_negative_numbers = true)]
+        /// Block up to this many seconds for an answer (default: return once the question is sent)
+        #[arg(long = "wait", value_name = "SECONDS", value_parser = seconds, allow_negative_numbers = true)]
         wait_seconds: Option<f64>,
         /// Print JSON
         #[arg(long)]
@@ -1954,11 +2051,12 @@ pub enum Command {
     /// A result is checked against the contract the parent gave at spawn (`by inspect` shows it
     /// as result_contract); a mismatch is refused naming the path and the rule, and nothing is
     /// recorded. The parent reads the latest result in `by inspect` and `by wait`.
-    #[command(display_order = 308)]
+    #[command(hide = true, display_order = 308)]
     Report {
         /// Act as this branch (outside a harness; inside one, it is the harness's own)
         #[arg(long = "as", value_name = "BRANCH")]
         as_branch: Option<String>,
+        /// What to report
         text: String,
         /// The branch's result, as JSON text
         #[arg(long, value_name = "JSON", value_parser = non_blank, conflicts_with = "result_file")]
@@ -1971,11 +2069,12 @@ pub enum Command {
         json: bool,
     },
     /// Escalate to this branch's parent, or further up if its rig seat allows
-    #[command(display_order = 309)]
+    #[command(hide = true, display_order = 309)]
     Escalate {
         /// Act as this branch (outside a harness; inside one, it is the harness's own)
         #[arg(long = "as", value_name = "BRANCH")]
         as_branch: Option<String>,
+        /// What to escalate
         text: String,
         /// Print JSON
         #[arg(long)]
@@ -1986,7 +2085,7 @@ pub enum Command {
     /// A claim the harness makes about itself, shown in `by log`, `by watch`, `by show` and
     /// `by inspect`; it changes nothing about the branch. `blocked` and `failure` are also
     /// escalated to the parent's inbox.
-    #[command(display_order = 312)]
+    #[command(hide = true, display_order = 312)]
     ReportStatus {
         /// Act as this branch (outside a harness; inside one, it is the harness's own)
         #[arg(long = "as", value_name = "BRANCH")]
@@ -2008,19 +2107,21 @@ pub enum Command {
         json: bool,
     },
     /// Answer a message (usually a question) from a descendant
-    #[command(display_order = 310)]
+    #[command(hide = true, display_order = 310)]
     Answer {
         /// Act as this branch (outside a harness; inside one, it is the harness's own)
         #[arg(long = "as", value_name = "BRANCH")]
         as_branch: Option<String>,
+        /// The message's number, as `by inbox` lists it
         message_id: u64,
+        /// The answer
         text: String,
         /// Print JSON
         #[arg(long)]
         json: bool,
     },
     /// List messages addressed to this branch
-    #[command(display_order = 311)]
+    #[command(hide = true, display_order = 311)]
     Inbox {
         /// Act as this branch (outside a harness; inside one, it is the harness's own)
         #[arg(long = "as", value_name = "BRANCH")]
@@ -2068,38 +2169,46 @@ pub enum Command {
     /// Serve repositories over an authenticated HTTP API (see 'by serve --help')
     // Its options are the server's own: `main` hands everything after `serve`
     // to `branchyard_server::cli` (see `server_call`) before this parser runs.
-    #[command(display_order = 500, disable_help_flag = true)]
+    #[command(hide = true, display_order = 500, disable_help_flag = true)]
     Serve {
         #[arg(
             trailing_var_arg = true,
             allow_hyphen_values = true,
             value_name = "SERVER_OPTIONS"
         )]
+        /// The server's own options (see `by serve --help`)
         args: Vec<String>,
     },
-    /// Run operations servers queued in a PostgreSQL database (see 'by worker --help')
+    /// Run the operations queued in a PostgreSQL database (see 'by worker --help')
     // `by serve --worker`; like `serve`, handed to the server's own parser.
-    #[command(display_order = 501, disable_help_flag = true)]
+    #[command(hide = true, display_order = 501, disable_help_flag = true)]
     Worker {
         #[arg(
             trailing_var_arg = true,
             allow_hyphen_values = true,
             value_name = "SERVER_OPTIONS"
         )]
+        /// The server's own options (see `by worker --help`)
         args: Vec<String>,
     },
     /// Serve a branch's delegation tools over MCP on stdio (started by the engine)
-    #[command(display_order = 502)]
+    #[command(hide = true, display_order = 502)]
     Mcp {
         /// Repository root
-        #[arg(long, value_name = "DIR")]
-        root: String,
+        #[arg(long, value_name = "DIR", required_unless_present = "list_tools")]
+        root: Option<String>,
         /// The branch whose turn this server serves
-        #[arg(long, value_name = "NAME")]
-        branch: String,
+        #[arg(long, value_name = "NAME", required_unless_present = "list_tools")]
+        branch: Option<String>,
+        /// Print the tools it serves, with their input schemas, as JSON, and exit; needs no
+        /// repository, branch or token
+        #[arg(long, conflicts_with_all = ["root", "branch"])]
+        list_tools: bool,
     },
-    /// Tasks on a schedule or from webhooks: add, list, show, test, enable, disable, rm, runs
-    /// (see docs/triggers.md)
+    /// Run tasks on a schedule or from webhooks
+    ///
+    /// Add, list, show, test, enable, disable and rm triggers, and see their runs (see
+    /// docs/triggers.md).
     #[command(
         display_order = 503,
         subcommand_required = true,
@@ -2112,8 +2221,9 @@ pub enum Command {
         #[command(subcommand)]
         action: crate::trigger_cmd::TriggerAction,
     },
-    /// Servers by --remote ssh:// started on other hosts: their status, or stop one
-    /// (see docs/remote-ssh.md)
+    /// Servers that --remote ssh:// started on other hosts
+    ///
+    /// Their status, or stop one (see docs/remote-ssh.md).
     #[command(
         display_order = 504,
         subcommand_required = true,
@@ -2127,15 +2237,18 @@ pub enum Command {
         action: crate::ssh_remote::RemoteAction,
     },
     /// Print a shell completion script for by
-    #[command(display_order = 600, after_help = COMPLETIONS_EXAMPLES)]
+    #[command(hide = true, display_order = 600, after_help = COMPLETIONS_EXAMPLES)]
     Completions {
         #[arg(value_enum)]
+        /// The shell to print the script for
         shell: clap_complete::Shell,
     },
     /// Print by's man page (roff), for `man -l -` or a man directory
-    #[command(display_order = 601)]
+    #[command(hide = true, display_order = 601)]
     Man,
-    /// Set up Branchyard by interview: project defaults, a server, a rig, a deployment, skills
+    /// Set up Branchyard by interview
+    ///
+    /// Project defaults, a server, a rig, a deployment, skills.
     #[command(display_order = 602, after_help = INIT_EXAMPLES)]
     Init {
         #[command(flatten)]
@@ -2160,7 +2273,9 @@ pub enum Command {
         #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         path: Option<String>,
     },
-    /// Bring this repository's configured backends up: install harnesses, start the gateway, and say what only you can do
+    /// Bring the configured backends up
+    ///
+    /// Installs harnesses, starts the gateway, and says what only you can do.
     #[command(display_order = 605, after_help = UP_EXAMPLES)]
     Up {
         /// Print JSON
@@ -2169,14 +2284,16 @@ pub enum Command {
         /// Say what would be done and what is missing; change nothing
         #[arg(long)]
         plan: bool,
-        /// Confirm the installs the [harnesses] policy would ask about
+        /// Make the installs the [harnesses] policy would ask about, without asking
         #[arg(long)]
         yes: bool,
     },
-    /// Tell a Claude Code session (or, with --harness, another harness's) what changed in this
-    /// repository's branches (run by the plugin's hooks with the hook's JSON on stdin; prints
-    /// nothing and exits 0 on any problem)
-    #[command(display_order = 606, after_help = HOOK_EXAMPLES)]
+    /// Tell a harness session what changed in this repository
+    ///
+    /// Tells a Claude Code session (or, with --harness, another harness's) what changed in
+    /// this repository's branches. Run by the plugin's hooks with the hook's JSON on stdin;
+    /// prints nothing and exits 0 on any problem.
+    #[command(hide = true, display_order = 606, after_help = HOOK_EXAMPLES)]
     Hook {
         /// Read and answer in this harness's hook dialect: claude-code (the default), codex,
         /// gemini-cli, qwen-code, github-copilot, droid, deepseek-harness, cursor, antigravity,
@@ -2186,16 +2303,19 @@ pub enum Command {
         /// session-start or user-prompt-submit
         event: String,
     },
-    /// Print one line about this repository's branches for Claude Code's (or, with --harness,
-    /// another harness's) status line (reads its JSON on stdin; prints nothing outside a
-    /// repository Branchyard uses)
-    #[command(display_order = 607, after_help = STATUSLINE_EXAMPLES)]
+    /// Print one line about the branches for a status line
+    ///
+    /// For Claude Code's (or, with --harness, another harness's) status line. Reads its
+    /// JSON on stdin; prints nothing outside a repository Branchyard uses.
+    #[command(hide = true, display_order = 607, after_help = STATUSLINE_EXAMPLES)]
     Statusline {
         /// Read the directory from this harness's status-line JSON (as for `by hook --harness`)
         #[arg(long, value_name = "ID")]
         harness: Option<String>,
     },
-    /// Run, stop or inspect this repository's connector gateway (Anvil), and its keys
+    /// Run, stop or inspect the connector gateway (Anvil), and its keys
+    ///
+    /// The connector gateway (Anvil) serves this repository's connectors to branches.
     #[command(display_order = 403, subcommand_required = true, after_help = GATEWAY_EXAMPLES)]
     Gateway {
         /// Print JSON
@@ -2204,8 +2324,9 @@ pub enum Command {
         #[command(subcommand)]
         action: GatewayAction,
     },
-    /// The model gateway: its routes, backends and budgets, and what its calls cost; `list` asks
-    /// the providers which models your keys can call
+    /// The model gateway: routes, backends, budgets and cost
+    ///
+    /// What its calls cost; `list` asks the providers which models your keys can call.
     #[command(
         display_order = 405,
         after_help = MODELS_EXAMPLES,
@@ -2221,7 +2342,7 @@ pub enum Command {
         #[command(subcommand)]
         action: Option<ModelsAction>,
     },
-    /// Connect your account for a connector through the gateway (anvil connect)
+    /// Connect your account for a connector through the connector gateway (Anvil)
     #[command(display_order = 404, after_help = CONNECT_EXAMPLES)]
     Connect {
         /// The connector, as the gateway serves it, such as github
@@ -2236,8 +2357,10 @@ pub enum Command {
         #[arg(long)]
         open: bool,
     },
-    /// What Branchyard started or found (gateways, proxies, servers, workers, sandboxes, pool
-    /// keepers), with health, lease and owner; gc reclaims what expired
+    /// What Branchyard started or found, with health and owner
+    ///
+    /// Gateways, proxies, servers, workers, sandboxes and pool keepers, with health, lease
+    /// and owner; gc reclaims what expired.
     #[command(display_order = 405, after_help = SERVICES_EXAMPLES)]
     Services {
         /// Print JSON
@@ -2252,7 +2375,9 @@ pub enum Command {
         #[command(subcommand)]
         action: Option<ServicesAction>,
     },
-    /// Sync tasks to durable storage: push and pull a branch, or every branch that changed
+    /// Sync tasks to durable storage: push and pull
+    ///
+    /// A branch, or every branch that changed.
     #[command(
         display_order = 407,
         after_help = SYNC_EXAMPLES,
@@ -2260,7 +2385,9 @@ pub enum Command {
         subcommand_negates_reqs = true
     )]
     Sync(SyncArgs),
-    /// Refresh the connector and harness catalogs from live registries, or show what is cached
+    /// Refresh the connector and harness catalogs from live registries
+    ///
+    /// Or show what is cached.
     #[command(display_order = 406, subcommand_required = true, after_help = CATALOG_EXAMPLES)]
     Catalog {
         /// Print JSON
@@ -2297,8 +2424,10 @@ pub enum SyncAction {
     },
     /// The tasks in the remote
     Ls,
-    /// Collect garbage: objects no manifest references, after their grace period; tasks past
-    /// their retention unless held
+    /// Collect garbage: unreferenced objects and tasks past retention
+    ///
+    /// Collect garbage: objects no manifest references, after their grace period; tasks
+    /// past their retention unless held
     Gc {
         /// Say what would be deleted, and delete nothing
         #[arg(long)]
@@ -2329,6 +2458,8 @@ pub enum SyncAction {
         /// A branch, or a task ID
         task: String,
     },
+    /// Rotate the tenant key
+    ///
     /// Rotate the tenant key: a new key version, every object's data key rewrapped, the old
     /// versions retired
     RotateKey {
@@ -2342,16 +2473,20 @@ pub enum SyncAction {
 /// `by services ...`; see docs/registry.md.
 #[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
 pub enum ServicesAction {
-    /// Expire services whose lease ran out or whose owner is gone, and reclaim what Branchyard
-    /// started for them
+    /// Reclaim the services whose lease ran out or whose owner is gone
+    ///
+    /// Expire services whose lease ran out or whose owner is gone, and reclaim what
+    /// Branchyard started for them
     Gc,
 }
 
 /// `by models ...`; see docs/model-gateway.md.
 #[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
 pub enum ModelsAction {
-    /// Ask each provider whose key you have which models it serves, cache the answer, and mark
-    /// the models no price covers
+    /// Ask each provider which models your keys can call
+    ///
+    /// Ask each provider whose key you have which models it serves, cache the answer, and
+    /// mark the models no price covers
     #[command(after_help = MODELS_LIST_EXAMPLES)]
     List {
         /// Ask the providers again instead of showing the cache
@@ -2390,6 +2525,8 @@ pub enum ModelsAction {
 /// `by catalog ...`; see docs/registry.md.
 #[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
 pub enum CatalogAction {
+    /// Refresh the connector and harness catalogs from live registries
+    ///
     /// Fetch the official MCP registry's servers and the npm registry's latest harness
     /// versions, verify them and cache them with their checksums
     Refresh {
@@ -2446,6 +2583,8 @@ pub enum GatewayAction {
 /// `by harnesses ACTION`.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum HarnessesAction {
+    /// Install a harness with the catalog's command, then check it
+    ///
     /// Install a harness with the catalog's command, when [harnesses] install allows, then
     /// check it is there
     Install(HarnessChange),
@@ -2473,7 +2612,7 @@ pub struct HarnessChange {
     /// the install command can take one)
     #[arg(long, value_name = "VERSION")]
     pub version: Option<String>,
-    /// Answer yes to installing ([harnesses] install = "ask")
+    /// Install without asking, where [harnesses] install = "ask"
     #[arg(long)]
     pub yes: bool,
 }
@@ -2504,7 +2643,8 @@ pub enum WorkspaceAction {
         /// several names start each its own script, each with its own port
         #[arg(value_name = "BRANCH [NAME...]")]
         args: Vec<String>,
-        /// Start it in the background, output to a log file, and return
+        /// Return as soon as the script has started, leaving it running in the background; its
+        /// output goes to a log file
         #[arg(long)]
         detach: bool,
     },
@@ -2531,7 +2671,7 @@ pub enum WorkspaceAction {
         /// Only the process listening on this port
         #[arg(long)]
         port: Option<u16>,
-        /// Do not ask first
+        /// Stop the process without a confirmation prompt
         #[arg(long)]
         yes: bool,
     },
@@ -2571,8 +2711,10 @@ pub enum EnvAction {
 pub enum PoolAction {
     /// The pool's slots: ready, being made, being claimed
     Status,
-    /// Discard stale slots and make new ones until the pool is full (runs setup when
-    /// the environment is not built)
+    /// Make the pool full again, replacing stale slots
+    ///
+    /// Discard stale slots and make new ones until the pool is full (runs setup when the
+    /// environment is not built)
     Fill,
     /// Remove every ready slot on this host
     Drain,
@@ -2876,6 +3018,7 @@ impl RigAction {
 pub enum ArtifactAction {
     /// Publish a file as a new artifact of the acting branch
     Publish {
+        /// The file to publish
         file: String,
         /// The artifact's name (default: the file's)
         #[arg(short, long)]
@@ -2891,6 +3034,7 @@ pub enum ArtifactAction {
     List,
     /// Write an artifact's bytes to a file
     Get {
+        /// The artifact's ID, as `by artifact list` shows it
         id: String,
         /// Where to write the artifact's bytes
         #[arg(short, long, value_name = "PATH")]
@@ -2898,6 +3042,7 @@ pub enum ArtifactAction {
     },
     /// Let another branch read an artifact
     Share {
+        /// The artifact's ID, as `by artifact list` shows it
         id: String,
         /// The branch to share with
         #[arg(long, value_name = "BRANCH")]
@@ -2906,6 +3051,7 @@ pub enum ArtifactAction {
     /// Write artifacts into one verified, deterministic tar bundle (local only)
     Export {
         #[arg(required = true)]
+        /// The artifacts' IDs, as `by artifact list` shows them
         ids: Vec<String>,
         /// Where to write the bundle's tar
         #[arg(short, long, value_name = "PATH")]
@@ -2969,15 +3115,25 @@ impl ArtifactAction {
 #[derive(Subcommand, Clone, Debug, PartialEq)]
 pub enum ScratchAction {
     /// Create a scratch area owned by the acting branch
-    Create { name: String },
+    Create {
+        /// The scratch area's name
+        name: String,
+    },
     /// List the scratch areas the acting branch may reach
     List,
     /// Take a scratch area's writer lock
-    Lock { name: String },
+    Lock {
+        /// The scratch area's name
+        name: String,
+    },
     /// Release a scratch area's writer lock
-    Unlock { name: String },
+    Unlock {
+        /// The scratch area's name
+        name: String,
+    },
     /// Let another branch reach a scratch area
     Share {
+        /// The scratch area to share
         name: String,
         /// The branch to share with
         #[arg(long, value_name = "BRANCH")]
@@ -3213,21 +3369,22 @@ fn provider_arg(value: &str) -> Result<ProviderArg, String> {
 #[derive(Args, Clone, Debug, Default, PartialEq)]
 #[command(next_help_heading = "Checks and limits")]
 pub struct Limits {
-    /// Check to pass before merging, such as "cargo test"; split like a shell, run without one
+    /// Command that must pass before the branch merges, such as "cargo test": split into words
+    /// like a shell does, then run directly, not through a shell (use `sh -c "..."` for pipes)
     #[arg(long, value_name = "CMD", value_parser = check_argv)]
     check: Option<Argv>,
     /// Stop once the harness's own cost estimate, or on the model gateway its metered cost,
-    /// exceeds X dollars
-    #[arg(long, value_name = "X", value_parser = usd, allow_negative_numbers = true)]
+    /// exceeds this many dollars
+    #[arg(long, value_name = "DOLLARS", value_parser = usd, allow_negative_numbers = true)]
     budget_usd: Option<f64>,
     /// Stop after N turns
     #[arg(long, value_name = "N", value_parser = positive_turns, allow_negative_numbers = true)]
     max_turns: Option<u32>,
-    /// Interrupt the turn after N minutes (or a duration such as 90s or 2h)
-    #[arg(long, value_name = "N", value_parser = max_minutes, allow_negative_numbers = true)]
+    /// Interrupt the turn after this many minutes (or a duration such as 90s or 2h)
+    #[arg(long, value_name = "MINUTES", value_parser = max_minutes, allow_negative_numbers = true)]
     max_minutes: Option<Duration>,
-    /// Mark the branch stalled after N minutes with no harness activity (or 90s, 2h, ...)
-    #[arg(long, value_name = "N", value_parser = stall_after, allow_negative_numbers = true)]
+    /// Mark the branch stalled after this many minutes with no harness activity (or 90s, 2h, ...)
+    #[arg(long, value_name = "MINUTES", value_parser = stall_after, allow_negative_numbers = true)]
     stall_after: Option<Duration>,
     /// What a stall does
     #[arg(long, value_name = "ACTION", requires = "stall_after")]
@@ -3249,7 +3406,8 @@ impl Limits {
 #[derive(Args, Clone, Debug, Default, PartialEq)]
 #[command(next_help_heading = "Permissions")]
 pub struct Perms {
-    /// Allow every tool permission request
+    /// Grant every tool permission request without asking; the harness may write files and run
+    /// commands
     #[arg(short, long, conflicts_with = "ask")]
     yes: bool,
     /// Ask on the terminal for each tool permission request
@@ -3803,12 +3961,13 @@ fn mcp_header(text: &str) -> Result<McpHeader, String> {
 /// its own `--json`); see `crate::detach`.
 #[derive(Args, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Detached {
-    /// Run the turn in the background, detached from this terminal, and return once it has
-    /// started; its output goes to a log under .branchyard/detached/ (local mode)
+    /// Return as soon as the turn has started, leaving it running in the background; its
+    /// output goes to a log under .branchyard/detached/ (local mode)
     #[arg(long, conflicts_with = "ask")]
     pub detach: bool,
-    /// With --detach: print the branch and the log's path as JSON
-    #[arg(long, requires = "detach")]
+    /// Print JSON: the branch as `by show --json` prints it once the turn has ended (activity
+    /// goes to standard error); with --detach, the branch and the log's path
+    #[arg(long)]
     pub json: bool,
 }
 
@@ -4013,6 +4172,8 @@ pub struct TaskCommand {
 /// `by task`'s actions (docs/task-repos.md), each with its own flags.
 #[derive(Subcommand, Clone, Debug, PartialEq)]
 pub enum TaskAction {
+    /// Start a task and run its first attempt
+    ///
     /// Start a task and run its first attempt: in this repository, in a folder you grant
     /// (--folder), or with no files (--no-files)
     New(Box<TaskNew>),
@@ -4062,6 +4223,7 @@ pub struct TaskShow {
 /// `by task open`.
 #[derive(Args, Clone, Debug, PartialEq)]
 pub struct TaskOpen {
+    /// The task, by ID or by one of its branches
     pub task: String,
     /// The attempt (default: the only one)
     #[arg(long, value_name = "BRANCH")]
@@ -4078,6 +4240,7 @@ pub struct TaskOpen {
 /// `by task rewind`.
 #[derive(Args, Clone, Debug, PartialEq)]
 pub struct TaskRewind {
+    /// The task whose attempt to reset, by ID or by one of its branches
     pub task: String,
     /// The attempt (default: the only one)
     #[arg(long, value_name = "BRANCH")]
@@ -4085,7 +4248,7 @@ pub struct TaskRewind {
     /// The checkpoint: a turn number, or 0 for the attempt's base
     #[arg(long, value_name = "N")]
     pub to: u32,
-    /// Do not ask for confirmation
+    /// Confirm the reset without a prompt
     #[arg(long, short = 'y')]
     pub yes: bool,
 }
@@ -4093,6 +4256,7 @@ pub struct TaskRewind {
 /// `by task fork`.
 #[derive(Args, Clone, Debug, PartialEq)]
 pub struct TaskFork {
+    /// The task to fork, by ID or by one of its branches
     pub task: String,
     /// The new attempt's prompt; quote it
     pub prompt: String,
@@ -4109,6 +4273,7 @@ pub struct TaskFork {
 /// `by task accept`.
 #[derive(Args, Clone, Debug, PartialEq)]
 pub struct TaskAccept {
+    /// The task whose attempt to accept, by ID or by one of its branches
     pub task: String,
     /// The attempt (default: the only one)
     #[arg(long, value_name = "BRANCH")]
@@ -4121,8 +4286,9 @@ pub struct TaskAccept {
 /// `by task rm`.
 #[derive(Args, Clone, Debug, PartialEq)]
 pub struct TaskRm {
+    /// A branch, or a task ID
     pub task: String,
-    /// Do not ask for confirmation
+    /// Confirm the removal without a prompt
     #[arg(long, short = 'y')]
     pub yes: bool,
 }
@@ -4132,6 +4298,7 @@ pub struct TaskRm {
 pub enum MapAction {
     /// Run a recorded map again with its command line and items, skipping the items done
     Resume {
+        /// The map to run again
         name: String,
         /// Run the items that failed again too
         #[arg(long)]
@@ -4140,9 +4307,15 @@ pub enum MapAction {
     /// The recorded maps and their progress
     Ls,
     /// A map's progress, its items' results and its reduce
-    Show { name: String },
+    Show {
+        /// The map's name
+        name: String,
+    },
     /// Forget a map's record (its branches stay; remove them with by rm)
-    Rm { name: String },
+    Rm {
+        /// The map to forget
+        name: String,
+    },
 }
 
 /// `by map`'s run: the prompt template, where the items come from, the
@@ -4179,7 +4352,7 @@ pub struct MapArgs {
     pub retries: Option<u32>,
     /// Stop starting items once the map has cost X dollars, across runs (per branch, use
     /// --budget-usd)
-    #[arg(long, value_name = "X", value_parser = usd)]
+    #[arg(long, value_name = "DOLLARS", value_parser = usd)]
     pub total_usd: Option<f64>,
     /// Then one more branch, given every result, answers this prompt: the map's summary
     #[arg(long, value_name = "PROMPT", value_parser = non_blank)]
@@ -4498,7 +4671,7 @@ pub struct SpawnGraph {
     #[arg(long, value_name = "TEXT", requires = "review", value_parser = non_blank)]
     review_rubric: Option<String>,
     /// Each review's cost limit, from your budget; required when you have a cost limit
-    #[arg(long, value_name = "X", requires = "review", value_parser = usd)]
+    #[arg(long, value_name = "DOLLARS", requires = "review", value_parser = usd)]
     review_budget_usd: Option<f64>,
 }
 
@@ -4638,7 +4811,7 @@ pub struct PrFlags {
     /// With --watch: the first time between polls, backing off to ten times it
     #[arg(
         long,
-        value_name = "SECS",
+        value_name = "SECONDS",
         default_value = "30",
         value_parser = watch_interval,
         requires = "watch",
@@ -4703,67 +4876,228 @@ impl Flags for PrFlags {
     }
 }
 
-/// `by`'s command, with the grouped command list in its help. Built on a
+/// `by`'s command, with the first-run command list in its help. Built on a
 /// thread with [`PARSE_STACK`], like parsing, so help, completions and the
 /// man page never depend on the caller's stack either.
 pub fn command() -> clap::Command {
     on_parse_stack(build_command)
 }
 
+/// [`command`] with the commands that are hidden from `by --help` shown, as
+/// the man page lists them.
+pub fn command_with_hidden() -> clap::Command {
+    on_parse_stack(|| {
+        let mut cmd = build_command();
+        let names: Vec<String> = cmd
+            .get_subcommands()
+            .filter(|c| c.is_hide_set())
+            .map(|c| c.get_name().to_owned())
+            .collect();
+        for name in names {
+            cmd = cmd.mut_subcommand(name, |c| c.hide(false));
+        }
+        cmd
+    })
+}
+
 fn build_command() -> clap::Command {
     let cmd = crate::operations::annotate(Cli::command());
     let header = *cmd.get_styles().get_header();
-    let listing = command_listing(&cmd);
+    let listing = command_listing(&cmd, Listing::Front, true);
     cmd.help_template(format!(
         "{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{listing}\
          {header}Options:{header:#}\n{{options}}{{after-help}}"
     ))
 }
 
-/// The commands of `by --help`, under [`GROUPS`].
-fn command_listing(cmd: &clap::Command) -> String {
+/// What `by --help` and `by help all|agents` list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Listing {
+    /// The first-run commands, [`FRONT`], and where to find the rest.
+    Front,
+    /// Every command, hidden or not, under [`GROUPS`]: `by help all`.
+    All,
+    /// What a harness runs for itself: `by help agents`.
+    Agents,
+}
+
+/// The commands of `by --help`, in the order a first hour uses them. A name
+/// no command has (a command another change adds) is left out.
+pub const FRONT: &[(&str, &[&str])] = &[
+    ("Start", &["setup", "init", "doctor"]),
+    (
+        "Work",
+        &[
+            "run", "fan", "send", "steer", "wait", "cancel", "merge", "pr",
+        ],
+    ),
+    ("Look", &["ls", "show", "diff", "log", "watch"]),
+    ("Clean up", &["rm", "rewind"]),
+];
+
+/// The commands of `by help agents` besides the group of delegation: what
+/// the engine and the plugins run.
+const AGENT_PLUMBING: &[&str] = &["mcp", "hook", "statusline"];
+
+/// The listing `by help NAME` prints when NAME is a topic and not a
+/// command: `all` and `agents`. `args` are `by`'s, after the program name;
+/// global options may come first.
+pub fn help_listing(args: &[OsString]) -> Option<Listing> {
+    let mut at = 0;
+    while let Some(arg) = args.get(at).and_then(|a| a.to_str()) {
+        let Some(long) = arg.strip_prefix("--") else {
+            break;
+        };
+        let name = long.split_once('=').map_or(long, |(name, _)| name);
+        if name == "no-notify" {
+            at += 1;
+        } else if ["remote", "token-file", "repo", "ca-file"].contains(&name) {
+            at += if long.contains('=') { 1 } else { 2 };
+        } else {
+            return None;
+        }
+    }
+    let rest: Vec<&str> = args
+        .get(at..)?
+        .iter()
+        .map(|a| a.to_str())
+        .collect::<Option<_>>()?;
+    match rest[..] {
+        ["help", "all"] => Some(Listing::All),
+        ["help", "agents"] => Some(Listing::Agents),
+        _ => None,
+    }
+}
+
+/// The text of `by help all` or `by help agents`; `color` for a terminal.
+pub fn listing_text(listing: Listing, color: bool) -> String {
+    on_parse_stack(move || {
+        let cmd = build_command();
+        let mut text = command_listing(&cmd, listing, color);
+        text.push_str("Run 'by help <command>' or 'by <command> --help' for its options.\n");
+        text
+    })
+}
+
+/// The command list of a help screen: `listing`'s, with ANSI styles when
+/// `color` (clap strips them again when the help goes to a pipe).
+fn command_listing(cmd: &clap::Command, listing: Listing, color: bool) -> String {
     let mut built = cmd.clone();
     built.build();
     let styles = built.get_styles();
-    let (header, literal): (Style, Style) = (*styles.get_header(), *styles.get_literal());
-    let commands: Vec<&clap::Command> = built
-        .get_subcommands()
-        .filter(|c| !c.is_hide_set())
-        .collect();
-    let width = commands
-        .iter()
-        .map(|c| c.get_name().len())
-        .max()
-        .unwrap_or(0);
-    let group = |c: &clap::Command| match c.get_name() {
-        "help" => GROUPS.last().map_or(9, |(group, _)| *group),
-        _ => c.get_display_order() / 100,
+    let (header, literal): (Style, Style) = match color {
+        true => (*styles.get_header(), *styles.get_literal()),
+        false => (Style::new(), Style::new()),
     };
-    let mut groups: Vec<(usize, &str)> = GROUPS.to_vec();
-    groups.push((usize::MAX, "Other commands"));
-    let mut text = String::new();
-    for (number, title) in groups {
-        let mut members: Vec<&&clap::Command> = commands
+    let find = |name: &str| built.get_subcommands().find(|c| c.get_name() == name);
+    let titled = |title: &str, rows: &[&clap::Command]| -> String {
+        let width = rows
             .iter()
-            .filter(|c| {
-                let g = group(c);
-                g == number || (number == usize::MAX && !GROUPS.iter().any(|(n, _)| *n == g))
-            })
-            .collect();
-        if members.is_empty() {
-            continue;
-        }
-        members.sort_by_key(|c| (c.get_display_order(), c.get_name()));
-        text.push_str(&format!("{header}{title}:{header:#}\n"));
-        for c in members {
+            .map(|c| c.get_name().len())
+            .max()
+            .unwrap_or(0)
+            .max(10);
+        let mut text = format!("{header}{title}:{header:#}\n");
+        for c in rows {
             let about = c.get_about().map(|a| a.to_string()).unwrap_or_default();
             let name = c.get_name();
             let pad = " ".repeat(width - name.len());
             text.push_str(&format!("  {literal}{name}{literal:#}{pad}  {about}\n"));
         }
         text.push('\n');
+        text
+    };
+    let mut text = String::new();
+    match listing {
+        Listing::Front => {
+            for (title, names) in FRONT {
+                let rows: Vec<&clap::Command> = names.iter().filter_map(|n| find(n)).collect();
+                if !rows.is_empty() {
+                    text.push_str(&titled(title, &rows));
+                }
+            }
+            let shown: Vec<&str> = FRONT
+                .iter()
+                .flat_map(|(_, names)| names.iter().copied())
+                .collect();
+            let others: Vec<&str> = built
+                .get_subcommands()
+                .filter(|c| !c.is_hide_set() && c.get_name() != "help")
+                .map(|c| c.get_name())
+                .filter(|name| !shown.contains(name))
+                .collect();
+            text.push_str(&format!("{header}More:{header:#}\n"));
+            for (what, says) in [
+                ("by help all", "Every command, with what agents use"),
+                ("by help agents", "What a harness runs for itself"),
+                ("by <command> --help", "Options for one command"),
+            ] {
+                let pad = " ".repeat(22 - what.len());
+                text.push_str(&format!("  {literal}{what}{literal:#}{pad}{says}\n"));
+            }
+            text.push_str(&wrapped("Also", &others));
+            text.push('\n');
+        }
+        Listing::All => {
+            let group = |c: &clap::Command| match c.get_name() {
+                "help" => GROUPS.last().map_or(9, |(group, _)| *group),
+                _ => c.get_display_order() / 100,
+            };
+            let mut groups: Vec<(usize, &str)> = GROUPS.to_vec();
+            groups.push((usize::MAX, "Other commands"));
+            for (number, title) in groups {
+                let mut members: Vec<&clap::Command> = built
+                    .get_subcommands()
+                    .filter(|c| {
+                        let g = group(c);
+                        g == number
+                            || (number == usize::MAX && !GROUPS.iter().any(|(n, _)| *n == g))
+                    })
+                    .collect();
+                if members.is_empty() {
+                    continue;
+                }
+                members.sort_by_key(|c| (c.get_display_order(), c.get_name()));
+                text.push_str(&titled(title, &members));
+            }
+        }
+        Listing::Agents => {
+            let mut members: Vec<&clap::Command> = built
+                .get_subcommands()
+                .filter(|c| {
+                    c.get_display_order() / 100 == 3 || AGENT_PLUMBING.contains(&c.get_name())
+                })
+                .collect();
+            members.sort_by_key(|c| (c.get_display_order(), c.get_name()));
+            text.push_str(&titled(
+                "Commands a harness runs for itself (usually from inside its branch)",
+                &members,
+            ));
+        }
     }
     text
+}
+
+/// `label: a, b, c` wrapped to 78 columns under the two-space indent.
+fn wrapped(label: &str, names: &[&str]) -> String {
+    let mut out = String::new();
+    let mut line = format!("  {label}: ");
+    let indent = " ".repeat(line.len());
+    for (n, name) in names.iter().enumerate() {
+        let piece = match n + 1 == names.len() {
+            true => (*name).to_owned(),
+            false => format!("{name}, "),
+        };
+        if line.trim_end().len() + piece.len() > 78 && line.trim().len() > label.len() + 1 {
+            out.push_str(line.trim_end());
+            out.push('\n');
+            line = indent.clone();
+        }
+        line.push_str(&piece);
+    }
+    out.push_str(line.trim_end());
+    out.push('\n');
+    out
 }
 
 /// The stack [`parse_from`] parses on: clap's derived parser for every
@@ -5016,7 +5350,7 @@ fn memory(text: &str) -> Result<u32, String> {
 fn seconds(text: &str) -> Result<f64, String> {
     match text.parse::<f64>() {
         Ok(secs) if secs.is_finite() && secs >= 0.0 => Ok(secs),
-        _ => Err("needs a number of seconds".into()),
+        _ => Err("needs a number of seconds, such as 30 or 2.5".into()),
     }
 }
 
@@ -5902,12 +6236,26 @@ mod tests {
         assert_eq!(
             parse_str("mcp --root /r --branch b").unwrap(),
             Command::Mcp {
-                root: "/r".into(),
-                branch: "b".into()
+                root: Some("/r".into()),
+                branch: Some("b".into()),
+                list_tools: false,
             }
         );
         assert_eq!(kind("mcp --root /r"), ErrorKind::MissingRequiredArgument);
         assert!(err("mcp --root /r").contains("--branch <NAME>"));
+        // --list-tools stands alone: no repository, branch or token.
+        assert_eq!(
+            parse_str("mcp --list-tools").unwrap(),
+            Command::Mcp {
+                root: None,
+                branch: None,
+                list_tools: true,
+            }
+        );
+        assert_eq!(
+            kind("mcp --list-tools --root /r"),
+            ErrorKind::ArgumentConflict
+        );
     }
 
     /// `--deny` takes a comma list and repeats, on every command that has
@@ -6059,9 +6407,10 @@ mod tests {
         ] {
             assert_eq!(kind(line), ErrorKind::ArgumentConflict, "{line}");
         }
-        // --json on run and fork is --detach's.
-        assert_eq!(kind("run go --json"), ErrorKind::MissingRequiredArgument);
-        assert_eq!(kind("fork b go --json"), ErrorKind::MissingRequiredArgument);
+        // --json on run and fork needs no --detach: the foreground run prints
+        // the branch as `show --json` does (`run_and_fork_take_json_without_detach`).
+        assert!(parse_str("run go --json").is_ok());
+        assert!(parse_str("fork b go --json").is_ok());
     }
 
     #[test]
@@ -6292,7 +6641,8 @@ mod tests {
                 branch: "b".into(),
                 into: None,
                 rm: false,
-                promote_effects: false
+                promote_effects: false,
+                json: false
             }
         );
         assert_eq!(
@@ -6301,14 +6651,16 @@ mod tests {
                 branch: "b".into(),
                 into: Some("release".into()),
                 rm: false,
-                promote_effects: false
+                promote_effects: false,
+                json: false
             }
         );
         assert_eq!(
             parse_str("rm b --keep-credentials").unwrap(),
             Command::Rm {
                 branch: "b".into(),
-                keep_credentials: true
+                keep_credentials: true,
+                json: false
             }
         );
         assert!(err("merge b --into").contains("a value is required for '--into <TARGET>'"));
@@ -6318,7 +6670,8 @@ mod tests {
                 branch: "b".into(),
                 into: None,
                 rm: true,
-                promote_effects: false
+                promote_effects: false,
+                json: false
             }
         );
     }
@@ -6777,16 +7130,91 @@ mod tests {
             .to_string()
     }
 
-    #[test]
-    fn help_lists_every_command_in_a_group() {
-        let general = command().render_help().to_string();
+    /// The commands a harness runs for itself, and plumbing: not in `by
+    /// --help`, but in `by help all`, and the first group in `by help
+    /// agents`.
+    const HIDDEN: &[&str] = &[
+        "ask",
+        "answer",
+        "inbox",
+        "escalate",
+        "report",
+        "report-status",
+        "brief",
+        "delegate",
+        "spawn",
+        "children",
+        "graph",
+        "integrate",
+        "inspect",
+        "events",
+        "discard",
+        "mcp",
+        "hook",
+        "statusline",
+        "completions",
+        "man",
+        "worker",
+        "serve",
+    ];
+
+    /// Every command and subcommand under `cmd`, with the path that names it.
+    fn walk<'a>(cmd: &'a clap::Command, path: &str, out: &mut Vec<(String, &'a clap::Command)>) {
+        for sub in cmd.get_subcommands().filter(|sub| sub.get_name() != "help") {
+            let name = format!("{path} {}", sub.get_name());
+            out.push((name.clone(), sub));
+            walk(sub, &name, out);
+        }
+    }
+
+    fn built() -> clap::Command {
         let mut cmd = command();
         cmd.build();
+        cmd
+    }
+
+    #[test]
+    fn help_lists_the_first_run_commands_and_help_all_every_command() {
+        let general = command().render_help().to_string();
+        for (title, names) in FRONT {
+            for name in *names {
+                if built().find_subcommand(name).is_some() {
+                    assert!(
+                        general.contains(&format!("\n  {name} ")),
+                        "{name} missing from:\n{general}"
+                    );
+                }
+            }
+            assert!(general.contains(&format!("{title}:")), "{title}");
+        }
+        // What an agent or the plumbing runs is not on the first screen.
+        for name in HIDDEN {
+            assert!(
+                !general.contains(&format!("\n  {name} ")),
+                "{name} is listed in:\n{general}"
+            );
+        }
+        // check, wait and cancel are for people too.
+        let visible = |name: &str| !built().find_subcommand(name).unwrap().is_hide_set();
+        assert!(["check", "wait", "cancel"].into_iter().all(visible));
+        assert!(general.contains("Also: "), "{general}");
+        assert!(general.contains("by help all") && general.contains("by help agents"));
+        assert!(
+            general.lines().count() < 70,
+            "{} lines:\n{general}",
+            general.lines().count()
+        );
+        assert!(general.contains("[env: BRANCHYARD_REMOTE]"), "{general}");
+        assert!(!general.contains("Other commands"));
+
+        // `by help all` lists every command, hidden or not, in its group.
+        let all = listing_text(Listing::All, false);
+        let cmd = built();
         for sub in cmd.get_subcommands() {
             let name = sub.get_name();
             assert!(
-                general.contains(&format!("\n  {name} ")),
-                "{name} missing from:\n{general}"
+                all.contains(&format!("\n  {name} ")),
+                "{name} missing from:\n{all}"
             );
             if name != "help" {
                 let order = sub.get_display_order();
@@ -6797,10 +7225,20 @@ mod tests {
             }
         }
         for (_, title) in GROUPS {
-            assert!(general.contains(&format!("{title}:")), "{title}");
+            assert!(all.contains(&format!("{title}:")), "{title}");
         }
-        assert!(!general.contains("Other commands"));
-        assert!(general.contains("[env: BRANCHYARD_REMOTE]"), "{general}");
+        assert!(!all.contains("Other commands"));
+
+        // `by help agents` is what a harness runs.
+        let agents = listing_text(Listing::Agents, false);
+        for name in ["spawn", "ask", "inbox", "wait", "check", "mcp", "hook"] {
+            assert!(
+                agents.contains(&format!("\n  {name} ")),
+                "{name}:\n{agents}"
+            );
+        }
+        assert!(!agents.contains("\n  run "), "{agents}");
+
         let run = help("run");
         for heading in [
             "Checks and limits:",
@@ -6818,6 +7256,216 @@ mod tests {
         assert!(help("fork").contains("Usage: by fork [OPTIONS] <BRANCH> <PROMPT>"));
         assert!(help("ls").contains("Usage: by ls [OPTIONS]"));
         assert!(help("rm").contains("Usage: by rm [OPTIONS] <BRANCH>"));
+        // A hidden command still has its help.
+        assert!(help("spawn").contains("Usage: by spawn"));
+    }
+
+    #[test]
+    fn help_topics_are_recognised_after_the_global_options() {
+        let argv =
+            |line: &str| -> Vec<OsString> { line.split_whitespace().map(OsString::from).collect() };
+        assert_eq!(help_listing(&argv("help all")), Some(Listing::All));
+        assert_eq!(help_listing(&argv("help agents")), Some(Listing::Agents));
+        assert_eq!(
+            help_listing(&argv("--remote http://h:1 --no-notify help all")),
+            Some(Listing::All)
+        );
+        // A command is a command: `by help run` is clap's.
+        assert_eq!(help_listing(&argv("help run")), None);
+        assert_eq!(help_listing(&argv("help")), None);
+        assert_eq!(help_listing(&argv("run all")), None);
+        assert_eq!(help_listing(&argv("help all extra")), None);
+    }
+
+    #[test]
+    fn the_agent_verbs_and_the_plumbing_are_hidden() {
+        let cmd = built();
+        for name in HIDDEN {
+            let sub = cmd
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("no {name}"));
+            assert!(sub.is_hide_set(), "{name} is listed");
+        }
+        // Everything else is listed, so `by help all` and the shell see it.
+        let shown: Vec<&str> = cmd
+            .get_subcommands()
+            .filter(|c| !c.is_hide_set())
+            .map(|c| c.get_name())
+            .collect();
+        for name in [
+            "run", "fan", "send", "check", "wait", "cancel", "merge", "doctor",
+        ] {
+            assert!(shown.contains(&name), "{name} is hidden");
+        }
+        // The man page lists them all.
+        let mut page = Vec::new();
+        clap_mangen::Man::new(command_with_hidden())
+            .render(&mut page)
+            .unwrap();
+        let page = String::from_utf8(page).unwrap();
+        assert!(
+            page.contains("by\\-spawn") && page.contains("by\\-hook"),
+            "{page}"
+        );
+    }
+
+    #[test]
+    fn a_summary_is_one_short_line() {
+        let cmd = built();
+        let mut all = Vec::new();
+        walk(&cmd, "by", &mut all);
+        let mut long = Vec::new();
+        for (path, sub) in &all {
+            let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
+            let top = path.matches(' ').count() == 1;
+            let limit = if top { 80 } else { 100 };
+            if about.chars().count() >= limit || about.contains('\n') {
+                long.push(format!("{path} ({}): {about}", about.chars().count()));
+            }
+        }
+        assert!(
+            long.is_empty(),
+            "summaries over the limit:\n{}",
+            long.join("\n")
+        );
+    }
+
+    #[test]
+    fn every_argument_says_what_it_is() {
+        let cmd = built();
+        let mut all = Vec::new();
+        walk(&cmd, "by", &mut all);
+        let mut blank = Vec::new();
+        for (path, sub) in &all {
+            for arg in sub.get_arguments() {
+                let id = arg.get_id().as_str();
+                if arg.is_hide_set() || matches!(id, "help" | "version") {
+                    continue;
+                }
+                if arg
+                    .get_help()
+                    .is_none_or(|h| h.to_string().trim().is_empty())
+                {
+                    blank.push(format!("{path} {id}"));
+                }
+            }
+        }
+        assert!(
+            blank.is_empty(),
+            "arguments with no help:\n{}",
+            blank.join("\n")
+        );
+    }
+
+    #[test]
+    fn placeholders_say_what_they_take() {
+        let cmd = built();
+        let mut all = Vec::new();
+        walk(&cmd, "by", &mut all);
+        let mut vague = Vec::new();
+        for (path, sub) in &all {
+            for arg in sub.get_arguments() {
+                for name in arg.get_value_names().unwrap_or_default() {
+                    if ["X", "S", "SECS"].contains(&name.as_str()) {
+                        vague.push(format!("{path} {} <{name}>", arg.get_id()));
+                    }
+                }
+            }
+        }
+        assert!(
+            vague.is_empty(),
+            "vague placeholders:\n{}",
+            vague.join("\n")
+        );
+        let run = help("run");
+        assert!(run.contains("--budget-usd <DOLLARS>"), "{run}");
+        assert!(help("wait").contains("--timeout <SECONDS>"));
+    }
+
+    #[test]
+    fn yes_says_what_it_does_in_each_command() {
+        let text = |command: &str| help(command);
+        assert!(
+            text("run").contains("Grant every tool permission request without asking")
+                && text("run").contains("the harness may write files and run commands"),
+            "{}",
+            text("run")
+        );
+        assert!(text("rewind").contains("Confirm the reset without a prompt"));
+        assert!(text("undo").contains("Undo every reversible effect without a confirmation"));
+        assert!(text("compare").contains("Confirm removing the other attempts without a prompt"));
+        assert!(text("up").contains("Make the installs the [harnesses] policy would ask about"));
+        // No command leaves it at the vague wording.
+        let cmd = built();
+        let mut all = Vec::new();
+        walk(&cmd, "by", &mut all);
+        for (path, sub) in &all {
+            for arg in sub.get_arguments().filter(|a| a.get_id() == "yes") {
+                let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
+                for vague in [
+                    "Do not ask first",
+                    "Do not ask for confirmation",
+                    "Allow every tool",
+                ] {
+                    assert!(!help.contains(vague), "{path} --yes: {help}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn run_and_fork_take_json_without_detach() {
+        let Command::Run { detached, .. } = parse_str("run go --json").unwrap() else {
+            panic!("not run")
+        };
+        assert!(detached.json && !detached.detach);
+        let Command::Fork { detached, .. } = parse_str("fork b go --json").unwrap() else {
+            panic!("not fork")
+        };
+        assert!(detached.json && !detached.detach);
+        let Command::Run { detached, .. } = parse_str("run go --detach --json").unwrap() else {
+            panic!("not run")
+        };
+        assert!(detached.json && detached.detach);
+        // The commands that gained --json this round.
+        for line in [
+            "merge b --json",
+            "rm b --json",
+            "fan go --harness codex --json",
+            "review b --json",
+        ] {
+            assert!(parse_str(line).is_ok(), "{line}: {}", err_or_ok(line));
+        }
+        assert!(parse_str("review b --detach --json").is_err());
+    }
+
+    fn err_or_ok(line: &str) -> String {
+        parse_str(line)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn the_run_help_defaults_say_the_command_waits() {
+        for command in ["run", "send", "fork", "fan"] {
+            let cmd = built();
+            let about = cmd
+                .find_subcommand(command)
+                .unwrap()
+                .get_about()
+                .unwrap()
+                .to_string();
+            assert!(about.contains("waits"), "{command}: {about}");
+        }
+        let detach = help("run");
+        assert!(
+            detach.contains(
+                "Return as soon as the turn has started, leaving it running in the background"
+            ),
+            "{detach}"
+        );
+        assert!(help("send").contains("Return as soon as the turn has started"));
     }
 
     #[test]
@@ -6833,10 +7481,10 @@ mod tests {
             clap_complete::generate(shell, &mut command(), "by", &mut out);
             let script = String::from_utf8(out).unwrap();
             for word in [
-                "spawn",
+                "reincarnate",
                 "budget-usd",
                 "remote",
-                "completions",
+                "doctor",
                 "init",
                 "dry-run",
                 "config",

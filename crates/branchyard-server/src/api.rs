@@ -143,6 +143,22 @@ fn usd_quota_exceeded(limit: &str, tenant: &str, max: f64, spent: f64) -> ApiErr
     .detail(serde_json::json!({ "tenant": tenant, "limit": limit, "max": max, "spent": spent }))
 }
 
+/// The `unknown_repo` error for `name`: the repositories that the one asking
+/// may use (`served`, sorted) in its detail and its message, which end with
+/// how to serve another. `who` is `server` or `worker`.
+pub(crate) fn unknown_repo(who: &str, name: &str, served: &[&str]) -> ApiError {
+    let listed = match served.is_empty() {
+        true => format!("this {who} serves no repositories for you"),
+        false => format!("this {who} serves {}", served.join(", ")),
+    };
+    ApiError::new(
+        StatusCode::NOT_FOUND,
+        "unknown_repo",
+        format!("no repository named {name}; {listed}; serve it with `by serve --repo NAME=PATH`"),
+    )
+    .detail(serde_json::json!({ "repo": name, "served": served }))
+}
+
 fn repo_not_allowed(repo: &str) -> ApiError {
     ApiError::new(
         StatusCode::FORBIDDEN,
@@ -153,6 +169,9 @@ fn repo_not_allowed(repo: &str) -> ApiError {
 }
 
 impl App {
+    /// The repository named `name`, for a caller that is not asking: a
+    /// trigger's own. Unlike [`App::authorized_repo`], its error lists no
+    /// repositories, since there is no one to list them for.
     pub(crate) fn repo(&self, name: &str) -> Result<&RepoState, ApiError> {
         self.repos.get(name).ok_or_else(|| {
             ApiError::new(
@@ -173,11 +192,21 @@ impl App {
         name: &str,
         scope: &str,
     ) -> Result<&RepoState, ApiError> {
-        let repo = self.repo(name)?;
+        let policy = self.config.tenant_policy(caller.tenant());
+        let Some(repo) = self.repos.get(name) else {
+            // Only the repositories this caller may use: another tenant's
+            // are not for it to learn.
+            let served: Vec<&str> = self
+                .repos
+                .keys()
+                .map(String::as_str)
+                .filter(|served| caller.0.repo_allowed(&policy, served))
+                .collect();
+            return Err(unknown_repo("server", name, &served));
+        };
         if !caller.0.allows(scope) {
             return Err(scope_required(scope));
         }
-        let policy = self.config.tenant_policy(caller.tenant());
         if !caller.0.repo_allowed(&policy, name) {
             return Err(repo_not_allowed(name));
         }

@@ -483,7 +483,15 @@ fn grace(text: &str) -> Result<Duration, String> {
 
 /// The command, named `program` in its usage and messages.
 fn command(program: &str) -> clap::Command {
-    Cli::command().bin_name(program.to_owned())
+    let cmd = Cli::command().bin_name(program.to_owned());
+    match program == "by worker" {
+        // A worker serves no requests and takes no credential: its help says
+        // what it does, and has no `token` command to run.
+        true => cmd
+            .about("Run the operations queued in a PostgreSQL database; serves no requests.")
+            .mut_subcommand("token", |token| token.hide(true)),
+        false => cmd,
+    }
 }
 
 /// Help for `program` (`branchyard-server`, `by serve` or `by worker`).
@@ -1143,6 +1151,19 @@ mod tests {
             .contains("invalid value 'yaml' for '--log-format <FORMAT>'"));
         assert!(help("by serve").contains("--log-format <FORMAT>"));
         assert!(help("by worker").contains("Usage: by worker [OPTIONS]"));
+        // A worker's help says what a worker is, and offers no `token`.
+        let worker = help("by worker");
+        assert!(
+            worker.starts_with("Run the operations queued in a PostgreSQL database"),
+            "{worker}"
+        );
+        assert!(!worker.contains("\n  token "), "{worker}");
+        let serve = help("by serve");
+        assert!(
+            serve.starts_with("Serve Branchyard repositories"),
+            "{serve}"
+        );
+        assert!(serve.contains("\n  token "), "{serve}");
         assert!(help("branchyard-server").contains("--webhook-events <KINDS>"));
         command("branchyard-server").debug_assert();
     }

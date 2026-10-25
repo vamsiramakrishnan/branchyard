@@ -3158,6 +3158,10 @@ pub enum Error {
     CheckFailed {
         /// The output of the check that failed.
         output_tail: String,
+        /// The check that ran and how it ended, when the engine recorded
+        /// it (not for a check run elsewhere; an integration of several
+        /// branches has `checks`, which name each).
+        ran: Option<Box<FailedCheck>>,
         /// Integrating branches: every check of the branches merged, in
         /// order, each with its branches and outcome, the failed one among
         /// them. Empty for a merge of no delegated branch (`by merge`).
@@ -3199,6 +3203,10 @@ pub enum Error {
     InvalidCandidate(String),
     /// Refused by a delegation envelope or authority check.
     Denied(String),
+    /// The call lacks an argument its operation needs, or gives
+    /// arguments that contradict each other; the message says which and
+    /// how to give it. Its kind is `usage`.
+    Usage(String),
     /// The branch is running a turn, and the operation needs it idle.
     Running(String),
     /// The branch is not running a turn, and the operation needs one, such
@@ -3232,9 +3240,13 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::NotARepository(path) => {
-                write!(f, "{} is not inside a git work tree", path.display())
-            }
+            Error::NotARepository(path) => write!(
+                f,
+                "{} is not inside a git repository",
+                std::path::absolute(path)
+                    .unwrap_or_else(|_| path.clone())
+                    .display()
+            ),
             Error::UnknownBranch(name) => write!(f, "no branch named {name}"),
             Error::BranchExists(name) => write!(
                 f,
@@ -3249,6 +3261,11 @@ impl fmt::Display for Error {
                 write!(f, "{name:?} is not a usable branch name: {reason}")
             }
             Error::UnknownHarness(name) => write!(f, "no harness or profile named {name}"),
+            Error::HarnessUnavailable { harness, reason }
+                if reason.ends_with("was not found on PATH") =>
+            {
+                write!(f, "{harness} is not installed: {reason}")
+            }
             Error::HarnessUnavailable { harness, reason } => {
                 write!(f, "{harness} is unavailable: {reason}")
             }
@@ -3287,11 +3304,15 @@ impl fmt::Display for Error {
             },
             Error::CheckFailed {
                 output_tail,
+                ran,
                 checks,
                 shared,
                 own_work,
             } => {
-                write!(f, "check failed:\n{output_tail}")?;
+                match ran.as_deref().map(|ran| ran.status.as_str()) {
+                    None | Some("") => write!(f, "check failed:\n{output_tail}")?,
+                    Some(status) => write!(f, "check failed ({status}):\n{output_tail}")?,
+                }
                 write_checks(f, checks)?;
                 if !own_work.is_empty() {
                     write!(
@@ -3328,9 +3349,9 @@ impl fmt::Display for Error {
                 write!(f, "the candidate is already contained in {target}")
             }
             Error::InvalidCandidate(message) => write!(f, "invalid candidate: {message}"),
-            Error::Denied(why) => write!(f, "denied: {why}"),
-            Error::Running(name) => write!(f, "branch {name} is running a turn"),
-            Error::NotRunning(name) => write!(f, "branch {name} is not running a turn"),
+            Error::Denied(why) | Error::Usage(why) => f.write_str(why),
+            Error::Running(name) => write!(f, "{name} is still running its turn"),
+            Error::NotRunning(name) => write!(f, "{name} has no running turn to steer"),
             Error::Fenced(why) => write!(f, "fenced: {why}"),
             Error::StaleRevision {
                 branch,
@@ -3342,10 +3363,10 @@ impl fmt::Display for Error {
                  {expected}; read it again and propose against the current revision"
             ),
             Error::Remote { message, .. } => f.write_str(message),
-            Error::Git(message) => write!(f, "git: {message}"),
+            Error::Git(message) => f.write_str(message),
             Error::Harness(message) => write!(f, "harness: {message}"),
             Error::Io(error) => write!(f, "{error}"),
-            Error::State(message) => write!(f, "state: {message}"),
+            Error::State(message) => f.write_str(message),
         }
     }
 }
@@ -3377,6 +3398,7 @@ impl Error {
             Error::AlreadyMerged { .. } => "already_merged",
             Error::InvalidCandidate(_) => "invalid_candidate",
             Error::Denied(_) => "denied",
+            Error::Usage(_) => "usage",
             Error::Running(_) => "running",
             Error::NotRunning(_) => "not_running",
             Error::Fenced(_) => "fenced",
@@ -3397,11 +3419,14 @@ impl Error {
     /// module raises it as `BranchyardError.detail`. A check of an
     /// integration that failed, timed out or could not start has its
     /// `checks` ([`IntegrationCheck`]) and, when a failed one left out
-    /// siblings sharing it, the [`SharedCheck`]'s fields. `None` for an
+    /// siblings sharing it, the [`SharedCheck`]'s fields; a failed check
+    /// also has its `status` (`exit 3`) and `command` (its argv) when the
+    /// engine recorded them. `None` for an
     /// error with nothing more to say.
     pub fn detail(&self) -> Option<serde_json::Value> {
         match self {
             Error::CheckFailed {
+                ran,
                 checks,
                 shared,
                 own_work,
@@ -3411,6 +3436,14 @@ impl Error {
                     .as_ref()
                     .and_then(|shared| serde_json::to_value(shared).ok())
                     .unwrap_or_else(|| serde_json::json!({}));
+                if let Some(ran) = ran {
+                    if !ran.status.is_empty() {
+                        detail["status"] = serde_json::json!(ran.status);
+                    }
+                    if !ran.command.is_empty() {
+                        detail["command"] = serde_json::json!(ran.command);
+                    }
+                }
                 if !checks.is_empty() {
                     detail["checks"] = serde_json::to_value(checks).ok()?;
                 }
@@ -3431,6 +3464,16 @@ impl Error {
             _ => None,
         }
     }
+}
+
+/// A check that failed: its command, and how it ended
+/// ([`Error::CheckFailed`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailedCheck {
+    /// The check, as its argv; empty when the engine did not record it.
+    pub command: Vec<String>,
+    /// How it ended, as `exit 3` or `signal 9`; empty when unknown.
+    pub status: String,
 }
 
 /// After a failed check's output, which of an integration's checks ran,

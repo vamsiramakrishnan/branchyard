@@ -1238,6 +1238,19 @@ fn children_words(info: &BranchInfo) -> String {
         .join(" ")
 }
 
+/// [`next_commands`] for a branch that has a check: `by check X`, which runs
+/// it without merging, comes before `by merge X`.
+pub fn next_commands_checked(info: &BranchInfo, has_check: bool) -> Vec<String> {
+    let mut next = next_commands(info);
+    if has_check {
+        let merge = format!("by merge {}", shell_quote(&info.name));
+        if let Some(at) = next.iter().position(|command| *command == merge) {
+            next.insert(at, format!("by check {}", shell_quote(&info.name)));
+        }
+    }
+    next
+}
+
 /// Commands that make sense after a branch reaches its status.
 pub fn next_commands(info: &BranchInfo) -> Vec<String> {
     let name = shell_quote(&info.name);
@@ -1309,8 +1322,10 @@ fn cost_detail(info: &BranchInfo) -> String {
     }
 }
 
-/// The summary closing `by run`, `by send` and `by fork`.
-pub fn summary(info: &BranchInfo, style: Style) -> String {
+/// The summary closing `by run`, `by send` and `by fork`; for a branch whose
+/// merge must pass `check`, a check line says so, and the next commands run
+/// it before they merge.
+pub fn summary_with_check(info: &BranchInfo, check: Option<&[String]>, style: Style) -> String {
     let (status, tone) = status_text(&info.status);
     let mut pairs = vec![
         ("branch", format!("{} ({})", info.name, info.git_branch)),
@@ -1318,7 +1333,10 @@ pub fn summary(info: &BranchInfo, style: Style) -> String {
         ("candidate", candidate_detail(info)),
         ("cost", cost_detail(info)),
     ];
-    let next = next_commands(info);
+    if let Some(check) = check {
+        pairs.push(("check", check_line(&info.name, check)));
+    }
+    let next = next_commands_checked(info, check.is_some());
     if !next.is_empty() {
         pairs.push(("next", next.join("\n")));
     }
@@ -1397,7 +1415,7 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
         true => (format!("{status} (stalled)"), Tone::Yellow),
         false => (status, tone),
     };
-    let money = |v: Option<f64>| v.map_or("unknown".into(), usd);
+    let money = |v: Option<f64>| v.map_or("not reported".into(), usd);
     let mut pairs = vec![
         ("branch", i.name.clone()),
         ("status", style.paint(tone, &status)),
@@ -1619,13 +1637,30 @@ fn owns_text(owns: &[String], within: &[Vec<String>]) -> String {
     text
 }
 
+/// A check as `by show` and the summary after a turn say it: the command,
+/// and that it runs at merge, or now with `by check`.
+fn check_line(branch: &str, check: &[String]) -> String {
+    format!(
+        "{} (runs at merge; `by check {}` runs it now)",
+        command_text(check),
+        shell_quote(branch)
+    )
+}
+
+/// A command's words as a shell would need them quoted, so that
+/// `sh -c 'echo hi'` reads as one command and not as four words.
+fn command_text(argv: &[String]) -> String {
+    let words: Vec<String> = argv.iter().map(|word| shell_quote(word)).collect();
+    words.join(" ")
+}
+
 /// The check a branch's merge must pass, where it came from, and the
 /// siblings that share it, which are integrated together.
 fn check_text(i: &branchyard::Inspection) -> String {
     let Some(check) = &i.check else {
         return "none".into();
     };
-    let command = check.join(" ");
+    let command = command_text(check);
     let source = match (i.check_inherited, &i.parent) {
         (true, Some(parent)) => format!("inherited from {parent}"),
         _ => "its own".into(),
@@ -1639,6 +1674,19 @@ fn check_text(i: &branchyard::Inspection) -> String {
             i.name,
             i.check_shared_with.join(" ")
         ),
+    }
+}
+
+/// `by show`'s check line: [`check_text`], and that it runs at merge unless
+/// the siblings sharing it have already said how it is run.
+fn show_check_text(i: &branchyard::Inspection) -> String {
+    match (&i.check, i.check_shared_with.is_empty()) {
+        (Some(_), true) => format!(
+            "{}; runs at merge, or now with `by check {}`",
+            check_text(i),
+            shell_quote(&i.name)
+        ),
+        _ => check_text(i),
     }
 }
 
@@ -1834,6 +1882,9 @@ pub fn details(
     ]);
     if let Some(inspection) = budget {
         pairs.extend(budget_lines(inspection, false));
+        if inspection.check.is_some() {
+            pairs.push(("check", show_check_text(inspection)));
+        }
     }
     pairs.extend([
         (
@@ -1843,7 +1894,10 @@ pub fn details(
         ("worktree", info.worktree.display().to_string()),
         (
             "created",
-            format!("{} ago", age_text(now.saturating_sub(info.created_at))),
+            match age_text(now.saturating_sub(info.created_at)).as_str() {
+                "now" => "just now".to_owned(),
+                age => format!("{age} ago"),
+            },
         ),
     ]);
     if let BranchStatus::Merged { commit, .. } = &info.status {
@@ -2586,7 +2640,9 @@ mod tests {
             "envelope": null, "last_message": "",
         }))
         .unwrap();
-        assert!(!inspection(&i, Style::PLAIN).contains("reported"));
+        assert!(!inspection(&i, Style::PLAIN)
+            .lines()
+            .any(|line| line.starts_with("reported")));
         i.reported = Some(branchyard::StatusReport::new(
             branchyard::ReportedState::Blocked,
             "needs the\nAPI key".into(),
@@ -2838,7 +2894,7 @@ mod tests {
         ready.cost_usd = Some(0.5);
         ready.turns = 2;
         assert_eq!(
-            summary(&ready, PLAIN),
+            summary_with_check(&ready, None, PLAIN),
             "branch     fix it (by/fix it)\n\
              status     ready\n\
              candidate  2 files +5 -1 at 0123456789\n\
@@ -2846,9 +2902,28 @@ mod tests {
              next       by diff 'fix it'\n\
              \x20          by merge 'fix it'\n"
         );
+        // A configured check is said, and offered before the merge it gates.
+        let check = ["cargo".to_owned(), "test".to_owned()];
+        let checked = summary_with_check(&ready, Some(&check), PLAIN);
+        assert!(
+            checked.contains(
+                "check      cargo test (runs at merge; `by check 'fix it'` runs it now)\n"
+            ),
+            "{checked}"
+        );
+        assert!(
+            checked.contains(
+                "next       by diff 'fix it'\n\x20          by check 'fix it'\n\x20          by merge 'fix it'\n"
+            ),
+            "{checked}"
+        );
         let mut failed = info("f", None);
         failed.status = BranchStatus::Failed { reason: "x".into() };
         assert_eq!(next_commands(&failed), ["by log f", "by rm f"]);
+        assert_eq!(
+            next_commands_checked(&failed, true),
+            ["by log f", "by rm f"]
+        );
         let mut none = info("n", None);
         none.status = BranchStatus::NoChanges;
         assert_eq!(next_commands(&none), ["by send n \"<prompt>\"", "by rm n"]);

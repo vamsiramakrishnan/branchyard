@@ -20,6 +20,7 @@ mod detach;
 mod doctor_cmd;
 mod effects_cmd;
 mod env_cmd;
+mod errors;
 mod fleet_cmd;
 mod gateway_cmd;
 mod gh;
@@ -76,12 +77,24 @@ fn main() -> ExitCode {
     if let Some(call) = args::server_call(&argv[1..]) {
         return serve(&argv[..=call.prefix], call);
     }
+    // `by help all` and `by help agents` list commands; they are not commands.
+    if let Some(listing) = args::help_listing(&argv[1..]) {
+        return match commands::print(&args::listing_text(listing, Env::detect().color)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
     let cli = match args::parse_from(&argv) {
         Ok(cli) => cli,
         // Help and --version come this way too, to stdout with exit 0;
         // usage errors go to stderr with exit 2.
         Err(error) => {
-            branchyard_support::best_effort("print the usage error", error.print());
+            // A refused command line is JSON too, when the line asks for it.
+            if error.use_stderr() && errors::wants_json(&argv) {
+                errors::print(&errors::usage(&error), true);
+            } else {
+                branchyard_support::best_effort("print the usage error", error.print());
+            }
             return ExitCode::from(error.exit_code() as u8);
         }
     };
@@ -103,7 +116,10 @@ fn main() -> ExitCode {
     let (globals, command) = match defaults::apply(&cwd, &env, cli.globals, command) {
         Ok(applied) => applied,
         Err(error) => {
-            eprintln!("by: {error}");
+            errors::print(
+                &errors::config(&error.to_string()),
+                errors::wants_json(&argv),
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -123,7 +139,9 @@ fn main() -> ExitCode {
         Err(Failure::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(Failure::Reported) => ExitCode::FAILURE,
         Err(failure) => {
-            eprintln!("by: {failure}");
+            if let Some(report) = errors::failure(&failure, None) {
+                errors::print(&report, errors::wants_json(&argv));
+            }
             ExitCode::FAILURE
         }
     }
@@ -172,7 +190,14 @@ fn serve(prefix: &[OsString], call: args::ServerCall) -> ExitCode {
 fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
     match command {
         // Started by the engine for one branch, always beside it.
-        Command::Mcp { root, branch } => return commands::mcp(&root, &branch),
+        Command::Mcp {
+            list_tools: true, ..
+        } => return commands::mcp_tools(),
+        Command::Mcp {
+            root: Some(root),
+            branch: Some(branch),
+            ..
+        } => return commands::mcp(&root, &branch),
         Command::Completions { shell } => {
             let mut out = Vec::new();
             clap_complete::generate(shell, &mut args::command(), "by", &mut out);
@@ -180,7 +205,7 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         }
         Command::Man => {
             let mut out = Vec::new();
-            clap_mangen::Man::new(args::command()).render(&mut out)?;
+            clap_mangen::Man::new(args::command_with_hidden()).render(&mut out)?;
             return commands::print(&String::from_utf8_lossy(&out));
         }
         // Setup needs no repository or server: it may be what creates them.
@@ -252,16 +277,21 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
     }
     match command {
         Command::Run {
-            prompt, mut task, ..
+            prompt,
+            detached,
+            mut task,
         } => {
             inventory_default(&mut task)?;
-            commands::run(env, target, &prompt, &task)
+            // The background command of a `--detach` writes its log as text.
+            let json = detached.json && !detached.detach;
+            commands::run(env, target, &prompt, &task, json)
         }
         Command::Fan {
             prompt,
             harnesses,
             attempts,
             judge,
+            json,
             mut task,
         } => {
             if harnesses.is_none() {
@@ -273,7 +303,11 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
                 &prompt,
                 harnesses.as_ref().map(|h| h.0.as_slice()),
                 &task,
-                &commands::FanRoute { attempts, judge },
+                &commands::FanRoute {
+                    attempts,
+                    judge,
+                    json,
+                },
             )
         }
         Command::Map {
@@ -409,16 +443,23 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             prompt,
             fresh_session,
             at: None,
+            detached,
             task,
-            ..
-        } => commands::fork(env, target, &branch, &prompt, fresh_session, &task),
+        } => {
+            let json = detached.json && !detached.detach;
+            commands::fork(env, target, &branch, &prompt, fresh_session, &task, json)
+        }
         Command::Fork {
             branch,
             prompt,
             at: Some(turn),
+            detached,
             task,
             ..
-        } => commands::fork_at(env, target, &branch, turn, &prompt, &task),
+        } => {
+            let json = detached.json && !detached.detach;
+            commands::fork_at(env, target, &branch, turn, &prompt, &task, json)
+        }
         Command::Task(task) => task_cmd::main(env, target, &task.action, task.json),
         Command::Rewind {
             branch,
@@ -464,6 +505,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             editor,
             file,
             detach,
+            json,
             task,
         } => review::main(
             env,
@@ -474,6 +516,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
                 editor: editor.as_deref(),
                 file: file.as_deref(),
                 detach,
+                json,
                 task: &task,
             },
         ),
@@ -496,11 +539,12 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             into,
             rm,
             promote_effects,
+            json,
         } => {
             if promote_effects {
                 effects_cmd::promote_before_merge(target, &branch)?;
             }
-            commands::merge(target, &branch, into.as_deref(), rm)
+            commands::merge_as(target, &branch, into.as_deref(), rm, json)
         }
         Command::Approvals(a) => effects_cmd::approvals(target, a.action.as_ref(), a.json),
         Command::Effects(e) => {
@@ -514,7 +558,8 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         Command::Rm {
             branch,
             keep_credentials,
-        } => commands::rm(target, &branch, keep_credentials),
+            json,
+        } => commands::rm(target, &branch, keep_credentials, json),
         Command::Harnesses {
             json,
             all,

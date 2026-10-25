@@ -11,8 +11,8 @@ use serde_json::json;
 use crate::record::Recorder;
 use crate::state::{Begun, Lease, Record, Store, Taken};
 use crate::{
-    git, names, recover, Activity, BranchInfo, BranchStatus, Error, Merged, RecordedEvent,
-    RemoveOptions, Yard,
+    git, names, recover, Activity, BranchInfo, BranchStatus, Error, FailedCheck, Merged,
+    RecordedEvent, RemoveOptions, Yard,
 };
 use branchyard_support::time::now_ms;
 
@@ -286,7 +286,27 @@ fn integrate(
             check.as_ref(),
         )
     };
-    let integrated = integrated.map_err(|e| integration_error(e, target))?;
+    let integrated = integrated.map_err(|e| match integration_error(e, target) {
+        Error::CheckFailed {
+            output_tail,
+            ran,
+            checks,
+            shared,
+            own_work,
+        } => Error::CheckFailed {
+            output_tail,
+            ran: ran.map(|ran| {
+                Box::new(FailedCheck {
+                    command: check.as_ref().map(|c| c.argv.clone()).unwrap_or_default(),
+                    status: ran.status,
+                })
+            }),
+            checks,
+            shared,
+            own_work,
+        },
+        other => other,
+    })?;
     let mut recorder = Recorder::fenced(&store, fence, None);
     for worktree in &integrated.stale_checkouts {
         recorder.record(Activity::Warning(format!(
@@ -306,6 +326,17 @@ fn integrate(
     })
 }
 
+/// How a check ended, as [`Error::CheckFailed`]'s `status` says it:
+/// `exit 3`, or `signal 9` for a check a signal killed.
+pub(crate) fn exit_text(status: std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt as _;
+    match (status.code(), status.signal()) {
+        (Some(code), _) => format!("exit {code}"),
+        (None, Some(signal)) => format!("signal {signal}"),
+        (None, None) => String::new(),
+    }
+}
+
 pub(crate) fn integration_error(error: IntegrationError, target: &str) -> Error {
     match error {
         IntegrationError::TargetMoved { expected, actual } => Error::TargetMoved {
@@ -313,8 +344,15 @@ pub(crate) fn integration_error(error: IntegrationError, target: &str) -> Error 
             actual: actual.map(|c| c.0),
         },
         IntegrationError::Conflict { files } => Error::Conflict { files },
-        IntegrationError::CheckFailed { output_tail, .. } => Error::CheckFailed {
+        IntegrationError::CheckFailed {
+            status,
             output_tail,
+        } => Error::CheckFailed {
+            output_tail,
+            ran: Some(Box::new(FailedCheck {
+                command: Vec::new(),
+                status: exit_text(status),
+            })),
             checks: Vec::new(),
             shared: None,
             own_work: Vec::new(),
