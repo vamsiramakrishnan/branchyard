@@ -537,11 +537,11 @@ fn doctor_on(repo: &Repo, bin: &Path, args: &[&str]) -> Report {
 fn each_installed_harness_has_a_short_row_of_its_own_and_a_summary_says_how_many_can_be_used() {
     let repo = Repo::used().without_keys();
     let bin = repo.dir.join("bin");
-    // Codex: its own status command says logged in; live-tested on 0.157.1.
+    // Codex: its own status command says logged in; live-tested on 0.164.0.
     fake(
         &bin,
         "codex",
-        "case \"$1 $2\" in\n  \"login status\") echo 'Logged in using ChatGPT';;\n  *) echo 'codex-cli 0.164.0';;\nesac\n",
+        "case \"$1 $2\" in\n  \"login status\") echo 'Logged in using ChatGPT';;\n  *) echo 'codex-cli 0.157.1';;\nesac\n",
     );
     // Claude Code: no credential file and no key, so the login is not verified.
     fake(&bin, "claude", "echo '2.1.310 (Claude Code)'\n");
@@ -581,7 +581,7 @@ fn each_installed_harness_has_a_short_row_of_its_own_and_a_summary_says_how_many
     assert_eq!(report.status("harnesses.codex"), "ok");
     assert_eq!(
         report.detail("harnesses.codex"),
-        "installed 0.164.0 · logged in · live-tested 0.157.1 (9/9)"
+        "installed 0.157.1 · logged in · live-tested 0.164.0 (9/9)"
     );
     assert_eq!(report.status("harnesses.goose"), "ok");
     assert_eq!(
@@ -627,7 +627,7 @@ fn a_harness_whose_own_command_says_logged_out_is_a_todo_and_the_default_warns()
     fake(
         &bin,
         "codex",
-        "case \"$1 $2\" in\n  \"login status\") echo 'Not logged in';;\n  *) echo 'codex-cli 0.157.1';;\nesac\n",
+        "case \"$1 $2\" in\n  \"login status\") echo 'Not logged in';;\n  *) echo 'codex-cli 0.164.0';;\nesac\n",
     );
     repo.project_file("[defaults]\nharness = \"codex\"\n");
     let report = doctor_on(&repo, &bin, &[]);
@@ -635,7 +635,7 @@ fn a_harness_whose_own_command_says_logged_out_is_a_todo_and_the_default_warns()
     assert_eq!(report.status("harnesses.codex"), "todo");
     assert_eq!(
         report.detail("harnesses.codex"),
-        "0.157.1 · logged out · live 9/9"
+        "0.164.0 · logged out · live 9/9"
     );
     assert_eq!(report.status("harnesses.summary"), "todo");
     assert_eq!(report.status("harnesses.default"), "warn");

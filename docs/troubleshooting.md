@@ -65,6 +65,7 @@ A repository's `[workspace]` scripts run as you, so they never run before you sa
 
 - If the harness works when you start it yourself, ignore the row. `--auto` routing leaves such a harness out (`ID is likely logged out`); name it with `--harness` instead.
 - Otherwise `by harnesses login ID` runs the harness's own sign-in, or stores a key (`printf %s "$KEY" | by harnesses login ID --api-key`). `by up --plan` lists what only you can do.
+- Codex with a model provider of its own (a `model_provider` and a `[model_providers.NAME]` with an `env_key` in `~/.codex/config.toml`) and no OpenAI login: `codex login status` says `Not logged in`, but Codex runs on the provider. Export the variable `env_key` names and the row reads `key set (VAR)`; if it is exported and the row still says `logged out`, the line under the table says which provider and variable the configuration selects, and `by run --harness codex --no-preflight` starts it anyway. `by harnesses login codex --api-key` would store an OpenAI key that this provider never reads. Detection reads `config.toml` once a minute (`by harnesses --refresh` asks again).
 
 ### `slow to start`
 

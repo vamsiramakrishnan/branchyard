@@ -2,44 +2,44 @@
   "profile": "codex-app-server",
   "harness": "codex",
   "command": "codex",
-  "harness_version": "codex-cli 0.157.1",
+  "harness_version": "codex-cli 0.164.0",
   "driver_version": "0.0.1",
-  "host": "Linux 6.18.44-fc-v139 x86_64",
-  "date": "2026-10-16",
+  "host": "Linux 6.18.44-fc-v153 x86_64",
+  "date": "2026-10-25",
   "installed_from": null,
   "execution": "local process with scrubbed environment and private home; not a Branchyard sandbox",
-  "seconds": 56.0,
+  "seconds": 45.0,
   "harness_estimated_cost_usd": "not reported by the harness; the cost cap did not apply",
   "scenarios": [
     {
       "name": "fresh_turn",
       "passed": true,
-      "detail": "session 01a146a4-882a-7ba3-9e66-068f3d3a81f4; replied \"OK\"",
-      "seconds": 19.6
+      "detail": "session 01a172ad-92bf-76d2-a38d-a22816f779c2; replied \"OK\"",
+      "seconds": 3.2
     },
     {
       "name": "permission_denied",
       "passed": true,
       "detail": "1 request(s) denied; marker absent; turn Completed",
-      "seconds": 7.2
+      "seconds": 8.2
     },
     {
       "name": "permission_allowed",
       "passed": true,
       "detail": "request allowed; command ran",
-      "seconds": 6.4
+      "seconds": 4.1
     },
     {
       "name": "interrupt_during_permission",
       "passed": true,
       "detail": "stopped 0.0s after interrupt; acknowledged: true; pending request withdrawn by harness: false",
-      "seconds": 2.4
+      "seconds": 5.0
     },
     {
       "name": "interrupt_during_tool",
       "passed": true,
       "detail": "stopped 0.0s after interrupt; acknowledged: true",
-      "seconds": 7.3
+      "seconds": 13.5
     },
     {
       "name": "clean_close",
@@ -50,20 +50,20 @@
     {
       "name": "resume",
       "passed": true,
-      "detail": "session 01a146a4-882a-7ba3-9e66-068f3d3a81f4; remembered PELICAN-7; cost $0.0000",
-      "seconds": 4.8
+      "detail": "session 01a172ad-92bf-76d2-a38d-a22816f779c2; remembered PELICAN-7; cost $0.0000",
+      "seconds": 2.5
     },
     {
       "name": "fork",
       "passed": true,
-      "detail": "session 01a146a5-1737-7331-914f-3385964ea514; remembered PELICAN-7; cost $0.0000",
-      "seconds": 3.8
+      "detail": "session 01a172ae-2190-7851-8b6a-01d8977c3509; remembered PELICAN-7; cost $0.0000",
+      "seconds": 5.2
     },
     {
       "name": "connection_lost",
       "passed": true,
       "detail": "killed mid-turn; outcome reported unknown",
-      "seconds": 4.4
+      "seconds": 3.0
     }
   ]
 }
