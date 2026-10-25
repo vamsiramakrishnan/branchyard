@@ -36,7 +36,6 @@
     "crates/branchyard-mcp/tests/protocol.rs": 1,
     "crates/branchyard-provision/tests/provision.rs": 1,
     "crates/branchyard-sandbox/src/fake.rs": 1,
-    "crates/branchyard-server/src/cli.rs": 2,
     "crates/branchyard-server/src/companion/store.rs": 1,
     "crates/branchyard-server/src/triggers/engine.rs": 2,
     "crates/branchyard-server/src/triggers/precheck.rs": 1,

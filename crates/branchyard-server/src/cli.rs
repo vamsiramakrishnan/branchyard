@@ -1436,7 +1436,7 @@ mod tests {
     /// Allowing a provider the build cannot run is a warning, with the command.
     #[test]
     fn check_warns_for_a_provider_this_build_cannot_run() {
-        let mut config = Config::new(PathBuf::from("/tmp/x"));
+        let mut config = Config::new(PathBuf::from("/nonexistent/x"));
         assert!(build_warnings(&config).is_empty());
         config.allow_providers.insert("microsandbox".into());
         let warnings = build_warnings(&config);

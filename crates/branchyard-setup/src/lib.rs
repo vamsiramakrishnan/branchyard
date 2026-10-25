@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod config;
+pub mod hint;
 pub mod import;
 pub mod install;
 pub mod interview;
@@ -60,7 +61,7 @@ pub enum Topic {
     Server,
     /// A Docker Compose deployment of the server.
     Deploy,
-    /// The Branchyard skills for Claude Code or Codex.
+    /// Branchyard's hooks, commands and skills in each chosen harness.
     Plugin,
 }
 
@@ -93,7 +94,7 @@ impl Topic {
             Topic::Rig => "A rig: a team of harnesses",
             Topic::Server => "A Branchyard server",
             Topic::Deploy => "A Docker Compose deployment",
-            Topic::Plugin => "Skills for your coding harness",
+            Topic::Plugin => "Hooks and skills for your coding harnesses",
         }
     }
 
@@ -103,7 +104,7 @@ impl Topic {
             Topic::Rig => "A rig TOML: a lead seat and the seats it delegates to, each with its harness, budget and policy",
             Topic::Server => "A server configuration: listen address and TLS, SQLite or PostgreSQL, tenants with hashed credentials and 0600 token files, quotas, providers, secrets, webhooks",
             Topic::Deploy => "compose.yaml with PostgreSQL, a server configuration and generated secret files",
-            Topic::Plugin => "Install the setup and delegate skills into Claude Code or Codex, or each detected harness's hooks, commands and skills (plugins/branchyard/install)",
+            Topic::Plugin => "Install Branchyard's hooks, commands and skills into each harness you use (Claude Code, Codex, Gemini CLI, ...), detected ones first (plugins/branchyard/install)",
         }
     }
 }
@@ -136,6 +137,7 @@ pub fn plan(
         Topic::Plugin => topics::plugin::plan(facts, answers, probe),
     };
     plan.validate(validator);
+    plan.label_diffs(facts.home.as_deref());
     plan
 }
 

@@ -270,9 +270,18 @@ pub fn run(topic: Option<Topic>, defaults: bool) -> Outcome {
         }
     };
     let cwd = std::env::current_dir()?;
+    if topic == Topic::Project && !crate::init::in_work_tree(&cwd) {
+        cliclack::outro_cancel(crate::init::not_a_repository(&cwd)).map_err(Failure::Io)?;
+        return Err(Failure::Reported);
+    }
     let spinner = cliclack::spinner();
     spinner.start("Looking at this machine and repository…");
-    let host = HostProbe::new(&cwd);
+    // Installing hooks needs no harness versions, and running some
+    // harnesses writes their directories into the home.
+    let host = match topic {
+        Topic::Plugin => HostProbe::without_versions(&cwd),
+        _ => HostProbe::new(&cwd),
+    };
     let root = host.root_path().to_path_buf();
     let probe = CachedProbe::new(host);
     let facts = Facts::gather(&probe);

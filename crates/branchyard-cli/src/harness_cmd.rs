@@ -57,6 +57,15 @@ impl Machine {
         )))
     }
 
+    /// For a sentence: where, in a person's words. `name` is for the log
+    /// and JSON, where a program reads it.
+    fn place(&self) -> String {
+        match self {
+            Machine::Local => "this machine".into(),
+            other => other.name(),
+        }
+    }
+
     /// For messages and the log.
     fn name(&self) -> String {
         match self {
@@ -230,7 +239,7 @@ fn detect(
             command.arg("sh -s");
             command
         })
-        .map_err(|e| Failure::Message(format!("on {}: {e}", machine.name()))),
+        .map_err(|e| Failure::Message(format!("on {}: {e}", machine.place()))),
         Machine::Recipe(name) => on_recipe(env, name, |transport| {
             inventory::detect_with(options, false, |script| transport.command(script, &[]))
                 .map_err(Failure::Message)
@@ -365,7 +374,7 @@ fn list(env: &Env, target: &Target, as_json: bool, refresh: bool, on: Option<&st
                 worker.repos.join(", ")
             ));
             match &worker.inventory {
-                Some(found) => text.push_str(&inventory_text(found, env.style())),
+                Some(found) => text.push_str(&inventory_text(found, false, env.style())),
                 None => {
                     text.push_str("  advertises no harness inventory (run with inventory on)\n")
                 }
@@ -381,7 +390,11 @@ fn list(env: &Env, target: &Target, as_json: bool, refresh: bool, on: Option<&st
             &serde_json::to_value(&found).expect("serializes"),
         ));
     }
-    print(&inventory_text(&found, env.style()))
+    print(&inventory_text(
+        &found,
+        matches!(machine, Machine::Local),
+        env.style(),
+    ))
 }
 
 fn quota_text(quota: Option<&Quota>) -> String {
@@ -419,7 +432,8 @@ fn login_text(state: &HarnessState) -> (String, Tone) {
 }
 
 /// An inventory as a table with what is not ready and why.
-fn inventory_text(found: &Inventory, style: Style) -> String {
+/// `local`: the inventory is of this machine, which is how it is named.
+fn inventory_text(found: &Inventory, local: bool, style: Style) -> String {
     let columns = [
         Column {
             header: "HARNESS",
@@ -497,9 +511,9 @@ fn inventory_text(found: &Inventory, style: Style) -> String {
          one.\n",
         found.harnesses.len(),
         found.checked.len(),
-        match found.host.as_str() {
-            "" => "this machine",
-            host => host,
+        match (local, found.host.as_str()) {
+            (true, _) | (_, "") => "this machine",
+            (false, host) => host,
         }
     ));
     text
@@ -554,7 +568,7 @@ fn change_harness(
             false => print(&format!(
                 "{id} is already installed on {} ({version}); `by harnesses update {id}` updates \
                  it\n",
-                machine.name()
+                machine.place()
             )),
         };
     }
@@ -587,7 +601,7 @@ fn change_harness(
         Permission::Ask => {
             let answer = crate::console::terminal_prompt(&format!(
                 "by: {action} {id} on {} by running `{}`? [y/N] ",
-                machine.name(),
+                machine.place(),
                 plan.command
             ))?;
             if !matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
@@ -606,7 +620,7 @@ fn change_harness(
             )));
         }
     }
-    eprintln!("by: on {}: {}", machine.name(), plan.command);
+    eprintln!("by: on {}: {}", machine.place(), plan.command);
     if let Some(why) = &plan.unpinned {
         eprintln!("by: unpinned: {why}");
     }
@@ -660,7 +674,7 @@ fn change_harness(
                 _ => "installed",
             },
             state.version.as_deref().unwrap_or("(version unknown)"),
-            machine.name(),
+            machine.place(),
             match (&current, action) {
                 (Some(c), InstallAction::Update) =>
                     format!(" (was {})", c.version.as_deref().unwrap_or("unknown")),
@@ -669,7 +683,7 @@ fn change_harness(
         )),
         _ => Err(Failure::Message(format!(
             "{action} of {id} on {} did not verify: {}{}",
-            machine.name(),
+            machine.place(),
             result.problem.unwrap_or_default(),
             match result.output_tail.trim() {
                 "" => String::new(),
@@ -825,7 +839,7 @@ fn login(
         let Some(state) = found.get(id) else {
             return Err(Failure::Message(format!(
                 "{id} is not installed on {}; `by harnesses install {id}{}` first",
-                machine.name(),
+                machine.place(),
                 match &machine {
                     Machine::Local => String::new(),
                     other => format!(" --on {}", other.name()),
@@ -877,7 +891,7 @@ fn login(
             c
         }
     };
-    eprintln!("by: on {}: {command}", machine.name());
+    eprintln!("by: on {}: {command}", machine.place());
     // The harness's own flow, with this terminal: a URL or device code it
     // prints reaches the person directly.
     let status = process
@@ -926,14 +940,14 @@ fn login(
     match (status.success(), state) {
         (true, Some(login)) => print(&format!(
             "{id} on {}: {} ({}: {})\n",
-            machine.name(),
+            machine.place(),
             login.state,
             login.evidence,
             login.detail
         )),
         (true, None) => print(&format!(
             "{id} ran its login; it is not found on {} now\n",
-            machine.name()
+            machine.place()
         )),
         (false, _) => Err(Failure::Message(format!(
             "`{command}` exited with {status}"

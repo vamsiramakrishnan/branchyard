@@ -73,6 +73,7 @@ HOOK_FILES = {
 }
 # Each status-line settings fragment: (harness id, the path to the statusLine object).
 STATUS_FILES = {
+    "claude-code/settings-statusline.json": ("claude-code", ("statusLine",)),
     "qwen-code/settings.json": ("qwen-code", ("ui", "statusLine")),
     "github-copilot/settings.json": ("github-copilot", ("statusLine",)),
     "droid/settings.json": ("droid", ("statusLine",)),
@@ -388,6 +389,38 @@ class InstallManifestTests(unittest.TestCase):
             for path in sorted((HARNESSES / harness).rglob("*")):
                 if path.is_file():
                     self.assertIn(path.relative_to(PLUGIN).as_posix(), named)
+
+
+class ClaudeCodeStatusLineTests(unittest.TestCase):
+    """Claude Code's status line: `by init plugin` merges it when the settings
+    have none, and leaves yours (the setup crate's tests/install.rs plans both)."""
+
+    def manifest(self):
+        return tomllib.loads((INSTALL / "claude-code.toml").read_text())
+
+    def test_the_manifest_merges_the_status_line_only_when_there_is_none(self):
+        manifest = self.manifest()
+        self.assertIn("statusline", manifest["provides"])
+        (entry,) = [f for f in manifest["file"] if f["from"].endswith("settings-statusline.json")]
+        self.assertEqual(
+            (entry["to"], entry["how"], entry["at"], entry["unless_set"]),
+            ("~/.claude/settings.json", "merge-json", "", "statusLine"),
+        )
+        # The hooks fragment sets no status line, so a user's own does not clash with it.
+        hooks = json.loads((HARNESSES / "claude-code/settings-hooks.json").read_text())
+        self.assertEqual(set(hooks), {"hooks"})
+        # The old note ("not merged, as it would replace yours") is no longer true.
+        self.assertFalse(any("Status line (not merged" in n["text"] for n in manifest["note"]))
+
+    def test_the_status_line_is_the_guarded_command_for_claude_code(self):
+        fragment = json.loads((HARNESSES / "claude-code/settings-statusline.json").read_text())
+        self.assertEqual(set(fragment), {"statusLine"})
+        self.assertEqual(fragment["statusLine"]["type"], "command")
+        with tempfile.TemporaryDirectory() as root:
+            empty = Path(root) / "empty"
+            empty.mkdir()
+            result = run_without_by(fragment["statusLine"]["command"], empty)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
 
 
 class DocsTests(unittest.TestCase):

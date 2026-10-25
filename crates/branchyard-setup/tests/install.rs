@@ -337,8 +337,10 @@ fn by_init_plugin_offers_detected_harnesses_and_plans_them() {
         .files
         .iter()
         .any(|f| f.path == "/home/dev/.claude/skills/setup/SKILL.md"));
-    assert!(
-        plan.summary[0].starts_with("Claude Code: hooks"),
+    // One line per harness: what it gets, and where.
+    assert_eq!(
+        plan.summary[0],
+        "Claude Code: 2 skills, 3 commands, 2 hooks, status line in ~/.claude/settings.json",
         "{:?}",
         plan.summary
     );
@@ -375,4 +377,261 @@ fn by_init_plugin_offers_detected_harnesses_and_plans_them() {
         &BuiltinValidator,
     );
     assert!(!refused.errors.is_empty());
+}
+
+// ---- Claude Code's status line: merged when there is none, never replaced ----
+
+/// Plan the built Claude Code install over the files in `existing`.
+fn claude_plan(existing: &[(&str, &str)]) -> (Plan, Vec<String>) {
+    let mut probe = FakeProbe::typical();
+    probe.tools.insert("claude".into(), "2.1.310".into());
+    for (path, text) in existing {
+        probe
+            .files
+            .insert(format!("{HOME}/{path}"), (*text).to_owned());
+    }
+    let answers: BTreeMap<String, Value> =
+        [("harnesses".to_owned(), json!(["claude-code"]))].into();
+    let response = next(
+        Topic::Plugin,
+        &probe,
+        &answers,
+        false,
+        &mut branchyard_setup::probe::CountingEntropy(0),
+        &BuiltinValidator,
+    );
+    let plan = response.plan.unwrap();
+    let notes = plan.notes.clone();
+    (plan, notes)
+}
+
+fn settings(plan: &Plan) -> Value {
+    let file = file(plan, "/home/dev/.claude/settings.json");
+    serde_json::from_str(file.content.as_deref().unwrap()).unwrap()
+}
+
+#[test]
+fn claude_codes_status_line_is_merged_when_there_is_none() {
+    let (plan, notes) = claude_plan(&[]);
+    assert!(plan.valid, "{:#?}", plan.files);
+    let merged = settings(&plan);
+    assert_eq!(merged["statusLine"]["type"], "command");
+    let command = merged["statusLine"]["command"].as_str().unwrap();
+    assert_eq!(
+        command,
+        "command -v by >/dev/null 2>&1 && by statusline --harness claude-code || true"
+    );
+    assert_eq!(merged["hooks"].as_object().unwrap().len(), 2);
+    assert!(
+        !notes.iter().any(|n| n.contains("kept the \"statusLine\"")),
+        "{notes:?}"
+    );
+
+    // Their other settings stay; applied, a second plan changes nothing.
+    let mine = "{\n  \"theme\": \"dark\"\n}\n";
+    let (plan, _) = claude_plan(&[(".claude/settings.json", mine)]);
+    let merged = settings(&plan);
+    assert_eq!(merged["theme"], "dark");
+    assert!(merged["statusLine"].is_object());
+    let written = file(&plan, "/home/dev/.claude/settings.json")
+        .body()
+        .to_owned();
+    let (again, notes) = claude_plan(&[(".claude/settings.json", written.as_str())]);
+    for f in again
+        .files
+        .iter()
+        .filter(|f| f.path.ends_with("settings.json"))
+    {
+        assert_eq!(f.action, FileAction::Unchanged, "{}: {:?}", f.path, f.diff);
+    }
+    assert!(
+        !notes.iter().any(|n| n.contains("kept")),
+        "installed already: {notes:?}"
+    );
+}
+
+#[test]
+fn a_status_line_you_already_have_is_kept_and_the_note_gives_the_line_to_choose() {
+    let mine = r#"{
+  "statusLine": {"type": "command", "command": "ccstatusline"},
+  "theme": "dark"
+}
+"#;
+    let (plan, notes) = claude_plan(&[(".claude/settings.json", mine)]);
+    // Not a clash that refuses the install: the hooks are merged, the line is not.
+    assert!(plan.valid, "{:#?}", plan.files);
+    let merged = settings(&plan);
+    assert_eq!(merged["statusLine"]["command"], "ccstatusline");
+    assert_eq!(merged["theme"], "dark");
+    assert_eq!(merged["hooks"].as_object().unwrap().len(), 2);
+    let note = notes
+        .iter()
+        .find(|n| n.contains("kept the \"statusLine\""))
+        .unwrap_or_else(|| panic!("{notes:?}"));
+    assert!(
+        note.starts_with(
+            "Claude Code: kept the \"statusLine\" already in ~/.claude/settings.json."
+        ),
+        "{note}"
+    );
+    assert!(
+        note.contains(
+            r#"set "statusLine": {"type":"command","command":"command -v by >/dev/null 2>&1 && by statusline --harness claude-code || true"}"#
+        ),
+        "{note}"
+    );
+    // The summary does not claim a status line it did not install.
+    assert_eq!(
+        plan.summary[0],
+        "Claude Code: 2 skills, 3 commands, 2 hooks in ~/.claude/settings.json"
+    );
+
+    // Theirs is the very line Branchyard would set: nothing to say.
+    let ours = r#"{"statusLine": {"type": "command", "command": "command -v by >/dev/null 2>&1 && by statusline --harness claude-code || true"}}"#;
+    let (plan, notes) = claude_plan(&[(".claude/settings.json", ours)]);
+    assert!(plan.valid);
+    assert!(!notes.iter().any(|n| n.contains("kept")), "{notes:?}");
+    // An unparseable file is not "set": the merge reports it as it always did.
+    let (plan, _) = claude_plan(&[(".claude/settings.json", "{ // comment\n}\n")]);
+    assert!(!plan.valid);
+}
+
+#[test]
+fn unless_set_is_for_a_top_level_json_merge_only() {
+    let bad = Bundle(&[
+        (
+            "install/x.toml",
+            "harness = \"x\"\nbinaries = [\"x\"]\n[[file]]\nfrom = \"a.toml\"\nto = \"~/a.toml\"\nhow = \"merge-toml\"\nunless_set = \"k\"\n[[file]]\nfrom = \"b.json\"\nto = \"~/b.json\"\nhow = \"merge-json\"\nat = \"ui\"\nunless_set = \"k\"\n",
+        ),
+        ("a.toml", "k = 1\n"),
+        ("b.json", "{\"k\": 1}"),
+    ]);
+    let e = bad.manifests().unwrap_err();
+    assert_eq!(
+        e.matches("`unless_set` is only for merge-json at the top level")
+            .count(),
+        2,
+        "{e}"
+    );
+}
+
+#[test]
+fn every_built_harness_summarizes_what_it_gets_and_where() {
+    let manifests = install::manifests().unwrap();
+    let line =
+        |id: &str| install::summary(manifests.iter().find(|m| m.harness == id).unwrap(), &[]);
+    assert_eq!(
+        line("claude-code"),
+        "2 skills, 3 commands, 2 hooks, status line in ~/.claude/settings.json"
+    );
+    assert_eq!(line("codex"), "2 hooks in ~/.codex/hooks.json");
+    assert_eq!(
+        line("gemini-cli"),
+        "3 commands, 1 hook in ~/.gemini/settings.json"
+    );
+    assert_eq!(
+        line("qwen-code"),
+        "2 hooks, status line in ~/.qwen/settings.json"
+    );
+    assert_eq!(
+        line("antigravity"),
+        "2 hooks, status line in ~/.gemini/config/hooks.json and ~/.gemini/antigravity-cli/settings.json"
+    );
+    assert_eq!(
+        line("droid"),
+        "2 hooks, status line in ~/.factory/hooks.json and ~/.factory/settings.json"
+    );
+    // Code and YAML are not counted, only named.
+    assert_eq!(
+        line("amp"),
+        "hooks, status line in ~/.config/amp/plugins/branchyard.ts"
+    );
+    assert_eq!(line("hermes"), "hooks in ~/.hermes/config.yaml");
+    for m in &manifests {
+        let text = install::summary(m, &[]);
+        assert!(
+            !text.is_empty() && !text.contains("{project}"),
+            "{}: {text}",
+            m.harness
+        );
+    }
+}
+
+#[test]
+fn a_plans_diffs_name_files_under_the_home_relative_to_it() {
+    let (plan, _) = claude_plan(&[]);
+    let skill = file(&plan, "/home/dev/.claude/skills/setup/SKILL.md");
+    let diff = skill.diff.as_deref().unwrap();
+    assert!(
+        diff.starts_with("--- /dev/null\n+++ b/.claude/skills/setup/SKILL.md\n"),
+        "{diff}"
+    );
+    assert!(!diff.contains("b//"), "{diff}");
+    // The file's own path is the one written.
+    assert_eq!(skill.path, "/home/dev/.claude/skills/setup/SKILL.md");
+
+    // An existing file diffs from `a/` to `b/`, both relative.
+    let (plan, _) = claude_plan(&[(".claude/settings.json", "{\"theme\": \"dark\"}\n")]);
+    let diff = file(&plan, "/home/dev/.claude/settings.json")
+        .diff
+        .as_deref()
+        .unwrap();
+    assert!(
+        diff.starts_with("--- a/.claude/settings.json\n+++ b/.claude/settings.json\n"),
+        "{diff}"
+    );
+}
+
+#[test]
+fn the_plugin_topic_has_one_installer_and_one_question() {
+    let mut probe = FakeProbe::typical();
+    probe.tools.insert("claude".into(), "2.1.310".into());
+    let go = |answers: BTreeMap<String, Value>, defaults: bool| {
+        next(
+            Topic::Plugin,
+            &probe,
+            &answers,
+            defaults,
+            &mut branchyard_setup::probe::CountingEntropy(0),
+            &BuiltinValidator,
+        )
+    };
+    // Which harnesses is the only thing asked, and the detected ones are chosen.
+    let first = go(BTreeMap::new(), false);
+    let ids: Vec<&str> = first.questions.iter().map(|q| q.id.as_str()).collect();
+    assert_eq!(ids, ["harnesses"]);
+    assert_eq!(first.questions[0].default, json!(["claude-code"]));
+    assert!(first.plan.is_none());
+    // --defaults is the same as naming the detected ones.
+    let defaulted = go(BTreeMap::new(), true);
+    let plan = defaulted.plan.unwrap();
+    assert!(
+        plan.summary[0].starts_with("Claude Code: 2 skills"),
+        "{:?}",
+        plan.summary
+    );
+    assert_eq!(plan.commands[0].command, "by setup");
+    // The retired skills-only host answers are ignored, not obeyed.
+    let old: BTreeMap<String, Value> = [
+        ("host".to_owned(), json!("codex-user")),
+        ("harnesses".to_owned(), json!(["codex"])),
+    ]
+    .into();
+    let old = go(old, false);
+    assert_eq!(old.unknown_answers, ["host"]);
+    let plan = old.plan.unwrap();
+    assert!(
+        plan.files
+            .iter()
+            .all(|f| !f.path.contains("/.codex/skills")),
+        "{:#?}",
+        plan.files
+    );
+    assert_eq!(plan.summary, ["Codex: 2 hooks in ~/.codex/hooks.json"]);
+    // Choosing none installs nothing and points at the listing.
+    let none = go([("harnesses".to_owned(), json!([]))].into(), false);
+    let plan = none.plan.unwrap();
+    assert!(plan.files.is_empty());
+    assert_eq!(plan.summary, ["No harness chosen; nothing to install"]);
+    assert_eq!(plan.commands[0].command, "by init plugin");
 }

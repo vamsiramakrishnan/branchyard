@@ -268,6 +268,18 @@ impl Plan {
         });
     }
 
+    /// Like [`Plan::command`], but first in the list: what has to happen
+    /// before anything else the plan suggests.
+    pub fn command_first(&mut self, command: impl Into<String>, why: impl Into<String>) {
+        self.commands.insert(
+            0,
+            FollowUp {
+                command: command.into(),
+                why: why.into(),
+            },
+        );
+    }
+
     /// Run `validator` over every file and record the verdicts.
     pub fn validate(&mut self, validator: &dyn Validator) {
         let snapshot = self.files.clone();
@@ -286,6 +298,49 @@ impl Plan {
     /// Files that applying would replace.
     pub fn overwrites(&self) -> Vec<&PlannedFile> {
         self.files.iter().filter(|f| f.overwrites).collect()
+    }
+
+    /// Show each diff's paths as [`diff_label`] does: a file under the
+    /// home directory relative to it, instead of `b//home/dev/.claude/...`.
+    /// The files' own paths, which are written, stay as they are.
+    pub fn label_diffs(&mut self, home: Option<&str>) {
+        for file in &mut self.files {
+            let label = diff_label(&file.path, home);
+            if label == file.path {
+                continue;
+            }
+            if let Some(diff) = &file.diff {
+                // Only the two header lines name the file.
+                let headers = [
+                    (format!("--- a/{}", file.path), format!("--- a/{label}")),
+                    (format!("+++ b/{}", file.path), format!("+++ b/{label}")),
+                ];
+                let mut out = String::with_capacity(diff.len());
+                for (i, line) in diff.split_inclusive('\n').enumerate() {
+                    let bare = line.trim_end_matches('\n');
+                    match headers.iter().find(|(old, _)| i < 2 && bare == old) {
+                        Some((_, new)) => out.push_str(&line.replacen(bare, new, 1)),
+                        None => out.push_str(line),
+                    }
+                }
+                file.diff = Some(out);
+            }
+        }
+    }
+}
+
+/// The path a diff header shows: under `home`, relative to it
+/// (`.claude/settings.json`); any other absolute path without its leading
+/// slash; a relative path as it is.
+pub fn diff_label(path: &str, home: Option<&str>) -> String {
+    let under_home = home
+        .map(|h| h.trim_end_matches('/'))
+        .filter(|h| !h.is_empty())
+        .and_then(|h| path.strip_prefix(h))
+        .and_then(|rest| rest.strip_prefix('/'));
+    match under_home {
+        Some(rest) => rest.to_owned(),
+        None => path.trim_start_matches('/').to_owned(),
     }
 }
 
@@ -392,6 +447,87 @@ mod tests {
             diff.contains("--- a/a.toml") && diff.contains("-x = 1") && diff.contains("+x = 2"),
             "{diff}"
         );
+    }
+
+    #[test]
+    fn diff_headers_name_a_file_under_the_home_relative_to_it() {
+        let label = |path: &str, home: Option<&str>| diff_label(path, home);
+        assert_eq!(
+            label("/home/dev/.claude/settings.json", Some("/home/dev")),
+            ".claude/settings.json"
+        );
+        assert_eq!(label("/home/dev/x", Some("/home/dev/")), "x");
+        // Not under it (a sibling directory with the same prefix, another
+        // root, no home, a home of "/"): no leading slash, never `b//`.
+        assert_eq!(
+            label("/home/developer/x", Some("/home/dev")),
+            "home/developer/x"
+        );
+        assert_eq!(label("/etc/x.toml", Some("/home/dev")), "etc/x.toml");
+        assert_eq!(label("/opt/x", None), "opt/x");
+        assert_eq!(label("/home/dev/x", Some("/")), "home/dev/x");
+        // A path in the repository is already relative.
+        assert_eq!(
+            label("branchyard.toml", Some("/home/dev")),
+            "branchyard.toml"
+        );
+    }
+
+    #[test]
+    fn labelling_rewrites_only_the_two_header_lines() {
+        let mut plan = Plan::new(crate::Topic::Plugin);
+        let path = "/home/dev/.codex/hooks.json";
+        // The text mentions its own path; only the headers change.
+        let body = format!("{{\"note\": \"b/{path}\"}}\n");
+        let created = PlannedFile::new(path, ArtifactKind::Text, 0o644, body.clone(), None);
+        let updated = PlannedFile::new(
+            path,
+            ArtifactKind::Text,
+            0o644,
+            body.clone(),
+            Some("{}\n".into()),
+        );
+        plan.files = vec![created, updated];
+        plan.label_diffs(Some("/home/dev"));
+        let created = plan.files[0].diff.as_deref().unwrap();
+        assert!(
+            created.starts_with("--- /dev/null\n+++ b/.codex/hooks.json\n"),
+            "{created}"
+        );
+        assert!(
+            created.contains(&format!("+{{\"note\": \"b/{path}\"}}")),
+            "{created}"
+        );
+        let updated = plan.files[1].diff.as_deref().unwrap();
+        assert!(
+            updated.starts_with("--- a/.codex/hooks.json\n+++ b/.codex/hooks.json\n"),
+            "{updated}"
+        );
+        assert_eq!(plan.files[0].path, path, "the path written is unchanged");
+        // Without a home, an absolute path still loses its doubled slash.
+        let mut plan = Plan::new(crate::Topic::Plugin);
+        plan.files = vec![PlannedFile::new(
+            "/opt/x/a.json",
+            ArtifactKind::Text,
+            0o644,
+            "{}\n".into(),
+            None,
+        )];
+        plan.label_diffs(None);
+        assert!(plan.files[0]
+            .diff
+            .as_deref()
+            .unwrap()
+            .contains("+++ b/opt/x/a.json\n"));
+    }
+
+    #[test]
+    fn a_command_can_lead_the_list() {
+        let mut plan = Plan::new(crate::Topic::Project);
+        plan.command("second", "b");
+        plan.command_first("first", "a");
+        let order: Vec<&str> = plan.commands.iter().map(|c| c.command.as_str()).collect();
+        assert_eq!(order, ["first", "second"]);
     }
 
     #[test]
