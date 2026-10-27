@@ -31,7 +31,6 @@
 use std::ffi::OsString;
 use std::io;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicU8, Ordering};
 
 use branchyard::{Error, Unavailable};
 use serde_json::{json, Value};
@@ -69,7 +68,9 @@ impl Exit {
     }
 }
 
-/// What each exit status means, in docs/cli.md's words.
+/// What each exit status means, in docs/cli.md's words. Read by the unit
+/// test below and by tools/docs_facts.py, not by `by` itself.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const EXITS: [(Exit, &str); 6] = [
     (Exit::Success, "the command did what it was asked"),
     (
@@ -180,25 +181,6 @@ pub(crate) fn exit_of(kind: &str) -> Exit {
         .iter()
         .find(|(known, _)| *known == kind)
         .map_or(Exit::Failed, |(_, exit)| *exit)
-}
-
-/// The status of the last report [`print`] wrote (0 before one is), for a
-/// command that printed its own and returned [`Failure::Reported`]: the
-/// process then exits with what its JSON said.
-static PRINTED: AtomicU8 = AtomicU8::new(0);
-
-/// Remember `report`'s status as the one printed last.
-fn remember(report: &Report) {
-    PRINTED.store(report.exit().code(), Ordering::Relaxed);
-}
-
-/// The exit status of the report printed last, if one was.
-fn printed_exit() -> Option<Exit> {
-    let code = PRINTED.load(Ordering::Relaxed);
-    EXITS
-        .iter()
-        .map(|(exit, _)| *exit)
-        .find(|exit| exit.code() == code && *exit != Exit::Success)
 }
 
 /// One failure, ready to print as text or as JSON. Build it with
@@ -331,10 +313,9 @@ impl From<Report> for Failure {
 
 /// Print `report`: its JSON on standard output with `json` (unless the
 /// report decided), else its text on standard error. A closed pipe is the
-/// reader's choice. Its exit status is remembered for a command that goes
-/// on to return [`Failure::Reported`].
+/// reader's choice. [`finish`] calls it, and `main` for a command line clap
+/// refused; a command returns its report instead of printing it.
 pub(crate) fn print(report: &Report, json: bool) {
-    remember(report);
     if report.json.unwrap_or(json) {
         branchyard_support::best_effort(
             "print the error as JSON",
@@ -356,14 +337,14 @@ pub(crate) fn finish(outcome: Outcome, json: bool) -> ExitCode {
         Ok(()) => Exit::Success,
         // A closed pipe, as in `by ls | head`, is the reader's choice.
         Err(Failure::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe => Exit::Success,
-        // Said already: the status of what was said, else a failure.
-        Err(Failure::Reported) => printed_exit().unwrap_or(Exit::Failed),
+        // Said already, and not as a report: the operation failed.
+        Err(Failure::Reported) => Exit::Failed,
         Err(failure) => match self::failure(&failure, None) {
             Some(report) => {
                 print(&report, json);
                 report.exit()
             }
-            None => exit_of("manual"),
+            None => Exit::Failed,
         },
     };
     ExitCode::from(exit.code())
@@ -581,8 +562,8 @@ fn last_lines(output: &str) -> Option<String> {
 }
 
 /// The report for any failure; `None` for [`Failure::Reported`], which has
-/// said all it has to, and for a [`Failure::Manual`] whose standard output
-/// said what to run.
+/// said all it has to. A step only the person can do (a login that needs a
+/// terminal) is a report of kind `manual`, exit 3, like any other.
 pub(crate) fn failure(failure: &Failure, branch: Option<&str>) -> Option<Report> {
     Some(match failure {
         Failure::Report(report) => (**report).clone(),
@@ -591,11 +572,6 @@ pub(crate) fn failure(failure: &Failure, branch: Option<&str>) -> Option<Report>
         Failure::Io(error) => Report::new("io", error.to_string()),
         Failure::Message(message) => Report::new("unclassified", message.clone()),
         Failure::Reported => return None,
-        // Something only the person can do remains (exit 3); an empty text
-        // means stdout already said what. Text either way: with `--json`
-        // the command printed its own `status: manual`.
-        Failure::Manual(message) if message.is_empty() => return None,
-        Failure::Manual(message) => Report::new("manual", message.clone()).with_json(false),
     })
 }
 
@@ -1057,9 +1033,16 @@ mod tests {
         assert_eq!(unreachable.exit(), Exit::Environment);
         assert_eq!(config("bad toml").kind, "config");
         assert!(failure(&Failure::Reported, None).is_none());
-        let manual = failure(&Failure::Manual("run `codex login`".into()), None).unwrap();
-        assert_eq!((manual.kind.as_str(), manual.json), ("manual", Some(false)));
-        assert!(failure(&Failure::Manual(String::new()), None).is_none());
+        // A step only the person can do is a report like any other: its
+        // `--json` envelope carries the members the command adds, and 3.
+        let manual: Failure = Report::new("manual", "no terminal here")
+            .next("run `codex login` in a terminal")
+            .field("status", json!("manual"))
+            .into();
+        let manual = failure(&manual, None).unwrap();
+        assert_eq!((manual.exit(), manual.json), (Exit::Environment, None));
+        assert_eq!(manual.json()["error"]["status"], "manual");
+        assert_eq!(manual.json()["error"]["exit"], 3);
     }
 
     /// Every engine error, one of each variant. The `match` is exhaustive:
@@ -1242,15 +1225,19 @@ mod tests {
         );
     }
 
-    /// A command that printed its report itself and returned
-    /// [`Failure::Reported`] exits with that report's status.
+    /// A command returns its report and `finish` prints it, with its kind's
+    /// status; what a command explained itself ([`Failure::Reported`]) is a
+    /// failed operation (the end-to-end paths, a pre-flight refusal exiting
+    /// 3 among them, are in tests/errors.rs).
     #[test]
-    fn a_report_printed_first_decides_the_exit_status() {
-        // What `print` records before it writes (the end-to-end path, a
-        // pre-flight refusal exiting 3, is in tests/errors.rs).
-        remember(&Report::new("harness_unavailable", "x is not installed"));
-        assert_eq!(printed_exit(), Some(Exit::Environment));
-        let code = finish(Err(Failure::Reported), false);
+    fn finish_ends_with_the_status_of_the_kind() {
+        assert_eq!(finish(Err(Failure::Reported), false), ExitCode::from(1));
+        let code = finish(
+            Err(Report::new("harness_unavailable", "x is not installed")
+                .with_json(false)
+                .into()),
+            false,
+        );
         assert_eq!(code, ExitCode::from(3));
         assert_eq!(finish(Ok(()), false), ExitCode::SUCCESS);
         let pipe = io::Error::from(io::ErrorKind::BrokenPipe);
