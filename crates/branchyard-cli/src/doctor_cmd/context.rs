@@ -84,6 +84,7 @@ pub(crate) struct Context {
     pub vars: Vars,
     store: OnceCell<Store>,
     inventory: OnceCell<Result<Inventory, String>>,
+    hooks: OnceCell<Result<Vec<super::hooks::Hooked>, String>>,
 }
 
 impl Context {
@@ -132,6 +133,7 @@ impl Context {
             vars,
             store: OnceCell::new(),
             inventory: OnceCell::new(),
+            hooks: OnceCell::new(),
         }
     }
 
@@ -158,6 +160,12 @@ impl Context {
     pub(crate) fn inventory(&self) -> &Result<Inventory, String> {
         self.inventory
             .get_or_init(crate::harness_cmd::detected_here)
+    }
+
+    /// The harnesses on `PATH` whose hooks are installed or were heard,
+    /// read the first time it is asked for.
+    pub(crate) fn hooks(&self) -> &Result<Vec<super::hooks::Hooked>, String> {
+        self.hooks.get_or_init(|| super::hooks::hooked(&self.base))
     }
 
     /// The repository's store, opened the first time it is asked for.

@@ -54,7 +54,7 @@ When the configuration does not load there is no mode to read: the line says `no
 
 ## The checks
 
-Rows come in this order, and their names are stable: a script may match on them. `harnesses.ID` has one row for each installed harness, so its names depend on the machine.
+Rows come in this order, and their names are stable: a script may match on them. `harnesses.ID` has one row for each installed harness, and `hooks.ID` one for each harness with hooks installed, so their names depend on the machine.
 
 | Check | What it looks at | `warn` | `fail` |
 |---|---|---|---|
@@ -69,6 +69,7 @@ Rows come in this order, and their names are stable: a script may match on them.
 | `harnesses.summary` | How many harnesses `by harnesses` finds and how many can be used: `9 installed: 1 logged in, 2 login unknown, 5 login not verified, 1 logged out` | none installed, or a harness off `PATH` or at its usage limit | |
 | `harnesses.ID` | One row for each installed harness, from the same cache: `VERSION · LOGIN · LIVE RUN` in at most 120 characters (below) | off `PATH`, or at its usage limit | |
 | `harnesses.default` | `[defaults] harness`, or `claude-code` (what `by run` starts) when unset, is installed, and its login is not known to be missing | unset and `claude-code` is not installed; or it is installed and its login is not verified, or it is logged out | set to a harness that is not installed |
+| `hooks.ID` | One row for each harness on `PATH` whose Branchyard hooks are installed (`by init plugin --status` is not `missing`) or were heard: whether a session of it called `by hook` or `by statusline`, from the notes those keep beside the user configuration ([heard](harness-hooks.md#heard-did-the-harness-run-it)). `ok`: `install current · heard 3m ago (session-start) in /home/me/app, as SessionStart`. `todo`: `install current · never heard`, or heard only before `by setup` last wrote the hooks; the fix is to start a new session of the harness (or to put `by` on `PATH`, when it is not) | | |
 | `harnesses.credentials` | Which of the usual credential variables are set (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `GH_TOKEN` and the rest of the list `by init` detects), by name only; and each `[secrets]` entry's source (a variable, or an `@file`) | a `[secrets]` entry whose variable is unset or file is missing | |
 | `provider.default` | `[defaults] provider`. Local always passes. Microsandbox goes through the engine's own check (a build with the `microsandbox` feature, an image). A recipe must be defined and trusted | a recipe that is not trusted as it is now; or the check could not run without the store | Microsandbox the engine refuses; a recipe that is not defined |
 | `provider.sandboxes` | With Microsandbox as the default: the kept sandboxes and snapshots the store holds, the oldest kept one's age, and any older than `[microsandbox] max_kept_minutes` | a kept sandbox past `max_kept_minutes`: nothing destroys it until a turn ends on the provider or its branch takes its next turn; `by rm BRANCH` destroys it now | the rows cannot be read |
@@ -156,7 +157,7 @@ and exits 0.
 
 ```json
 {
-  "format": 2,
+  "format": 3,
   "mode": "local, no isolation · SQLite (.branchyard/state.db) · no server",
   "checks": [
     {
@@ -172,13 +173,14 @@ and exits 0.
       "fix": "run `by setup`"
     }
   ],
+  "hooks": [],
   "status": "todo"
 }
 ```
 
-`status` is the worst of the rows. `fix` is a string for every row that is not `ok` and `null` for every `ok`; `detail` and `fix` are one line each. (The example shows two rows; the real list has every check above, in the order above.)
+`status` is the worst of the rows. `fix` is a string for every row that is not `ok` and `null` for every `ok`; `detail` and `fix` are one line each. (The example shows two rows; the real list has every check above, in the order above.) `hooks` has one object for each `hooks.ID` row: `harness`, `label`, `install` and `heard` (`state`: `heard`, `never` or `stale`; `kind`, `harness_event`, `at_ms`, `age_seconds`, `session`, a digest of the session id, `repository` and `installed_at_ms`).
 
-**`format`.** The report is versioned. Format 2, this one, differs from the unversioned report before it in four ways: the `todo` status (a repository with no `.branchyard/` was a `fail`, exit 1); `mode`; `harnesses.summary` and one `harnesses.ID` row for each installed harness in place of the single `harnesses.installed` row; and `format` itself. Rows that were there keep their names. A reader that treats any status it does not know as "not ok, not fail" reads both formats; the Python SDK's `Report` ([sdk](sdk.md)) passes the strings through.
+**`format`.** The report is versioned. Format 3, this one, adds `hooks` and the `hooks.ID` rows to format 2. Format 2 differs from the unversioned report before it in four ways: the `todo` status (a repository with no `.branchyard/` was a `fail`, exit 1); `mode`; `harnesses.summary` and one `harnesses.ID` row for each installed harness in place of the single `harnesses.installed` row; and `format` itself. Rows that were there keep their names. A reader that treats any status it does not know as "not ok, not fail" reads both formats; the Python SDK's `Report` ([sdk](sdk.md)) passes the strings through.
 
 ## What it reads, writes and costs
 
@@ -216,6 +218,7 @@ A check is a function from the shared context to rows, in `crates/branchyard-cli
 - a repository without `.branchyard/` is a `todo` with `by setup` as its fix and the report exits 0, and the report creates neither `.branchyard/` nor an exclude entry; the table starts with the `Mode:` line and ends with `1 to do`;
 - the `Mode:` line for local, isolated, microsandbox and recipe providers, a `--remote` URL with its credentials left out, and a `[serve]` file naming PostgreSQL (the URL never shown); and `not known` when the configuration does not load;
 - the harness rows with fake harnesses on a temporary `PATH` and a home of its own: a summary and one row of at most 120 characters for each, the version beside the live-tested one, a login not verified as a `todo` that never says "cannot run", a login the harness's own command says is missing as a `todo`, and the default harness agreeing with its row;
+- a harness with hooks installed: no `hooks.ID` row before `by init plugin codex --apply`, then a `todo` `never heard`, then `ok` `heard … (session-start) in REPO, as SessionStart` after a hook call with a Codex payload, with `hooks` in the JSON and no session id in the output;
 - an initialized repository has no failure;
 - a broken `branchyard.toml` and a broken user file each fail naming the file and line, in JSON and in the table, and what depends on them says `not checked`;
 - untrusted `[workspace]` scripts warn, are `ok` after `by workspace trust`, warn again naming both digests after a change, and copy-only sections need no trust;

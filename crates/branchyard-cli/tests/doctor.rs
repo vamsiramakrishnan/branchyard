@@ -324,11 +324,17 @@ fn the_json_has_the_documented_shape_and_every_row_that_is_not_ok_says_what_to_d
     let repo = Repo::new();
     let report = repo.doctor(&[]);
     let object = report.value.as_object().unwrap();
-    // `format` 2: the `todo` status, `mode`, and a row for each harness.
+    // `format` 2: the `todo` status, `mode`, and a row for each harness; 3:
+    // `hooks`, what was heard of each harness's hooks.
     let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["checks", "format", "mode", "status"], "{object:?}");
-    assert_eq!(report.value["format"], 2);
+    assert_eq!(
+        keys,
+        ["checks", "format", "hooks", "mode", "status"],
+        "{object:?}"
+    );
+    assert_eq!(report.value["format"], 3);
+    assert!(report.value["hooks"].is_array());
     assert!(report.value["mode"].as_str().unwrap().contains(" · "));
     assert!(["ok", "todo", "warn", "fail"].contains(&report.overall()));
     let rows = report.value["checks"].as_array().unwrap();
@@ -643,6 +649,92 @@ fn a_harness_whose_own_command_says_logged_out_is_a_todo_and_the_default_warns()
     assert!(report
         .fix("harnesses.default")
         .contains("by harnesses login codex"));
+}
+
+#[test]
+fn a_harness_with_hooks_installed_is_a_todo_until_a_session_of_it_is_heard() {
+    let repo = Repo::used().without_keys();
+    let bin = repo.dir.join("bin");
+    fake(&bin, "codex", "echo 'codex-cli 0.164.0'\n");
+    std::os::unix::fs::symlink(repo.by_path(), bin.join("by")).unwrap();
+    let envs = machine(&repo, &bin);
+    // No hooks installed: no row.
+    let report = doctor_on(&repo, &bin, &[]);
+    assert!(report.value["hooks"].as_array().unwrap().is_empty());
+    assert!(
+        !report.stdout.contains("\"hooks.codex\""),
+        "{}",
+        report.stdout
+    );
+
+    let install = repo
+        .command(repo.by_path())
+        .args(["init", "plugin", "codex", "--apply"])
+        .envs(envs.clone())
+        .output()
+        .unwrap();
+    assert!(install.status.success(), "{install:?}");
+    let report = doctor_on(&repo, &bin, &[]);
+    assert_eq!(report.code, Some(0), "a step to take is not a failure");
+    assert_eq!(report.status("hooks.codex"), "todo");
+    assert_eq!(
+        report.detail("hooks.codex"),
+        "install current · never heard"
+    );
+    assert!(
+        report
+            .fix("hooks.codex")
+            .starts_with("start a new Codex session"),
+        "{}",
+        report.fix("hooks.codex")
+    );
+    assert_eq!(report.value["hooks"][0]["harness"], "codex");
+    assert_eq!(report.value["hooks"][0]["install"], "current");
+    assert_eq!(report.value["hooks"][0]["heard"]["state"], "never");
+
+    // A Codex session starts in the repository and its hook runs `by hook`.
+    let input = json!({
+        "session_id": "01a16dba",
+        "cwd": repo.root,
+        "hook_event_name": "SessionStart",
+    })
+    .to_string();
+    let hook = {
+        use std::io::Write as _;
+        let mut child = repo
+            .command(repo.by_path())
+            .args(["hook", "--harness", "codex", "session-start"])
+            .envs(envs)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    assert_eq!(hook.status.code(), Some(0));
+    let report = doctor_on(&repo, &bin, &[]);
+    assert_eq!(report.status("hooks.codex"), "ok", "{}", report.stdout);
+    let detail = report.detail("hooks.codex");
+    assert!(detail.starts_with("install current · heard "), "{detail}");
+    assert!(
+        detail.ends_with(&format!(
+            "(session-start) in {}, as SessionStart",
+            repo.root.display()
+        )),
+        "{detail}"
+    );
+    let heard = &report.value["hooks"][0]["heard"];
+    assert_eq!(heard["state"], "heard", "{heard}");
+    assert_eq!(heard["kind"], "session-start", "{heard}");
+    assert_eq!(heard["harness_event"], "SessionStart", "{heard}");
+    assert!(heard["at_ms"].as_u64().is_some(), "{heard}");
+    assert!(!report.stdout.contains("01a16dba"), "the session id itself");
 }
 
 #[test]
