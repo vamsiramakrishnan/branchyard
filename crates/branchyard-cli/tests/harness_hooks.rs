@@ -290,6 +290,24 @@ fn a_call_outside_any_repository_is_noted_without_one() {
     assert_eq!(call["session"], digest("o").as_str());
 }
 
+/// A directory holding an empty `.git` is not a repository (a stray one
+/// made `by` take /tmp for a repository in round 8): a call made there is
+/// heard without one, as any call outside a repository is.
+#[test]
+fn a_call_from_an_empty_git_directory_is_heard_without_a_repository() {
+    let repo = yard_with_a_ready_branch();
+    let stray = branchyard_testkit::Scratch::new("hook-empty-git");
+    std::fs::create_dir_all(stray.join(".git")).unwrap();
+    let input = serde_json::json!({"session_id": "e", "cwd": stray.path()}).to_string();
+    let args = ["hook", "--harness", "codex", "session-start"];
+    let out = run_in(&repo, stray.path(), &[], &args, &input);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(stdout(&out), "", "an empty .git holds no yard to tell of");
+    let call = &heard(&repo, "codex").unwrap()["calls"]["session-start"];
+    assert!(call.get("repository").is_none(), "{call}");
+    assert_eq!(call["session"], digest("e").as_str());
+}
+
 #[test]
 fn a_note_that_cannot_be_written_never_fails_the_hook() {
     use std::os::unix::fs::PermissionsExt as _;
