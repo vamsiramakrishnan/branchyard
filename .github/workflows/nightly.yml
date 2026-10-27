@@ -21,6 +21,11 @@ concurrency:
   cancel-in-progress: false
 env:
   PYTHONDONTWRITEBYTECODE: '1'
+  # The build settings of check.yml, whose `workspace-tests` cache both jobs
+  # read: built otherwise, none of its artifacts would fit.
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
 jobs:
   ignored:
     # 29 tests carry `#[ignore]`. Counted by their reason:

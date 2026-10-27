@@ -12,6 +12,13 @@ concurrency:
   cancel-in-progress: true
 env:
   PYTHONDONTWRITEBYTECODE: '1'
+  # No incremental artifacts and no debug info in any build here, as the
+  # coverage job had alone before: smaller caches and faster links. A failing
+  # test still names its file and line (a panic's location needs no debug
+  # info). nightly.yml sets the same, so the caches it reads fit its builds.
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
 jobs:
   fast:
     # The first signal, in minutes: every Python gate (tools/check.py --fast:
@@ -28,13 +35,22 @@ jobs:
       - run: pip install ruff==0.15.8 mypy==2.4.0
       - run: python3 tools/check.py --fast --keep-going
       - run: cargo fmt --all -- --check
-  controls:
+  test-engine:
+    # The cargo gates one serial `controls` job ran until October 2026 (about
+    # 25 minutes with a warm cache, 13 of them the workspace's tests) run as
+    # this job and the five after it, in parallel, and `controls` is now the
+    # one check that is green only when all of them are. Each restores a
+    # cache of its own: their dependency sets differ, and a key several jobs
+    # share keeps whichever job saved first. tests/test_check.py holds the
+    # split to what the one job ran.
+    #
+    # Every crate's tests but the four the next two jobs take: the engine,
+    # the harness drivers, runtime, sandbox, provisioning, workspace, setup,
+    # controls and the rest. `--exclude` keeps a crate added later in this
+    # job; a crate tested by two jobs, or by none, fails tests/test_check.py.
+    # The timeouts below are a cold cache plus the margin a hung test needs.
     runs-on: ubuntu-latest
-    # The workspace's tests, four Clippy passes and three schema builds:
-    # 28 to 30 minutes by October 2026 without a cache, when 30 was cancelling
-    # runs on main; 45 keeps the margin a hung test still needs. The cache
-    # holds the dependencies, not the workspace's own crates.
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -42,38 +58,153 @@ jobs:
           python-version: '3.12'
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          # The key nightly.yml reads: this job builds most of the workspace.
           shared-key: workspace-tests
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Resolve crates from Cargo.lock once; every later cargo step runs offline.
       - run: cargo fetch --locked
       - name: Compare generated files, never rewrite them
-        # The catalog, docs/compatibility.md and the schemas are checked by
-        # `cargo test --workspace` below; BRANCHYARD_BLESS and BY_UPDATE_SCHEMA
-        # would make those tests rewrite what they compare.
+        # The catalog, docs/compatibility.md and the setup schemas are checked
+        # by the tests below (the other schemas by the schema jobs);
+        # BRANCHYARD_BLESS and BY_UPDATE_SCHEMA would make those tests
+        # rewrite what they compare.
         run: test -z "${BRANCHYARD_BLESS+x}" && test -z "${BY_UPDATE_SCHEMA+x}"
-      - run: cargo test --workspace --locked --offline
+      - run: cargo test --workspace --exclude branchyard-cli --exclude branchyard-server --exclude branchyard-client --exclude branchyard-herdr --locked --offline
+  test-cli:
+    # The `by` command: its unit tests and every file of
+    # crates/branchyard-cli/tests, the SDK client examples among them.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: test-cli
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fetch --locked
+      - name: Compare generated files, never rewrite them
+        run: test -z "${BRANCHYARD_BLESS+x}" && test -z "${BY_UPDATE_SCHEMA+x}"
+      - run: cargo test -p branchyard-cli --locked --offline
+  test-server:
+    # The server, its client and the Herdr bridge: the crates that serve the
+    # HTTP API or call it.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: test-server
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fetch --locked
+      - name: Compare generated files, never rewrite them
+        run: test -z "${BRANCHYARD_BLESS+x}" && test -z "${BY_UPDATE_SCHEMA+x}"
+      - run: cargo test -p branchyard-server -p branchyard-client -p branchyard-herdr --locked --offline
+  walkthrough:
+    # docs/getting-started.md run for real on the built programs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: walkthrough
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fetch --locked
       - run: cargo build --locked --offline -p branchyard-cli -p branchyard-runtime --bin by --bin fake-acp-agent
       - name: Run the getting-started guide on the built programs
         # tests/test_getting_started.py runs the guide's tested blocks and checks every `by` command the
         # guides show against the built `by --help`. It needs target/debug/by and fake-acp-agent, which
-        # the workspace tests above built; with REQUIRE_BINARIES=1 it fails, not skips, without them.
+        # the step above built; with REQUIRE_BINARIES=1 it fails, not skips, without them.
         run: REQUIRE_BINARIES=1 python3 tests/test_getting_started.py
+  lint:
+    # Clippy over the workspace with every warning an error, and the count
+    # of undocumented public items against tools/missing_docs_ratchet.json.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fetch --locked
       - name: Count undocumented public items against the ratchet
         run: python tools/check_missing_docs.py
       - run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
-      - name: Verify schema/contract.json is generated and fresh
-        run: cargo test -p branchyard-client --locked --offline --features schema
-      - run: cargo clippy -p branchyard-client --all-targets --locked --offline --features schema -- -D warnings
-      - name: Verify schema/server.config.json is generated and fresh
-        run: cargo test -p branchyard-server --locked --offline --features schema
-      - run: cargo clippy -p branchyard-server --all-targets --locked --offline --features schema -- -D warnings
-      - name: Verify schema/rig.json is generated and fresh
-        run: cargo test -p branchyard-cli --locked --offline --features schema rig
-      - run: cargo clippy -p branchyard-cli --all-targets --locked --offline --features schema -- -D warnings
+  schemas:
+    # Each generated schema against the types that generate it (the crate's
+    # tests with its `schema` feature), and Clippy with that feature on: one
+    # job per schema, each with its own cache.
+    name: schema ${{ matrix.schema }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - schema: schema/contract.json
+            crate: branchyard-client
+            test: cargo test -p branchyard-client --locked --offline --features schema
+            clippy: cargo clippy -p branchyard-client --all-targets --locked --offline --features schema -- -D warnings
+          - schema: schema/server.config.json
+            crate: branchyard-server
+            test: cargo test -p branchyard-server --locked --offline --features schema
+            clippy: cargo clippy -p branchyard-server --all-targets --locked --offline --features schema -- -D warnings
+          - schema: schema/rig.json
+            crate: branchyard-cli
+            test: cargo test -p branchyard-cli --locked --offline --features schema rig
+            clippy: cargo clippy -p branchyard-cli --all-targets --locked --offline --features schema -- -D warnings
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: schema-${{ matrix.crate }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fetch --locked
+      - name: Compare generated files, never rewrite them
+        run: test -z "${BRANCHYARD_BLESS+x}" && test -z "${BY_UPDATE_SCHEMA+x}"
+      - name: Verify ${{ matrix.schema }} is generated and fresh
+        run: ${{ matrix.test }}
+      - run: ${{ matrix.clippy }}
+  controls:
+    # Green only when every job it needs is: the one name, kept from the
+    # single job these replaced, that the docs and any branch rule can name
+    # for the cargo gates. `!cancelled()` runs it after a needed job failed,
+    # so that it fails too; skipped instead, it would count as passed for a
+    # required check.
+    if: ${{ !cancelled() }}
+    needs: [test-engine, test-cli, test-server, walkthrough, lint, schemas]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every cargo gate passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          for result in $RESULTS; do
+            test "$result" = success || exit 1
+          done
   postgres:
     # The PostgreSQL store: the shared backend conformance suite, the engine
-    # and the server against a real database. The job above stays offline
-    # and without the feature.
+    # and the server against a real database. The test jobs above stay
+    # offline and without the feature.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -179,10 +310,6 @@ jobs:
     # must not be carried by integration tests.
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
