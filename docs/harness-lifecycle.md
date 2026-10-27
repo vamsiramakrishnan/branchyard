@@ -146,7 +146,9 @@ by up                                     # installs every harness the configura
 
 **Pins.** A package manager's command (`npm`, `bun`, `pnpm`) is pinned to the version the harness's default profile was checked against (`codex-cli 0.157.1` gives `@openai/codex@0.157.1`), or to `--version`. A piped installer takes no version, so it runs unpinned and `by` says so; `--version` with one is refused.
 
-**Verification.** After the command, detection runs again for that harness. The install is verified when the command exited 0, the harness is found, and its version is the pinned one when pinned. Otherwise `by` fails and shows the end of the output.
+**Verification.** After the command, detection runs again for that harness. The install is verified when the command exited 0, the harness is found, and its version is the pinned one when pinned. Otherwise `by` fails (`command_failed`, exit 1) and shows the end of the output; with `--json` the error envelope carries the attempt, as a verified install prints it, in `result`.
+
+**Exit status.** An install that ran and did not verify exits 1; a refusal by the policy, or a prompt answered no, is `denied`, exit 4; a harness the catalog does not know, `--remote`, `--on recipe:NAME` and a `--version` the command cannot take are the command line's (exit 2); a machine with none of the programs the catalog's commands need, or an `ssh` host that does not answer, exits 3 ([exit status](cli.md#exit-status)).
 
 **Policy.** `[harnesses]` in your user configuration (`~/.config/branchyard/config.toml`, or `BRANCHYARD_USER_CONFIG`):
 
@@ -163,7 +165,7 @@ allow = ["codex", "claude-code"]   # when set, only these
 | `auto` | Runs | Installs a missing candidate on demand |
 | unset | `ask` on a terminal, `never` without one (a script, a server, a worker) | Never installs |
 
-A refused install names the file and the key: without a terminal and with nothing set, `not running ...: [harnesses] install is "never" here`, then `put this in <your user file>: [harnesses] install = "ask"`, and `by harnesses install ID --yes` to run it. An `allow` list that leaves the harness out says to add it there.
+A refused install (`denied`, exit 4) names the file and the key: without a terminal and with nothing set, `by: not running ...: [harnesses] install is "never" here`, then `to allow installs, put this in <your user file>:` with `[harnesses]` and `install = "ask"` under it, and `next: by harnesses install ID --yes (once installs are allowed), or run ... yourself`. An `allow` list that leaves the harness out says to add it there.
 
 **Trust.** Installing runs software on your machine, so only your user file can allow it. A repository's `branchyard.toml` may set `install = "never"`; `install = "ask"`, `"auto"` or `allow` there is a configuration error, as `by config validate` reports. Install commands come only from the catalog built into `by`, never from a repository. A harness running on a branch (`BRANCHYARD_BRANCH` set) can never install or log in.
 
@@ -181,7 +183,7 @@ printf %s "$KEY" | by harnesses login claude-code --api-key
 
 Without a terminal (a script, or `--remote`, since a worker has none) nothing runs: `by` says what to run and where (`run \`codex login --device-auth\` there, in a terminal, as the worker's user`). A recipe's machine gets its login from the recipe's create script or its environment. A harness whose catalog entry records no login command says what to do instead: give it a key with `--api-key` when it has a key variable, or start it and sign in inside it, then `by harnesses --refresh`; where it has a [provider login](#through-a-gateway-provider), that too (`by harnesses login qwen-code --provider zai`).
 
-**Antigravity with a key.** With `GEMINI_API_KEY` set, `by harnesses login antigravity` has nothing to sign in to; `agy` needs `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json` to read the key. `by` merges that one key into the file (the rest of it kept, with its key order and indentation; the file is rewritten as plain JSON, so comments in it would be refused), shows the change as a diff, and writes it after you answer yes on a terminal or with `--yes`. Without a terminal and without `--yes` it shows the diff and writes nothing (exit 3, `status` `manual`, like any login that only says what to run). A different provider already chosen (`"modelProvider": "vertex"`) is never replaced: `by` says so and leaves the file. The write is recorded in the harness log as `wrote_settings`. With the setting already there it says so and does nothing.
+**Antigravity with a key.** With `GEMINI_API_KEY` set, `by harnesses login antigravity` has nothing to sign in to; `agy` needs `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json` to read the key. `by` merges that one key into the file (the rest of it kept, with its key order and indentation; the file is rewritten as plain JSON, so comments in it would be refused), shows the change as a diff, and writes it after you answer yes on a terminal or with `--yes`. Without a terminal and without `--yes` it shows the diff on standard output and writes nothing (exit 3, `manual`, like any login that only says what to run; with `--json` the diff is the error envelope's `diff`). A different provider already chosen (`"modelProvider": "vertex"`) is never replaced: `by` says so and leaves the file. The write is recorded in the harness log as `wrote_settings`. With the setting already there it says so and does nothing.
 
 **Exit codes.** `login` says whether it logged in.
 
@@ -189,10 +191,11 @@ Without a terminal (a script, or `--remote`, since a worker has none) nothing ru
 |---|---|---|
 | 0 | `done` | The harness's own flow ran and exited 0; the state afterwards is `login` in the JSON |
 | 0 | `stored` | `--api-key` stored a key, or `--provider` recorded a provider login (with its key stored, reused or already named in `[secrets]`) |
-| 3 | `manual` | Nothing ran: there is no terminal, the machine is a recipe's, a worker needs a login, or the catalog records no login command (it names `--api-key` or where to look). The message (stderr; with `--json`, `run` or `workers` in the JSON) says what to run and where |
-| 1 | `failed` | The flow ran and exited non-zero. `by` also exits 1, with a message and no `status`, when it cannot start one: the harness is not installed here |
+| 3 | `manual` | Nothing ran: there is no terminal, the machine is a recipe's, a worker needs a login, or the catalog records no login command (it names `--api-key` or where to look). The message on stderr says what is left and `next:` what to run and where; with `--json` it is the error envelope, kind `manual`, with `status`, `run` (the same sentence) and, for workers, `workers` |
+| 1 | `failed` | The flow ran and exited non-zero (`command_failed`). With `--json`, the error envelope with `status`, the flow's own `command_exit` and the `login` detected afterwards |
+| 3 | none | No flow could start: the harness is not installed here (`harness_unavailable`, `next: by harnesses install ID`), or `ssh` could not be run (`tool_unavailable`) |
 
-So `by harnesses login codex && by run ...` goes on only after a login that happened. The log records a `manual` outcome the same way.
+A `manual` or `failed` login with `--json` prints `{"error": {"kind": "manual", "message", "next", "harness", "on", "status": "manual", "run", "exit": 3}}`, like every failure ([exit status](cli.md#exit-status)); `done` and `stored` are the plain object. So `by harnesses login codex && by run ...` goes on only after a login that happened. The log records a `manual` outcome the same way.
 
 **An API key.** `--api-key` reads a key from standard input (hidden on a terminal) for the harness's first key variable, writes it to `secrets/<VARIABLE>` beside your user configuration (directory 0700, file 0600), and names it in your user file's `[secrets]` (`ANTHROPIC_API_KEY = "@…/secrets/ANTHROPIC_API_KEY"`). That is the existing secrets path: branches with a private home (`--isolated`, a sandbox) are given it ([setup](setup.md)). The key is never printed, never on a command line, never in the log, and refused when the file would land inside the repository. A harness you run directly reads its own environment, so export the variable from that file yourself.
 

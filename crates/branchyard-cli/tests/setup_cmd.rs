@@ -354,7 +354,7 @@ fn flags_choose_what_is_installed() {
     // A harness with no install is an error with the list; both flags
     // together are a usage error.
     let bad = s.by(&["setup", "--yes", "--harness", "nope"]);
-    assert_eq!(bad.status.code(), Some(1));
+    assert_eq!(bad.status.code(), Some(2));
     assert!(
         text(&bad).contains("no install for harness \"nope\""),
         "{}",
@@ -619,7 +619,17 @@ fn a_file_that_differs_holds_back_that_harness_alone() {
     // Named on purpose, the same refusal is an error.
     let named = s.by(&["setup", "--yes", "--harness", "claude-code"]);
     assert_eq!(named.status.code(), Some(1));
-    assert!(text(&named).contains("Next: by init plugin claude-code --dry-run"));
+    assert!(
+        text(&named).contains("next: by init plugin claude-code --dry-run"),
+        "{}",
+        text(&named)
+    );
+    // With --json, the kind `by init plugin` gives the same refusal.
+    let named = s.by(&["setup", "--yes", "--harness", "claude-code", "--json"]);
+    assert_eq!(named.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&named.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "would_overwrite", "{error}");
+    assert_eq!(error["error"]["exit"], 1, "{error}");
 }
 
 #[test]
@@ -680,7 +690,7 @@ fn bare_by_outside_a_repository_says_so_and_points_at_setup() {
     let card = stdout(&out);
     assert!(card.contains("is not inside a git repository"), "{card}");
     assert!(card.contains("Next: cd <repo> && by setup"), "{card}");
-    // And setup says the same, as an error.
+    // And setup says the same, as an error: around the command, 3.
     let setup = Command::new(env!("CARGO_BIN_EXE_by"))
         .args(["setup", "--yes"])
         .current_dir(dir.path())
@@ -688,7 +698,7 @@ fn bare_by_outside_a_repository_says_so_and_points_at_setup() {
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    assert_eq!(setup.status.code(), Some(1));
+    assert_eq!(setup.status.code(), Some(3));
     assert!(
         text(&setup).contains("is not inside a git repository"),
         "{}",

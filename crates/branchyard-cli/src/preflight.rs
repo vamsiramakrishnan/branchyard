@@ -35,7 +35,7 @@ use branchyard_harness::profiles;
 
 use crate::args::TaskArgs;
 use crate::commands::{Env, Failure};
-use crate::errors::{self, Report};
+use crate::errors::Report;
 
 /// The `--json` kind of every pre-flight refusal.
 const KIND: &str = "harness_unavailable";
@@ -68,11 +68,12 @@ pub(crate) fn check(
         }
     };
     for id in &wanted {
-        if let Err(report) = decide(env, task, &found, id, by_default) {
-            // The refusal in the error style, `--json` as the envelope on
-            // stdout: `{"error": {"kind": "harness_unavailable", ...}}`.
-            errors::print(&report, json);
-            return Err(Failure::Reported);
+        if let Err(mut report) = decide(env, task, &found, id, by_default) {
+            // The refusal in the error style, printed once by
+            // `errors::finish` (exit 3), `--json` as the envelope on stdout:
+            // `{"error": {"kind": "harness_unavailable", ..., "exit": 3}}`.
+            report.json = Some(json);
+            return Err(Failure::Report(report));
         }
     }
     Ok(())

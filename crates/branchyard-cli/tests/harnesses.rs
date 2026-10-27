@@ -655,12 +655,18 @@ fn installs_follow_the_policy_and_are_verified_and_logged() {
     // It names the file to edit and the key to set, and what to run after.
     assert!(
         never.contains(&format!(
-            "put this in {}:\n  [harnesses]\n  install = \"ask\"\nThen run `by harnesses install \
-             codex --yes`",
+            "  to allow installs, put this in {}:\n    [harnesses]\n    install = \"ask\"\n  \
+             next: by harnesses install codex --yes (once installs are allowed), or run `npm",
             w.user.display()
         )),
         "{never}"
     );
+    // Refused by policy: `denied`, exit 4, the same with `--json`.
+    let out = w.by(&["harnesses", "install", "codex", "--json"]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "denied", "{error}");
+    assert_eq!(error["error"]["exit"], 4, "{error}");
     assert!(w.calls("npm ").is_empty());
     // A repository cannot allow installs.
     fs::write(
@@ -727,6 +733,22 @@ fn installs_follow_the_policy_and_are_verified_and_logged() {
         "--yes",
     ]);
     assert!(bad.contains("not the pinned 9.9.9"), "{bad}");
+    // With --json: the error envelope (1), the attempt in its `result`.
+    let out = w.by(&[
+        "harnesses",
+        "update",
+        "codex",
+        "--version",
+        "9.9.9",
+        "--yes",
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "command_failed", "{error}");
+    assert_eq!(error["error"]["exit"], 1, "{error}");
+    assert_eq!(error["error"]["result"]["verified"], false, "{error}");
+    assert_eq!(error["error"]["result"]["plan"]["pinned"], "9.9.9");
     // "auto" with an allowlist that does not name it.
     w.user_config("[harnesses]\ninstall = \"auto\"\nallow = [\"goose\"]\n");
     let allow = w.fails(&["harnesses", "update", "codex"]);
@@ -775,13 +797,15 @@ fn installs_follow_the_policy_and_are_verified_and_logged() {
             ("install", "refused"),
             ("install", "refused"),
             ("install", "refused"),
+            ("install", "refused"),
             ("install", "verified"),
             ("update", "verified"),
+            ("update", "failed"),
             ("update", "failed"),
             ("update", "refused"),
         ]
     );
-    let verified = &log[3];
+    let verified = &log[4];
     assert_eq!(verified["command"], "npm install -g @openai/codex@0.157.1");
     assert_eq!(verified["version_after"], "0.157.1");
     assert_eq!(verified["on"], "local");
@@ -1432,11 +1456,32 @@ fn login_antigravity_writes_the_model_provider_when_a_gemini_key_is_set() {
         shown.contains("+    \"modelProvider\": \"gemini\""),
         "{shown}"
     );
+    // The diff on stdout, what to run on stderr.
     assert!(
-        shown.contains("harnesses login antigravity --yes"),
-        "{shown}"
+        text(&out.stderr).contains(
+            "not written: there is no terminal to ask on\n  next: by harnesses login \
+             antigravity --yes (writes exactly the change shown)\n"
+        ),
+        "{}",
+        text(&out.stderr)
     );
     assert!(!shown.contains("gem-test-0123456789"));
+    assert_eq!(fs::read_to_string(&settings).unwrap(), original);
+    // With --json: the envelope, `manual` with its exit, and the diff in it.
+    let out = w.by_env(&["harnesses", "login", "antigravity", "--json"], &key);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    let error: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(error["error"]["kind"], "manual", "{error}");
+    assert_eq!(error["error"]["status"], "manual", "{error}");
+    assert_eq!(error["error"]["exit"], 3, "{error}");
+    assert_eq!(error["error"]["wrote"], false, "{error}");
+    assert!(
+        error["error"]["diff"]
+            .as_str()
+            .unwrap()
+            .contains("+    \"modelProvider\": \"gemini\""),
+        "{error}"
+    );
     assert_eq!(fs::read_to_string(&settings).unwrap(), original);
 
     // --yes: merged, everything else kept, indentation kept.
@@ -1540,19 +1585,27 @@ fn login_runs_the_harness_own_flow_or_stores_a_key_and_says_what_to_run() {
     // and `by harnesses login codex && by run ...` stops here.
     let out = w.by(&["harnesses", "login", "codex"]);
     assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
-    assert!(
-        text(&out.stderr).contains("no terminal here; run `codex login --device-auth`"),
-        "{}",
-        text(&out.stderr)
+    assert_eq!(
+        text(&out.stderr),
+        "by: codex's login is interactive and there is no terminal here\n  next: run `codex \
+         login --device-auth` in a terminal\n"
     );
     assert!(text(&out.stdout).is_empty(), "{}", text(&out.stdout));
     assert!(w.calls("codex login --device-auth").is_empty());
-    // With --json: the same exit, and the status on stdout.
+    // With --json: the same exit, and the envelope on stdout, with the
+    // status and what to run.
     let out = w.by(&["harnesses", "login", "codex", "--json"]);
     assert_eq!(out.status.code(), Some(3));
     let said: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(said["status"], "manual", "{said}");
-    assert!(said["run"]
+    let error = &said["error"];
+    assert_eq!(error["kind"], "manual", "{said}");
+    assert_eq!(error["status"], "manual", "{said}");
+    assert_eq!(error["exit"], 3, "{said}");
+    assert_eq!(
+        error["next"],
+        serde_json::json!(["run `codex login --device-auth` in a terminal"])
+    );
+    assert!(error["run"]
         .as_str()
         .unwrap()
         .contains("codex login --device-auth"));
@@ -1764,15 +1817,22 @@ fn a_run_is_refused_before_a_branch_when_its_harness_cannot_start() {
         "{why}"
     );
     assert!(why.contains("--no-preflight"), "{why}");
+    // Said once: the refusal is a report, and only `errors::finish` prints.
+    assert_eq!(why.matches("Nothing was started").count(), 1, "{why}");
     // Refused before the yard is opened: no `.branchyard/` either.
     assert!(!w.repo.join(".branchyard").exists());
     assert!(w.branches().is_empty());
     assert!(w.calls("app-server").is_empty());
     // With --json the refusal is the error envelope on stdout, with its next.
     let out = w.by(&["run", "say hi", "--harness", "codex", "-n", "cx", "--json"]);
-    // The pre-flight prints its own refusal; the process still exits with
-    // the status the envelope names (environment: 3).
+    // The status its kind names (environment: 3), and nothing on stderr
+    // that the envelope does not say.
     assert_eq!(out.status.code(), Some(3));
+    assert!(
+        !text(&out.stderr).contains("Nothing was started"),
+        "{}",
+        text(&out.stderr)
+    );
     let error: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(error["error"]["kind"], "harness_unavailable", "{error}");
     assert_eq!(error["error"]["exit"], 3, "{error}");
@@ -1800,11 +1860,15 @@ fn a_run_is_refused_before_a_branch_when_its_harness_cannot_start() {
         "{why}"
     );
     // A fan refuses the same, whichever harness is among the list.
-    let why = w.fails(&["fan", "say hi", "--harness", "gemini-cli,codex"]);
+    let out = w.by(&["fan", "say hi", "--harness", "gemini-cli,codex"]);
+    assert_eq!(out.status.code(), Some(3));
+    let why = text(&out.stderr);
     assert!(why.contains("gemini-cli is not installed"), "{why}");
+    assert_eq!(why.matches("is not installed").count(), 1, "{why}");
     assert!(w.branches().is_empty());
     let why = w.fails(&["fan", "say hi", "--harness", "codex"]);
     assert!(why.contains("codex is verified logged out"), "{why}");
+    assert_eq!(why.matches("Nothing was started").count(), 1, "{why}");
     assert!(w.branches().is_empty());
     // --no-preflight tries anyway: Codex is started (the fake cannot speak
     // its protocol, so the branch fails, after it exists).
@@ -1956,12 +2020,16 @@ fn a_harness_that_is_not_installed_is_refused_with_how_to_install_it() {
         "--yes",
     ]);
     fs::remove_file(w.bin.join("gemini")).unwrap();
-    let why = w.fails(&["send", "keep", "more"]);
+    let out = w.by(&["send", "keep", "more"]);
+    assert_eq!(out.status.code(), Some(3));
+    let why = text(&out.stderr);
     assert!(why.contains("gemini-cli is not installed"), "{why}");
+    assert_eq!(why.matches("is not installed").count(), 1, "{why}");
     let out = w.by(&["send", "keep", "more", "--json"]);
     assert_eq!(out.status.code(), Some(3));
     let error: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(error["error"]["kind"], "harness_unavailable", "{error}");
+    assert_eq!(error["error"]["exit"], 3, "{error}");
     // The executable named on the command line is the person's business.
     let agent = fake_agent!().display().to_string();
     w.ok(&["send", "keep", "more", "--command", &agent, "--yes"]);
@@ -2145,17 +2213,27 @@ fn a_server_shows_its_workers_harnesses_and_says_where_to_log_in() {
     );
     // Nothing was logged in: exit 3, as without a terminal here.
     assert_eq!(out.status.code(), Some(3), "{said}");
+    assert!(
+        text(&out.stderr).contains("next: run `codex login --device-auth` on "),
+        "{}",
+        text(&out.stderr)
+    );
     let out = remote(&["harnesses", "login", "codex", "--json"]);
     assert_eq!(out.status.code(), Some(3));
     let said: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(said["status"], "manual", "{said}");
-    // Workers never install.
+    assert_eq!(said["error"]["status"], "manual", "{said}");
+    assert_eq!(said["error"]["exit"], 3, "{said}");
+    assert_eq!(said["error"]["workers"].as_array().map(Vec::len), Some(1));
+    // Workers never install: the command line asks for what cannot be.
     let out = remote(&["harnesses", "install", "codex"]);
-    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     assert!(text(&out.stderr).contains("never install harnesses themselves"));
-    assert!(!remote(&["harnesses", "--on", "ssh://vm.test"])
-        .status
-        .success());
+    assert_eq!(
+        remote(&["harnesses", "--on", "ssh://vm.test"])
+            .status
+            .code(),
+        Some(2)
+    );
     branchyard_support::best_effort(
         "stop the server process",
         Command::new("kill")

@@ -102,13 +102,11 @@ pub enum Failure {
     /// The old shape: tools/failure_message_ratchet.json counts what is
     /// left, and a new failure is a [`Failure::Report`].
     Message(String),
-    /// Already explained, such as a branch that failed; exit 1, or the
-    /// status of the report `crate::errors::print` printed.
+    /// Already explained, such as a branch that failed or a doctor's
+    /// failing check; exit 1. A failure with a kind of its own is a
+    /// [`Failure::Report`] instead, which `crate::errors::finish` prints
+    /// once, with its kind's status.
     Reported,
-    /// A step only the person can do remains, such as a login that needs a
-    /// terminal; exit 3. The text says what to run (empty when stdout
-    /// already did).
-    Manual(String),
 }
 
 impl fmt::Display for Failure {
@@ -124,7 +122,6 @@ impl fmt::Display for Failure {
             Failure::Report(report) => f.write_str(&report.said()),
             Failure::Message(message) => f.write_str(message),
             Failure::Reported => Ok(()),
-            Failure::Manual(message) => f.write_str(message),
         }
     }
 }

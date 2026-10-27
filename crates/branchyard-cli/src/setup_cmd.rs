@@ -44,6 +44,7 @@ use serde_json::{json, Value};
 
 use crate::args::SetupFlags;
 use crate::commands::{print, Env, Failure, Outcome};
+use crate::errors;
 use crate::hook_cmd::heard::{self, dialect_of, Hearing};
 use crate::render::{table, Cell, Column, Tone};
 use crate::setup_io::{self, which, CachedProbe, HostProbe, HostValidator, RandomEntropy};
@@ -69,8 +70,9 @@ enum State {
     Pending,
     /// Written by this run.
     Done,
-    /// Cannot be written, and why.
-    Refused(String),
+    /// Cannot be written: the kind of refusal `by init plugin` would report
+    /// (`would_overwrite`, `invalid_plan`, `incomplete`), and why.
+    Refused(&'static str, String),
 }
 
 /// What happens to `branchyard.toml`.
@@ -177,10 +179,12 @@ struct Report {
 /// `by setup`.
 pub fn main(env: &Env, args: &SetupFlags) -> Outcome {
     if let Some(branch) = crate::workspace_cmd::in_harness() {
-        return Err(Failure::Message(format!(
-            "by setup is a person's decision, made outside any branch (this is {branch}).\n\
-             Next: run it from your own terminal"
-        )));
+        return Err(errors::Report::new(
+            "denied",
+            format!("by setup is a person's decision, made outside any branch (this is {branch})"),
+        )
+        .next("run by setup from your own terminal")
+        .into());
     }
     let cwd = std::env::current_dir()?;
     let interactive = env.stdin_tty && env.stdout_tty && !args.json;
@@ -188,12 +192,16 @@ pub fn main(env: &Env, args: &SetupFlags) -> Outcome {
     let asking = !args.yes && !args.dry_run && interactive;
     let dry_run = !writing && !asking;
     if !args.no_config && !branchyard_config::is_repository(&setup_io::project_root(&cwd)) {
-        return Err(Failure::Message(format!(
-            "{} is not inside a git repository, and branchyard.toml belongs to one.\n\
-             Next: cd into a repository (or git init here) and run by setup; \
-             by setup --no-config installs hooks alone",
-            cwd.display()
-        )));
+        return Err(errors::Report::new(
+            "not_a_repository",
+            format!(
+                "{} is not inside a git repository, and branchyard.toml belongs to one",
+                cwd.display()
+            ),
+        )
+        .next("cd into a repository (or git init here), then by setup")
+        .next("by setup --no-config (installs hooks alone)")
+        .into());
     }
     if interactive {
         eprintln!("Looking at this machine and repository...");
@@ -209,12 +217,14 @@ pub fn main(env: &Env, args: &SetupFlags) -> Outcome {
     let hooks = plan_hooks(args, &facts, &probe)?;
     if !args.harnesses.is_empty() {
         // Named on purpose: a refusal is an error, not a line to read later.
-        if let Some(step) = hooks.iter().find(|h| matches!(h.state, State::Refused(_))) {
-            if let State::Refused(why) = &step.state {
-                return Err(Failure::Message(format!(
-                    "{}: {why}\nNext: by init plugin {} --dry-run",
-                    step.label, step.id
-                )));
+        if let Some(step) = hooks.iter().find(|h| matches!(h.state, State::Refused(..))) {
+            if let State::Refused(kind, why) = &step.state {
+                return Err(errors::Report::new(*kind, format!("{}: {why}", step.label))
+                    .next(format!(
+                        "by init plugin {} --dry-run (shows each file)",
+                        step.id
+                    ))
+                    .into());
             }
         }
     }
@@ -279,7 +289,7 @@ pub fn main(env: &Env, args: &SetupFlags) -> Outcome {
     }
     let store = heard::store();
     for step in &mut report.hooks {
-        if !matches!(step.state, State::Refused(_)) {
+        if !matches!(step.state, State::Refused(..)) {
             step.heard = Some(Hearing::of(&store, &step.id));
         }
     }
@@ -426,11 +436,12 @@ fn plan_config(
         &HostValidator,
     );
     let Some(plan) = response.plan else {
-        return Err(Failure::Message(
-            "the project defaults need answers setup could not default.\n\
-             Next: by init project"
-                .into(),
-        ));
+        return Err(errors::Report::new(
+            "incomplete",
+            "the project defaults need answers setup could not default; nothing was written",
+        )
+        .next("by init project (asks for them)")
+        .into());
     };
     if !plan.valid {
         let why: Vec<String> = plan
@@ -439,10 +450,15 @@ fn plan_config(
             .filter(|f| !f.validation.ok)
             .map(|f| format!("{}: {}", f.path, f.validation.messages.join("; ")))
             .collect();
-        return Err(Failure::Message(format!(
-            "branchyard.toml would not load: {}\nNext: by init project",
-            why.join("; ")
-        )));
+        return Err(errors::Report::new(
+            "invalid_plan",
+            format!(
+                "branchyard.toml would not load, so nothing was written: {}",
+                why.join("; ")
+            ),
+        )
+        .next("by init project (asks for the defaults again)")
+        .into());
     }
     let answer = |id: &str| {
         response
@@ -552,7 +568,7 @@ fn plan_hooks(
     if args.no_hooks {
         return Ok(Vec::new());
     }
-    let manifests = install::manifests().map_err(Failure::Message)?;
+    let manifests = install::manifests().map_err(broken_manifests)?;
     let ids: Vec<String> = match args.harnesses.is_empty() {
         true => facts.install_detected.clone(),
         false => args.harnesses.clone(),
@@ -561,11 +577,15 @@ fn plan_hooks(
     for id in ids {
         let Some(manifest) = manifests.iter().find(|m| m.harness == id) else {
             let known: Vec<&str> = manifests.iter().map(|m| m.harness.as_str()).collect();
-            return Err(Failure::Message(format!(
-                "no install for harness {id:?}; by setup installs for: {}\n\
-                 Next: by init plugin lists them with what each gets",
-                known.join(", ")
-            )));
+            return Err(errors::Report::new(
+                "unknown_harness",
+                format!(
+                    "no install for harness {id:?}; by setup installs for: {}",
+                    known.join(", ")
+                ),
+            )
+            .next("by init plugin (lists them with what each gets)")
+            .into());
         };
         steps.push(plan_hook(manifest, facts, probe));
     }
@@ -589,7 +609,7 @@ fn plan_hook(manifest: &Manifest, facts: &Facts, probe: &CachedProbe<HostProbe>)
         heard: None,
     };
     let Some(plan) = response.plan else {
-        step.state = State::Refused("the install finished without a plan".into());
+        step.state = State::Refused("incomplete", "the install finished without a plan".into());
         return step;
     };
     if !plan.valid {
@@ -603,16 +623,22 @@ fn plan_hook(manifest: &Manifest, facts: &Facts, probe: &CachedProbe<HostProbe>)
                     .map(|why| format!("{}: {why}", f.path))
             })
             .collect();
-        step.state = State::Refused(format!("cannot be installed ({})", why.join("; ")));
+        step.state = State::Refused(
+            "invalid_plan",
+            format!("cannot be installed ({})", why.join("; ")),
+        );
         return step;
     }
     let differing = plan.overwrites();
     if !differing.is_empty() {
         let paths: Vec<&str> = differing.iter().map(|f| f.path.as_str()).collect();
-        step.state = State::Refused(format!(
-            "these files differ from the packaged copy and were not replaced: {}",
-            paths.join(", ")
-        ));
+        step.state = State::Refused(
+            "would_overwrite",
+            format!(
+                "these files differ from the packaged copy and were not replaced: {}",
+                paths.join(", ")
+            ),
+        );
         return step;
     }
     step.writes = plan.files.iter().filter(|f| f.writes()).count();
@@ -690,7 +716,7 @@ fn apply(report: &mut Report) -> Result<(), Failure> {
                 );
             }
             State::Current => unchanged.extend(plan.files.iter().map(|f| f.path.clone())),
-            State::Done | State::Refused(_) => {}
+            State::Done | State::Refused(..) => {}
         }
     }
     report.written = written;
@@ -700,15 +726,29 @@ fn apply(report: &mut Report) -> Result<(), Failure> {
 
 /// One plan written under `root`, never replacing a file that differs.
 fn write_plan(plan: &Plan, root: &Path) -> Result<branchyard_setup::protocol::Applied, Failure> {
-    setup_io::apply(plan, root, false).map_err(|refusal| match refusal {
-        setup_io::Refusal::Invalid(problems) | setup_io::Refusal::WouldOverwrite(problems) => {
-            Failure::Message(format!(
-                "nothing more was written: {}\nNext: by init plugin --all-detected --dry-run",
-                problems.join("; ")
-            ))
-        }
-        setup_io::Refusal::Io(message) => Failure::Message(message),
-    })
+    let (kind, problems) = match setup_io::apply(plan, root, false) {
+        Ok(applied) => return Ok(applied),
+        Err(setup_io::Refusal::Invalid(problems)) => ("invalid_plan", problems),
+        Err(setup_io::Refusal::WouldOverwrite(problems)) => ("would_overwrite", problems),
+        Err(setup_io::Refusal::Io(message)) => ("io", vec![message]),
+    };
+    Err(errors::Report::new(
+        kind,
+        format!("nothing more was written: {}", problems.join("; ")),
+    )
+    .next("by setup --dry-run (shows what it would write)")
+    .next("by init plugin --all-detected --dry-run (each harness's files)")
+    .into())
+}
+
+/// The install manifests built into `by` did not load: a broken build.
+fn broken_manifests(why: String) -> Failure {
+    errors::Report::new(
+        "internal",
+        format!("the install manifests built into this by do not load: {why}"),
+    )
+    .next("by --version, then reinstall by (docs/distribution.md)")
+    .into()
 }
 
 /// Trust the `[workspace]` scripts setup itself just wrote: the person saw
@@ -955,7 +995,7 @@ fn finish(report: &mut Report) {
     let mut silent: Vec<(String, Vec<String>)> = Vec::new();
     for step in &report.hooks {
         match (&step.state, &step.check) {
-            (State::Refused(why), _) => todo.push(Todo {
+            (State::Refused(_, why), _) => todo.push(Todo {
                 kind: "hooks",
                 harness: Some(step.id.clone()),
                 text: format!("{}: hooks not installed: {why}", step.label),
@@ -968,7 +1008,7 @@ fn finish(report: &mut Report) {
             },
             _ => {}
         }
-        if matches!(step.state, State::Refused(_)) {
+        if matches!(step.state, State::Refused(..)) {
             continue;
         }
         for note in &step.notes {
@@ -1131,7 +1171,7 @@ fn changes_text(report: &Report, files: bool) -> String {
         (State::Current, _) => "already current",
         (State::Pending, true) => "would install",
         (State::Pending, false) => "will install",
-        (State::Refused(_), _) => "not installed",
+        (State::Refused(..), _) => "not installed",
     };
     let mut out = String::new();
     let c = &report.config;
@@ -1185,7 +1225,7 @@ fn changes_text(report: &Report, files: bool) -> String {
             State::Pending | State::Done => {
                 format!("{} {}", verb(&step.state), plural(step.writes, "file"))
             }
-            State::Refused(_) => "not installed (see below)".to_owned(),
+            State::Refused(..) => "not installed (see below)".to_owned(),
             other => verb(other).to_owned(),
         };
         let provides = step.provides.join(", ");
@@ -1197,7 +1237,7 @@ fn changes_text(report: &Report, files: bool) -> String {
         if let Some(line) = hooks_line(step, now) {
             row(&mut out, "", &format!("{:<12} hooks: {line}", ""));
         }
-        if files || matches!(step.state, State::Refused(_)) {
+        if files || matches!(step.state, State::Refused(..)) {
             for t in &step.targets {
                 let dir = match t.files {
                     1 => String::new(),
@@ -1339,7 +1379,7 @@ fn report_json(report: &Report) -> Value {
                 State::Current => ("current", None),
                 State::Pending => ("would_install", None),
                 State::Done => ("installed", None),
-                State::Refused(why) => ("refused", Some(why.clone())),
+                State::Refused(_, why) => ("refused", Some(why.clone())),
             };
             let (hooks, detail) = match &step.check {
                 Some(HookCheck::Answers(d)) => (Some("answers"), Some(d.clone())),
@@ -1482,16 +1522,21 @@ pub(crate) fn installs(cwd: &Path, detected_only: bool) -> Result<Vec<Installed>
 /// steps still on the person's list. Writes nothing.
 pub fn plugin_status(env: &Env, only: &[String], as_json: bool) -> Outcome {
     let cwd = std::env::current_dir()?;
-    let all = installs(&cwd, false).map_err(Failure::Message)?;
+    let all = installs(&cwd, false).map_err(broken_manifests)?;
     if let Some(unknown) = only
         .iter()
         .find(|id| !all.iter().any(|i| &i.manifest.harness == *id))
     {
         let known: Vec<&str> = all.iter().map(|i| i.manifest.harness.as_str()).collect();
-        return Err(Failure::Message(format!(
-            "no install for harness {unknown:?}; by init plugin installs for: {}",
-            known.join(", ")
-        )));
+        return Err(errors::Report::new(
+            "unknown_harness",
+            format!(
+                "no install for harness {unknown:?}; by init plugin installs for: {}",
+                known.join(", ")
+            ),
+        )
+        .next("by init plugin --status (all of them)")
+        .into());
     }
     let store = heard::store();
     let now = branchyard_support::time::now_ms();

@@ -794,6 +794,104 @@ fn reports_say_what_failed_and_the_command_to_run() {
     assert_eq!(error["next"][0], "by harnesses --all (lists them)");
 }
 
+/// `by harnesses` and `by setup` fail as every command does: what failed
+/// and the command to run on standard error, or with `--json` the envelope
+/// with its `exit`, and the status of the kind. None of these needs a
+/// harness, a network or a terminal.
+#[test]
+fn harness_and_setup_failures_say_what_failed_and_the_command_to_run() {
+    let repo = Repo::new();
+    // A harness the catalog does not know: the command line, 2.
+    let out = repo.by(&["harnesses", "install", "nope"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out),
+        "by: nope is not a harness Branchyard knows\n  next: by harnesses --all (lists them)\n"
+    );
+    let json = repo.by(&["harnesses", "install", "nope", "--json"]);
+    assert_eq!(json.status.code(), Some(2));
+    let error = envelope(&json);
+    assert_eq!(error["kind"], "unknown_harness");
+    assert_eq!(error["exit"], 2);
+    assert_eq!(
+        error["next"],
+        serde_json::json!(["by harnesses --all (lists them)"])
+    );
+    assert_eq!(stderr(&json), "");
+
+    // `--on` naming no recipe: 2, before anything is detected.
+    let out = repo.by(&["harnesses", "login", "codex", "--on", "recipe:"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        stderr(&out),
+        "by: --on recipe:NAME needs a recipe's name\n  next: by recipe list (lists the recipes)\n"
+    );
+
+    // A provider the harness has no login for: 2, naming the one it has.
+    let json = repo.by(&[
+        "harnesses",
+        "login",
+        "claude-code",
+        "--provider",
+        "gemini",
+        "--json",
+    ]);
+    assert_eq!(json.status.code(), Some(2));
+    let error = envelope(&json);
+    assert_eq!(error["kind"], "usage");
+    assert_eq!(error["exit"], 2);
+    assert_eq!(
+        error["next"][0],
+        "by harnesses login claude-code --provider zai"
+    );
+
+    // A harness's own `by` may not install one: refused, 4.
+    let inside = |extra: &[&str]| {
+        repo.command(env!("CARGO_BIN_EXE_by"))
+            .args(["harnesses", "install", "codex"])
+            .args(extra)
+            .env("BRANCHYARD_BRANCH", "b")
+            .output()
+            .unwrap()
+    };
+    let out = inside(&[]);
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out),
+        "by: a harness running on a branch (b) cannot install harnesses; that is a person's \
+         decision, made outside any branch\n  next: run it from your own terminal, outside any \
+         branch\n"
+    );
+    let json = inside(&["--json"]);
+    assert_eq!(json.status.code(), Some(4));
+    let error = envelope(&json);
+    assert_eq!(
+        (error["kind"].as_str(), error["exit"].as_i64()),
+        (Some("denied"), Some(4))
+    );
+
+    // `by setup` outside a repository: around the command, 3.
+    let here = fs::canonicalize(&repo.dir).unwrap();
+    let out = repo.outside(&["setup"]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out),
+        format!(
+            "by: {} is not inside a git repository, and branchyard.toml belongs to one\n  next: \
+             cd into a repository (or git init here), then by setup, or by setup --no-config \
+             (installs hooks alone)\n",
+            here.display()
+        )
+    );
+    let json = repo.outside(&["setup", "--json"]);
+    assert_eq!(json.status.code(), Some(3));
+    let error = envelope(&json);
+    assert_eq!(error["kind"], "not_a_repository");
+    assert_eq!(error["exit"], 3);
+    assert_eq!(error["next"].as_array().map(Vec::len), Some(2), "{error}");
+    assert_eq!(stderr(&json), "");
+}
+
 /// `by init`'s refusals keep the setup protocol's envelope (with its
 /// `paths`), and gain the exit status of their kind; a usage error no
 /// longer ends the process from inside the command.
