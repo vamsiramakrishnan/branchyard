@@ -616,6 +616,13 @@ fn by_cancel_stops_a_turn_on_the_server() {
         "{}",
         text(&ran.stdout)
     );
+    // The token `by serve` made is `default`: the log names it as a token,
+    // not as `cancelled by default`.
+    assert!(
+        text(&ran.stdout).contains("cancelled by the default token through the server"),
+        "{}",
+        text(&ran.stdout)
+    );
     let json_cancel = server.by(&dir.0, &["cancel", "held", "--json"]);
     // Nothing runs any more; the note says so, through the server too.
     let json_cancel: Value = serde_json::from_slice(&json_cancel.stdout).unwrap();
@@ -1980,6 +1987,14 @@ fn work_requiring_a_label_no_worker_carries_says_why_in_by_show() {
     assert!(shown.contains("not created yet"), "{shown}");
     assert!(shown.contains("requires  gpu"), "{shown}");
     assert!(shown.contains("no live worker carries"), "{shown}");
+    // `by ls` has no row for it yet, and says so under the table.
+    let listed = text(&server.by(&dir.0, &["ls"]).stdout);
+    assert!(
+        listed.contains(
+            "queued on the server, not started yet: on-gpu (by show on-gpu shows its operation)"
+        ),
+        "{listed}"
+    );
     let json: Value =
         serde_json::from_slice(&server.by(&dir.0, &["show", "on-gpu", "--json"]).stdout).unwrap();
     assert_eq!(json["operation"]["requires"][0], "gpu");
@@ -2006,6 +2021,166 @@ fn work_requiring_a_label_no_worker_carries_says_why_in_by_show() {
         "{}",
         text(&local.stderr)
     );
+}
+
+#[cfg(unix)]
+/// `by serve` on the Unix socket `socket` (so a restart listens where the
+/// last one did, with no port to race for), serving `root` as `app` from
+/// `data`, with `extra`; and the URL it printed.
+fn serve_unix(dir: &Path, socket: &Path, data: &Path, root: &Path, extra: &[&str]) -> Killed {
+    let mut serve = command(BY, dir);
+    serve
+        .args([
+            "serve",
+            "--quiet",
+            "--no-inventory",
+            "--allow-client-commands",
+        ])
+        .arg("--listen-unix")
+        .arg(socket)
+        .arg("--data-dir")
+        .arg(data)
+        .arg("--repo")
+        .arg(format!("app={}", root.display()))
+        .args(extra);
+    let mut child = serve
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(
+        line.trim(),
+        format!("listening on unix:{}", socket.display()),
+        "the server did not start"
+    );
+    Killed(child)
+}
+
+/// `by --remote run` follows its operation across a restart of the server:
+/// it says once that the server is gone and that the work is the server's,
+/// waits, says when it answers again, and prints the result. On 27 October
+/// 2026 ten real runs each ended at the restart with `by: cannot reach …`
+/// and `next: start a server with by serve on that host, or fix the URL`,
+/// while the server, restarted, finished their work.
+#[cfg(unix)]
+#[test]
+fn a_run_follows_its_operation_across_a_server_restart() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let run_dir = dir.0.join("run");
+    fs::create_dir(&run_dir).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let socket = run_dir.join("by.sock");
+    let data = dir.0.join("data");
+    // The first server carries no `gpu` label, so the run waits queued.
+    let mut first = serve_unix(&dir.0, &socket, &data, &there, &[]);
+    let url = format!("unix:{}", socket.display());
+    let token = data.join("token");
+    let err_path = dir.0.join("run.err");
+    let running = command(BY, &dir.0)
+        .arg("--remote")
+        .arg(&url)
+        .arg("--token-file")
+        .arg(&token)
+        .args(with_agent(&[
+            "run",
+            "WRITE later.txt=1",
+            "--name",
+            "later",
+            "--require-label",
+            "gpu",
+            "--yes",
+        ]))
+        .stdout(Stdio::piped())
+        .stderr(fs::File::create(&err_path).unwrap())
+        .spawn()
+        .unwrap();
+    let runner = std::thread::spawn(move || running.wait_with_output().unwrap());
+    let ls = |cwd: &Path| {
+        command(BY, cwd)
+            .arg("--remote")
+            .arg(&url)
+            .arg("--token-file")
+            .arg(&token)
+            .arg("ls")
+            .output()
+            .unwrap()
+    };
+    wait::until("the run to be queued", || {
+        text(&ls(&dir.0).stdout).contains("not started yet: later")
+    });
+    // Stopped: the run's client is left with nobody to ask.
+    branchyard_support::best_effort(
+        "stop the first server",
+        Command::new("kill")
+            .args(["-TERM", &first.0.id().to_string()])
+            .status(),
+    );
+    wait::until("the first server to exit", || {
+        first.0.try_wait().unwrap().is_some()
+    });
+    let err = || fs::read_to_string(&err_path).unwrap_or_default();
+    wait::until("the run to say the server is gone", || {
+        err().contains("the server keeps operation")
+    });
+    // Restarted with the label: it claims the queued run and runs it.
+    let _second = serve_unix(&dir.0, &socket, &data, &there, &["--label", "gpu"]);
+    let ran = runner.join().unwrap();
+    let (out, err) = (text(&ran.stdout), err());
+    assert!(ran.status.success(), "{out}\n{err}");
+    assert!(
+        err.contains("(Ctrl-C stops watching, not the work)"),
+        "{err}"
+    );
+    assert!(err.contains("answers again"), "{err}");
+    assert!(!err.contains("next: start a server"), "{err}");
+    assert!(out.contains("wrote later.txt"), "{out}");
+    assert!(out.contains("status     ready"), "{out}");
+}
+
+/// A send to a branch with a private home says the harness runs there, as
+/// a local `by send` does, though the send's own flags ask for nothing.
+#[test]
+fn a_send_to_an_isolated_branch_says_it_keeps_its_private_home() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let server = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
+    let run = server.by(
+        &dir.0,
+        &with_agent(&[
+            "run",
+            "WRITE a.txt=1",
+            "--name",
+            "iso",
+            "--isolated",
+            "--yes",
+        ])
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>(),
+    );
+    assert!(run.status.success(), "{}", text(&run.stderr));
+    let send = server.by(
+        &dir.0,
+        &with_agent(&["send", "iso", "WRITE b.txt=2", "--yes"])
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
+    assert!(send.status.success(), "{}", text(&send.stderr));
+    let said = text(&send.stderr);
+    assert!(
+        said.contains("harnesses run as the server's user with a private HOME"),
+        "{said}"
+    );
+    assert!(!said.contains("in the server's own HOME"), "{said}");
 }
 
 /// A child killed when dropped.

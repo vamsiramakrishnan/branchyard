@@ -97,6 +97,8 @@ by: remote mode needs a token
 
 The first comes from `--remote` (or `BRANCHYARD_REMOTE`, or `[remote] url`) when nothing answers; the second when no token file is given. `by doctor` shows the first as `server.reachable` with the same next step, and with `--json` the failures are `{"error": {"kind": "remote_unreachable", …}}` and `{"error": {"kind": "usage", …}}`, each with its `next` list. Check the scheme and port, start `by serve` on the host, and pass `--ca-file` for an https server with a private CA. Without `--remote`, commands run here and need no server.
 
+A `by run`, `fan` or `send` whose server stops while it waits does not end with this. It says `by: cannot reach http://host:8421: Connection refused (os error 111); the server keeps operation op_…, and this waits for it to answer again (Ctrl-C stops watching, not the work)` once, and `by: http://host:8421 answers again` when the server is back, then ends as it would have. Interrupting it leaves the work on the server: `by ls` and `by show NAME` find it. A turn that was running when its server died ends `interrupted`, and `by log NAME` says whether the prompt had reached the harness and whether `by send NAME --retry` runs it ([server](server.md#remote-mode-in-by)).
+
 ### `this build has no PostgreSQL support` and `this build has no Microsandbox support`
 
 Both are cargo features that are off by default. `by serve --database` needs a build with `postgres`, and `--provider microsandbox` one with `microsandbox` (it also needs Rust 1.94 or newer and `libcap-ng-dev`). Rebuild from the clone: `cargo install --locked --force --path crates/branchyard-cli --features postgres`, or `--features microsandbox`. [Server](server.md#postgresql) and [providers](providers.md) cover each.

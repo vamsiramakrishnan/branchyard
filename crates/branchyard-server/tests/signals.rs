@@ -1,7 +1,8 @@
 //! The `branchyard-server` binary stopped by SIGTERM (what `docker stop`
 //! sends) and SIGINT: each starts the same graceful shutdown, and the
 //! process exits within its grace period even with a running operation and
-//! a connection that never finishes its request. Unix only; requires
+//! a connection that never finishes its request; and what it logs about
+//! its token, closed connections and a shutdown. Unix only; requires
 //! `kill`.
 #![cfg(unix)]
 #![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
@@ -12,6 +13,7 @@ use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use branchyard_client::api::OperationState;
 use branchyard_client::{new_key, Client};
 use branchyard_testkit::wait;
 use common::{fake_agent, started, task, Fixture, TOKEN};
@@ -67,8 +69,11 @@ fn stop(child: &mut Child, signal: &str, limit: Duration) -> (Option<i32>, Durat
     let elapsed = sent.elapsed();
     match exited {
         Ok(status) => {
+            // Empty when the log went to a file instead.
             let mut stderr = String::new();
-            std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
+            if let Some(mut piped) = child.stderr.take() {
+                std::io::Read::read_to_string(&mut piped, &mut stderr).unwrap();
+            }
             (status.code(), elapsed, stderr)
         }
         Err(_) => {
@@ -77,6 +82,121 @@ fn stop(child: &mut Child, signal: &str, limit: Duration) -> (Option<i32>, Durat
             panic!("still running {limit:?} after SIG{signal}");
         }
     }
+}
+
+/// What `branchyard-server` (and `by serve`) logs when started as
+/// docs/server.md starts it, with no token: where the token it made is, in
+/// one sentence; nothing above debug when a client closes the event stream
+/// it was reading (every `by --remote run` does once its work is done: on
+/// 27 October 2026 each left `WARN best-effort step failed: serve a
+/// connection: connection closed before message completed`); and, at a
+/// shutdown, what runs and gets the grace period, what stays queued, and
+/// what became of them, where it said only `shutting down; running
+/// operations may finish`.
+#[test]
+fn the_log_says_where_the_token_is_and_what_a_shutdown_did() {
+    let f = Fixture::new();
+    let log_path = f.dir.join("server.log");
+    let mut child =
+        branchyard_testkit::hermetic(&mut Command::new(env!("CARGO_BIN_EXE_branchyard-server")))
+            .env("BRANCHYARD_LOG", "info,branchyard_server::serve=debug")
+            .args([
+                "--listen",
+                "127.0.0.1:0",
+                "--shutdown-grace",
+                "1",
+                "--max-running",
+                "1",
+                "--no-inventory",
+            ])
+            .arg("--repo")
+            .arg(format!("app={}", f.root.display()))
+            .arg("--data-dir")
+            .arg(&f.data)
+            .arg("--harness-command")
+            .arg(format!("gemini-cli={}", fake_agent().display()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(std::fs::File::create(&log_path).unwrap())
+            .spawn()
+            .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let url = line
+        .trim()
+        .strip_prefix("listening on ")
+        .unwrap_or_else(|| panic!("server did not start: {line:?}"))
+        .to_owned();
+    let log = || std::fs::read_to_string(&log_path).unwrap();
+    let token_file = f.data.join("token");
+    let token = std::fs::read_to_string(&token_file).unwrap();
+    assert!(
+        log().contains(&format!(
+            "created a token in {}; clients pass --token-file with it",
+            token_file.display()
+        )),
+        "{}",
+        log()
+    );
+    let client = Client::new(&url, token.trim()).unwrap();
+
+    // A client reads the event stream, then goes away.
+    let mut stream = TcpStream::connect(url.strip_prefix("http://").unwrap()).unwrap();
+    write!(
+        stream,
+        "GET /v1/repos/app/events/stream HTTP/1.1\r\nHost: x\r\n\
+         Authorization: Bearer {}\r\n\r\n",
+        token.trim()
+    )
+    .unwrap();
+    let mut status = String::new();
+    BufReader::new(stream.try_clone().unwrap())
+        .read_line(&mut status)
+        .unwrap();
+    assert!(status.contains(" 200 "), "the stream: {status:?}");
+    drop(stream);
+
+    // One operation runs (and never ends by itself); with --max-running 1
+    // the next waits in the queue. The first one's events go to the
+    // closed stream.
+    let repo = client.repo("app");
+    repo.submit_task(&task("HANG", "held"), &new_key()).unwrap();
+    wait::until("the turn to start", || started(&client, "app", "held"));
+    let queued = repo
+        .submit_task(&task("WRITE w.txt=1", "waits"), &new_key())
+        .unwrap();
+    wait::until("the server to see the stream's client gone", || {
+        log().contains("a client closed its connection")
+    });
+
+    let (code, _, _) = stop(&mut child, "TERM", Duration::from_secs(30));
+    assert_eq!(code, Some(0), "{}", log());
+    let log = log();
+    assert!(!log.contains("wrote a secret file"), "{log}");
+    assert!(!log.contains("serve a connection"), "{log}");
+    assert!(
+        log.contains(
+            "shutting down: 1 running operation may finish within 1s (signal again to stop \
+             waiting); 1 queued stay queued for the next start"
+        ),
+        "{log}"
+    );
+    assert!(
+        log.contains(
+            "stopped: 0 finished within the grace period; 1 recorded interrupted; 1 left in the \
+             queue for the next start, or another server on the database"
+        ),
+        "{log}"
+    );
+    // The queued one runs after the next start.
+    let (mut again, url) = spawn(&f, "0");
+    let restarted = Client::new(&url, TOKEN).unwrap();
+    let ran = restarted.wait(&queued.id).unwrap();
+    assert_eq!(ran.state, OperationState::Succeeded, "{ran:?}");
+    let (code, _, _) = stop(&mut again, "INT", Duration::from_secs(20));
+    assert_eq!(code, Some(0));
 }
 
 #[test]

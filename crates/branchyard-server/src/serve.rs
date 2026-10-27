@@ -73,6 +73,59 @@ pub struct Stopped {
     /// Operations recorded as interrupted because they outlasted the grace
     /// period.
     pub interrupted: usize,
+    /// Operations that were running when the shutdown began and finished
+    /// within the grace period.
+    pub finished: usize,
+    /// Operations left in the queue for the next start, or for another
+    /// server or worker on the same store: the queued ones, and those
+    /// another worker runs. `None` when the store could not say.
+    pub queued: Option<usize>,
+}
+
+impl Stopped {
+    /// The one line a server logs once it has stopped: what happened to
+    /// the operations it was running, and what waits for the next start.
+    pub fn summary(&self) -> String {
+        let mut parts = match (self.finished, self.interrupted) {
+            (0, 0) => vec!["nothing was running".to_owned()],
+            (finished, 0) => vec![format!("{finished} finished within the grace period")],
+            (finished, interrupted) => vec![
+                format!("{finished} finished within the grace period"),
+                format!("{interrupted} recorded interrupted"),
+            ],
+        };
+        match self.queued {
+            Some(0) => {}
+            Some(n) => parts.push(format!(
+                "{n} left in the queue for the next start, or another server on the database"
+            )),
+            None => parts.push("the queue could not be read".to_owned()),
+        }
+        format!("stopped: {}", parts.join("; "))
+    }
+}
+
+/// The line a server logs when a shutdown begins: what runs and gets the
+/// grace period, and what stays queued. `queued` as [`Handle::queued`]
+/// reads it.
+pub fn stopping_line(running: usize, queued: Option<usize>, grace: Duration) -> String {
+    let running = match running {
+        0 => "nothing is running".to_owned(),
+        1 => format!(
+            "1 running operation may finish within {}s (signal again to stop waiting)",
+            grace.as_secs()
+        ),
+        n => format!(
+            "{n} running operations may finish within {}s (signal again to stop waiting)",
+            grace.as_secs()
+        ),
+    };
+    match queued {
+        Some(n) if n > 0 => {
+            format!("shutting down: {running}; {n} queued stay queued for the next start")
+        }
+        _ => format!("shutting down: {running}"),
+    }
 }
 
 impl Running {
@@ -135,6 +188,9 @@ impl Running {
             "wait for the shutdown signal",
             begun.wait_for(|stop| *stop).await,
         );
+        // Nothing is claimed from here on, so what runs now is what the
+        // grace period is for.
+        let running = self.registry.running_here();
         drop(self.pools);
         let services = self.services;
         best_effort(
@@ -164,6 +220,10 @@ impl Running {
         let interrupted = tokio::task::spawn_blocking(move || registry.close())
             .await
             .unwrap_or(0);
+        let registry = self.registry.clone();
+        let queued = tokio::task::spawn_blocking(move || registry.in_queue())
+            .await
+            .unwrap_or(None);
         if let Some(sync) = self.sync {
             best_effort(
                 "finish the sync engine",
@@ -173,7 +233,11 @@ impl Running {
         if let Some(path) = &self.unix {
             branchyard_support::cleanup_file(path);
         }
-        Stopped { interrupted }
+        Stopped {
+            interrupted,
+            finished: running.saturating_sub(interrupted),
+            queued,
+        }
     }
 }
 
@@ -196,6 +260,17 @@ impl Handle {
     pub fn force(&self) {
         self.shutdown();
         self.force.notify_one();
+    }
+
+    /// How many operations this server runs now.
+    pub fn running(&self) -> usize {
+        self.registry.running_here()
+    }
+
+    /// How many operations of its repositories wait in the queue without
+    /// running here; `None` when the store cannot say. Reads the store.
+    pub fn queued(&self) -> Option<usize> {
+        self.registry.in_queue()
     }
 }
 
@@ -962,7 +1037,100 @@ where
         .timer(TokioTimer::new())
         .header_read_timeout(Duration::from_secs(30));
     let connection = builder.serve_connection(TokioIo::new(io), service);
-    best_effort("serve a connection", watcher.watch(connection).await);
+    match watcher.watch(connection).await {
+        Ok(()) => {}
+        // A client that stops reading an event stream or exits mid-answer
+        // (every `by --remote run` does, once its operation is done), or one
+        // that never finished its request: nothing went wrong here.
+        Err(error) if ended_by_client(&error) => {
+            tracing::debug!(%error, "a client closed its connection");
+        }
+        Err(error) => {
+            best_effort("serve a connection", Err::<(), _>(error));
+        }
+    }
+}
+
+/// Whether a connection's error is its client going away or never sending
+/// a whole request, rather than something the server got wrong.
+fn ended_by_client(error: &hyper::Error) -> bool {
+    if error.is_incomplete_message() || error.is_canceled() || error.is_timeout() {
+        return true;
+    }
+    let mut cause = std::error::Error::source(error);
+    while let Some(inner) = cause {
+        if let Some(io) = inner.downcast_ref::<std::io::Error>() {
+            return client_io_end(io.kind());
+        }
+        cause = inner.source();
+    }
+    false
+}
+
+/// The I/O errors a client's going away shows up as.
+fn client_io_end(kind: std::io::ErrorKind) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        kind,
+        ErrorKind::BrokenPipe
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::UnexpectedEof
+    )
+}
+
+#[cfg(test)]
+mod shutdown_lines {
+    use super::{stopping_line, Stopped};
+    use std::time::Duration;
+
+    /// A shutdown says what runs and gets the grace period and what stays
+    /// queued, and its end says what became of them: on 27 October 2026 a
+    /// server stopped in the middle of ten runs said only `shutting down;
+    /// running operations may finish`.
+    #[test]
+    fn a_shutdown_says_what_runs_and_what_stays_queued() {
+        let grace = Duration::from_secs(60);
+        assert_eq!(
+            stopping_line(8, Some(2), grace),
+            "shutting down: 8 running operations may finish within 60s (signal again to stop \
+             waiting); 2 queued stay queued for the next start"
+        );
+        assert_eq!(
+            stopping_line(1, Some(0), grace),
+            "shutting down: 1 running operation may finish within 60s (signal again to stop \
+             waiting)"
+        );
+        assert_eq!(
+            stopping_line(0, None, grace),
+            "shutting down: nothing is running"
+        );
+        let stopped = Stopped {
+            interrupted: 1,
+            finished: 7,
+            queued: Some(2),
+        };
+        assert_eq!(
+            stopped.summary(),
+            "stopped: 7 finished within the grace period; 1 recorded interrupted; 2 left in the \
+             queue for the next start, or another server on the database"
+        );
+        let idle = Stopped {
+            interrupted: 0,
+            finished: 0,
+            queued: Some(0),
+        };
+        assert_eq!(idle.summary(), "stopped: nothing was running");
+        let unread = Stopped {
+            interrupted: 0,
+            finished: 2,
+            queued: None,
+        };
+        assert_eq!(
+            unread.summary(),
+            "stopped: 2 finished within the grace period; the queue could not be read"
+        );
+    }
 }
 
 #[cfg(all(test, unix))]

@@ -803,9 +803,11 @@ fn operations_survive_a_restart() {
     wait::until("the hanging turn to start", || {
         client.operation(&hanging.id).unwrap().state == OperationState::Running
     });
-    // A graceful shutdown lets running turns finish.
+    // A graceful shutdown lets running turns finish, and says so.
     let stopped = server.stop();
     assert_eq!(stopped.interrupted, 0);
+    assert_eq!(stopped.finished, 1);
+    assert_eq!(stopped.queued, Some(0));
 
     let mut config = f.config();
     config.shutdown_grace = Duration::ZERO;
