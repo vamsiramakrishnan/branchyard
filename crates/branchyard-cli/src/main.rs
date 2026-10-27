@@ -339,7 +339,7 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
 }
 
 /// One arm per command that runs against a repository or a server; see
-/// "Adding a command" in `args.rs`.
+/// "Adding a command" in `args/mod.rs`.
 fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
     // `--auto` with no [fleet] routes among what is logged in here
     // (docs/fleet.md#the-inventory-default); a server refuses routing.

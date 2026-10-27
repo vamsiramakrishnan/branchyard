@@ -632,6 +632,16 @@ class ReleaseWorkflowTests(unittest.TestCase):
         head = self.text.split("\npermissions:", 1)[0]
         return head[head.index("\non:\n") + 1 :]
 
+    def test_the_sums_are_written_where_their_glob_cannot_see_them(self):
+        # `sha256sum -- * | sort > SHA256SUMS` can create SHA256SUMS before the
+        # glob is expanded, so the file sums itself half-written and the check
+        # that follows fails now and then (one run in three, 27 October 2026).
+        script = step_script(self.jobs["assemble"], "Write SHA256SUMS and the Homebrew formula")
+        globbing = [line for line in script.splitlines() if "sha256sum -- *" in line]
+        self.assertEqual(len(globbing), 1, script)
+        target = globbing[0].rsplit(">", 1)[1].strip()
+        self.assertTrue(target.startswith("../"), globbing[0])
+
     def test_a_tag_drafts_and_a_pull_request_or_run_workflow_rehearses(self):
         on = self.triggers()
         self.assertIn("  push:\n    tags: ['v*']\n", on)

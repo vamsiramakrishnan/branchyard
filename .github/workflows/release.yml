@@ -262,7 +262,10 @@ jobs:
           # Each archive is the one its build checked.
           for sums in *.sha256; do sha256sum -c "$sums"; done
           rm -- *.sha256
-          sha256sum -- * | sort -k2 > SHA256SUMS
+          # Written outside dist first: a redirect into dist can create
+          # SHA256SUMS before the glob is expanded, and it would sum itself.
+          sha256sum -- * | sort -k2 > ../SHA256SUMS.partial
+          mv ../SHA256SUMS.partial SHA256SUMS
           python3 ../tools/homebrew_formula.py --version "$VERSION" --sums SHA256SUMS > branchyard.rb
           sha256sum branchyard.rb >> SHA256SUMS
           sort -k2 -o SHA256SUMS SHA256SUMS
