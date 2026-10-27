@@ -17,7 +17,6 @@
     "crates/branchyard-bridge/src/tree.rs": 1,
     "crates/branchyard-bridge/tests/bridge.rs": 2,
     "crates/branchyard-cli/tests/anvil_e2e.rs": 1,
-    "crates/branchyard-cli/tests/devex.rs": 1,
     "crates/branchyard-cli/tests/remote.rs": 1,
     "crates/branchyard-cli/tests/services.rs": 1,
     "crates/branchyard-cli/tests/setup.rs": 1,
