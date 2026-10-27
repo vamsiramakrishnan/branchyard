@@ -186,6 +186,8 @@ pub use branchyard_config as config;
 pub use branchyard_microsandbox::{ENABLED as MICROSANDBOX_BUILT, REBUILD as MICROSANDBOX_REBUILD};
 pub use git::current_branch;
 pub use lock::DirLock;
+#[cfg(feature = "postgres")]
+pub use pg::postgres_config;
 pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
 
 pub use access::{AccessActivity, Ceiling, DelegationScope, NetworkScope};

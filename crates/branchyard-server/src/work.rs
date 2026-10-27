@@ -798,7 +798,7 @@ pub(crate) fn task_options(
 /// Who a plan decision names: the request's principal, through the server.
 fn person(principal: Option<&crate::config::Principal>) -> String {
     match principal {
-        Some(p) => format!("{} through the server", p.name),
+        Some(p) => crate::api::through_the_server(&p.name),
         None => "a person through the server".into(),
     }
 }

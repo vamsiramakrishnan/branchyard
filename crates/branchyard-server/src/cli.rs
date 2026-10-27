@@ -639,10 +639,9 @@ fn default_secret(path: &Path, message: &str) -> Result<(), String> {
         .open(path)
         .map_err(|e| format!("token file {}: {e}", path.display()))?;
     writeln!(file, "{token}").map_err(|e| format!("token file {}: {e}", path.display()))?;
-    tracing::info!(
-        message = %message.replace("{path}", &path.display().to_string()),
-        "wrote a secret file"
-    );
+    // The line is the message: a `message` field beside a format string
+    // would be joined to it (`wrote a secret file created a token in …`).
+    tracing::info!("{}", message.replace("{path}", &path.display().to_string()));
     Ok(())
 }
 
@@ -1054,6 +1053,7 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
     };
     let repos: Vec<String> = config.repos.iter().map(|(n, _)| n.clone()).collect();
     let token_file = config.default_token_file.clone();
+    let grace = config.shutdown_grace;
     let code = runtime.block_on(async move {
         let mut signals = Signals::new();
         let running = match serve::start(config).await {
@@ -1090,19 +1090,20 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
         let handle = running.handle();
         tokio::spawn(async move {
             signals.recv().await;
-            tracing::info!(
-                "shutting down; running operations may finish (signal again to stop waiting)"
-            );
             handle.shutdown();
+            let counts = handle.clone();
+            let (running, queued) =
+                tokio::task::spawn_blocking(move || (counts.running(), counts.queued()))
+                    .await
+                    .unwrap_or((0, None));
+            tracing::info!("{}", serve::stopping_line(running, queued, grace));
             signals.recv().await;
             handle.force();
         });
         let stopped = running.wait().await;
-        if stopped.interrupted > 0 {
-            tracing::warn!(
-                interrupted = stopped.interrupted,
-                "recorded unfinished operation(s) as interrupted"
-            );
+        match stopped.interrupted {
+            0 => tracing::info!("{}", stopped.summary()),
+            _ => tracing::warn!("{}", stopped.summary()),
         }
         ExitCode::SUCCESS
     });

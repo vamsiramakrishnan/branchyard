@@ -689,8 +689,46 @@ impl Drop for Postgres {
 /// Connect to `url`. Only `sslmode=disable` or `prefer` work: TLS to the
 /// database is not built in.
 pub(crate) fn connect(url: &str) -> Result<Client, Error> {
-    off_runtime(|| Client::connect(url, NoTls))
-        .map_err(|e| state(&format!("connect to {}", redact(url)), &e))
+    let refused = |e: postgres::Error| state(&format!("connect to {}", redact(url)), &e);
+    let config = postgres_config(url).map_err(refused)?;
+    off_runtime(|| config.connect(NoTls)).map_err(refused)
+}
+
+/// The connection settings `url` names, with the notices PostgreSQL sends
+/// logged at `debug` (a `WARNING` at `warn`) rather than at the client
+/// library's `info`, where every start of a server printed one line per
+/// `CREATE TABLE IF NOT EXISTS` that found its table. Every connection
+/// Branchyard opens to its database is made from these.
+pub fn postgres_config(url: &str) -> Result<postgres::Config, postgres::Error> {
+    let mut config: postgres::Config = url.parse()?;
+    config.notice_callback(|notice| match notice_level(notice.parsed_severity()) {
+        tracing::Level::WARN => {
+            tracing::warn!(
+                severity = notice.severity(),
+                "PostgreSQL: {}",
+                notice.message()
+            );
+        }
+        _ => tracing::debug!(
+            severity = notice.severity(),
+            "PostgreSQL: {}",
+            notice.message()
+        ),
+    });
+    Ok(config)
+}
+
+/// How loudly a PostgreSQL notice of `severity` is logged: a `WARNING` (or
+/// anything worse sent as a notice) at `warn`, the routine `NOTICE`, `INFO`,
+/// `LOG` and `DEBUG` at `debug`.
+pub(crate) fn notice_level(severity: Option<postgres::error::Severity>) -> tracing::Level {
+    use postgres::error::Severity;
+    match severity {
+        Some(Severity::Notice | Severity::Info | Severity::Log | Severity::Debug) => {
+            tracing::Level::DEBUG
+        }
+        _ => tracing::Level::WARN,
+    }
 }
 
 impl Postgres {
@@ -2164,9 +2202,8 @@ impl Glanced {
         connect_wait: Duration,
         statement_wait: Duration,
     ) -> Result<Glanced, Error> {
-        let mut config: postgres::Config = url
-            .parse()
-            .map_err(|e: postgres::Error| Error::State(format!("database {}: {e}", redact(url))))?;
+        let mut config = postgres_config(url)
+            .map_err(|e| Error::State(format!("database {}: {e}", redact(url))))?;
         config.connect_timeout(connect_wait);
         let mut client = off_runtime(|| config.connect(NoTls))
             .map_err(|e| state(&format!("connect to {}", redact(url)), &e))?;
@@ -3818,6 +3855,46 @@ mod redact_tests {
             redact("postgres://by@db/yard?application_name=x"),
             "postgres://by@db/yard?application_name=x"
         );
+    }
+}
+
+#[cfg(test)]
+mod notice_tests {
+    use super::{notice_level, postgres_config};
+    use postgres::error::Severity;
+    use tracing::Level;
+
+    /// The routine notices (a `CREATE TABLE IF NOT EXISTS` that found its
+    /// table) are debug lines, not the `info` the client library logs them
+    /// at; a warning stays a warning.
+    #[test]
+    fn routine_notices_are_debug_and_warnings_stay_warnings() {
+        for routine in [
+            Severity::Notice,
+            Severity::Info,
+            Severity::Log,
+            Severity::Debug,
+        ] {
+            assert_eq!(notice_level(Some(routine)), Level::DEBUG, "{routine}");
+        }
+        for loud in [Severity::Warning, Severity::Error, Severity::Fatal] {
+            assert_eq!(notice_level(Some(loud)), Level::WARN, "{loud}");
+        }
+        // A severity the library cannot parse (a localized one) is not
+        // hidden.
+        assert_eq!(notice_level(None), Level::WARN);
+    }
+
+    #[test]
+    fn the_config_is_the_urls_and_a_bad_url_is_refused() {
+        let config =
+            postgres_config("postgres://by@%2Fhome%2Fby%2Frun:5544/yard?application_name=by")
+                .unwrap();
+        assert_eq!(config.get_dbname(), Some("yard"));
+        assert_eq!(config.get_user(), Some("by"));
+        assert_eq!(config.get_ports(), [5544]);
+        assert_eq!(config.get_application_name(), Some("by"));
+        assert!(postgres_config("postgres://by@db/yard?nonsense=1").is_err());
     }
 }
 

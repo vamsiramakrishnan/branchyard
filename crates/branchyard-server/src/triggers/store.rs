@@ -1072,7 +1072,7 @@ impl PostgresTriggers {
             scope
                 .spawn(move || {
                     if conn.as_ref().is_none_or(postgres::Client::is_closed) {
-                        *conn = Some(postgres::Client::connect(url, postgres::NoTls)?);
+                        *conn = Some(branchyard::postgres_config(url)?.connect(postgres::NoTls)?);
                     }
                     f(conn.as_mut().expect("connected above"))
                 })

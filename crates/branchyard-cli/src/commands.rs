@@ -1030,13 +1030,19 @@ pub fn ls(env: &Env, target: &Target, as_json: bool) -> Outcome {
     }
     // Recorded maps and their progress follow the branches (docs/map.md).
     let maps = crate::map_cmd::ls_section(target, env.style()).unwrap_or_default();
+    // A server's queued work has no branch yet: say so, or ten runs read
+    // as eight.
+    let queued = match target {
+        Target::Local => String::new(),
+        Target::Remote(remote) => remote::queued_line(remote, &infos),
+    };
     if infos.is_empty() {
         return print(&format!(
-            "no branches; start one with: by run \"<prompt>\"\n{maps}"
+            "no branches; start one with: by run \"<prompt>\"\n{queued}{maps}"
         ));
     }
     print(&format!(
-        "{}{maps}",
+        "{}{queued}{maps}",
         render::branch_table(
             &infos,
             branchyard_support::time::now_ms() / 1000,

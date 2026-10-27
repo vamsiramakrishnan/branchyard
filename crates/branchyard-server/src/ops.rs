@@ -947,6 +947,24 @@ impl Registry {
         })
     }
 
+    /// How many operations this process runs now.
+    pub fn running_here(&self) -> usize {
+        self.lock().running.len()
+    }
+
+    /// How many operations of this registry's repositories wait in the
+    /// queue without running here: queued ones, and ones another worker on
+    /// the store runs. `None`, with the store's error logged, when it
+    /// cannot say: the count is only for the shutdown's log lines, which
+    /// then say the queue could not be read.
+    pub fn in_queue(&self) -> Option<usize> {
+        let pending = branchyard_support::best_effort(
+            "count the queued operations",
+            self.store.pending(&self.options.repos),
+        )?;
+        Some(pending.saturating_sub(self.running_here()))
+    }
+
     /// Refuse new operations and stop claiming queued ones.
     pub fn stop_accepting(&self) {
         self.lock().accepting = false;
