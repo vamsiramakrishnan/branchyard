@@ -145,14 +145,19 @@ fn setup_yes_writes_the_config_and_the_hooks_and_prints_the_card() {
         "wrote branchyard.toml: harness claude-code · check \"cargo test\" · local, no isolation",
         "installed 13 files (hooks, commands, skills, statusline)",
         "installed 1 file (hooks)",
-        "hooks: verified",
+        "hooks: by hook answers · never heard: start a new Codex session",
+        "hooks: by hook answers · never heard: start a new Gemini CLI session",
         "Only you can do:",
         "Codex runs no hook until you trust it",
         "Next: by run \"fix the flaky test\" --check \"cargo test\"",
     ] {
         assert!(card.contains(expected), "{expected:?} missing:\n{card}");
     }
-    assert!(!card.contains("hooks: silent"), "{card}");
+    assert!(!card.contains("silent"), "{card}");
+    assert!(
+        !card.contains("hooks: verified"),
+        "answering is not proof:\n{card}"
+    );
     // The config loads with the loader `by` uses, and names the check.
     let config = fs::read_to_string(s.repo.root.join("branchyard.toml")).unwrap();
     assert!(config.contains("check = \"cargo test\""), "{config}");
@@ -193,7 +198,7 @@ fn a_second_run_writes_nothing_and_says_so() {
         "{card}"
     );
     assert!(card.contains("already current"), "{card}");
-    assert!(card.contains("hooks: verified"), "{card}");
+    assert!(card.contains("hooks: by hook answers"), "{card}");
     // Nothing was created, changed or removed.
     assert_eq!(s.snapshot(), before);
     let json = s.json(&["setup", "--yes", "--json"]);
@@ -216,7 +221,11 @@ fn dry_run_and_a_missing_terminal_write_nothing() {
     assert!(card.contains("create ~/.claude/settings.json"), "{card}");
     assert!(card.contains("Nothing was written (--dry-run)."), "{card}");
     assert!(card.contains("Next: by setup --yes"), "{card}");
-    assert!(!card.contains("hooks: verified"), "nothing to check yet");
+    assert!(!card.contains("by hook answers"), "nothing to check yet");
+    assert!(
+        !card.contains("heard"),
+        "nothing installed to hear:\n{card}"
+    );
     assert_eq!(s.snapshot(), before);
     // No terminal and no --yes: the same, and it says how to write.
     let piped = s.by(&["setup"]);
@@ -293,7 +302,12 @@ fn json_is_one_object_with_what_was_detected_written_installed_and_left() {
     assert!(installed.len() >= 4, "{installed:?}");
     for harness in installed {
         assert_eq!(harness["state"], "installed", "{harness}");
-        assert_eq!(harness["hooks"], "verified", "{harness}");
+        assert_eq!(harness["hooks"], "answers", "{harness}");
+        assert_eq!(harness["heard"]["state"], "never", "{harness}");
+        assert!(
+            harness["heard"]["installed_at_ms"].as_u64().is_some(),
+            "{harness}"
+        );
     }
     let kinds: Vec<&str> = done["todo"]
         .as_array()
@@ -420,8 +434,16 @@ fn hooks_are_silent_when_by_is_not_on_path_and_setup_says_so_once() {
     let out = s.by(&["setup", "--yes"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     let card = flat(&stdout(&out));
-    assert_eq!(card.matches("hooks: silent").count(), 4, "{card}");
-    assert!(!card.contains("hooks: verified"), "{card}");
+    assert_eq!(
+        card.matches("hooks: by hook is silent (see below)").count(),
+        4,
+        "{card}"
+    );
+    assert!(!card.contains("by hook answers"), "{card}");
+    assert!(
+        !card.contains("never heard"),
+        "the reason below is the news:\n{card}"
+    );
     assert_eq!(
         card.matches("`by` is not on PATH").count(),
         1,
@@ -439,6 +461,125 @@ fn hooks_are_silent_when_by_is_not_on_path_and_setup_says_so_once() {
             .unwrap()
             .contains("not on PATH"));
     }
+}
+
+/// Whether a line of `text` has `head`, then an age (`just now`, `12s
+/// ago`: the machine may be slow), then `tail`.
+fn has_line(text: &str, head: &str, tail: &str) -> bool {
+    text.lines().any(|line| {
+        line.split_once(head)
+            .is_some_and(|(_, rest)| rest.contains(" ago") || rest.starts_with("just now"))
+            && line.trim_end().ends_with(tail)
+    })
+}
+
+/// What a Codex session sends its `SessionStart` hook, in `repo`.
+fn codex_session_start(repo: &Path, session: &str) -> String {
+    serde_json::json!({
+        "session_id": session,
+        "transcript_path": "/home/me/.codex/sessions/rollout.jsonl",
+        "cwd": repo,
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+    })
+    .to_string()
+}
+
+#[test]
+fn the_card_says_whether_a_harness_was_heard_not_only_that_by_hook_answers() {
+    let s = Setup::new();
+    assert!(s.by(&["setup", "--yes"]).status.success());
+    // Codex starts a session in the repository: its hook runs `by hook`.
+    let hook = ["hook", "--harness", "codex", "session-start"];
+    let heard = s
+        .repo
+        .by_with_stdin(&hook, &codex_session_start(&s.repo.root, "s1"));
+    assert_eq!(heard.status.code(), Some(0), "{}", text(&heard));
+    let again = s.by(&["setup", "--yes"]);
+    let card = stdout(&again);
+    assert!(
+        has_line(&card, "hooks: by hook answers · heard ", "(session-start)"),
+        "{card}"
+    );
+    assert!(
+        card.contains("hooks: by hook answers · never heard: start a new Claude Code session"),
+        "{card}"
+    );
+    let json = s.json(&["setup", "--json"]);
+    let codex = json["installed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["harness"] == "codex")
+        .unwrap();
+    assert_eq!(codex["heard"]["state"], "heard", "{codex}");
+    assert_eq!(codex["heard"]["kind"], "session-start", "{codex}");
+    assert_eq!(codex["heard"]["harness_event"], "SessionStart", "{codex}");
+    assert_eq!(
+        codex["heard"]["repository"],
+        s.repo.root.display().to_string(),
+        "{codex}"
+    );
+
+    // Bare `by` says the same in one row.
+    let bare = s.by(&[]);
+    let card = stdout(&bare);
+    assert!(Setup::lines(&bare) <= 12, "{card}");
+    assert!(
+        has_line(
+            &card,
+            "  hooks       heard: Codex ",
+            " · never heard: Claude Code, Gemini CLI, Qwen Code (start a new session)"
+        ),
+        "{card}"
+    );
+    // So does `by init plugin --status`, in a column of its own.
+    let status = s.json(&["init", "plugin", "--status", "--json"]);
+    let rows = status["harnesses"].as_array().unwrap();
+    let state = |id: &str| {
+        rows.iter().find(|r| r["harness"] == id).unwrap()["heard"]["state"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(state("codex"), "heard");
+    assert_eq!(state("gemini-cli"), "never");
+    let table = stdout(&s.by(&["init", "plugin", "--status"]));
+    assert!(table.contains("HEARD"), "{table}");
+
+    // Setup writes Codex's hooks again: what was heard was the old file.
+    fs::remove_file(s.file(".codex/hooks.json")).unwrap();
+    let reinstalled = stdout(&s.by(&["setup", "--yes"]));
+    assert!(
+        has_line(
+            &reinstalled,
+            "hooks: by hook answers · last heard ",
+            "(session-start), before by setup rewrote the hooks: start a new Codex session"
+        ),
+        "{reinstalled}"
+    );
+    let json = s.json(&["setup", "--json"]);
+    let codex = json["installed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["harness"] == "codex")
+        .unwrap();
+    assert_eq!(codex["heard"]["state"], "stale", "{codex}");
+    assert!(stdout(&s.by(&[])).contains("not heard since by setup: Codex"));
+    // The next session is heard again.
+    let heard = s
+        .repo
+        .by_with_stdin(&hook, &codex_session_start(&s.repo.root, "s2"));
+    assert_eq!(heard.status.code(), Some(0), "{}", text(&heard));
+    let json = s.json(&["setup", "--json"]);
+    let codex = json["installed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["harness"] == "codex")
+        .unwrap();
+    assert_eq!(codex["heard"]["state"], "heard", "{codex}");
 }
 
 #[test]

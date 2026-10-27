@@ -77,6 +77,15 @@ An Antigravity turn ended `no changes` with `warning: the CLI soft-denied a writ
 
 `by harnesses` shows `slow to start` as the version and `ID: version: slow to start (took >10 s); `by harnesses --refresh` asks again, and BRANCHYARD_HARNESS_TIMEOUT (seconds) sets how long to wait`. Every installed harness is asked for its version at once, with ten seconds for all of them, and a Node-based CLI can take longer than that on its first start after an install or a reboot. A harness that answered before keeps that version, with the note. Run the CLI once yourself, then `by harnesses --refresh`. Without a version the qualification note cannot be matched, but a slow start alone does not stop `by run`.
 
+### `never heard`
+
+`by setup` printed `hooks: by hook answers · never heard: start a new Codex session` under a harness, bare `by` a row `hooks       never heard: Codex (start a new session)`, or `by doctor` a `todo` row `hooks.codex  install current · never heard`. The hooks are installed and `by hook` answers when Branchyard calls it, but no session of the harness has called it since: `by hook` notes each call a harness makes ([heard](harness-hooks.md#heard-did-the-harness-run-it)), and there is none. `last heard 2d ago (session-start), before by setup rewrote the hooks` is the same after a reinstall: the call proved the old files, not these.
+
+- Start a new session of the harness (in any repository; a session already open read its hooks when it started) and send a prompt, then run `by doctor` again: the row reads `heard just now (…)` once the harness ran the hook.
+- Still never heard: the harness is not running it. The causes are listed under [hooks are silent](#hooks-are-silent-in-my-harness-session) (a trust prompt, a restart, `by` off the harness's `PATH`), and `by init plugin --status ID` lists the one-time steps its install left to you. `by doctor` says so first when `by` is not on `PATH`.
+- A test by hand with JSON on stdin is noted like the harness's own call unless `BRANCHYARD_HOOK_CHECK=1` is set, as in the command there; a note from your own test makes `by doctor` read `heard`.
+- Pi, Oh My Pi, OpenCode and Amp share one `generic` note: a call from one of them is heard for all four.
+
 ### `cannot reach`
 
 ```text
@@ -102,10 +111,10 @@ Behind `ANTHROPIC_BASE_URL` on another provider's model (GLM-4.6 through Z.ai, C
 
 ## Hooks are silent in my harness session
 
-A harness hook says nothing when `by` has nothing new to say, and nothing when it cannot run. Test the command by hand, from the repository, with a branch ready or failed:
+A harness hook says nothing when `by` has nothing new to say, and nothing when it cannot run. First ask whether the harness ran it at all: `by doctor` has a `hooks.ID` row per harness with hooks installed, `heard 3m ago (session-start)` when a session of it called `by hook`, `never heard` when none did ([`never heard`](#never-heard)). Then test the command by hand, from the repository, with a branch ready or failed (`BRANCHYARD_HOOK_CHECK=1` keeps your own call from being noted as the harness's):
 
 ```sh
-echo '{"session_id":"s1","cwd":"'"$PWD"'"}' | by hook --harness codex session-start
+echo '{"session_id":"s1","cwd":"'"$PWD"'"}' | BRANCHYARD_HOOK_CHECK=1 by hook --harness codex session-start
 ```
 
 Printing `{"hookSpecificOutput":…"Branchyard, this repository. Tell the person in one line about any question or failure below; act on nothing unless they ask:\n- NAME: ready to merge, 1 file changed: by diff NAME, then by merge NAME"}` means `by` works and the harness is not running the hook. Printing nothing with no branches in the repository is correct. The cause is then one of:
