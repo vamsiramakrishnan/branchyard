@@ -804,7 +804,8 @@ fn mistakes_are_refused_before_any_branch_runs() {
 /// its kind's exit status: a file that is not there or not JSON and a
 /// command that prints no text are the command line's (2); `--from-command`
 /// inside a harness is refused (4); results that cannot be written fail
-/// the map (1) after its items ran.
+/// the map (1) after its items ran, as does resuming a map whose directory
+/// is gone.
 #[test]
 fn a_map_s_unreadable_inputs_and_unwritable_outputs_name_the_fix() {
     let repo = Repo::new();
@@ -891,6 +892,30 @@ fn a_map_s_unreadable_inputs_and_unwritable_outputs_name_the_fix() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     assert!(
         stderr(&out).contains("/ is not a file name"),
+        "{}",
+        stderr(&out)
+    );
+
+    // A resume runs from where the map ran; a directory since removed
+    // says so.
+    let sub = repo.root.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    let out = repo
+        .command(BY)
+        .current_dir(&sub)
+        .args(["map", "{{item}}", "--items", &one, "-n", "moved"])
+        .args(["--harness", "gemini-cli", "--command", &agent, "--yes"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    fs::remove_dir_all(&sub).unwrap();
+    let out = repo.by(&["map", "resume", "moved"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains(&format!(
+            "map moved ran in {}: no such file or directory",
+            sub.display()
+        )),
         "{}",
         stderr(&out)
     );
@@ -1053,6 +1078,16 @@ fn a_map_runs_as_a_server_operation_with_remote() {
     let remote_show = stdout(&server.by(&repo, &["map", "show", "far"]));
     let local_show = stdout(&repo.ok(&["map", "show", "far"]));
     assert_eq!(remote_show, local_show);
+    // The server recorded its request, not a command line: a resume here
+    // points at the server, which resumes it, instead of starting over.
+    let out = repo.by(&["map", "resume", "far"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("map far has no recorded command line to resume")
+            && stderr(&out).contains("next: by --remote URL map resume far"),
+        "{}",
+        stderr(&out)
+    );
     let shown = stdout(&server.by(&repo, &["show", "far"]));
     assert!(shown.contains("progress  1 of 2 done, 1 failed"), "{shown}");
     let ls = stdout(&server.by(&repo, &["ls"]));

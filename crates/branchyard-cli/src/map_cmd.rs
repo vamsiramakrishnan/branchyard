@@ -379,11 +379,19 @@ fn resume(env: &Env, name: &str, retry_failed: bool, json: bool) -> Outcome {
                 .next("run it again with by map")
         })?;
     let Some(command) = cli.command else {
+        // A server records its request, not a command line: the server
+        // resumes it, and running it again here would start over.
+        let next = match stored.launch.get("argv") {
+            None if stored.launch.is_object() => {
+                format!("by --remote URL map resume {name} (the server it ran on resumes it)")
+            }
+            _ => "run it again with by map".to_owned(),
+        };
         return Err(crate::errors::Report::new(
             "state",
             format!("map {name} has no recorded command line to resume"),
         )
-        .next("run it again with by map")
+        .next(next)
         .into());
     };
     std::env::set_current_dir(&cwd).map_err(|e| {
