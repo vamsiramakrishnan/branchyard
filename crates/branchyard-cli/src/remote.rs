@@ -1628,6 +1628,7 @@ mod tests {
             model: None,
             provider: provider.into(),
             isolated,
+            guard: None,
         }
     }
 
