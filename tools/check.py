@@ -54,6 +54,27 @@ STEPS = (
     Step("fix_cargo_fmt", "fast", ("cargo", "fmt", "--all"), cargo=True, fix=True),
     Step("fix_ruff_format", "fast", (PY, "-m", "ruff", "format", *TARGETS), fix=True),
     Step(
+        "fix_cli_reference",
+        "test-cli",
+        (
+            "cargo",
+            "run",
+            "-q",
+            "-p",
+            "branchyard-cli",
+            "--bin",
+            "by",
+            "--locked",
+            "--offline",
+            "--",
+            "man",
+            "--markdown",
+        ),
+        cargo=True,
+        fix=True,
+        stdout="docs/cli-reference.md",
+    ),
+    Step(
         "fix_contract_schema",
         "schemas",
         (

@@ -157,7 +157,7 @@ class RealTable(unittest.TestCase):
     def test_names_are_unique_and_every_job_is_known(self):
         names = [step.name for step in check.STEPS]
         self.assertEqual(len(names), len(set(names)))
-        known = {"fast", "docs", "controls", "lint", "schemas", "test-engine", "walkthrough"}
+        known = {"fast", "docs", "controls", "lint", "schemas", "test-engine", "test-cli", "test-server", "walkthrough"}
         self.assertTrue({step.job for step in check.STEPS} <= known)
         self.assertTrue(
             {step.job for step in check.STEPS} <= set(controls_jobs()), "a step names a job check.yml lacks"

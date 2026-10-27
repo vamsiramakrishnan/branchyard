@@ -31,14 +31,14 @@ const SEAM: &str = "crates/branchyard/src/providers/";
 /// Files outside the seam that still name a variant, and how many times.
 /// Lower these as the sites move onto `ProviderKind`; never raise one.
 ///
-/// - `branchyard-cli`: announcing the chosen provider (`commands.rs`,
-///   `remote.rs`), building it from flags (`commands.rs`), and a local-only
+/// - `branchyard-cli`: announcing the chosen provider (`commands/mod.rs`,
+///   `remote.rs`), building it from flags (`commands/mod.rs`), and a local-only
 ///   check (`harness_cmd.rs`).
 /// - `branchyard-server`: admitting a requested provider against
 ///   `allow_providers` (`api.rs`). These crates cannot reach the
 ///   crate-private trait; they need a public accessor first.
 const RATCHET: &[(&str, usize)] = &[
-    ("crates/branchyard-cli/src/commands.rs", 4),
+    ("crates/branchyard-cli/src/commands/mod.rs", 4),
     ("crates/branchyard-cli/src/harness_cmd.rs", 1),
     ("crates/branchyard-cli/src/remote.rs", 1),
     ("crates/branchyard-server/src/api.rs", 6),

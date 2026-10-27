@@ -92,9 +92,11 @@ fn initialize_matches_a_recorded_handshake_and_opens_a_session() {
     let (mut driver, opened) = open_with(SessionMode::Fresh);
     let initialize = decode(&opened.frames[0]);
     assert_conforms::<InitializeRequest>(&initialize, "/params");
-    // The adapter accepted exactly this frame, apart from the request ID.
+    // The adapter accepted exactly this frame, apart from the request ID and
+    // Branchyard's own version (the recording says 0.0.1).
     let replayed = Replay::new(&recorded)
         .alias("/id")
+        .ignore("/params/clientInfo/version")
         .run(&mut driver, &opened);
     assert_eq!(replayed.sent, 1);
     assert!(replayed.events.is_empty());

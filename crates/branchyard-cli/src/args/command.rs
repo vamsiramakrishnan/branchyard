@@ -942,7 +942,11 @@ pub enum Command {
     },
     /// Print by's man page (roff), for `man -l -` or a man directory
     #[command(hide = true, display_order = 601)]
-    Man,
+    Man {
+        /// Print the command reference as Markdown instead (docs/cli-reference.md)
+        #[arg(long)]
+        markdown: bool,
+    },
     /// Set this repository up in one command
     ///
     /// Project defaults, hooks for the harnesses on PATH, and what only you can do.

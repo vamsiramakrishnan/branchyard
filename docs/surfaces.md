@@ -219,7 +219,7 @@ Every `by` command, flag and JSON output is unchanged; the parsing around them i
 | `by --help` | every command, in six groups, 112 lines | the commands of a first hour in Start, Work, Look and Clean up, and the names of the rest; `by help all` lists every command, hidden ones included, under the old groups; `by help agents` lists what a harness runs for itself. The commands a harness runs (`ask`, `answer`, `inbox`, `escalate`, `report`, `report-status`, `brief`, `delegate`, `spawn`, `children`, `graph`, `integrate`, `inspect`, `events`, `discard`) and the plumbing (`mcp`, `hook`, `statusline`, `completions`, `man`, `worker`, `serve`) are `hide = true`: they work as before, and `by help NAME` and `NAME --help` still show them |
 | `by mcp --list-tools` | `--root` and `--branch` were required | prints the MCP `tools/list` result as JSON with each tool's input schema, with no repository, branch or token |
 | Command summaries | up to 227 characters | under 80, with the detail in the second paragraph of `--help`; every argument has help text, numbers say `<DOLLARS>` or `<SECONDS>`, and `--yes` says what it grants or confirms in each command |
-| New | none | `by completions <bash\|zsh\|fish\|powershell\|elvish>`, `by man`, short flags, durations with units, `$` in `--budget-usd` |
+| New | none | `by completions <bash\|zsh\|fish\|powershell\|elvish>`, `by man` (`--markdown`: the [command reference](cli-reference.md)), short flags, durations with units, `$` in `--budget-usd` |
 
 ## Added with setup
 

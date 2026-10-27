@@ -36,7 +36,7 @@ What `by harnesses --all` lists for each harness above, from the [harness catalo
 
 | Harness | Executables | Install | Sign in | API key variables |
 |---|---|---|---|---|
-| Claude Code (`claude-code`) | `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` | `claude auth login` | `ANTHROPIC_API_KEY` |
+| Claude Code (`claude-code`) | `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` | `claude auth login` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` |
 | Codex (`codex`) | `codex` | `npm install -g @openai/codex` | `codex login --device-auth` | `OPENAI_API_KEY` |
 | Antigravity (`antigravity`) | `agy`, `antigravity` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `agy` | `GEMINI_API_KEY` |
 | Oh My Pi (`oh-my-pi`) | `omp` | `curl -fsSL https://omp.sh/install \| sh` | `omp login` | `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `ZAI_API_KEY` |

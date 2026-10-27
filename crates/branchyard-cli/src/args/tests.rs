@@ -2419,3 +2419,31 @@ fn doctor_takes_json_and_a_path_and_the_global_server_options() {
         assert!(text.contains(needle), "{needle} missing from:\n{text}");
     }
 }
+
+/// docs/cli-reference.md is what `by man --markdown` renders now: a flag or
+/// command added, renamed or reworded here is in the reference too.
+#[test]
+fn the_cli_reference_is_current() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/cli-reference.md");
+    let checked_in = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        checked_in == reference_markdown(),
+        "docs/cli-reference.md is stale; regenerate it with `python3 tools/check.py --fix` (or \
+         cargo run -q -p branchyard-cli --bin by -- man --markdown > docs/cli-reference.md)"
+    );
+}
+
+#[test]
+fn the_reference_lists_every_visible_command_once() {
+    let text = reference_markdown();
+    for sub in command().get_subcommands().filter(|s| !s.is_hide_set()) {
+        if sub.get_name() == "help" {
+            continue;
+        }
+        let heading = format!("## `by {}`\n", sub.get_name());
+        assert_eq!(text.matches(&heading).count(), 1, "{heading}");
+    }
+    // Hidden plumbing stays out, as it does in `by --help`.
+    assert!(!text.contains("## `by hook`"));
+    assert!(text.contains("| `--remote <URL>` |"), "the global options");
+}

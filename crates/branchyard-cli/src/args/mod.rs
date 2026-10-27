@@ -16,6 +16,7 @@
 //! - `help.rs`: the command groups, each command's examples and the help
 //!   listings;
 //! - `parse.rs`: parsing on a large stack, error hints and value parsers;
+//! - `reference.rs`: the Markdown command reference (`docs/cli-reference.md`);
 //! - `tests.rs`: the parser's tests.
 //!
 //! # Adding a command
@@ -72,12 +73,14 @@ mod command;
 mod flags;
 mod help;
 mod parse;
+mod reference;
 
 pub use self::actions::*;
 pub use self::command::*;
 pub use self::flags::*;
 pub use self::help::*;
 pub use self::parse::*;
+pub use self::reference::*;
 
 /// How tool permission requests are answered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

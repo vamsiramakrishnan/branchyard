@@ -58,6 +58,7 @@ What exactly is true, and what has run.
 | [Surfaces](surfaces.md) | Which operations and options work in the SDK, `by`, `by --remote`, the HTTP API, the Rust client and delegation, and which are refused where? |
 | [Server and remote mode](server.md) | How do I run `by serve`, call its HTTP API, and drive it with `by --remote`? What is durable, and what is not isolated? |
 | [Command line](cli.md) | What do the global options and their variables, short forms, durations, shell completions and the man page do, and where is each command's own flag list? |
+| [Command reference](cli-reference.md) | Every command and subcommand with its usage and options, generated from `by`'s own definitions? |
 | [Sandbox providers](providers.md) | What is the provider contract, what does the local provider guarantee, and how do I run harnesses in Microsandbox microVMs or Agent Substrate actors? |
 | [Compatibility](compatibility.md) | Which profile drives each harness, with which capabilities, and has it passed live qualification? |
 | [Driver qualification](qualification/README.md) | Which driver profiles passed live protocol qualification, and what did it find? |

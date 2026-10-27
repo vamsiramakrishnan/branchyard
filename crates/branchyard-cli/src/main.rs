@@ -245,7 +245,8 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
             clap_complete::generate(shell, &mut args::command(), "by", &mut out);
             return commands::print(&String::from_utf8_lossy(&out));
         }
-        Command::Man => {
+        Command::Man { markdown: true } => return commands::print(&args::reference_markdown()),
+        Command::Man { markdown: false } => {
             let mut out = Vec::new();
             clap_mangen::Man::new(args::command_with_hidden()).render(&mut out)?;
             return commands::print(&String::from_utf8_lossy(&out));
@@ -807,7 +808,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Worker { .. }
         | Command::Mcp { .. }
         | Command::Completions { .. }
-        | Command::Man
+        | Command::Man { .. }
         | Command::Init { .. }
         | Command::Setup { .. }
         | Command::Config { .. }
