@@ -8,7 +8,7 @@ Find the words you see, read what they mean, run the command beside them. When y
 
 The turn stopped before it finished: you cancelled it with `by cancel NAME`, or the engine running it stopped (a closed terminal, a killed process, a reboot). The session and the worktree are kept.
 
-- `by log NAME` says which. A cancel logs `warning: cancelled by by cancel`; an engine that stopped logs `recovered: its engine (pid N) is no longer running; the prompt had been submitted and the turn's outcome is unknown`.
+- `by log NAME` says which. A cancel logs ``warning: cancelled with `by cancel` `` (another canceller, by its name: `cancelled by alice`); an engine that stopped logs `recovered: its engine (pid N) is no longer running; the prompt had been submitted and the turn's outcome is unknown`.
 - `by diff NAME` shows what the turn wrote before it stopped.
 - `by send NAME --retry` submits the cut-off prompt again; `by send NAME "…"` sends a new one into the same session; `by rewind NAME --to N` goes back to checkpoint N first (0 is the base).
 
@@ -91,6 +91,10 @@ The first comes from `--remote` (or `BRANCHYARD_REMOTE`, or `[remote] url`) when
 ### `this build has no PostgreSQL support` and `this build has no Microsandbox support`
 
 Both are cargo features that are off by default. `by serve --database` needs a build with `postgres`, and `--provider microsandbox` one with `microsandbox` (it also needs Rust 1.94 or newer and `libcap-ng-dev`). Rebuild from the clone: `cargo install --locked --force --path crates/branchyard-cli --features postgres`, or `--features microsandbox`. [Server](server.md#postgresql) and [providers](providers.md) cover each.
+
+### `is not inside a git repository`, beside a `.git`
+
+`by` takes a directory for a repository the way git does: its `.git` is a git directory (one holding a `HEAD` file) or a file naming one (`gitdir: …`, a linked worktree or a submodule). An empty `.git` directory does not count: a harness run without `HOME` once left one in `/tmp`, and before 27 October 2026 `by` then took `/tmp` for a repository where git did not. `git rev-parse --show-toplevel` shows what git sees; remove a stray empty `.git`, or run `git init` if the directory should be one.
 
 ### The shell cannot find `by`
 

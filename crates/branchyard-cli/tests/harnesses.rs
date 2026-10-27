@@ -1413,6 +1413,8 @@ fn a_run_is_refused_before_a_branch_when_its_harness_cannot_start() {
         "{why}"
     );
     assert!(why.contains("--no-preflight"), "{why}");
+    // Refused before the yard is opened: no `.branchyard/` either.
+    assert!(!w.repo.join(".branchyard").exists());
     assert!(w.branches().is_empty());
     assert!(w.calls("app-server").is_empty());
     // With --json the refusal is the error envelope on stdout, with its next.

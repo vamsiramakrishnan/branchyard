@@ -96,6 +96,30 @@ pub fn truncate(text: &str, max: usize) -> String {
     short
 }
 
+/// Shorten `text` to `max` terminal columns by cutting its middle, marked
+/// with an ellipsis: for a branch name, whose end (`-2`, `-codex`) is what
+/// tells it from its siblings.
+pub fn truncate_middle(text: &str, max: usize) -> String {
+    if width(text) <= max {
+        return text.to_owned();
+    }
+    let room = max.saturating_sub(1);
+    let tail_room = room / 2;
+    let mut tail = Vec::new();
+    let mut used = 0;
+    for c in text.chars().rev() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > tail_room {
+            break;
+        }
+        used += w;
+        tail.push(c);
+    }
+    let head = truncate(text, room.saturating_sub(used) + 1);
+    let head = head.strip_suffix('…').unwrap_or(&head);
+    format!("{head}…{}", tail.iter().rev().collect::<String>())
+}
+
 /// `text` followed by spaces up to `columns` terminal columns.
 fn pad_right(text: &str, columns: usize) -> String {
     format!("{text}{}", " ".repeat(columns.saturating_sub(width(text))))
@@ -103,7 +127,19 @@ fn pad_right(text: &str, columns: usize) -> String {
 
 /// A tool invocation's input as one short line: the field a person would
 /// recognize (a command, a path) when there is one, else compact JSON.
+/// Wrapped inputs are read through: an ACP tool call (its `rawInput`, else
+/// the path it touches, else its title) and a `{"tool", "arguments"}` pair
+/// (the tool's name, then its field: `write_file hello.txt`).
 pub fn compact_input(input: &Value) -> String {
+    let text = recognizable(input).unwrap_or_else(|| match input {
+        Value::Null => String::new(),
+        other => other.to_string(),
+    });
+    truncate(&text.split_whitespace().collect::<Vec<_>>().join(" "), 80)
+}
+
+/// The part of a tool's input a person would recognize, if there is one.
+fn recognizable(input: &Value) -> Option<String> {
     const KEYS: [&str; 7] = [
         "command",
         "cmd",
@@ -113,16 +149,61 @@ pub fn compact_input(input: &Value) -> String {
         "pattern",
         "query",
     ];
-    let text = match input {
-        Value::Null => String::new(),
-        Value::String(text) => text.clone(),
-        Value::Object(map) => KEYS
-            .iter()
-            .find_map(|key| map.get(*key).and_then(Value::as_str))
-            .map_or_else(|| input.to_string(), str::to_owned),
-        other => other.to_string(),
+    let map = match input {
+        Value::String(text) => return Some(text.clone()),
+        Value::Object(map) => map,
+        _ => return None,
     };
-    truncate(&text.split_whitespace().collect::<Vec<_>>().join(" "), 80)
+    let field = KEYS.iter().find_map(|key| match map.get(*key) {
+        Some(Value::String(text)) => Some(text.clone()),
+        // A command as its words: `["bash", "-lc", "ls"]`.
+        Some(Value::Array(words)) if words.iter().all(Value::is_string) => Some(
+            words
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        _ => None,
+    });
+    if field.is_some() {
+        return field;
+    }
+    if let Some(raw) = map.get("rawInput").filter(|raw| !raw.is_null()) {
+        return recognizable(raw).or_else(|| Some(raw.to_string()));
+    }
+    let tool = ["tool", "name", "toolName"]
+        .iter()
+        .find_map(|key| map.get(*key).and_then(Value::as_str));
+    let arguments = ["arguments", "args", "input", "parameters"]
+        .iter()
+        .find_map(|key| map.get(*key));
+    if let (Some(tool), Some(arguments)) = (tool, arguments) {
+        // Arguments may come as a JSON string, as in OpenAI's function calls.
+        let parsed = match arguments {
+            Value::String(text) => serde_json::from_str(text).unwrap_or_else(|_| arguments.clone()),
+            other => other.clone(),
+        };
+        return Some(match recognizable(&parsed) {
+            Some(field) => format!("{tool} {field}"),
+            None => tool.to_owned(),
+        });
+    }
+    // An ACP tool call without its input: the first path it touches, from
+    // its locations or a diff, else its title.
+    let path = |list: &str| {
+        map.get(list)?
+            .as_array()?
+            .iter()
+            .find_map(|item| item.get("path").and_then(Value::as_str))
+            .map(str::to_owned)
+    };
+    if map.contains_key("toolCallId") {
+        return path("locations")
+            .or_else(|| path("content"))
+            .or_else(|| map.get("title").and_then(Value::as_str).map(str::to_owned));
+    }
+    None
 }
 
 pub fn usd(value: f64) -> String {
@@ -464,7 +545,8 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
         Activity::Steered { by, text, .. } => style.paint(
             Tone::Bold,
             &format!(
-                "steered by {by}: {}",
+                "steered {}: {}",
+                branchyard::operations::actor_text(by),
                 truncate(&text.split_whitespace().collect::<Vec<_>>().join(" "), 100)
             ),
         ),
@@ -1121,7 +1203,7 @@ pub fn branch_table(infos: &[BranchInfo], now: u64, style: Style) -> String {
             };
             let (status, tone) = branch_status_text(info);
             vec![
-                Cell::plain(name),
+                Cell::plain(truncate_middle(&name, 40)),
                 Cell::plain(&info.harness),
                 Cell::toned(status, tone),
                 Cell::plain(candidate_text(info.candidate.as_ref())),
@@ -1168,7 +1250,7 @@ pub fn comparison_table(infos: &[&BranchInfo], style: Style) -> String {
         .map(|info| {
             let (status, tone) = status_text(&info.status);
             vec![
-                Cell::plain(&info.name),
+                Cell::plain(truncate_middle(&info.name, 40)),
                 Cell::toned(status, tone),
                 Cell::plain(candidate_text(info.candidate.as_ref())),
                 Cell::plain(info.turns.to_string()),
@@ -2518,6 +2600,69 @@ mod tests {
         let long = compact_input(&json!({ "command": "x".repeat(200) }));
         assert_eq!(long.chars().count(), 80);
         assert!(long.ends_with('…'));
+    }
+
+    /// A permission line names what the call touches, not its raw JSON
+    /// (round 8: `asks acp:edit: {"toolCallId":"write_file__call_935705",
+    /// "status":"pending","title":"Writing to …`).
+    #[test]
+    fn compact_input_reads_through_wrapped_tool_calls() {
+        // Gemini CLI: an ACP tool call with no input, a diff and locations.
+        let gemini = json!({"toolCallId": "write_file__call_935705", "status": "pending",
+            "title": "Writing to notes/x.md", "kind": "edit",
+            "content": [{"type": "diff", "path": "/w/notes/x.md", "oldText": null, "newText": "x"}],
+            "locations": [{"path": "/w/notes/x.md"}]});
+        assert_eq!(compact_input(&gemini), "/w/notes/x.md");
+        let shell = json!({"toolCallId": "run_shell_command-1", "title": "echo hi > a.txt",
+            "kind": "execute", "content": [], "locations": []});
+        assert_eq!(compact_input(&shell), "echo hi > a.txt");
+        // Hermes: the tool and its arguments, as an OpenAI function call.
+        let hermes =
+            json!({"tool": "write_file", "arguments": {"content": "hello", "path": "hello.txt"}});
+        assert_eq!(compact_input(&hermes), "write_file hello.txt");
+        let encoded = json!({"name": "terminal", "arguments": "{\"command\": \"ls -la\"}"});
+        assert_eq!(compact_input(&encoded), "terminal ls -la");
+        assert_eq!(
+            compact_input(&json!({"tool": "todo", "arguments": {"items": []}})),
+            "todo"
+        );
+        // An ACP call that carries its input.
+        let raw = json!({"toolCallId": "c", "title": "bash", "rawInput": {"command": "touch m"}});
+        assert_eq!(compact_input(&raw), "touch m");
+        // A command given as its words.
+        assert_eq!(
+            compact_input(&json!({"command": ["bash", "-lc", "cargo test"]})),
+            "bash -lc cargo test"
+        );
+        // Nothing to go on: the call's id, as JSON.
+        assert_eq!(
+            compact_input(&json!({"toolCallId": "call_943d"})),
+            r#"{"toolCallId":"call_943d"}"#
+        );
+        // And the line, as the console and `by log` print it.
+        let asked = Event::PermissionRequested {
+            turn: Some(1),
+            request: request("acp:edit", gemini),
+        };
+        assert_eq!(
+            event_line(&asked, Style::PLAIN).unwrap(),
+            "asks acp:edit: /w/notes/x.md"
+        );
+    }
+
+    /// A name too long for its column keeps its end, which is what tells a
+    /// fan's branches apart.
+    #[test]
+    fn truncate_middle_keeps_the_end_of_a_name() {
+        let gemini = "create-a-file-named-fan-txt-containing-it-gemini-cli";
+        let agy = "create-a-file-named-fan-txt-containing-it-antigravity";
+        let (a, b) = (truncate_middle(gemini, 40), truncate_middle(agy, 40));
+        assert_ne!(a, b);
+        assert_eq!(width(&a), 40);
+        assert_eq!(a, "create-a-file-named-…ining-it-gemini-cli");
+        assert!(b.ends_with("it-antigravity"), "{b}");
+        assert_eq!(truncate_middle("short", 40), "short");
+        assert_eq!(truncate_middle("abcdef", 3), "a…f");
     }
 
     fn delta(text: &str) -> Event {

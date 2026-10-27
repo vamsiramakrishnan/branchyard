@@ -3,6 +3,11 @@
 //! A name is free when it has no record or reservation in `.branchyard/`
 //! and no `by/<name>` git branch, which a merged branch keeps after its
 //! record is removed.
+//!
+//! An automatic name, suffixes included (`-2`, `-<harness>`), is at most 40
+//! characters: the slug is cut at a word boundary to leave room for them.
+//! So a fan's names, which differ only in their suffixes, stay apart in a
+//! table that shows 40 characters of a name.
 
 use std::path::Path;
 
@@ -27,20 +32,27 @@ pub(crate) fn slug(prompt: &str) -> String {
             slug.push('-');
         }
     }
-    let mut slug = slug.trim_end_matches('-').to_owned();
-    if slug.len() > SLUG_MAX {
-        let cut = match slug[..=SLUG_MAX].rfind('-') {
-            Some(boundary) if boundary > 0 => boundary,
-            _ => SLUG_MAX,
-        };
-        slug.truncate(cut);
-        slug = slug.trim_end_matches('-').to_owned();
-    }
+    let slug = cut(slug.trim_end_matches('-'), SLUG_MAX);
     if slug.is_empty() {
         "task".into()
     } else {
         slug
     }
+}
+
+/// `slug` in at most `max` characters, cut at a word boundary where there
+/// is one, never to nothing.
+fn cut(slug: &str, max: usize) -> String {
+    let max = max.max(1);
+    if slug.len() <= max {
+        return slug.to_owned();
+    }
+    // A slug is ASCII, so every index is a character boundary.
+    let at = match slug[..=max].rfind('-') {
+        Some(boundary) if boundary > 0 => boundary,
+        _ => max,
+    };
+    slug[..at].trim_end_matches('-').to_owned()
 }
 
 /// Check that `name` is a usable single-segment branch name.
@@ -91,6 +103,19 @@ fn candidates(base: &str, harnesses: &[&str]) -> Vec<String> {
     } else {
         harnesses.iter().map(|h| format!("{base}-{h}")).collect()
     }
+}
+
+/// The names of try `attempt` (1, 2, ...) at an automatic name for one
+/// task: `base`, then `base-2`, `base-3`, ..., each with every harness's
+/// suffix, `base` cut so that the longest of them is at most 40 characters.
+fn automatic(base: &str, harnesses: &[&str], attempt: usize) -> Vec<String> {
+    let longest = harnesses.iter().map(|h| h.len() + 1).max().unwrap_or(0);
+    let number = match attempt {
+        1 => String::new(),
+        n => format!("-{n}"),
+    };
+    let room = SLUG_MAX.saturating_sub(longest + number.len());
+    candidates(&format!("{}{number}", cut(base, room)), harnesses)
 }
 
 fn free(store: &Store, root: &Path, name: &str) -> Result<bool, Error> {
@@ -193,11 +218,7 @@ fn search(
     }
     let base = slug(prompt);
     for attempt in 1..=ATTEMPTS {
-        let stem = match attempt {
-            1 => base.clone(),
-            n => format!("{base}-{n}"),
-        };
-        let names = candidates(&stem, harnesses);
+        let names = automatic(&base, harnesses, attempt);
         for name in &names {
             validate(name)?;
         }
@@ -241,6 +262,46 @@ mod tests {
         assert!(matches!(validate("-x"), Err(Error::InvalidName { .. })));
         assert_eq!(candidates("t", &["codex", "goose"]), ["t-codex", "t-goose"]);
         assert_eq!(candidates("t", &[]), ["t"]);
+    }
+
+    /// A fan's names differ only in their harness suffixes, so each fits in
+    /// the 40 characters a table shows (round 8: two rows read
+    /// `create-a-file-named-fan-txt-containing-…`). The slug gives way, at
+    /// a word boundary, to the suffixes, `-2` and the like included.
+    #[test]
+    fn automatic_names_keep_their_suffixes_within_forty_characters() {
+        let base = slug("Create a file named fan.txt containing the word fan");
+        assert_eq!(base, "create-a-file-named-fan-txt-containing");
+        let fan = automatic(&base, &["gemini-cli", "antigravity"], 1);
+        assert_eq!(
+            fan,
+            [
+                "create-a-file-named-fan-txt-gemini-cli",
+                "create-a-file-named-fan-txt-antigravity"
+            ]
+        );
+        let again = automatic(&base, &["gemini-cli", "antigravity"], 2);
+        assert_eq!(
+            again,
+            [
+                "create-a-file-named-fan-2-gemini-cli",
+                "create-a-file-named-fan-2-antigravity"
+            ]
+        );
+        for name in fan.iter().chain(&again) {
+            assert!(name.len() <= SLUG_MAX, "{name}");
+            assert!(validate(name).is_ok(), "{name}");
+        }
+        // A short slug is left whole; a single branch's `-2` fits too.
+        assert_eq!(automatic("fix-it", &["codex"], 1), ["fix-it-codex"]);
+        let single = automatic(&slug(&"word ".repeat(20)), &[], 3);
+        assert_eq!(single, ["word-word-word-word-word-word-word-3"]);
+        // A slug with no boundary is cut where it must be, never to nothing.
+        assert_eq!(
+            automatic(&"x".repeat(40), &["github-copilot"], 1),
+            [format!("{}-github-copilot", "x".repeat(25))]
+        );
+        assert_eq!(cut("abc", 0), "a");
     }
 
     /// A refused name suggests a usable one, which a model can retry with.

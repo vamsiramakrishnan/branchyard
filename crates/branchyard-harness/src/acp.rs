@@ -13,7 +13,13 @@
 //!
 //! Resume uses `session/resume` when the agent advertises it, else
 //! `session/load`; updates that `session/load` replays are not reported as a
-//! new turn. A profile may pin an auth method ([`Acp::with_auth_method`]):
+//! new turn. ACP has the agent replay the history before it answers
+//! `session/load`, but Gemini CLI 0.65.0 answers first and streams the rest
+//! after, so the driver fences the replay: on the answer it sends one request
+//! no agent knows, [`REPLAY_FENCE`], which an agent answers (`method not
+//! found`, as JSON-RPC requires) after everything it wrote before reading
+//! it, and only that answer opens the session. A profile may pin an auth
+//! method ([`Acp::with_auth_method`]):
 //! when the agent answers a resume with `auth_required` and advertises that
 //! method, the driver calls `authenticate` once and sends the resume again
 //! (Gemini CLI's `session/load` needs this where its `session/new` does not).
@@ -43,7 +49,8 @@ use std::collections::HashMap;
 
 use agent_client_protocol_schema::v1::{
     ContentBlock, InitializeResponse, PermissionOption, PermissionOptionKind, PromptResponse,
-    RequestPermissionRequest, SessionNotification, SessionUpdate, StopReason, ToolKind,
+    RequestPermissionRequest, SessionNotification, SessionUpdate, StopReason, ToolCallUpdateFields,
+    ToolKind,
 };
 use serde_json::json;
 
@@ -66,6 +73,8 @@ enum Pending {
     Session,
     /// An `authenticate` request sent after a resume answered `auth_required`.
     Authenticate,
+    /// [`REPLAY_FENCE`], sent when `session/load` answered with this result.
+    Fence(Value),
     Prompt(u64),
     /// A `_session/steering` request: the turn and the steer's number.
     Steer(u64, u64),
@@ -73,6 +82,14 @@ enum Pending {
 
 /// The ACP extension request that injects input into a running prompt.
 const STEER_METHOD: &str = "_session/steering";
+
+/// The request sent once `session/load` is answered, whose own answer ends
+/// the replay of the session's history: an agent that streams the history
+/// after answering the load (Gemini CLI 0.65.0's `streamHistory` is not
+/// awaited) has written it all before it reads this. No agent implements
+/// it; an unknown method is answered with an error, which is all the fence
+/// needs.
+pub const REPLAY_FENCE: &str = "_branchyard/replay_fence";
 
 /// ACP stdio servers: `{name, command, args, env: [{name, value}]}` with no
 /// `type`, the untagged `McpServer::Stdio` variant every agent must accept;
@@ -104,15 +121,18 @@ pub struct Acp {
     command: Vec<String>,
     open: Option<Open>,
     ready: bool,
-    /// True while `session/load` replays history.
+    /// True while `session/load` replays history: from the request until
+    /// the answer to [`REPLAY_FENCE`].
     loading: bool,
     session: Option<NativeSession>,
     next_id: u64,
     pending: HashMap<u64, Pending>,
     permissions: HashMap<String, (Value, Vec<PermissionOption>)>,
-    /// Tool names by tool call id, from `tool_call` updates, so a later
-    /// permission request for the call is matched by name.
-    tool_names: HashMap<String, String>,
+    /// What the turn's `tool_call` updates said of each call, by its id,
+    /// with its later `tool_call_update` fields merged over it, so a
+    /// permission request that names only the id (DeepSeek Harness's) is
+    /// read with the call's name, kind, title and input.
+    tool_calls: HashMap<String, serde_json::Map<String, Value>>,
     turns: Turns,
     /// Agent-specific `_meta` sent when opening a session.
     session_meta: Option<Value>,
@@ -131,7 +151,7 @@ pub struct Acp {
 }
 
 impl Acp {
-    /// `command` is the full ACP launch, such as `["gemini", "--experimental-acp"]`.
+    /// `command` is the full ACP launch, such as `["gemini", "--acp"]`.
     pub fn new(command: Vec<String>) -> Self {
         Self {
             command,
@@ -142,7 +162,7 @@ impl Acp {
             next_id: 0,
             pending: HashMap::new(),
             permissions: HashMap::new(),
-            tool_names: HashMap::new(),
+            tool_calls: HashMap::new(),
             turns: Turns::default(),
             session_meta: None,
             preamble: None,
@@ -329,7 +349,18 @@ impl Acp {
         }
         match (pending, error) {
             (Pending::Initialize, None) => self.initialized(&message["result"]),
+            // A load's history may still be on its way: fence it.
+            (Pending::Session, None) if self.loading => Output {
+                events: Vec::new(),
+                frames: vec![self.request(
+                    Pending::Fence(message["result"].clone()),
+                    REPLAY_FENCE,
+                    json!({}),
+                )],
+            },
             (Pending::Session, None) => self.session_opened(&message["result"]),
+            // Answered either way: the agent wrote the history before it.
+            (Pending::Fence(result), _) => self.session_opened(&result),
             (Pending::Authenticate, None) => match self.session_request.clone() {
                 Some((method, params)) => Output {
                     events: Vec::new(),
@@ -371,6 +402,7 @@ impl Acp {
             (Pending::Prompt(turn), error) => {
                 self.turns.end();
                 self.permissions.clear();
+                self.tool_calls.clear();
                 let outcome = match error {
                     Some(message) => TurnOutcome::Failed { message },
                     None => {
@@ -429,23 +461,40 @@ impl Acp {
                 _ => Output::default(),
             },
             SessionUpdate::ToolCall(call) => {
-                if self.tool_names.len() >= 256 {
-                    self.tool_names.clear();
-                }
-                self.tool_names.insert(
-                    call.tool_call_id.to_string(),
-                    call.name
-                        .clone()
-                        .unwrap_or_else(|| kind_name(call.kind).to_owned()),
-                );
+                self.remember_call(&call.tool_call_id.to_string(), &params["update"], true);
                 Output::event(Event::ToolStarted {
                     turn,
                     call_id: call.tool_call_id.to_string(),
                     name: call.name.unwrap_or(call.title),
                 })
             }
+            SessionUpdate::ToolCallUpdate(update) => {
+                self.remember_call(&update.tool_call_id.to_string(), &params["update"], false);
+                Output::default()
+            }
             _ => Output::default(),
         }
+    }
+
+    /// Keep what `update` says of call `id`: a `tool_call` starts its
+    /// record afresh, a `tool_call_update` replaces the fields it carries.
+    fn remember_call(&mut self, id: &str, update: &Value, start: bool) {
+        if self.tool_calls.len() >= 256 && !self.tool_calls.contains_key(id) {
+            self.tool_calls.clear();
+        }
+        let record = self.tool_calls.entry(id.to_owned()).or_default();
+        if start {
+            record.clear();
+        }
+        merge_fields(record, update);
+    }
+
+    /// The tool call a permission request is about: what the turn's
+    /// updates said of it, with the request's own fields over them.
+    fn call_for(&self, id: &str, asked: &Value) -> Value {
+        let mut call = self.tool_calls.get(id).cloned().unwrap_or_default();
+        merge_fields(&mut call, asked);
+        Value::Object(call)
     }
 
     fn client_request(&mut self, message: &Value, method: &str) -> Output {
@@ -454,23 +503,16 @@ impl Acp {
             if let Ok(request) =
                 serde_json::from_value::<RequestPermissionRequest>(message["params"].clone())
             {
-                let fields = &request.tool_call.fields;
                 let call_id = request.tool_call.tool_call_id.to_string();
-                // The tool's name when the agent gives one, here or in the
-                // call's earlier update; else its kind under a name the
-                // permission presets know; else its title, which no preset
-                // matches ("Writing to notes/x.md" is not a tool).
-                let tool = fields
-                    .name
-                    .clone()
-                    .or_else(|| self.tool_names.remove(&call_id))
-                    .or_else(|| fields.kind.map(|kind| kind_name(kind).to_owned()))
-                    .or_else(|| fields.title.clone())
-                    .unwrap_or_else(|| call_id.clone());
-                let input = fields
-                    .raw_input
-                    .clone()
-                    .unwrap_or_else(|| message["params"]["toolCall"].clone());
+                // The request joined to the call's earlier updates: an agent
+                // may name only the call's id here (DeepSeek Harness does).
+                let call = self.call_for(&call_id, &message["params"]["toolCall"]);
+                let fields = serde_json::from_value::<ToolCallUpdateFields>(call.clone())
+                    .unwrap_or_else(|_| request.tool_call.fields.clone());
+                let tool = tool_name(&fields).unwrap_or_else(|| call_id.clone());
+                // The call's own input, else the call as the agent described
+                // it (its title, the paths it touches).
+                let input = fields.raw_input.clone().unwrap_or(call);
                 let key = id.to_string();
                 self.permissions.insert(key.clone(), (id, request.options));
                 return Output::event(Event::PermissionRequested {
@@ -509,6 +551,45 @@ impl Acp {
 /// the user queued while the turn runs?") once per session, and stops asking
 /// at the first "method not found".
 const OPTIONAL_REQUESTS: [&str; 1] = ["craft/drainMidTurnQueue"];
+
+/// The name a permission request is matched by: the tool's name when the
+/// agent gives one; else the call's kind under a name the permission presets
+/// know (`acp:edit`, ...); else, for a call of kind `other` or none, a title
+/// that is one word, which is the tool's name (DeepSeek Harness titles its
+/// calls `bash`, `write`); else `acp:other`; else the title, which no preset
+/// matches ("Writing to notes/x.md" is not a tool).
+fn tool_name(fields: &ToolCallUpdateFields) -> Option<String> {
+    let title = fields.title.as_deref().map(str::trim);
+    let one_word = title.filter(|title| {
+        !title.is_empty()
+            && title.len() <= 64
+            && title
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':'))
+    });
+    fields
+        .name
+        .clone()
+        .or_else(|| match fields.kind {
+            Some(kind) if kind != ToolKind::Other => Some(kind_name(kind).to_owned()),
+            _ => None,
+        })
+        .or_else(|| one_word.map(str::to_owned))
+        .or_else(|| fields.kind.map(|kind| kind_name(kind).to_owned()))
+        .or_else(|| title.map(str::to_owned))
+}
+
+/// Merge `update`'s fields into `record`, leaving out the update's own
+/// `sessionUpdate` tag and fields it leaves empty (`null`).
+fn merge_fields(record: &mut serde_json::Map<String, Value>, update: &Value) {
+    if let Some(fields) = update.as_object() {
+        for (key, value) in fields {
+            if key != "sessionUpdate" && !value.is_null() {
+                record.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
 
 /// A tool call's kind as a name the permission presets know
 /// (`docs/egress.md#permission-presets`): `acp:edit`, `acp:execute`, ...
@@ -754,6 +835,7 @@ impl Driver for Acp {
         self.steering = false;
         self.pending.clear();
         self.permissions.clear();
+        self.tool_calls.clear();
         self.turns.closed()
     }
 }

@@ -754,7 +754,7 @@ pub(crate) fn prepare(
             .cancel_requested(fence)
             .ok()
             .flatten()
-            .map(|by| format!("cancelled by {by}"))
+            .map(|by| format!("cancelled {}", crate::operations::actor_text(&by)))
     };
     // What the worktree took from its warm pool, on the setup report.
     let pool_use = state.pool.as_ref().map(|p| Box::new(p.used.clone()));

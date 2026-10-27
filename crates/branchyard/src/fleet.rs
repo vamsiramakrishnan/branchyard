@@ -1878,6 +1878,7 @@ pub fn harness_fault(status: &BranchStatus) -> Option<String> {
         "lease to another",
         "denied:",
         "cancelled by",
+        "cancelled with",
         "its turn did not start",
         "snapshot failed",
         "could not create the worktree",

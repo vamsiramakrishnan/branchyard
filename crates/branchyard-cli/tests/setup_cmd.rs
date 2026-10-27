@@ -555,6 +555,41 @@ fn bare_by_outside_a_repository_says_so_and_points_at_setup() {
     );
 }
 
+/// An empty `.git` directory is no repository (round 8: a stray `/tmp/.git`
+/// left by a harness run without `HOME` made `by` take `/tmp` for one,
+/// where git itself does not): the card, `by setup` and `by init` all say
+/// so.
+#[test]
+fn an_empty_git_directory_does_not_make_a_repository() {
+    let dir = branchyard_testkit::Scratch::new("stray");
+    std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+    let by = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_by"))
+            .args(args)
+            .current_dir(dir.path())
+            .env("GIT_CEILING_DIRECTORIES", dir.path().parent().unwrap())
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let card = by(&[]);
+    assert!(
+        stdout(&card).contains("is not inside a git repository"),
+        "{}",
+        text(&card)
+    );
+    let setup = by(&["setup", "--yes"]);
+    assert!(!setup.status.success());
+    assert!(
+        text(&setup).contains("is not inside a git repository"),
+        "{}",
+        text(&setup)
+    );
+    assert!(!dir.path().join("branchyard.toml").exists());
+    assert!(!dir.path().join(".branchyard").exists());
+}
+
 #[test]
 fn init_plugin_status_says_what_is_installed_and_what_is_left() {
     let s = Setup::new();

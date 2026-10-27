@@ -150,11 +150,10 @@ pub const PROFILES: &[Profile] = &[
         // settings choose no auth type; `session/load` does not, and answers
         // `auth_required` until `authenticate` has chosen one.
         acp_auth_method: Some("gemini-api-key"),
-        ..acp(
-            "gemini-cli-acp",
-            "gemini-cli",
-            &["gemini", "--experimental-acp"],
-        )
+        // `--acp`; 0.65.0's `--help` calls `--experimental-acp` deprecated
+        // (it still starts ACP mode, and `--command` can still pass it to a
+        // release from before `--acp`).
+        ..acp("gemini-cli-acp", "gemini-cli", &["gemini", "--acp"])
     },
     acp("opencode-acp", "opencode", &["opencode", "acp"]),
     Profile {

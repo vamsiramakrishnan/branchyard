@@ -1308,6 +1308,15 @@ pub fn harness_profile(id: &str) -> Result<HarnessProfile, Error> {
     })
 }
 
+/// [`harness_profile`], refused as a run refuses it before it creates
+/// anything: no harness or profile of that name, or one whose tools would
+/// run without the policy when `unapproved_tools` is not set. A caller can
+/// ask before it opens a [`Yard`], which creates `.branchyard/`.
+pub fn admit_harness(id: &str, unapproved_tools: bool) -> Result<HarnessProfile, Error> {
+    harness::check_approvals(harness::select(Some(id))?, unapproved_tools)?;
+    harness_profile(id)
+}
+
 /// A harness profile as [`harness_profile`] resolves it.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

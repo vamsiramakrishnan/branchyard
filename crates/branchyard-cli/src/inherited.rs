@@ -77,7 +77,7 @@ pub(crate) fn applies(root: &Path, worktree: Option<&Path>, cwd: &Path) -> bool 
 /// The working tree `dir` is in, by rule 1 of the module comment.
 fn repository(dir: &Path) -> Option<PathBuf> {
     for ancestor in dir.ancestors() {
-        if ancestor.join(".git").exists() {
+        if branchyard_config::is_repository(ancestor) {
             return Some(ancestor.to_path_buf());
         }
         if ancestor.file_name().is_some_and(|n| n == ".branchyard") {
@@ -90,14 +90,7 @@ fn repository(dir: &Path) -> Option<PathBuf> {
 /// The git directory of the working tree at `top`: its `.git` directory,
 /// or the one its `.git` file names (for a linked worktree or a submodule).
 fn own_git_dir(top: &Path) -> Option<PathBuf> {
-    let dot_git = top.join(".git");
-    if dot_git.is_dir() {
-        return Some(canonical(&dot_git));
-    }
-    let text = fs::read_to_string(&dot_git).ok()?;
-    Some(canonical(
-        &top.join(text.trim().strip_prefix("gitdir:")?.trim()),
-    ))
+    branchyard_config::git_dir(top).map(|dir| canonical(&dir))
 }
 
 /// The common git directory of the working tree at `top`: its own git
@@ -147,6 +140,10 @@ mod tests {
         ] {
             fs::create_dir_all(d).unwrap();
         }
+        // A git directory holds a HEAD; an empty `.git` is not one.
+        for git in [&root.join(".git"), &other.join(".git"), &own] {
+            fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        }
         fs::write(own.join("commondir"), "../..\n").unwrap();
         fs::write(
             worktree.join(".git"),
@@ -183,7 +180,32 @@ mod tests {
         // A repository nested in the turn's own worktree is not the turn's.
         let nested = l.worktree.join("target/tmp/repo");
         fs::create_dir_all(nested.join(".git")).unwrap();
+        fs::write(nested.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         assert!(!applies(&l.root, Some(&l.worktree), &nested));
+    }
+
+    /// A stray empty `.git` (a harness run without `HOME` left one in
+    /// `/tmp`) is no repository: git does not take it for one, so its
+    /// directory is still the root's working tree, or nobody's.
+    #[test]
+    fn an_empty_git_directory_is_not_a_repository() {
+        let l = layout();
+        let stray = l.root.join("src/stray");
+        fs::create_dir_all(stray.join(".git")).unwrap();
+        assert_eq!(repository(&stray), Some(l.root.clone()));
+        assert!(applies(&l.root, None, &stray));
+        assert!(!branchyard_config::is_repository(&stray));
+        // A `.git` file that names no git directory is not one either.
+        let broken = l.root.join("src/broken");
+        fs::create_dir_all(&broken).unwrap();
+        fs::write(broken.join(".git"), "gitdir: ../nowhere\n").unwrap();
+        assert!(!branchyard_config::is_repository(&broken));
+        assert!(branchyard_config::is_repository(&l.root));
+        assert!(branchyard_config::is_repository(&l.worktree));
+        assert_eq!(
+            branchyard_config::git_dir(&l.worktree).map(|d| canonical(&d)),
+            Some(canonical(&l.root.join(".git/worktrees/b")))
+        );
     }
 
     #[test]

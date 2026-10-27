@@ -1202,7 +1202,7 @@ fn store_key(env: &Env, as_json: bool, machine: &Machine, id: &str) -> Outcome {
     // Never in a repository: a key file there could be committed.
     let cwd = std::env::current_dir()?;
     let root = crate::setup_io::project_root(&cwd);
-    if root.join(".git").exists() && path.starts_with(&root) {
+    if branchyard_config::is_repository(&root) && path.starts_with(&root) {
         return Err(Failure::Message(format!(
             "{} is inside the repository at {}; set BRANCHYARD_USER_CONFIG outside it",
             path.display(),

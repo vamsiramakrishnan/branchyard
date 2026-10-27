@@ -8,7 +8,10 @@
 //!
 //! - `PERMISSION`: asks `session/request_permission` and replies `allowed` or
 //!   `denied` by the option selected. Any `WRITE` in the prompt happens only
-//!   if allowed.
+//!   if allowed. With `PERMISSION_BY_ID` the call is described first, by a
+//!   `tool_call` update (title `bash`, kind `other`, input `{"command":
+//!   "touch marker.txt"}`), and the request names only its `toolCallId`, as
+//!   DeepSeek Harness asks.
 //! - `WRITE path=content`: writes `content` and a newline to `path` in its
 //!   working directory, creating parent directories; may repeat. Replies
 //!   `wrote <path>` for each.
@@ -76,6 +79,15 @@
 //! contains `<branchyard-land>`): a test scripts how the child reconciles
 //! or fixes its work.
 //!
+//! With `FAKE_ACP_REPLAY=before` or `FAKE_ACP_REPLAY=after` it does not
+//! advertise `session/resume`, so a resume loads the session, and a
+//! `session/load` replays a canned history (an earlier prompt as
+//! `user_message_chunk`, `replayed: an earlier reply` as
+//! `agent_message_chunk`, and a completed `tool_call` titled `replayed
+//! tool`): all of it before answering the load, as ACP says, or, with
+//! `after`, the prompt before the answer and the rest after it, as Gemini CLI
+//! 0.65.0 does.
+//!
 //! With `FAKE_ACP_SILENT=1` in its environment it never answers
 //! `initialize`, so no prompt is ever submitted to it.
 //!
@@ -112,14 +124,28 @@ fn reply(id: &Value, result: Value) {
 }
 
 fn chunk(session: &str, text: &str) {
+    update(
+        session,
+        json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}),
+    );
+}
+
+fn update(session: &str, update: Value) {
     send(&json!({
         "jsonrpc": "2.0",
         "method": "session/update",
-        "params": {
-            "sessionId": session,
-            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}},
-        },
+        "params": {"sessionId": session, "update": update},
     }));
+}
+
+/// The canned history a `session/load` replays under `FAKE_ACP_REPLAY`.
+fn history() -> [Value; 3] {
+    [
+        json!({"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "an earlier prompt"}}),
+        json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "replayed: an earlier reply"}}),
+        json!({"sessionUpdate": "tool_call", "toolCallId": "earlier-1", "title": "replayed tool",
+               "kind": "edit", "status": "completed"}),
+    ]
 }
 
 /// The prompt in flight: its request id, and the permission request it
@@ -188,6 +214,8 @@ fn main() {
     let mut next_request = 1000;
     let silent = std::env::var_os("FAKE_ACP_SILENT").is_some_and(|v| v == "1");
     let steering = std::env::var_os("FAKE_ACP_NO_STEER").is_none_or(|v| v != "1");
+    // `before` or `after`: when a load replays the history.
+    let replay = std::env::var("FAKE_ACP_REPLAY").ok();
     let mut stubborn = false;
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
@@ -210,6 +238,9 @@ fn main() {
                 });
                 if steering {
                     result["_meta"] = json!({"steering": {"supported": true}});
+                }
+                if replay.is_some() {
+                    result["agentCapabilities"]["sessionCapabilities"] = json!({});
                 }
                 reply(&id, result)
             }
@@ -246,11 +277,24 @@ fn main() {
                     "error": {"code": -32002, "message": "Resource not found", "data": params["sessionId"]},
                 }));
             }
-            (Some("session/resume" | "session/load"), Some(id)) => {
+            (Some(method @ ("session/resume" | "session/load")), Some(id)) => {
                 servers = params["mcpServers"].clone();
                 session = params["sessionId"].as_str().unwrap_or_default().to_owned();
                 resumed = true;
-                reply(&id, json!({}));
+                let [prompt, rest @ ..] = history();
+                match (method, replay.as_deref()) {
+                    ("session/load", Some("after")) => {
+                        update(&session, prompt);
+                        reply(&id, json!({}));
+                        rest.into_iter().for_each(|u| update(&session, u));
+                    }
+                    ("session/load", Some(_)) => {
+                        update(&session, prompt);
+                        rest.into_iter().for_each(|u| update(&session, u));
+                        reply(&id, json!({}));
+                    }
+                    _ => reply(&id, json!({})),
+                }
             }
             (Some("session/prompt"), Some(id)) => {
                 let mut text = params["prompt"][0]["text"].as_str().unwrap_or_default();
@@ -492,13 +536,27 @@ fn prompt(
     }
     if text.contains("PERMISSION") {
         *next_request += 1;
+        let tool_call = match text.contains("PERMISSION_BY_ID") {
+            true => {
+                update(
+                    session,
+                    json!({"sessionUpdate": "tool_call", "toolCallId": "call-1", "title": "bash",
+                           "kind": "other", "status": "in_progress",
+                           "rawInput": {"command": "touch marker.txt"}}),
+                );
+                json!({"toolCallId": "call-1"})
+            }
+            false => {
+                json!({"toolCallId": "call-1", "title": "write marker", "rawInput": {"path": "marker.txt"}})
+            }
+        };
         send(&json!({
             "jsonrpc": "2.0",
             "id": *next_request,
             "method": "session/request_permission",
             "params": {
                 "sessionId": session,
-                "toolCall": {"toolCallId": "call-1", "title": "write marker", "rawInput": {"path": "marker.txt"}},
+                "toolCall": tool_call,
                 "options": [
                     {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
                     {"optionId": "reject", "name": "Reject", "kind": "reject_once"},

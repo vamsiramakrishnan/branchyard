@@ -803,6 +803,7 @@ mod tests {
             crate::triggers::new_id("t")
         ));
         std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         dir
     }
 
