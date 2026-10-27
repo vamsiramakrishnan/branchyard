@@ -2913,12 +2913,43 @@ fn render_workspace(out: &mut String, table: &str, workspace: &WorkspaceConfig) 
 
 // Where the files are, and reading them.
 
-/// The directory holding `.git` at or above `cwd`, else `cwd`.
+/// The top of the git working tree at or above `cwd` (see
+/// [`is_repository`]), else `cwd`.
 pub fn project_root(cwd: &Path) -> PathBuf {
     cwd.ancestors()
-        .find(|dir| dir.join(".git").exists())
+        .find(|dir| is_repository(dir))
         .unwrap_or(cwd)
         .to_path_buf()
+}
+
+/// Whether `dir` is the top of a git working tree: its `.git` is a git
+/// directory, or a file naming one (`gitdir: <path>`, as a linked worktree
+/// or a submodule has). A git directory is one holding a `HEAD` file, as git
+/// itself requires: a stray empty `.git` directory (a harness run with no
+/// `HOME` left one in `/tmp`) does not make its parent a repository.
+pub fn is_repository(dir: &Path) -> bool {
+    git_dir(dir).is_some()
+}
+
+/// The git directory of the working tree whose top is `dir`: its `.git`
+/// directory, or the one its `.git` file names; `None` when that is not a
+/// git directory (see [`is_repository`]).
+pub fn git_dir(dir: &Path) -> Option<PathBuf> {
+    let dot_git = dir.join(".git");
+    let git_dir = match dot_git.is_dir() {
+        true => dot_git,
+        false => {
+            let text = match std::fs::read_to_string(&dot_git) {
+                Ok(text) => text,
+                // No `.git` here, or a file git could not read either: the
+                // answer to "is this a work tree's top" is no, not an error.
+                Err(_) => return None,
+            };
+            let named = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+            dir.join(named)
+        }
+    };
+    git_dir.join("HEAD").is_file().then_some(git_dir)
 }
 
 /// `branchyard.toml` at or above `cwd`, up to the repository root.
@@ -2928,7 +2959,7 @@ pub fn project_file(cwd: &Path) -> Option<PathBuf> {
         if candidate.is_file() {
             return Some(candidate);
         }
-        if dir.join(".git").exists() {
+        if is_repository(dir) {
             break;
         }
     }

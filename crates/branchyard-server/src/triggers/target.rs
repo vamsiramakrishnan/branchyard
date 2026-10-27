@@ -40,7 +40,7 @@ pub fn resolve(repo: &str, served: &[(String, PathBuf)]) -> Result<PathBuf, &'st
 }
 
 fn is_checkout(root: &Path) -> bool {
-    root.join(".git").exists()
+    branchyard::config::is_repository(root)
 }
 
 #[cfg(test)]
@@ -54,6 +54,7 @@ mod tests {
             std::fs::remove_dir_all(&dir).unwrap();
         }
         std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         let served = vec![
             ("app".to_owned(), dir.clone()),
             ("gone".to_owned(), dir.join("missing")),
@@ -62,7 +63,8 @@ mod tests {
         assert_eq!(resolve("app", &served), Ok(dir.clone()));
         assert_eq!(resolve("docs", &served), Err(NOT_SERVED));
         assert_eq!(resolve("gone", &served), Err(PATH_GONE));
-        if !std::env::temp_dir().join(".git").exists() {
+        // A stray empty `.git` in it (as one was) does not make it one.
+        if !is_checkout(&std::env::temp_dir()) {
             assert_eq!(resolve("plain", &served), Err(NOT_A_CHECKOUT));
         }
         std::fs::remove_dir_all(&dir).unwrap();

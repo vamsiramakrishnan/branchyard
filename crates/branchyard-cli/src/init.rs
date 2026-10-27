@@ -62,7 +62,7 @@ fn usage(json: bool, message: String) -> Outcome {
 
 /// Whether `cwd` is inside a repository, as setup finds the root.
 pub(crate) fn in_work_tree(cwd: &std::path::Path) -> bool {
-    setup_io::project_root(cwd).join(".git").exists()
+    branchyard_config::is_repository(&setup_io::project_root(cwd))
 }
 
 /// What `by init project` and `by up` say outside a repository.

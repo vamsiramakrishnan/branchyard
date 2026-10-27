@@ -105,6 +105,58 @@ fn each_way_of_running_says_so_and_the_record_agrees() {
     );
 }
 
+/// A run refused before it starts leaves the repository as it found it:
+/// no `.branchyard/` (round 8: a refused run left `state.db`,
+/// `worktrees/` and `gateway/`). And the local-mode note, said until a run
+/// it was printed for has started its harness, is not spent by a command
+/// that failed first (round 8: a `--harness` typo printed it, and the first
+/// real run said nothing).
+#[test]
+fn a_refused_run_leaves_no_yard_and_keeps_the_local_note_for_a_real_one() {
+    let repo = repo();
+    let yard = repo.root.join(".branchyard");
+    let typo = repo.by_agent(&["run", "WRITE a.txt=1", "--harness", "nonesuch"]);
+    assert!(!typo.status.success());
+    assert!(
+        stderr(&typo).contains("no harness or profile named nonesuch"),
+        "{}",
+        stderr(&typo)
+    );
+    assert!(!yard.exists(), "an unknown harness created .branchyard/");
+    let unapproved = repo.by_agent(&["run", "WRITE a.txt=1", "--harness", "pi"]);
+    assert!(!unapproved.status.success());
+    assert!(
+        stderr(&unapproved).contains("does not route tool permission requests"),
+        "{}",
+        stderr(&unapproved)
+    );
+    let fan = repo.by_agent(&["fan", "WRITE a.txt=1", "--harness", "gemini-cli,nonesuch"]);
+    assert!(!fan.status.success());
+    assert!(!yard.exists(), "a refused run or fan created .branchyard/");
+
+    // Past those, a base that does not exist fails before the harness
+    // starts: the note is printed, and not spent.
+    let based = repo.by_agent(&["run", "WRITE a.txt=1", "--base", "nonesuch"]);
+    assert!(!based.status.success());
+    assert!(
+        banner(&based).starts_with("by: local mode:"),
+        "{}",
+        stderr(&based)
+    );
+    assert!(!yard.join("local-mode-noted").exists());
+    let first = repo.by_agent(&["run", "WRITE a.txt=1", "--name", "first"]);
+    assert!(first.status.success(), "{}", stderr(&first));
+    assert!(
+        banner(&first).starts_with("by: local mode:"),
+        "{}",
+        stderr(&first)
+    );
+    assert!(yard.join("local-mode-noted").is_file());
+    let second = repo.by_agent(&["run", "WRITE b.txt=1", "--name", "second"]);
+    assert!(second.status.success(), "{}", stderr(&second));
+    assert!(banner(&second).is_empty(), "{}", stderr(&second));
+}
+
 #[test]
 fn isolated_false_turns_off_what_the_project_file_turned_on() {
     let repo = repo();

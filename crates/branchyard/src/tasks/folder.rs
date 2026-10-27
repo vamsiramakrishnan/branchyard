@@ -260,7 +260,7 @@ pub fn create(new: &NewTask) -> Result<(Task, Yard), Error> {
                     folder.display()
                 )));
             }
-            if folder.join(".git").exists() {
+            if crate::config::is_repository(&folder) {
                 return Err(Error::Unsupported(format!(
                     "{} is a git repository; run by there, and each attempt is a branch of it",
                     folder.display()

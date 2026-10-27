@@ -132,6 +132,44 @@ fn without_a_terminal_permissions_are_denied_and_shown() {
     assert_eq!(decision["source"]["kind"], "default");
 }
 
+/// DeepSeek Harness asks with only the call's id; the line names the tool
+/// and its command from the call's earlier update, not `acp:other` and an
+/// id, live and in `by log`.
+#[test]
+fn a_permission_asked_by_call_id_alone_shows_the_tool_and_its_command() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&["run", "PERMISSION_BY_ID", "--name", "byid", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("asks bash: touch marker.txt"), "{text}");
+    assert!(text.contains("allowed bash"), "{text}");
+    let log = stdout(&repo.by(&["log", "byid"]));
+    assert!(log.contains("asks bash: touch marker.txt"), "{log}");
+    assert!(!log.contains("toolCallId"), "{log}");
+}
+
+/// Gemini CLI 0.65.0 answers `session/load` and streams the history it
+/// replays after the answer. A `by send` shows and logs only its own turn
+/// (round 8: the earlier turns printed as the new turn's output).
+#[test]
+fn a_send_after_a_late_history_replay_shows_only_its_own_turn() {
+    let mut repo = Repo::new();
+    repo.0.set_env("FAKE_ACP_REPLAY", "after");
+    let first = repo.by_agent(&["run", "WRITE one.txt=1", "--name", "replay"]);
+    assert!(first.status.success(), "{}", stderr(&first));
+    let sent = repo.by_agent(&["send", "replay", "WHOAMI"]);
+    assert!(sent.status.success(), "{}", stderr(&sent));
+    let text = stdout(&sent);
+    // Loaded, not resumed: the fake advertises no session/resume.
+    assert!(text.contains("resumed=true"), "{text}");
+    assert!(!text.contains("replayed"), "{text}");
+    let log = stdout(&repo.by(&["log", "replay"]));
+    assert!(log.contains("resumed=true"), "{log}");
+    assert!(!log.contains("replayed"), "{log}");
+    assert!(!log.contains("an earlier prompt"), "{log}");
+    assert!(!log.contains("an earlier reply"), "{log}");
+}
+
 #[test]
 fn fan_prefixes_branches_and_compares_them() {
     let repo = Repo::new();
@@ -154,6 +192,50 @@ fn fan_prefixes_branches_and_compares_them() {
     );
     assert!(text.contains("by diff write-f-txt-x-qwen-code"), "{text}");
     assert_eq!(repo.json(&["ls", "--json"]).as_array().unwrap().len(), 2);
+}
+
+/// A long prompt's fan names keep their harness suffixes within the 40
+/// characters the comparison table shows, so its rows stay apart (round 8:
+/// two rows read `create-a-file-named-fan-txt-containing-…`).
+#[test]
+fn a_fans_rows_stay_apart_however_long_its_prompt() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&[
+        "fan",
+        "WRITE fan.txt=1 then create a file named fan txt containing the word fan",
+        "--harness",
+        "gemini-cli,qwen-code",
+        "--yes",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    let list = repo.json(&["ls", "--json"]);
+    let names: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+    let table: Vec<&str> = text
+        .lines()
+        .skip_while(|line| !line.starts_with("BRANCH"))
+        .collect();
+    for name in &names {
+        assert!(name.len() <= 40, "{name}");
+        // The comparison table's row shows the whole name.
+        assert!(
+            table
+                .iter()
+                .any(|line| line.starts_with(&format!("{name} "))),
+            "{name} in\n{text}"
+        );
+    }
+    assert!(
+        names.iter().any(|n| n.ends_with("-gemini-cli")),
+        "{names:?}"
+    );
+    assert!(names.iter().any(|n| n.ends_with("-qwen-code")), "{names:?}");
 }
 
 #[test]
@@ -210,7 +292,8 @@ fn by_cancel_stops_a_turn_that_another_by_runs() {
         "interrupted"
     );
     let log = stdout(&repo.by(&["log", "held"]));
-    assert!(log.contains("warning: cancelled by by cancel"), "{log}");
+    // The command that asked, said once (not "cancelled by by cancel").
+    assert!(log.contains("warning: cancelled with `by cancel`"), "{log}");
     // Settled: a second cancel changes nothing and says what to use.
     let again = stdout(&repo.by(&["cancel", "held"]));
     assert!(
@@ -285,6 +368,24 @@ fn watch_prints_the_tree_once_or_logs_changes_until_q() {
         .status
         .success());
     let agent = fake_agent!().display().to_string();
+    // ACP cannot fork a session: the refusal names the flag that starts a
+    // fresh one (round 8 said only "fork with a fresh session").
+    let refused = repo.by(&[
+        "fork",
+        "w",
+        "WRITE v.txt=2",
+        "--name",
+        "w-alt",
+        "--yes",
+        "--command",
+        &agent,
+    ]);
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("gemini-cli-acp cannot fork a session; pass --fresh-session"),
+        "{}",
+        stderr(&refused)
+    );
     let fork = repo.by(&[
         "fork",
         "w",
@@ -1412,7 +1513,7 @@ fn send_steer_reaches_a_turn_another_process_runs() {
     assert!(reply(&repo, "live").contains("steered: try the other file"));
     let log = stdout(&repo.by(&["log", "live"]));
     assert!(
-        log.contains("steered by by send --steer: try the other file"),
+        log.contains("steered with `by send --steer`: try the other file"),
         "{log}"
     );
 
@@ -1474,7 +1575,7 @@ fn steering_takes_a_prompt_file_and_names_its_command() {
         assert!(reply(&repo, name).contains(&format!("steered: {text}")));
         let log = stdout(&repo.by(&["log", name]));
         assert!(
-            log.contains(&format!("steered by {sender}: {text}")),
+            log.contains(&format!("steered with `{sender}`: {text}")),
             "{log}"
         );
     }

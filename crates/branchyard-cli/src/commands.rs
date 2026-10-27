@@ -183,22 +183,34 @@ pub(crate) fn banner(provider: Option<&Provider>, isolated: bool, server: Option
     }
 }
 
-/// Whether the local-mode note has not yet been printed for this
-/// repository, recording that it now has: the note is a fact about the
-/// repository's setup, said the first time and not on every run. Without a
+/// Whether the local-mode note is due in this repository, and the marker
+/// that records it was said: the note is a fact about the repository's
+/// setup, said until a run it was printed for has started a harness, and not
+/// on every run after. A command that fails before its harness starts (an
+/// unknown harness, a refused flag) does not spend it. Without a
 /// `.branchyard/` directory to keep the marker in, it is said every time.
-fn first_local_note() -> bool {
+fn local_note() -> (bool, Option<std::path::PathBuf>) {
     let Some(state) = std::env::current_dir().ok().and_then(|cwd| {
         cwd.ancestors()
             .map(|dir| dir.join(".branchyard"))
             .find(|d| d.is_dir())
     }) else {
-        return true;
+        return (true, None);
     };
     let marker = state.join("local-mode-noted");
-    if marker.exists() {
-        return false;
+    match marker.exists() {
+        true => (false, None),
+        false => (true, Some(marker)),
     }
+}
+
+/// Record that the local-mode note was said, once a harness it was said
+/// for has started: the marker [`local_note`] named, written at most once.
+fn note_said(marker: &std::sync::Mutex<Option<std::path::PathBuf>>) {
+    use branchyard_support::LockExt as _;
+    let Some(marker) = marker.lock_recovering("local-mode note").take() else {
+        return;
+    };
     best_effort(
         "record that the local-mode note was printed",
         std::fs::write(
@@ -206,13 +218,14 @@ fn first_local_note() -> bool {
             "harnesses run as your user, with no isolation beyond it\n",
         ),
     );
-    true
 }
 
 /// Console and policy for commands that run a harness.
 pub(crate) struct Live {
     pub(crate) console: Arc<Console>,
     policy: Policy,
+    /// The local-mode note's marker, written once a harness starts.
+    note: Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
 }
 
 impl Live {
@@ -285,18 +298,27 @@ impl Live {
         // A recipe that cannot be used is refused by `options`, below.
         let provider = provider(task).ok().flatten().or(branch);
         let isolated = isolated || task.isolated;
-        // The plain local mode is a fact about the repository's setup, said the
-        // first time and not on every run (`first_local_note`); a private home,
-        // a sandbox or a server is said every time.
+        // The plain local mode is a fact about the repository's setup, said
+        // until a run has started with it and not on every run after
+        // (`local_note`); a private home, a sandbox or a server is said every
+        // time.
         let plain_local = !isolated && Provider::is_local(provider.as_ref());
-        if !plain_local || first_local_note() {
+        let (due, marker) = match plain_local {
+            true => local_note(),
+            false => (true, None),
+        };
+        if due {
             eprintln!("{}", banner(provider.as_ref(), isolated, None));
         }
         if choice == (Choice::DenyAll { notice: true }) {
             eprintln!("by: {}", console::DENY_NOTICE);
         }
         let policy = console::policy(choice, console.clone());
-        Live { console, policy }
+        Live {
+            console,
+            policy,
+            note: Arc::new(std::sync::Mutex::new(marker)),
+        }
     }
 
     pub(crate) fn options(&self, task: &TaskArgs) -> Result<TaskOptions, Failure> {
@@ -311,6 +333,7 @@ impl Live {
             ));
         }
         let console = self.console.clone();
+        let note = self.note.clone();
         let exe = std::env::current_exe().ok();
         let policy = match (&exe, task.allow_delegation) {
             (Some(by), true) => self.policy.clone().allow_delegation_commands(by),
@@ -334,6 +357,10 @@ impl Live {
             observer: Some(Arc::new(move |event| {
                 // A `--detach` launcher waits for this turn to start.
                 crate::detach::observe(event);
+                // A harness started: the local-mode note was said for it.
+                if matches!(event.activity, Activity::Harness(_)) {
+                    note_said(&note);
+                }
                 console.event(event)
             })),
             isolated: task.isolated,
@@ -484,7 +511,49 @@ pub fn run(env: &Env, target: &Target, prompt: &str, task: &TaskArgs, json: bool
             false => remote::run(env, remote, &prompt, &task),
         };
     }
-    run_in_as(env, &open()?, prompt, task, None, json)
+    admit(
+        env,
+        task,
+        &[run_harness(task)],
+        task.harness.is_none(),
+        json,
+    )?;
+    run_admitted(env, &open()?, prompt, task, None, json)
+}
+
+/// The harness a `by run` without `--harness` runs.
+fn run_harness(task: &TaskArgs) -> String {
+    task.harness.clone().unwrap_or_else(|| "claude-code".into())
+}
+
+/// The refusals of a local `by run` or `by fan` that need no repository
+/// state, made before the yard is opened, which creates `.branchyard/`: a
+/// refused run leaves the repository as it found it. Each harness must be
+/// one a profile drives, routing its tools' permission requests unless
+/// `--allow-unapproved-tools` says otherwise, installed and not logged out
+/// (preflight.rs), and not near a 5-hour or weekly limit (docs/usage.md).
+/// A routed task's harnesses are chosen later, by its router.
+fn admit(
+    env: &Env,
+    task: &TaskArgs,
+    harnesses: &[String],
+    by_default: bool,
+    json: bool,
+) -> Outcome {
+    if crate::fleet_cmd::is_routed(task) {
+        return Ok(());
+    }
+    crate::preflight::check(env, task, harnesses, by_default, json)?;
+    crate::usage::guard(harnesses)?;
+    for id in harnesses {
+        // As the engine's own refusal would have failed the run.
+        match branchyard::admit_harness(id, task.unapproved_tools) {
+            Ok(_) => {}
+            Err(error) if json => return fail(true, &error),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 /// `by run`'s local half, in `yard`. `join` makes the branch another
@@ -497,11 +566,19 @@ pub(crate) fn run_in(
     task: &TaskArgs,
     join: Option<&str>,
 ) -> Outcome {
-    run_in_as(env, yard, prompt, task, join, false)
+    admit(
+        env,
+        task,
+        &[run_harness(task)],
+        task.harness.is_none(),
+        false,
+    )?;
+    run_admitted(env, yard, prompt, task, join, false)
 }
 
-/// [`run_in`], with `json` the branch as `by show --json` prints it.
-fn run_in_as(
+/// [`run_in`] once [`admit`] let the run in, with `json` the branch as `by
+/// show --json` prints it.
+fn run_admitted(
     env: &Env,
     yard: &Yard,
     prompt: &str,
@@ -510,14 +587,6 @@ fn run_in_as(
     json: bool,
 ) -> Outcome {
     let yard = yard.clone();
-    if !crate::fleet_cmd::is_routed(task) {
-        let harness = task.harness.clone().unwrap_or_else(|| "claude-code".into());
-        // Installed and not logged out, before a branch exists (preflight.rs).
-        let by_default = task.harness.is_none();
-        crate::preflight::check(env, task, std::slice::from_ref(&harness), by_default, json)?;
-        // A login near its 5-hour or weekly limit (docs/usage.md).
-        crate::usage::guard(&[harness])?;
-    }
     let (prompt, task, issue) = crate::pr::issue_task(prompt, task, Some(&yard))?;
     let task = &task;
     let workspace = workspace(env, &yard)?;
@@ -599,12 +668,8 @@ pub fn fan(
         }
         return remote::fan(env, remote, &prompt, harnesses, &task);
     }
+    admit(env, task, harnesses, false, route.json)?;
     let yard = open()?;
-    if !routed {
-        crate::preflight::check(env, task, harnesses, false, route.json)?;
-        // Logins near their 5-hour or weekly limits (docs/usage.md).
-        crate::usage::guard(harnesses)?;
-    }
     let (prompt, task, issue) = crate::pr::issue_task(prompt, task, Some(&yard))?;
     let (prompt, task) = (prompt.as_str(), &task);
     let workspace = workspace(env, &yard)?;

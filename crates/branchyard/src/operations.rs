@@ -1006,6 +1006,17 @@ pub fn limit_text(limit: &str) -> String {
     }
 }
 
+/// Who did something, after a verb: `by alice` for a person, a branch or a
+/// server's principal, and ``with `by cancel` `` for one of `by`'s own
+/// command lines, which the CLI names as the one who asked ("cancelled by
+/// by cancel" said the command twice).
+pub fn actor_text(by: &str) -> String {
+    match by.starts_with("by ") {
+        true => format!("with `{by}`"),
+        false => format!("by {by}"),
+    }
+}
+
 /// Flags `by run` and `by spawn` both take, with the same meaning: what a
 /// person starts a root with, a parent may give a child.
 pub const SHARED_TASK_FLAGS: &[&str] = &[
@@ -1193,5 +1204,19 @@ mod tests {
         assert_eq!(limit_text("max_usd"), "max_usd (--budget-usd)");
         assert_eq!(limit_text("other"), "other");
         assert_eq!(by_tool("integrate").unwrap().name, "integrate");
+    }
+
+    /// Round 8's log read `cancelled by by cancel`.
+    #[test]
+    fn a_command_line_is_named_with_and_a_person_by() {
+        assert_eq!(actor_text("by cancel"), "with `by cancel`");
+        assert_eq!(actor_text("by send --steer"), "with `by send --steer`");
+        assert_eq!(actor_text("alice"), "by alice");
+        assert_eq!(
+            actor_text("tester through the server"),
+            "by tester through the server"
+        );
+        // A name that merely starts with "by" is a name.
+        assert_eq!(actor_text("byron"), "by byron");
     }
 }

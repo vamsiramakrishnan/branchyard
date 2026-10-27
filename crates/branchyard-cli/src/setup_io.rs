@@ -130,7 +130,7 @@ impl Probe for HostProbe {
     }
 
     fn git(&self) -> Option<GitFact> {
-        if !self.root.join(".git").exists() {
+        if !branchyard_config::is_repository(&self.root) {
             return None;
         }
         let git = which("git")?;

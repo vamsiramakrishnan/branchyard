@@ -369,7 +369,8 @@ fn execute_turn(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
         }
         if let Some(by) = store.backend().cancel_requested(&fence)? {
             recorder.record(Activity::Warning(format!(
-                "cancelled by {by} before the turn started"
+                "cancelled {} before the turn started",
+                crate::operations::actor_text(&by)
             )))?;
             record.info.status = BranchStatus::Interrupted;
         } else if let Some(limit) = exhausted(&store, &record, &bounds.budget) {
@@ -2294,7 +2295,10 @@ pub(crate) fn conclude(
             BranchStatus::BudgetExceeded { limit }
         }
         End::Cancelled { by } => {
-            recorder.record(Activity::Warning(format!("cancelled by {by}")))?;
+            recorder.record(Activity::Warning(format!(
+                "cancelled {}",
+                crate::operations::actor_text(&by)
+            )))?;
             BranchStatus::Interrupted
         }
         End::Failed { reason } => BranchStatus::Failed { reason },

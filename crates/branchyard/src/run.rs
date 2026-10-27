@@ -1426,7 +1426,8 @@ pub(crate) fn fork(
         (None, Some(_), _) | (None, None, None) if fresh_session => SessionMode::Fresh,
         (None, Some(reason), _) => {
             return Err(Error::Unsupported(format!(
-                "{reason}; fork with a fresh session to start one on its candidate"
+                "{reason}; pass --fresh-session (fresh_session in the SDK and the HTTP API) \
+                 to start a new session on its candidate"
             )))
         }
         (None, None, None) => unreachable!("a missing session is a refusal"),

@@ -92,7 +92,7 @@ Each poll:
    - a review with a body that requested changes or commented, keyed `review:<id>`;
    - a comment on the pull request, keyed `comment:<id>`;
    - each comment in an unresolved review thread, keyed `thread:<id>` (resolved threads are skipped).
-5. **Deliver** everything new as one message, listing each piece with its author, file and line or its failed log, and asking the harness to address it on the branch. If the branch has a running turn, the message is steered into it (`by send --steer`'s path; the log shows `steered by by pr --watch`) and the watch waits for that turn to end. Otherwise, or if the harness does not take it, the message starts a new turn with `by send`'s path, with the watch's `--yes`, `--ask` and `--command`, and the turn's output streams to the terminal as `by send` shows it. The next poll pushes what the turn made.
+5. **Deliver** everything new as one message, listing each piece with its author, file and line or its failed log, and asking the harness to address it on the branch. If the branch has a running turn, the message is steered into it (`by send --steer`'s path; the log shows ``steered with `by pr --watch` ``) and the watch waits for that turn to end. Otherwise, or if the harness does not take it, the message starts a new turn with `by send`'s path, with the watch's `--yes`, `--ask` and `--command`, and the turn's output streams to the terminal as `by send` shows it. The next poll pushes what the turn made.
 
 Polls start `--interval` apart (default 30 seconds) and double while nothing changes, up to ten times the interval; any change, push or delivery resets it.
 

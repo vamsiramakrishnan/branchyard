@@ -101,10 +101,6 @@
       "count": 1,
       "why": "a hook's cursor file; hooks never fail a harness (docs/harness-integration.md): unreadable means start over."
     },
-    "crates/branchyard-cli/src/inherited.rs": {
-      "count": 1,
-      "why": "a worktree's .git file: unreadable gives no git directory for it."
-    },
     "crates/branchyard-cli/src/ports.rs": {
       "count": 3,
       "why": "/proc/<pid> files for by ports: a process that exited has none, and one owned by another user has no readable environ."

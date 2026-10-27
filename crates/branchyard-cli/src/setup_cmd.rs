@@ -187,7 +187,7 @@ pub fn main(env: &Env, args: &SetupFlags) -> Outcome {
     let writing = args.yes && !args.dry_run;
     let asking = !args.yes && !args.dry_run && interactive;
     let dry_run = !writing && !asking;
-    if !args.no_config && !setup_io::project_root(&cwd).join(".git").exists() {
+    if !args.no_config && !branchyard_config::is_repository(&setup_io::project_root(&cwd)) {
         return Err(Failure::Message(format!(
             "{} is not inside a git repository, and branchyard.toml belongs to one.\n\
              Next: cd into a repository (or git init here) and run by setup; \
@@ -1654,7 +1654,7 @@ pub fn plugin_status(env: &Env, only: &[String], as_json: bool) -> Outcome {
 pub fn card() -> Outcome {
     let cwd = std::env::current_dir()?;
     let root = setup_io::project_root(&cwd);
-    if !root.join(".git").exists() {
+    if !branchyard_config::is_repository(&root) {
         return print(&format!(
             "Branchyard: {} is not inside a git repository.\n\
              Next: cd <repo> && by setup\n\
