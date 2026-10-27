@@ -413,22 +413,46 @@ pub fn block_signals() {
     unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) };
 }
 
-/// Receive signals and reap orphans until told to terminate.
-fn supervise(shared: Arc<Shared>) {
-    let set = termination_signals();
-    let pid1 = std::process::id() == 1;
+/// The next signal of `set` and the process that sent it (0 when unknown).
+/// On Linux it returns at least once a second, with no signal (-1), so
+/// orphans are reaped even when no SIGCHLD reaches this thread.
+#[cfg(target_os = "linux")]
+fn next_signal(set: &libc::sigset_t) -> (i32, i32) {
     let tick = libc::timespec {
         tv_sec: 1,
         tv_nsec: 0,
     };
+    // SAFETY: sigtimedwait with a valid set and out-parameter.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let signal = unsafe { libc::sigtimedwait(set, &mut info, &tick) };
+    match signal {
+        // SAFETY: si_pid is valid for signals sent with kill.
+        libc::SIGTERM | libc::SIGINT => (signal, unsafe { info.si_pid() }),
+        _ => (signal, 0),
+    }
+}
+
+/// The next signal of `set`; the sender is not known. Unix systems other than
+/// Linux have no `sigtimedwait`, and no `/proc` to find orphans in, so this
+/// blocks until a signal arrives.
+#[cfg(not(target_os = "linux"))]
+fn next_signal(set: &libc::sigset_t) -> (i32, i32) {
+    let mut signal = 0;
+    // SAFETY: sigwait with a valid set and out-parameter.
+    match unsafe { libc::sigwait(set, &mut signal) } {
+        0 => (signal, 0),
+        _ => (-1, 0),
+    }
+}
+
+/// Receive signals and reap orphans until told to terminate.
+fn supervise(shared: Arc<Shared>) {
+    let set = termination_signals();
+    let pid1 = std::process::id() == 1;
     loop {
-        // SAFETY: sigtimedwait with a valid set and out-parameter.
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let signal = unsafe { libc::sigtimedwait(&set, &mut info, &tick) };
+        let (signal, sender) = next_signal(&set);
         shared.reap_orphans();
         if signal == libc::SIGTERM || signal == libc::SIGINT {
-            // SAFETY: si_pid is valid for signals sent with kill.
-            let sender = unsafe { info.si_pid() };
             if pid1 && sender != 0 {
                 eprintln!(
                     "branchyard-bridge: ignoring signal {signal} from process {sender} in the sandbox"

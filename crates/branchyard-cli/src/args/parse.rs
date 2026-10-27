@@ -53,7 +53,11 @@ pub(crate) fn parse_argv(argv: Vec<OsString>) -> Result<Cli, clap::Error> {
 }
 
 /// A stray word after a prompt is most likely an unquoted prompt.
-pub(crate) fn with_prompt_tip(mut error: clap::Error, cmd: &clap::Command, argv: &[OsString]) -> clap::Error {
+pub(crate) fn with_prompt_tip(
+    mut error: clap::Error,
+    cmd: &clap::Command,
+    argv: &[OsString],
+) -> clap::Error {
     if error.kind() != ErrorKind::UnknownArgument {
         return error;
     }

@@ -1677,11 +1677,13 @@ mod tests {
             "by: remote mode on http://127.0.0.1:8421 (app): harnesses run in the microsandbox \
              sandbox the branch was started in, on the server"
         );
-        // A provider the flags name wins over the record.
+        // A provider the flags name wins over the record. Built from its
+        // wire form: only crates/branchyard/src/providers names a variant.
+        let flagged: Provider = serde_json::from_str(r#"{"kind": "local"}"#).unwrap();
         assert_eq!(
             continuing_banner(
                 label,
-                Some(&Provider::Local),
+                Some(&flagged),
                 false,
                 &info("b", "microsandbox", false)
             ),

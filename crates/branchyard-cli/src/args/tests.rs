@@ -289,8 +289,7 @@ fn the_model_gateway_flag_parses() {
         })
     );
     let Command::Models { action, .. } =
-        parse_str("models list --refresh --harness codex --openai-url http://127.0.0.1:9")
-            .unwrap()
+        parse_str("models list --refresh --harness codex --openai-url http://127.0.0.1:9").unwrap()
     else {
         panic!("models list");
     };
@@ -494,12 +493,11 @@ fn provider_flags_select_and_configure_a_sandbox() {
     assert!(!task.local);
     let task = self::task("fork b go --provider local");
     assert!(task.local && task.sandbox.is_none());
-    assert!(
-        err("run go --provider microsandbox").contains("--provider microsandbox needs --image")
-    );
+    assert!(err("run go --provider microsandbox").contains("--provider microsandbox needs --image"));
     assert!(err("run go --image alpine").contains("--image needs --provider microsandbox"));
-    assert!(err("run go --provider local --cpus 2")
-        .contains("--cpus needs --provider microsandbox"));
+    assert!(
+        err("run go --provider local --cpus 2").contains("--cpus needs --provider microsandbox")
+    );
     assert!(err("run go --provider local --pass-env A")
         .contains("--pass-env needs --provider microsandbox, substrate or recipe:NAME"));
     let docker = err("run go --provider docker");
@@ -543,12 +541,8 @@ fn provider_recipe_names_a_recipe_and_its_paths() {
     assert!(err("run go --provider recipe:").contains("not a recipe name"));
     assert!(err("run go --provider recipe:Dev").contains("not a recipe name"));
     assert!(err("run go --recipe-workdir /w").contains("needs --provider recipe:NAME"));
-    assert!(
-        err("run go --provider recipe:devbox --recipe-home home").contains("must be absolute")
-    );
-    assert!(
-        err("run go --provider recipe:devbox --sandbox-snapshots 2").contains("no snapshots")
-    );
+    assert!(err("run go --provider recipe:devbox --recipe-home home").contains("must be absolute"));
+    assert!(err("run go --provider recipe:devbox --sandbox-snapshots 2").contains("no snapshots"));
     assert!(err("run go --provider recipe:devbox --image a")
         .contains("--image needs --provider microsandbox"));
 }
@@ -600,8 +594,7 @@ fn delegation_commands_parse_with_optional_branches() {
     assert_eq!(spawn.bindings.len(), 2);
     assert!(spawn.connectors.is_empty());
     assert_eq!(spawn.model, None);
-    let Command::Spawn { spawn: cheap, .. } = parse_str("spawn go --model haiku").unwrap()
-    else {
+    let Command::Spawn { spawn: cheap, .. } = parse_str("spawn go --model haiku").unwrap() else {
         panic!("not spawn")
     };
     assert_eq!(cheap.model.as_deref(), Some("haiku"));
@@ -615,8 +608,7 @@ fn delegation_commands_parse_with_optional_branches() {
     let grants: Vec<String> = granted.connectors.iter().map(|g| g.to_string()).collect();
     assert_eq!(grants, ["github:read", "linear@work:write:issues.*"]);
     let Command::Spawn { spawn: owner, .. } =
-        parse_str("spawn go --owns src/parser,tests/parser_*.rs --owns docs/parser.md")
-            .unwrap()
+        parse_str("spawn go --owns src/parser,tests/parser_*.rs --owns docs/parser.md").unwrap()
     else {
         panic!("not spawn")
     };
@@ -649,8 +641,7 @@ fn delegation_commands_parse_with_optional_branches() {
     );
     assert!(err("spawn go --review codex").contains("--land"));
     assert!(err("spawn go --land --review-model large").contains("--review"));
-    let Command::Delegate { land, .. } = parse_str("delegate --plan p.json --land").unwrap()
-    else {
+    let Command::Delegate { land, .. } = parse_str("delegate --plan p.json --land").unwrap() else {
         panic!("not delegate")
     };
     assert!(land);
@@ -825,8 +816,7 @@ fn send_and_steer_take_a_prompt_file() {
             json: true
         }
     );
-    let Command::Steer { prompt_file, .. } = parse_str("steer b --prompt-file f").unwrap()
-    else {
+    let Command::Steer { prompt_file, .. } = parse_str("steer b --prompt-file f").unwrap() else {
         panic!("not steer")
     };
     assert_eq!(prompt_file.as_deref(), Some("f"));
@@ -989,8 +979,7 @@ fn send_and_fork_take_a_branch_and_a_prompt() {
 
 #[test]
 fn detach_refuses_what_needs_a_terminal_or_a_wait() {
-    let Command::Run { detached, .. } = parse_str("run go --detach --json --yes").unwrap()
-    else {
+    let Command::Run { detached, .. } = parse_str("run go --detach --json --yes").unwrap() else {
         panic!("not run")
     };
     assert_eq!(
