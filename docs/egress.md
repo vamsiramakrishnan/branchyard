@@ -190,6 +190,8 @@ An ACP agent's request is matched by the tool name the agent gives (in the reque
 
 A preset is also the last layer of [approvals](effects.md#approvals) for connector operations (`PolicyPreset::approvals`): `read-only` and `edit-worktree` block every reversible, compensable and irreversible operation, since they change nothing outside the machine; `full` keeps the class defaults (reversible allowed, compensable asked, irreversible staged, deletions asked). Approvals that name a tool only tighten what the preset allowed. Rules match tool names only: `edit-worktree` says a harness may edit, not where; the harness's own tools decide what path an edit touches.
 
+Below the rules, on Linux, a local harness under `read-only` or `edit-worktree` also runs under the [file guard](modes.md#the-file-guard): Landlock holds it, and everything it starts, to the preset's write scope (`edit-worktree`: the worktree, its git directory, `HOME`, its temporary directory, `/dev`; `read-only`: the same without the worktree and the git directory), whether or not the harness asks Branchyard before a write. That is what makes the presets hold for a harness that runs a shell write without asking (Pi, Antigravity, DeepSeek Harness, Hermes, OpenCode on its defaults). It does not limit reads or the network (the policy above does that when it is set), and `full`, `--yes` and `--ask` run without it. The run prints `by: guard: landlock (PRESET): …`; a host without Landlock prints one `by: note: no file guard on this host (…)` and runs unguarded.
+
 How a preset combines:
 
 - In a request, its rules follow the request's own rules, and its default replaces `mode`.

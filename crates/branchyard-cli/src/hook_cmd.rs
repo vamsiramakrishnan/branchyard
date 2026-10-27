@@ -1080,6 +1080,7 @@ mod tests {
             parent: parent.map(str::to_owned),
             provider: "local".into(),
             isolated: false,
+            guard: None,
             children: Vec::new(),
             depth: u32::from(parent.is_some()),
             base: "0123456789abcdef".into(),

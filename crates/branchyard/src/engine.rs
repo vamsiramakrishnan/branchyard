@@ -898,6 +898,28 @@ fn run(
         record.cost_session = resumed;
         store.write_fenced(record, fence)?;
     }
+    // The turn's file guard: its preset's write scope, held below the
+    // harness by Landlock where this host can, and what the branch
+    // records of it either way. See `crate::guard`.
+    let home = placement.local_home();
+    let (writable, guard) =
+        match crate::guard::plan(turn.yard, record, bounds.policy.preset(), home.as_deref()) {
+            Ok(planned) => planned,
+            Err(reason) => {
+                driven.end = End::failed(format!(
+                    "could not work out where its harness may write: {reason}; the harness was \
+                     not started"
+                ));
+                return Ok(driven);
+            }
+        };
+    if let Some(writable) = writable {
+        placement.guard(writable);
+    }
+    if record.info.guard.as_ref() != Some(&guard) {
+        record.info.guard = Some(guard);
+        store.write_fenced(record, fence)?;
+    }
     let record: &Record = record;
     // Every local harness learns which branch it is on, so `by` inside it
     // never mistakes it for a person, and finds `by` itself; only a

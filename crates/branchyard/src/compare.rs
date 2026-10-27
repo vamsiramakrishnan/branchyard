@@ -343,6 +343,7 @@ mod tests {
             model: None,
             provider: "local".into(),
             isolated: false,
+            guard: None,
         };
         let mut attempts = vec![
             attempt(&info("a"), &[], vec!["x".into(), "y".into()]),

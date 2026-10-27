@@ -29,8 +29,10 @@
 //!
 //! - Isolation. [`Session::start`] runs a local process with a scrubbed
 //!   environment and a private `HOME` ([`Environment`]); proxy and system
-//!   variables pass through, and the process sees the host filesystem. A
-//!   descendant that leaves the process group escapes teardown. Under
+//!   variables pass through, and the process sees the host filesystem
+//!   ([`Session::start_local`] can hold its writes to a scope and its
+//!   network to one listener: [`Confinement`]). A descendant that leaves
+//!   the process group escapes teardown. Under
 //!   [`Session::start_in`], isolation is whatever the provider documents.
 //! - Bounded frames. Lines are not size-limited; the reader applies
 //!   backpressure to the harness through a bounded queue.
@@ -44,6 +46,8 @@
 #![cfg(unix)]
 
 pub mod egress;
+#[cfg(target_os = "linux")]
+mod landlock;
 mod local;
 #[cfg(target_os = "linux")]
 mod netns;
@@ -75,6 +79,26 @@ pub use local::{LocalProcess, LocalProvider};
 /// a local process's network cannot be confined, without trying; see
 /// `docs/egress.md`.
 pub const ENV_EGRESS_NETNS: &str = "BRANCHYARD_EGRESS_NETNS";
+
+/// `off` in this variable makes [`LocalProvider::write_guard`] report that
+/// a local process's writes cannot be held to a scope, without trying; see
+/// `docs/modes.md#the-file-guard`.
+pub const ENV_GUARD: &str = "BRANCHYARD_GUARD";
+
+/// How [`Session::start_local`] confines a local harness, beyond its
+/// environment. The default confines nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Confinement {
+    /// Its own network namespace whose only way out is a listener on
+    /// `127.0.0.1:port` there, returned for the caller to serve
+    /// ([`LocalProvider::spawn_confined_tied`]). `None` leaves its network
+    /// as this process's.
+    pub egress_port: Option<u16>,
+    /// Where it may write ([`ExecSpec::writable`], held by Landlock where
+    /// [`LocalProvider::write_guard`] says it can be). `None` leaves its
+    /// writes to your user's permissions.
+    pub writable: Option<Vec<PathBuf>>,
+}
 
 /// Lines buffered between the stdout reader and the session. When full, the
 /// reader stops reading and the harness blocks on its own writes.
@@ -350,9 +374,8 @@ impl Session {
         env: &Environment,
         transcript: Option<&Path>,
     ) -> Result<Session, RuntimeError> {
-        Session::launch(driver, open, env.resolve(), transcript, |spec| {
-            LocalProvider::spawn_tied(spec).map(|p| Box::new(p) as Box<dyn Process>)
-        })
+        Session::start_local(driver, open, env, transcript, &Confinement::default())
+            .map(|(session, _)| session)
     }
 
     /// Like [`Session::start`], but confined to its own network namespace
@@ -365,15 +388,42 @@ impl Session {
         transcript: Option<&Path>,
         port: u16,
     ) -> Result<(Session, std::net::TcpListener), RuntimeError> {
+        let confinement = Confinement {
+            egress_port: Some(port),
+            writable: None,
+        };
+        match Session::start_local(driver, open, env, transcript, &confinement)? {
+            (session, Some(listener)) => Ok((session, listener)),
+            (_, None) => Err(RuntimeError::Io {
+                context: "the confined listener",
+                source: io::Error::other("the confined process did not hand back its listener"),
+            }),
+        }
+    }
+
+    /// Like [`Session::start`], confined as `confinement` says: its network
+    /// (the listener is returned when it names a port) and where it may
+    /// write. A write scope this host cannot hold fails the start
+    /// ([`RuntimeError::Spawn`]); the harness never runs unguarded.
+    pub fn start_local(
+        driver: Box<dyn Driver>,
+        open: Open,
+        env: &Environment,
+        transcript: Option<&Path>,
+        confinement: &Confinement,
+    ) -> Result<(Session, Option<std::net::TcpListener>), RuntimeError> {
         let mut listener = None;
-        let session = Session::launch(driver, open, env.resolve(), transcript, |spec| {
-            let (process, bound) = LocalProvider::spawn_confined_tied(spec, port)?;
-            listener = Some(bound);
+        let writable = confinement.writable.clone();
+        let session = Session::launch(driver, open, env.resolve(), writable, transcript, |spec| {
+            let process = match confinement.egress_port {
+                Some(port) => {
+                    let (process, bound) = LocalProvider::spawn_confined_tied(spec, port)?;
+                    listener = Some(bound);
+                    process
+                }
+                None => LocalProvider::spawn_tied(spec)?,
+            };
             Ok(Box::new(process) as Box<dyn Process>)
-        })?;
-        let listener = listener.ok_or_else(|| RuntimeError::Io {
-            context: "the confined listener",
-            source: io::Error::other("the confined process did not hand back its listener"),
         })?;
         Ok((session, listener))
     }
@@ -389,7 +439,7 @@ impl Session {
         env: BTreeMap<OsString, OsString>,
         transcript: Option<&Path>,
     ) -> Result<Session, RuntimeError> {
-        Session::launch(driver, open, env, transcript, |spec| {
+        Session::launch(driver, open, env, None, transcript, |spec| {
             provider.exec(sandbox, spec).map_err(io::Error::from)
         })
     }
@@ -398,6 +448,7 @@ impl Session {
         mut driver: Box<dyn Driver>,
         open: Open,
         env: BTreeMap<OsString, OsString>,
+        writable: Option<Vec<PathBuf>>,
         transcript: Option<&Path>,
         exec: impl FnOnce(&ExecSpec) -> io::Result<Box<dyn Process>>,
     ) -> Result<Session, RuntimeError> {
@@ -414,6 +465,7 @@ impl Session {
             argv: opened.launch.argv,
             cwd: PathBuf::from(&opened.launch.cwd),
             env,
+            writable,
         };
         if spec.argv.is_empty() {
             return Err(RuntimeError::Spawn {

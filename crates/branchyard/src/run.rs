@@ -159,6 +159,7 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
             model: new.provision.as_ref().and_then(|p| p.model.clone()),
             provider: crate::providers::label_of(new.provider.as_ref()),
             isolated: new.home.is_some() && !placement::sandboxed(new.provider.as_ref()),
+            guard: None,
         },
         created_ms,
         check: new.check,

@@ -261,6 +261,7 @@ by run "Same, authenticated" --isolated --mcp world=https://mcp.example.com/mcp 
 
 ## Security notes
 
+- The permission rules written above (Claude Code's managed settings, Antigravity's rules, Oh My Pi's tool policies, OpenCode's asks) are kept by the harness, in files under its own `HOME`, which it can rewrite. Under `--permissions read-only` and `edit-worktree`, a local harness on Linux is also held below them by the [file guard](modes.md#the-file-guard): Landlock limits its writes to the preset's scope (`read-only`: its `HOME`, its temporary directory and `/dev`; `edit-worktree`: those, its worktree and its git directory), whatever its own rules say. Reads, the network and per-command decisions stay with the rules and the [egress policy](egress.md).
 - Variables reach everything the harness starts, including its tool commands. Which secrets are variables, per harness, is in [the table above](#secrets-and-the-harnesss-tools) and in each `provisioned` event; Claude Code's API key is not one of them. Prefer file-based credentials (`CLAUDE_AUTH`, `CODEX_AUTH`, `GEMINI_OAUTH_CREDS`, `OPENCODE_AUTH`, `COPILOT_CONFIG`) where the harness has them.
 - No secret is on a command line (rule 6). MCP servers' variables and headers are in a 0600 file or on the harness's stdin.
 - Credential files stay in the branch's private home between turns, 0600, like Scion's, because a send resumes the session there; the private home is under `.branchyard/homes/`. Removing the branch removes them (see [removing a branch](#removing-a-branch)).

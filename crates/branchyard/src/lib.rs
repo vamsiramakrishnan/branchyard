@@ -120,6 +120,7 @@ mod git;
 pub mod glance;
 mod goal;
 mod graph;
+pub mod guard;
 mod harness;
 mod inbox;
 mod integrate;
@@ -185,6 +186,7 @@ pub use branchyard_config as config;
 /// builds one that does.
 pub use branchyard_microsandbox::{ENABLED as MICROSANDBOX_BUILT, REBUILD as MICROSANDBOX_REBUILD};
 pub use git::current_branch;
+pub use guard::Guard;
 pub use lock::DirLock;
 pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
 
@@ -2169,6 +2171,12 @@ pub struct BranchInfo {
     /// provider, whose private home is the sandbox's.
     #[serde(default)]
     pub isolated: bool,
+    /// What held its harness to its permission preset's file scope on its
+    /// last turn: Landlock and where it could write, or nothing and why
+    /// (`docs/modes.md#the-file-guard`). `None` until a turn has started
+    /// its harness, and for a record from before it was kept.
+    #[serde(default)]
+    pub guard: Option<Guard>,
 }
 
 /// The `provider` of a record that predates the field.

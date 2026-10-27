@@ -1121,6 +1121,7 @@ mod tests {
             model: None,
             provider: "local".into(),
             isolated: false,
+            guard: None,
         }
     }
 

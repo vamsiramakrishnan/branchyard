@@ -943,6 +943,28 @@ pub(super) fn host_namespaces(ctx: &Context) -> Vec<Check> {
     }]
 }
 
+/// Landlock, which holds a local harness to its permission preset's file
+/// scope (docs/modes.md#the-file-guard).
+pub(super) fn host_landlock(_: &Context) -> Vec<Check> {
+    const NAME: &str = "host.landlock";
+    vec![match branchyard::guard::support() {
+        Ok(abi) => Check::ok(
+            NAME,
+            format!(
+                "Landlock ABI {abi}: under --permissions read-only or edit-worktree a local \
+                 harness can write only in its preset's scope"
+            ),
+        ),
+        Err(why) => Check::warn(
+            NAME,
+            format!("no file guard: {why}"),
+            "--permissions read-only and edit-worktree then decide only the tool calls a \
+             harness asks about; a Linux 5.13 or newer kernel with Landlock enabled holds the \
+             rest (docs/modes.md#the-file-guard)",
+        ),
+    }]
+}
+
 /// A loopback listener, which the egress proxy and the gateways need.
 pub(super) fn host_loopback(_: &Context) -> Vec<Check> {
     const NAME: &str = "host.loopback";

@@ -173,6 +173,7 @@ fn sh(cwd: &Path, script: &str) -> ExecSpec {
         argv: vec!["sh".into(), "-c".into(), script.into()],
         cwd: cwd.to_path_buf(),
         env: [("BY_TEST".into(), "set".into())].into(),
+        writable: None,
     }
 }
 
@@ -242,6 +243,7 @@ fn an_exec_relays_stdio_env_and_exit_status() {
         argv: vec!["/nonexistent/program".into()],
         cwd: bridge.work(),
         env: Default::default(),
+        writable: None,
     };
     assert!(matches!(
         endpoint.exec(&missing),
@@ -613,6 +615,7 @@ fn sigterm_is_forwarded_to_the_execs_and_the_bridge_exits_cleanly() {
             argv: vec!["cat".into(), "/proc/self/status".into()],
             cwd: bridge.work(),
             env: Default::default(),
+            writable: None,
         })
         .unwrap();
     let mut status = String::new();

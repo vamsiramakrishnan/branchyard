@@ -183,6 +183,23 @@ pub(crate) fn banner(provider: Option<&Provider>, isolated: bool, server: Option
     }
 }
 
+/// The line `by` prints before a local run whose preset names a file
+/// scope: `by: guard: landlock (edit-worktree): ...`, or `by: note: no
+/// file guard on this host (...)` where Landlock cannot hold it. A
+/// `--plan` run's planning turns are read-only. `None` for `--yes`,
+/// `--ask`, `full` and no preset, which name no scope.
+pub(crate) fn guard_line(task: &TaskArgs, isolated: bool) -> Option<String> {
+    let preset = match task.permissions {
+        _ if task.plan => Some(branchyard::PolicyPreset::ReadOnly),
+        Permissions::Preset(preset) => Some(preset),
+        _ => None,
+    };
+    Some(match branchyard::guard::banner(preset, isolated)? {
+        Ok(line) => format!("by: guard: {line}"),
+        Err(note) => format!("by: note: {note}"),
+    })
+}
+
 /// Whether the local-mode note is due in this repository, and the marker
 /// that records it was said: the note is a fact about the repository's
 /// setup, said until a run it was printed for has started a harness, and not
@@ -309,6 +326,13 @@ impl Live {
         };
         if due {
             eprintln!("{}", banner(provider.as_ref(), isolated, None));
+        }
+        // A preset's file scope, held by Landlock for a local harness, is
+        // said on every run, as is a host that cannot hold it.
+        if Provider::is_local(provider.as_ref()) {
+            if let Some(line) = guard_line(task, isolated) {
+                eprintln!("{line}");
+            }
         }
         if choice == (Choice::DenyAll { notice: true }) {
             eprintln!("by: {}", console::DENY_NOTICE);

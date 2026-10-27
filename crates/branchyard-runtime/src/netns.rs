@@ -13,7 +13,9 @@
 //!
 //! Everything the child does runs between `fork` and `exec` and so uses
 //! only system calls on memory prepared before the fork: no allocation, no
-//! locks.
+//! locks. A write scope ([`crate::landlock`]) is registered after this
+//! hook ([`prepare`], then [`Pending::spawn`]), so the child writes its
+//! `/proc/self` maps before Landlock would refuse them.
 //!
 //! Support is detected at run time by confining `/bin/sh -c 'exit 0'`: a
 //! kernel without unprivileged user namespaces, or a security module that
@@ -89,6 +91,19 @@ struct Prepared {
 /// Spawn `command` confined, with its listener on `127.0.0.1:port` in its
 /// namespace (`0` for any port); returns the child and the listener.
 pub fn spawn(command: &mut Command, port: u16) -> io::Result<(Child, TcpListener)> {
+    prepare(command, port)?.spawn(command)
+}
+
+/// A command confined by [`prepare`], to be spawned by [`Pending::spawn`].
+pub struct Pending {
+    receiver: OwnedFd,
+}
+
+/// Register the confinement on `command`, with its listener on
+/// `127.0.0.1:port` in its namespace (`0` for any port), so a hook
+/// registered after this one (Landlock's) runs inside the namespace, after
+/// its `/proc/self` writes.
+pub fn prepare(command: &mut Command, port: u16) -> io::Result<Pending> {
     let (receiver, sender) = rustix::net::socketpair(
         AddressFamily::UNIX,
         SocketType::DGRAM,
@@ -109,37 +124,45 @@ pub fn spawn(command: &mut Command, port: u16) -> io::Result<(Child, TcpListener
     unsafe {
         command.pre_exec(move || confine(&prepared));
     }
-    // The listener was sent before the exec, so it is queued once the
-    // spawn has succeeded: the receive below does not wait.
-    let child = command.spawn()?;
-    let mut byte = [0u8; 1];
-    let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
-    let mut ancillary = RecvAncillaryBuffer::new(&mut space);
-    let received = rustix::net::recvmsg(
-        &receiver,
-        &mut [IoSliceMut::new(&mut byte)],
-        &mut ancillary,
-        RecvFlags::DONTWAIT | RecvFlags::CMSG_CLOEXEC,
-    );
-    let mut listener = None;
-    if received.is_ok() {
-        for message in ancillary.drain() {
-            if let RecvAncillaryMessage::ScmRights(fds) = message {
-                for fd in fds {
-                    listener.get_or_insert(fd);
+    Ok(Pending { receiver })
+}
+
+impl Pending {
+    /// Spawn the prepared `command`; returns the child and its listener.
+    pub fn spawn(self, command: &mut Command) -> io::Result<(Child, TcpListener)> {
+        // The listener was sent before the exec, so it is queued once the
+        // spawn has succeeded: the receive in `listener` does not wait.
+        let child = command.spawn()?;
+        let receiver = self.receiver;
+        let mut byte = [0u8; 1];
+        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut ancillary = RecvAncillaryBuffer::new(&mut space);
+        let received = rustix::net::recvmsg(
+            &receiver,
+            &mut [IoSliceMut::new(&mut byte)],
+            &mut ancillary,
+            RecvFlags::DONTWAIT | RecvFlags::CMSG_CLOEXEC,
+        );
+        let mut listener = None;
+        if received.is_ok() {
+            for message in ancillary.drain() {
+                if let RecvAncillaryMessage::ScmRights(fds) = message {
+                    for fd in fds {
+                        listener.get_or_insert(fd);
+                    }
                 }
             }
         }
-    }
-    match listener {
-        Some(fd) => Ok((child, TcpListener::from(fd))),
-        None => {
-            let mut child = child;
-            branchyard_support::best_effort("kill child", child.kill());
-            branchyard_support::best_effort("reap child", child.wait());
-            Err(io::Error::other(
-                "the confined process did not hand back its listener",
-            ))
+        match listener {
+            Some(fd) => Ok((child, TcpListener::from(fd))),
+            None => {
+                let mut child = child;
+                branchyard_support::best_effort("kill child", child.kill());
+                branchyard_support::best_effort("reap child", child.wait());
+                Err(io::Error::other(
+                    "the confined process did not hand back its listener",
+                ))
+            }
         }
     }
 }

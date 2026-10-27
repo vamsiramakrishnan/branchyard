@@ -119,6 +119,7 @@ fn run(provider: &SubstrateProvider, name: &str, script: &str) -> String {
         argv: vec!["sh".into(), "-c".into(), script.into()],
         cwd: "/".into(),
         env: [("PATH".into(), std::env::var_os("PATH").unwrap_or_default())].into(),
+        writable: None,
     };
     let mut process = provider.exec(name, &spec).unwrap();
     drop(process.take_stdin());
