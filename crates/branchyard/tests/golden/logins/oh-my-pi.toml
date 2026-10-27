@@ -1,0 +1,82 @@
+# Oh My Pi (18.10.3): provider keys in the environment or in the .env files it
+# loads, `omp login` logins as rows of agent.db (read with sqlite3 or
+# python3, the provider's name only), and the Bun its script needs.
+# Run by crates/branchyard/tests/logins.rs.
+
+[[case]]
+name = "a provider key in the environment"
+env = { GEMINI_API_KEY = "fake-gemini" }
+lines = ["env GEMINI_API_KEY", "fact bun missing"]
+cell = "key set (GEMINI_API_KEY)"
+state = "logged_in"
+evidence = "likely"
+detail = "GEMINI_API_KEY is set (an API key; not checked)"
+key = "GEMINI_API_KEY"
+
+[[case]]
+name = "logins omp login stored, read with sqlite3"
+home = { ".omp/agent/agent.db" = "a database the fake sqlite3 reads" }
+programs = { sqlite3 = 'printf "anthropic\nopenai-codex\n"' }
+lines = ["fact login anthropic", "fact login openai-codex", "fact bun missing"]
+cell = "credentials found"
+state = "logged_in"
+evidence = "likely"
+detail = "omp login stored for anthropic, openai-codex in ~/.omp/agent/agent.db (not checked)"
+
+[[case]]
+name = "logins read with python3 where there is no sqlite3"
+home = { ".omp/agent/agent.db" = "a database the fake python3 reads" }
+programs = { python3 = '[ "$1" = -I ] && printf "zai\n"' }
+lines = ["fact login zai", "fact bun missing"]
+cell = "credentials found"
+state = "logged_in"
+evidence = "likely"
+detail = "omp login stored for zai in ~/.omp/agent/agent.db (not checked)"
+
+[[case]]
+name = "a login store nothing on the machine can read"
+home = { ".omp/agent/agent.db" = "unread" }
+lines = ["fact login-store unread", "fact bun missing"]
+cell = "unknown"
+state = "unknown"
+evidence = "none"
+detail = "~/.omp/agent/agent.db may hold a login, which needs sqlite3 or python3 on the machine to read, and none of GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENROUTER_API_KEY, ZAI_API_KEY is set"
+
+[[case]]
+name = "a key in a .env file it loads beats an unreadable store"
+home = { ".omp/agent/agent.db" = "unread", ".omp/agent/.env" = "export ZAI_API_KEY=fake-zai\n" }
+lines = ["fact login-store unread", "fact env-file ZAI_API_KEY ~/.omp/agent/.env", "fact bun missing"]
+cell = "credentials found"
+state = "logged_in"
+evidence = "likely"
+detail = "ZAI_API_KEY is set in ~/.omp/agent/.env, which omp loads (an API key; not checked)"
+
+[[case]]
+name = "an empty value or a comment in a .env file is no key"
+home = { ".omp/.env" = "OPENAI_API_KEY=\n# ANTHROPIC_API_KEY=fake-commented\n" }
+lines = ["fact bun missing"]
+cell = "login not verified"
+state = "logged_out"
+evidence = "likely"
+detail = "no login stored in ~/.omp/agent/agent.db and none of GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENROUTER_API_KEY, ZAI_API_KEY is set; set one, or run omp login"
+
+[[case]]
+name = "a Bun script with a Bun too old to run it"
+first_line = "#!/usr/bin/env bun"
+programs = { bun = 'case "$1" in --version) echo 1.3.11;; *) echo "SyntaxError: Unexpected identifier" >&2; exit 1;; esac' }
+lines = ["fact runs-on-bun", "fact bun 1.3.11"]
+cell = "login not verified"
+state = "logged_out"
+evidence = "likely"
+detail = "no login stored in ~/.omp/agent/agent.db and none of GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENROUTER_API_KEY, ZAI_API_KEY is set; set one, or run omp login"
+version_note = "its version command exited with status 1; omp runs on Bun 1.3.14 or newer and the bun on PATH is 1.3.11: `curl -fsSL https://omp.sh/install | sh` installs or upgrades it"
+
+[[case]]
+name = "a Bun script and no Bun"
+first_line = "#!/usr/bin/env bun"
+lines = ["fact runs-on-bun", "fact bun missing"]
+cell = "login not verified"
+state = "logged_out"
+evidence = "likely"
+detail = "no login stored in ~/.omp/agent/agent.db and none of GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENROUTER_API_KEY, ZAI_API_KEY is set; set one, or run omp login"
+version_note = "its version command exited with status 127; omp runs on Bun 1.3.14 or newer and no bun is on PATH: `curl -fsSL https://omp.sh/install | sh` installs or upgrades it"

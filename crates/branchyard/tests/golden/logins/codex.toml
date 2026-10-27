@@ -1,0 +1,107 @@
+# Codex: `codex login status` read with emdash's phrases, CODEX_API_KEY
+# beside a login, and the model provider config.toml selects (0.164.0).
+# Run by crates/branchyard/tests/logins.rs.
+
+[[case]]
+name = "logged in, with CODEX_API_KEY set"
+status = ["Logged in using ChatGPT"]
+env = { CODEX_API_KEY = "fake-codex" }
+lines = ["env CODEX_API_KEY"]
+cell = "logged in"
+state = "logged_in"
+evidence = "verified"
+detail = "codex login status: Logged in using ChatGPT; CODEX_API_KEY is set, and Codex uses it instead of the login (unset it, or run isolated, to use the login)"
+
+[[case]]
+name = "a warning, then logged out"
+status = ["WARNING: proceeding, even though we could not create PATH aliases", "Not logged in"]
+status_exit = 1
+lines = []
+cell = "logged out"
+state = "logged_out"
+evidence = "verified"
+detail = "codex login status: Not logged in"
+
+[[case]]
+name = "a model provider of its own whose key is set"
+status = ["Not logged in"]
+status_exit = 1
+env = { ZAI_KEY = "fake-zai" }
+home = { ".codex/config.toml" = """
+model = "glm-4.6"
+model_provider = "zai"
+
+[model_providers.zai]
+name = "Z.ai"
+base_url = "https://api.z.ai/api/v1"
+env_key = "ZAI_KEY"
+wire_api = "responses"
+""" }
+lines = ["fact model-provider zai", "fact provider-env ZAI_KEY", "env ZAI_KEY"]
+cell = "key set (ZAI_KEY)"
+state = "logged_in"
+evidence = "likely"
+detail = "ZAI_KEY is set, and ~/.codex/config.toml selects the model provider zai, which reads it (an API key; not checked)"
+key = "ZAI_KEY"
+
+[[case]]
+name = "a model provider of its own whose key is not set"
+status = ["Not logged in"]
+status_exit = 1
+env = { CODEX_HOME = "{home}/codex-home" }
+home = { "codex-home/config.toml" = """
+model_provider = "zai"
+
+[model_providers.zai]
+env_key = "ZAI_KEY"
+""" }
+lines = ["fact model-provider zai", "fact provider-env ZAI_KEY"]
+cell = "logged out"
+state = "logged_out"
+evidence = "verified"
+detail = "codex login status: Not logged in; ~/.codex/config.toml selects the model provider zai, which reads ZAI_KEY, and ZAI_KEY is not set"
+
+[[case]]
+name = "a model provider that names no key variable"
+status = ["Not logged in"]
+status_exit = 1
+home = { ".codex/config.toml" = """
+model_provider = "local"
+
+[model_providers.local]
+base_url = "http://localhost:8080/v1"
+""" }
+lines = ["fact model-provider local"]
+cell = "logged out"
+state = "logged_out"
+evidence = "verified"
+detail = "codex login status: Not logged in; ~/.codex/config.toml selects the model provider local, which names no key variable (this status command speaks only of the OpenAI login)"
+
+[[case]]
+name = "a profile's provider is not read; an OpenAI key is"
+status = ["Not logged in"]
+status_exit = 1
+env = { OPENAI_API_KEY = "fake-openai" }
+home = { ".codex/config.toml" = """
+profile = "glm"
+
+[profiles.glm]
+model_provider = "zai"
+""" }
+lines = ["env OPENAI_API_KEY"]
+cell = "key set (OPENAI_API_KEY)"
+state = "logged_in"
+evidence = "likely"
+detail = "OPENAI_API_KEY is set (an API key; not checked)"
+key = "OPENAI_API_KEY"
+
+[[case]]
+name = "a credential file and a status that says nothing it knows"
+status = ["usage: codex login status"]
+status_exit = 2
+home = { ".codex/auth.json" = "{}" }
+lines = ["file ~/.codex/auth.json"]
+cell = "credentials found"
+state = "logged_in"
+evidence = "likely"
+detail = "~/.codex/auth.json exists"

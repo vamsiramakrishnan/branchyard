@@ -525,8 +525,30 @@ fn the_inventory_is_cached_for_a_minute_and_refreshed_on_request() {
         "the second read is cached"
     );
     assert_eq!(first["detected_at_ms"], second["detected_at_ms"]);
+    // The listing says when the cache answered, and how to ask again.
+    let cached = text(&w.ok(&["harnesses"]).stdout);
+    assert_eq!(w.calls("codex --version").len(), 1);
+    let note = cached
+        .lines()
+        .find(|l| l.contains("are installed on this machine (cached "))
+        .unwrap_or_else(|| panic!("no cached note:\n{cached}"));
+    assert!(note.contains("s ago; --refresh asks again). "), "{note}");
     w.json(&["harnesses", "--json", "--refresh"]);
     assert_eq!(w.calls("codex --version").len(), 2);
+    let fresh = text(&w.ok(&["harnesses", "--refresh"]).stdout);
+    assert_eq!(w.calls("codex --version").len(), 3);
+    assert!(!fresh.contains("(cached "), "{fresh}");
+    // `by doctor` and `by setup` read the same cache, and `--refresh` asks
+    // the harnesses again there too.
+    // (Whether they pass is theirs to say: Codex is logged out here.)
+    w.by(&["doctor"]);
+    assert_eq!(w.calls("codex --version").len(), 3, "doctor read the cache");
+    w.by(&["doctor", "--refresh"]);
+    assert_eq!(w.calls("codex --version").len(), 4, "doctor --refresh");
+    w.by(&["setup", "--dry-run"]);
+    assert_eq!(w.calls("codex --version").len(), 4, "setup read the cache");
+    w.by(&["setup", "--dry-run", "--refresh"]);
+    assert_eq!(w.calls("codex --version").len(), 5, "setup --refresh");
     // A different PATH is a different machine as far as the cache goes.
     let out = w.by_env(
         &["harnesses", "--json"],

@@ -276,12 +276,25 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         }
         // Setup needs no repository or server: it may be what creates them.
         Command::Init { init } => return init::main(env, &init),
-        Command::Setup { setup } => return setup_cmd::main(env, &setup),
+        Command::Setup { setup } => {
+            // `--refresh`: the harnesses are asked again, not the cache.
+            if setup.refresh {
+                harness_cmd::forget_inventory();
+            }
+            return setup_cmd::main(env, &setup);
+        }
         Command::Config { json, action } => return config_cmd::main(&action, json),
         // Doctor reports a broken configuration, a missing store or an
         // unreachable server rather than stopping at it.
-        Command::Doctor { json, path } => {
-            return doctor_cmd::main(env, globals, path.as_deref(), json)
+        Command::Doctor {
+            json,
+            path,
+            refresh,
+        } => {
+            if refresh {
+                harness_cmd::forget_inventory();
+            }
+            return doctor_cmd::main(env, globals, path.as_deref(), json);
         }
         // Up acts on this machine's repository, whatever [remote] says.
         Command::Up { json, plan, yes } => return up_cmd::main(env, globals, plan, yes, json),

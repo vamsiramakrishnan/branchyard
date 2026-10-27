@@ -1,0 +1,31 @@
+# OpenCode: GOOGLE_GENERATIVE_AI_API_KEY is its Google key; GEMINI_API_KEY is
+# not (1.19.4 fails with "Google Generative AI API key is missing").
+# Run by crates/branchyard/tests/logins.rs.
+
+[[case]]
+name = "the Google key its SDK reads, beside one it does not"
+env = { GEMINI_API_KEY = "fake-gemini", GOOGLE_GENERATIVE_AI_API_KEY = "fake-google" }
+lines = ["env GOOGLE_GENERATIVE_AI_API_KEY"]
+cell = "key set (GOOGLE_GENERATIVE_AI_API_KEY)"
+state = "logged_in"
+evidence = "likely"
+detail = "GOOGLE_GENERATIVE_AI_API_KEY is set (an API key; not checked)"
+key = "GOOGLE_GENERATIVE_AI_API_KEY"
+
+[[case]]
+name = "GEMINI_API_KEY alone is no login"
+env = { GEMINI_API_KEY = "fake-gemini" }
+lines = []
+cell = "login not verified"
+state = "logged_out"
+evidence = "likely"
+detail = "no ~/.local/share/opencode/auth.json and no ANTHROPIC_API_KEY or OPENAI_API_KEY or GOOGLE_GENERATIVE_AI_API_KEY or ORCAROUTER_API_KEY"
+
+[[case]]
+name = "its own credential file"
+home = { ".local/share/opencode/auth.json" = "{}" }
+lines = ["file ~/.local/share/opencode/auth.json"]
+cell = "credentials found"
+state = "logged_in"
+evidence = "likely"
+detail = "~/.local/share/opencode/auth.json exists"

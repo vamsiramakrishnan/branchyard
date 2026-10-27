@@ -118,6 +118,12 @@ fn cache() -> InventoryCache {
     InventoryCache::new(inventory::user_paths(&user_dir()).0, inventory::DEFAULT_TTL)
 }
 
+/// Forget this machine's cached inventory, so the next command that reads
+/// it detects again: `by doctor --refresh` and `by setup --refresh`.
+pub(crate) fn forget_inventory() {
+    cache().clear();
+}
+
 /// The harnesses this machine has, from the cache `by harnesses` keeps
 /// (detected afresh once it is older than its time to live), without the
 /// usage meters. For `by doctor`.
@@ -252,25 +258,41 @@ fn detect(
     options: &DetectOptions,
     refresh: bool,
 ) -> Result<Inventory, Failure> {
+    detect_aged(env, machine, options, refresh).map(|fetched| fetched.inventory)
+}
+
+/// [`detect`], with how old the cache's answer is when it gave one.
+fn detect_aged(
+    env: &Env,
+    machine: &Machine,
+    options: &DetectOptions,
+    refresh: bool,
+) -> Result<inventory::Fetched, Failure> {
+    let fresh = |inventory| inventory::Fetched {
+        inventory,
+        cached: None,
+    };
     match machine {
         Machine::Local => {
-            let mut found = match options.only {
-                Some(_) => inventory::detect_local(options),
-                None => cache().local(options, refresh),
+            let mut fetched = match options.only {
+                Some(_) => inventory::detect_local(options).map(fresh),
+                None => cache().fetch(options, refresh),
             }
             .map_err(Failure::Message)?;
-            attach_quota(&mut found);
-            count_stored_keys(&mut found);
-            Ok(found)
+            attach_quota(&mut fetched.inventory);
+            count_stored_keys(&mut fetched.inventory);
+            Ok(fetched)
         }
         Machine::Ssh(url) => inventory::detect_with(options, true, |_| {
             let mut command = ssh(url, false);
             command.arg("sh -s");
             command
         })
+        .map(fresh)
         .map_err(|e| Failure::Message(format!("on {}: {e}", machine.place()))),
         Machine::Recipe(name) => on_recipe(env, name, |transport| {
             inventory::detect_with(options, false, |script| transport.command(script, &[]))
+                .map(fresh)
                 .map_err(Failure::Message)
         }),
     }
@@ -405,7 +427,7 @@ fn list(env: &Env, target: &Target, as_json: bool, refresh: bool, on: Option<&st
                 worker.repos.join(", ")
             ));
             match &worker.inventory {
-                Some(found) => text.push_str(&inventory_text(found, false, env.style())),
+                Some(found) => text.push_str(&inventory_text(found, false, None, env.style())),
                 None => {
                     text.push_str("  advertises no harness inventory (run with inventory on)\n")
                 }
@@ -415,15 +437,16 @@ fn list(env: &Env, target: &Target, as_json: bool, refresh: bool, on: Option<&st
         return print(&text);
     }
     let machine = Machine::parse(on)?;
-    let found = detect(env, &machine, &DetectOptions::from_env(), refresh)?;
+    let fetched = detect_aged(env, &machine, &DetectOptions::from_env(), refresh)?;
     if as_json {
         return print(&json::text(
-            &serde_json::to_value(&found).expect("serializes"),
+            &serde_json::to_value(&fetched.inventory).expect("serializes"),
         ));
     }
     print(&inventory_text(
-        &found,
+        &fetched.inventory,
         matches!(machine, Machine::Local),
+        fetched.cached,
         env.style(),
     ))
 }
@@ -458,7 +481,13 @@ fn login_text(state: &HarnessState) -> (String, Tone) {
 
 /// An inventory as a table with what is not ready and why.
 /// `local`: the inventory is of this machine, which is how it is named.
-fn inventory_text(found: &Inventory, local: bool, style: Style) -> String {
+/// `cached`: how old the cache's answer is, when the cache gave it.
+fn inventory_text(
+    found: &Inventory,
+    local: bool,
+    cached: Option<std::time::Duration>,
+    style: Style,
+) -> String {
     let known = branchyard::harnesses();
     let any_quota = found.harnesses.iter().any(|h| h.quota.is_some());
     let mut columns = vec![
@@ -577,7 +606,7 @@ fn inventory_text(found: &Inventory, local: bool, style: Style) -> String {
         }
     }
     text.push_str(&format!(
-        "\n{} of the {} harnesses with a known executable are installed on {}. `by harnesses \
+        "\n{} of the {} harnesses with a known executable are installed on {}{}. `by harnesses \
          --all` lists the rest with their install commands; `by harnesses install ID` installs \
          one.\n",
         found.harnesses.len(),
@@ -585,7 +614,11 @@ fn inventory_text(found: &Inventory, local: bool, style: Style) -> String {
         match (local, found.host.as_str()) {
             (true, _) | (_, "") => "this machine",
             (false, host) => host,
-        }
+        },
+        // The cache answered: say so, and how to ask the harnesses again.
+        cached
+            .map(|age| format!(" ({})", inventory::cached_note(age)))
+            .unwrap_or_default()
     ));
     text
 }

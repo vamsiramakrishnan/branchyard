@@ -13,12 +13,14 @@
 //!
 //! A login state is `verified` only when the harness's own status command
 //! said so; otherwise it is `likely` (a key variable or credential file is
-//! present, or every known credential file is absent) or unknown. Three
-//! harnesses need a look inside their configuration, still by name only
-//! (the `probes` module): Antigravity reads a key only when its settings select the
-//! Gemini provider, DeepSeek Harness takes its provider from
-//! `cordis.patch.yml`, and Gemini CLI's headless runs need the workspace
-//! trusted (`GEMINI_CLI_TRUST_WORKSPACE`).
+//! present, or every known credential file is absent) or unknown. How each
+//! harness's login is read is data, `catalog/logins.toml`: its status
+//! command, credential files, key variables, and the looks inside its
+//! configuration that some need, still by name only (Antigravity reads a
+//! key only when its settings select the Gemini provider, DeepSeek Harness
+//! takes its providers from `cordis.patch.yml`, Codex from the
+//! `model_provider` its `config.toml` selects). The `logins` module is the
+//! one interpreter of that file, for the script and for the login.
 //!
 //! Installing runs the catalog's own install command for the harness,
 //! pinned to the version its default profile was checked against when the
@@ -41,6 +43,8 @@ use std::time::Duration;
 use branchyard_controls::catalog;
 use branchyard_recipe::quote;
 use serde::{Deserialize, Serialize};
+
+mod logins;
 
 /// Labels derived from an inventory: `harness:<id>` for each harness that
 /// can run on the machine.
@@ -149,16 +153,20 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// What Antigravity's login detail says when `GEMINI_API_KEY` is set and
-/// its settings do not select the provider that reads it.
+/// its settings do not select the provider that reads it (part of its
+/// gate's `unused` detail in `catalog/logins.toml`).
 pub const AGY_KEY_UNUSED: &str = "does not set modelProvider gemini";
 
 impl Login {
+    /// The key is set but a gate in `catalog/logins.toml` keeps it unused:
     /// Antigravity has `GEMINI_API_KEY`, but its settings do not select the
-    /// provider that reads it ([`AGY_KEY_UNUSED`]): `agy` asks for a Google
-    /// sign-in, and a headless run fails, unless a private home gets the
-    /// setting from Branchyard.
+    /// provider that reads it ([`AGY_KEY_UNUSED`]), so `agy` asks for a
+    /// Google sign-in, and a headless run fails, unless a private home gets
+    /// the setting from Branchyard.
     pub fn key_unused(&self) -> bool {
-        self.key.as_deref() == Some("GEMINI_API_KEY") && self.detail.contains(AGY_KEY_UNUSED)
+        self.key
+            .as_deref()
+            .is_some_and(|key| logins::gated_unused(key, &self.detail))
     }
 
     /// The login in the fewest honest words, for a table cell:
@@ -481,311 +489,11 @@ pub fn login_hint(id: &str) -> String {
     }
 }
 
-// What is known about each harness's login, beyond the catalog.
-
-/// How to tell whether one harness is logged in.
-struct LoginCheck {
-    harness: &'static str,
-    /// Its own status command (the arguments after the executable), with
-    /// the phrases that mean logged out and logged in, checked in that
-    /// order, ignoring case.
-    status: Option<StatusCommand>,
-    /// Credential files, as `sh` words expanded on the machine, with how
-    /// to show each.
-    files: &'static [(&'static str, &'static str)],
-    /// Key variables besides the catalog's `auth_env`.
-    env: &'static [&'static str],
-    /// On macOS the login is in the keychain, so no file proves nothing.
-    keychain_on_macos: bool,
-}
-
-struct StatusCommand {
-    args: &'static [&'static str],
-    logged_out: &'static [&'static str],
-    logged_in: &'static [&'static str],
-}
-
-/// From emdash's agent plugins (`checkStatus`: Codex runs `codex login
-/// status` and reads it with these patterns) and Scion's harness configs
-/// (`auth.types.*.required_files` and `autodetect.env`). Claude Code's
-/// emdash status check (`claude/auth.ts`) is not in the vendored sources;
-/// Branchyard asks `claude auth status` itself (run on Claude Code 2.1.310,
-/// which prints JSON with `loggedIn`), and reads files and variables when
-/// that says nothing.
-const LOGIN_CHECKS: &[LoginCheck] = &[
-    LoginCheck {
-        harness: "claude-code",
-        // `claude auth status` prints JSON with a `loggedIn` flag. It sees
-        // logins the credential file does not (a token the host provides).
-        status: Some(StatusCommand {
-            args: &["auth", "status"],
-            logged_out: &["\"loggedin\": false", "\"loggedin\":false"],
-            logged_in: &["\"loggedin\": true", "\"loggedin\":true"],
-        }),
-        files: &[(
-            "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json",
-            "~/.claude/.credentials.json",
-        )],
-        env: &["CLAUDE_CODE_OAUTH_TOKEN"],
-        keychain_on_macos: true,
-    },
-    LoginCheck {
-        harness: "codex",
-        status: Some(StatusCommand {
-            args: &["login", "status"],
-            logged_out: &[
-                "not authenticated",
-                "not logged in",
-                "not signed in",
-                "login required",
-            ],
-            logged_in: &["authenticated", "logged in", "signed in"],
-        }),
-        files: &[(
-            "${CODEX_HOME:-$HOME/.codex}/auth.json",
-            "~/.codex/auth.json",
-        )],
-        env: &["CODEX_API_KEY"],
-        keychain_on_macos: false,
-    },
-    LoginCheck {
-        harness: "gemini-cli",
-        status: None,
-        files: &[(
-            "$HOME/.gemini/oauth_creds.json",
-            "~/.gemini/oauth_creds.json",
-        )],
-        env: &[],
-        keychain_on_macos: false,
-    },
-    LoginCheck {
-        harness: "opencode",
-        status: None,
-        files: &[(
-            "$HOME/.local/share/opencode/auth.json",
-            "~/.local/share/opencode/auth.json",
-        )],
-        env: &[],
-        keychain_on_macos: false,
-    },
-    LoginCheck {
-        harness: "antigravity",
-        status: None,
-        files: &[(
-            "$HOME/.gemini/antigravity-cli/antigravity-oauth-token",
-            "~/.gemini/antigravity-cli/antigravity-oauth-token",
-        )],
-        // GEMINI_API_KEY is the catalog's `auth_env`: agy reads a key from
-        // it alone (GOOGLE_API_KEY has no effect), and only with
-        // `modelProvider` set to `gemini` in its settings.
-        env: &["AGY_TOKEN"],
-        keychain_on_macos: false,
-    },
-    // DeepSeek Harness 0.2.0-rc.2 has no login command: DEEPSEEK_API_KEY
-    // (the catalog's `auth_env`) feeds its shipped provider, and `probes`
-    // reads the provider a `cordis.patch.yml` configures.
-    LoginCheck {
-        harness: "deepseek-harness",
-        status: None,
-        files: &[],
-        env: &[],
-        keychain_on_macos: false,
-    },
-    // Oh My Pi 18.10.3 reads provider keys from its environment (the
-    // catalog's `auth_env`) and keeps `omp login` logins in a database,
-    // which `probes` reads for provider names.
-    LoginCheck {
-        harness: "oh-my-pi",
-        status: None,
-        files: &[],
-        env: &[],
-        keychain_on_macos: false,
-    },
-    LoginCheck {
-        harness: "github-copilot",
-        status: None,
-        files: &[("$HOME/.copilot/config.json", "~/.copilot/config.json")],
-        env: &["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"],
-        keychain_on_macos: false,
-    },
-    LoginCheck {
-        harness: "grok-build",
-        status: None,
-        files: &[("$HOME/.grok/auth.json", "~/.grok/auth.json")],
-        env: &["XAI_API_KEY"],
-        keychain_on_macos: false,
-    },
-    LoginCheck {
-        harness: "hermes",
-        status: None,
-        files: &[],
-        env: &["GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
-        keychain_on_macos: false,
-    },
-    LoginCheck {
-        harness: "muse-code",
-        status: None,
-        files: &[],
-        env: &["META_API_KEY"],
-        keychain_on_macos: false,
-    },
-];
+// What is known about each harness's login, beyond the catalog, is
+// catalog/logins.toml, read by the `logins` module.
 
 /// Version arguments other than `--version`: emdash's `versionArgs`.
 const VERSION_ARGS: &[(&str, &[&str])] = &[("jules", &["version"])];
-
-fn login_check(id: &str) -> Option<&'static LoginCheck> {
-    LOGIN_CHECKS.iter().find(|c| c.harness == id)
-}
-
-/// The `cordis.patch.yml` files DeepSeek Harness composes its providers
-/// from, as `probes` reads them: under `$DSH_HOME` (default `~/.dsh`) and
-/// under its ACP profile there, for people.
-const DSH_CONFIGS: &[&str] = &[
-    "~/.dsh/cordis.patch.yml",
-    "~/.dsh/profiles/acp/cordis.patch.yml",
-];
-
-/// Where Oh My Pi keeps the logins `omp login` stores, as shown to people.
-const OMP_LOGINS: &str = "~/.omp/agent/agent.db";
-
-/// Where Pi keeps the logins `/login` stores, as shown to people.
-const PI_LOGINS: &str = "~/.pi/agent/auth.json";
-
-/// The Bun release Oh My Pi 18.10.3 needs (`engines.bun` of
-/// `@oh-my-pi/pi-coding-agent`, and `MIN_BUN_VERSION` of its installer): an
-/// older Bun fails to parse `omp` and its version command exits 1.
-const OMP_MIN_BUN: &str = "1.3.14";
-
-/// What only a look inside a configuration file or a flag variable can
-/// tell, as `sh` run on the machine once the harness is found. Each prints
-/// `fact ID NAME` (or an `env` line for a key variable that is set) and
-/// never a value: the files are searched, not printed.
-///
-/// - Antigravity 1.3.3 reads `GEMINI_API_KEY` only when its `settings.json`
-///   has `"modelProvider": "gemini"`: `model-provider-gemini`.
-/// - Codex 0.164.0 sends its requests to the `model_provider` its
-///   `config.toml` selects (`$CODEX_HOME`, default `~/.codex`) with the
-///   variable that provider's `env_key` names, and `codex login status`
-///   speaks only of the OpenAI login: a top-level `model_provider` other than
-///   `openai` is `model-provider NAME`, the `env_key` of its
-///   `[model_providers.NAME]` table is `provider-env VAR`, and an `env` line
-///   when that variable is set.
-/// - Qwen Code 0.26.0 has no login command or credential file (`qwen auth`
-///   is removed): it runs on `OPENAI_API_KEY` alone (an `env` line when
-///   set) or on a provider connected inside it, which is a
-///   `security.auth.selectedType` in `~/.qwen/settings.json`:
-///   `auth-selected`.
-/// - Gemini CLI 0.63.0's headless `gemini -p` refuses an untrusted
-///   directory unless `GEMINI_CLI_TRUST_WORKSPACE` is `true`:
-///   `trust-workspace`.
-/// - DeepSeek Harness 0.2.0-rc.2 composes its `llm-pi-ai` providers from
-///   `cordis.patch.yml` under `$DSH_HOME` and the profile's: a `providers:`
-///   key is `providers FILE`, an `apiKey:` line with a value is `inline-key
-///   FILE`, and each `apiKeyEnv:` variable is an `env` line when it is set
-///   and `key-unset NAME` when it is not (dsh stops with
-///   `MISSING_CREDENTIAL` on a provider whose variable is unset).
-/// - Hermes Agent 0.19.0 loads `$HERMES_HOME/.env` (default `~/.hermes/.env`)
-///   for its providers' keys: each `NAME_API_KEY=` line with a value is
-///   `env-file NAME FILE`, the name alone.
-/// - Oh My Pi 18.10.3 is a Bun script: `runs-on-bun` when its executable's
-///   first bytes name `bun`, and `bun VERSION` or `bun missing` for the Bun
-///   on `PATH`. Its `omp login` logins are rows of `~/.omp/agent/agent.db`:
-///   `login PROVIDER` for each provider with one, read with `sqlite3` or
-///   `python3` (`login-store unread` when the file exists and neither
-///   does); the provider's name is read, never the credential. A key in
-///   `~/.omp/agent/.env` or `~/.omp/.env`, which omp loads, is `env-file
-///   NAME FILE`, the name alone.
-/// - Pi 0.73.1 keeps what `/login` stored in `$PI_CODING_AGENT_DIR` or
-///   `~/.pi/agent/auth.json`, and creates the file as `{}` on its first
-///   start, so the file existing says nothing: an entry (`"type":`) is
-///   `login-stored`.
-fn probes(id: &str) -> &'static str {
-    match id {
-        "pi" => {
-            r##"  pd=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
-  grep -Eq '"type"[[:space:]]*:' "$pd/auth.json" 2>/dev/null && echo 'fact pi login-stored'
-"##
-        }
-        "antigravity" => {
-            r##"  grep -Eq '"modelProvider"[[:space:]]*:[[:space:]]*"gemini"' "$HOME/.gemini/antigravity-cli/settings.json" 2>/dev/null && echo 'fact antigravity model-provider-gemini'
-"##
-        }
-        "codex" => {
-            r##"  cx="${CODEX_HOME:-$HOME/.codex}/config.toml"
-  if [ -f "$cx" ]; then
-    mp=$(sed -n -e '/^\[/q' -e 's/^model_provider[[:space:]]*=[[:space:]]*"\([A-Za-z0-9_.-]*\)".*$/\1/p' "$cx" 2>/dev/null | head -n1)
-    if [ -n "$mp" ] && [ "$mp" != openai ]; then
-      echo "fact codex model-provider $mp"
-      ek=$(sed -n "/^\[model_providers\.$mp\]/,/^\[/p" "$cx" 2>/dev/null | sed -n 's/^env_key[[:space:]]*=[[:space:]]*"\([A-Za-z_][A-Za-z0-9_]*\)".*$/\1/p' | head -n1)
-      if [ -n "$ek" ]; then
-        echo "fact codex provider-env $ek"
-        eval "[ -n \"\${$ek:-}\" ]" && echo "env codex $ek"
-      fi
-    fi
-  fi
-"##
-        }
-        "qwen-code" => {
-            r##"  [ -n "${OPENAI_API_KEY:-}" ] && echo 'env qwen-code OPENAI_API_KEY'
-  grep -Eq '"selectedType"[[:space:]]*:' "$HOME/.qwen/settings.json" 2>/dev/null && echo 'fact qwen-code auth-selected'
-"##
-        }
-        "gemini-cli" => {
-            r##"  [ "${GEMINI_CLI_TRUST_WORKSPACE:-}" = true ] && echo 'fact gemini-cli trust-workspace'
-"##
-        }
-        "deepseek-harness" => {
-            r##"  ph=${DSH_HOME:-$HOME/.dsh}
-  for pf in cordis.patch.yml profiles/acp/cordis.patch.yml; do
-    [ -f "$ph/$pf" ] || continue
-    grep -Eq '^[[:space:]-]*providers:' "$ph/$pf" 2>/dev/null && echo "fact deepseek-harness providers $pf"
-    grep -Eq '^[[:space:]-]*apiKey:[[:space:]]*[^[:space:]#]' "$ph/$pf" 2>/dev/null && echo "fact deepseek-harness inline-key $pf"
-    for pv in $(sed -n 's/^[[:space:]-]*apiKeyEnv:[^A-Za-z_]*\([A-Za-z_][A-Za-z0-9_]*\).*$/\1/p' "$ph/$pf" 2>/dev/null); do
-      if eval "[ -n \"\${$pv:-}\" ]"; then echo "env deepseek-harness $pv"; else echo "fact deepseek-harness key-unset $pv"; fi
-    done
-  done
-"##
-        }
-        "hermes" => {
-            r##"  hh=${HERMES_HOME:-$HOME/.hermes}
-  ef="$hh/.env"
-  if [ -f "$ef" ]; then
-    case "$ef" in "$HOME"/*) shown="~/${ef#"$HOME"/}" ;; *) shown="$ef" ;; esac
-    for pv in $(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*_API_KEY\)[[:space:]]*=[[:space:]]*[^[:space:]#].*$/\2/p' "$ef" 2>/dev/null); do echo "fact hermes env-file $pv $shown"; done
-  fi
-"##
-        }
-        "oh-my-pi" => {
-            r##"  head -c 64 "$f" 2>/dev/null | tr -d '\0' | grep -q bun && echo 'fact oh-my-pi runs-on-bun'
-  if b=$(command -v bun 2>/dev/null); then echo "fact oh-my-pi bun $("$b" --version 2>/dev/null | head -n1)"; else echo 'fact oh-my-pi bun missing'; fi
-  db="$HOME/.omp/agent/agent.db"
-  if [ -f "$db" ]; then
-    q='select distinct provider from auth_credentials where disabled_cause is null'
-    if command -v sqlite3 >/dev/null 2>&1; then
-      for pv in $(sqlite3 -readonly "$db" "$q" 2>/dev/null); do echo "fact oh-my-pi login $pv"; done
-    elif command -v python3 >/dev/null 2>&1; then
-      for pv in $(python3 -I -c 'import sqlite3,sys
-c=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True)
-print("\n".join(r[0] for r in c.execute(sys.argv[2])))' "$db" "$q" 2>/dev/null); do echo "fact oh-my-pi login $pv"; done
-    else
-      echo 'fact oh-my-pi login-store unread'
-    fi
-  fi
-  for ef in "$HOME/.omp/agent/.env" "$HOME/.omp/.env"; do
-    [ -f "$ef" ] || continue
-    for pv in $(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*_API_KEY\)[[:space:]]*=.*/\2/p' "$ef" 2>/dev/null); do echo "fact oh-my-pi env-file $pv ~/${ef#"$HOME"/}"; done
-  done
-"##
-        }
-        _ => "",
-    }
-}
-
-/// Whether a Bun `version` (`1.3.11`) is older than [`OMP_MIN_BUN`].
-fn bun_too_old(version: &str) -> bool {
-    version_below(version, OMP_MIN_BUN)
-}
 
 /// Whether `version` (`0.73.1`, `1.3.14-rc.1`) is older than `floor`,
 /// comparing the first three numbers; a suffix is not looked at.
@@ -820,14 +528,14 @@ fn version_args(id: &str) -> &'static [&'static str] {
 }
 
 /// The key variables a harness reads instead of a login: the catalog's
-/// `auth_env` and the ones above, once each.
+/// `auth_env` and its `env` in `catalog/logins.toml`, once each.
 pub fn key_variables(id: &str) -> Vec<String> {
     let mut vars: Vec<String> = catalog::harness(id)
         .map(|e| e.auth_env.clone())
         .unwrap_or_default();
-    for var in login_check(id).map(|c| c.env).unwrap_or_default() {
-        if !vars.iter().any(|v| v == var) {
-            vars.push((*var).to_owned());
+    for var in logins::extra_key_variables(id) {
+        if !vars.contains(var) {
+            vars.push(var.clone());
         }
     }
     vars
@@ -849,12 +557,8 @@ pub fn set_key_variables() -> Vec<String> {
 /// The status command `id`'s login is verified with, for people.
 pub fn status_command(id: &str) -> Option<String> {
     let entry = catalog::harness(id)?;
-    let check = login_check(id)?.status.as_ref()?;
-    Some(format!(
-        "{} {}",
-        entry.binaries.first()?,
-        check.args.join(" ")
-    ))
+    let args = logins::status_args(id)?;
+    Some(format!("{} {}", entry.binaries.first()?, args.join(" ")))
 }
 
 // Detection.
@@ -1004,26 +708,30 @@ pub fn script(options: &DetectOptions) -> String {
             "  run \"$D/o.{index}\" version {id} \"$f\" {}\n",
             version.join(" ")
         ));
-        let check = login_check(id);
-        if let Some(status) = check.and_then(|c| c.status.as_ref()) {
-            let args: Vec<String> = status.args.iter().map(|a| quote(a)).collect();
+        // How its login is read: catalog/logins.toml, by the `logins` module.
+        if let Some(args) = logins::status_args(id) {
+            let args: Vec<String> = args.iter().map(|a| quote(a)).collect();
             s.push_str(&format!(
                 "  run \"$D/o.{index}\" status {id} \"$f\" {}\n",
                 args.join(" ")
             ));
         }
-        for var in key_variables(id).iter().filter(|v| variable(v)) {
+        let vars = key_variables(id);
+        let quiet = logins::quiet_variables(id)
+            .iter()
+            .filter(|v| !vars.contains(v));
+        for var in vars.iter().chain(quiet).filter(|v| variable(v)) {
             s.push_str(&format!(
                 "  [ -n \"${{{var}:-}}\" ] && echo 'env {id} {var}'\n"
             ));
         }
-        for (expr, shown) in check.map(|c| c.files).unwrap_or_default() {
+        for (expr, shown) in logins::credential_files(id) {
             s.push_str(&format!(
                 "  [ -e \"{expr}\" ] && echo {}\n",
                 quote(&format!("file {id} {shown}"))
             ));
         }
-        s.push_str(probes(id));
+        s.push_str(&logins::lines(id));
         s.push_str(&format!("  ) >\"$D/h.{index}\" 2>/dev/null &\nfi\n"));
     }
     s.push_str("wait\ncat \"$D\"/h.* 2>/dev/null\n");
@@ -1046,7 +754,8 @@ struct Found {
     status: Option<Ran>,
     env: Vec<String>,
     files: Vec<String>,
-    /// What [`probes`] found, as it printed it after `fact ID`.
+    /// What its probes found (`logins::lines`), as they printed it after
+    /// `fact ID`.
     facts: Vec<String>,
 }
 
@@ -1158,28 +867,14 @@ fn state(id: &str, found: Found, os: &str, limit: Option<u64>) -> HarnessState {
         },
         None => (None, Some("its version command did not run".into())),
     };
-    // omp is a Bun script: when it cannot even print its version and the
-    // Bun on PATH is missing or too old, that is why.
-    let version_note = match (id, &version) {
-        ("oh-my-pi", None) if found.facts.iter().any(|f| f == "runs-on-bun") => {
-            let bun = found.facts.iter().find_map(|f| f.strip_prefix("bun "));
-            let found_bun = match bun {
-                Some("missing") => Some("no bun is on PATH".to_owned()),
-                Some(v) if bun_too_old(v) => Some(format!("the bun on PATH is {v}")),
-                _ => None,
-            };
-            match found_bun {
-                Some(found_bun) => Some(format!(
-                    "{}; omp runs on Bun {OMP_MIN_BUN} or newer and {found_bun}: \
-                     `curl -fsSL https://omp.sh/install | sh` installs or upgrades it",
-                    version_note.unwrap_or_default()
-                )),
-                None => version_note,
-            }
-        }
-        _ => version_note,
+    // A harness whose executable is a script for a runtime (omp, a Bun
+    // script): when it cannot even print its version and the runtime on PATH
+    // is missing or too old, that is why.
+    let version_note = match &version {
+        None => logins::version_note(id, &found, version_note),
+        Some(_) => version_note,
     };
-    let login = login(id, &found, os);
+    let login = logins::login(id, &found, os);
     HarnessState {
         id: id.to_owned(),
         path: found.path,
@@ -1191,35 +886,11 @@ fn state(id: &str, found: Found, os: &str, limit: Option<u64>) -> HarnessState {
     }
 }
 
-/// What a status command printed, as one short phrase for the line that
-/// decided the login. Claude Code prints JSON; the rest print a sentence.
-fn status_summary(id: &str, lines: &[String], decided: &str) -> String {
-    if id == "claude-code" {
-        let method = lines.iter().find_map(|l| {
-            let (_, rest) = l.split_once("\"authMethod\"")?;
-            let value = rest.trim_start_matches([' ', ':']).trim_start_matches('"');
-            let value = value.split('"').next()?;
-            (!value.is_empty()).then(|| value.to_owned())
-        });
-        let state = match decided.to_lowercase().contains("true") {
-            true => "logged in",
-            false => "not logged in",
-        };
-        return match method {
-            Some(method) => format!("{state} ({method})"),
-            None => state.to_owned(),
-        };
-    }
-    decided.trim().to_owned()
-}
-
 /// Why a login cannot be told, with what would tell: the key variables the
 /// catalog records, or that nothing is recorded.
 fn unknown_detail(id: &str) -> String {
     let vars = key_variables(id);
-    let program = catalog::harness(id)
-        .and_then(|e| e.binaries.first().cloned())
-        .unwrap_or_else(|| id.to_owned());
+    let program = logins::program(id);
     match vars.is_empty() {
         true => format!(
             "Branchyard cannot read {program}'s login: the catalog records no status command, \
@@ -1230,322 +901,12 @@ fn unknown_detail(id: &str) -> String {
                 "Branchyard cannot read {program}'s login; a key in {} would tell",
                 vars.join(" or ")
             );
-            if id == "hermes" {
-                detail.push_str(
-                    ", and so would a NAME_API_KEY= line in ~/.hermes/.env; `hermes status` \
-                     shows what Hermes itself sees",
-                );
+            if let Some(also) = logins::unknown_also(id) {
+                detail.push_str(", ");
+                detail.push_str(also);
             }
             detail
         }
-    }
-}
-
-fn login(id: &str, found: &Found, os: &str) -> Login {
-    let mut login = login_from_evidence(id, found, os);
-    // Gemini CLI's headless `gemini -p` refuses an untrusted directory
-    // whatever the login; say so where the login is shown.
-    if id == "gemini-cli" && login.state == LoginState::LoggedIn {
-        login
-            .detail
-            .push_str(match found.facts.iter().any(|f| f == "trust-workspace") {
-                true => {
-                    "; GEMINI_CLI_TRUST_WORKSPACE=true is set, so headless runs trust the workspace"
-                }
-                false => {
-                    "; headless runs (gemini -p) refuse an untrusted workspace: set \
-                     GEMINI_CLI_TRUST_WORKSPACE=true or pass --skip-trust"
-                }
-            });
-    }
-    login
-}
-
-/// The model provider Codex's `config.toml` selects, as the probe found it:
-/// its name and the variable its `env_key` names, when it names one.
-fn codex_provider(found: &Found) -> Option<(&str, Option<&str>)> {
-    let name = found
-        .facts
-        .iter()
-        .find_map(|f| f.strip_prefix("model-provider "))?;
-    let var = found
-        .facts
-        .iter()
-        .find_map(|f| f.strip_prefix("provider-env "));
-    Some((name, var))
-}
-
-fn login_from_evidence(id: &str, found: &Found, os: &str) -> Login {
-    let check = login_check(id);
-    let program = catalog::harness(id)
-        .and_then(|e| e.binaries.first().cloned())
-        .unwrap_or_else(|| id.to_owned());
-    let verified = |state, detail: String| Login {
-        state,
-        evidence: Evidence::Verified,
-        detail,
-        ..Login::default()
-    };
-    let likely = |state, detail: String| Login {
-        state,
-        evidence: Evidence::Likely,
-        detail,
-        ..Login::default()
-    };
-    // A login that rests on a key variable.
-    let keyed = |var: &str, detail: String| Login {
-        key: Some(var.to_owned()),
-        ..likely(LoginState::LoggedIn, detail)
-    };
-    // The harness's own answer, when it gave one. Only the line that
-    // decided it is shown: a status command may print warnings before it.
-    let mut said: Option<(LoginState, String)> = None;
-    if let (Some(command), Some(ran)) = (check.and_then(|c| c.status.as_ref()), &found.status) {
-        if ran.status.as_deref() != Some("timeout") {
-            let decided = |phrases: &[&str]| -> Option<&String> {
-                ran.lines
-                    .iter()
-                    .find(|l| phrases.iter().any(|p| l.to_lowercase().contains(p)))
-            };
-            let shown = |line: &str| {
-                format!(
-                    "{program} {}: {}",
-                    command.args.join(" "),
-                    status_summary(id, &ran.lines, line)
-                )
-            };
-            if let Some(line) = decided(command.logged_out) {
-                said = Some((LoginState::LoggedOut, shown(line)));
-            } else if let Some(line) = decided(command.logged_in) {
-                said = Some((LoginState::LoggedIn, shown(line)));
-            }
-        }
-    }
-    if let Some((LoginState::LoggedIn, detail)) = &said {
-        // Codex sends its requests with CODEX_API_KEY when the variable is
-        // set, whatever `codex login status` says: that key's organization is
-        // billed, and a key without quota answers "Quota exceeded" beside a
-        // valid login. Say so, rather than report the login alone.
-        let detail = match found.env.iter().find(|v| v.as_str() == "CODEX_API_KEY") {
-            Some(var) if id == "codex" => format!(
-                "{detail}; {var} is set, and Codex uses it instead of the login (unset it, or \
-                 run isolated, to use the login)"
-            ),
-            _ => detail.clone(),
-        };
-        return verified(LoginState::LoggedIn, detail);
-    }
-    // Antigravity reads GEMINI_API_KEY only when its settings select the
-    // gemini provider; without that it asks for a Google sign-in.
-    let provider = found.facts.iter().any(|f| f == "model-provider-gemini");
-    let key_is_used =
-        |var: &&String| id != "antigravity" || var.as_str() != "GEMINI_API_KEY" || provider;
-    // The key the model provider Codex's config selects reads: Codex sends
-    // its requests with it, and `codex login status` does not speak of it.
-    let codex_key = codex_provider(found)
-        .filter(|_| id == "codex")
-        .and_then(|(name, var)| {
-            let var = found.env.iter().find(|set| Some(set.as_str()) == var)?;
-            Some((name, var))
-        });
-    if let Some((name, var)) = codex_key {
-        return keyed(
-            var,
-            format!(
-                "{var} is set, and ~/.codex/config.toml selects the model provider {name}, which \
-                 reads it (an API key; not checked)"
-            ),
-        );
-    }
-    // A key variable works whatever the login says.
-    if let Some(var) = found.env.iter().find(key_is_used) {
-        return keyed(
-            var,
-            match (id, var.as_str()) {
-                ("antigravity", "GEMINI_API_KEY") => "GEMINI_API_KEY is set and settings.json \
-                    selects the gemini provider (an API key; not checked)"
-                    .to_owned(),
-                _ => format!("{var} is set (an API key; not checked)"),
-            },
-        );
-    }
-    if let Some((state, mut detail)) = said {
-        // Not logged in to OpenAI is not the same as unable to run: say which
-        // provider the configuration selects, and what it still lacks.
-        if let (true, LoginState::LoggedOut, Some((name, var))) =
-            (id == "codex", state, codex_provider(found))
-        {
-            detail.push_str(&match var {
-                Some(var) => format!(
-                    "; ~/.codex/config.toml selects the model provider {name}, which reads \
-                     {var}, and {var} is not set"
-                ),
-                None => format!(
-                    "; ~/.codex/config.toml selects the model provider {name}, which names no \
-                     key variable (this status command speaks only of the OpenAI login)"
-                ),
-            });
-        }
-        return verified(state, detail);
-    }
-    if let Some(file) = found.files.first() {
-        return likely(LoginState::LoggedIn, format!("{file} exists"));
-    }
-    // A provider connected inside Qwen Code (`Connect a Provider`, or by hand)
-    // is `security.auth.selectedType` in its settings; the key is wherever the
-    // provider's `envKey` or the settings' `env` puts it, and is not read.
-    if id == "qwen-code" && found.facts.iter().any(|f| f == "auth-selected") {
-        return likely(
-            LoginState::LoggedIn,
-            "~/.qwen/settings.json selects an auth type (security.auth.selectedType; its key \
-             is not checked)"
-                .to_owned(),
-        );
-    }
-    if id == "antigravity" && found.env.iter().any(|v| v == "GEMINI_API_KEY") {
-        // Still a key Branchyard can use: isolated runs set the provider.
-        return keyed(
-            "GEMINI_API_KEY",
-            format!(
-                "GEMINI_API_KEY is set but ~/.gemini/antigravity-cli/settings.json \
-                 {AGY_KEY_UNUSED}: agy will ask for a Google sign-in; Branchyard sets it in \
-                 isolated runs, and `by harnesses login antigravity` sets it for your own"
-            ),
-        );
-    }
-    if let Some(file) = found
-        .facts
-        .iter()
-        .find_map(|f| f.strip_prefix("providers "))
-        .filter(|_| id == "deepseek-harness")
-    {
-        // A provider whose key variable is unset is a login dsh refuses
-        // (`MISSING_CREDENTIAL`), unless a key sits in the file itself.
-        let inline = found.facts.iter().any(|f| f.starts_with("inline-key "));
-        let mut unset: Vec<&str> = found
-            .facts
-            .iter()
-            .filter_map(|f| f.strip_prefix("key-unset "))
-            .collect();
-        unset.sort_unstable();
-        unset.dedup();
-        if let (false, Some(first)) = (inline, unset.first()) {
-            return Login {
-                key: Some((*first).to_owned()),
-                ..likely(
-                    LoginState::LoggedOut,
-                    format!(
-                        "~/.dsh/{file} configures a provider, but the variable its apiKeyEnv \
-                         names ({}) is not set, and dsh stops with MISSING_CREDENTIAL; export it",
-                        unset.join(", ")
-                    ),
-                )
-            };
-        }
-        return likely(
-            LoginState::LoggedIn,
-            format!("~/.dsh/{file} configures a provider (its key variable is not checked)"),
-        );
-    }
-    if let Some(rest) = found
-        .facts
-        .iter()
-        .find_map(|f| f.strip_prefix("env-file "))
-        .filter(|_| id == "hermes")
-    {
-        let (var, file) = rest.split_once(' ').unwrap_or((rest, "~/.hermes/.env"));
-        return likely(
-            LoginState::LoggedIn,
-            format!("{var} is set in {file}, which Hermes loads (an API key; not checked)"),
-        );
-    }
-    if id == "pi" && found.facts.iter().any(|f| f == "login-stored") {
-        return likely(
-            LoginState::LoggedIn,
-            format!("{PI_LOGINS} holds a login (not checked)"),
-        );
-    }
-    if id == "deepseek-harness" {
-        let vars = key_variables(id).join(" or ");
-        return likely(
-            LoginState::LoggedOut,
-            format!(
-                "no provider in {} and no {vars}; set {vars} (the shipped provider \
-                 deepseek-official reads it) or configure a provider under the llm-pi-ai \
-                 plugin in cordis.patch.yml (`dsh --profile acp --dump-config` shows the \
-                 composed configuration)",
-                DSH_CONFIGS.join(" or ")
-            ),
-        );
-    }
-    if id == "oh-my-pi" {
-        let logins: Vec<&str> = found
-            .facts
-            .iter()
-            .filter_map(|f| f.strip_prefix("login "))
-            .collect();
-        if !logins.is_empty() {
-            return likely(
-                LoginState::LoggedIn,
-                format!(
-                    "omp login stored for {} in {OMP_LOGINS} (not checked)",
-                    logins.join(", ")
-                ),
-            );
-        }
-        if let Some(rest) = found.facts.iter().find_map(|f| f.strip_prefix("env-file ")) {
-            let (var, file) = rest.split_once(' ').unwrap_or((rest, "~/.omp/agent/.env"));
-            return likely(
-                LoginState::LoggedIn,
-                format!("{var} is set in {file}, which omp loads (an API key; not checked)"),
-            );
-        }
-        let vars = key_variables(id).join(", ");
-        if found.facts.iter().any(|f| f == "login-store unread") {
-            return Login {
-                state: LoginState::Unknown,
-                evidence: Evidence::None,
-                detail: format!(
-                    "{OMP_LOGINS} may hold a login, which needs sqlite3 or python3 on the \
-                     machine to read, and none of {vars} is set"
-                ),
-                ..Login::default()
-            };
-        }
-        return likely(
-            LoginState::LoggedOut,
-            format!(
-                "no login stored in {OMP_LOGINS} and none of {vars} is set; set one, or run \
-                 omp login"
-            ),
-        );
-    }
-    match check {
-        Some(c) if !(c.files.is_empty() || c.keychain_on_macos && os == "Darwin") => {
-            let files: Vec<&str> = c.files.iter().map(|(_, shown)| *shown).collect();
-            let vars = key_variables(id);
-            let mut detail = format!(
-                "no {} and no {}",
-                files.join(" or "),
-                match vars.is_empty() {
-                    true => "key variable".to_owned(),
-                    false => vars.join(" or "),
-                }
-            );
-            if id == "antigravity" {
-                detail.push_str(
-                    "; a GEMINI_API_KEY also needs modelProvider gemini in \
-                     ~/.gemini/antigravity-cli/settings.json",
-                );
-            }
-            likely(LoginState::LoggedOut, detail)
-        }
-        _ => Login {
-            state: LoginState::Unknown,
-            evidence: Evidence::None,
-            detail: unknown_detail(id),
-            ..Login::default()
-        },
     }
 }
 
@@ -1841,9 +1202,20 @@ impl InventoryCache {
     /// The cached inventory when fresh, else a new detection here, kept.
     /// Only a detection of every harness is kept.
     pub fn local(&self, options: &DetectOptions, refresh: bool) -> Result<Inventory, String> {
+        self.fetch(options, refresh)
+            .map(|fetched| fetched.inventory)
+    }
+
+    /// [`InventoryCache::local`], saying whether the cache answered and how
+    /// old its answer is, so a listing can say so ([`cached_note`]).
+    pub fn fetch(&self, options: &DetectOptions, refresh: bool) -> Result<Fetched, String> {
         if !refresh && options.only.is_none() {
             if let Some(inventory) = self.get(options) {
-                return Ok(inventory);
+                let age = now_ms().saturating_sub(inventory.detected_at_ms);
+                return Ok(Fetched {
+                    inventory,
+                    cached: Some(Duration::from_millis(age)),
+                });
             }
         }
         let mut inventory = detect_local(options)?;
@@ -1853,8 +1225,32 @@ impl InventoryCache {
             }
             best_effort("store the inventory", self.put(options, &inventory));
         }
-        Ok(inventory)
+        Ok(Fetched {
+            inventory,
+            cached: None,
+        })
     }
+}
+
+/// An inventory from [`InventoryCache::fetch`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fetched {
+    /// What the machine has.
+    pub inventory: Inventory,
+    /// How old it was when the cache answered for it; `None` when it was
+    /// detected just now.
+    pub cached: Option<Duration>,
+}
+
+/// What a listing that the cache answered says about it: `cached 23s ago;
+/// --refresh asks again`.
+pub fn cached_note(age: Duration) -> String {
+    let seconds = age.as_secs();
+    let age = match seconds {
+        0..60 => format!("{seconds}s"),
+        _ => format!("{}m {}s", seconds / 60, seconds % 60),
+    };
+    format!("cached {age} ago; --refresh asks again")
 }
 
 // Installing.
@@ -2971,6 +2367,15 @@ mod tests {
                 "{facts:?}"
             );
         }
+        // The floor is the runtime's `min` in catalog/logins.toml.
+        let min = &catalog::login("oh-my-pi")
+            .unwrap()
+            .runtime
+            .as_ref()
+            .unwrap()
+            .min;
+        assert_eq!(min, "1.3.14");
+        let bun_too_old = |v: &str| version_below(v, min);
         assert!(bun_too_old("1.3.11") && bun_too_old("1.2") && bun_too_old("0.9.9"));
         assert!(!bun_too_old("1.3.14") && !bun_too_old("1.4.3") && !bun_too_old("2.0.0"));
         // A working omp has a version and no note.
@@ -3230,9 +2635,15 @@ mod tests {
             "{text}"
         );
 
-        for file in DSH_CONFIGS {
-            let relative = file.trim_start_matches("~/.dsh/");
-            assert!(text.contains(relative), "{relative}");
+        // The files the probe reads are the ones the logged-out detail names.
+        let Some(catalog::Probe::Providers { files, shown, .. }) =
+            catalog::login("deepseek-harness").unwrap().probes.first()
+        else {
+            panic!("deepseek-harness reads its providers");
+        };
+        for relative in files {
+            assert!(text.contains(relative.as_str()), "{relative}");
+            assert!(none.login.detail.contains(&format!("{shown}/{relative}")));
         }
         // The only `cat` reads back what the harnesses' own subshells wrote.
         assert!(
