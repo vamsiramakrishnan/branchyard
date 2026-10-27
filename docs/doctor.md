@@ -6,9 +6,10 @@
 by doctor                    # the mode, a table, then what to do about each row that is not ok
 by doctor --json             # the same as JSON, for a script or a CI step
 by doctor --path ~/src/app   # check that repository instead of the one around here
+by doctor --refresh          # ask the harnesses again instead of reading the cached inventory
 ```
 
-The checks reuse what `by` already knows rather than looking again: the loaders `by config validate` runs, the trust decision `by workspace trust` records, the inventory `by harnesses` shows, the engine's own provider check, the service registry `by services` lists, and the client `--remote` uses. When a row says something is wrong, a command that depends on it would say the same.
+The checks reuse what `by` already knows rather than looking again: the loaders `by config validate` runs, the trust decision `by workspace trust` records, the inventory `by harnesses` shows (kept a minute; `--refresh` detects again), the engine's own provider check, the service registry `by services` lists, and the client `--remote` uses. When a row says something is wrong, a command that depends on it would say the same.
 
 `by up` ([up](up.md)) is the command that acts: it installs the harnesses the configuration names where your user file allows, starts the connector gateway, and lists what only you can do. Run `by doctor` to see where you stand and `by up` to get there.
 

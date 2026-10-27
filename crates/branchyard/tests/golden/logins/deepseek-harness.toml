@@ -1,0 +1,93 @@
+# DeepSeek Harness: DEEPSEEK_API_KEY, and the providers cordis.patch.yml
+# configures under $DSH_HOME and its ACP profile (0.2.0-rc.2); a provider
+# whose apiKeyEnv variable is unset is not a login (MISSING_CREDENTIAL,
+# 0.2.1-rc.2). Run by crates/branchyard/tests/logins.rs.
+
+[[case]]
+name = "the shipped provider's key"
+env = { DEEPSEEK_API_KEY = "fake-deepseek" }
+lines = ["env DEEPSEEK_API_KEY"]
+cell = "key set (DEEPSEEK_API_KEY)"
+state = "logged_in"
+evidence = "likely"
+detail = "DEEPSEEK_API_KEY is set (an API key; not checked)"
+key = "DEEPSEEK_API_KEY"
+
+[[case]]
+name = "a provider in the ACP profile whose variable is unset"
+home = { ".dsh/profiles/acp/cordis.patch.yml" = """
+plugins:
+  - id: llm-pi-ai
+    config:
+      providers:
+        proxy:
+          apiKeyEnv: PROXY_KEY
+          api: openai-completions
+""" }
+lines = ["fact providers profiles/acp/cordis.patch.yml", "fact key-unset PROXY_KEY"]
+cell = "login not verified"
+state = "logged_out"
+evidence = "likely"
+detail = "~/.dsh/profiles/acp/cordis.patch.yml configures a provider, but the variable its apiKeyEnv names (PROXY_KEY) is not set, and dsh stops with MISSING_CREDENTIAL; export it"
+key = "PROXY_KEY"
+
+[[case]]
+name = "the same provider with its variable set"
+env = { PROXY_KEY = "fake-proxy" }
+home = { ".dsh/profiles/acp/cordis.patch.yml" = """
+plugins:
+  - id: llm-pi-ai
+    config:
+      providers:
+        proxy:
+          apiKeyEnv: PROXY_KEY
+""" }
+lines = ["fact providers profiles/acp/cordis.patch.yml", "env PROXY_KEY"]
+cell = "key set (PROXY_KEY)"
+state = "logged_in"
+evidence = "likely"
+detail = "PROXY_KEY is set (an API key; not checked)"
+key = "PROXY_KEY"
+
+[[case]]
+name = "a key written in the file itself needs no variable"
+home = { ".dsh/cordis.patch.yml" = """
+providers:
+  mine:
+    apiKey: fake-inline
+    apiKeyEnv: Z_AI
+""" }
+lines = ["fact providers cordis.patch.yml", "fact inline-key cordis.patch.yml", "fact key-unset Z_AI"]
+cell = "credentials found"
+state = "logged_in"
+evidence = "likely"
+detail = "~/.dsh/cordis.patch.yml configures a provider (its key variable is not checked)"
+
+[[case]]
+name = "a comment configures nothing"
+env = { COMMENTED_KEY = "fake-commented" }
+home = { ".dsh/cordis.patch.yml" = """
+# providers:
+#   apiKeyEnv: COMMENTED_KEY
+plugins: []
+""" }
+lines = []
+cell = "login not verified"
+state = "logged_out"
+evidence = "likely"
+detail = "no provider in ~/.dsh/cordis.patch.yml or ~/.dsh/profiles/acp/cordis.patch.yml and no DEEPSEEK_API_KEY; set DEEPSEEK_API_KEY (the shipped provider deepseek-official reads it) or configure a provider under the llm-pi-ai plugin in cordis.patch.yml (`dsh --profile acp --dump-config` shows the composed configuration)"
+
+[[case]]
+name = "DSH_HOME moves the configuration"
+env = { DSH_HOME = "{home}/elsewhere", MOVED_KEY = "fake-moved" }
+home = { "elsewhere/cordis.patch.yml" = """
+providers:
+  moved:
+    apiKeyEnv: 'MOVED_KEY'
+""" }
+lines = ["fact providers cordis.patch.yml", "env MOVED_KEY"]
+cell = "key set (MOVED_KEY)"
+state = "logged_in"
+evidence = "likely"
+detail = "MOVED_KEY is set (an API key; not checked)"
+key = "MOVED_KEY"

@@ -1,0 +1,20 @@
+# Muse Code: META_API_KEY alone (Scion's harness configuration).
+# Run by crates/branchyard/tests/logins.rs.
+
+[[case]]
+name = "its key"
+env = { META_API_KEY = "fake-meta" }
+lines = ["env META_API_KEY"]
+cell = "key set (META_API_KEY)"
+state = "logged_in"
+evidence = "likely"
+detail = "META_API_KEY is set (an API key; not checked)"
+key = "META_API_KEY"
+
+[[case]]
+name = "nothing"
+lines = []
+cell = "unknown"
+state = "unknown"
+evidence = "none"
+detail = "Branchyard cannot read muse's login; a key in META_API_KEY would tell"

@@ -2327,6 +2327,9 @@ pub enum Command {
         /// Check the repository at PATH instead of the one around the current directory
         #[arg(long, value_name = "PATH", value_hint = ValueHint::DirPath)]
         path: Option<String>,
+        /// Ask the harnesses again instead of reading the inventory `by harnesses` cached
+        #[arg(long)]
+        refresh: bool,
     },
     /// Bring the configured backends up
     ///
@@ -2939,6 +2942,9 @@ pub struct SetupFlags {
     /// Do not write branchyard.toml
     #[arg(long)]
     pub no_config: bool,
+    /// Ask the harnesses again instead of reading the inventory `by harnesses` cached
+    #[arg(long)]
+    pub refresh: bool,
 }
 
 /// `by init`'s topics, from [`branchyard_setup::Topic::ALL`]: completed by
@@ -7758,6 +7764,8 @@ mod tests {
             ["claude-code", "codex"]
         );
         assert!(setup("setup --no-hooks").no_hooks);
+        // Ask the harnesses again rather than read the cached inventory.
+        assert!(setup("setup --dry-run --refresh").refresh);
         // Naming harnesses and installing none contradict.
         let error = parse_str("setup --harness codex --no-hooks").unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{error}");
@@ -7970,9 +7978,13 @@ mod tests {
     #[test]
     fn doctor_takes_json_and_a_path_and_the_global_server_options() {
         let doctor = |line: &str| match parse_str(line).unwrap() {
-            Command::Doctor { json, path } => (json, path),
+            Command::Doctor { json, path, .. } => (json, path),
             other => panic!("{line}: parsed as {other:?}"),
         };
+        assert!(matches!(
+            parse_str("doctor --refresh").unwrap(),
+            Command::Doctor { refresh: true, .. }
+        ));
         assert_eq!(doctor("doctor"), (false, None));
         assert_eq!(doctor("doctor --json"), (true, None));
         assert_eq!(

@@ -1,0 +1,29 @@
+# GitHub Copilot CLI: its token variables and config file (Scion's harness
+# configuration). Run by crates/branchyard/tests/logins.rs.
+
+[[case]]
+name = "a GitHub token"
+env = { GH_TOKEN = "fake-gh" }
+lines = ["env GH_TOKEN"]
+cell = "key set (GH_TOKEN)"
+state = "logged_in"
+evidence = "likely"
+detail = "GH_TOKEN is set (an API key; not checked)"
+key = "GH_TOKEN"
+
+[[case]]
+name = "its config file"
+home = { ".copilot/config.json" = "{}" }
+lines = ["file ~/.copilot/config.json"]
+cell = "credentials found"
+state = "logged_in"
+evidence = "likely"
+detail = "~/.copilot/config.json exists"
+
+[[case]]
+name = "nothing"
+lines = []
+cell = "login not verified"
+state = "logged_out"
+evidence = "likely"
+detail = "no ~/.copilot/config.json and no COPILOT_GITHUB_TOKEN or GH_TOKEN or GITHUB_TOKEN"

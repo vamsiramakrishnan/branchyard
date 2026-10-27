@@ -446,6 +446,20 @@ fn the_cache_keeps_an_inventory_for_its_ttl() {
     };
     cache.put(&opts, &taken).unwrap();
     assert_eq!(cache.get(&opts), Some(taken.clone()));
+    // A listing the cache answered says so, with its age.
+    let fetched = cache.fetch(&opts, false).unwrap();
+    assert_eq!(fetched.inventory, taken);
+    assert!(fetched
+        .cached
+        .is_some_and(|age| age < Duration::from_secs(60)));
+    assert_eq!(
+        inventory::cached_note(Duration::from_millis(23_400)),
+        "cached 23s ago; --refresh asks again"
+    );
+    assert_eq!(
+        inventory::cached_note(Duration::from_secs(75)),
+        "cached 1m 15s ago; --refresh asks again"
+    );
     // Other directories are another machine's view.
     let other = DetectOptions {
         dirs: vec![],
