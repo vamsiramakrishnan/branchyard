@@ -18,6 +18,13 @@
 //! - `read-only`: `HOME`, the temporary directory and `/dev`. Not the
 //!   worktree, and not the git directory: a read-only turn makes no commit.
 //!
+//! Landlock lets a harness write everything beneath a path it may write,
+//! and nothing can carve a path back out. So when your own `HOME` holds
+//! the repository (`/home/you/project`, the usual place), a scope with
+//! `HOME` in it would hold the whole repository too: the turn then runs
+//! unguarded and records why ([`home_holds`]); `--isolated` gives it a
+//! private `HOME` the guard can hold.
+//!
 //! Reads, execution and the network are not the guard's (the network is
 //! the egress policy's, `docs/egress.md`), nor is any one command: inside
 //! the scope a harness writes what it likes, and with your own `HOME` in
@@ -105,11 +112,50 @@ pub fn support() -> Result<u32, String> {
     branchyard_runtime::LocalProvider::write_guard()
 }
 
+/// The first of `protected` that is `home` or lies beneath it, symlinks
+/// resolved: a guard that lets a harness write in `home` lets it write
+/// there too, since Landlock grants everything beneath a writable path.
+/// `None` for a `home` that is not absolute, which the scope leaves out.
+pub fn home_holds(home: &Path, protected: &[&Path]) -> Option<PathBuf> {
+    if !home.is_absolute() {
+        return None;
+    }
+    let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let home = real(home);
+    protected
+        .iter()
+        .map(|path| real(path))
+        .find(|path| path.starts_with(&home))
+}
+
+/// Why a turn whose `HOME` holds the repository runs unguarded.
+fn held_by_home(home: &Path) -> String {
+    format!(
+        "your HOME ({}) holds this repository, and a guard that lets the harness write in HOME \
+         would let it write the repository too; --isolated gives it a private HOME the guard \
+         can hold",
+        home.display()
+    )
+}
+
 /// What `by` says before a local run under `preset` (`isolated`: with a
-/// private `HOME`): `Ok` the guard's line, `Err` the note that this host
-/// cannot hold it; `None` when the preset names no file scope.
-pub fn banner(preset: Option<PolicyPreset>, isolated: bool) -> Option<Result<String, String>> {
+/// private `HOME`; `holding_home`: your own `HOME`, when it holds the
+/// repository, see [`home_holds`]): `Ok` the guard's line, `Err` the note
+/// that the guard cannot hold this run; `None` when the preset names no
+/// file scope.
+pub fn banner(
+    preset: Option<PolicyPreset>,
+    isolated: bool,
+    holding_home: Option<&Path>,
+) -> Option<Result<String, String>> {
     let preset = preset.filter(|p| *p != PolicyPreset::Full)?;
+    if let (Ok(_), Some(home), false) = (support(), holding_home, isolated) {
+        return Some(Err(format!(
+            "no file guard for this run: {}; --permissions {preset} decides only the tool calls \
+             the harness asks Branchyard about",
+            held_by_home(home)
+        )));
+    }
     Some(match support() {
         Ok(_) => {
             let home = match isolated {
@@ -167,6 +213,9 @@ pub(crate) fn plan(
         Ok(abi) => abi,
         Err(why) => return unguarded(format!("this host cannot hold it: {why}")),
     };
+    if home_holds(home, &[yard.root(), &record.info.worktree]).is_some() {
+        return unguarded(held_by_home(home));
+    }
     let writable = scope(yard, record, preset, home)?;
     Ok((
         Some(writable.clone()),
@@ -271,11 +320,26 @@ mod tests {
     }
 
     #[test]
+    fn a_home_holds_what_lies_beneath_it_and_only_that() {
+        let home = Path::new("/home/alice");
+        let project = Path::new("/home/alice/project");
+        assert_eq!(home_holds(home, &[project]), Some(project.to_path_buf()));
+        assert_eq!(home_holds(home, &[home]), Some(home.to_path_buf()));
+        // Components, not characters: /home/alicia is not beneath it.
+        assert_eq!(home_holds(home, &[Path::new("/home/alicia/p")]), None);
+        assert_eq!(home_holds(home, &[Path::new("/srv/project")]), None);
+        assert_eq!(home_holds(Path::new("/"), &[project]), Some(project.into()));
+        // A HOME the scope leaves out holds nothing.
+        assert_eq!(home_holds(Path::new(""), &[project]), None);
+        assert_eq!(home_holds(Path::new("home"), &[project]), None);
+    }
+
+    #[test]
     fn only_a_preset_with_a_scope_has_a_banner() {
-        assert_eq!(banner(None, false), None);
-        assert_eq!(banner(Some(PolicyPreset::Full), true), None);
+        assert_eq!(banner(None, false, None), None);
+        assert_eq!(banner(Some(PolicyPreset::Full), true, None), None);
         // Hosts differ: either the guard's line or the note, never empty.
-        match banner(Some(PolicyPreset::EditWorktree), false) {
+        match banner(Some(PolicyPreset::EditWorktree), false, None) {
             Some(Ok(line)) => {
                 assert!(line.starts_with("landlock (edit-worktree)"), "{line}");
                 assert!(line.contains("your own HOME"), "{line}");
@@ -283,9 +347,26 @@ mod tests {
             Some(Err(note)) => assert!(note.starts_with("no file guard on this host"), "{note}"),
             None => panic!("edit-worktree has a scope"),
         }
-        if let Some(Ok(line)) = banner(Some(PolicyPreset::ReadOnly), true) {
+        if let Some(Ok(line)) = banner(Some(PolicyPreset::ReadOnly), true, None) {
             assert!(line.contains("its private HOME"), "{line}");
             assert!(line.contains("not its worktree"), "{line}");
+        }
+        // Your own HOME holding the repository: no guard claimed, on a
+        // host that has one; a private HOME is held as before.
+        let home = Path::new("/home/alice");
+        if support().is_ok() {
+            let note = banner(Some(PolicyPreset::EditWorktree), false, Some(home))
+                .unwrap()
+                .unwrap_err();
+            assert!(
+                note.starts_with("no file guard for this run: your HOME (/home/alice) holds"),
+                "{note}"
+            );
+            assert!(note.contains("--isolated"), "{note}");
+            assert!(matches!(
+                banner(Some(PolicyPreset::EditWorktree), true, Some(home)),
+                Some(Ok(_))
+            ));
         }
     }
 }

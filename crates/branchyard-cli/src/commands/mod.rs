@@ -212,7 +212,8 @@ pub(crate) fn banner(provider: Option<&Provider>, isolated: bool, server: Option
 
 /// The line `by` prints before a local run whose preset names a file
 /// scope: `by: guard: landlock (edit-worktree): ...`, or `by: note: no
-/// file guard on this host (...)` where Landlock cannot hold it. A
+/// file guard ...` where Landlock cannot hold it, on this host or because
+/// your own HOME holds the repository (`branchyard::guard::home_holds`). A
 /// `--plan` run's planning turns are read-only. `None` for `--yes`,
 /// `--ask`, `full` and no preset, which name no scope.
 pub(crate) fn guard_line(task: &TaskArgs, isolated: bool) -> Option<String> {
@@ -221,10 +222,23 @@ pub(crate) fn guard_line(task: &TaskArgs, isolated: bool) -> Option<String> {
         Permissions::Preset(preset) => Some(preset),
         _ => None,
     };
-    Some(match branchyard::guard::banner(preset, isolated)? {
-        Ok(line) => format!("by: guard: {line}"),
-        Err(note) => format!("by: note: {note}"),
-    })
+    let repository = std::env::current_dir().ok().and_then(|cwd| {
+        cwd.ancestors()
+            .find(|dir| branchyard_config::is_repository(dir))
+            .map(std::path::Path::to_path_buf)
+    });
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let holding = home.filter(|home| {
+        repository
+            .as_deref()
+            .is_some_and(|repo| branchyard::guard::home_holds(home, &[repo]).is_some())
+    });
+    Some(
+        match branchyard::guard::banner(preset, isolated, holding.as_deref())? {
+            Ok(line) => format!("by: guard: {line}"),
+            Err(note) => format!("by: note: {note}"),
+        },
+    )
 }
 
 /// Whether the local-mode note is due in this repository, and the marker

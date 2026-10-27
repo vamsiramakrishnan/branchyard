@@ -4,7 +4,9 @@
 //! harness that routes nothing to Branchyard), and recorded on the branch
 //! for `by show`, `by inspect` and `by ls --json`; `--yes` unguarded; a
 //! delegating harness whose `by spawn` reaches the engine from inside the
-//! guard, and a child guarded in its own worktree; a host without the
+//! guard, and a child guarded in its own worktree; your own HOME holding
+//! the repository, which no guard can carve out, run unguarded and said
+//! so, and the same run `--isolated` guarded; a host without the
 //! guard (`BRANCHYARD_GUARD=off`) saying so in one note and running
 //! unguarded; `by doctor`'s `host.landlock` row. Hermetic: the fake agent,
 //! git and `sh`.
@@ -160,6 +162,81 @@ fn yes_runs_unguarded_and_the_record_says_why() {
         text.lines()
             .any(|l| l.starts_with("guard") && l.contains("none: no permission preset")),
         "{text}"
+    );
+}
+
+/// Landlock grants everything beneath a writable path: with your own HOME
+/// holding the repository, a guard that kept HOME writable would hold
+/// nothing. The run says so and records why instead of claiming a guard;
+/// `--isolated`, whose private HOME holds only itself, is guarded.
+#[test]
+fn a_home_that_holds_the_repository_is_not_claimed_as_guarded() {
+    if !guarded("a_home_that_holds_the_repository_is_not_claimed_as_guarded") {
+        return;
+    }
+    let mut repo = repo();
+    // The scratch directory holds the repository at `repo/`.
+    let home = repo.dir.display().to_string();
+    repo.set_env("HOME", &home);
+    let out = repo.by_agent(&[
+        "run",
+        "WRITE ../loose.txt=out",
+        "--name",
+        "loose",
+        "--permissions",
+        "edit-worktree",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let said = format!(
+        "your HOME ({}) holds this repository, and a guard that lets the harness write in HOME \
+         would let it write the repository too; --isolated gives it a private HOME the guard \
+         can hold",
+        repo.dir.display()
+    );
+    assert_eq!(
+        guard_line(&out).as_deref(),
+        Some(
+            format!(
+                "by: note: no file guard for this run: {said}; --permissions edit-worktree \
+                 decides only the tool calls the harness asks Branchyard about"
+            )
+            .as_str()
+        ),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!stderr(&out).contains("by: guard:"), "{}", stderr(&out));
+    // Unguarded, as it said: the write beside the worktree landed.
+    assert!(repo.root.join(".branchyard/worktrees/loose.txt").exists());
+    assert_eq!(
+        repo.json(&["show", "loose", "--json"])["guard"],
+        json!({"kind": "none", "reason": said})
+    );
+
+    // With a private HOME the same run is held.
+    let out = repo.by_agent(&[
+        "run",
+        "WRITE ../held.txt=out",
+        "--name",
+        "held",
+        "--permissions",
+        "edit-worktree",
+        "--isolated",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let line = guard_line(&out).unwrap();
+    assert!(
+        line.starts_with("by: guard: landlock (edit-worktree)"),
+        "{line}"
+    );
+    assert!(
+        reply(&repo, "held").contains("write ../held.txt failed: Permission denied"),
+        "{}",
+        reply(&repo, "held")
+    );
+    assert_eq!(
+        repo.json(&["show", "held", "--json"])["guard"]["kind"],
+        "landlock"
     );
 }
 

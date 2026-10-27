@@ -48,7 +48,7 @@ Local mode runs the engine in your process and each harness as a child of it, in
 
 **Guaranteed:** one worktree and one process group per branch, so a branch's files and processes are its own, and `by cancel` reaches the group. The environment loses the variables that mark the Claude Code session that started `by`, so a harness never runs as that session.
 
-**Not guaranteed:** anything beyond your operating-system user. The harness has your `HOME`, your login, your other variables, your filesystem and your network. A `--yes` run lets it use all of that without asking. Under `--permissions read-only` or `edit-worktree` on Linux the [file guard](#the-file-guard) limits where it can write; your `HOME` stays in its scope.
+**Not guaranteed:** anything beyond your operating-system user. The harness has your `HOME`, your login, your other variables, your filesystem and your network. A `--yes` run lets it use all of that without asking. Under `--permissions read-only` or `edit-worktree` on Linux the [file guard](#the-file-guard) limits where it can write; your `HOME` stays in its scope, so when your `HOME` holds the repository only an `--isolated` run is guarded.
 
 Before it starts, `by` says so, the first time in a repository: `by: local mode: harnesses run as your user, in your own HOME; no sandbox` (the marker is `.branchyard/local-mode-noted`, written once a harness the note was printed for has started, so a command that fails before that, such as a run on a base that does not exist, does not spend it). The other modes are said on every run.
 
@@ -83,7 +83,13 @@ A permission preset decides the tool calls a harness asks Branchyard about. Seve
 | `read-only` | its `HOME`, its temporary directory, `/dev` | its worktree, the git directory (a read-only turn makes no commit), anything else |
 | `full`, `--yes`, `--ask`, explicit rules | anywhere your user can: no guard | |
 
-`HOME` is the branch's private home with `--isolated`, and **your own `HOME` otherwise**: without `--isolated` a guarded harness can still write your dotfiles. A planning turn (`--plan`) runs under `read-only`, and so under its guard. A delegated child gets its own guard, in its own worktree, from the policy it runs under.
+`HOME` is the branch's private home with `--isolated`, and **your own `HOME` otherwise**: without `--isolated` a guarded harness can still write your dotfiles. Landlock lets a harness write everything beneath a path it may write, and nothing carves a path back out, so when your own `HOME` holds the repository (`/home/you/project`, the usual place) no guard that keeps `HOME` writable can keep the harness out of the repository. Such a run is **not guarded**: `by` says so before it starts, and the branch records why:
+
+```text
+by: note: no file guard for this run: your HOME (/home/you) holds this repository, and a guard that lets the harness write in HOME would let it write the repository too; --isolated gives it a private HOME the guard can hold; --permissions edit-worktree decides only the tool calls the harness asks Branchyard about
+```
+
+Pass `--isolated` to be guarded there: the private home, under `.branchyard/homes/`, holds nothing but itself. A planning turn (`--plan`) runs under `read-only`, and so under its guard. A delegated child gets its own guard, in its own worktree, from the policy it runs under.
 
 What a refused write looks like: the operating system answers `EACCES` (`Permission denied`), and the harness reports it as any failed write. Pi 1.4.0 on 27 October 2026: `EACCES: permission denied, open '…/.branchyard/worktrees/outside.txt'`.
 
