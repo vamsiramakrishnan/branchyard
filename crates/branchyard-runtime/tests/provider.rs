@@ -53,6 +53,7 @@ conformance!(
     drop_tears_down,
     stop_ends_processes,
     egress_confinement,
+    write_scope,
 );
 
 /// The local provider, except that the background child of
@@ -182,6 +183,7 @@ fn stop_kills_background_children_and_blocks_exec() {
         argv: vec!["sh".into(), "-c".into(), "sleep 300 & echo $!; wait".into()],
         cwd: setup.workspace.clone(),
         env,
+        writable: None,
     };
     let mut process = provider.exec(&spec.name, &exec).unwrap();
     let mut line = String::new();

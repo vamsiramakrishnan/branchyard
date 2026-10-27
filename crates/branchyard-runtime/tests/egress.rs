@@ -857,6 +857,7 @@ fn a_confined_process_reaches_only_its_listener() {
         argv: vec!["python3".into(), "-c".into(), script],
         cwd: PathBuf::from("/"),
         env: BTreeMap::from([("PATH".into(), std::env::var_os("PATH").unwrap_or_default())]),
+        writable: None,
     };
     let reports: Arc<Mutex<Vec<Decision>>> = Arc::default();
     let (mut process, listener) = LocalProvider::spawn_confined(&spec, 3128).unwrap();

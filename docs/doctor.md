@@ -73,6 +73,7 @@ Rows come in this order, and their names are stable: a script may match on them.
 | `provider.default` | `[defaults] provider`. Local always passes. Microsandbox goes through the engine's own check (a build with the `microsandbox` feature, an image). A recipe must be defined and trusted | a recipe that is not trusted as it is now; or the check could not run without the store | Microsandbox the engine refuses; a recipe that is not defined |
 | `provider.sandboxes` | With Microsandbox as the default: the kept sandboxes and snapshots the store holds, the oldest kept one's age, and any older than `[microsandbox] max_kept_minutes` | a kept sandbox past `max_kept_minutes`: nothing destroys it until a turn ends on the provider or its branch takes its next turn; `by rm BRANCH` destroys it now | the rows cannot be read |
 | `host.namespaces` | Whether this host can confine a local harness to the egress proxy in an unprivileged user and network namespace ([egress](egress.md)): the engine's own probe | it cannot (a kernel or security-module setting, `BRANCHYARD_EGRESS_NETNS=off`, or not Linux): a network policy would be advisory | `[network] enforce = "required"` with an allowlist, on a host that cannot: every branch with that policy is refused |
+| `host.landlock` | Whether this host can hold a local harness to its permission preset's write scope with Landlock ([file guard](modes.md#the-file-guard)), and the ABI: the engine's own probe, a restricted `/bin/sh` refused a write | it cannot (a kernel before 5.13 or without Landlock enabled, `BRANCHYARD_GUARD=off`, or not Linux): `read-only` and `edit-worktree` then decide only the tool calls a harness asks about | |
 | `host.loopback` | A listener can be opened on `127.0.0.1`, which the egress proxy and the gateways use | it cannot | |
 | `host.kvm` | Read-write access to `/dev/kvm`, which `--provider microsandbox` needs | Linux without it | |
 | `server.reachable` | A server named by `--remote`, `BRANCHYARD_REMOTE` or `[remote] url` answers `GET /v1/repos` with the token in the token file, and serves the `repo` named, if one is | | no token file, an unreadable token or CA file, no answer within 5 seconds, a refusal, or the repository named is not served |
@@ -117,6 +118,7 @@ ok      harnesses.credentials   set: GH_TOKEN (names only)
 ok      provider.default        local (the default): harnesses run as your user in a worktree, with no isolation
 ok      provider.sandboxes      no sandbox provider is configured, so no sandbox is kept
 ok      host.namespaces         unprivileged user and network namespaces work: a local harness can be confined to the egress proxy
+ok      host.landlock           Landlock ABI 7: under --permissions read-only or edit-worktree a local harness can write only in its preset's scope
 ok      host.loopback           a listener on 127.0.0.1 can be opened
 warn    host.kvm                no read-write access to /dev/kvm: `--provider microsandbox` cannot start a microVM here
 ok      server.reachable        not configured: no --remote, BRANCHYARD_REMOTE or [remote] url; commands run here
@@ -129,10 +131,10 @@ To do:
   harnesses.default: run `by harnesses login claude-code`, or set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
   host.kvm: load the kvm module and add your user to the kvm group; local branches need none
 
-warn: 3 warnings, 1 to do, 17 ok
+warn: 3 warnings, 1 to do, 18 ok
 ```
 
-The exit status is 0. Where a row would fail, the summary reads `fail: 1 failed, 2 warnings, 1 to do, 16 ok` and the status is 1. The table never cuts a detail, so a configuration refusal is shown whole.
+The exit status is 0. Where a row would fail, the summary reads `fail: 1 failed, 2 warnings, 1 to do, 17 ok` and the status is 1. The table never cuts a detail, so a configuration refusal is shown whole.
 
 In a repository `by` has not been used in, the same report says:
 
@@ -147,7 +149,7 @@ todo    repository.state  not set up yet (no .branchyard/ in /home/me/app)
 To do:
   repository.state: run `by setup`
 
-todo: 1 to do, 18 ok
+todo: 1 to do, 19 ok
 ```
 
 and exits 0.
@@ -224,6 +226,7 @@ A check is a function from the shared context to rows, in `crates/branchyard-cli
 - the JSON has exactly the documented fields, unique dotted names, a fix on every row that is not `ok`, and the worst row as its status; the exit status is 0 with warnings only, 1 with a failure, and 2 for a usage error;
 - credentials appear by name and their values are in no output, stdout or stderr;
 - a provider that cannot run, an undefined or untrusted recipe, a default harness that is not installed, and `enforce = "required"` on a host that cannot confine (made deterministic with `BRANCHYARD_EGRESS_NETNS=off`);
+- `host.landlock` naming the Landlock ABI where the host has it, and warning with `BRANCHYARD_GUARD=off` (`crates/branchyard-cli/tests/guard.rs`);
 - a configured server asked once with its token against a mock, a refused token, a missing token file, a repository it does not serve, a server that stopped, and an `ssh://` remote left alone;
 - the model gateway's key variables named and never shown, and an unpriced routed model.
 

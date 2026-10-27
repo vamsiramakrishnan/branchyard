@@ -163,6 +163,7 @@ const CHECKS: &[CheckFn] = &[
     checks::provider_default,
     checks::provider_sandboxes,
     checks::host_namespaces,
+    checks::host_landlock,
     checks::host_loopback,
     checks::host_kvm,
     checks::server_reachable,

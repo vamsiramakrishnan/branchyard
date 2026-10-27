@@ -1795,6 +1795,7 @@ pub(crate) fn run_in_sandbox(report: &mut WorkspaceReport, commands: &[String], 
             argv: vec!["sh".into(), "-c".into(), command.clone()],
             cwd: PathBuf::from(cwd),
             env: env.iter().map(|(n, v)| (n.into(), v.into())).collect(),
+            writable: None,
         };
         let mut process = match provider.exec(sandbox, &spec) {
             Ok(process) => process,

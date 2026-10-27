@@ -1451,6 +1451,11 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
                 .unwrap_or_else(|| "the harness's default".into()),
         ),
         ("provider", runs_text(&i.provider, i.isolated)),
+    ];
+    if let Some(guard) = &i.guard {
+        pairs.push(("guard", guard.describe()));
+    }
+    pairs.extend([
         ("parent", i.parent.clone().unwrap_or_else(|| "none".into())),
         (
             "children",
@@ -1462,7 +1467,7 @@ pub fn inspection(i: &branchyard::Inspection, style: Style) -> String {
         ("candidate", candidate_text(i.candidate.as_ref())),
         ("turns", i.turns.to_string()),
         ("cost", money(i.cost_usd)),
-    ];
+    ]);
     pairs.extend(budget_lines(i, true));
     pairs.push(("check", check_text(i)));
     if !i.owns.is_empty() || !i.owns_within.is_empty() {
@@ -1892,9 +1897,14 @@ pub fn details(
         ("git branch", info.git_branch.clone()),
         ("harness", harness_label(&info.harness, &info.profile)),
         ("provider", runs_text(&info.provider, info.isolated)),
+    ];
+    if let Some(guard) = &info.guard {
+        pairs.push(("guard", guard.describe()));
+    }
+    pairs.extend([
         ("status", style.paint(tone, &status)),
         ("prompt", info.prompt.clone()),
-    ];
+    ]);
     if let Some(parent) = &info.parent {
         pairs.push(("forked from", parent.clone()));
     }
@@ -2125,6 +2135,7 @@ mod tests {
             model: None,
             provider: "local".into(),
             isolated: false,
+            guard: None,
         }
     }
 
@@ -2690,6 +2701,51 @@ mod tests {
         assert_eq!(
             line(inspection(&i, Style::PLAIN)).as_deref(),
             Some("local: as your user, no sandbox")
+        );
+    }
+
+    /// `by show` and `by inspect` say what held the harness's writes, under
+    /// the provider line, once a turn has recorded it.
+    #[test]
+    fn show_and_inspect_say_what_guarded_the_harness() {
+        let guard_line = |text: &str| {
+            text.lines()
+                .find(|l| l.starts_with("guard "))
+                .map(|l| l.split_whitespace().skip(1).collect::<Vec<_>>().join(" "))
+        };
+        let mut b = info("b", None);
+        let shown = details(&b, None, 100, Style::PLAIN, Vec::new());
+        assert_eq!(guard_line(&shown), None, "no turn yet: no guard line");
+        b.guard = Some(branchyard::Guard::Landlock {
+            preset: branchyard::PolicyPreset::EditWorktree,
+            abi: 7,
+            writable: vec!["/w".into()],
+        });
+        let shown = details(&b, None, 100, Style::PLAIN, Vec::new());
+        assert_eq!(
+            guard_line(&shown).as_deref(),
+            Some(
+                "landlock (edit-worktree, ABI 7): writes only in its worktree, its git \
+                 directory, HOME, its temporary directory and /dev"
+            )
+        );
+        let lines: Vec<&str> = shown.lines().collect();
+        let at = |key: &str| lines.iter().position(|l| l.starts_with(key));
+        assert_eq!(at("guard"), at("provider").map(|p| p + 1), "{shown}");
+
+        let i: branchyard::Inspection = serde_json::from_value(serde_json::json!({
+            "name": "kid", "status": {"state": "ready"}, "harness": "pi",
+            "profile": "pi-rpc", "parent": null, "children": [],
+            "depth": 0, "turns": 1, "candidate": null, "cost_usd": null,
+            "subtree_cost_usd": 0.0, "max_usd": null, "remaining_usd": null,
+            "envelope": null, "last_message": "", "provider": "local", "isolated": false,
+            "guard": {"kind": "none", "reason": "the full preset allows every tool and names \
+                      no file scope"},
+        }))
+        .unwrap();
+        assert_eq!(
+            guard_line(&inspection(&i, Style::PLAIN)).as_deref(),
+            Some("none: the full preset allows every tool and names no file scope")
         );
     }
 

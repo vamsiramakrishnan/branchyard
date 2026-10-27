@@ -222,6 +222,27 @@ pub struct ExecSpec {
     /// environment. The local provider's base is empty; an image-based
     /// provider's is the image's configured environment.
     pub env: BTreeMap<OsString, OsString>,
+    /// Where the process and its descendants may write: beneath these
+    /// paths (sandbox paths, absolute) and nowhere else on the filesystem.
+    /// Reading and executing stay allowed everywhere. `None` leaves writes
+    /// to the provider's own boundary. A provider that cannot hold a
+    /// process to it refuses the exec ([`Operation::WriteScope`], through
+    /// [`ExecSpec::refuse_write_scope`]) rather than run it unconfined;
+    /// the local provider holds it with Landlock, on Linux kernels that
+    /// have it.
+    pub writable: Option<Vec<PathBuf>>,
+}
+
+impl ExecSpec {
+    /// For a provider that cannot hold a process to
+    /// [`ExecSpec::writable`]: an error when this spec asks for a write
+    /// scope, so the exec is refused rather than run unconfined.
+    pub fn refuse_write_scope(&self) -> Result<(), ProviderError> {
+        match self.writable {
+            Some(_) => Err(ProviderError::unsupported(Operation::WriteScope)),
+            None => Ok(()),
+        }
+    }
 }
 
 /// How a process ended.
@@ -558,6 +579,25 @@ mod tests {
             io::Error::from(ProviderError::Runtime("x".into())).kind(),
             io::ErrorKind::Other
         );
+    }
+
+    #[test]
+    fn a_write_scope_is_refused_by_a_provider_that_cannot_hold_it() {
+        assert!(ExecSpec::default().refuse_write_scope().is_ok());
+        let scoped = ExecSpec {
+            writable: Some(vec![PathBuf::from("/workspace")]),
+            ..ExecSpec::default()
+        };
+        match scoped.refuse_write_scope() {
+            Err(ProviderError::Unsupported(unsupported)) => {
+                assert_eq!(unsupported.operation, Operation::WriteScope);
+                assert_eq!(
+                    unsupported.to_string(),
+                    "provider does not support confine writes"
+                );
+            }
+            other => panic!("expected unsupported, got {other:?}"),
+        }
     }
 
     #[test]

@@ -872,6 +872,7 @@ dependencies = [
  "branchyard-support",
  "branchyard-testkit",
  "branchyard-wire",
+ "libc",
  "rcgen",
  "rustix",
  "rustls",

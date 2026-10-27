@@ -189,6 +189,8 @@ pub struct ExecPlan {
 
 /// Plan an exec. The guest protocol carries UTF-8 strings only.
 pub fn exec(spec: &ExecSpec) -> Result<ExecPlan, ProviderError> {
+    // The microVM is the boundary; nothing inside it holds a write scope.
+    spec.refuse_write_scope()?;
     let Some((program, args)) = spec.argv.split_first() else {
         return Err(ProviderError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -334,6 +336,7 @@ mod tests {
                 ("HOME".into(), "/branchyard/home".into()),
                 ("ANTHROPIC_API_KEY".into(), "k".into()),
             ]),
+            writable: None,
         };
         assert_eq!(
             exec(&spec).unwrap(),
@@ -355,6 +358,7 @@ mod tests {
             argv: vec!["sh".into()],
             cwd: "/workspace".into(),
             env: BTreeMap::new(),
+            writable: None,
         };
         assert!(matches!(
             exec(&ExecSpec {

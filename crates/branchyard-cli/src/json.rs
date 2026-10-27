@@ -404,6 +404,7 @@ mod tests {
             model: None,
             provider: "local".into(),
             isolated: false,
+            guard: None,
         };
         let value = branch(&info);
         assert_eq!(value["status"], json!({ "state": "failed", "reason": "r" }));
@@ -444,7 +445,8 @@ mod tests {
                 "stalled",
                 "superseded_by",
                 "provider",
-                "isolated"
+                "isolated",
+                "guard"
             ]
         );
         let harness = harness(&HarnessInfo {

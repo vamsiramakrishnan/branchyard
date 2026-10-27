@@ -104,6 +104,9 @@ pub enum Operation {
     /// Run a process whose only network is a loopback listener handed to
     /// the caller, such as an egress proxy's.
     Egress,
+    /// Run a process that may write only beneath the paths its
+    /// [`ExecSpec::writable`] names.
+    WriteScope,
 }
 
 impl fmt::Display for Operation {
@@ -120,6 +123,7 @@ impl fmt::Display for Operation {
             Operation::LiveBranch => "live branch",
             Operation::Release => "release a checkpoint",
             Operation::Egress => "confine egress",
+            Operation::WriteScope => "confine writes",
         })
     }
 }

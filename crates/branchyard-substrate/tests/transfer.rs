@@ -74,6 +74,7 @@ fn guest_run(endpoint: &Endpoint, cwd: &Path, script: &str) -> String {
             ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ]
         .into(),
+        writable: None,
     };
     let mut process = endpoint.exec(&spec).unwrap();
     drop(process.take_stdin());

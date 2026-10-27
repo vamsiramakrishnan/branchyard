@@ -80,6 +80,7 @@ impl SandboxProvider for Intercept {
                 argv: vec!["sh".into(), "-c".into(), command],
                 cwd: spec.cwd.clone(),
                 env: spec.env.clone(),
+                writable: None,
             },
         )
     }
@@ -324,7 +325,10 @@ fn a_refused_write_is_a_warning_and_the_turn_goes_on() {
 fn a_local_branch_gets_no_managed_settings() {
     let f = Fixture::new();
     let intercept = install(&f, false);
-    let record = f.dir.join("launch.json");
+    // In the branch's temporary directory: under `read-only` a local
+    // harness's file guard lets it write there and not beside the
+    // repository (docs/modes.md#the-file-guard).
+    let record = f.root.join(".branchyard/tmp/local/launch.json");
     let options = TaskOptions {
         harness: Some("claude-code-stream-json".into()),
         command: Some(vec![
