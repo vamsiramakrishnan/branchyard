@@ -1133,6 +1133,7 @@ pub(crate) fn plan(
                 true => "it lists no candidates".into(),
                 false => format!("no candidate can run: {}", why.join("; ")),
             },
+            cause: crate::Unavailable::NoCandidate,
         });
     }
     let exploration = entry.exploration.clamp(0.0, 1.0);

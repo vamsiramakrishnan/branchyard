@@ -806,9 +806,9 @@ fn installs_and_logins_reach_another_machine_over_ssh() {
     assert_eq!(out["on"], "ssh://dev@vm.test");
     assert!(w.vm_home.join(".local/bin/codex").is_file());
     assert!(!w.home.join(".local/bin/codex").exists());
-    // No terminal: the login is not done (exit 2), with where to run it.
+    // No terminal: the login is not done (exit 3), with where to run it.
     let out = w.by(&["harnesses", "login", "codex", "--on", "ssh://dev@vm.test"]);
-    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
     // Codex is off PATH there, so the login names the executable found.
     let said = text(&out.stderr);
     assert!(said.contains("run `ssh -t dev@vm.test /"), "{said}");
@@ -1426,7 +1426,7 @@ fn login_antigravity_writes_the_model_provider_when_a_gemini_key_is_set() {
 
     // No terminal and no --yes: the change is shown, nothing is written.
     let out = w.by_env(&["harnesses", "login", "antigravity"], &key);
-    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
     let shown = text(&out.stdout);
     assert!(
         shown.contains("+    \"modelProvider\": \"gemini\""),
@@ -1536,10 +1536,10 @@ fn login_prints_the_exact_command_for_a_harness_it_cannot_log_in_itself() {
 fn login_runs_the_harness_own_flow_or_stores_a_key_and_says_what_to_run() {
     let w = World::new();
     w.fake_codex(&w.bin, "0.157.1");
-    // No terminal: nothing ran, so it says what to run and exits 2, not 0,
+    // No terminal: nothing ran, so it says what to run and exits 3, not 0,
     // and `by harnesses login codex && by run ...` stops here.
     let out = w.by(&["harnesses", "login", "codex"]);
-    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
     assert!(
         text(&out.stderr).contains("no terminal here; run `codex login --device-auth`"),
         "{}",
@@ -1549,7 +1549,7 @@ fn login_runs_the_harness_own_flow_or_stores_a_key_and_says_what_to_run() {
     assert!(w.calls("codex login --device-auth").is_empty());
     // With --json: the same exit, and the status on stdout.
     let out = w.by(&["harnesses", "login", "codex", "--json"]);
-    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(out.status.code(), Some(3));
     let said: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(said["status"], "manual", "{said}");
     assert!(said["run"]
@@ -1658,7 +1658,7 @@ fn login_runs_the_harness_own_flow_or_stores_a_key_and_says_what_to_run() {
     // No login command in the catalog but a key variable: nothing ran either,
     // and it says which form works.
     let out = w.by(&["harnesses", "login", "deepseek-harness"]);
-    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
     assert!(
         text(&out.stderr)
             .contains("give it an API key with `by harnesses login deepseek-harness --api-key`"),
@@ -1770,9 +1770,12 @@ fn a_run_is_refused_before_a_branch_when_its_harness_cannot_start() {
     assert!(w.calls("app-server").is_empty());
     // With --json the refusal is the error envelope on stdout, with its next.
     let out = w.by(&["run", "say hi", "--harness", "codex", "-n", "cx", "--json"]);
-    assert_eq!(out.status.code(), Some(1));
+    // The pre-flight prints its own refusal; the process still exits with
+    // the status the envelope names (environment: 3).
+    assert_eq!(out.status.code(), Some(3));
     let error: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(error["error"]["kind"], "harness_unavailable", "{error}");
+    assert_eq!(error["error"]["exit"], 3, "{error}");
     assert!(
         error["error"]["next"][0]
             .as_str()
@@ -1956,7 +1959,7 @@ fn a_harness_that_is_not_installed_is_refused_with_how_to_install_it() {
     let why = w.fails(&["send", "keep", "more"]);
     assert!(why.contains("gemini-cli is not installed"), "{why}");
     let out = w.by(&["send", "keep", "more", "--json"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(3));
     let error: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(error["error"]["kind"], "harness_unavailable", "{error}");
     // The executable named on the command line is the person's business.
@@ -2140,10 +2143,10 @@ fn a_server_shows_its_workers_harnesses_and_says_where_to_log_in() {
         said.contains("run `codex login --device-auth` there, in a terminal"),
         "{said}"
     );
-    // Nothing was logged in: exit 2, as without a terminal here.
-    assert_eq!(out.status.code(), Some(2), "{said}");
+    // Nothing was logged in: exit 3, as without a terminal here.
+    assert_eq!(out.status.code(), Some(3), "{said}");
     let out = remote(&["harnesses", "login", "codex", "--json"]);
-    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(out.status.code(), Some(3));
     let said: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(said["status"], "manual", "{said}");
     // Workers never install.

@@ -220,7 +220,7 @@ fn an_edited_diff_is_refused_and_kept_and_a_file_can_be_given() {
         r#"sed -i -e 's/^+two$/+three/' -e '/^+three$/a >> hm' "$1""#,
     );
     let out = repo.by(Some(&breaking), &["review", "feat", "--print"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     let error = stderr(&out);
     assert!(error.contains("the diff was edited here"), "{error}");
     assert!(error.contains("nothing was sent"), "{error}");
@@ -247,7 +247,7 @@ fn an_edited_diff_is_refused_and_kept_and_a_file_can_be_given() {
 
     // No editor at all is explained.
     let out = repo.by(None, &["review", "feat"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(3));
     assert!(stderr(&out).contains("no editor"), "{}", stderr(&out));
     // A branch with no changes has nothing to review.
     repo.ok(repo.by(
@@ -369,7 +369,7 @@ fn review_prints_json_for_the_prompt_the_send_and_no_comments() {
 
     // A refusal is the envelope.
     let missing = repo.by(Some("true"), &["review", "nope", "--json"]);
-    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(missing.status.code(), Some(2));
     let missing: Value = serde_json::from_str(&stdout(&missing)).unwrap();
     assert_eq!(missing["error"]["kind"], "unknown_branch");
 }

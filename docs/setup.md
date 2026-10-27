@@ -162,7 +162,7 @@ A plan's file:
 }
 ```
 
-A generated token is a file with `"sensitive": true`, `"mode": "0600"`, and `null` content and diff. Kinds of question: `select`, `multiselect`, `text`, `confirm`, `number`, `path`, and `secret_ref`, which asks where a secret is (a variable name, or `@path`) and refuses anything that looks like a credential itself. Refusals print `{"error": {"kind", "message", "paths"}}` on stdout and exit 1: `incomplete`, `invalid_plan`, `would_overwrite`, `invalid_answers`, `io`; usage errors exit 2.
+A generated token is a file with `"sensitive": true`, `"mode": "0600"`, and `null` content and diff. Kinds of question: `select`, `multiselect`, `text`, `confirm`, `number`, `path`, and `secret_ref`, which asks where a secret is (a variable name, or `@path`) and refuses anything that looks like a credential itself. Refusals print `{"error": {"kind", "message", "paths", "exit"}}` on stdout and exit 1: `incomplete`, `invalid_plan`, `would_overwrite`, `invalid_answers`, `io`; usage errors exit 2, and `by init project` outside a repository (`not_a_repository`) exits 3 ([exit status](cli.md#exit-status)).
 
 The JSON Schema of every document is [`schema/setup.protocol.json`](../schema/setup.protocol.json). Output is deterministic: maps are ordered, questions keep their topic's order, and the same answers on the same machine print the same bytes (except a freshly generated token's hash).
 

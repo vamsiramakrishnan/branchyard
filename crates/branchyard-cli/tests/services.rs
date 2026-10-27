@@ -408,7 +408,10 @@ fn a_pinned_port_held_by_something_else_is_refused_not_adopted() {
         "{error}"
     );
     assert!(text.contains("404"), "what it answered: {error}");
-    assert!(text.contains("Next:"), "{error}");
+    // The way out is the envelope's `next`; the port is the environment's (3).
+    assert_eq!(error["error"]["next"][0], "free the port", "{error}");
+    assert_eq!(error["error"]["exit"], 3, "{error}");
+    assert_eq!(out.status.code(), Some(3));
     let listed = repo.json(&["services", "--kind", "connector_gateway", "--json"]);
     assert_eq!(listed["services"], serde_json::json!([]), "{listed}");
 }

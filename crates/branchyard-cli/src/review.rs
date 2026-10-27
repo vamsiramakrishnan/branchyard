@@ -331,11 +331,11 @@ pub fn main(env: &Env, target: &Target, args: &ReviewArgs) -> Outcome {
             ..TaskArgs::default()
         };
         if carried != *args.task {
-            return Err(Failure::Message(
-                "--detach carries only --yes, --ask and --command to the background by send; \
-                 drop the other options or leave out --detach"
-                    .into(),
-            ));
+            return Err(crate::errors::Report::usage(
+                "--detach carries only --yes, --ask and --command to the background by send",
+            )
+            .next("drop the other options, or leave out --detach")
+            .into());
         }
     }
     let branch = args.branch;
@@ -344,14 +344,22 @@ pub fn main(env: &Env, target: &Target, args: &ReviewArgs) -> Outcome {
         Target::Remote(remote) => remote.repo.diff(branch)?,
     };
     if diff.trim().is_empty() {
-        return Err(Failure::Message(format!(
-            "{branch} has no changes to review"
-        )));
+        return Err(crate::errors::Report::new(
+            "no_candidate",
+            format!("{branch} has no changes to review"),
+        )
+        .next(format!("by log {branch} (what its turns did)"))
+        .into());
     }
     let (path, edited) = match args.file {
         Some(file) => {
-            let text = std::fs::read_to_string(file)
-                .map_err(|e| Failure::Message(format!("--file {file}: {e}")))?;
+            let text = std::fs::read_to_string(file).map_err(|e| {
+                crate::errors::Report::usage(format!(
+                    "--file {file}: {}",
+                    crate::errors::plain_io(&e)
+                ))
+                .next("give the file that holds the review")
+            })?;
             (PathBuf::from(file), text)
         }
         None => {
@@ -374,12 +382,14 @@ pub fn main(env: &Env, target: &Target, args: &ReviewArgs) -> Outcome {
         }
     };
     let comments = parse(&diff, &edited).map_err(|e| {
-        Failure::Message(format!(
-            "{}:{}: {}; nothing was sent. Fix it and run by review {branch} again (the file \
-             is kept), or pass it with --file",
+        crate::errors::Report::usage(format!(
+            "{}:{}: {}; nothing was sent",
             path.display(),
             e.line,
             e.message
+        ))
+        .next(format!(
+            "fix it and run by review {branch} again (the file is kept), or pass it with --file"
         ))
     })?;
     if comments.is_empty() {

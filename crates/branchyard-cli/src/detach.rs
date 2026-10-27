@@ -452,7 +452,7 @@ pub struct Detached {
 pub fn launch(target: &Target, launch: &Launch) -> Outcome {
     let in_harness = std::env::var_os(branchyard::ENV_BRANCH).is_some_and(|v| !v.is_empty());
     if let Some(why) = refusal(launch, matches!(target, Target::Remote(_)), in_harness) {
-        return Err(Failure::Message(why));
+        return Err(crate::errors::Report::usage(why).into());
     }
     let yard = commands::open()?;
     let dir = yard.root().join(".branchyard").join("detached");

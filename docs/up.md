@@ -11,7 +11,7 @@ by up --yes      # confirm the installs the [harnesses] policy would ask about
 by up --json     # the steps as JSON, for a script or the Python SDK
 ```
 
-Outside a git repository it stops before any step, with the fix: ``by: not a git repository: /path. Run `git init` here, or cd into one`` (exit 1).
+Outside a git repository it stops before any step, with the fix: ``by: not a git repository: /path. Run `git init` here, or cd into one`` (exit 3, `not_a_repository`).
 
 The same operation is the engine's ([`branchyard::up`](../crates/branchyard/src/up.rs)): `Yard::up_plan`, `Yard::up_apply` and `Yard::up` over a `Machine`, and the Python SDK's `Local.up()` ([SDKs](sdk.md#local-mode)). `by up` is one caller of it.
 

@@ -1,4 +1,4 @@
-//! What a failed command says, and how it says it.
+//! What a failed command says, how it says it, and the status it exits with.
 //!
 //! One shape for every failure (CONTRIBUTING.md, "CLI style"):
 //!
@@ -9,41 +9,220 @@
 //! ```
 //!
 //! With `--json` anywhere on the command line the same failure is
-//! `{"error": {"kind", "message", "next", "detail"}}` on standard output,
-//! whichever layer failed: the engine, a server, the configuration or the
-//! command line itself. `kind` is [`branchyard::Error::kind`] for an
-//! engine error, the server's `code` for a server's, and `usage`,
-//! `config`, `remote_unreachable` or `io` for the layers above.
+//! `{"error": {"kind", "message", "next", "detail", "exit"}}` on standard
+//! output, whichever layer failed: the engine, a server, the configuration
+//! or the command line itself. `kind` is [`branchyard::Error::kind`] for an
+//! engine error, the server's `code` for a server's (its `git_error` read
+//! as `git`, and so on), and `usage`, `config`, `remote_unreachable` or
+//! `io` for the layers above.
+//!
+//! One way to fail: a command returns a [`Report`] as [`Failure::Report`]
+//! (or an engine, server or I/O error, which becomes one here), and
+//! [`finish`] prints it, as JSON or as text, and exits with the status its
+//! kind maps to in [`KINDS`]. The JSON's `exit` is that status.
 //!
 //! The engine's [`branchyard::Error`] texts are shared with the server, the
-//! MCP tools and the Python module, so they stay plain statements of fact.
-//! The next command is the CLI's to add: it knows the command names.
+//! MCP tools and the Python module, so they stay plain statements of fact;
+//! what the CLI needs beyond them (why a harness cannot start, which
+//! profile routes no approvals) it reads from the error's data, never from
+//! its text. The next command is the CLI's to add: it knows the command
+//! names.
 
 use std::ffi::OsString;
+use std::io;
+use std::process::ExitCode;
+use std::sync::atomic::{AtomicU8, Ordering};
 
-use branchyard::Error;
+use branchyard::{Error, Unavailable};
 use serde_json::{json, Value};
 
 use crate::args::shell_quote;
-use crate::commands::Failure;
+use crate::commands::{Failure, Outcome};
 
 /// How many lines of a failed check's output a message shows.
 const OUTPUT_LINES: usize = 10;
 
-/// One failure, ready to print as text or as JSON.
-#[derive(Debug, PartialEq)]
-pub(crate) struct Report {
+/// The exit statuses `by` ends with, each meaning one thing. Every error
+/// kind ends with one of them ([`KINDS`]); docs/cli.md's table is
+/// generated from [`EXITS`] and [`KINDS`] by tools/docs_facts.py
+/// (`cli.exit_codes`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    /// Done.
+    Success = 0,
+    /// The operation ran and failed.
+    Failed = 1,
+    /// The command line asks for what cannot be.
+    Usage = 2,
+    /// Something around the command must change first.
+    Environment = 3,
+    /// Refused before anything ran.
+    Refused = 4,
+    /// Interrupted with Ctrl-C.
+    Interrupted = 130,
+}
+
+impl Exit {
+    /// The status as the process ends with it.
+    pub(crate) fn code(self) -> u8 {
+        self as u8
+    }
+}
+
+/// What each exit status means, in docs/cli.md's words.
+pub(crate) const EXITS: [(Exit, &str); 6] = [
+    (Exit::Success, "the command did what it was asked"),
+    (
+        Exit::Failed,
+        "the operation ran and failed: a branch failed, a check failed, a merge conflicted, the \
+         branch was busy; also a failure not yet given a kind (`unclassified`), and any kind not \
+         listed here",
+    ),
+    (
+        Exit::Usage,
+        "the command line asks for what cannot be: a bad flag or value (clap's own usage errors \
+         too), an unknown branch, harness or repository, a name already taken",
+    ),
+    (
+        Exit::Environment,
+        "something around the command must change first: not a repository, a harness (or gh, \
+         ssh) not installed, a configuration file that does not load, a server that does not \
+         answer or refuses the token, a login only you can do",
+    ),
+    (
+        Exit::Refused,
+        "refused before anything ran: a policy, a delegation envelope, a budget or quota, or a \
+         capability the harness lacks",
+    ),
+    (
+        Exit::Interrupted,
+        "interrupted with Ctrl-C: `by` installs no handler, so the shell reports 128 + SIGINT \
+         (`by serve` and `by worker` catch it and shut down)",
+    ),
+];
+
+/// Every error kind `by` reports (`--json`'s `kind`), each with the exit
+/// status it ends with. A kind not listed exits [`Exit::Failed`].
+pub(crate) const KINDS: &[(&str, Exit)] = &[
+    // The command line.
+    ("usage", Exit::Usage),
+    ("invalid_name", Exit::Usage),
+    ("invalid_request", Exit::Usage),
+    ("invalid_rig", Exit::Usage),
+    ("unknown_branch", Exit::Usage),
+    ("unknown_harness", Exit::Usage),
+    ("unknown_message", Exit::Usage),
+    ("unknown_knowledge", Exit::Usage),
+    ("unknown_repo", Exit::Usage),
+    ("unknown_operation", Exit::Usage),
+    ("unknown_trigger", Exit::Usage),
+    ("not_found", Exit::Usage),
+    ("branch_exists", Exit::Usage),
+    // Around the command.
+    ("not_a_repository", Exit::Environment),
+    ("harness_unavailable", Exit::Environment),
+    ("config", Exit::Environment),
+    ("remote_unreachable", Exit::Environment),
+    ("remote_protocol", Exit::Environment),
+    ("unauthorized", Exit::Environment),
+    ("shutting_down", Exit::Environment),
+    ("manual", Exit::Environment),
+    // A program `by` runs for you (gh, ssh) is not installed or not logged in.
+    ("tool_unavailable", Exit::Environment),
+    // Refused by a policy, an envelope, a budget or a capability.
+    ("denied", Exit::Refused),
+    ("unsupported", Exit::Refused),
+    ("scope_required", Exit::Refused),
+    ("repo_not_allowed", Exit::Refused),
+    ("delegation_not_allowed", Exit::Refused),
+    ("command_not_allowed", Exit::Refused),
+    ("provider_not_allowed", Exit::Refused),
+    ("secret_not_allowed", Exit::Refused),
+    ("unapproved_tools_not_allowed", Exit::Refused),
+    ("quota_exceeded", Exit::Refused),
+    ("rate_limited", Exit::Refused),
+    // The operation ran and failed.
+    ("check_failed", Exit::Failed),
+    ("check_timed_out", Exit::Failed),
+    ("check_not_started", Exit::Failed),
+    ("conflict", Exit::Failed),
+    ("target_moved", Exit::Failed),
+    ("dirty_target", Exit::Failed),
+    ("already_merged", Exit::Failed),
+    ("no_candidate", Exit::Failed),
+    ("invalid_candidate", Exit::Failed),
+    ("no_plan", Exit::Failed),
+    ("running", Exit::Failed),
+    ("not_running", Exit::Failed),
+    ("steer_refused", Exit::Failed),
+    ("fenced", Exit::Failed),
+    ("stale_revision", Exit::Failed),
+    ("git", Exit::Failed),
+    ("harness", Exit::Failed),
+    ("io", Exit::Failed),
+    ("state", Exit::Failed),
+    ("internal", Exit::Failed),
+    // A program `by` ran for you (gh, an editor, anvil) failed.
+    ("command_failed", Exit::Failed),
+    // A bare message (`Failure::Message`) not yet given a kind of its own;
+    // tools/failure_message_ratchet.json counts the places that build one.
+    ("unclassified", Exit::Failed),
+    // `by init`'s refusals of a plan (docs/setup.md): nothing was written.
+    ("incomplete", Exit::Failed),
+    ("invalid_answers", Exit::Failed),
+    ("invalid_plan", Exit::Failed),
+    ("would_overwrite", Exit::Failed),
+];
+
+/// The exit status of a failure of `kind` ([`KINDS`]).
+pub(crate) fn exit_of(kind: &str) -> Exit {
+    KINDS
+        .iter()
+        .find(|(known, _)| *known == kind)
+        .map_or(Exit::Failed, |(_, exit)| *exit)
+}
+
+/// The status of the last report [`print`] wrote (0 before one is), for a
+/// command that printed its own and returned [`Failure::Reported`]: the
+/// process then exits with what its JSON said.
+static PRINTED: AtomicU8 = AtomicU8::new(0);
+
+/// Remember `report`'s status as the one printed last.
+fn remember(report: &Report) {
+    PRINTED.store(report.exit().code(), Ordering::Relaxed);
+}
+
+/// The exit status of the report printed last, if one was.
+fn printed_exit() -> Option<Exit> {
+    let code = PRINTED.load(Ordering::Relaxed);
+    EXITS
+        .iter()
+        .map(|(exit, _)| *exit)
+        .find(|exit| exit.code() == code && *exit != Exit::Success)
+}
+
+/// One failure, ready to print as text or as JSON. Build it with
+/// `Report::new(kind, what).line(..).next(..)` and return it (`.into()`
+/// makes it a [`Failure::Report`]); [`finish`] prints it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Report {
     /// `unknown_branch`, `usage`, `config`, ...
     pub(crate) kind: String,
     /// The first line after `by: `: what failed, naming the object.
     pub(crate) message: String,
-    /// Labelled lines under it (`why`, `check`, `output`).
+    /// Labelled lines under it (`why`, `check`, `output`); an empty label
+    /// is an item of a list, indented with none.
     pub(crate) lines: Vec<(&'static str, String)>,
     /// What to run next, each a command or a short sentence with one.
     pub(crate) next: Vec<String>,
     /// What the error carries beyond its message, as
     /// [`branchyard::Error::detail`] gives it.
     pub(crate) detail: Option<Value>,
+    /// More members of the JSON `error` object (`steer`, `field`).
+    pub(crate) fields: Vec<(&'static str, Value)>,
+    /// JSON or text, when the command decided it (the background command
+    /// of `--detach` writes text); `None` asks the command line.
+    pub(crate) json: Option<bool>,
 }
 
 impl Report {
@@ -54,7 +233,14 @@ impl Report {
             lines: Vec::new(),
             next: Vec::new(),
             detail: None,
+            fields: Vec::new(),
+            json: None,
         }
+    }
+
+    /// A command line that asks for what cannot be (`usage`, exit 2).
+    pub(crate) fn usage(message: impl Into<String>) -> Report {
+        Report::new("usage", message)
     }
 
     pub(crate) fn line(mut self, label: &'static str, text: impl Into<String>) -> Report {
@@ -67,33 +253,60 @@ impl Report {
         self
     }
 
+    /// Another member of the JSON `error` object.
+    pub(crate) fn field(mut self, name: &'static str, value: Value) -> Report {
+        self.fields.push((name, value));
+        self
+    }
+
+    /// Printed as JSON (`true`) or as text, whatever the command line says.
+    pub(crate) fn with_json(mut self, json: bool) -> Report {
+        self.json = Some(json);
+        self
+    }
+
+    /// The exit status its kind ends with.
+    pub(crate) fn exit(&self) -> Exit {
+        exit_of(&self.kind)
+    }
+
     /// The text for standard error.
     pub(crate) fn text(&self) -> String {
-        let mut out = format!("by: {}\n", self.message);
+        format!("by: {}\n", self.said())
+    }
+
+    /// What the text says after `by: `, without the final newline.
+    pub(crate) fn said(&self) -> String {
+        let mut out = self.message.clone();
         for (label, text) in &self.lines {
-            match text.contains('\n') {
-                false => out.push_str(&format!("  {label}: {text}\n")),
-                true => {
-                    out.push_str(&format!("  {label}:\n"));
+            match (label.is_empty(), text.contains('\n')) {
+                // An unlabelled line: an item of a list (`by init`'s paths).
+                (true, _) => out.push_str(&format!("\n  {text}")),
+                (false, false) => out.push_str(&format!("\n  {label}: {text}")),
+                (false, true) => {
+                    out.push_str(&format!("\n  {label}:"));
                     for line in text.lines() {
-                        out.push_str(&format!("    {line}\n"));
+                        out.push_str(&format!("\n    {line}"));
                     }
                 }
             }
         }
         if !self.next.is_empty() {
-            out.push_str(&format!("  next: {}\n", self.next.join(", or ")));
+            out.push_str(&format!("\n  next: {}", self.next.join(", or ")));
         }
         out
     }
 
     /// The `--json` envelope for standard output. Its `message` is the
     /// first line and the labelled lines under it, so nothing the text
-    /// says is missing from it.
+    /// says is missing from it; `exit` is the status the process ends with.
     pub(crate) fn json(&self) -> Value {
         let mut message = self.message.clone();
         for (label, text) in &self.lines {
-            message.push_str(&format!("\n{label}: {text}"));
+            match label.is_empty() {
+                true => message.push_str(&format!("\n{text}")),
+                false => message.push_str(&format!("\n{label}: {text}")),
+            }
         }
         let mut error = json!({"kind": self.kind, "message": message});
         if !self.next.is_empty() {
@@ -102,14 +315,27 @@ impl Report {
         if let Some(detail) = &self.detail {
             error["detail"] = detail.clone();
         }
+        for (name, value) in &self.fields {
+            error[*name] = value.clone();
+        }
+        error["exit"] = json!(self.exit().code());
         json!({ "error": error })
     }
 }
 
-/// Print `report`: its JSON on standard output with `json`, else its text on
-/// standard error. A closed pipe is the reader's choice.
+impl From<Report> for Failure {
+    fn from(report: Report) -> Failure {
+        Failure::Report(Box::new(report))
+    }
+}
+
+/// Print `report`: its JSON on standard output with `json` (unless the
+/// report decided), else its text on standard error. A closed pipe is the
+/// reader's choice. Its exit status is remembered for a command that goes
+/// on to return [`Failure::Reported`].
 pub(crate) fn print(report: &Report, json: bool) {
-    if json {
+    remember(report);
+    if report.json.unwrap_or(json) {
         branchyard_support::best_effort(
             "print the error as JSON",
             crate::commands::print(&format!(
@@ -120,6 +346,27 @@ pub(crate) fn print(report: &Report, json: bool) {
     } else {
         eprint!("{}", report.text());
     }
+}
+
+/// End a command: print its failure, once, as JSON with `json` (whether
+/// `--json` is on the command line) or as text, and return the exit
+/// status its kind maps to. The one place a failure is printed.
+pub(crate) fn finish(outcome: Outcome, json: bool) -> ExitCode {
+    let exit = match outcome {
+        Ok(()) => Exit::Success,
+        // A closed pipe, as in `by ls | head`, is the reader's choice.
+        Err(Failure::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe => Exit::Success,
+        // Said already: the status of what was said, else a failure.
+        Err(Failure::Reported) => printed_exit().unwrap_or(Exit::Failed),
+        Err(failure) => match self::failure(&failure, None) {
+            Some(report) => {
+                print(&report, json);
+                report.exit()
+            }
+            None => exit_of("manual"),
+        },
+    };
+    ExitCode::from(exit.code())
 }
 
 /// Whether `--json` is among `argv`'s arguments (the program name first),
@@ -153,15 +400,11 @@ pub(crate) fn sdk(error: &Error, branch: Option<&str>) -> Report {
             .next(format!("by cancel {name} (stops it)")),
         Error::NotRunning(name) if is_name(name) => Report::new(error.kind(), error.to_string())
             .next(format!("by send {name} \"<prompt>\" (starts a new turn)")),
-        Error::HarnessUnavailable { harness, reason } => {
-            let report = Report::new(error.kind(), error.to_string());
-            match reason.ends_with("was not found on PATH") {
-                true => report
-                    .next(format!("by harnesses install {harness}"))
-                    .next("pick another with by harnesses"),
-                false => report.next("by harnesses (shows what is installed)"),
-            }
-        }
+        Error::HarnessUnavailable { harness, cause, .. } => unavailable(
+            Report::new(error.kind(), error.to_string()),
+            harness,
+            *cause,
+        ),
         Error::UnknownHarness(_) => Report::new(error.kind(), error.to_string())
             .next("by harnesses --profiles (lists the harnesses and profiles)"),
         Error::CheckFailed {
@@ -187,38 +430,65 @@ pub(crate) fn sdk(error: &Error, branch: Option<&str>) -> Report {
             detail,
         } => by_kind(kind, message, detail.as_deref(), branch),
         // The engine names the SDK option too; here only the flag matters.
-        Error::Unsupported(what) if what.contains("does not route tool permission requests") => {
-            let what = what.split("; allow that explicitly").next().unwrap_or(what);
-            Report::new(error.kind(), format!("unsupported: {what}"))
-                .next(
-                    "add --allow-unapproved-tools (its tools then run under the harness's own \
-                     permissions, not your policy)",
-                )
-                .next("pick another profile: by harnesses --profiles")
-        }
+        Error::UnroutedApprovals { profile } => unrouted(profile),
         other => Report::new(other.kind(), other.to_string()),
     };
     report.detail = error.detail();
     report
 }
 
-/// The report for an error known by its `kind` and message alone, as a
-/// server sends it: the hints that need only the branch the message starts
-/// with, or the one the command acts on.
+/// A harness that cannot start: install it when it is missing, else see
+/// what is installed.
+fn unavailable(report: Report, harness: &str, cause: Unavailable) -> Report {
+    match cause {
+        Unavailable::NotOnPath if is_name(harness) => report
+            .next(format!("by harnesses install {harness}"))
+            .next("pick another with by harnesses"),
+        _ => report.next("by harnesses (shows what is installed)"),
+    }
+}
+
+/// A profile that routes no tool approvals, run without allowing that.
+fn unrouted(profile: &str) -> Report {
+    Report::new(
+        "unsupported",
+        format!(
+            "unsupported: {profile} does not route tool permission requests to Branchyard, so \
+             its tools would run without your policy"
+        ),
+    )
+    .next(
+        "add --allow-unapproved-tools (its tools then run under the harness's own permissions, \
+         not your policy)",
+    )
+    .next("pick another profile: by harnesses --profiles")
+}
+
+/// The report for an error known by its `kind`, message and detail alone,
+/// as a server or a parent's engine sends it: the hints that need only the
+/// branch the message starts with, the one the command acts on, or the
+/// detail's data.
 fn by_kind(kind: &str, message: &str, detail: Option<&Value>, branch: Option<&str>) -> Report {
     let first = message.split_whitespace().next().unwrap_or_default();
+    let said = |key: &str| detail.and_then(|d| d.get(key)).and_then(Value::as_str);
     let report = Report::new(kind, message);
     match kind {
         "unknown_branch" => report.next("by ls"),
         "unknown_harness" => {
             report.next("by harnesses --profiles (lists the harnesses and profiles)")
         }
-        "harness_unavailable" if message.ends_with("was not found on PATH") && is_name(first) => {
-            report
-                .next(format!("by harnesses install {first}"))
-                .next("pick another with by harnesses")
+        "harness_unavailable" => {
+            match (
+                said("harness"),
+                said("cause").and_then(Unavailable::from_name),
+            ) {
+                (Some(harness), Some(cause)) => unavailable(report, harness, cause),
+                _ => report.next("by harnesses (shows what is installed)"),
+            }
         }
-        "harness_unavailable" => report.next("by harnesses (shows what is installed)"),
+        "unsupported" if said("unsupported") == Some("unrouted_approvals") => {
+            unrouted(said("profile").unwrap_or("this profile"))
+        }
         "running" if is_name(first) => report
             .next(format!("by wait {first} (blocks until it settles)"))
             .next(format!("by cancel {first} (stops it)")),
@@ -311,28 +581,49 @@ fn last_lines(output: &str) -> Option<String> {
 }
 
 /// The report for any failure; `None` for [`Failure::Reported`], which has
-/// said all it has to.
+/// said all it has to, and for a [`Failure::Manual`] whose standard output
+/// said what to run.
 pub(crate) fn failure(failure: &Failure, branch: Option<&str>) -> Option<Report> {
     Some(match failure {
+        Failure::Report(report) => (**report).clone(),
         Failure::Sdk(error) => sdk(error, branch),
         Failure::Remote(error) => remote(error, branch),
         Failure::Io(error) => Report::new("io", error.to_string()),
-        Failure::Message(message) => Report::new("usage", message.clone()),
+        Failure::Message(message) => Report::new("unclassified", message.clone()),
         Failure::Reported => return None,
-        // Something only the person can do remains (exit 2); an empty text
-        // means stdout already said what.
+        // Something only the person can do remains (exit 3); an empty text
+        // means stdout already said what. Text either way: with `--json`
+        // the command printed its own `status: manual`.
         Failure::Manual(message) if message.is_empty() => return None,
-        Failure::Manual(message) => Report::new("manual", message.clone()),
+        Failure::Manual(message) => Report::new("manual", message.clone()).with_json(false),
     })
 }
 
-/// The report for an error from a Branchyard server: its `code` is the
-/// kind, as `by --json` has always printed a server's.
+/// The kind a local `by` gives what a server calls `code`: the server's
+/// `git_error`, `harness_error`, `io_error`, `state_error` and
+/// `config_error` are `git`, `harness`, `io`, `state` and `config`, and a
+/// `remote_error` is the kind its detail names.
+pub(crate) fn local_kind(code: &str, detail: Option<&Value>) -> String {
+    match code {
+        "git_error" => "git",
+        "harness_error" => "harness",
+        "io_error" => "io",
+        "state_error" => "state",
+        "config_error" => "config",
+        "remote_error" => detail.and_then(|d| d["kind"].as_str()).unwrap_or("remote"),
+        code => code,
+    }
+    .to_owned()
+}
+
+/// The report for an error from a Branchyard server, under the kind a
+/// local `by` would give it ([`local_kind`]).
 pub(crate) fn remote(error: &branchyard_client::Error, branch: Option<&str>) -> Report {
     use branchyard_client::Error as Client;
     match error {
         Client::Api { error: body, .. } => {
-            let mut report = by_kind(&body.code, &body.message, body.detail.as_ref(), branch);
+            let kind = local_kind(&body.code, body.detail.as_ref());
+            let mut report = by_kind(&kind, &body.message, body.detail.as_ref(), branch);
             report.detail = body.detail.clone();
             report
         }
@@ -348,11 +639,27 @@ pub(crate) fn config(message: &str) -> Report {
     Report::new("config", message)
 }
 
+/// An I/O error in words, without the operating system's number:
+/// `no such file or directory`, not `No such file or directory (os error
+/// 2)` (CONTRIBUTING.md, "CLI style").
+pub(crate) fn plain_io(error: &io::Error) -> String {
+    let text = error.to_string();
+    let text = match text.rfind(" (os error ") {
+        Some(at) if text.ends_with(')') => &text[..at],
+        _ => &text,
+    };
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 /// The report for a command line clap refused.
 pub(crate) fn usage(error: &clap::Error) -> Report {
     let text = error.to_string();
     let message = text.trim_end();
-    Report::new("usage", message.strip_prefix("error: ").unwrap_or(message))
+    Report::usage(message.strip_prefix("error: ").unwrap_or(message))
 }
 
 /// Whether `text` could be a branch name, so a hint may name it.
@@ -470,7 +777,30 @@ mod tests {
             json["error"]["next"],
             json!(["by wait stuck", "by cancel stuck"])
         );
+        assert_eq!(json["error"]["exit"], 1);
         assert!(json["error"].get("detail").is_none());
+        // The envelope stays one member, so a reader that checks for
+        // exactly `{"error": ...}` still finds it.
+        assert_eq!(json.as_object().map(serde_json::Map::len), Some(1));
+    }
+
+    #[test]
+    fn a_report_carries_more_members_and_a_decided_format() {
+        let report = Report::new("invalid_rig", "rig.toml: no seats")
+            .field("line", json!(3))
+            .with_json(false);
+        assert_eq!(report.json()["error"]["line"], 3);
+        assert_eq!(report.json()["error"]["exit"], 2);
+        assert_eq!(report.json, Some(false));
+        let failure: Failure = report.clone().into();
+        assert_eq!(super::failure(&failure, None), Some(report));
+    }
+
+    #[test]
+    fn an_io_error_is_said_without_its_number() {
+        let missing = io::Error::from_raw_os_error(2);
+        assert_eq!(plain_io(&missing), "no such file or directory");
+        assert_eq!(plain_io(&io::Error::other("Broken")), "broken");
     }
 
     #[test]
@@ -499,6 +829,7 @@ mod tests {
             &Error::HarnessUnavailable {
                 harness: "claude-code".into(),
                 reason: "claude was not found on PATH".into(),
+                cause: Unavailable::NotOnPath,
             },
             None,
         );
@@ -508,6 +839,89 @@ mod tests {
              harnesses install claude-code, or pick another with by harnesses\n"
         );
         assert_eq!(report.kind, "harness_unavailable");
+        assert_eq!(report.exit(), Exit::Environment);
+        assert_eq!(report.json()["error"]["detail"]["cause"], "not_on_path");
+        // Any other cause: what is installed, not an install.
+        let broken = sdk(
+            &Error::HarnessUnavailable {
+                harness: "claude-code".into(),
+                reason: "/opt/claude is not an executable file".into(),
+                cause: Unavailable::NotExecutable,
+            },
+            None,
+        );
+        assert_eq!(broken.next, ["by harnesses (shows what is installed)"]);
+    }
+
+    /// The hints come from the error's data: a server's (or a parent
+    /// engine's) error carries it in its detail, whatever its text says.
+    #[test]
+    fn a_remote_refusal_is_read_from_its_detail_not_its_text() {
+        let remote = |code: &str, message: &str, detail: Value| Error::Remote {
+            kind: code.into(),
+            message: message.into(),
+            detail: Some(Box::new(detail)),
+        };
+        let missing = sdk(
+            &remote(
+                "harness_unavailable",
+                "whatever the server says",
+                json!({"harness": "codex", "cause": "not_on_path"}),
+            ),
+            None,
+        );
+        assert_eq!(
+            missing.next,
+            [
+                "by harnesses install codex",
+                "pick another with by harnesses"
+            ]
+        );
+        let unrouted = sdk(
+            &remote(
+                "unsupported",
+                "unsupported: anything",
+                json!({"unsupported": "unrouted_approvals", "profile": "pi-rpc"}),
+            ),
+            None,
+        );
+        assert_eq!(
+            unrouted.message,
+            "unsupported: pi-rpc does not route tool permission requests to Branchyard, so its \
+             tools would run without your policy"
+        );
+        assert_eq!(unrouted.next.len(), 2);
+        assert_eq!(unrouted.exit(), Exit::Refused);
+        // The text alone carries no hint any more.
+        let bare = by_kind(
+            "harness_unavailable",
+            "codex is not installed: codex was not found on PATH",
+            None,
+            None,
+        );
+        assert_eq!(bare.next, ["by harnesses (shows what is installed)"]);
+    }
+
+    #[test]
+    fn unrouted_approvals_name_the_flag_and_another_profile() {
+        let report = sdk(
+            &Error::UnroutedApprovals {
+                profile: "pi-rpc".into(),
+            },
+            None,
+        );
+        assert_eq!(report.kind, "unsupported");
+        assert_eq!(
+            report.text(),
+            "by: unsupported: pi-rpc does not route tool permission requests to Branchyard, so \
+             its tools would run without your policy\n  next: add --allow-unapproved-tools (its \
+             tools then run under the harness's own permissions, not your policy), or pick \
+             another profile: by harnesses --profiles\n"
+        );
+        assert_eq!(
+            report.detail,
+            Some(json!({"unsupported": "unrouted_approvals", "profile": "pi-rpc"}))
+        );
     }
 
     #[test]
@@ -548,10 +962,12 @@ mod tests {
         let missing_tool = Error::HarnessUnavailable {
             harness: "g".into(),
             reason: "g was not found on PATH".into(),
+            cause: Unavailable::NotOnPath,
         };
         let other_reason = Error::HarnessUnavailable {
             harness: "g".into(),
             reason: "the command is empty".into(),
+            cause: Unavailable::NoCommand,
         };
         let failed = Error::CheckFailed {
             output_tail: "nope\n".into(),
@@ -600,6 +1016,16 @@ mod tests {
                 "g is unavailable: the command is empty",
                 "harness_unavailable",
             ),
+            (
+                Error::UnroutedApprovals {
+                    profile: "amp-stream-json".into(),
+                },
+                "unsupported: amp-stream-json does not route tool permission requests to \
+                 Branchyard, so its tools would run without your policy; allow that explicitly \
+                 (--allow-unapproved-tools, TaskOptions::unapproved_tools) or choose another \
+                 profile",
+                "unsupported",
+            ),
             (failed, "check failed (exit 3):\nnope\n", "check_failed"),
         ] {
             assert_eq!(error.to_string(), text);
@@ -615,8 +1041,12 @@ mod tests {
 
     #[test]
     fn layers_above_the_engine_have_their_own_kinds() {
-        let message = failure(&Failure::Message("--priority orders a queue".into()), None);
-        assert_eq!(message.unwrap().kind, "usage");
+        // A bare message has no kind of its own yet, and exits 1 as before.
+        let message = failure(&Failure::Message("gh failed".into()), None).unwrap();
+        assert_eq!(
+            (message.kind.as_str(), message.exit()),
+            ("unclassified", Exit::Failed)
+        );
         let transport = branchyard_client::Error::Transport {
             endpoint: "http://h:1".into(),
             message: "refused".into(),
@@ -624,7 +1054,206 @@ mod tests {
         let unreachable = remote(&transport, None);
         assert_eq!(unreachable.kind, "remote_unreachable");
         assert_eq!(unreachable.message, "cannot reach http://h:1: refused");
+        assert_eq!(unreachable.exit(), Exit::Environment);
         assert_eq!(config("bad toml").kind, "config");
         assert!(failure(&Failure::Reported, None).is_none());
+        let manual = failure(&Failure::Manual("run `codex login`".into()), None).unwrap();
+        assert_eq!((manual.kind.as_str(), manual.json), ("manual", Some(false)));
+        assert!(failure(&Failure::Manual(String::new()), None).is_none());
+    }
+
+    /// Every engine error, one of each variant. The `match` is exhaustive:
+    /// a new variant does not compile until it is listed here, and so
+    /// until its kind is in [`KINDS`] (the test below).
+    fn every_engine_error() -> Vec<Error> {
+        let all = vec![
+            Error::NotARepository("/x".into()),
+            Error::UnknownBranch("b".into()),
+            Error::BranchExists("b".into()),
+            Error::UnknownMessage(1),
+            Error::UnknownKnowledge(1),
+            Error::NoPlan("none".into()),
+            Error::InvalidName {
+                name: "B".into(),
+                reason: "upper case".into(),
+            },
+            Error::UnknownHarness("h".into()),
+            Error::HarnessUnavailable {
+                harness: "h".into(),
+                reason: "h was not found on PATH".into(),
+                cause: Unavailable::NotOnPath,
+            },
+            Error::Unsupported("no".into()),
+            Error::UnroutedApprovals {
+                profile: "pi-rpc".into(),
+            },
+            Error::Config("bad".into()),
+            Error::NoCandidate("b".into()),
+            Error::TargetMoved {
+                expected: "a".into(),
+                actual: None,
+            },
+            Error::Conflict {
+                files: vec!["f".into()],
+            },
+            Error::ConflictBetween {
+                branch: "b".into(),
+                target: "main".into(),
+                merged: Vec::new(),
+                files: vec!["f".into()],
+            },
+            Error::CheckFailed {
+                output_tail: String::new(),
+                ran: None,
+                checks: Vec::new(),
+                shared: None,
+                own_work: Vec::new(),
+            },
+            Error::CheckTimedOut {
+                timeout: std::time::Duration::from_secs(1),
+                output_tail: String::new(),
+                checks: Vec::new(),
+            },
+            Error::CheckNotStarted {
+                reason: "no sh".into(),
+                checks: Vec::new(),
+            },
+            Error::DirtyTarget("/x".into()),
+            Error::AlreadyMerged {
+                target: "main".into(),
+            },
+            Error::InvalidCandidate("c".into()),
+            Error::Denied("no".into()),
+            Error::Usage("no".into()),
+            Error::Running("b".into()),
+            Error::NotRunning("b".into()),
+            Error::Fenced("lost".into()),
+            Error::StaleRevision {
+                branch: "b".into(),
+                expected: 1,
+                actual: 2,
+            },
+            Error::Remote {
+                kind: "denied".into(),
+                message: "no".into(),
+                detail: None,
+            },
+            Error::Git("g".into()),
+            Error::Harness("h".into()),
+            Error::Io(io::Error::other("i")),
+            Error::State("s".into()),
+        ];
+        for error in &all {
+            match error {
+                Error::NotARepository(_)
+                | Error::UnknownBranch(_)
+                | Error::BranchExists(_)
+                | Error::UnknownMessage(_)
+                | Error::UnknownKnowledge(_)
+                | Error::NoPlan(_)
+                | Error::InvalidName { .. }
+                | Error::UnknownHarness(_)
+                | Error::HarnessUnavailable { .. }
+                | Error::Unsupported(_)
+                | Error::UnroutedApprovals { .. }
+                | Error::Config(_)
+                | Error::NoCandidate(_)
+                | Error::TargetMoved { .. }
+                | Error::Conflict { .. }
+                | Error::ConflictBetween { .. }
+                | Error::CheckFailed { .. }
+                | Error::CheckTimedOut { .. }
+                | Error::CheckNotStarted { .. }
+                | Error::DirtyTarget(_)
+                | Error::AlreadyMerged { .. }
+                | Error::InvalidCandidate(_)
+                | Error::Denied(_)
+                | Error::Usage(_)
+                | Error::Running(_)
+                | Error::NotRunning(_)
+                | Error::Fenced(_)
+                | Error::StaleRevision { .. }
+                | Error::Remote { .. }
+                | Error::Git(_)
+                | Error::Harness(_)
+                | Error::Io(_)
+                | Error::State(_) => {}
+            }
+        }
+        all
+    }
+
+    /// Every kind has one exit status: each engine error's kind is in the
+    /// table, a server's code for it reads back as the same kind with the
+    /// same status, and the kinds the CLI adds are there too.
+    #[test]
+    fn every_kind_maps_to_one_exit_status() {
+        let listed = |kind: &str| KINDS.iter().filter(|(k, _)| *k == kind).count();
+        for (kind, _) in KINDS {
+            assert_eq!(listed(kind), 1, "{kind} is listed once");
+        }
+        for error in every_engine_error() {
+            let kind = error.kind().to_owned();
+            assert_eq!(listed(&kind), 1, "{kind} ({error:?}) has an exit status");
+            let report = sdk(&error, None);
+            assert_eq!(report.exit(), exit_of(&kind), "{kind}");
+            assert_eq!(report.json()["error"]["exit"], exit_of(&kind).code());
+            // The same error from a server: the same kind, the same status.
+            let served = branchyard_server::error::sdk(&error);
+            let read = local_kind(&served.body.code, served.body.detail.as_ref());
+            assert_eq!(
+                read, kind,
+                "the server's {} reads as {kind}",
+                served.body.code
+            );
+        }
+        for kind in [
+            "usage",
+            "config",
+            "io",
+            "remote_unreachable",
+            "remote_protocol",
+            "manual",
+            "steer_refused",
+            "invalid_rig",
+            "unknown_repo",
+            "unauthorized",
+        ] {
+            assert_eq!(listed(kind), 1, "{kind} has an exit status");
+        }
+        // Each status but success and Ctrl-C has kinds, and is described.
+        for (exit, meaning) in EXITS {
+            assert!(!meaning.is_empty());
+            let kinds = KINDS.iter().filter(|(_, e)| *e == exit).count();
+            match exit {
+                Exit::Success | Exit::Interrupted => assert_eq!(kinds, 0, "{exit:?}"),
+                _ => assert!(kinds > 0, "{exit:?} has kinds"),
+            }
+        }
+        assert_eq!(exit_of("never-heard-of-it"), Exit::Failed);
+        assert_eq!(
+            [
+                exit_of("usage"),
+                exit_of("not_a_repository"),
+                exit_of("denied")
+            ]
+            .map(Exit::code),
+            [2, 3, 4]
+        );
+    }
+
+    /// A command that printed its report itself and returned
+    /// [`Failure::Reported`] exits with that report's status.
+    #[test]
+    fn a_report_printed_first_decides_the_exit_status() {
+        // What `print` records before it writes (the end-to-end path, a
+        // pre-flight refusal exiting 3, is in tests/errors.rs).
+        remember(&Report::new("harness_unavailable", "x is not installed"));
+        assert_eq!(printed_exit(), Some(Exit::Environment));
+        let code = finish(Err(Failure::Reported), false);
+        assert_eq!(code, ExitCode::from(3));
+        assert_eq!(finish(Ok(()), false), ExitCode::SUCCESS);
+        let pipe = io::Error::from(io::ErrorKind::BrokenPipe);
+        assert_eq!(finish(Err(Failure::Io(pipe)), false), ExitCode::SUCCESS);
     }
 }

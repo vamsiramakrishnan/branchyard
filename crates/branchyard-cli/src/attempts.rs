@@ -42,9 +42,11 @@ pub fn confirm(env: &Env, question: &str) -> bool {
 fn local_only(target: &Target, what: &str) -> Result<(), Failure> {
     match target {
         Target::Local => Ok(()),
-        Target::Remote(_) => Err(Failure::Message(format!(
-            "{what} is not available in remote mode; run it on the server's host"
-        ))),
+        Target::Remote(_) => Err(crate::errors::Report::usage(format!(
+            "{what} is not available in remote mode"
+        ))
+        .next("run it on the server's host, without --remote")
+        .into()),
     }
 }
 
@@ -247,9 +249,11 @@ impl Rewind<'_> {
         if !yes {
             let list = list()?;
             if !confirm(env, &rewind_question(&list, branch, to)) {
-                return Err(Failure::Message(format!(
-                    "rewinding {branch} resets its worktree; pass --yes to confirm (or run on a terminal)"
-                )));
+                return Err(crate::errors::Report::usage(format!(
+                    "rewinding {branch} resets its worktree, and nothing confirmed it"
+                ))
+                .next("pass --yes to confirm, or run it on a terminal")
+                .into());
             }
         }
         let rewound = act()?;
@@ -332,9 +336,11 @@ pub fn try_branch(
         });
     }
     let Some(branch) = branch else {
-        return Err(Failure::Message(
-            "name a branch, or pass --off or --status".into(),
-        ));
+        return Err(
+            crate::errors::Report::usage("by try needs a branch, --off or --status")
+                .next("by try BRANCH (by ls lists them)")
+                .into(),
+        );
     };
     let previous = yard.try_status()?;
     let state = yard.try_on(branch)?;
@@ -398,10 +404,11 @@ fn gather(target: &Target, args: &CompareArgs) -> Result<Vec<Attempt>, Failure> 
         }
         Target::Remote(remote) => {
             if args.check {
-                return Err(Failure::Message(
-                    "compare --check runs checks locally; it is not available in remote mode"
-                        .into(),
-                ));
+                return Err(crate::errors::Report::usage(
+                    "compare --check runs checks locally; it is not available in remote mode",
+                )
+                .next("drop --check, or run by compare --check on the server's host")
+                .into());
             }
             let infos = remote.repo.branches()?;
             let names: Vec<String> = match &args.fan {
@@ -424,10 +431,15 @@ fn gather(target: &Target, args: &CompareArgs) -> Result<Vec<Attempt>, Failure> 
                 None => args.branches.clone(),
             };
             if names.is_empty() {
-                return Err(Failure::Message(format!(
-                    "no branches named {}-<harness> from one by fan",
-                    args.fan.as_deref().unwrap_or_default()
-                )));
+                return Err(crate::errors::Report::new(
+                    "unknown_branch",
+                    format!(
+                        "no branches named {}-<harness> from one by fan",
+                        args.fan.as_deref().unwrap_or_default()
+                    ),
+                )
+                .next("by ls")
+                .into());
             }
             remote_attempts(&remote.repo, &names)
         }
@@ -456,18 +468,22 @@ pub fn compare(env: &Env, target: &Target, args: &CompareArgs) -> Outcome {
     }
     let attempts = gather(target, args)?;
     if attempts.is_empty() {
-        return Err(Failure::Message("nothing to compare".into()));
+        return Err(crate::errors::Report::usage("nothing to compare")
+            .next("by compare BRANCH BRANCH..., or --fan NAME")
+            .into());
     }
     if let Some(pick) = &args.pick {
         if !attempts.iter().any(|a| &a.branch == pick) {
-            return Err(Failure::Message(format!(
+            let names: Vec<&str> = attempts.iter().map(|a| a.branch.as_str()).collect();
+            return Err(crate::errors::Report::usage(format!(
                 "{pick} is not one of the compared attempts: {}",
-                attempts
-                    .iter()
-                    .map(|a| a.branch.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
+                names.join(", ")
+            ))
+            .next(format!(
+                "pick one of them: --pick {}",
+                names.first().copied().unwrap_or_default()
+            ))
+            .into());
         }
     }
     if args.json && args.pick.is_none() {

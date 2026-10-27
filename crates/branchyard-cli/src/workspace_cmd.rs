@@ -30,6 +30,7 @@ use serde_json::json;
 
 use crate::args::WorkspaceAction;
 use crate::commands::{self, print, Env, Failure, Outcome, Target};
+use crate::errors::Report;
 use crate::setup_io;
 
 /// The trust file's format version.
@@ -63,13 +64,15 @@ fn read_trust() -> Result<TrustFile, Failure> {
     let path = trust_file();
     match fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).map_err(|e| {
-            Failure::Message(format!(
-                "{} is not a trust file ({e}); remove it to start over",
-                path.display()
-            ))
+            Report::new(
+                "config",
+                format!("{} is not a trust file ({e})", path.display()),
+            )
+            .next(format!("remove {} to start over", path.display()))
+            .into()
         }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(TrustFile::default()),
-        Err(e) => Err(Failure::Message(format!("{}: {e}", path.display()))),
+        Err(e) => Err(unwritable("read", &path, &e)),
     }
 }
 
@@ -79,8 +82,7 @@ fn write_trust(trust: &TrustFile) -> Result<(), Failure> {
     use std::os::unix::fs::OpenOptionsExt;
     let path = trust_file();
     if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)
-            .map_err(|e| Failure::Message(format!("create {}: {e}", dir.display())))?;
+        fs::create_dir_all(dir).map_err(|e| unwritable("create", dir, &e))?;
     }
     let temporary = path.with_extension(format!("json.{}", std::process::id()));
     let text = serde_json::to_string_pretty(trust).unwrap_or_default() + "\n";
@@ -92,7 +94,52 @@ fn write_trust(trust: &TrustFile) -> Result<(), Failure> {
         .open(&temporary)
         .and_then(|mut file| file.write_all(text.as_bytes()))
         .and_then(|()| fs::rename(&temporary, &path));
-    written.map_err(|e| Failure::Message(format!("write {}: {e}", path.display())))
+    written.map_err(|e| unwritable("write", &path, &e))
+}
+
+/// No `[workspace]` with run scripts in the repository at `root`.
+fn no_run_scripts(root: &Path) -> Failure {
+    Report::new(
+        "config",
+        format!(
+            "{} has no [workspace] with run scripts",
+            canonical(root).display()
+        ),
+    )
+    .next("add [workspace.run] to branchyard.toml (docs/workspace.md)")
+    .into()
+}
+
+/// A branch whose worktree is gone, so nothing can run in it.
+fn missing_worktree(branch: &str, worktree: &Path) -> Failure {
+    Report::new(
+        "state",
+        format!("{branch}'s worktree {} is missing", worktree.display()),
+    )
+    .next(format!("by show {branch}"))
+    .into()
+}
+
+/// `sh` could not be started for a script.
+fn no_sh(error: &std::io::Error) -> Failure {
+    Report::new(
+        "io",
+        format!("could not start sh: {}", crate::errors::plain_io(error)),
+    )
+    .into()
+}
+
+/// A file of the trust store that could not be read or written.
+fn unwritable(doing: &str, path: &Path, error: &std::io::Error) -> Failure {
+    Report::new(
+        "io",
+        format!(
+            "could not {doing} {}: {}",
+            path.display(),
+            crate::errors::plain_io(error)
+        ),
+    )
+    .into()
 }
 
 /// Whether the trust decision for `root` covers `workspace`.
@@ -210,9 +257,10 @@ pub fn resolve(root: &Path) -> Result<Option<Resolved>, Failure> {
 
 fn read(path: &Path) -> Result<ProjectConfig, Failure> {
     setup_io::read_layer(path).map_err(|e| {
-        Failure::Message(format!(
+        crate::errors::config(&format!(
             "{e}\n(fix it, or check it with `by config validate`)"
         ))
+        .into()
     })
 }
 
@@ -265,13 +313,17 @@ fn refusal(resolved: &Resolved) -> Failure {
         TrustState::Changed => "changed since you trusted it",
         _ => "has scripts you have not trusted",
     };
-    Failure::Message(format!(
-        "{}'s [workspace] in {} {why}, and there is no terminal to ask on; nothing was \
-         created. Review it with `by workspace show`, then run `by workspace trust` in the \
-         repository",
-        resolved.root.display(),
-        resolved.file.display()
-    ))
+    Report::new(
+        "denied",
+        format!(
+            "{}'s [workspace] in {} {why}, and there is no terminal to ask on; nothing was \
+             created",
+            resolved.root.display(),
+            resolved.file.display()
+        ),
+    )
+    .next("by workspace show, then by workspace trust in the repository")
+    .into()
 }
 
 /// Ask on the terminal whether to trust `resolved`; record a yes.
@@ -315,11 +367,13 @@ pub(crate) fn require_trust(env: &Env, resolved: &Resolved) -> Result<(), Failur
     if in_harness().is_none() && env.stdin_tty && env.stderr_tty {
         return match ask(resolved)? {
             true => Ok(()),
-            false => Err(Failure::Message(format!(
-                "not trusted; nothing was created. Change or remove [workspace] in {}, or trust \
-                 it with `by workspace trust`",
-                resolved.file.display()
-            ))),
+            false => Err(Report::new("denied", "not trusted; nothing was created")
+                .next("by workspace trust")
+                .next(format!(
+                    "change or remove [workspace] in {}",
+                    resolved.file.display()
+                ))
+                .into()),
         };
     }
     Err(refusal(resolved))
@@ -345,11 +399,12 @@ pub fn for_new_branch(env: &Env, root: &Path) -> Result<Option<WorkspaceSpec>, F
 /// `by workspace ACTION`.
 pub fn main(env: &Env, target: &Target, action: &WorkspaceAction, json: bool) -> Outcome {
     if let Target::Remote(_) = target {
-        return Err(Failure::Message(
+        return Err(Report::usage(
             "by workspace acts on a local repository; a server runs a repository's workspace \
-             scripts only when its operator allows them (allow_workspace_scripts)"
-                .into(),
-        ));
+             scripts only when its operator allows them (allow_workspace_scripts)",
+        )
+        .next("run by workspace without --remote")
+        .into());
     }
     match action {
         WorkspaceAction::Show { branch } => show(branch.as_deref(), json),
@@ -510,18 +565,22 @@ fn repository_root() -> Result<PathBuf, Failure> {
 
 fn trust_command(json: bool) -> Outcome {
     if in_harness().is_some() {
-        return Err(Failure::Message(
+        return Err(Report::new(
+            "denied",
             "a harness running on a branch cannot trust workspace scripts; trusting is a \
-             person's decision, made outside any branch"
-                .into(),
-        ));
+             person's decision, made outside any branch",
+        )
+        .next("run by workspace trust in your own terminal")
+        .into());
     }
     let root = repository_root()?;
     let Some(resolved) = resolve(&root)? else {
-        return Err(Failure::Message(format!(
-            "{} has no [workspace] to trust",
-            canonical(&root).display()
-        )));
+        return Err(Report::new(
+            "config",
+            format!("{} has no [workspace] to trust", canonical(&root).display()),
+        )
+        .next("add [workspace] to branchyard.toml (docs/workspace.md)")
+        .into());
     };
     if resolved.trust != TrustState::NotNeeded {
         trust(&resolved)?;
@@ -583,9 +642,11 @@ fn pick(yard: &Yard, args: &[String]) -> Result<(String, Vec<String>), Failure> 
     let known = |name: &str| yard.branch(name).is_ok();
     match (args, inside) {
         ([], Some(branch)) => Ok((branch, Vec::new())),
-        ([], None) => Err(Failure::Message(
-            "name the branch whose worktree it runs in: by workspace run BRANCH [NAME...]".into(),
-        )),
+        ([], None) => Err(
+            Report::usage("name the branch whose worktree the script runs in")
+                .next("by workspace run BRANCH [NAME...]")
+                .into(),
+        ),
         ([first, rest @ ..], _) if known(first) => Ok((first.clone(), rest.to_vec())),
         (names, Some(branch)) => Ok((branch, names.to_vec())),
         ([first, ..], None) => Err(branchyard::Error::UnknownBranch(first.clone()).into()),
@@ -637,30 +698,24 @@ fn run(env: &Env, args: &[String], detach: bool, json: bool) -> Outcome {
     let (branch, names) = pick(&yard, args)?;
     if names.len() > 1 {
         if !detach {
-            return Err(Failure::Message(
-                "several run scripts run at once only in the background: add --detach".into(),
-            ));
+            return Err(
+                Report::usage("several run scripts run at once only in the background")
+                    .next("add --detach")
+                    .into(),
+            );
         }
         return run_many(env, &yard, &branch, &names, json);
     }
     let name = names.into_iter().next();
     let info = yard.workspace(&branch)?;
-    let resolved = resolve(yard.root())?.ok_or_else(|| {
-        Failure::Message(format!(
-            "{} has no [workspace] with run scripts",
-            canonical(yard.root()).display()
-        ))
-    })?;
+    let resolved = resolve(yard.root())?.ok_or_else(|| no_run_scripts(yard.root()))?;
     let (name, commands) = resolved
         .workspace
         .run_script(name.as_deref())
-        .map_err(Failure::Message)?;
+        .map_err(Report::usage)?;
     require_trust(env, &resolved)?;
     if !info.worktree.is_dir() {
-        return Err(Failure::Message(format!(
-            "{branch}'s worktree {} is missing",
-            info.worktree.display()
-        )));
+        return Err(missing_worktree(&branch, &info.worktree));
     }
     let vars = yard.workspace_env(&branch)?;
     let port = vars
@@ -705,7 +760,7 @@ fn run(env: &Env, args: &[String], detach: bool, json: bool) -> Outcome {
             .stderr(out)
             .process_group(0)
             .spawn()
-            .map_err(|e| Failure::Message(format!("could not start sh: {e}")))?;
+            .map_err(|e| no_sh(&e))?;
         report.commands = commands.clone();
         report.output = format!("pid {}, output in {}", child.id(), log.display());
         yard.record_workspace(&branch, report)?;
@@ -730,9 +785,7 @@ fn run(env: &Env, args: &[String], detach: bool, json: bool) -> Outcome {
             port.map(|p| p.to_string()).unwrap_or_default()
         );
         report.commands.push(command.clone());
-        let ran = sh(&["-c", command])
-            .status()
-            .map_err(|e| Failure::Message(format!("could not start sh: {e}")))?;
+        let ran = sh(&["-c", command]).status().map_err(|e| no_sh(&e))?;
         status = Some(ran);
         if !ran.success() {
             break;
@@ -774,31 +827,25 @@ struct Started {
 fn run_many(env: &Env, yard: &Yard, branch: &str, names: &[String], json: bool) -> Outcome {
     use std::os::unix::process::CommandExt;
     let info = yard.workspace(branch)?;
-    let resolved = resolve(yard.root())?.ok_or_else(|| {
-        Failure::Message(format!(
-            "{} has no [workspace] with run scripts",
-            canonical(yard.root()).display()
-        ))
-    })?;
+    let resolved = resolve(yard.root())?.ok_or_else(|| no_run_scripts(yard.root()))?;
     let mut seen = std::collections::BTreeSet::new();
     let scripts = names
         .iter()
         .map(|name| {
             if !seen.insert(name.as_str()) {
-                return Err(Failure::Message(format!("{name} is named twice")));
+                return Err(Failure::from(Report::usage(format!(
+                    "{name} is named twice"
+                ))));
             }
             resolved
                 .workspace
                 .run_script(Some(name))
-                .map_err(Failure::Message)
+                .map_err(|why| Failure::from(Report::usage(why)))
         })
         .collect::<Result<Vec<_>, _>>()?;
     require_trust(env, &resolved)?;
     if !info.worktree.is_dir() {
-        return Err(Failure::Message(format!(
-            "{branch}'s worktree {} is missing",
-            info.worktree.display()
-        )));
+        return Err(missing_worktree(branch, &info.worktree));
     }
     let vars = yard.workspace_env(branch)?;
     let base = vars
@@ -845,7 +892,7 @@ fn run_many(env: &Env, yard: &Yard, branch: &str, names: &[String], json: bool) 
             .stderr(out)
             .process_group(0)
             .spawn()
-            .map_err(|e| Failure::Message(format!("could not start sh: {e}")))?;
+            .map_err(|e| no_sh(&e))?;
         let mut report = WorkspaceReport::new(WorkspacePhase::Run, port);
         report.commands = commands.clone();
         report.output = format!("{name}: pid {}, output in {}", child.id(), log.display());
@@ -878,9 +925,11 @@ fn ports_branch(branch: Option<&str>, what: &str) -> Result<String, Failure> {
     match (branch, in_harness()) {
         (Some(branch), _) => Ok(branch.to_owned()),
         (None, Some(branch)) => Ok(branch),
-        (None, None) => Err(Failure::Message(format!(
-            "name the branch: by workspace {what} BRANCH"
-        ))),
+        (None, None) => Err(
+            Report::usage(format!("name the branch by workspace {what} acts on"))
+                .next(format!("by workspace {what} BRANCH"))
+                .into(),
+        ),
     }
 }
 
@@ -933,21 +982,25 @@ fn browse(branch: Option<&str>, port: Option<u16>, print_only: bool, json: bool)
         },
     };
     let Some(listener) = chosen else {
-        return Err(Failure::Message(match (port, listening.is_empty()) {
-            (Some(port), _) => format!("{branch} does not listen on port {port}"),
-            (None, true) => format!(
-                "{branch}'s processes listen on no TCP port; start one with by workspace run \
+        return Err(Report::new(
+            "not_found",
+            match (port, listening.is_empty()) {
+                (Some(port), _) => format!("{branch} does not listen on port {port}"),
+                (None, true) => format!(
+                    "{branch}'s processes listen on no TCP port; start one with by workspace run \
                  {branch} --detach"
-            ),
-            (None, false) => format!(
-                "{branch} listens on several ports ({}); pick one with --port",
-                listening
-                    .iter()
-                    .map(|l| l.port.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        }));
+                ),
+                (None, false) => format!(
+                    "{branch} listens on several ports ({}); pick one with --port",
+                    listening
+                        .iter()
+                        .map(|l| l.port.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            },
+        )
+        .into());
     };
     let url = listener.url();
     if json {
@@ -958,7 +1011,8 @@ fn browse(branch: Option<&str>, port: Option<u16>, print_only: bool, json: bool)
     if print_only {
         return print(&format!("{url}\n"));
     }
-    crate::ports::open_browser(&url).map_err(Failure::Message)?;
+    crate::ports::open_browser(&url)
+        .map_err(|why| Report::new("tool_unavailable", why).next(format!("open {url} yourself")))?;
     print(&format!("opened {url} ({branch})\n"))
 }
 
@@ -979,10 +1033,15 @@ fn kill(env: &Env, branch: Option<&str>, port: Option<u16>, yes: bool, json: boo
     pids.sort();
     pids.dedup_by_key(|p| p.0);
     if pids.is_empty() {
-        return Err(Failure::Message(match port {
-            Some(port) => format!("no process of {branch} listens on port {port}"),
-            None => format!("{branch}'s processes listen on no TCP port"),
-        }));
+        return Err(Report::new(
+            "not_found",
+            match port {
+                Some(port) => format!("no process of {branch} listens on port {port}"),
+                None => format!("{branch}'s processes listen on no TCP port"),
+            },
+        )
+        .next(format!("by workspace ports {branch}"))
+        .into());
     }
     let described: Vec<String> = pids
         .iter()
@@ -990,10 +1049,12 @@ fn kill(env: &Env, branch: Option<&str>, port: Option<u16>, yes: bool, json: boo
         .collect();
     if !yes {
         if !env.stdin_tty {
-            return Err(Failure::Message(format!(
-                "would stop {}; pass --yes to do it without a terminal",
+            return Err(Report::usage(format!(
+                "would stop {}, and there is no terminal to ask on",
                 described.join(", ")
-            )));
+            ))
+            .next("pass --yes to do it without a terminal")
+            .into());
         }
         eprint!("stop {}? [y/N] ", described.join(", "));
         std::io::stderr().flush()?;

@@ -65,18 +65,20 @@ pub fn plan(
             (Some(visual), _) => (visual, "$VISUAL"),
             (None, Some(editor)) => (editor, "$EDITOR"),
             (None, None) => {
-                return Err(Failure::Message(format!(
-                    "no editor: set $VISUAL or $EDITOR, or pass --editor NAME ({}); \
-                     `by open --print` prints the worktree's path",
-                    names()
-                )))
+                return Err(crate::errors::Report::new(
+                    "config",
+                    "no editor: set $VISUAL or $EDITOR",
+                )
+                .next(format!("pass --editor NAME ({})", names()))
+                .next("by open BRANCH --print (prints the worktree's path)")
+                .into())
             }
         },
     };
-    let mut argv =
-        args::split_words(&line).map_err(|e| Failure::Message(format!("{source}: {e}")))?;
+    let mut argv = args::split_words(&line)
+        .map_err(|e| bad_editor(source, format!("{source} is not a command line: {e}")))?;
     if argv.is_empty() {
-        return Err(Failure::Message(format!("{source} names no command")));
+        return Err(bad_editor(source, format!("{source} names no command")).into());
     }
     let known = KNOWN_EDITORS.iter().find(|(name, _, _)| *name == argv[0]);
     if let Some((_, command, _)) = known {
@@ -98,6 +100,19 @@ pub fn plan(
     })
 }
 
+/// An editor named wrong: a usage error for `--editor`, the environment's
+/// for `$VISUAL` or `$EDITOR`.
+fn bad_editor(source: &str, what: String) -> crate::errors::Report {
+    let kind = match source {
+        "--editor" => "usage",
+        _ => "config",
+    };
+    crate::errors::Report::new(kind, what).next(format!(
+        "pass --editor with one that is installed ({})",
+        names()
+    ))
+}
+
 fn names() -> String {
     let mut seen: Vec<&str> = Vec::new();
     for (name, command, _) in KNOWN_EDITORS {
@@ -112,26 +127,35 @@ fn names() -> String {
 /// editor's returns at once). A missing command is refused by name.
 pub fn launch(plan: &Plan) -> Outcome {
     let Some((program, rest)) = plan.argv.split_first() else {
-        return Err(Failure::Message("the editor plan has no command".into()));
+        return Err(
+            crate::errors::Report::new("internal", "the editor plan has no command").into(),
+        );
     };
     let status = match Command::new(program).args(rest).status() {
         Ok(status) => status,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(Failure::Message(format!(
-                "{program} (from {}) is not on PATH; pass --editor with one that is ({})",
+            return Err(bad_editor(
                 plan.source,
-                names()
-            )))
+                format!("{program} (from {}) is not on PATH", plan.source),
+            )
+            .into())
         }
         Err(error) => {
-            return Err(Failure::Message(format!(
-                "could not start {program}: {error}"
-            )))
+            return Err(crate::errors::Report::new(
+                "io",
+                format!(
+                    "could not start {program}: {}",
+                    crate::errors::plain_io(&error)
+                ),
+            )
+            .into())
         }
     };
     match status.success() {
         true => Ok(()),
-        false => Err(Failure::Message(format!("{program} exited with {status}"))),
+        false => {
+            Err(crate::errors::Report::new("io", format!("{program} exited with {status}")).into())
+        }
     }
 }
 
@@ -139,10 +163,15 @@ pub fn launch(plan: &Plan) -> Outcome {
 pub fn worktree(branch: &str) -> Result<PathBuf, Failure> {
     let info = commands::open()?.branch(branch)?.info().clone();
     if !info.worktree.is_dir() {
-        return Err(Failure::Message(format!(
-            "{branch} has no worktree at {} (it may be waiting, or removed)",
-            info.worktree.display()
-        )));
+        return Err(crate::errors::Report::new(
+            "state",
+            format!(
+                "{branch} has no worktree at {} (it may be waiting, or removed)",
+                info.worktree.display()
+            ),
+        )
+        .next(format!("by show {branch}"))
+        .into());
     }
     Ok(info.worktree)
 }

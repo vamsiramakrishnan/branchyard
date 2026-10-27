@@ -64,25 +64,31 @@ pub fn configured(yard: &Yard) -> Result<Option<Gateway>, Failure> {
 fn local_only(target: &Target, what: &str) -> Result<(), Failure> {
     match target {
         Target::Local => Ok(()),
-        Target::Remote(_) => Err(Failure::Message(format!(
+        Target::Remote(_) => Err(crate::errors::Report::usage(format!(
             "{what} runs here; a server runs its own gateway beside `by serve` (docs/server.md)"
-        ))),
+        ))
+        .next(format!("run {what} without --remote"))
+        .into()),
     }
 }
 
 fn inside_harness() -> Failure {
-    Failure::Message("a harness on a branch reaches the gateway through its turn's token".into())
+    crate::errors::Report::new(
+        "denied",
+        "a harness on a branch reaches the gateway through its turn's token",
+    )
+    .into()
 }
 
 fn require(yard: &Yard) -> Result<(Connectors, Gateway, GatewayLocation), Failure> {
     let config = settings(yard.root())?.ok_or_else(inside_harness)?;
     let found = configure::locate_gateway(yard, &config)?.ok_or_else(|| {
-        Failure::Message(
-            "no connector gateway runs for this repository and none is pinned; `by gateway \
-             start` starts one, or set [connectors] gateway in branchyard.toml \
-             (docs/connectors.md)"
-                .into(),
+        crate::errors::Report::new(
+            "config",
+            "no connector gateway runs for this repository and none is pinned",
         )
+        .next("by gateway start")
+        .next("set [connectors] gateway in branchyard.toml (docs/connectors.md)")
     })?;
     let gateway = configure::connector_gateway(yard, &config, &found)?;
     Ok((config, gateway, found))
@@ -92,7 +98,16 @@ fn require(yard: &Yard) -> Result<(Connectors, Gateway, GatewayLocation), Failur
 fn free_url() -> Result<String, Failure> {
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())
-        .map_err(|e| Failure::Message(format!("could not find a free port: {e}")))?
+        .map_err(|e| {
+            crate::errors::Report::new(
+                "io",
+                format!(
+                    "could not find a free port: {}",
+                    crate::errors::plain_io(&e)
+                ),
+            )
+            .next("set [connectors] gateway in branchyard.toml to a URL with a port")
+        })?
         .port();
     Ok(format!("http://127.0.0.1:{port}/mcp"))
 }
@@ -111,10 +126,11 @@ fn gateway_command(
         .map_or_else(|| dir.join("vault.key"), PathBuf::from);
     gateway::ensure_vault_key(&vault_key)?;
     let (host, port) = gateway::host_port(&gw.url).ok_or_else(|| {
-        Failure::Message(format!(
-            "connectors.gateway {} has no host and port",
-            gw.url
-        ))
+        crate::errors::Report::new(
+            "config",
+            format!("connectors.gateway {} has no host and port", gw.url),
+        )
+        .next("set [connectors] gateway to a URL such as http://127.0.0.1:8790/mcp")
     })?;
     let jwks = gw
         .jwks_file
@@ -333,11 +349,16 @@ pub(crate) fn start_background(yard: &Yard, config: &Connectors) -> Result<Start
 /// a gateway: what it is, and the two ways out.
 fn not_a_gateway(url: &str, why: &str) -> Failure {
     let port = gateway::host_port(url).map_or_else(|| url.to_owned(), |(_, port)| port.to_string());
-    Failure::Message(format!(
-        "port {port} is held by something that is not a Branchyard gateway: {why}.\n\
-         Next: free the port, or set `[connectors] gateway` in branchyard.toml to another URL \
-         (or remove it to have a free port chosen)."
-    ))
+    crate::errors::Report::new(
+        "config",
+        format!("port {port} is held by something that is not a Branchyard gateway: {why}"),
+    )
+    .next("free the port")
+    .next(
+        "set `[connectors] gateway` in branchyard.toml to another URL (or remove it to have a \
+         free port chosen)",
+    )
+    .into()
 }
 
 /// `by gateway start` without `--foreground`.
@@ -400,10 +421,12 @@ fn background(yard: &Yard, dir: &Path, config: &Connectors) -> Result<Started, F
         std::thread::sleep(Duration::from_millis(100));
     }
     let Some(started) = started else {
-        return Err(Failure::Message(format!(
-            "the gateway's supervisor did not start; see {}",
-            log.display()
-        )));
+        return Err(
+            crate::errors::Report::new("io", "the gateway's supervisor did not start")
+                .next(format!("read {}", log.display()))
+                .next("by gateway start --foreground (shows why)")
+                .into(),
+        );
     };
     Ok(Started::Spawned {
         pid: started.pid,
@@ -667,7 +690,9 @@ pub fn connect(
     open: bool,
 ) -> Outcome {
     local_only(target, "by connect")?;
-    connectors::check_connector(connector).map_err(Failure::Message)?;
+    connectors::check_connector(connector).map_err(|why| {
+        crate::errors::Report::usage(why).next("by connectors catalog (lists them)")
+    })?;
     let yard = commands::open()?;
     let (config, gw, _) = require(&yard)?;
     let token = gw.connect_token(None, connectors::CONNECT_TTL)?;
@@ -694,13 +719,24 @@ pub fn connect(
     }
     let status = command.status();
     branchyard_support::cleanup_file(&file);
-    let status =
-        status.map_err(|e| Failure::Message(format!("could not run {}: {e}", anvil[0])))?;
+    let status = status.map_err(|e| {
+        crate::errors::Report::new(
+            "config",
+            format!(
+                "could not run {}: {}",
+                anvil[0],
+                crate::errors::plain_io(&e)
+            ),
+        )
+        .next("install anvil, or set [connectors] anvil to its command")
+    })?;
     match status.success() {
         true => Ok(()),
-        false => Err(Failure::Message(format!(
-            "anvil connect {connector} failed ({status})"
-        ))),
+        false => Err(crate::errors::Report::new(
+            "io",
+            format!("anvil connect {connector} failed ({status})"),
+        )
+        .into()),
     }
 }
 

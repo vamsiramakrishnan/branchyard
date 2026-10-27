@@ -346,11 +346,12 @@ fn run(env: &Env, target: &Target, action: &KnowledgeAction, json: bool) -> Outc
                 }
                 Store::Remote(repo) => {
                     if harness.is_some() {
-                        return Err(Failure::Message(
-                            "a server distills with the deterministic extractor only; drop \
-                             --harness, or run by knowledge distill on the server's host"
-                                .into(),
-                        ));
+                        return Err(crate::errors::Report::usage(
+                            "a server distills with the deterministic extractor only",
+                        )
+                        .next("drop --harness")
+                        .next("run by knowledge distill on the server's host")
+                        .into());
                     }
                     repo.distill(branch)?
                 }

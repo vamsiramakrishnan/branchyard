@@ -22,22 +22,25 @@ use crate::json;
 const ENV_NEW_PASSPHRASE: &str = "BRANCHYARD_SYNC_NEW_PASSPHRASE";
 
 fn failure(e: branchyard_sync::Error) -> Failure {
-    Failure::Message(format!("sync: {e}"))
+    crate::errors::Report::new("io", format!("sync: {e}"))
+        .next("by sync status (what the remote holds)")
+        .into()
 }
 
 /// `[sync]` from the user configuration.
 fn config() -> Result<SyncConfig, Failure> {
     let cwd = std::env::current_dir()?;
     let env = |name: &str| std::env::var(name).ok();
-    let effective =
-        crate::setup_io::load(&cwd, Some(&env)).map_err(|e| Failure::Message(e.to_string()))?;
+    let effective = crate::setup_io::load(&cwd, Some(&env))
+        .map_err(|e| crate::errors::config(&e.to_string()))?;
     let s = effective.config.sync;
     let Some(remote) = s.remote else {
-        return Err(Failure::Message(
-            "no [sync] remote: add `[sync]` with `remote = \"gs://bucket/prefix\"` (or s3://, \
-             az://, file:///, git+https://) to ~/.config/branchyard/config.toml; see docs/sync.md"
-                .into(),
-        ));
+        return Err(crate::errors::Report::new("config", "no [sync] remote is configured")
+            .next(
+                "add `[sync]` with `remote = \"gs://bucket/prefix\"` (or s3://, az://, file:///, \
+                 git+https://) to ~/.config/branchyard/config.toml (docs/sync.md)",
+            )
+            .into());
     };
     let config = SyncConfig {
         remote,
@@ -63,11 +66,12 @@ pub fn main(
     as_json: bool,
 ) -> Outcome {
     if globals.remote.is_some() {
-        return Err(Failure::Message(
+        return Err(crate::errors::Report::usage(
             "by sync runs on this machine's repository; a server syncs with the `sync` of its own \
-             configuration (docs/sync.md). Run it without --remote"
-                .into(),
-        ));
+             configuration (docs/sync.md)",
+        )
+        .next("run by sync without --remote")
+        .into());
     }
     let config = config()?;
     let yard = commands::open()?;
@@ -178,7 +182,11 @@ pub fn main(
             }
             match report.clean() {
                 true => Ok(()),
-                false => Err(Failure::Message("sync: scrub found damage".into())),
+                false => Err(
+                    crate::errors::Report::new("state", "sync: scrub found damage")
+                        .next("by sync scrub --json (lists what is damaged)")
+                        .into(),
+                ),
             }
         }
         Some(SyncAction::Hold {
@@ -256,11 +264,16 @@ fn sync(replicator: &Replicator, task: Option<&str>, as_json: bool) -> Outcome {
     }
     match failed.is_empty() {
         true => Ok(()),
-        false => Err(Failure::Message(format!(
-            "sync: {} of {} tasks failed",
-            failed.len(),
-            failed.len() + synced.len()
-        ))),
+        false => Err(crate::errors::Report::new(
+            "io",
+            format!(
+                "sync: {} of {} tasks failed",
+                failed.len(),
+                failed.len() + synced.len()
+            ),
+        )
+        .next("by sync (tries the failed ones again)")
+        .into()),
     }
 }
 
@@ -314,17 +327,20 @@ fn status(replicator: &Replicator, as_json: bool) -> Outcome {
 
 fn rotate(config: &SyncConfig, remote: &Remote, to: Option<&str>, as_json: bool) -> Outcome {
     let Encryption::Envelope { wrapper, .. } = config.encryption().map_err(failure)? else {
-        return Err(Failure::Message(
-            "sync: this remote is not encrypted; there is no key to rotate".into(),
-        ));
+        return Err(crate::errors::Report::usage(
+            "sync: this remote is not encrypted; there is no key to rotate",
+        )
+        .into());
     };
     let new: Option<Box<dyn branchyard_sync::kms::Wrapper>> = match to {
         None => None,
         Some("passphrase") => {
             let passphrase = std::env::var(ENV_NEW_PASSPHRASE).map_err(|_| {
-                Failure::Message(format!(
-                    "sync: --to passphrase reads the new passphrase from {ENV_NEW_PASSPHRASE}"
+                crate::errors::Report::usage(format!(
+                    "sync: --to passphrase reads the new passphrase from {ENV_NEW_PASSPHRASE}, \
+                     which is not set"
                 ))
+                .next(format!("set {ENV_NEW_PASSPHRASE}, then run it again"))
             })?;
             Some(Box::new(
                 branchyard_sync::kms::Passphrase::new(&passphrase).map_err(failure)?,

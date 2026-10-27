@@ -1130,9 +1130,20 @@ fn profiles_that_route_no_tool_approvals_need_an_explicit_opt_in() {
     for profile in ["antigravity-stream-json", "pi-rpc", "amp-stream-json"] {
         let refused = f.task("go").harness(profile).run();
         assert!(
-            matches!(&refused, Err(Error::Unsupported(why))
-                if why.contains("does not route tool permission requests")),
+            matches!(&refused, Err(Error::UnroutedApprovals { profile: p }) if p == profile),
             "{profile}: {refused:?}"
+        );
+        let refusal = refused.unwrap_err();
+        assert_eq!(refusal.kind(), "unsupported");
+        assert!(
+            refusal
+                .to_string()
+                .contains("does not route tool permission requests"),
+            "{refusal}"
+        );
+        assert_eq!(
+            refusal.detail(),
+            Some(serde_json::json!({"unsupported": "unrouted_approvals", "profile": profile}))
         );
         // With the opt-in it gets as far as looking for the executable.
         let admitted = f
@@ -1147,7 +1158,10 @@ fn profiles_that_route_no_tool_approvals_need_an_explicit_opt_in() {
         );
     }
     let fan = f.task("go").run_on(&["gemini-cli", "pi"]);
-    assert!(matches!(fan, Err(Error::Unsupported(_))), "{fan:?}");
+    assert!(
+        matches!(&fan, Err(Error::UnroutedApprovals { profile }) if profile == "pi-rpc"),
+        "{fan:?}"
+    );
     assert!(f.yard.branches().unwrap().is_empty(), "nothing was created");
 }
 

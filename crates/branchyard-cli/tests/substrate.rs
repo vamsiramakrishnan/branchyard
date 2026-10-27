@@ -284,7 +284,7 @@ fn by_remote_run_in_a_substrate_actor_on_the_server() {
     // Refused by a server whose operator did not allow the provider.
     let plain = Served::start(dir, "plain", &setup.root, &["--harness-command", &harness]);
     let refused = plain.by(dir, &run_args("refused", key.to_str().unwrap()));
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(4));
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(stderr.contains("--allow-provider substrate"), "{stderr}");
     drop(plain);
@@ -325,7 +325,7 @@ fn by_remote_run_in_a_substrate_actor_on_the_server() {
 
     // A relative key would name a file on this machine, not the server.
     let relative = server.by(dir, &run_args("relative", "bridge.key"));
-    assert_eq!(relative.status.code(), Some(1));
+    assert_eq!(relative.status.code(), Some(2));
     assert!(
         String::from_utf8_lossy(&relative.stderr).contains("names a file on the server"),
         "{}",

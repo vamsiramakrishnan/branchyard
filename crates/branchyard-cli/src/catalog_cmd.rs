@@ -241,7 +241,6 @@ pub fn connectors(env: &Env, as_json: bool) -> Outcome {
 #[allow(clippy::expect_used, clippy::unwrap_in_result)] // ratchet: branchyard-cli
 pub fn live(action: &crate::args::CatalogAction, as_json: bool) -> Outcome {
     use crate::args::CatalogAction;
-    use crate::commands::Failure;
     use crate::live_catalog::{self, Sources};
     let dir = live_catalog::dir();
     match action {
@@ -261,7 +260,9 @@ pub fn live(action: &crate::args::CatalogAction, as_json: bool) -> Outcome {
                     harnesses: only.as_deref() != Some("connectors"),
                 },
             )
-            .map_err(Failure::Message)?;
+            .map_err(|why| {
+                crate::errors::Report::new("io", why).next("by catalog status (what is cached)")
+            })?;
             if as_json {
                 return print(&json::text(
                     &serde_json::to_value(&done).expect("a summary"),
@@ -285,10 +286,12 @@ pub fn live(action: &crate::args::CatalogAction, as_json: bool) -> Outcome {
             print(&out)
         }
         CatalogAction::Status => {
-            let loaded = live_catalog::load(&dir).map_err(Failure::Message)?;
+            let refetch =
+                |why: String| crate::errors::Report::new("io", why).next("by catalog refresh");
+            let loaded = live_catalog::load(&dir).map_err(refetch)?;
             // The model listings of `by models list` share the cache; a
             // file that does not match its checksum is refused here too.
-            live_catalog::load_models(&dir).map_err(Failure::Message)?;
+            live_catalog::load_models(&dir).map_err(refetch)?;
             let Some(loaded) = loaded else {
                 return match as_json {
                     true => print(&json::text(&json!({"dir": dir, "cached": false}))),

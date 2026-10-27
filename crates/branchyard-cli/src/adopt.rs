@@ -365,14 +365,18 @@ pub fn find<'a>(sessions: &'a [Session], wanted: &str) -> Result<&'a Session, Fa
         .collect();
     match matching.as_slice() {
         [one] => Ok(one),
-        [] => Err(Failure::Message(format!(
-            "no Claude Code or Codex session {wanted:?} for this repository; by adopt --list \
-             shows them"
-        ))),
-        many => Err(Failure::Message(format!(
-            "{wanted:?} starts {} sessions' IDs; give more of it",
+        [] => Err(crate::errors::Report::new(
+            "not_found",
+            format!("no Claude Code or Codex session {wanted:?} for this repository"),
+        )
+        .next("by adopt --list (shows them)")
+        .into()),
+        many => Err(crate::errors::Report::usage(format!(
+            "{wanted:?} starts {} sessions' IDs",
             many.len()
-        ))),
+        ))
+        .next("give more of the session's ID (by adopt --list shows them)")
+        .into()),
     }
 }
 
@@ -481,7 +485,13 @@ pub fn plan(root: &Path, session: &Session, with_diff: bool) -> Result<Plan, Fai
     let diff = Git::new(top.as_deref().unwrap_or(&cwd))
         .args(["diff", "--binary", "HEAD"])
         .run_bytes()
-        .map_err(|e| Failure::Message(format!("could not read {}'s diff: {e}", cwd.display())))?;
+        .map_err(|e| {
+            crate::errors::Report::new(
+                "git",
+                format!("could not read {}'s diff: {e}", cwd.display()),
+            )
+            .next("by adopt SESSION --no-diff (adopts the session without the changes)")
+        })?;
     if !diff.is_empty() {
         plan.diff_files = git_out(&cwd, &["diff", "--name-only", "HEAD"])
             .unwrap_or_default()
@@ -509,8 +519,11 @@ pub fn plan(root: &Path, session: &Session, with_diff: bool) -> Result<Plan, Fai
 }
 
 fn head(root: &Path) -> Result<String, Failure> {
-    git_out(root, &["rev-parse", "--verify", "HEAD"])
-        .ok_or_else(|| Failure::Message("this repository has no commit to start from".into()))
+    git_out(root, &["rev-parse", "--verify", "HEAD"]).ok_or_else(|| {
+        crate::errors::Report::new("git", "this repository has no commit to start from")
+            .next("git commit --allow-empty -m start, then by adopt again")
+            .into()
+    })
 }
 
 fn short(commit: &str) -> &str {
@@ -538,16 +551,20 @@ pub struct Asked<'a> {
 /// `by adopt [--list] [SESSION] [--name N] [--harness ID] [--no-diff] [--json]`.
 pub fn main(env: &Env, target: &Target, asked: &Asked<'_>) -> Outcome {
     if let Target::Remote(_) = target {
-        return Err(Failure::Message(
+        return Err(crate::errors::Report::usage(
             "by adopt reads the sessions on this machine and makes a local branch; it works in \
-             local mode only"
-                .into(),
-        ));
+             local mode only",
+        )
+        .next("run by adopt without --remote, on the machine with the session")
+        .into());
     }
     if crate::workspace_cmd::in_harness().is_some() {
-        return Err(Failure::Message(
-            "by adopt is a person's command; a harness on a branch cannot adopt sessions".into(),
-        ));
+        return Err(crate::errors::Report::new(
+            "denied",
+            "by adopt is a person's command; a harness on a branch cannot adopt sessions",
+        )
+        .next("run by adopt in your own terminal, outside any branch")
+        .into());
     }
     let yard = commands::open()?;
     let vars = |name: &str| std::env::var(name).ok();
@@ -570,12 +587,12 @@ pub fn main(env: &Env, target: &Target, asked: &Asked<'_>) -> Outcome {
             let session = find(&found, wanted)?;
             let profile = match asked.profile {
                 Some(profile) if usage::login_of(profile) == Some(session.harness) => profile,
-                Some(profile) => {
-                    return Err(Failure::Message(format!(
-                        "{profile} is not a profile of {}, whose session this is",
-                        session.harness
-                    )))
-                }
+                Some(profile) => return Err(crate::errors::Report::usage(format!(
+                    "{profile} is not a profile of {}, whose session this is",
+                    session.harness
+                ))
+                .next("leave out --harness, or name one of its profiles (by harnesses --profiles)")
+                .into()),
                 None => session.harness,
             };
             adopt(&yard, session, asked, profile, now)
@@ -630,8 +647,10 @@ fn list_text(env: &Env, yard: &Yard, shown: &[&Session], now: u64) -> Outcome {
 /// is not touched.
 fn place_claude_transcript(session: &Session, worktree: &Path) -> Result<PathBuf, Failure> {
     let vars = |name: &str| std::env::var(name).ok();
-    let dir = usage::default_dir("claude-code", &vars)
-        .ok_or_else(|| Failure::Message("no home directory for Claude Code's store".into()))?;
+    let dir = usage::default_dir("claude-code", &vars).ok_or_else(|| {
+        crate::errors::Report::new("io", "no home directory for Claude Code's store")
+            .next("set HOME")
+    })?;
     let project = dir.join("projects").join(encode_claude_project(
         &canonical(worktree).display().to_string(),
     ));

@@ -14,11 +14,17 @@ pub(crate) fn read(file: &Path) -> Result<String, Failure> {
     match std::fs::read_to_string(file) {
         Ok(text) => Ok(text),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(String::new()),
-        Err(error) => Err(Failure::Message(format!(
-            "could not read {}: {error}; it was left as it is. Fix the file or its permissions, \
-             or set BRANCHYARD_USER_CONFIG to another path, then run this again",
-            file.display()
-        ))),
+        Err(error) => Err(crate::errors::Report::new(
+            "config",
+            format!(
+                "could not read {}: {}; it was left as it is",
+                file.display(),
+                crate::errors::plain_io(&error)
+            ),
+        )
+        .next("fix the file or its permissions, then run this again")
+        .next("set BRANCHYARD_USER_CONFIG to another path")
+        .into()),
     }
 }
 

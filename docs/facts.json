@@ -65,7 +65,7 @@
     }
   },
   "tests": {
-    "total": 2704,
+    "total": 2714,
     "ignored": 29,
     "by_crate": {
       "branchyard": {
@@ -77,7 +77,7 @@
         "ignored": 0
       },
       "branchyard-cli": {
-        "tests": 653,
+        "tests": 662,
         "ignored": 3
       },
       "branchyard-client": {
@@ -129,7 +129,7 @@
         "ignored": 0
       },
       "branchyard-server": {
-        "tests": 279,
+        "tests": 280,
         "ignored": 0
       },
       "branchyard-setup": {
@@ -505,5 +505,108 @@
       },
       "status": "partial"
     }
-  ]
+  ],
+  "cli": {
+    "exit_codes": [
+      {
+        "code": 0,
+        "name": "Success",
+        "meaning": "the command did what it was asked",
+        "kinds": []
+      },
+      {
+        "code": 1,
+        "name": "Failed",
+        "meaning": "the operation ran and failed: a branch failed, a check failed, a merge conflicted, the branch was busy; also a failure not yet given a kind (`unclassified`), and any kind not listed here",
+        "kinds": [
+          "already_merged",
+          "check_failed",
+          "check_not_started",
+          "check_timed_out",
+          "command_failed",
+          "conflict",
+          "dirty_target",
+          "fenced",
+          "git",
+          "harness",
+          "incomplete",
+          "internal",
+          "invalid_answers",
+          "invalid_candidate",
+          "invalid_plan",
+          "io",
+          "no_candidate",
+          "no_plan",
+          "not_running",
+          "running",
+          "stale_revision",
+          "state",
+          "steer_refused",
+          "target_moved",
+          "unclassified",
+          "would_overwrite"
+        ]
+      },
+      {
+        "code": 2,
+        "name": "Usage",
+        "meaning": "the command line asks for what cannot be: a bad flag or value (clap's own usage errors too), an unknown branch, harness or repository, a name already taken",
+        "kinds": [
+          "branch_exists",
+          "invalid_name",
+          "invalid_request",
+          "invalid_rig",
+          "not_found",
+          "unknown_branch",
+          "unknown_harness",
+          "unknown_knowledge",
+          "unknown_message",
+          "unknown_operation",
+          "unknown_repo",
+          "unknown_trigger",
+          "usage"
+        ]
+      },
+      {
+        "code": 3,
+        "name": "Environment",
+        "meaning": "something around the command must change first: not a repository, a harness (or gh, ssh) not installed, a configuration file that does not load, a server that does not answer or refuses the token, a login only you can do",
+        "kinds": [
+          "config",
+          "harness_unavailable",
+          "manual",
+          "not_a_repository",
+          "remote_protocol",
+          "remote_unreachable",
+          "shutting_down",
+          "tool_unavailable",
+          "unauthorized"
+        ]
+      },
+      {
+        "code": 4,
+        "name": "Refused",
+        "meaning": "refused before anything ran: a policy, a delegation envelope, a budget or quota, or a capability the harness lacks",
+        "kinds": [
+          "command_not_allowed",
+          "delegation_not_allowed",
+          "denied",
+          "provider_not_allowed",
+          "quota_exceeded",
+          "rate_limited",
+          "repo_not_allowed",
+          "scope_required",
+          "secret_not_allowed",
+          "unapproved_tools_not_allowed",
+          "unsupported"
+        ]
+      },
+      {
+        "code": 130,
+        "name": "Interrupted",
+        "meaning": "interrupted with Ctrl-C: `by` installs no handler, so the shell reports 128 + SIGINT (`by serve` and `by worker` catch it and shut down)",
+        "kinds": []
+      }
+    ]
+  }
 }

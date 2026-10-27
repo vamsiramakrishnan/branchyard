@@ -472,7 +472,10 @@ fn remote_commands_print_what_local_ones_do() {
         &["send", "p", "--retry"],
     ] {
         let (l, r) = same(args);
-        assert_eq!(l.status.code(), Some(1), "{args:?}");
+        // The same status both ways: a server's code reads as the kind a
+        // local `by` gives the same error (docs/cli.md, "Exit status").
+        assert!(!l.status.success(), "{args:?}");
+        assert_eq!(l.status.code(), r.status.code(), "{args:?}");
         assert_eq!(
             normalize(&text(&l.stderr), &here)
                 .lines()
@@ -702,11 +705,11 @@ fn remote_mode_is_configured_by_flags_or_environment() {
 
     // Two repositories: which one must be said.
     let ambiguous = server.by(&dir.0, &["ls"]);
-    assert_eq!(ambiguous.status.code(), Some(1));
+    assert_eq!(ambiguous.status.code(), Some(2));
     assert_eq!(
         text(&ambiguous.stderr),
-        "by: the server serves one, two; pass --repo NAME, set BRANCHYARD_REPO, or set repo \
-         under [remote] in branchyard.toml\n"
+        "by: the server serves one, two: name one\n  next: pass --repo one, or set \
+         BRANCHYARD_REPO, or set repo under [remote] in branchyard.toml\n"
     );
     let run = server.by(
         &dir.0,
@@ -742,14 +745,14 @@ fn remote_mode_is_configured_by_flags_or_environment() {
         &dir.0,
         &["--repo", "one", "run", "x", "--command", "/bin/sh", "--yes"],
     );
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(4));
     assert!(
         text(&refused.stderr).contains("does not accept a request's own command"),
         "{}",
         text(&refused.stderr)
     );
     let ask = server.by(&dir.0, &["--repo", "one", "run", "x", "--ask"]);
-    assert_eq!(ask.status.code(), Some(1));
+    assert_eq!(ask.status.code(), Some(2));
     assert!(text(&ask.stderr).contains("--ask is not available in remote mode"));
 
     // Credentials and reachability.
@@ -761,7 +764,7 @@ fn remote_mode_is_configured_by_flags_or_environment() {
         .args(["--repo", "one", "ls"])
         .output()
         .unwrap();
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(3));
     assert_eq!(
         text(&refused.stderr),
         "by: a valid bearer token is required\n"
@@ -803,7 +806,7 @@ fn remote_mode_is_configured_by_flags_or_environment() {
         .args(["--repo", "one", "ls"])
         .output()
         .unwrap();
-    assert_eq!(gone.status.code(), Some(1));
+    assert_eq!(gone.status.code(), Some(3));
     assert!(
         text(&gone.stderr).starts_with(&format!("by: cannot reach {}", server.url)),
         "{}",
@@ -1004,7 +1007,7 @@ fn delegation_commands_print_what_local_ones_do() {
         assert!(error["error"]["kind"].is_string(), "{args:?}: {error}");
     }
     let (l, r) = both(&["integrate", "plain"]);
-    assert_eq!(l.status.code(), Some(1));
+    assert_eq!(l.status.code(), Some(4));
     assert_eq!(text(&l.stderr), text(&r.stderr));
 }
 
@@ -1023,7 +1026,7 @@ fn a_harness_on_the_server_delegates_with_by_in_its_shell() {
     // Refused unless the operator offers delegation.
     let plain = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
     let refused = plain.by(&dir.0, &args);
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(4));
     assert!(
         text(&refused.stderr).contains("does not offer delegation"),
         "{}",
@@ -1084,7 +1087,7 @@ fn unapproved_tools_need_the_operators_consent() {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let plain = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
     let refused = plain.by(&dir.0, &args);
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(4));
     assert!(
         text(&refused.stderr).contains("--allow-unapproved-tools"),
         "{}",
@@ -1157,7 +1160,7 @@ fn remote_secrets_come_from_the_servers_table() {
     ]);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let refused = server.by(&dir.0, &args);
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(2));
     assert!(
         text(&refused.stderr).contains("secrets come from the server"),
         "{}",
@@ -1174,7 +1177,7 @@ fn remote_secrets_come_from_the_servers_table() {
     ]);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let refused = server.by(&dir.0, &args);
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(4));
     assert!(
         text(&refused.stderr).contains("--secret OPENAI_API_KEY"),
         "{}",
@@ -1252,7 +1255,7 @@ fn rig_runs_print_what_local_ones_do() {
     // A rig's root delegates, so the operator must allow delegation.
     let plain = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
     let refused = plain.by(&dir.0, &run);
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(4));
     let refused: Value = serde_json::from_slice(&refused.stdout).unwrap();
     assert_eq!(refused["error"]["kind"], "delegation_not_allowed");
     drop(plain);
@@ -1332,7 +1335,7 @@ fn rig_runs_print_what_local_ones_do() {
     .unwrap();
     let secret = secret.display().to_string();
     let refused = server.by(&dir.0, &["rig", "run", &secret, "go", "--json"]);
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(4));
     let refused: Value = serde_json::from_slice(&refused.stdout).unwrap();
     assert_eq!(refused["error"]["kind"], "secret_not_allowed", "{refused}");
 }
@@ -1468,8 +1471,8 @@ fn artifact_and_scratch_commands_print_what_local_ones_do() {
             "--json",
         ],
     );
-    assert_eq!(denied_local.status.code(), Some(1));
-    assert_eq!(denied_remote.status.code(), Some(1));
+    assert_eq!(denied_local.status.code(), Some(4));
+    assert_eq!(denied_remote.status.code(), Some(4));
     let (lj, rj): (Value, Value) = (
         serde_json::from_slice(&denied_local.stdout).unwrap(),
         serde_json::from_slice(&denied_remote.stdout).unwrap(),
@@ -1523,8 +1526,8 @@ fn artifact_and_scratch_commands_print_what_local_ones_do() {
     // harness to delegate as, in either mode) but both refuse the same way.
     let l = local(&here, &["artifact", "list"]);
     let r = server.by(&dir.0, &["artifact", "list"]);
-    assert_eq!(l.status.code(), Some(1));
-    assert_eq!(r.status.code(), Some(1));
+    assert!(!l.status.success());
+    assert_eq!(l.status.code(), r.status.code());
 }
 
 #[test]
@@ -1751,7 +1754,7 @@ fn the_server_comes_from_flags_after_the_command_or_the_environment() {
         .env("BRANCHYARD_REPO", "app")
         .output()
         .unwrap();
-    assert_eq!(flag_wins.status.code(), Some(1));
+    assert_eq!(flag_wins.status.code(), Some(2));
     // `--json` makes the refusal an envelope on standard output, and the
     // server's own error says which repository it does serve.
     let refused: Value = serde_json::from_slice(&flag_wins.stdout)
@@ -2015,9 +2018,9 @@ fn work_requiring_a_label_no_worker_carries_says_why_in_by_show() {
         .args(with_agent(&["run", "x", "--require-label", "gpu"]))
         .output()
         .unwrap();
-    assert_eq!(local.status.code(), Some(1));
+    assert_eq!(local.status.code(), Some(2));
     assert!(
-        text(&local.stderr).contains("use it with --remote"),
+        text(&local.stderr).contains("add --remote URL"),
         "{}",
         text(&local.stderr)
     );
@@ -2266,8 +2269,8 @@ fn priority_reaches_the_queue_and_by_stats_summarizes_it() {
 
     // Locally: no queue, so no priority; the stats read the event store.
     let refused = local(&there, &["run", "x", "--priority", "2"]);
-    assert_eq!(refused.status.code(), Some(1));
-    assert!(text(&refused.stderr).contains("use it with --remote"));
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(text(&refused.stderr).contains("add --remote URL"));
     let out = local(&there, &["run", "WRITE b.txt=1", "--name", "here", "--yes"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     // The server's SQLite state is the repository's own, so the branch

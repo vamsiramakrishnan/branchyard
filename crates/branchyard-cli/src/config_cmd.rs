@@ -30,7 +30,8 @@ fn to_json(value: &Value) -> String {
 
 fn show(cwd: &Path, json: bool) -> Outcome {
     let env = |name: &str| std::env::var(name).ok();
-    let effective = setup_io::load(cwd, Some(&env)).map_err(|e| Failure::Message(e.to_string()))?;
+    let effective =
+        setup_io::load(cwd, Some(&env)).map_err(|e| crate::errors::config(&e.to_string()))?;
     let flat = effective.config.flatten();
     if json {
         let values: serde_json::Map<String, Value> = flat

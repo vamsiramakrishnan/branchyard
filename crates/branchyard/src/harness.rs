@@ -7,7 +7,7 @@ use branchyard_harness::profiles::{self, Profile, PROFILES};
 use branchyard_runtime::Environment;
 use serde_json::Value;
 
-use crate::{Error, HarnessInfo};
+use crate::{Error, HarnessInfo, Unavailable};
 
 pub(crate) const DEFAULT_HARNESS: &str = "claude-code";
 
@@ -153,12 +153,9 @@ pub(crate) fn check_approvals(profile: &Profile, allowed: bool) -> Result<(), Er
     if allowed || profile.driver().capabilities().tool_approvals {
         return Ok(());
     }
-    Err(Error::Unsupported(format!(
-        "{} does not route tool permission requests to Branchyard, so its tools would run \
-         without your policy; allow that explicitly (--allow-unapproved-tools, \
-         TaskOptions::unapproved_tools) or choose another profile",
-        profile.id
-    )))
+    Err(Error::UnroutedApprovals {
+        profile: profile.id.to_owned(),
+    })
 }
 
 /// Refuse `model` for a profile that cannot deliver it. Its provisioner
@@ -218,22 +215,32 @@ pub(crate) fn check_delegation_tools(profile: &Profile, private_home: bool) -> R
 /// Fail with [`Error::HarnessUnavailable`] unless `command[0]` is an
 /// executable file, by path or on `PATH`.
 pub(crate) fn check_available(harness: &str, command: &[String]) -> Result<(), Error> {
-    let unavailable = |reason: String| Error::HarnessUnavailable {
+    let unavailable = |cause: Unavailable, reason: String| Error::HarnessUnavailable {
         harness: harness.to_owned(),
         reason,
+        cause,
     };
     let Some(program) = command.first().filter(|p| !p.is_empty()) else {
-        return Err(unavailable("the command is empty".into()));
+        return Err(unavailable(
+            Unavailable::NoCommand,
+            "the command is empty".into(),
+        ));
     };
     if program.contains('/') {
         if executable(Path::new(program)) {
             return Ok(());
         }
-        return Err(unavailable(format!("{program} is not an executable file")));
+        return Err(unavailable(
+            Unavailable::NotExecutable,
+            format!("{program} is not an executable file"),
+        ));
     }
     match find_on_path(program) {
         Some(_) => Ok(()),
-        None => Err(unavailable(format!("{program} was not found on PATH"))),
+        None => Err(unavailable(
+            Unavailable::NotOnPath,
+            format!("{program} was not found on PATH"),
+        )),
     }
 }
 
@@ -399,12 +406,26 @@ mod tests {
     fn missing_executables_are_reported_before_launch() {
         let missing = check_available("x", &["branchyard-no-such-binary".into()]);
         assert!(
-            matches!(&missing, Err(Error::HarnessUnavailable { reason, .. }) if reason.contains("not found on PATH")),
+            matches!(&missing, Err(Error::HarnessUnavailable { reason, cause: Unavailable::NotOnPath, .. }) if reason.contains("not found on PATH")),
             "{missing:?}"
         );
-        assert!(check_available("x", &["/nonexistent/bin".into()]).is_err());
-        assert!(check_available("x", &[]).is_err());
+        let cause = |command: &[String]| match check_available("x", command) {
+            Err(Error::HarnessUnavailable { cause, .. }) => Some(cause),
+            _ => None,
+        };
+        assert_eq!(
+            cause(&["/nonexistent/bin".into()]),
+            Some(Unavailable::NotExecutable)
+        );
+        assert_eq!(cause(&[]), Some(Unavailable::NoCommand));
         assert!(check_available("x", &["sh".into()]).is_ok());
+        // The detail says the cause by name, and the name reads back.
+        let detail = missing.unwrap_err().detail().unwrap();
+        assert_eq!(detail["harness"], "x");
+        assert_eq!(detail["cause"], "not_on_path");
+        for cause in Unavailable::ALL {
+            assert_eq!(Unavailable::from_name(cause.as_str()), Some(cause));
+        }
     }
 
     #[test]

@@ -501,7 +501,7 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 | `invalid_name`, `unknown_harness` | 400 | SDK refusals |
 | `denied` | 403 | The envelope or authority refused a delegation operation, as `by --json` reports `denied` |
 | `remote_error` | 502 | An error the engine running a delegating turn returned through its broker; `detail.kind` is its kind |
-| `harness_unavailable`, `unsupported`, `config_error`, `check_failed`, `check_timed_out`, `check_not_started`, `invalid_candidate` | 422 | SDK refusals (`config_error`: a configuration section that describes nothing usable); check failures have `detail.output_tail`, and an integration's `check_failed`, `check_timed_out` and `check_not_started` have `detail.checks`, every check of the branches integrated as `{check, branches, outcome}` (`passed`, `failed`, `timed_out`, `not_started` or `not_run`) |
+| `harness_unavailable`, `unsupported`, `config_error`, `check_failed`, `check_timed_out`, `check_not_started`, `invalid_candidate` | 422 | SDK refusals (`config_error`: a configuration section that describes nothing usable); `harness_unavailable` has `detail.harness` and `detail.cause` (`not_on_path`, `not_executable`, `no_command` or `no_candidate`), and the refusal of a profile that routes no tool approvals is `unsupported` with `detail` `{"unsupported": "unrouted_approvals", "profile"}`; check failures have `detail.output_tail`, and an integration's `check_failed`, `check_timed_out` and `check_not_started` have `detail.checks`, every check of the branches integrated as `{check, branches, outcome}` (`passed`, `failed`, `timed_out`, `not_started` or `not_run`) |
 
 ## Published schema
 
