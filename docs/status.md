@@ -88,7 +88,7 @@ A live run is protocol qualification against the real binary as a local process.
 | `branchyard-workspace` | Git worktrees, candidates and validated merges: compare-and-swap on the target, checks in a temporary worktree | built; hermetic |
 | `branchyard-server`, `branchyard-client` | The HTTP and SSE server with tenants, quotas, a durable queue and metrics; the typed blocking client | built; hermetic |
 | `branchyard-config`, `branchyard-setup` | `branchyard.toml` and the setup interview | built; hermetic |
-| `branchyard-provision` | Harness home provisioning, translated from Scion's provisioners | built; Claude Code's key and MCP delivery checked against its binary offline, the rest unqualified |
+| `branchyard-provision` | Harness home provisioning, translated from Scion's provisioners, and provider logins (`--provider zai`, `gemini`) | built; Claude Code's key and MCP delivery checked against its binary offline; provider logins run live for Claude Code 2.1.311 and Qwen Code 0.26.0 on GLM through Z.ai, 27 October 2026 ([record](harness-lifecycle.md#through-a-gateway-provider)); the rest unqualified. Not done: the other provider logins live |
 | `branchyard-sandbox`, `branchyard-microsandbox`, `branchyard-substrate`, `branchyard-bridge`, `branchyard-recipe` | The provider contract and admission; the Microsandbox and Agent Substrate providers; the in-sandbox exec bridge; environment recipes over ssh | built; unqualified |
 | `branchyard-sync` | Replication of task repositories to object storage | built; hermetic |
 | `branchyard-mcp`, `branchyard-herdr` | Delegation tools over MCP; the Herdr plugin's binary | built; hermetic. Not run against a real Herdr |

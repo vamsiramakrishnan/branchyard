@@ -1,0 +1,11 @@
+model = "gpt-5.6-sol"
+model_provider = "zai"
+
+[projects."/workspace"]
+trust_level = "trusted"
+
+[model_providers.zai]
+name = "Z.ai"
+base_url = "https://api.z.ai/api/v1"
+env_key = "ZAI_API_KEY"
+wire_api = "responses"

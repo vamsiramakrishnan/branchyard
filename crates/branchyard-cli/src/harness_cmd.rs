@@ -134,7 +134,8 @@ pub(crate) fn detected_here() -> Result<Inventory, String> {
 }
 
 /// The keys `by harnesses login ID --api-key` stored count as logins, by
-/// name: they are in `[secrets]`, which the inventory's script cannot see.
+/// name: they are in `[secrets]`, which the inventory's script cannot see;
+/// so do the provider logins `--provider` recorded in `[logins]`.
 fn count_stored_keys(found: &mut Inventory) {
     let Ok(cwd) = std::env::current_dir() else {
         return;
@@ -144,7 +145,9 @@ fn count_stored_keys(found: &mut Inventory) {
         return;
     };
     let root = crate::setup_io::project_root(&cwd);
-    inventory::count_stored_keys(found, &inventory::stored_keys(&root, &config.secrets));
+    let stored = inventory::stored_keys(&root, &config.secrets);
+    inventory::count_stored_keys(found, &stored);
+    branchyard::configure::count_provider_logins(found, &config.logins, &stored);
 }
 
 /// The qualification of `id`'s default profile (else any profile of it).
@@ -395,9 +398,29 @@ pub fn main(
         Some(HarnessesAction::Update(change)) => {
             change_harness(env, target, json, on, change, InstallAction::Update)
         }
-        Some(HarnessesAction::Login { id, api_key, yes }) => {
-            login(env, target, json, on, id, *api_key, *yes)
-        }
+        Some(HarnessesAction::Login {
+            id,
+            provider: Some(provider),
+            api_key,
+            yes,
+        }) => login_provider(
+            env,
+            target,
+            json,
+            on,
+            &ProviderAsk {
+                id,
+                provider,
+                new_key: *api_key,
+                yes: *yes,
+            },
+        ),
+        Some(HarnessesAction::Login {
+            id,
+            api_key,
+            provider: None,
+            yes,
+        }) => login(env, target, json, on, id, *api_key, *yes),
         Some(HarnessesAction::Log) => show_log(env, json),
     }
 }
@@ -931,7 +954,7 @@ fn login(
             None,
             as_json,
             format!(
-                "the catalog records no login command for {id}; {}{}",
+                "the catalog records no login command for {id}; {}{}{}",
                 match vars.is_empty() {
                     true => format!(
                         "start `{program}` and sign in inside it, then `by harnesses --refresh`"
@@ -945,6 +968,14 @@ fn login(
                 match (vars.is_empty(), e.homepage.as_deref()) {
                     (true, Some(h)) => format!(" ({h})"),
                     _ => String::new(),
+                },
+                // Another provider's key, where the harness can take one.
+                match branchyard::logins::providers_of(id).first() {
+                    Some(provider) => format!(
+                        "; or log it in to another provider with that provider's key: `by \
+                         harnesses login {id} --provider {provider}`"
+                    ),
+                    None => String::new(),
                 }
             ),
         );
@@ -1212,47 +1243,12 @@ fn store_key(env: &Env, as_json: bool, machine: &Machine, id: &str) -> Outcome {
             "{id} reads no API key variable that Branchyard knows of; use `by harnesses login {id}`"
         )));
     };
-    let key = match env.stdin_tty {
-        true => {
-            eprint!("by: paste the {var} for {id} (it is not shown), then press Enter: ");
-            read_hidden()?
-        }
-        false => {
-            let mut text = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
-            text
-        }
-    };
-    let key = key.trim();
-    if key.is_empty() || key.contains(['\n', '\r']) {
-        return Err(Failure::Message(format!(
-            "no key on standard input: pipe it in, as in `printf %s \"$KEY\" | by harnesses login \
-             {id} --api-key`"
-        )));
-    }
-    let dir = user_dir().join("secrets");
-    let path = dir.join(var);
-    // Never in a repository: a key file there could be committed.
-    let cwd = std::env::current_dir()?;
-    let root = crate::setup_io::project_root(&cwd);
-    if branchyard_config::is_repository(&root) && path.starts_with(&root) {
-        return Err(Failure::Message(format!(
-            "{} is inside the repository at {}; set BRANCHYARD_USER_CONFIG outside it",
-            path.display(),
-            root.display()
-        )));
-    }
+    let key = read_key(env, var, id, &format!("by harnesses login {id} --api-key"))?;
+    let path = key_file(var)?;
     // The user file is read before anything is written, so one that cannot
     // be read leaves the key file unwritten too.
     crate::user_config::read(&crate::setup_io::user_file())?;
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&dir)?;
-    }
-    crate::setup_io::write_file(&path, key, 0o600)?;
+    write_key(&path, &key)?;
     let named = name_secret(var, &path)?;
     record(HarnessEvent {
         at_ms: branchyard_support::time::now_ms(),
@@ -1285,6 +1281,418 @@ fn store_key(env: &Env, as_json: bool, machine: &Machine, id: &str) -> Outcome {
             }
         )),
     }
+}
+
+/// A key for `var`, from the terminal with echo off or from standard
+/// input, never shown. `command` is what to pipe it into.
+fn read_key(env: &Env, var: &str, id: &str, command: &str) -> Result<String, Failure> {
+    let key = match env.stdin_tty {
+        true => {
+            eprint!("by: paste the {var} for {id} (it is not shown), then press Enter: ");
+            read_hidden()?
+        }
+        false => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+            text
+        }
+    };
+    let key = key.trim();
+    if key.is_empty() || key.contains(['\n', '\r']) {
+        return Err(Failure::Message(format!(
+            "no key on standard input: pipe it in, as in `printf %s \"$KEY\" | {command}`"
+        )));
+    }
+    Ok(key.to_owned())
+}
+
+/// Where a stored key for `var` lives: `secrets/VAR` beside the user
+/// configuration. Never in a repository, where it could be committed.
+fn key_file(var: &str) -> Result<PathBuf, Failure> {
+    let path = user_dir().join("secrets").join(var);
+    let cwd = std::env::current_dir()?;
+    let root = crate::setup_io::project_root(&cwd);
+    if branchyard_config::is_repository(&root) && path.starts_with(&root) {
+        return Err(Failure::Message(format!(
+            "{} is inside the repository at {}; set BRANCHYARD_USER_CONFIG outside it",
+            path.display(),
+            root.display()
+        )));
+    }
+    Ok(path)
+}
+
+/// Write `key` to `path`, 0600, in a 0700 directory.
+fn write_key(path: &Path, key: &str) -> Result<(), Failure> {
+    if let Some(dir) = path.parent() {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+    }
+    crate::setup_io::write_file(path, key, 0o600)?;
+    Ok(())
+}
+
+/// What `by harnesses login ID --provider NAME` was asked.
+struct ProviderAsk<'a> {
+    id: &'a str,
+    provider: &'a str,
+    /// `--api-key`: read a new key even when one is kept already.
+    new_key: bool,
+    /// `--yes`: write the harness's own configuration without asking.
+    yes: bool,
+}
+
+/// `by harnesses login ID --provider NAME`: log a harness in to another
+/// model provider with that provider's key ([`branchyard::logins`]).
+/// The key is kept as `--api-key` keeps one, once per provider
+/// (`ZAI_API_KEY`), unless `[secrets]` already names it; `[logins]` in the
+/// user file records the choice, so isolated and sandboxed branches get
+/// the endpoint, the token variable and the model. A run in your own home
+/// gets nothing from Branchyard: this prints the `export` line, and writes
+/// the harness's own configuration where a variable cannot select the
+/// provider (Codex's `config.toml`, Antigravity's settings, OpenCode's
+/// model) only after showing the change and being told yes.
+fn login_provider(
+    env: &Env,
+    target: &Target,
+    as_json: bool,
+    on: Option<&str>,
+    ask: &ProviderAsk<'_>,
+) -> Outcome {
+    use branchyard::logins;
+    let ProviderAsk { id, provider, .. } = *ask;
+    entry(id)?;
+    not_in_harness("log in to")?;
+    let login = logins::check(id, provider).map_err(Failure::Message)?;
+    let local = matches!(target, Target::Local) && matches!(Machine::parse(on)?, Machine::Local);
+    if !local {
+        return Err(Failure::Message(format!(
+            "a provider login is kept on the machine that runs the harness; run `by harnesses \
+             login {id} --provider {provider}` there"
+        )));
+    }
+    let title = logins::provider(provider).map_or(provider, |p| p.title);
+    let user_file = crate::setup_io::user_file();
+    let text = crate::user_config::read(&user_file)?;
+    let parsed = match text.trim().is_empty() {
+        true => Default::default(),
+        false => branchyard_setup::config::parse(&text)
+            .map_err(|e| Failure::Message(format!("{}: {e}", user_file.display())))?,
+    };
+    // The key: a new one when asked for, else what `[secrets]` already
+    // names, else the file an earlier login stored, else read now.
+    let var = login.key;
+    let path = key_file(var)?;
+    let configured = parsed.secrets.get(var).cloned();
+    let ours = format!("@{}", path.display());
+    let (key, source) = match (ask.new_key, &configured) {
+        (false, Some(source)) if *source == ours && path.is_file() => ("reused", ours),
+        (false, Some(source)) => ("named", source.clone()),
+        (false, None) if path.is_file() => ("reused", format!("@{}", path.display())),
+        _ => {
+            let command = format!("by harnesses login {id} --provider {provider}");
+            let key = read_key(env, var, id, &command)?;
+            write_key(&path, &key)?;
+            ("stored", format!("@{}", path.display()))
+        }
+    };
+    let named = match key {
+        "named" => false,
+        _ => name_secret(var, &path)?,
+    };
+    let logins_entry = name_login(id, provider)?;
+    record(HarnessEvent {
+        at_ms: branchyard_support::time::now_ms(),
+        on: "local".into(),
+        harness: id.to_owned(),
+        action: InstallAction::Login,
+        by: "by harnesses".into(),
+        command: None,
+        outcome: "provider".into(),
+        version_before: None,
+        version_after: None,
+        detail: Some(format!("{provider}: {var} from {source}")),
+    });
+    cache().clear();
+    // In your own home: the export line, reading the key where it is.
+    let key_expr = match source.strip_prefix('@') {
+        // As the configuration reads it: `~/` is the home, and a relative
+        // path is beside the user file.
+        Some(file) => {
+            let file = match (file.strip_prefix("~/"), crate::setup_io::home()) {
+                (Some(rest), Some(home)) => home.join(rest),
+                _ => user_dir().join(file),
+            };
+            format!("$(cat {})", quote(&file.display().to_string()))
+        }
+        None => format!("${source}"),
+    };
+    let export = logins::exports(login, &key_expr);
+    let config = own_config(env, login, as_json, ask.yes)?;
+    let isolated: Vec<&str> = login.env.iter().map(|(name, _)| *name).collect();
+    if as_json {
+        return print(&json::text(&json!({
+            "harness": id,
+            "provider": provider,
+            "status": "stored",
+            "variable": var,
+            "key": key,
+            "source": source,
+            "secrets_entry_added": named,
+            "logins_entry": logins_entry,
+            "isolated": { "env": isolated, "model": login.model },
+            "export": export,
+            "config": config.as_ref().map(OwnConfig::json),
+        })));
+    }
+    let user = user_file.display();
+    let mut out = match key {
+        "stored" => format!("stored {var} in {} (0600)", path.display()),
+        "reused" => format!("{id} uses the {var} stored in {}", path.display()),
+        _ => format!("{id} uses [secrets] {var} ({source})"),
+    };
+    out.push_str(&match (named, logins_entry) {
+        (true, _) => {
+            format!(", named it in [secrets] and set [logins] {id} = \"{provider}\" in {user}.\n")
+        }
+        (false, "unchanged") => format!("; [logins] {id} = \"{provider}\" in {user} already.\n"),
+        (false, _) => format!("; set [logins] {id} = \"{provider}\" in {user}.\n"),
+    });
+    let gets: Vec<String> = login
+        .env
+        .iter()
+        .map(|(name, value)| match value {
+            logins::Value::Key => format!("{name} (the key)"),
+            logins::Value::Text(text) => format!("{name}={text}"),
+        })
+        .collect();
+    out.push_str(&format!(
+        "{id} through {title}: a branch with a private home (--isolated, a sandbox) gets {}{}.\n",
+        gets.join(", "),
+        match login.model {
+            Some(model) => format!(", and model {model} unless --model names another"),
+            None => String::new(),
+        }
+    ));
+    out.push_str(&format!(
+        "In your own home (`by run` without --isolated, or {id} itself), export:\n  {export}\n"
+    ));
+    if let Some(config) = &config {
+        out.push_str(&config.text);
+    }
+    print(&out)
+}
+
+/// The harness's own configuration a provider login offers for a home
+/// that is yours, and what became of it.
+struct OwnConfig {
+    shown: String,
+    diff: String,
+    wrote: bool,
+    /// Why it was not written, when it was not and needed to be.
+    why: Option<String>,
+    /// For people.
+    text: String,
+}
+
+impl OwnConfig {
+    fn json(&self) -> serde_json::Value {
+        json!({
+            "file": self.shown, "changed": !self.diff.is_empty(), "wrote": self.wrote,
+            "diff": self.diff, "why": self.why,
+        })
+    }
+}
+
+/// Offer `login`'s configuration change for your own home: show the diff,
+/// and write it with `--yes`, or when asked on a terminal and told yes.
+/// `None` when the login needs none.
+fn own_config(
+    env: &Env,
+    login: &branchyard::logins::ProviderLogin,
+    as_json: bool,
+    yes: bool,
+) -> Result<Option<OwnConfig>, Failure> {
+    use branchyard::logins::Config;
+    let Some((relative, edit)) = branchyard::logins::config_edit(login) else {
+        return Ok(None);
+    };
+    let Some(home) = crate::setup_io::home() else {
+        return Ok(None);
+    };
+    let path = home.join(relative);
+    let shown = format!("~/{relative}");
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(Failure::Message(format!("reading {shown}: {e}"))),
+    };
+    let before = existing.clone().unwrap_or_default();
+    let unchanged = |text: String, why: Option<String>| OwnConfig {
+        text,
+        shown: shown.clone(),
+        diff: String::new(),
+        wrote: false,
+        why,
+    };
+    // A JSON key is merged, keeping the file's order and indentation, and
+    // never replaces another value; Codex's provider is reconciled as the
+    // provisioner writes it into a private home.
+    let merged = match login.config {
+        Some(Config::Json { key, value, .. }) => branchyard_setup::install::merge::json(
+            existing.as_deref(),
+            &json!({ key: value }).to_string(),
+            "",
+        ),
+        _ => branchyard::logins::apply(&edit, existing.as_deref()),
+    };
+    let merged = match merged {
+        Ok(merged) => merged,
+        Err(why) => {
+            let why = format!("{why}; set it there yourself");
+            return Ok(Some(unchanged(
+                format!("{shown} was not changed: {why}\n"),
+                Some(why),
+            )));
+        }
+    };
+    if merged == before {
+        return Ok(Some(unchanged(
+            format!("{shown} selects {} already.\n", login.provider),
+            None,
+        )));
+    }
+    let diff = branchyard_setup::plan::unified_diff(&shown, &before, &merged);
+    let what = format!(
+        "{} reads {} in your own home only with this change to {shown}",
+        login.harness, login.provider
+    );
+    let not_written = |text: String| OwnConfig {
+        text,
+        shown: shown.clone(),
+        diff: diff.clone(),
+        wrote: false,
+        why: Some("not confirmed".into()),
+    };
+    let confirmed = match (yes, interactive(env) && !as_json) {
+        (true, _) => true,
+        (false, true) => {
+            eprint!("{diff}");
+            let answer = crate::console::terminal_prompt(&format!("by: {what}. Write it? [y/N] "))?;
+            matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
+        }
+        (false, false) => {
+            return Ok(Some(not_written(format!(
+                "{diff}{what}. Not written: there is no terminal to ask on. Add --yes to write \
+                 exactly the change above.\n"
+            ))))
+        }
+    };
+    if !confirmed {
+        return Ok(Some(not_written(format!(
+            "not confirmed; {shown} was not changed\n"
+        ))));
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mode = std::fs::metadata(&path)
+        .map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o777)
+        .unwrap_or(0o644);
+    crate::setup_io::write_file(&path, &merged, mode)?;
+    record(HarnessEvent {
+        at_ms: branchyard_support::time::now_ms(),
+        on: "local".into(),
+        harness: login.harness.to_owned(),
+        action: InstallAction::Login,
+        by: "by harnesses".into(),
+        command: None,
+        outcome: "wrote_settings".into(),
+        version_before: None,
+        version_after: None,
+        detail: Some(format!("{} in {shown}", login.provider)),
+    });
+    Ok(Some(OwnConfig {
+        text: format!(
+            "{}wrote {shown}.\n",
+            match yes {
+                true => diff.as_str(),
+                false => "",
+            }
+        ),
+        shown,
+        diff,
+        wrote: true,
+        why: None,
+    }))
+}
+
+/// Set `[logins] ID = "PROVIDER"` in the user file: `added`, `replaced`
+/// (another provider was named) or `unchanged`.
+fn name_login(id: &str, provider: &str) -> Result<&'static str, Failure> {
+    let file = crate::setup_io::user_file();
+    let text = crate::user_config::read(&file)?;
+    let parsed = match text.trim().is_empty() {
+        true => Default::default(),
+        false => branchyard_setup::config::parse(&text)
+            .map_err(|e| Failure::Message(format!("{}: {e}", file.display())))?,
+    };
+    let line = format!("{id} = {}", branchyard_setup::config::toml_string(provider));
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let section = lines.iter().position(|l| l.trim() == "[logins]");
+    let outcome = match (parsed.logins.get(id), section) {
+        (Some(existing), _) if existing == provider => return Ok("unchanged"),
+        (Some(_), Some(at)) => {
+            // The line of [logins], before the next table, that sets it.
+            let end = lines[at + 1..]
+                .iter()
+                .position(|l| l.trim_start().starts_with('['))
+                .map_or(lines.len(), |n| at + 1 + n);
+            let sets = |l: &str| {
+                l.split_once('=')
+                    .is_some_and(|(key, _)| key.trim().trim_matches('"') == id)
+            };
+            let Some(found) = (at + 1..end).find(|&n| sets(&lines[n])) else {
+                return Err(Failure::Message(format!(
+                    "[logins] in {} sets {id} in a way this cannot edit; set {line} there yourself",
+                    file.display()
+                )));
+            };
+            lines[found] = line.clone();
+            "replaced"
+        }
+        (Some(_), None) => {
+            return Err(Failure::Message(format!(
+                "{} sets logins.{id} outside a [logins] table; set {line} there yourself",
+                file.display()
+            )))
+        }
+        (None, Some(at)) => {
+            lines.insert(at + 1, line.clone());
+            "added"
+        }
+        (None, None) => {
+            if lines.last().is_some_and(|l| !l.trim().is_empty()) {
+                lines.push(String::new());
+            }
+            lines.push("[logins]".into());
+            lines.push(line.clone());
+            "added"
+        }
+    };
+    let mut updated = lines.join("\n");
+    updated.push('\n');
+    branchyard_setup::config::parse(&updated).map_err(|e| {
+        Failure::Message(format!("setting [logins] {id} in {}: {e}", file.display()))
+    })?;
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    crate::setup_io::write_file(&file, &updated, 0o600)?;
+    Ok(outcome)
 }
 
 /// Read a line from the terminal with echo off.

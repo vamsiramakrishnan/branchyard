@@ -232,6 +232,8 @@ A route names one backend (with fallbacks of the same kind), so a yard serving s
 
 `by init project` proposes the `zai` backend and the `glm-*` route when `ZAI_API_KEY` is set. Oh My Pi reads the same variable for its `zai` provider (`--model zai/glm-5.3`) and needs no gateway for it.
 
+**Without a gateway.** One harness on GLM needs no gateway either: `printf %s "$KEY" | by harnesses login claude-code --provider zai` (or `qwen-code`, `codex`, `pi`, `oh-my-pi`, `opencode`) stores the key once as `ZAI_API_KEY` and records the login, and an isolated or sandboxed branch of that harness gets the endpoint above that its API needs, the key in the variable it reads and a GLM model ([harness lifecycle](harness-lifecycle.md#through-a-gateway-provider)). The harness then calls Z.ai itself: no metering, routes, budgets or interception records, which are the gateway's. A branch on the gateway gets no provider login.
+
 **Status, 16 October 2026.** Run against the real endpoints with a GLM Coding Plan key (a key created under the plan: a standard key of the same account listed the models but answered every completion `429` `1113 Insufficient balance or no resource package`, since the two kinds of key are not interchangeable):
 
 - `by models list` lists the `zai` source: 11 models, `glm-4.5` to `glm-5.3-flashx`.

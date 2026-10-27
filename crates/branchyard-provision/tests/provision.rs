@@ -1344,3 +1344,243 @@ fn antigravity_takes_the_key_as_gemini_api_key_and_sets_its_model_provider() {
     assert_eq!(settings["modelProvider"], "gemini");
     assert_eq!(settings["permissions"]["allow"][0], "Read");
 }
+
+// Provider logins (`branchyard_provision::logins`): the harness reaches its
+// model through another provider with that provider's key, as round 8 ran
+// each of these harnesses on Z.ai (25 October 2026).
+
+const ZAI_KEY: &str = "zai-test-0123456789abcdef";
+
+/// A context logged in to `provider` with its key, and `more` secrets.
+fn logged_in(harness: &str, protocol: Protocol, provider: &str, more: &[(&str, &str)]) -> Context {
+    let mut context = context(harness, protocol);
+    context.login = Some(provider.into());
+    context.secrets = secrets(&[("ZAI_API_KEY", ZAI_KEY)]);
+    context.secrets.extend(secrets(more));
+    context
+}
+
+/// Nothing a plan holds shows the key except the files and variables
+/// marked secret, and every file holding it is 0600.
+fn key_only_where_secret(plan: &Plan, temp: &Temp) {
+    for var in &plan.env {
+        assert!(var.secret || !var.value.contains(ZAI_KEY), "{}", var.name);
+    }
+    assert!(!format!("{plan:?}").contains(ZAI_KEY));
+    for (path, content) in files(&temp.home()) {
+        if content.contains(ZAI_KEY) {
+            assert_eq!(temp.mode(&path), 0o600, "{path}");
+        }
+    }
+}
+
+#[test]
+fn claude_code_on_zai_gets_the_token_through_its_helper_and_the_endpoint() {
+    // An Anthropic key stored for Claude Code earlier is set aside: the
+    // login decides, and the record says the key went unused.
+    let temp = Temp::new();
+    temp.seed(".claude/settings.json", "{\"theme\": \"dark\"}\n");
+    let context = logged_in(
+        "claude-code",
+        Protocol::ClaudeStreamJson,
+        "zai",
+        &[("ANTHROPIC_API_KEY", ANTHROPIC_KEY), ("GH_TOKEN", "t")],
+    );
+    let plan = provision(&temp, &context);
+    golden("claude-code-zai", &temp, &plan);
+    assert_eq!(plan.auth.as_deref(), Some("zai"));
+    // The login's model, on the command line too, since nothing named one.
+    assert_eq!(plan.session.model.as_deref(), Some("glm-4.6"));
+    let key_file = ".branchyard/credentials/anthropic-api-key";
+    assert_eq!(temp.read(key_file), ZAI_KEY);
+    assert_eq!(
+        plan.secrets,
+        [branchyard_provision::Delivery {
+            secret: "ZAI_API_KEY".into(),
+            via: Via::Helper {
+                path: key_file.into(),
+                setting: "apiKeyHelper in .claude/settings.json".into()
+            },
+            tool_env: false,
+        }]
+    );
+    assert_eq!(plan.unused_secrets, ["GH_TOKEN", "ANTHROPIC_API_KEY"]);
+    key_only_where_secret(&plan, &temp);
+    // A model the run names wins over the login's.
+    let mut named = context.clone();
+    named.installed = installed(&temp.home());
+    named.model = Some("glm-5.3".into());
+    let plan = provision(&temp, &named);
+    assert_eq!(plan.session.model.as_deref(), Some("glm-5.3"));
+}
+
+#[test]
+fn claude_code_takes_a_gateway_token_and_base_url_given_as_secrets() {
+    // `--secret ANTHROPIC_AUTH_TOKEN --secret ANTHROPIC_BASE_URL`: a login,
+    // not unused secrets (round 8 found them reported unused and the turn
+    // failing `Not logged in`).
+    let temp = Temp::new();
+    let mut context = context("claude-code", Protocol::ClaudeStreamJson);
+    context.secrets = secrets(&[
+        ("ANTHROPIC_AUTH_TOKEN", ZAI_KEY),
+        ("ANTHROPIC_BASE_URL", "https://gateway.example/anthropic"),
+    ]);
+    let plan = provision(&temp, &context);
+    assert_eq!(plan.auth.as_deref(), Some("auth-token"));
+    assert!(plan.unused_secrets.is_empty(), "{:?}", plan.unused_secrets);
+    assert_eq!(
+        temp.read(".branchyard/credentials/anthropic-api-key"),
+        ZAI_KEY
+    );
+    let base = plan
+        .env
+        .iter()
+        .find(|v| v.name == "ANTHROPIC_BASE_URL")
+        .unwrap();
+    assert_eq!(base.value, "https://gateway.example/anthropic");
+    // Not the variable itself: the helper.
+    assert!(plan.env.iter().all(|v| v.name != "ANTHROPIC_AUTH_TOKEN"));
+    // With the helper, Claude Code must not be told the host manages it.
+    assert!(plan
+        .env
+        .iter()
+        .all(|v| v.name != "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"));
+    key_only_where_secret(&plan, &temp);
+}
+
+#[test]
+fn qwen_code_on_zai_gets_the_three_variables_it_logs_in_from() {
+    let temp = Temp::new();
+    let context = logged_in("qwen-code", Protocol::Acp, "zai", &[]);
+    let plan = provision(&temp, &context);
+    golden("qwen-code-zai", &temp, &plan);
+    let env: Vec<(&str, &str)> = plan
+        .env
+        .iter()
+        .map(|v| (v.name.as_str(), v.value.as_str()))
+        .collect();
+    assert_eq!(
+        env,
+        [
+            ("OPENAI_API_KEY", ZAI_KEY),
+            ("OPENAI_MODEL", "glm-4.5-air"),
+            ("OPENAI_BASE_URL", "https://api.z.ai/api/coding/paas/v4"),
+        ]
+    );
+    // ACP has no model parameter: the variable carries it.
+    assert!(plan.session.model.is_none());
+    key_only_where_secret(&plan, &temp);
+}
+
+#[test]
+fn codex_on_zai_gets_a_provider_of_its_own_and_the_key_in_its_variable() {
+    let temp = Temp::new();
+    temp.seed(
+        ".codex/config.toml",
+        "model = \"gpt-5.6-sol\"\nmodel_provider = \"openai\"\n\n\
+         [projects.\"/workspace\"]\ntrust_level = \"trusted\"\n",
+    );
+    // An OpenAI key given too is set aside: no auth.json is written.
+    let context = logged_in(
+        "codex",
+        Protocol::CodexAppServer,
+        "zai",
+        &[("OPENAI_API_KEY", "sk-openai-test")],
+    );
+    let plan = provision(&temp, &context);
+    golden("codex-zai", &temp, &plan);
+    assert!(!temp.home().join(".codex/auth.json").exists());
+    assert_eq!(plan.session.model.as_deref(), Some("glm-4.6"));
+    let config = temp.read(".codex/config.toml");
+    assert_eq!(config.matches("model_provider = ").count(), 1, "{config}");
+    assert!(config.contains("model_provider = \"zai\""), "{config}");
+    assert!(
+        config.contains(
+            "base_url = \"https://api.z.ai/api/v1\"\nenv_key = \"ZAI_API_KEY\"\n\
+             wire_api = \"responses\""
+        ),
+        "{config}"
+    );
+    assert!(config.contains("[projects.\"/workspace\"]"), "{config}");
+    assert_eq!(plan.unused_secrets, ["OPENAI_API_KEY"]);
+    key_only_where_secret(&plan, &temp);
+    // The model gateway wins over a login: it holds the keys.
+    let mut gateway = context.clone();
+    gateway.installed = installed(&temp.home());
+    gateway.model_gateway = Some(branchyard_provision::models::ModelGateway {
+        url: "http://127.0.0.1:41100".into(),
+        anthropic: false,
+        openai: true,
+    });
+    let plan = branchyard_provision::plan(&gateway).unwrap();
+    assert_ne!(plan.auth.as_deref(), Some("zai"));
+}
+
+#[test]
+fn pi_on_zai_gets_its_key_and_model_and_other_keys_are_set_aside() {
+    let temp = Temp::new();
+    let context = logged_in("pi", Protocol::PiRpc, "zai", &[("GEMINI_API_KEY", "g")]);
+    let plan = provision(&temp, &context);
+    golden("pi-zai", &temp, &plan);
+    assert_eq!(plan.session.model.as_deref(), Some("zai/glm-5.3-flash"));
+    assert_eq!(plan.unused_secrets, ["GEMINI_API_KEY"]);
+    key_only_where_secret(&plan, &temp);
+}
+
+#[test]
+fn a_login_without_its_key_is_refused_with_how_to_store_it() {
+    let mut context = context("claude-code", Protocol::ClaudeStreamJson);
+    context.login = Some("zai".into());
+    context.secrets = secrets(&[("ANTHROPIC_API_KEY", ANTHROPIC_KEY)]);
+    let refused = branchyard_provision::plan(&context).unwrap_err().0;
+    assert_eq!(
+        refused,
+        "claude-code's zai login needs the secret ZAI_API_KEY; store it with `by harnesses \
+         login claude-code --provider zai`"
+    );
+    // Without the login, the same secrets log in as they always did.
+    context.login = None;
+    assert_eq!(
+        branchyard_provision::plan(&context)
+            .unwrap()
+            .auth
+            .as_deref(),
+        Some("api-key")
+    );
+}
+
+#[test]
+fn every_login_provisions_for_its_harness_in_a_private_home() {
+    for login in branchyard_provision::logins::LOGINS {
+        let profile = branchyard_harness::profiles::default_for(login.harness)
+            .unwrap_or_else(|| panic!("{} has no profile", login.harness));
+        let mut context = context(login.harness, profile.protocol);
+        context.login = Some(login.provider.into());
+        context.secrets = secrets(&[(login.key, "k")]);
+        let plan = branchyard_provision::plan(&context)
+            .unwrap_or_else(|e| panic!("{} {}: {e}", login.harness, login.provider));
+        let what = format!("{} {}", login.harness, login.provider);
+        assert_eq!(plan.auth.as_deref(), Some(login.provider), "{what}");
+        assert!(
+            plan.secrets.iter().any(|d| d.secret == login.key),
+            "{what}: {:?}",
+            plan.secrets
+        );
+        assert!(plan.unused_secrets.is_empty(), "{what}");
+        for (name, value) in login.env {
+            match value {
+                branchyard_provision::logins::Value::Key => assert!(
+                    plan.env.iter().any(|v| v.name == *name && v.secret)
+                        || plan.files.iter().any(|f| f.secret),
+                    "{what}: {name}"
+                ),
+                branchyard_provision::logins::Value::Text(text) => assert!(
+                    plan.env
+                        .iter()
+                        .any(|v| v.name == *name && v.value == *text && !v.secret),
+                    "{what}: {name}"
+                ),
+            }
+        }
+    }
+}

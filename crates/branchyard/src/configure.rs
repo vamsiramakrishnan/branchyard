@@ -303,6 +303,52 @@ pub fn key_source(root: &Path, secrets: &BTreeMap<String, String>, name: &str) -
     }
 }
 
+/// Count the provider logins of `[logins]` as logins of their harnesses, as
+/// [`crate::inventory::count_stored_keys`] counts a key of the harness's
+/// own: one whose provider's key Branchyard stored (`stored`, from
+/// [`crate::inventory::stored_keys`]) makes a harness that is logged out or
+/// unknown logged in, likely, with the key as the reason (`key stored
+/// (ZAI_API_KEY)`). The key is not checked, and only isolated and
+/// sandboxed branches get the login; a harness logged in already is left
+/// alone.
+pub fn count_provider_logins(
+    inventory: &mut crate::inventory::Inventory,
+    logins: &BTreeMap<String, String>,
+    stored: &BTreeMap<String, String>,
+) {
+    use crate::inventory::{Evidence, Login, LoginState};
+    for state in &mut inventory.harnesses {
+        if state.login.state == LoginState::LoggedIn {
+            continue;
+        }
+        let Some(login) = logins
+            .get(&state.id)
+            .and_then(|provider| branchyard_provision::logins::find(&state.id, provider))
+        else {
+            continue;
+        };
+        let Some(file) = stored.get(login.key) else {
+            continue;
+        };
+        let title = branchyard_provision::logins::provider(login.provider)
+            .map_or(login.provider, |p| p.title);
+        state.login = Login {
+            state: LoginState::LoggedIn,
+            evidence: Evidence::Likely,
+            detail: format!(
+                "{key} is stored in {file} and [logins] logs {id} in to {title} with it (an API \
+                 key; not checked); isolated and sandboxed branches get it, and `by harnesses \
+                 login {id} --provider {provider}` prints the export line for your own sessions",
+                key = login.key,
+                id = state.id,
+                provider = login.provider,
+            ),
+            key: Some(login.key.to_owned()),
+            stored: true,
+        };
+    }
+}
+
 /// `[models]` as the gateway takes it: the file's table and the engine's
 /// agree field for field.
 pub fn models_config(config: &ModelsConfig) -> Result<models::Config, Error> {
@@ -487,11 +533,11 @@ pub fn private_home(options: &TaskOptions) -> bool {
 /// Fill what `spec` leaves unset from `config`, for a new branch: the
 /// model, effort and authentication of `[defaults]`, the `[network]`
 /// policy, the `[mcp]` servers and, with `private_home` (see
-/// [`private_home`]), the `[secrets]` and the default grants of
-/// `[connectors]`; and the access `[models]` gives, which also keeps a
-/// provider's key from a branch on the gateway. Servers and secrets the
-/// caller named stay; the rest is added. `spec` stays `None` when there
-/// is nothing to add.
+/// [`private_home`]), the `[secrets]`, the `[logins]` and the default
+/// grants of `[connectors]`; and the access `[models]` gives, which also
+/// keeps a provider's key, and the provider logins, from a branch on the
+/// gateway. Servers, secrets and logins the caller named stay; the rest is
+/// added. `spec` stays `None` when there is nothing to add.
 pub fn fill_provisioning(
     config: &ProjectConfig,
     spec: &mut Option<Provisioning>,
@@ -528,6 +574,12 @@ pub fn fill_provisioning(
             })
             .collect(),
     };
+    // Provider logins need the provider's key, so a private home; on the
+    // gateway, the gateway decides the endpoint.
+    let logins = match private_home && !on_gateway {
+        true => config.logins.clone(),
+        false => Default::default(),
+    };
     let mcp: Vec<McpServerSpec> = config
         .mcp
         .iter()
@@ -561,6 +613,7 @@ pub fn fill_provisioning(
         || effort.is_some()
         || d.auth.is_some()
         || !secrets.is_empty()
+        || !logins.is_empty()
         || !mcp.is_empty()
         || (!grants.is_empty() && !given_grants)
         || (models.is_some() && !given_models);
@@ -581,6 +634,9 @@ pub fn fill_provisioning(
         if !spec.secrets.iter().any(|s| s.name == secret.name) {
             spec.secrets.push(secret);
         }
+    }
+    for (harness, provider) in logins {
+        spec.logins.entry(harness).or_insert(provider);
     }
     for server in mcp {
         if !spec.mcp_servers.iter().any(|s| s.name == server.name) {
@@ -799,6 +855,100 @@ key = "ZAI_KEY"
         let names: Vec<&str> = spec.secrets.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["GITHUB_TOKEN"]);
         assert!(spec.models.is_some());
+    }
+
+    #[test]
+    fn provider_logins_go_with_their_key_into_a_private_home_and_not_onto_the_gateway() {
+        let text = r#"
+[secrets]
+ZAI_API_KEY = "@/keys/zai"
+[logins]
+claude-code = "zai"
+qwen-code = "zai"
+"#;
+        let config = parsed(text);
+        let mut spec = Some(Provisioning {
+            logins: [("qwen-code".to_owned(), "zai".to_owned())].into(),
+            ..Provisioning::default()
+        });
+        fill_provisioning(&config, &mut spec, true).unwrap();
+        let spec = spec.unwrap();
+        assert_eq!(spec.logins.len(), 2);
+        assert_eq!(spec.logins["claude-code"], "zai");
+        assert_eq!(spec.secrets[0].name, "ZAI_API_KEY");
+        // No private home: neither the key nor the login.
+        let mut spec = None;
+        fill_provisioning(&config, &mut spec, false).unwrap();
+        assert!(spec.is_none());
+        // On the model gateway the gateway decides the endpoint.
+        let gateway = parsed(&format!(
+            "{text}[models]\nallow = [\"glm-*\"]\n[models.backends.zai]\napi = \"openai\"\n\
+             url = \"https://api.z.ai/v1\"\nkey = \"ZAI_KEY\"\n"
+        ));
+        let mut spec = None;
+        fill_provisioning(&gateway, &mut spec, true).unwrap();
+        assert!(spec.unwrap().logins.is_empty());
+        // A login the table does not have is a configuration error.
+        let refused = config::parse("[logins]\nclaude-code = \"openai\"\n").unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("logins.claude-code: no provider named"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn a_provider_login_whose_key_is_stored_counts_as_a_login() {
+        use crate::inventory::{Evidence, HarnessState, Inventory, Login, LoginState};
+        let state = |id: &str, login: LoginState| HarnessState {
+            id: id.into(),
+            login: Login {
+                state: login,
+                evidence: Evidence::Verified,
+                ..Login::default()
+            },
+            ..HarnessState::default()
+        };
+        let mut inventory = Inventory {
+            harnesses: vec![
+                state("claude-code", LoginState::LoggedOut),
+                state("qwen-code", LoginState::LoggedIn),
+                state("codex", LoginState::Unknown),
+            ],
+            ..Inventory::default()
+        };
+        let logins: BTreeMap<String, String> = [
+            ("claude-code".to_owned(), "zai".to_owned()),
+            ("qwen-code".to_owned(), "zai".to_owned()),
+        ]
+        .into();
+        let stored: BTreeMap<String, String> = [(
+            "ZAI_API_KEY".to_owned(),
+            "~/.config/branchyard/secrets/ZAI_API_KEY".to_owned(),
+        )]
+        .into();
+        count_provider_logins(&mut inventory, &logins, &stored);
+        let claude = &inventory.harnesses[0].login;
+        assert_eq!(claude.label(), "key stored (ZAI_API_KEY)");
+        assert_eq!(claude.evidence, Evidence::Likely);
+        assert!(
+            claude
+                .detail
+                .contains("[logins] logs claude-code in to Z.ai (GLM)"),
+            "{}",
+            claude.detail
+        );
+        // Logged in already: left alone. No login: left alone.
+        assert_eq!(inventory.harnesses[1].login.label(), "logged in");
+        assert_eq!(inventory.harnesses[2].login.label(), "unknown");
+        // No stored key: nothing counts.
+        let mut again = Inventory {
+            harnesses: vec![state("claude-code", LoginState::LoggedOut)],
+            ..Inventory::default()
+        };
+        count_provider_logins(&mut again, &logins, &BTreeMap::new());
+        assert_eq!(again.harnesses[0].login.label(), "logged out");
     }
 
     #[test]

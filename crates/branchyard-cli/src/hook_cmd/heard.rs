@@ -142,10 +142,10 @@ pub(crate) fn session_digest(id: &str) -> String {
 }
 
 /// The git repository `dir` is in: the nearest directory at or above it
-/// that holds `.git`.
+/// that is one ([`branchyard_config::is_repository`]: an empty `.git` is not).
 fn repository_of(dir: &Path) -> Option<PathBuf> {
     dir.ancestors()
-        .find(|d| d.join(".git").exists())
+        .find(|d| branchyard_config::is_repository(d))
         .map(Path::to_path_buf)
 }
 

@@ -51,6 +51,7 @@ pub mod auth;
 pub mod connectors;
 pub mod edit;
 pub mod instructions;
+pub mod logins;
 pub mod models;
 pub mod network;
 pub mod permissions;
@@ -66,6 +67,7 @@ mod generic;
 mod hermes;
 mod oh_my_pi;
 mod opencode;
+mod qwen_code;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -98,6 +100,13 @@ pub struct Provisioning {
     /// such as `api-key` or `oauth-token`. Unset: the harness's order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<String>,
+    /// Provider logins by harness ID, such as `claude-code = "zai"`
+    /// (`[logins]`, written by `by harnesses login ID --provider NAME`):
+    /// the harness reaches its model through that provider, with the
+    /// provider's key from the secrets ([`logins`]). A harness not named
+    /// here logs in from the secrets as usual.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub logins: BTreeMap<String, String>,
     /// Stdio MCP servers the harness starts, besides Branchyard's own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServerSpec>,
@@ -580,6 +589,9 @@ pub struct Context {
     pub secrets: Vec<Secret>,
     /// Explicit authentication method.
     pub auth: Option<String>,
+    /// The provider this harness is logged in to ([`Provisioning::logins`]
+    /// for its ID), whose key is among the secrets.
+    pub login: Option<String>,
     /// Every MCP server for the turn: the task's and Branchyard's own,
     /// with their variables, secrets included.
     pub mcp_servers: Vec<McpServer>,
@@ -622,6 +634,7 @@ impl Context {
             sandbox: false,
             secrets: Vec::new(),
             auth: None,
+            login: None,
             mcp_servers: Vec::new(),
             remote_mcp_servers: Vec::new(),
             mcp_secrets: Vec::new(),
@@ -1028,6 +1041,7 @@ static PROVISIONERS: &[&dyn Provisioner] = &[
     &antigravity::Antigravity,
     &oh_my_pi::OhMyPi,
     &deepseek_harness::DeepSeekHarness,
+    &qwen_code::QwenCode,
 ];
 
 /// Every translated provisioner.
@@ -1134,7 +1148,22 @@ pub fn plan(context: &Context) -> Result<Plan, Refused> {
             ));
         }
     }
-    let mut plan = for_harness(&context.harness).plan(context)?;
+    let provisioner = for_harness(&context.harness);
+    let mut plan = match logins::active(context) {
+        None => provisioner.plan(context)?,
+        Some(login) => {
+            // The harness's own credentials give way to the login's.
+            let set_aside: Vec<String> = credentials(context)
+                .into_iter()
+                .filter(|name| name != login.key)
+                .collect();
+            let derived = logins::derive(context, login, &set_aside).map_err(Refused)?;
+            let mut plan = provisioner.plan(&derived)?;
+            let key = context.secret(login.key).unwrap_or_default();
+            logins::finish(&mut plan, login, key, &set_aside);
+            plan
+        }
+    };
     // Secrets given to MCP servers are used, and delivered with them.
     for used in &context.mcp_secrets {
         plan.unused_secrets.retain(|name| name != &used.secret);
@@ -1144,6 +1173,37 @@ pub fn plan(context: &Context) -> Result<Plan, Refused> {
         record_installed(context, &mut plan);
     }
     Ok(plan)
+}
+
+/// The secrets `context`'s harness would log in with, by name: those its
+/// provisioner delivers to the harness itself (its environment, a file or
+/// a helper), planned for a private home with nothing else asked for. None
+/// when that plan is refused; the real one says why.
+fn credentials(context: &Context) -> Vec<String> {
+    let mut probe = Context::new(
+        context.harness.clone(),
+        context.protocol,
+        context.home.clone(),
+        context.workspace.clone(),
+    );
+    probe.private_home = true;
+    probe.secrets = context.secrets.clone();
+    let Ok(plan) = for_harness(&context.harness).plan(&probe) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = plan
+        .secrets
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.via,
+                Via::Env { .. } | Via::File { .. } | Via::Helper { .. }
+            )
+        })
+        .map(|d| d.secret.clone())
+        .collect();
+    names.dedup();
+    names
 }
 
 /// Record in the home what the plan installs: its native MCP entries and

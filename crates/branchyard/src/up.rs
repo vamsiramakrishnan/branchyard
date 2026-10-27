@@ -530,11 +530,11 @@ fn plan(
     )];
     match machine.inventory() {
         Ok(mut inventory) => {
-            // A key `by harnesses login ID --api-key` stored counts.
-            inventory::count_stored_keys(
-                &mut inventory,
-                &inventory::stored_keys(root, &config.secrets),
-            );
+            // A key `by harnesses login ID --api-key` stored counts, and so
+            // does a provider login's (`--provider`).
+            let stored = inventory::stored_keys(root, &config.secrets);
+            inventory::count_stored_keys(&mut inventory, &stored);
+            crate::configure::count_provider_logins(&mut inventory, &config.logins, &stored);
             let policy = install_policy(config, options);
             for harness in needed_harnesses(config) {
                 steps.extend(harness_steps(&harness, &inventory, &policy, options));

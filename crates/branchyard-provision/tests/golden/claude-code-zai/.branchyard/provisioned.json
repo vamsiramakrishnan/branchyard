@@ -1,0 +1,17 @@
+{
+  "credentials": [
+    {
+      "kind": "file",
+      "path": ".branchyard/credentials/anthropic-api-key"
+    },
+    {
+      "keys": [
+        [
+          "apiKeyHelper"
+        ]
+      ],
+      "kind": "json",
+      "path": ".claude/settings.json"
+    }
+  ]
+}

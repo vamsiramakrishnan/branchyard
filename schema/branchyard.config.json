@@ -22,6 +22,13 @@
       },
       "description": "Secrets a new branch's harness is given, by name: `\"VAR\"` reads the\nvariable VAR, `\"@path\"` a file. Never the value itself. Applied only\nto isolated or sandboxed branches, which have a private home."
     },
+    "logins": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`: the\nharness reaches its model through that provider, with the\nprovider's key from `[secrets]` (`ZAI_API_KEY`, `GEMINI_API_KEY`).\nWritten by `by harnesses login ID --provider NAME`. Applied, like\n`[secrets]`, only to isolated or sandboxed branches, and not to a\nbranch on the model gateway. See docs/harness-lifecycle.md."
+    },
     "mcp": {
       "type": "object",
       "additionalProperties": {

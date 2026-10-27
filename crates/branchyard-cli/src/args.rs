@@ -2656,8 +2656,15 @@ pub enum HarnessesAction {
         /// (in a 0600 file beside your user configuration, named in its [secrets])
         #[arg(long)]
         api_key: bool,
+        /// Log the harness in to another model provider with that provider's key: zai (Z.ai's
+        /// GLM models) or gemini. The key is read from standard input as --api-key reads it
+        /// (once per provider; --api-key reads a new one), stored as ZAI_API_KEY or
+        /// GEMINI_API_KEY, and [logins] records the choice; isolated and sandboxed branches
+        /// get the endpoint, token variable and model, and runs in your own home the export line
+        #[arg(long, value_name = "NAME")]
+        provider: Option<String>,
         /// Answer yes to writing a setting the login needs (Antigravity's modelProvider, when
-        /// GEMINI_API_KEY is set)
+        /// GEMINI_API_KEY is set; with --provider, the harness's own configuration)
         #[arg(long)]
         yes: bool,
     },
@@ -3919,8 +3926,8 @@ pub struct Provision {
     /// VAR, or FILE; written only into its private home (--isolated or a sandbox). Repeatable
     #[arg(long = "secret", value_name = "NAME[=VAR|=@FILE]", value_parser = branchyard::SecretSource::parse)]
     secrets: Vec<branchyard::SecretSource>,
-    /// The authentication method when the secrets allow several: api-key, oauth-token,
-    /// auth-file, vertex-ai
+    /// The authentication method when the secrets allow several: api-key, auth-token,
+    /// oauth-token, auth-file, vertex-ai
     #[arg(long, value_name = "METHOD")]
     auth: Option<String>,
     /// An MCP server for the harness: NAME=COMMAND starts a stdio server, COMMAND an absolute
@@ -6741,6 +6748,7 @@ mod tests {
                 action: Some(HarnessesAction::Login {
                     id: "codex".into(),
                     api_key: true,
+                    provider: None,
                     yes: false,
                 }),
             }
