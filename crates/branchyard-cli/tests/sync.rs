@@ -190,6 +190,27 @@ fn by_sync_pushes_pulls_holds_and_collects_through_a_directory() {
     let scrub = w.json(&a, &["sync", "scrub", "--sample", "1000", "--json"], &[]);
     assert!(scrub["corrupt"].as_array().unwrap().is_empty(), "{scrub}");
 
+    // A remote with no key has none to rotate: a usage error.
+    let out = w.by(&a, &["sync", "rotate-key"], &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("not encrypted"), "{}", stderr(&out));
+    // A pack whose bytes no longer match its name is damage (gc kept it,
+    // in its grace period): the scrub lists it and fails, naming the
+    // command that lists what is damaged.
+    let pack = walk(&w.dir.join("bucket"))
+        .into_iter()
+        .find(|p| p.components().any(|c| c.as_os_str() == "packs"))
+        .unwrap();
+    fs::write(&pack, "not a pack").unwrap();
+    let out = w.by(&a, &["sync", "scrub", "--sample", "1000"], &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("scrub found damage")
+            && stderr(&out).contains("by sync scrub --json"),
+        "{}",
+        stderr(&out)
+    );
+
     // Sync is local: --remote is refused, and so is a missing [sync].
     let out = w.by(&a, &["--remote", "http://127.0.0.1:9", "sync"], &[]);
     assert!(!out.status.success());
@@ -239,6 +260,14 @@ fn by_sync_through_an_encrypted_remote() {
     assert_eq!(w.git(&b, &["show", "hello:hello.txt"]), "hi");
     let status = w.json(&b, &["sync", "status", "--json"], &pass);
     assert_eq!(status["encrypted"], true);
+    // Rotating to a new passphrase needs the new one in its variable.
+    let out = w.by(&b, &["sync", "rotate-key", "--to", "passphrase"], &pass);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("BRANCHYARD_SYNC_NEW_PASSPHRASE, which is not set"),
+        "{}",
+        stderr(&out)
+    );
 }
 
 /// A folder task (a repository of its own under BRANCHYARD_HOME, not in

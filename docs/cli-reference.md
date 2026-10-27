@@ -2621,3 +2621,16 @@ by up [OPTIONS]
 | `--json` | Print JSON |
 | `--plan` | Say what would be done and what is missing; change nothing |
 | `--yes` | Make the installs the [harnesses] policy would ask about, without asking |
+
+## Exit status
+
+Every command ends with one of these; `--json` puts the same number in an error's `exit`, and [the error kinds](cli.md#exit-status) say which kind ends with which.
+
+| Status | Meaning |
+|---|---|
+| 0 | the command did what it was asked |
+| 1 | the operation ran and failed: a branch failed, a check failed, a merge conflicted, the branch was busy; also a failure not yet given a kind (`unclassified`), and any kind not listed here |
+| 2 | the command line asks for what cannot be: a bad flag or value (clap's own usage errors too), an unknown branch, harness or repository, a name already taken |
+| 3 | something around the command must change first: not a repository, a harness (or gh, ssh) not installed, a configuration file that does not load, a server that does not answer or refuses the token, a login only you can do |
+| 4 | refused before anything ran: a policy, a delegation envelope, a budget or quota, or a capability the harness lacks |
+| 130 | interrupted with Ctrl-C: `by` installs no handler, so the shell reports 128 + SIGINT (`by serve` and `by worker` catch it and shut down) |

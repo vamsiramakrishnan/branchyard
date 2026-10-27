@@ -68,9 +68,9 @@ impl Exit {
     }
 }
 
-/// What each exit status means, in docs/cli.md's words. Read by the unit
-/// test below and by tools/docs_facts.py, not by `by` itself.
-#[cfg_attr(not(test), allow(dead_code))]
+/// What each exit status means, in docs/cli.md's words. `by man
+/// --markdown` prints it as docs/cli-reference.md's last table, and
+/// tools/docs_facts.py reads it for docs/cli.md's.
 pub(crate) const EXITS: [(Exit, &str); 6] = [
     (Exit::Success, "the command did what it was asked"),
     (

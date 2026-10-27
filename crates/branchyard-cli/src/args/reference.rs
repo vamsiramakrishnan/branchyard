@@ -1,6 +1,7 @@
 //! The command reference in `docs/cli-reference.md`: every command `by help
 //! all` lists, with its subcommands, usage and options, rendered as Markdown
-//! from the same definitions `--help` prints. `by man --markdown` prints it,
+//! from the same definitions `--help` prints, then the exit statuses
+//! (`crate::errors::EXITS`). `by man --markdown` prints it,
 //! `python3 tools/check.py --fix` writes it, and a test fails when the file
 //! no longer matches what this renders.
 
@@ -35,8 +36,21 @@ pub fn reference_markdown() -> String {
         for sub in visible(&cmd) {
             section(sub, "by", &mut out);
         }
+        exit_statuses(&mut out);
         out
     })
+}
+
+/// The table of exit statuses, from the one `by` ends with.
+fn exit_statuses(out: &mut String) {
+    out.push_str(
+        "\n## Exit status\n\nEvery command ends with one of these; `--json` puts the same \
+         number in an error's `exit`, and [the error kinds](cli.md#exit-status) say which \
+         kind ends with which.\n\n| Status | Meaning |\n|---|---|\n",
+    );
+    for (exit, meaning) in crate::errors::EXITS {
+        out.push_str(&format!("| {} | {meaning} |\n", exit.code()));
+    }
 }
 
 /// The subcommands `--help` lists, in its order.

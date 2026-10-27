@@ -2446,4 +2446,8 @@ fn the_reference_lists_every_visible_command_once() {
     // Hidden plumbing stays out, as it does in `by --help`.
     assert!(!text.contains("## `by hook`"));
     assert!(text.contains("| `--remote <URL>` |"), "the global options");
+    // The exit statuses close it, each once, from the table `by` ends with.
+    for (exit, _) in crate::errors::EXITS {
+        assert_eq!(text.matches(&format!("\n| {} | ", exit.code())).count(), 1);
+    }
 }
