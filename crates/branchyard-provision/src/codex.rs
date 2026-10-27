@@ -36,6 +36,12 @@
 //! discussion 7782), so the route for Codex's model must name a backend
 //! that serves `/responses` (OpenAI's, Z.ai's `https://api.z.ai/api/v1`), not
 //! a chat-completions-only endpoint such as Gemini's.
+//!
+//! A [provider login](crate::logins) is written the same way under the
+//! provider's own ID (`[model_providers.zai]`, `base_url =
+//! "https://api.z.ai/api/v1"`, `env_key = "ZAI_API_KEY"`), with the key in
+//! that variable: codex-cli 0.164.0 ran GLM-4.6 so with no OpenAI login (25
+//! October 2026).
 
 use serde_json::json;
 
@@ -47,7 +53,7 @@ use crate::{
 };
 
 pub(crate) const AUTH_FILE: &str = ".codex/auth.json";
-const CONFIG: &str = ".codex/config.toml";
+pub(crate) const CONFIG: &str = ".codex/config.toml";
 
 /// The provider written for the model gateway, and the `model_provider`.
 pub const GATEWAY_PROVIDER: &str = "branchyard";
@@ -191,6 +197,19 @@ impl Provisioner for Codex {
                 literal: toml::string(GATEWAY_PROVIDER),
             });
             toml_edits.push(TomlEdit::AppendTable(gateway_provider(&gateway.url)));
+        }
+        // A provider login: the provider as one of Codex's own, as for the
+        // gateway, with its key in the variable the entry names. Codex's
+        // shell may pass that on to its commands: taken to reach them.
+        if let Some(login) = crate::logins::active(context) {
+            if let Some(edits) = crate::logins::codex_provider_edits(login) {
+                if let Some(crate::logins::Config::CodexProvider { env_key, .. }) = login.config {
+                    if let Some(value) = context.secret(env_key) {
+                        plan.secret_env(env_key, env_key, value, true);
+                    }
+                }
+                toml_edits.extend(edits);
+            }
         }
         if !toml_edits.is_empty() {
             needs_private_home(context, "Codex's config.toml")?;

@@ -507,6 +507,48 @@ fn credentials_are_named_and_their_values_never_shown() {
     assert_eq!(report.status("harnesses.credentials"), "ok");
 }
 
+#[test]
+fn a_gateway_token_and_provider_logins_are_named_and_a_login_without_its_key_is_a_warning() {
+    let repo = Repo::used();
+    // Claude Code's gateway token is one of the usual variables.
+    let report = repo.doctor_in(
+        &repo.root,
+        &[],
+        &[("ANTHROPIC_AUTH_TOKEN", "zai-token-never-shown")],
+    );
+    let detail = report.detail("harnesses.credentials");
+    assert!(detail.contains("ANTHROPIC_AUTH_TOKEN"), "{detail}");
+    assert!(!report.stdout.contains("never-shown"), "{}", report.stdout);
+    // A provider login with its key named in [secrets]: said, and ok.
+    repo.project_file(
+        "[secrets]\nZAI_API_KEY = \"DOCTOR_TEST_ZAI\"\n[logins]\nclaude-code = \"zai\"\n",
+    );
+    let report = repo.doctor_in(&repo.root, &[], &[("DOCTOR_TEST_ZAI", "z")]);
+    assert_eq!(report.status("harnesses.credentials"), "ok");
+    assert!(
+        report
+            .detail("harnesses.credentials")
+            .contains("[logins]: claude-code via zai (ZAI_API_KEY)"),
+        "{}",
+        report.detail("harnesses.credentials")
+    );
+    // Without the key: a warning naming the command that stores it.
+    repo.project_file("[logins]\nqwen-code = \"zai\"\n");
+    let report = repo.doctor(&[]);
+    assert_eq!(report.status("harnesses.credentials"), "warn");
+    assert!(
+        report
+            .detail("harnesses.credentials")
+            .contains("[logins] whose key [secrets] does not name: qwen-code via zai"),
+        "{}",
+        report.detail("harnesses.credentials")
+    );
+    assert_eq!(
+        report.fix("harnesses.credentials"),
+        "store the provider's key with `by harnesses login qwen-code --provider zai`"
+    );
+}
+
 /// The environment for a machine whose only harnesses are the fakes in
 /// `bin`: nothing else on `PATH`, a home of its own.
 fn machine(repo: &Repo, bin: &Path) -> Vec<(String, String)> {

@@ -52,6 +52,14 @@ pub struct ProjectConfig {
     /// to isolated or sandboxed branches, which have a private home.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secrets: BTreeMap<String, String>,
+    /// Provider logins by harness ID, such as `claude-code = "zai"`: the
+    /// harness reaches its model through that provider, with the
+    /// provider's key from `[secrets]` (`ZAI_API_KEY`, `GEMINI_API_KEY`).
+    /// Written by `by harnesses login ID --provider NAME`. Applied, like
+    /// `[secrets]`, only to isolated or sandboxed branches, and not to a
+    /// branch on the model gateway. See docs/harness-lifecycle.md.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub logins: BTreeMap<String, String>,
     /// Stdio MCP servers for a new branch's harness: `NAME = "/absolute/command args"`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp: BTreeMap<String, String>,
@@ -2057,6 +2065,10 @@ impl ProjectConfig {
         for (name, source) in &self.secrets {
             secret_source(name, source).map_err(|e| ConfigError(format!("secrets.{name}: {e}")))?;
         }
+        for (harness, provider) in &self.logins {
+            branchyard_provision::logins::check(harness, provider)
+                .map_err(|e| ConfigError(format!("logins.{harness}: {e}")))?;
+        }
         for (name, command) in &self.mcp {
             branchyard_provision::McpServerSpec::parse(&format!("{name}={command}"))
                 .map_err(|e| ConfigError(format!("mcp.{name}: {e}")))?;
@@ -2517,7 +2529,13 @@ pub fn merge(
 }
 
 /// The methods `--auth` takes.
-pub const AUTH_METHODS: &[&str] = &["api-key", "oauth-token", "auth-file", "vertex-ai"];
+pub const AUTH_METHODS: &[&str] = &[
+    "api-key",
+    "auth-token",
+    "oauth-token",
+    "auth-file",
+    "vertex-ai",
+];
 
 /// `NAME` with its `VAR` or `@FILE` source, parsed as `--secret` does,
 /// after [`check_secret_reference`]. No error quotes the source.

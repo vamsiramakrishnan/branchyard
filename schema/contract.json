@@ -881,6 +881,13 @@
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
             },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
+            },
             "mcp_servers": {
               "type": "array",
               "items": {
@@ -2351,6 +2358,13 @@
                 "null"
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
+            },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
             },
             "mcp_servers": {
               "type": "array",
@@ -5799,6 +5813,13 @@
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
             },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
+            },
             "mcp_servers": {
               "type": "array",
               "items": {
@@ -6673,6 +6694,13 @@
                 "null"
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
+            },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
             },
             "mcp_servers": {
               "type": "array",
@@ -11937,6 +11965,13 @@
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
             },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
+            },
             "mcp_servers": {
               "type": "array",
               "items": {
@@ -13164,6 +13199,13 @@
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
             },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
+            },
             "mcp_servers": {
               "type": "array",
               "items": {
@@ -14254,6 +14296,13 @@
                 "null"
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
+            },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
             },
             "mcp_servers": {
               "type": "array",
@@ -43401,6 +43450,13 @@
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
             },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
+            },
             "mcp_servers": {
               "type": "array",
               "items": {
@@ -45195,6 +45251,13 @@
                 "null"
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
+            },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
             },
             "mcp_servers": {
               "type": "array",
@@ -47010,6 +47073,13 @@
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
             },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
+            },
             "mcp_servers": {
               "type": "array",
               "items": {
@@ -48819,6 +48889,13 @@
                 "null"
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
+            },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
             },
             "mcp_servers": {
               "type": "array",
@@ -50994,6 +51071,13 @@
                 "null"
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
+            },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
             },
             "mcp_servers": {
               "type": "array",

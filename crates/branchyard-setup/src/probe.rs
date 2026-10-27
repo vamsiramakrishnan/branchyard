@@ -10,10 +10,12 @@ use serde::{Deserialize, Serialize};
 
 /// Variables whose presence setup reports, by name only: the credentials
 /// harnesses read (`DEEPSEEK_API_KEY` for DeepSeek Harness, `GEMINI_API_KEY` for
-/// Gemini CLI and Antigravity, `ZAI_API_KEY` for Oh My Pi's Z.ai provider),
-/// and Branchyard's own.
+/// Gemini CLI and Antigravity, `ZAI_API_KEY` for Oh My Pi's Z.ai provider and
+/// every `--provider zai` login, `ANTHROPIC_AUTH_TOKEN` for Claude Code behind a
+/// gateway such as Z.ai's), and Branchyard's own.
 pub const KNOWN_VARIABLES: &[&str] = &[
     "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
     "BRANCHYARD_REMOTE",
     "BRANCHYARD_TOKEN_FILE",
     "CLAUDE_CODE_OAUTH_TOKEN",

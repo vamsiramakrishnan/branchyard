@@ -325,6 +325,10 @@ instructions = "docs/agents.md"
 [secrets]                   # applied only with a private home (isolated or sandboxed)
 ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"   # the variable of that name
 CODEX_AUTH = "@~/.codex/auth.json"         # a file; never the value itself
+ZAI_API_KEY = "@~/.config/branchyard/secrets/ZAI_API_KEY"
+
+[logins]                    # provider logins, with the provider's key from [secrets]; private home only
+claude-code = "zai"         # by harnesses login claude-code --provider zai writes it
 
 [mcp]
 docs = "/usr/local/bin/docs-mcp --stdio"

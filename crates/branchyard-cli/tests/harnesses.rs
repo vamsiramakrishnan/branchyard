@@ -153,6 +153,26 @@ impl World {
         command.args(args).stdin(Stdio::null()).output().unwrap()
     }
 
+    /// `by ARGS` with `input` on standard input, as a key is piped in.
+    fn by_input(&self, args: &[&str], input: &str) -> Output {
+        use std::io::Write;
+        let mut child = self
+            .command(BY)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
     fn ok(&self, args: &[&str]) -> Output {
         let out = self.by(args);
         assert!(
@@ -1010,6 +1030,310 @@ fn a_key_branchyard_stored_counts_as_a_login_by_name_only() {
     assert!(!table.contains(key));
 }
 
+/// A fake Claude Code: a version, and `claude auth status` saying logged
+/// out. (2.1.310 itself answers `loggedIn: true` with a gateway token set,
+/// and is then `logged in`, verified; the variable decides where the status
+/// command says otherwise or nothing.)
+const FAKE_CLAUDE: &str =
+    "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '2.1.310 (Claude Code)'; \
+     exit 0; fi\necho '{\"loggedIn\": false, \"authMethod\": \"none\"}'\n";
+
+/// Claude Code behind a gateway reads `ANTHROPIC_AUTH_TOKEN`: the
+/// inventory names it as the key a login rests on, and a key variable wins
+/// over a status command that says logged out.
+#[test]
+fn a_gateway_token_in_the_environment_is_claude_codes_key() {
+    let w = World::new();
+    w.script("claude", FAKE_CLAUDE);
+    let token = [("ANTHROPIC_AUTH_TOKEN", "zai-token-never-shown")];
+    let out = w.by_env(&["harnesses", "--json"], &token);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!text(&out.stdout).contains("never-shown"));
+    let inventory: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let login = &harness(&inventory, "claude-code").unwrap()["login"];
+    assert_eq!(login["state"], "logged_in", "{login}");
+    assert_eq!(login["key"], "ANTHROPIC_AUTH_TOKEN", "{login}");
+    let table = text(&w.by_env(&["harnesses", "--refresh"], &token).stdout);
+    assert!(table.contains("key set (ANTHROPIC_AUTH_TOKEN)"), "{table}");
+}
+
+/// `by harnesses login ID --provider zai`: one key for every harness on the
+/// provider, the choice in `[logins]`, the export line for your own home,
+/// and the listing counting it; never the key's value.
+#[test]
+fn a_provider_login_stores_one_key_and_records_each_harness_on_it() {
+    let w = World::new();
+    w.script("claude", FAKE_CLAUDE);
+    w.script("qwen", "#!/bin/sh\necho '0.26.0'\n");
+    let key = "zai-test-0123456789abcdef";
+    let before = w.json(&["harnesses", "--json"]);
+    assert_eq!(
+        harness(&before, "claude-code").unwrap()["login"]["state"],
+        "logged_out"
+    );
+
+    let out = w.by_input(
+        &[
+            "harnesses",
+            "login",
+            "claude-code",
+            "--provider",
+            "zai",
+            "--json",
+        ],
+        key,
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!text(&out.stdout).contains(key) && !text(&out.stderr).contains(key));
+    let said: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let file = w.user.parent().unwrap().join("secrets/ZAI_API_KEY");
+    assert_eq!(said["status"], "stored", "{said}");
+    assert_eq!(said["variable"], "ZAI_API_KEY");
+    assert_eq!(said["key"], "stored");
+    assert_eq!(said["secrets_entry_added"], true);
+    assert_eq!(said["logins_entry"], "added");
+    assert_eq!(
+        said["isolated"],
+        serde_json::json!({
+            "env": ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ENABLE_TOOL_SEARCH"],
+            "model": "glm-4.6",
+        })
+    );
+    assert_eq!(
+        said["export"],
+        format!(
+            "export ANTHROPIC_AUTH_TOKEN=\"$(cat {})\" \
+             ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic ENABLE_TOOL_SEARCH=false \
+             ANTHROPIC_MODEL=glm-4.6",
+            file.display()
+        )
+    );
+    assert_eq!(said["config"], Value::Null);
+    assert_eq!(fs::read_to_string(&file).unwrap(), key);
+    assert_eq!(
+        fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let config = fs::read_to_string(&w.user).unwrap();
+    assert!(
+        config.contains(&format!("ZAI_API_KEY = \"@{}\"", file.display())),
+        "{config}"
+    );
+    assert!(
+        config.contains("[logins]\nclaude-code = \"zai\""),
+        "{config}"
+    );
+    assert!(!config.contains(key));
+    w.ok(&["config", "validate"]);
+
+    // A second harness on the same provider: the stored key, nothing read.
+    let out = w.ok(&["harnesses", "login", "qwen-code", "--provider", "zai"]);
+    let said = text(&out.stdout);
+    assert!(
+        said.contains(&format!(
+            "qwen-code uses the ZAI_API_KEY stored in {}",
+            file.display()
+        )),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "qwen-code through Z.ai (GLM): a branch with a private home (--isolated, a \
+             sandbox) gets OPENAI_API_KEY (the key), \
+             OPENAI_BASE_URL=https://api.z.ai/api/coding/paas/v4, and model glm-4.5-air"
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "OPENAI_BASE_URL=https://api.z.ai/api/coding/paas/v4 OPENAI_MODEL=glm-4.5-air"
+        ),
+        "{said}"
+    );
+    assert!(!said.contains(key));
+    let config = fs::read_to_string(&w.user).unwrap();
+    assert!(
+        config.contains("[logins]\nqwen-code = \"zai\"\nclaude-code = \"zai\""),
+        "{config}"
+    );
+    // Again: nothing changes.
+    let again = w.json(&[
+        "harnesses",
+        "login",
+        "qwen-code",
+        "--provider",
+        "zai",
+        "--json",
+    ]);
+    assert_eq!(again["key"], "reused");
+    assert_eq!(again["logins_entry"], "unchanged");
+    assert_eq!(fs::read_to_string(&w.user).unwrap(), config);
+
+    // The listing counts the login, by the key's name only.
+    let out = w.ok(&["harnesses", "--json", "--refresh"]);
+    assert!(!text(&out.stdout).contains(key));
+    let after: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let login = &harness(&after, "claude-code").unwrap()["login"];
+    assert_eq!(login["state"], "logged_in", "{login}");
+    assert_eq!(login["key"], "ZAI_API_KEY");
+    assert_eq!(login["stored"], true);
+    let table = text(&w.ok(&["harnesses"]).stdout);
+    assert!(
+        table
+            .lines()
+            .any(|l| l.starts_with("claude-code") && l.contains("key stored (ZAI_API_KEY)")),
+        "{table}"
+    );
+    let log: Value = w.json(&["harnesses", "log", "--json"]);
+    let outcomes: Vec<&str> = log
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["outcome"].as_str().unwrap())
+        .collect();
+    assert!(outcomes.contains(&"provider"), "{log}");
+    assert!(!log.to_string().contains(key));
+
+    // What there is not, said with what there is.
+    let why = w.fails(&["harnesses", "login", "claude-code", "--provider", "openai"]);
+    assert!(
+        why.contains("no provider named \"openai\"; providers are zai, gemini"),
+        "{why}"
+    );
+    let why = w.fails(&["harnesses", "login", "claude-code", "--provider", "gemini"]);
+    assert!(
+        why.contains("claude-code has no gemini login; it has zai"),
+        "{why}"
+    );
+    let why = w.fails(&[
+        "harnesses",
+        "login",
+        "claude-code",
+        "--provider",
+        "zai",
+        "--on",
+        "ssh://vm.test",
+    ]);
+    assert!(
+        why.contains("a provider login is kept on the machine that runs the harness"),
+        "{why}"
+    );
+}
+
+/// Codex takes no endpoint from its environment: the login offers its
+/// `config.toml` change for your own home, shows it, and writes it only
+/// with `--yes` (or a yes on a terminal).
+#[test]
+fn a_codex_provider_login_shows_its_config_change_and_writes_it_with_yes() {
+    let w = World::new();
+    w.fake_codex(&w.bin, "0.164.0");
+    let config = w.home.join(".codex/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let original = "approval_policy = \"untrusted\"\n";
+    fs::write(&config, original).unwrap();
+    let key = "zai-test-0123456789abcdef";
+
+    // No terminal, no --yes: stored, the change shown, the file unchanged.
+    let out = w.by_input(&["harnesses", "login", "codex", "--provider", "zai"], key);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let said = text(&out.stdout);
+    assert!(said.contains("+model_provider = \"zai\""), "{said}");
+    assert!(said.contains("+[model_providers.zai]"), "{said}");
+    assert!(
+        said.contains("Not written: there is no terminal to ask on. Add --yes"),
+        "{said}"
+    );
+    assert!(said.contains("export ZAI_API_KEY=\"$(cat "), "{said}");
+    assert!(!said.contains(key));
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+    let shown = w.json(&["harnesses", "login", "codex", "--provider", "zai", "--json"]);
+    assert_eq!(shown["config"]["wrote"], false, "{shown}");
+    assert_eq!(shown["config"]["changed"], true);
+    assert_eq!(shown["config"]["file"], "~/.codex/config.toml");
+
+    // --yes: written, the rest kept.
+    let out = w.ok(&["harnesses", "login", "codex", "--provider", "zai", "--yes"]);
+    assert!(
+        text(&out.stdout).contains("wrote ~/.codex/config.toml"),
+        "{}",
+        text(&out.stdout)
+    );
+    let written = fs::read_to_string(&config).unwrap();
+    for line in [
+        "approval_policy = \"untrusted\"",
+        "model = \"glm-4.6\"",
+        "model_provider = \"zai\"",
+        "[model_providers.zai]",
+        "base_url = \"https://api.z.ai/api/v1\"",
+        "env_key = \"ZAI_API_KEY\"",
+        "wire_api = \"responses\"",
+    ] {
+        assert!(written.contains(line), "{line}: {written}");
+    }
+    let out = w.ok(&["harnesses", "login", "codex", "--provider", "zai", "--yes"]);
+    assert!(
+        text(&out.stdout).contains("~/.codex/config.toml selects zai already"),
+        "{}",
+        text(&out.stdout)
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), written);
+}
+
+/// An isolated run of a harness logged in to Z.ai gets the login's
+/// variables and the stored key, and nothing of the key under its own
+/// name: the fake ACP agent standing in for Qwen Code prints what it got.
+#[test]
+fn an_isolated_run_gets_the_provider_login_in_its_environment() {
+    let w = World::new();
+    let agent = fake_agent!().display().to_string();
+    w.script(
+        "qwen",
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 0.26.0; exit 0; fi\nexec {agent}\n"
+        ),
+    );
+    let key = "zai-test-0123456789abcdef";
+    let out = w.by_input(
+        &["harnesses", "login", "qwen-code", "--provider", "zai"],
+        key,
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let out = w.ok(&[
+        "run",
+        "ENV OPENAI_API_KEY OPENAI_BASE_URL OPENAI_MODEL ZAI_API_KEY",
+        "--harness",
+        "qwen-code",
+        "--isolated",
+        "-n",
+        "glm",
+    ]);
+    let all = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    let log = text(&w.ok(&["log", "glm"]).stdout);
+    for line in [
+        format!("OPENAI_API_KEY={key}"),
+        "OPENAI_BASE_URL=https://api.z.ai/api/coding/paas/v4".to_owned(),
+        "OPENAI_MODEL=glm-4.5-air".to_owned(),
+        "ZAI_API_KEY unset".to_owned(),
+    ] {
+        assert!(log.contains(&line), "{line}\n{log}\n{all}");
+    }
+    // Without --isolated nothing of the login reaches the harness.
+    let out = w.ok(&[
+        "run",
+        "ENV OPENAI_API_KEY OPENAI_BASE_URL",
+        "--harness",
+        "qwen-code",
+        "-n",
+        "mine",
+    ]);
+    let log = text(&w.ok(&["log", "mine"]).stdout);
+    assert!(
+        log.contains("OPENAI_API_KEY unset") && log.contains("OPENAI_BASE_URL unset"),
+        "{log}\n{}",
+        text(&out.stderr)
+    );
+}
+
 /// Antigravity's `agy` reads `GEMINI_API_KEY` only with `modelProvider` set
 /// to `gemini` in its settings; `by harnesses login antigravity` writes
 /// that one key, after showing the change.
@@ -1161,6 +1485,11 @@ fn login_prints_the_exact_command_for_a_harness_it_cannot_log_in_itself() {
     let why = w.fails(&["harnesses", "login", "qwen-code"]);
     assert!(
         why.contains("start `qwen` and sign in inside it, then `by harnesses --refresh`"),
+        "{why}"
+    );
+    // ... or another provider's key, where the harness takes one.
+    assert!(
+        why.contains("`by harnesses login qwen-code --provider zai`"),
         "{why}"
     );
     // No login command but key variables (Pi reads ZAI_API_KEY and the

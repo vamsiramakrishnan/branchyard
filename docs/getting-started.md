@@ -55,6 +55,8 @@ It ends with a short card: what was detected, written and installed, the `Only y
 
 The same work, one piece at a time: `by init project`, `by init plugin --all-detected`, `by harnesses login ID`. The settings are in [setup](setup.md).
 
+With a Z.ai or Gemini key instead of the harness's own login, `printf %s "$KEY" | by harnesses login claude-code --provider zai` (or `--provider gemini` for Gemini CLI, Antigravity or OpenCode) stores it for isolated runs and prints the `export` line for your own ([gateway providers](harness-lifecycle.md#through-a-gateway-provider)).
+
 `--dry-run` shows the plan and writes nothing. In a throwaway repository with no harness on `PATH`, followed by the bare `by`:
 
 ```sh test

@@ -448,10 +448,17 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             if !unused_secrets.is_empty() {
                 parts.push(format!("unused secrets {}", unused_secrets.join(", ")));
             }
-            let exposed: Vec<&str> = secrets
+            // Under the variable that holds it, when that is another name
+            // (a provider login's key, `ZAI_API_KEY (as OPENAI_API_KEY)`).
+            let exposed: Vec<String> = secrets
                 .iter()
                 .filter(|d| d.tool_env)
-                .map(|d| d.secret.as_str())
+                .map(|d| match &d.via {
+                    branchyard::Via::Env { var } if *var != d.secret => {
+                        format!("{} (as {var})", d.secret)
+                    }
+                    _ => d.secret.clone(),
+                })
                 .collect();
             if !exposed.is_empty() {
                 parts.push(format!(
@@ -2040,6 +2047,42 @@ mod tests {
                 sandbox: "by-a-2".into(),
             }),
             "sandbox: kept paused for the next turn (substrate by-a-2)"
+        );
+    }
+
+    #[test]
+    fn a_provider_login_says_which_variable_holds_its_key() {
+        use branchyard::{Delivery, Via};
+        let provisioned = Activity::Provisioned {
+            auth: Some("zai".into()),
+            files: Vec::new(),
+            env: vec!["OPENAI_API_KEY".into(), "OPENAI_BASE_URL".into()],
+            secrets: vec![
+                Delivery {
+                    secret: "ZAI_API_KEY".into(),
+                    via: Via::Env {
+                        var: "OPENAI_API_KEY".into(),
+                    },
+                    tool_env: true,
+                },
+                Delivery {
+                    secret: "GH_TOKEN".into(),
+                    via: Via::Env {
+                        var: "GH_TOKEN".into(),
+                    },
+                    tool_env: true,
+                },
+            ],
+            unused_secrets: Vec::new(),
+            connectors: Vec::new(),
+            knowledge: Vec::new(),
+            managed: None,
+            permissions: None,
+        };
+        assert_eq!(
+            activity_line(&provisioned, PLAIN).unwrap(),
+            "provisioned: auth zai; set OPENAI_API_KEY, OPENAI_BASE_URL; ZAI_API_KEY (as \
+             OPENAI_API_KEY), GH_TOKEN in the environment of its tool commands"
         );
     }
 

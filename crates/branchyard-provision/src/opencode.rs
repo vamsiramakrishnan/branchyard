@@ -54,13 +54,15 @@ pub const AUTH: Spec = Spec {
             // OpenCode 1.19.4's Google provider reads
             // GOOGLE_GENERATIVE_AI_API_KEY; GEMINI_API_KEY, which
             // `opencode providers list` offers for it, is not passed on
-            // (checked 25 October 2026), so it is not a method.
+            // (checked 25 October 2026), so it is not a method. Its Z.ai
+            // providers (`zai`, `zai-coding-plan`) read ZHIPU_API_KEY.
             &[
                 "ANTHROPIC_API_KEY",
                 "OPENAI_API_KEY",
                 "GOOGLE_GENERATIVE_AI_API_KEY",
+                "ZHIPU_API_KEY",
             ],
-            "set ANTHROPIC_API_KEY, OPENAI_API_KEY or GOOGLE_GENERATIVE_AI_API_KEY",
+            "set ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY or ZHIPU_API_KEY",
         ),
         Method::file(
             "auth-file",

@@ -198,8 +198,8 @@ pub use branchyard_provision::network::{
     narrow as network_narrow, Enforce as NetworkEnforce, HostRule as NetworkRule, Network,
 };
 pub use branchyard_provision::{
-    Delivery, Effort, McpServerSpec, Provisioning, RemoteMcpSpec, RemoteMcpTransport, SecretFrom,
-    SecretSource, Telemetry, Via,
+    logins, Delivery, Effort, McpServerSpec, Provisioning, RemoteMcpSpec, RemoteMcpTransport,
+    SecretFrom, SecretSource, Telemetry, Via,
 };
 use branchyard_workspace::Repository;
 pub use bundle::BundleEntry;

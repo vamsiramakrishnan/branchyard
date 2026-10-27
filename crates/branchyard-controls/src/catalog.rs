@@ -262,6 +262,13 @@ pub(crate) mod tests {
                 e.install = strings(&["npm install -g @deepseek-ai/dsh"]);
                 e.auth_env = strings(&["DEEPSEEK_API_KEY"]);
             }
+            // Claude Code 2.1.310 reads a gateway's token from
+            // ANTHROPIC_AUTH_TOKEN (with ANTHROPIC_BASE_URL), as Z.ai's
+            // Anthropic-compatible endpoint asks; the vendored sources
+            // record only ANTHROPIC_API_KEY.
+            "claude-code" => {
+                e.auth_env = strings(&["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]);
+            }
             // Gemini CLI 0.63.0: no emdash plugin describes it. `gemini`
             // signs in on its first interactive run.
             "gemini-cli" => {

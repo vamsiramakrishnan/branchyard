@@ -678,19 +678,56 @@ pub(super) fn harnesses_credentials(ctx: &Context) -> Vec<Check> {
         .config()
         .map(|config| missing_secrets(root, &config.secrets, &|name| ctx.var_set(name)))
         .unwrap_or_default();
-    if missing.is_empty() {
+    // Provider logins, and any whose key `[secrets]` does not name.
+    let (logins, keyless) = ctx.config().map(provider_logins).unwrap_or_default();
+    if !logins.is_empty() {
+        detail.push_str(&format!("; [logins]: {}", logins.join(", ")));
+    }
+    if missing.is_empty() && keyless.is_empty() {
         return vec![Check::ok(NAME, detail)];
     }
-    detail.push_str(&format!(
-        "; [secrets] without a source here: {}",
-        missing.join(", ")
-    ));
+    if !missing.is_empty() {
+        detail.push_str(&format!(
+            "; [secrets] without a source here: {}",
+            missing.join(", ")
+        ));
+    }
+    if !keyless.is_empty() {
+        detail.push_str(&format!(
+            "; [logins] whose key [secrets] does not name: {}",
+            keyless.join(", ")
+        ));
+    }
     vec![Check::warn(
         NAME,
         detail,
-        "export the variable (or create the file) each secret names; isolated and sandboxed \
-         branches are given them",
+        match keyless.first() {
+            Some(first) => format!(
+                "store the provider's key with `by harnesses login {}`",
+                first.replace(" via ", " --provider ")
+            ),
+            None => "export the variable (or create the file) each secret names; isolated and \
+                     sandboxed branches are given them"
+                .to_owned(),
+        },
     )]
+}
+
+/// `[logins]` as `ID via PROVIDER (KEY)`, and those whose key `[secrets]`
+/// does not name as `ID via PROVIDER`, which an isolated run would refuse.
+fn provider_logins(config: &branchyard_setup::config::ProjectConfig) -> (Vec<String>, Vec<String>) {
+    let mut logins = Vec::new();
+    let mut keyless = Vec::new();
+    for (id, provider) in &config.logins {
+        let Some(login) = branchyard::logins::find(id, provider) else {
+            continue;
+        };
+        logins.push(format!("{id} via {provider} ({})", login.key));
+        if !config.secrets.contains_key(login.key) {
+            keyless.push(format!("{id} via {provider}"));
+        }
+    }
+    (logins, keyless)
 }
 
 /// The `[secrets]` whose variable is unset or whose file is missing, as
