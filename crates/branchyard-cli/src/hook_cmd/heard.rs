@@ -327,6 +327,8 @@ mod tests {
         let store = scratch.path().join("user/hooks-heard");
         let repo = scratch.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
+        // A git directory has a HEAD; an empty `.git` is not a repository.
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         std::fs::create_dir_all(repo.join("src")).unwrap();
         let wrote = note(
             &store,

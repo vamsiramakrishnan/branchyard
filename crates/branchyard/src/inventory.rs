@@ -2953,7 +2953,7 @@ mod tests {
         // A login command the catalog records: the Branchyard command that runs it.
         assert_eq!(
             login_hint("claude-code"),
-            "run `by harnesses login claude-code`, or set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN"
+            "run `by harnesses login claude-code`, or set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN"
         );
         // No login command, a key variable: only a key can be given.
         assert_eq!(

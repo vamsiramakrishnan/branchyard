@@ -81,7 +81,7 @@ With no `[fleet]` in either file, `by run --auto`, `by fan --auto`, `by map --au
 ```text
 by: routed as bugfix (classifier: fix) by the inventory default (no [fleet]): candidates codex, gemini-cli; seed 1834...
 by:   gemini-cli — sampled success rate 0.62 (no recorded bugfix outcomes)
-by:   not claude-code: claude-code is likely logged out (no ~/.claude/.credentials.json and no ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN); run `by harnesses login claude-code`, or set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
+by:   not claude-code: claude-code is likely logged out (no ~/.claude/.credentials.json and no ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN); run `by harnesses login claude-code`, or set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
 ```
 
 The route records the entry `inventory` (no `[fleet.<kind>]` can have that name), so `by log` says `routed bugfix (classifier) by the inventory default to gemini-cli: ...` and `by fleet route --json` has `"entry": "inventory"`, with the harnesses left out among `excluded`. Nothing logged in is an error listing each installed harness and why, and nothing is created. A sandboxed task (`--sandbox`, a substrate, a recipe) runs its image's harnesses, which this machine's inventory does not describe, so with `--auto` it needs a `[fleet]`.

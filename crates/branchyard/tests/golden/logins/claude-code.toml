@@ -50,7 +50,7 @@ lines = []
 cell = "login not verified"
 state = "logged_out"
 evidence = "likely"
-detail = "no ~/.claude/.credentials.json and no ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN"
+detail = "no ~/.claude/.credentials.json and no ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN"
 
 [[case]]
 name = "nothing on macOS, where the login is in the keychain"
@@ -59,4 +59,4 @@ lines = []
 cell = "unknown"
 state = "unknown"
 evidence = "none"
-detail = "Branchyard cannot read claude's login; a key in ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN would tell"
+detail = "Branchyard cannot read claude's login; a key in ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN would tell"

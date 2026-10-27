@@ -129,8 +129,8 @@ ok      models.prices           not configured: no [models]
 
 To do:
   config.workspace_trust: review it with `by workspace show`, then run `by workspace trust`
-  harnesses.claude-code: run `by harnesses login claude-code`, or set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
-  harnesses.default: run `by harnesses login claude-code`, or set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
+  harnesses.claude-code: run `by harnesses login claude-code`, or set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN
+  harnesses.default: run `by harnesses login claude-code`, or set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN
   host.kvm: load the kvm module and add your user to the kvm group; local branches need none
 
 warn: 3 warnings, 1 to do, 18 ok

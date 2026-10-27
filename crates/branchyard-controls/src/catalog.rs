@@ -1044,7 +1044,7 @@ pub(crate) mod tests {
         let claude = harness("claude-code").unwrap();
         assert_eq!(claude.binaries, ["claude"]);
         assert_eq!(claude.login.as_deref(), Some("claude auth login"));
-        assert_eq!(claude.auth_env, ["ANTHROPIC_API_KEY"]);
+        assert_eq!(claude.auth_env, ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]);
         assert_eq!(
             claude.install[0],
             "curl -fsSL https://claude.ai/install.sh | bash"
