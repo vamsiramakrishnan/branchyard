@@ -40,6 +40,7 @@ The format is Prometheus text exposition 0.0.4 (`text/plain; version=0.0.4`), wr
 | `branchyard_cost_usd_total` | counter | `tenant`, `harness` | Harness-reported cost: what each of an operation's branches added to its recorded `cost_usd` |
 | `branchyard_connector_calls_total` | counter | `connector`, `decision` (`allowed`, `denied`, `confirmation_required`) | Connector gateway calls, from its audit log |
 | `branchyard_webhook_deliveries_total` | counter | `result` (`delivered`, `retried`, `dead_lettered`) | Webhook delivery attempts |
+| `branchyard_trigger_looks_total` | counter | | Times this process's [trigger](triggers.md) dispatcher looked for schedules due and runs waiting to fire: once a tick (a second by default) and at once after a webhook delivery. Flat on a server that dispatches means its dispatcher has stopped |
 | `branchyard_workers_live` | gauge | | Workers that recorded themselves alive in the last 15 seconds |
 | `branchyard_worker_last_seen_seconds` | gauge | `worker`, `host` | Seconds since each live worker's last beat |
 | `branchyard_pool_slots` | gauge | `repo`, `state` (`ready`, `filling`, `claimed`) | [Warm pool](pools.md) slots of each served repository whose workspace has a pool, on this host, read at scrape time |

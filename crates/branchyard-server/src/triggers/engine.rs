@@ -24,7 +24,7 @@
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 
 use branchyard_client::api::{Operation, OperationState, TaskRequest};
@@ -144,6 +144,8 @@ pub struct Engine {
     /// When the lifecycles of the triggers that have one were last looked
     /// at (0: never); see [`Engine::rest`].
     pub rested_at: AtomicU64,
+    /// Set while [`Engine::rest`] looks, so that two looks never overlap.
+    pub resting: AtomicBool,
 }
 
 /// What one [`Engine::tick`] did.
@@ -687,6 +689,11 @@ mod tests {
         /// lifecycle did to it: (branch, action, reason).
         standings: Mutex<BTreeMap<String, Standing>>,
         rested: Mutex<Vec<(String, Action, String)>>,
+        /// When set, the next step waits for this before it is taken, and
+        /// while it waits (`holding`) any other step is refused, as the
+        /// server's hold on the branch refuses it.
+        hold: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        holding: AtomicBool,
     }
 
     impl Sink for FakeSink {
@@ -770,6 +777,15 @@ mod tests {
             if self.refuse.lock().unwrap().is_some() {
                 return Err("busy".into());
             }
+            if self.holding.load(Ordering::SeqCst) {
+                return Err("held by the step before".into());
+            }
+            let gate = self.hold.lock().unwrap().take();
+            if let Some(gate) = gate {
+                self.holding.store(true, Ordering::SeqCst);
+                gate.recv().unwrap();
+                self.holding.store(false, Ordering::SeqCst);
+            }
             let mut standings = self.standings.lock().unwrap();
             match action {
                 Action::Park => standings.get_mut(branch).unwrap().stage = Stage::Idle,
@@ -823,6 +839,7 @@ mod tests {
                 sink: sink.clone(),
                 worker: format!("w{i}"),
                 rested_at: AtomicU64::new(0),
+                resting: AtomicBool::new(false),
             })
             .collect();
         (engines, sink, store)
@@ -1202,6 +1219,64 @@ mod tests {
             },
         );
         assert!(rest(40 * DAY).is_empty());
+    }
+
+    /// The dispatcher starts a look at the lifecycles each tick without
+    /// waiting for the last one. A look that begins while another is still
+    /// taking a step skips and spends no pace. Begun anyway (the clock past
+    /// the pace meanwhile, as a test's clock moves), it found the branch
+    /// held by the other's step, could not take its own, and spent the pace:
+    /// the step waited a whole pace, and under a test's still clock, forever.
+    #[test]
+    fn a_look_that_begins_while_another_takes_a_step_skips_and_spends_no_pace() {
+        const DAY: u64 = 86_400_000;
+        let clock = Arc::new(AtomicU64::new(10 * MINUTE));
+        let (engines, sink, store) = engines(1, &clock);
+        let mut t = conformance::trigger("default", "heartbeat", true);
+        t.spec.when = When::Interval { seconds: 60 };
+        t.spec.deliver = Some(Deliver {
+            branch: "assistant".into(),
+            busy: Busy::Queue,
+            lifecycle: Some(Lifecycle {
+                idle_minutes: Some(30),
+                dormant_days: Some(7),
+                delete_days: Some(30),
+            }),
+        });
+        t.next_due_ms = Some(10 * MINUTE);
+        assert!(store.create(&t).unwrap());
+        assert_eq!(engines[0].tick().unwrap().fired.len(), 1);
+        let ended = 10 * MINUTE;
+        sink.standings.lock().unwrap().insert(
+            "assistant".into(),
+            Standing {
+                running: false,
+                last_turn_end_ms: ended,
+                stage: Stage::Active,
+            },
+        );
+        let (release, gate) = std::sync::mpsc::channel();
+        *sink.hold.lock().unwrap() = Some(gate);
+        let step = |action| [("heartbeat".to_owned(), "assistant".to_owned(), action)];
+        clock.store(ended + 31 * MINUTE, Ordering::SeqCst);
+        std::thread::scope(|s| {
+            let first = s.spawn(|| engines[0].rest().unwrap());
+            branchyard_testkit::wait::until("the first look to be taking its step", || {
+                sink.holding.load(Ordering::SeqCst)
+            });
+            // Days later by the clock, while the branch is still being parked.
+            clock.store(ended + 7 * DAY, Ordering::SeqCst);
+            assert!(engines[0].rest().unwrap().is_empty());
+            release.send(()).unwrap();
+            assert_eq!(first.join().unwrap(), step(Action::Park));
+        });
+        // The pace is the first look's: a look at the same time takes the
+        // next step.
+        assert_eq!(engines[0].rest().unwrap(), step(Action::GoDormant));
+        assert_eq!(
+            sink.standings.lock().unwrap()["assistant"].stage,
+            Stage::Dormant
+        );
     }
 
     #[test]

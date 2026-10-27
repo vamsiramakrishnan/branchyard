@@ -11,7 +11,6 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 use branchyard::{
     Activity, AttemptCheck, Branch, BranchStatus, Error, Policy, RecordedEvent, SessionContinuity,
@@ -325,10 +324,10 @@ fn a_rewind_is_refused_while_a_turn_runs_and_over_uncommitted_changes() {
         wait::until("the branch to run", || {
             f.yard.branch("busy").unwrap().info().status == BranchStatus::Running
         });
-        wait::settle(
-            "the running turn must be well under way before the rewind",
-            Duration::from_millis(200),
-        );
+        // Well under way: the harness has the turn's prompt, the third.
+        wait::until("the harness to be sent the turn's prompt", || {
+            prompts(&f.yard.branch("busy").unwrap().events().unwrap()).len() == 3
+        });
         assert!(matches!(branch.rewind(1), Err(Error::Running(_))));
         assert_eq!(read(&worktree.join("r.txt")).as_deref(), Some("2\n"));
         f.yard.cancel("busy").unwrap();

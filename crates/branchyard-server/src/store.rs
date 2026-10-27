@@ -3769,12 +3769,11 @@ mod tests {
             .claim(&one, &repos, &[], Duration::from_millis(1))
             .unwrap()
             .unwrap();
-        // The store's clock is the wall clock: the 1 ms lease lapses by time passing.
-        branchyard_testkit::wait::settle(
-            "a one-millisecond lease lapses",
-            Duration::from_millis(20),
-        );
-        let second = store.claim(&two, &repos, &[], LEASE).unwrap().unwrap();
+        // The store's clock is the wall clock: the 1 ms lease lapses by time
+        // passing, and until it has, another worker's claim finds nothing.
+        let second = branchyard_testkit::wait::until("the one-millisecond lease to lapse", || {
+            store.claim(&two, &repos, &[], LEASE).unwrap()
+        });
         assert_eq!(second.fence, first.fence + 1);
         assert!(!first.took_over);
         assert!(second.took_over, "the first claim's lease had lapsed");

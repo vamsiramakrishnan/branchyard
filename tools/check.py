@@ -33,9 +33,11 @@ REWRITE_VARIABLES = ("BY_UPDATE_SCHEMA", "BRANCHYARD_BLESS")
 
 
 class Step(NamedTuple):
-    """One gate. `job` names where it was first grouped in check.yml: the `fast` job runs every
-    step --fast keeps (the Python gates, whichever label they carry), `docs` and `controls` run
-    the cargo ones; `cargo` steps are skipped by --fast."""
+    """One gate. `job` names a job of check.yml: the `fast` job runs every step --fast keeps (the
+    Python gates, whichever label they carry; `controls` marks the ones the single cargo job ran
+    before they moved to `fast`, and is now the job that is green when every cargo job is), and
+    `docs`, `lint`, `schemas`, `test-engine` and `walkthrough` run the cargo ones named for them;
+    `cargo` steps are skipped by --fast."""
 
     name: str
     job: str
@@ -49,11 +51,11 @@ class Step(NamedTuple):
 STEPS = (
     # --fix, in the order it runs.
     Step("fix_docs_facts", "controls", (PY, "tools/docs_facts.py", "--write"), fix=True),
-    Step("fix_cargo_fmt", "controls", ("cargo", "fmt", "--all"), cargo=True, fix=True),
+    Step("fix_cargo_fmt", "fast", ("cargo", "fmt", "--all"), cargo=True, fix=True),
     Step("fix_ruff_format", "fast", (PY, "-m", "ruff", "format", *TARGETS), fix=True),
     Step(
         "fix_contract_schema",
-        "controls",
+        "schemas",
         (
             "cargo",
             "run",
@@ -73,14 +75,14 @@ STEPS = (
     ),
     Step(
         "fix_setup_schemas",
-        "controls",
+        "test-engine",
         ("cargo", "run", "-q", "-p", "branchyard-setup", "--example", "generate_schemas", "--locked", "--offline"),
         cargo=True,
         fix=True,
     ),
     Step(
         "fix_server_config_schema",
-        "controls",
+        "schemas",
         (
             "cargo",
             "run",
@@ -101,7 +103,7 @@ STEPS = (
     # schema/rig.json is not written by an example: its test rewrites it when BY_UPDATE_SCHEMA is set.
     Step(
         "fix_rig_schema",
-        "controls",
+        "schemas",
         (
             "cargo",
             "test",
@@ -206,17 +208,17 @@ STEPS = (
         cargo=True,
         env=(("RUSTDOCFLAGS", "-D warnings"),),
     ),
-    Step("cargo_fmt", "controls", ("cargo", "fmt", "--all", "--", "--check"), cargo=True),
-    Step("check_missing_docs", "controls", (PY, "tools/check_missing_docs.py"), cargo=True),
+    Step("cargo_fmt", "fast", ("cargo", "fmt", "--all", "--", "--check"), cargo=True),
+    Step("check_missing_docs", "lint", (PY, "tools/check_missing_docs.py"), cargo=True),
     Step(
         "cargo_clippy",
-        "controls",
+        "lint",
         ("cargo", "clippy", "--workspace", "--all-targets", "--locked", "--offline", "--", "-D", "warnings"),
         cargo=True,
     ),
     Step(
         "schema_contract",
-        "controls",
+        "schemas",
         (
             "cargo",
             "test",
@@ -233,7 +235,7 @@ STEPS = (
     ),
     Step(
         "schema_server_config",
-        "controls",
+        "schemas",
         (
             "cargo",
             "test",
@@ -250,13 +252,13 @@ STEPS = (
     ),
     Step(
         "schema_setup",
-        "controls",
+        "test-engine",
         ("cargo", "test", "-p", "branchyard-setup", "--locked", "--offline", "--test", "schema"),
         cargo=True,
     ),
     Step(
         "schema_rig",
-        "controls",
+        "schemas",
         (
             "cargo",
             "test",
@@ -274,10 +276,10 @@ STEPS = (
     ),
     # docs/getting-started.md run for real: `by` and the fake ACP agent built, then every tested block run
     # in a temporary repository with a private HOME, and every `by` command the new guides show checked
-    # against the built `by --help`. CI runs the same test after its `cargo test --workspace` built them.
+    # against the built `by --help`. CI's walkthrough job runs the same build and the same test.
     Step(
         "build_by",
-        "controls",
+        "walkthrough",
         (
             "cargo",
             "build",
@@ -296,7 +298,7 @@ STEPS = (
     ),
     Step(
         "test_getting_started_built",
-        "controls",
+        "walkthrough",
         (PY, "tests/test_getting_started.py"),
         cargo=True,
         env=(("REQUIRE_BINARIES", "1"),),
